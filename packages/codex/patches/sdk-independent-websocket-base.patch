@@ -248,7 +248,7 @@ index c931ed5b898a22e908fba82cceb327fa9c7c3bc3..5ec63a3e19ab2cbd8e020e6cf1daaa83
              headers: HeaderMap::new(),
              retry: crate::RetryConfig {
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index 4ab779058fae15c10ab45d7d3c0739e114931428..b3a5a7a939f30f66b0bc90850144a979fe257373 100644
+index 4ab779058fae15c10ab45d7d3c0739e114931428..2703404a701957197f30811ec18e411eb81f0086 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 @@ -424,7 +424,10 @@ pub struct ResponsesWebsocketProbe {
@@ -355,7 +355,7 @@ index 4ab779058fae15c10ab45d7d3c0739e114931428..b3a5a7a939f30f66b0bc90850144a979
                  headers: Some(headers),
                  body,
                  retry_after,
-@@ -1046,6 +1082,253 @@ mod tests {
+@@ -1046,6 +1082,252 @@ mod tests {
      use std::collections::HashMap;
      use std::sync::Arc;
  
@@ -494,7 +494,7 @@ index 4ab779058fae15c10ab45d7d3c0739e114931428..b3a5a7a939f30f66b0bc90850144a979
 +                HttpClientFactory::new(codex_http_client::OutboundProxyPolicy::ReqwestDefault);
 +            let error = tokio::time::timeout(
 +                Duration::from_secs(2),
-+                connect_websocket(endpoint, HeaderMap::new(), &factory, None, None),
++                connect_websocket(endpoint, HeaderMap::new(), &factory, None),
 +            )
 +            .await
 +            .expect("handshake settled")
@@ -573,7 +573,6 @@ index 4ab779058fae15c10ab45d7d3c0739e114931428..b3a5a7a939f30f66b0bc90850144a979
 +                        Url::parse(&endpoint).unwrap(),
 +                        HeaderMap::new(),
 +                        &factory,
-+                        None,
 +                        None,
 +                    ),
 +                )

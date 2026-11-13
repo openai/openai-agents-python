@@ -17,6 +17,8 @@ from aiohttp.test_utils import TestServer
 from agents import (
     Agent,
     Environment,
+    HostedShell,
+    ImageGeneration,
     LocalRecoveryRequired,
     LocalStorage,
     NativeAgents,
@@ -221,13 +223,18 @@ async def worker() -> None:
         api_key="destination" if request["resume"] else "source",
         supports_websockets=False,
     )
+    settled_hosted_root = request["mode"] == "cold-settled-hosted-root"
     native = None if request["no_children"] else NativeAgents(max_children=2, max_depth=2)
+    if native is not None and settled_hosted_root:
+        native = replace(native, before_step=lambda _: [])
     agent = Agent(
         instructions="Record a memory.",
         model=request["model"],
         provider=connection,
         programmatic_tool_calling=False,
-        tools=[lookup] if native is None else [lookup, native],
+        tools=([lookup] if native is None else [lookup, native])
+        + ([ImageGeneration()] if request["mode"] == "cold-hosted" else [])
+        + ([HostedShell(environment={"type": "container_auto"})] if settled_hosted_root else []),
     )
     try:
         async with (
@@ -246,7 +253,10 @@ async def worker() -> None:
                 ),
             ) as session,
         ):
-            print(json.dumps({"opened": session.id, "pid": os.getpid()}), flush=True)
+            opening: dict[str, Any] = {"opened": session.id, "pid": os.getpid()}
+            if request["mode"] == "inspect":
+                opening["root_turns"] = [turn async for turn in session.turns()]
+            print(json.dumps(opening), flush=True)
             if request["mode"] == "inspect":
                 async for child in session.subagents():
                     items = [item async for item in session.items(subagent_id=child.id)]
@@ -264,6 +274,10 @@ async def worker() -> None:
                     )
                 return
             result = await (await session.submit("Run requested work.")).get_result()
+            if request["mode"] == "cold-followup":
+                [child] = await handles(session, 1)
+                await child.get_result()
+                result = await (await session.submit("Continue the child.")).get_result()
             root_items = [item async for item in session.items()]
             if request["mode"] == "cold-active" and request["depth"] == 2:
                 (spawn,) = [item for item in root_items if item["type"] == "create_subagent_call"]
@@ -763,31 +777,125 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
                 assert (tmp_path / "effects").read_text() == old_effect + "destination:fresh\n"
 
 
-@pytest.mark.parametrize("depth", [1, 2], ids=["child", "grandchild"])
 @pytest.mark.parametrize(
-    "no_children", [False, True], ids=["current-children", "no-current-children"]
+    ("depth", "no_children", "native_effect", "root_active"),
+    [
+        (1, False, None, False),
+        (2, False, None, False),
+        (1, True, None, False),
+        (2, True, None, False),
+        (1, False, "shell", False),
+        (1, False, "hosted-progress", False),
+        (1, False, "settled-hosted-root", False),
+        (1, False, None, True),
+        (1, False, None, "followup"),
+    ],
 )
-async def test_local_reopen_refuses_cold_active_child_without_tool_receipt(
-    tmp_path, monkeypatch, depth, no_children
+async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
+    tmp_path, monkeypatch, depth, no_children, native_effect, root_active
 ):
+    model = (
+        "gpt-5.5"
+        if native_effect in {"hosted-progress", "settled-hosted-root"}
+        else DESCENDANT_MODEL
+    )
+    unsafe_effect = native_effect in {"shell", "hosted-progress"}
     peer = LocalFamilyPeer(depth, fork_turns="all" if depth == 2 else "none")
     entered, release = asyncio.Event(), asyncio.Event()
+    root_entered = asyncio.Event()
     original_response = peer.response
 
     def response():
         path = metadata(peer.requests[-1], peer.request_headers[-1])["agent_name"]
+        source_requests = [
+            body
+            for body, headers in zip(peer.requests, peer.request_headers, strict=True)
+            if headers["authorization"] == "Bearer source"
+            and metadata(body, headers)["agent_name"] == path
+        ]
+        if (
+            root_active == "followup"
+            and peer.request_headers[-1]["authorization"] == "Bearer source"
+            and path == "/root"
+            and len(source_requests) >= 3
+        ):
+            if not any(
+                item.get("call_id") == "cold-followup"
+                for item in source_requests[-1].get("input", [])
+            ):
+                return [
+                    collaboration(
+                        "followup_task",
+                        {"target": "/root/alpha", "message": "Continue."},
+                        "cold-followup",
+                    )
+                ]
+            message = assistant_output("held follow-up root")
+            message["item"]["id"] = "held-root-with-spawn"
+            return [message]
         if (
             peer.request_headers[-1]["authorization"] == "Bearer source"
             and path.count("/") - 1 == depth
         ):
+            if root_active == "followup" and len(source_requests) == 1:
+                return [assistant_output("first child turn finished")]
             # The child exists, but never attempts a function call. Hold only
             # its final message so it cannot finish before the process dies.
             message = assistant_output("leaf not yet settled")
             message["item"]["id"] = "held-leaf-without-tool"
+            if native_effect == "hosted-progress":
+                return [
+                    {
+                        "type": "response.image_generation_call.generating",
+                        "item_id": "unfinished-hosted",
+                    },
+                    message,
+                ]
             return [message]
-        return original_response()
+        result = original_response()
+        if (
+            native_effect == "settled-hosted-root"
+            and peer.request_headers[-1]["authorization"] == "Bearer source"
+            and path == "/root"
+            and result[0].get("item", {}).get("type") == "message"
+        ):
+            assert any(tool["type"] == "shell" for tool in source_requests[-1]["tools"])
+            shell = {
+                "type": "shell_call",
+                "id": "settled-shell-command",
+                "call_id": "settled-shell",
+                "status": "completed",
+                "action": {"commands": ["printf provider"]},
+            }
+            output = {
+                "type": "shell_call_output",
+                "id": "settled-shell-receipt",
+                "call_id": "settled-shell",
+                "status": "completed",
+                "output": [
+                    {
+                        "stdout": "provider",
+                        "stderr": "",
+                        "outcome": {"type": "exit", "exit_code": 0},
+                    }
+                ],
+            }
+            return [
+                {"type": "response.output_item.done", "output_index": index, "item": item}
+                for index, item in enumerate([shell, output, result[0]["item"]])
+            ]
+        if (
+            root_active is True
+            and path == "/root"
+            and result[0].get("item", {}).get("type") == "message"
+        ):
+            result[0]["item"]["id"] = "held-root-with-spawn"
+        return result
 
     async def hold(event):
+        if event.get("item", {}).get("id") == "held-root-with-spawn":
+            root_entered.set()
+            await release.wait()
         if event.get("item", {}).get("id") == "held-leaf-without-tool":
             entered.set()
             await release.wait()
@@ -804,18 +912,35 @@ async def test_local_reopen_refuses_cold_active_child_without_tool_receipt(
         ExecutorPeer(tmp_path / "remote").serve() as executor,
     ):
         peer.url = str(server.make_url("/v1"))
-        source = await start(peer, executor, tmp_path, "cold-active", depth)
+        source = await start(
+            peer,
+            executor,
+            tmp_path,
+            "cold-followup"
+            if root_active == "followup"
+            else "cold-hosted"
+            if native_effect == "hosted-progress"
+            else "cold-settled-hosted-root"
+            if native_effect == "settled-hosted-root"
+            else "cold-active",
+            depth,
+            model=model,
+        )
         try:
             assert source.stdout is not None
             opened = json.loads(await source.stdout.readline())
             assert opened.get("opened"), opened
             await entered.wait()
-            root = json.loads(await source.stdout.readline())
-            assert root["output"] == "/root finished"
-            assert not any(
-                item["type"] == "function_call" and item["status"] in ("in_progress", "incomplete")
-                for item in root["root_items"]
-            )
+            if root_active:
+                await root_entered.wait()
+            else:
+                root = json.loads(await source.stdout.readline())
+                assert root["output"] == "/root finished"
+                assert not any(
+                    item["type"] == "function_call"
+                    and item["status"] in ("in_progress", "incomplete")
+                    for item in root["root_items"]
+                )
             assert not (tmp_path / "effects").exists()
             source.kill()
             code, _, err = await _collect(source)
@@ -826,24 +951,128 @@ async def test_local_reopen_refuses_cold_active_child_without_tool_receipt(
                 source.kill()
                 await _collect(source)
         before = len(peer.requests)
+        child_id = next(
+            metadata(body, headers)["thread_id"]
+            for body, headers in zip(peer.requests, peer.request_headers, strict=True)
+            if metadata(body, headers)["agent_name"] == "/root/alpha"
+        )
+        [rollout] = (tmp_path / "profile").rglob(f"*{child_id}.jsonl")
+        history = [json.loads(line) for line in rollout.read_text().splitlines()]
+        sampling_receipt = next(
+            row["payload"]["sdk_receipt"]
+            for row in reversed(history)
+            if row["type"] == "turn_context"
+            and row["payload"].get("sdk_receipt", {}).get("thread_id") == child_id
+        )
+        assert sampling_receipt["provider_effects_possible"] is (native_effect == "hosted-progress")
+        if native_effect == "settled-hosted-root":
+            [root_rollout] = (tmp_path / "profile").rglob(f"*{opened['opened']}.jsonl")
+            root_history = [json.loads(line) for line in root_rollout.read_text().splitlines()]
+            [root_turn] = [
+                row["payload"]["turn_id"]
+                for row in root_history
+                if row["type"] == "event_msg" and row["payload"]["type"] == "task_complete"
+            ]
+            assert [
+                (
+                    item["type"],
+                    item["status"],
+                    item["internal_chat_message_metadata_passthrough"]["turn_id"],
+                )
+                for row in root_history
+                if row["type"] == "response_item"
+                and (item := row["payload"]).get("call_id") == "settled-shell"
+            ] == [
+                ("shell_call", "completed", root_turn),
+                ("shell_call_output", "completed", root_turn),
+            ]
+            assert any(
+                row["type"] == "turn_context"
+                and row["payload"]["turn_id"] == root_turn
+                and row["payload"].get("sdk_receipt", {}).get("provider_effects_possible") is True
+                for row in root_history
+            )
+        if native_effect == "hosted-progress":
+            child_request = next(
+                body
+                for body, headers in zip(peer.requests, peer.request_headers, strict=True)
+                if metadata(body, headers)["agent_name"] == "/root/alpha"
+            )
+            assert any(tool["type"] == "image_generation" for tool in child_request["tools"])
+            assert not any(
+                row["type"] == "response_item" and row["payload"]["type"] == "image_generation_call"
+                for row in history
+            )
+        if native_effect == "shell":
+            turn_id = next(
+                row["payload"]["turn_id"]
+                for row in reversed(history)
+                if row["type"] == "turn_context"
+            )
+            payload = {
+                "type": "shell_call",
+                "call_id": "unknown-native",
+                "action": {"commands": ["synthetic"]},
+                "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+            }
+            with rollout.open("a") as stream:
+                stream.write(
+                    json.dumps(
+                        {
+                            "timestamp": history[-1]["timestamp"],
+                            "ordinal": history[-1]["ordinal"] + 1,
+                            "type": "response_item",
+                            "payload": payload,
+                        }
+                    )
+                    + "\n"
+                )
         for _ in range(2):
             restored = await start(
                 peer,
                 executor,
                 tmp_path,
-                "destination",
+                "inspect",
                 depth,
                 identity=opened["opened"],
                 no_children=no_children,
+                model=model,
             )
             code, rows, err = await _collect(restored)
-            assert code != 0 and rows and "active descendant" in rows[0].get("message", ""), (
-                rows,
-                err,
-            )
-            assert "opened" not in rows[0], rows
+            if unsafe_effect:
+                assert code != 0 and "unknown tool effects" in rows[0].get("message", ""), (
+                    rows,
+                    err,
+                )
+                assert len(peer.requests) == before
+                assert not (tmp_path / "effects").exists()
+                continue
+            assert code == 0 and rows[0]["opened"] == opened["opened"], (rows, err)
+            if root_active:
+                assert any(turn["status"] == "cancelled" for turn in rows[0]["root_turns"])
+            assert len(rows[1:]) == depth
+            leaf = rows[-1]
+            assert not leaf["is_live"]
+            assert any(turn["status"] == "cancelled" for turn in leaf["turns"])
             assert len(peer.requests) == before
             assert not (tmp_path / "effects").exists()
+        if unsafe_effect:
+            return
+        restored = await start(
+            peer,
+            executor,
+            tmp_path,
+            "destination",
+            depth,
+            identity=opened["opened"],
+            no_children=no_children,
+            model=model,
+        )
+        code, rows, err = await _collect(restored)
+        assert code == 0 and rows[0]["opened"] == opened["opened"], (rows, err)
+        assert rows[1]["output"] == "destination finished"
+        assert len(peer.requests) == before + 2
+        assert (tmp_path / "effects").read_text() == "destination:fresh\n"
 
 
 if __name__ == "__main__":

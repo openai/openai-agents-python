@@ -505,6 +505,10 @@ struct ReconciledCall {
 struct RecoveryRequest {
     receipts: Vec<ReconciledCall>,
     histories: HashMap<ThreadId, DescendantHistory>,
+    #[serde(default)]
+    root_recovery_turns: Vec<String>,
+    #[serde(default)]
+    automatic_root_turns: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -514,6 +518,8 @@ struct DescendantHistory {
     parent: ThreadId,
     status: String,
     interrupted: Vec<String>,
+    #[serde(default)]
+    automatic_turns: Option<Vec<String>>,
 }
 
 pub(crate) fn encode_history(history: &[RolloutItem]) -> serde_json::Result<String> {
@@ -870,7 +876,6 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
         .get::<crate::recovery_guard::Guard>()
         .context("Reconciliation requires the SDK replay guard")?;
 
-    let has_receipts = !request.receipts.is_empty();
     let mut receipts_by_thread = HashMap::<_, Vec<_>>::new();
     for receipt in &request.receipts {
         ensure!(
@@ -883,7 +888,69 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
             .push(receipt);
     }
     let root_receipts = receipts_by_thread.remove(&state.id).unwrap_or_default();
+    let checking_family = request
+        .histories
+        .values()
+        .any(|source| !source.interrupted.is_empty());
+    let root_command_turns = if checking_family {
+        recorded_turn_ids(&history)
+    } else {
+        HashSet::new()
+    };
+    let mut active_root_turns = HashSet::new();
+    for row in &history {
+        match row {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                active_root_turns.insert(event.turn_id.as_str());
+            }
+            RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
+                active_root_turns.remove(event.turn_id.as_str());
+            }
+            RolloutItem::EventMsg(EventMsg::TurnAborted(event)) => {
+                if let Some(turn) = event.turn_id.as_deref() {
+                    active_root_turns.remove(turn);
+                }
+            }
+            _ => {}
+        }
+    }
+    let interrupted_root_turns: Vec<_> = request
+        .root_recovery_turns
+        .iter()
+        .filter(|turn| active_root_turns.contains(turn.as_str()))
+        .cloned()
+        .collect();
+    let root_automatic = request.automatic_root_turns.clone().unwrap_or_else(|| {
+        interrupted_root_turns
+            .iter()
+            .filter(|turn| {
+                !root_receipts
+                    .iter()
+                    .any(|receipt| &receipt.turn_id == *turn)
+            })
+            .cloned()
+            .collect()
+    });
+    ensure!(
+        root_automatic
+            .iter()
+            .all(|turn| request.root_recovery_turns.contains(turn)),
+        "Invalid automatic root recovery turn"
+    );
+    let root_automatic: Vec<_> = root_automatic
+        .into_iter()
+        .filter(|turn| interrupted_root_turns.contains(turn))
+        .collect();
+    validate_sampling_effects(&history, state.id, &interrupted_root_turns, &root_automatic)?;
     let (root_append, protected) = plan(&history, &root_receipts)?;
+    validate_interrupted_effects(
+        &history,
+        &interrupted_root_turns,
+        &root_command_turns,
+        &root_append,
+        &root_receipts,
+        &request.root_recovery_turns,
+    )?;
 
     // The root writer fences the original owner. Also reserve each child writer
     // so an independently reopened child cannot race recovery or change topology.
@@ -901,41 +968,86 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
             "Native descendant history changed during local recovery"
         );
         let receipts = receipts_by_thread.remove(&id).unwrap_or_default();
+        let automatic = expected.automatic_turns.clone().unwrap_or_else(|| {
+            expected
+                .interrupted
+                .iter()
+                .filter(|turn| !receipts.iter().any(|receipt| &receipt.turn_id == *turn))
+                .cloned()
+                .collect()
+        });
+        ensure!(
+            automatic
+                .iter()
+                .all(|turn| expected.interrupted.contains(turn)),
+            "Invalid automatic descendant recovery turn"
+        );
+        validate_sampling_effects(&history, id, &expected.interrupted, &automatic)?;
         let (outputs, protected) = plan(&history, &receipts)?;
         if !protected.is_empty() {
             protected_children.insert(id.to_string(), protected);
         }
         let writes_receipts = !outputs.is_empty();
+        let command_turns = if checking_family {
+            let parent_turns = if expected.parent == state.id {
+                root_command_turns.clone()
+            } else {
+                recorded_turn_ids(&store.reconciliation_history(expected.parent).await?.1)
+            };
+            recorded_turn_ids(&history)
+                .difference(&parent_turns)
+                .cloned()
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        validate_interrupted_effects(
+            &history,
+            &expected.interrupted,
+            &command_turns,
+            &outputs,
+            &receipts,
+            &[],
+        )?;
+        let prior_interruption = history.iter().any(|row| {
+            matches!(row,
+            RolloutItem::EventMsg(EventMsg::TurnAborted(event))
+                if event.reason == TurnAbortReason::Interrupted && event.turn_id.is_some()
+                    && event.model_attempt.is_none() && event.error.is_none()
+                    && event.started_at.is_none() && event.completed_at.is_none() && event.duration_ms.is_none())
+        });
         if writes_receipts || !expected.interrupted.is_empty() {
-            ensure!(
-                has_receipts,
-                "An interrupted descendant turn requires a confirmed call"
-            );
-            let mut items = Vec::new();
-            for turn in &expected.interrupted {
-                items.push(RolloutItem::EventMsg(EventMsg::TurnAborted(
-                    TurnAbortedEvent {
-                        model_attempt: None,
-                        turn_id: Some(turn.clone()),
-                        reason: TurnAbortReason::Interrupted,
-                        error: None,
-                        started_at: None,
-                        completed_at: None,
-                        duration_ms: None,
-                    },
-                )));
-            }
+            let mut items: Vec<_> = expected
+                .interrupted
+                .iter()
+                .map(|turn| interruption(turn.clone()))
+                .collect();
             items.extend(
                 outputs
                     .into_iter()
                     .map(|item| RolloutItem::ResponseItem(ResponseItemEnvelope::new(item))),
             );
             child_appends.push((writes_receipts, id, path, items, receipts));
+        } else if prior_interruption {
+            // A previous replace can be visible before its directory sync
+            // completed. Reconfirm it even when no new abort is necessary.
+            child_appends.push((false, id, path, Vec::new(), receipts));
         }
     }
     // Validate every supplied result before recording any part of the batch.
     // Publish interrupted ancestors before receipts that could clear the last
     // unresolved call and allow the next open without confirmations.
+    let root_interruptions: Vec<_> = interrupted_root_turns
+        .iter()
+        .map(|turn| interruption(turn.clone()))
+        .collect();
+    if !root_interruptions.is_empty() {
+        state
+            .thread
+            .append_rollout_items(&root_interruptions)
+            .await?;
+        state.thread.flush_rollout().await?;
+    }
     child_appends.sort_by_key(|(writes_receipts, ..)| *writes_receipts);
     for (_, id, path, items, receipts) in child_appends {
         confirm_durable(
@@ -953,6 +1065,335 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
         .engine
         .recovery
         .set_reconciled_descendants(protected_children);
+    Ok(())
+}
+
+fn interruption(turn: String) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
+        model_attempt: None,
+        turn_id: Some(turn),
+        reason: TurnAbortReason::Interrupted,
+        error: None,
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
+    }))
+}
+
+fn recorded_turn_ids(history: &[RolloutItem]) -> HashSet<String> {
+    history
+        .iter()
+        .filter_map(|row| match row {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(turn)) => Some(turn.turn_id.clone()),
+            RolloutItem::TurnContext(turn) => turn.turn_id.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_native_command(item: &ResponseItem) -> bool {
+    matches!(item, ResponseItem::FunctionCall { name, namespace, .. }
+        if matches!(namespace.as_deref(), None | Some("" | "functions"))
+            && matches!(name.as_str(), "exec_command" | "write_stdin" | "shell" | "shell_command"))
+}
+
+fn completed_hosted_mcp(item: &ResponseItem) -> bool {
+    matches!(item, ResponseItem::McpCall { id: Some(id), provider_fields, .. }
+        if !id.as_str().is_empty()
+            && provider_fields.get("status").and_then(Value::as_str) == Some("completed")
+            && provider_fields.get("output").and_then(Value::as_str).is_some()
+            && provider_fields.get("error").is_none_or(Value::is_null))
+}
+
+fn validate_sampling_effects(
+    history: &[RolloutItem],
+    thread: ThreadId,
+    interrupted: &[String],
+    automatic: &[String],
+) -> Result<()> {
+    let mut proven = HashSet::new();
+    let thread = thread.to_string();
+    for row in history {
+        let RolloutItem::TurnContext(context) = row else {
+            continue;
+        };
+        let Some(turn) = context.turn_id.as_deref() else {
+            continue;
+        };
+        if !interrupted.iter().any(|selected| selected == turn) {
+            continue;
+        }
+        let Some(receipt) = &context.sdk_receipt else {
+            continue;
+        };
+        // Exact call receipts retain the legacy missing-marker path, never
+        // permission to ignore explicit negative evidence for another effect.
+        if !automatic.iter().any(|selected| selected == turn)
+            && receipt.get("provider_effects_possible").is_none()
+        {
+            continue;
+        }
+        ensure!(
+            receipt.get("version").and_then(Value::as_u64) == Some(1)
+                && receipt.get("thread_id").and_then(Value::as_str) == Some(thread.as_str())
+                && receipt
+                    .get("provider_effects_possible")
+                    .and_then(Value::as_bool)
+                    == Some(false),
+            "Native local history contains unknown tool effects; interruption lacks safe provider dispatch evidence"
+        );
+        proven.insert(turn);
+    }
+    ensure!(
+        automatic.iter().all(|turn| proven.contains(turn.as_str())),
+        "Native local history contains unknown tool effects; automatic recovery lacks a retained safe sampling receipt"
+    );
+    Ok(())
+}
+
+fn completed_hosted_item(item: &ResponseItem) -> bool {
+    match item {
+        ResponseItem::CodeInterpreterCall {
+            id: Some(id),
+            status,
+            provider_fields,
+            ..
+        }
+        | ResponseItem::ImageGenerationCall {
+            id: Some(id),
+            status,
+            provider_fields,
+            ..
+        } => {
+            !id.as_str().is_empty()
+                && status == "completed"
+                && provider_fields.get("error").is_none_or(Value::is_null)
+        }
+        _ => false,
+    }
+}
+
+// Aborting a cold turn changes its lifecycle, never the outcome of its tools.
+// Check original retained invocations, including native tools omitted by the
+// application reconciliation projection, before publishing any interruption.
+fn validate_interrupted_effects(
+    history: &[RolloutItem],
+    turns: &[String],
+    command_turns: &HashSet<String>,
+    reconciled: &[ResponseItem],
+    receipts: &[&ReconciledCall],
+    historical_shell_turns: &[String],
+) -> Result<()> {
+    if turns.is_empty() && command_turns.is_empty() && historical_shell_turns.is_empty() {
+        return Ok(());
+    }
+    let mut context = None;
+    let mut calls = HashMap::new();
+    let mut outputs = HashMap::new();
+    let mut terminal_commands = HashSet::new();
+    let mut terminal_processes = Vec::new();
+    let mut application_shells = HashSet::new();
+    for row in history {
+        match row {
+            RolloutItem::TurnContext(turn) => context = turn.turn_id.as_deref().or(context),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(turn)) => context = Some(&turn.turn_id),
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => {
+                if let codex_protocol::items::TurnItem::CommandExecution(command) = &event.item
+                    && command.status != codex_protocol::items::CommandExecutionStatus::InProgress
+                {
+                    terminal_commands.insert((event.turn_id.as_str(), command.id.as_str()));
+                    if command.source
+                        == codex_protocol::protocol::ExecCommandSource::UnifiedExecStartup
+                        && let Some(process) = command.process_id.as_deref()
+                    {
+                        terminal_processes
+                            .push((process, (event.turn_id.as_str(), command.id.as_str())));
+                    }
+                }
+            }
+            RolloutItem::ResponseItem(envelope) => {
+                let item = &envelope.item;
+                let Some(turn) = item.turn_id().or(context) else {
+                    continue;
+                };
+                // Completed provider-hosted work does not belong to a new
+                // interruption. Historical local invocations still need proof.
+                let local_shell = match item {
+                    ResponseItem::LocalShellCall { .. } => true,
+                    ResponseItem::ShellCall {
+                        provider_fields, ..
+                    } => {
+                        envelope
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.sdk_application_tool.as_deref())
+                            == Some("shell")
+                            || provider_fields
+                                .get("environment")
+                                .and_then(|value| value.get("type"))
+                                .and_then(Value::as_str)
+                                == Some("local")
+                    }
+                    ResponseItem::ShellCallOutput { .. } => output_identity(item)
+                        .is_some_and(|(id, _)| application_shells.contains(&(turn, id))),
+                    _ => false,
+                };
+                let selected = turns.iter().any(|id| id == turn)
+                    || local_shell && historical_shell_turns.iter().any(|id| id == turn)
+                    || command_turns.contains(turn)
+                        && is_native_command(item)
+                        && !matches!(item, ResponseItem::FunctionCall { name, .. } if name == "write_stdin");
+                if !selected {
+                    if let Some((call, _)) = output_identity(item) {
+                        outputs.insert((turn, call), item);
+                    }
+                    continue;
+                }
+                if let ResponseItem::ShellCall {
+                    provider_fields, ..
+                } = item
+                {
+                    ensure!(
+                        envelope
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.sdk_application_tool.as_deref())
+                            == Some("shell"),
+                        "Native local history contains unknown tool effects; hosted shell has no application owner"
+                    );
+                    let id = shell_call_id(provider_fields)
+                        .context("Native shell invocation lacks identity")?;
+                    application_shells.insert((turn, id.as_str()));
+                }
+                if matches!(item, ResponseItem::ShellCallOutput { .. }) {
+                    let (id, _) =
+                        output_identity(item).context("Native shell result lacks identity")?;
+                    ensure!(
+                        application_shells.contains(&(turn, id)),
+                        "Native local history contains unknown tool effects; shell result has no application owner"
+                    );
+                }
+                let call = match item {
+                    ResponseItem::FunctionCall { call_id, .. }
+                    | ResponseItem::CustomToolCall { call_id, .. }
+                    | ResponseItem::ComputerCall { call_id, .. }
+                    | ResponseItem::ApplyPatchCall { call_id, .. } => Some(call_id.as_str()),
+                    ResponseItem::LocalShellCall { call_id, .. } => Some(
+                        call_id
+                            .as_deref()
+                            .context("Native shell invocation lacks identity")?,
+                    ),
+                    ResponseItem::ShellCall {
+                        provider_fields, ..
+                    } => Some(
+                        shell_call_id(provider_fields)
+                            .context("Native shell invocation lacks identity")?
+                            .as_str(),
+                    ),
+                    ResponseItem::McpCall { id, .. }
+                    | ResponseItem::CodeInterpreterCall { id, .. }
+                    | ResponseItem::ImageGenerationCall { id, .. }
+                    | ResponseItem::McpApprovalRequest { id, .. } => Some(
+                        id.as_ref()
+                            .context("Hosted provider item lacks identity")?
+                            .as_str(),
+                    ),
+                    _ => None,
+                };
+                if let Some(call) = call {
+                    ensure!(
+                        calls.insert((turn, call), item).is_none(),
+                        "Ambiguous tool identity in interrupted history"
+                    );
+                } else if let Some((call, _)) = output_identity(item) {
+                    outputs.insert((turn, call), item);
+                }
+            }
+            _ => {}
+        }
+    }
+    for item in reconciled {
+        if let Some((call, Some(turn))) = output_identity(item) {
+            outputs.insert((turn, call), item);
+        }
+    }
+    for (key, call) in &calls {
+        let call = *call;
+        if matches!(
+            call,
+            ResponseItem::CodeInterpreterCall { .. } | ResponseItem::ImageGenerationCall { .. }
+        ) {
+            ensure!(
+                completed_hosted_item(call),
+                "Native local history contains an unproven hosted effect"
+            );
+            continue;
+        }
+        if matches!(call, ResponseItem::McpCall { .. }) {
+            ensure!(
+                completed_hosted_mcp(call),
+                "Native local history contains an unproven hosted MCP effect"
+            );
+            continue;
+        }
+        ensure!(outputs.get(key).is_some_and(|output| {
+            output_matches_invocation(call, output)
+                || matches!((call, *output), (ResponseItem::LocalShellCall { call_id: Some(expected), .. }, ResponseItem::FunctionCallOutput { call_id: Some(actual), .. }) if expected == actual)
+        }), "Native local history contains unknown tool effects; interruption requires a retained result");
+        if let ResponseItem::McpApprovalRequest {
+            id: Some(id),
+            server_label,
+            name,
+            arguments,
+            provider_fields,
+            ..
+        } = call
+        {
+            let denied = matches!(
+                outputs.get(key),
+                Some(ResponseItem::McpApprovalResponse { approve: false, .. })
+            );
+            ensure!(denied || calls.iter().any(|((turn, _), candidate)| {
+                *turn == key.0 && completed_hosted_mcp(candidate)
+                    && matches!(candidate, ResponseItem::McpCall {
+                        server_label: actual_server, name: actual_name, arguments: actual_arguments,
+                        provider_fields: fields, ..
+                    } if actual_server == server_label && actual_name == name && actual_arguments == arguments
+                        && fields.get("approval_request_id").and_then(Value::as_str) == Some(id.as_str())
+                        && fields.get("caller").filter(|value| !value.is_null())
+                            == provider_fields.get("caller").filter(|value| !value.is_null()))
+            }), "Native local history has an approved hosted MCP call without a terminal receipt");
+        }
+        if is_native_command(call) {
+            let terminal_poll = match call {
+                ResponseItem::FunctionCall { name, arguments, .. } if name == "write_stdin" => {
+                    serde_json::from_str::<Value>(arguments).ok()
+                        .and_then(|arguments| arguments.get("session_id").and_then(Value::as_i64))
+                        .and_then(|id| i32::try_from(id).ok())
+                        .is_some_and(|id| terminal_processes.iter().any(|(process, original)| {
+                            *process == id.to_string() && calls.get(original).is_some_and(|original| {
+                                is_native_command(original)
+                                    && matches!(original, ResponseItem::FunctionCall { name, .. } if name == "exec_command")
+                            })
+                        }))
+                }
+                _ => false,
+            };
+            // A tool result can acknowledge a still-running command process.
+            // Cold recovery cannot establish that process's terminal state.
+            ensure!(
+                terminal_commands.contains(key)
+                    || terminal_poll
+                    || outputs.get(key).is_some_and(|output| {
+                        output.turn_id() == Some(key.0) && tag(output).is_some()
+                    })
+                    || receipts
+                        .iter()
+                        .any(|receipt| receipt.turn_id == key.0 && receipt.call_id == key.1),
+                "Native local history has unproven command process lifetime; interruption is unsafe"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1161,6 +1602,651 @@ fn plan(
 mod tests {
     use super::*;
     use crate::environment::workspace_profile;
+
+    #[test]
+    fn cold_interruption_preserves_unknown_native_effects() {
+        let start = || {
+            RolloutItem::EventMsg(
+                serde_json::from_value(serde_json::json!({
+                    "type": "task_started", "turn_id": "original", "root_turn_id": "original"
+                }))
+                .unwrap(),
+            )
+        };
+        let turns = vec!["original".to_owned()];
+        assert!(
+            validate_interrupted_effects(&[start()], &turns, &HashSet::new(), &[], &[], &[])
+                .is_ok()
+        );
+        for invocation in [
+            serde_json::json!({"type":"function_call", "name":"exec_command", "call_id":"effect", "arguments":"{}"}),
+            serde_json::json!({"type":"shell_call", "call_id":"effect", "action":{"commands":["synthetic"], "timeout_ms":1000, "max_output_length":1000}}),
+            serde_json::json!({"type":"apply_patch_call", "call_id":"effect", "operation":{"type":"delete_file", "path":"synthetic.txt"}}),
+        ] {
+            let call: ResponseItem = serde_json::from_value(invocation).unwrap();
+            let history = vec![
+                start(),
+                RolloutItem::ResponseItem(ResponseItemEnvelope::new(call)),
+            ];
+            assert!(
+                validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn cold_interruption_requires_the_original_command_to_be_terminal() {
+        let start = RolloutItem::EventMsg(
+            serde_json::from_value(serde_json::json!({
+                "type":"task_started", "turn_id":"original", "root_turn_id":"original"
+            }))
+            .unwrap(),
+        );
+        let row = |value| {
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                serde_json::from_value(value).unwrap(),
+            ))
+        };
+        let mut history = vec![
+            start,
+            row(
+                serde_json::json!({"type":"function_call", "name":"exec_command", "call_id":"effect", "arguments":"{}"}),
+            ),
+            row(
+                serde_json::json!({"type":"function_call_output", "call_id":"effect", "output":"Process running with session ID 123"}),
+            ),
+        ];
+        let turns = vec!["original".to_owned()];
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
+        let terminal = |call, turn| {
+            RolloutItem::EventMsg(serde_json::from_value(serde_json::json!({
+            "type":"item_completed", "thread_id":ThreadId::new(), "turn_id":turn,
+            "item":{"type":"CommandExecution", "id":call, "command":["synthetic"], "cwd":"file:///synthetic", "parsed_cmd":[], "source":"agent", "status":"completed", "exit_code":0}
+        })).unwrap())
+        };
+        history.push(terminal("unrelated", "original"));
+        history.push(terminal("effect", "unrelated"));
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
+        history.push(terminal("effect", "original"));
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_ok()
+        );
+    }
+
+    #[test]
+    fn cold_interruption_links_stdin_to_its_original_terminal_process() {
+        let row = |value| {
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                serde_json::from_value(value).unwrap(),
+            ))
+        };
+        let terminal = |process, source| {
+            RolloutItem::EventMsg(
+                serde_json::from_value(serde_json::json!({
+                    "type":"item_completed", "thread_id":ThreadId::new(), "turn_id":"turn",
+                    "item":{"type":"CommandExecution", "id":"exec", "process_id":process,
+                        "command":["synthetic"], "cwd":"file:///synthetic", "parsed_cmd":[],
+                        "source":source, "status":"completed", "exit_code":0}
+                }))
+                .unwrap(),
+            )
+        };
+        let mut history = vec![
+            RolloutItem::EventMsg(serde_json::from_value(serde_json::json!({"type":"task_started", "turn_id":"turn", "root_turn_id":"turn"})).unwrap()),
+            row(serde_json::json!({"type":"function_call", "name":"exec_command", "call_id":"exec", "arguments":"{}"})),
+            row(serde_json::json!({"type":"function_call_output", "call_id":"exec", "output":"retained startup result"})),
+            row(serde_json::json!({"type":"function_call", "name":"write_stdin", "call_id":"poll", "arguments":"{\"session_id\":41}"})),
+            row(serde_json::json!({"type":"function_call_output", "call_id":"poll", "output":"retained poll result"})),
+        ];
+        let turns = vec!["turn".to_owned()];
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
+        history.push(terminal("42", "unified_exec_startup"));
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
+        history.pop();
+        history.push(terminal("41", "unified_exec_startup"));
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_ok()
+        );
+        history.pop();
+        history.push(terminal("41", "unified_exec_interaction"));
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
+        history.pop();
+        history.push(terminal("41", "unified_exec_startup"));
+        history[1] = row(
+            serde_json::json!({"type":"function_call", "namespace":"application", "name":"exec_command", "call_id":"exec", "arguments":"{}"}),
+        );
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
+        history[1] = row(
+            serde_json::json!({"type":"function_call", "name":"exec_command", "call_id":"exec", "arguments":"{}"}),
+        );
+        history[3] = row(
+            serde_json::json!({"type":"function_call", "name":"write_stdin", "call_id":"poll", "arguments":"{\"session_id\":\"41\"}"}),
+        );
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
+        history[3] = row(
+            serde_json::json!({"type":"function_call", "name":"write_stdin", "call_id":"poll", "arguments":"{\"session_id\":41}"}),
+        );
+        history.remove(4);
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
+    }
+
+    #[test]
+    fn cold_interruption_distinguishes_namespaced_application_commands() {
+        let row = |value| {
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                serde_json::from_value(value).unwrap(),
+            ))
+        };
+        for name in ["exec_command", "write_stdin", "shell", "shell_command"] {
+            let history = vec![
+                RolloutItem::EventMsg(serde_json::from_value(serde_json::json!({"type":"task_started", "turn_id":"original", "root_turn_id":"original"})).unwrap()),
+                row(serde_json::json!({"type":"function_call","namespace":"application","name":name,"call_id":"effect","arguments":"{}"})),
+                row(serde_json::json!({"type":"function_call_output","call_id":"effect","output":"application result"})),
+            ];
+            assert!(
+                validate_interrupted_effects(
+                    &history,
+                    &["original".into()],
+                    &HashSet::new(),
+                    &[],
+                    &[],
+                    &[]
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn cold_interruption_checks_running_commands_from_earlier_turns() {
+        let row = |value| {
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                serde_json::from_value(value).unwrap(),
+            ))
+        };
+        let event = |value| RolloutItem::EventMsg(serde_json::from_value(value).unwrap());
+        let mut history = vec![
+            event(
+                serde_json::json!({"type":"task_started", "turn_id":"earlier", "root_turn_id":"earlier"}),
+            ),
+            row(
+                serde_json::json!({"type":"function_call","name":"exec_command","call_id":"effect","arguments":"{}"}),
+            ),
+            row(
+                serde_json::json!({"type":"function_call_output","call_id":"effect","output":"Process running with session ID 123"}),
+            ),
+            event(serde_json::json!({"type":"task_complete", "turn_id":"earlier"})),
+            event(
+                serde_json::json!({"type":"task_started", "turn_id":"later", "root_turn_id":"later"}),
+            ),
+        ];
+        assert!(
+            validate_interrupted_effects(
+                &history,
+                &["later".into()],
+                &HashSet::from(["earlier".into(), "later".into()]),
+                &[],
+                &[],
+                &[]
+            )
+            .is_err()
+        );
+        assert!(
+            validate_interrupted_effects(
+                &history,
+                &[],
+                &HashSet::from(["earlier".into()]),
+                &[],
+                &[],
+                &[]
+            )
+            .is_err()
+        );
+        history.push(row(serde_json::json!({
+            "type":"function_call_output", "call_id":"effect", "output":"confirmed by application",
+            "internal_chat_message_metadata_passthrough":{
+                "turn_id":"earlier", "content_item_kinds":["sdk_reconciliation.applied"]
+            }
+        })));
+        assert!(
+            validate_interrupted_effects(
+                &history,
+                &[],
+                &HashSet::from(["earlier".into()]),
+                &[],
+                &[],
+                &[]
+            )
+            .is_ok()
+        );
+        history.pop();
+        history.push(event(serde_json::json!({
+            "type":"item_completed", "thread_id":ThreadId::new(), "turn_id":"earlier",
+            "item":{"type":"CommandExecution", "id":"effect", "command":["synthetic"], "cwd":"file:///synthetic", "parsed_cmd":[], "source":"agent", "status":"completed", "exit_code":0}
+        })));
+        assert!(
+            validate_interrupted_effects(
+                &history,
+                &["later".into()],
+                &HashSet::from(["earlier".into(), "later".into()]),
+                &[],
+                &[],
+                &[]
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn cold_interruption_requires_safe_sampling_receipts() {
+        let thread = ThreadId::new();
+        let context = |turn, receipt| {
+            RolloutItem::TurnContext(serde_json::from_value(serde_json::json!({
+            "turn_id":turn, "cwd":std::env::current_dir().unwrap(), "approval_policy":"never",
+            "sandbox_policy":{"type":"danger-full-access"}, "model":"synthetic", "summary":"auto",
+            "sdk_receipt":receipt
+        })).unwrap())
+        };
+        let turns = vec!["turn".to_owned()];
+        let safe =
+            serde_json::json!({"version":1, "thread_id":thread, "provider_effects_possible":false});
+        assert!(validate_sampling_effects(&[], thread, &turns, &turns).is_err());
+        assert!(
+            validate_sampling_effects(&[context("turn", safe.clone())], thread, &turns, &turns)
+                .is_ok()
+        );
+        assert!(
+            validate_sampling_effects(&[context("other", safe.clone())], thread, &turns, &turns)
+                .is_err()
+        );
+        for flag in [
+            serde_json::json!(true),
+            serde_json::Value::Null,
+            serde_json::json!("false"),
+        ] {
+            let mut receipt = safe.clone();
+            receipt["provider_effects_possible"] = flag;
+            assert!(
+                validate_sampling_effects(
+                    &[
+                        context("turn", safe.clone()),
+                        context("turn", receipt.clone())
+                    ],
+                    thread,
+                    &turns,
+                    &turns
+                )
+                .is_err()
+            );
+            assert!(
+                validate_sampling_effects(&[context("turn", receipt)], thread, &turns, &[])
+                    .is_err()
+            );
+        }
+        let mut legacy = safe.clone();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_effects_possible");
+        assert!(
+            validate_sampling_effects(&[context("turn", legacy)], thread, &turns, &turns).is_err()
+        );
+        let mut legacy_receipt = safe.clone();
+        legacy_receipt
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_effects_possible");
+        assert!(
+            validate_sampling_effects(&[context("turn", legacy_receipt)], thread, &turns, &[])
+                .is_ok()
+        );
+        let mut true_receipt = safe.clone();
+        true_receipt["provider_effects_possible"] = true.into();
+        assert!(
+            validate_sampling_effects(
+                &[
+                    context("turn", true_receipt.clone()),
+                    context("turn", safe.clone())
+                ],
+                thread,
+                &turns,
+                &[]
+            )
+            .is_err()
+        );
+        assert!(
+            validate_sampling_effects(
+                &[
+                    context("settled", true_receipt),
+                    context("turn", safe.clone())
+                ],
+                thread,
+                &turns,
+                &turns
+            )
+            .is_ok()
+        );
+        let mut foreign = safe.clone();
+        foreign["thread_id"] = ThreadId::new().to_string().into();
+        assert!(
+            validate_sampling_effects(&[context("turn", foreign)], thread, &turns, &turns).is_err()
+        );
+        let mut unknown = safe;
+        unknown["version"] = 2.into();
+        assert!(
+            validate_sampling_effects(&[context("turn", unknown)], thread, &turns, &turns).is_err()
+        );
+    }
+
+    #[test]
+    fn cold_interruption_requires_terminal_hosted_code_and_image() {
+        let row = |value| {
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                serde_json::from_value(value).unwrap(),
+            ))
+        };
+        let start = || {
+            RolloutItem::EventMsg(serde_json::from_value(serde_json::json!({"type":"task_started", "turn_id":"turn", "root_turn_id":"turn"})).unwrap())
+        };
+        let turns = vec!["turn".to_owned()];
+        for kind in ["code_interpreter_call", "image_generation_call"] {
+            for payload in [serde_json::Value::Null, serde_json::json!([])] {
+                let completed = serde_json::json!({"type":kind, "id":"hosted", "status":"completed", "outputs":payload, "result":null});
+                assert!(
+                    validate_interrupted_effects(
+                        &[start(), row(completed.clone())],
+                        &turns,
+                        &HashSet::new(),
+                        &[],
+                        &[],
+                        &[]
+                    )
+                    .is_ok()
+                );
+                for status in ["in_progress", "failed", "unknown"] {
+                    let mut item = completed.clone();
+                    item["status"] = status.into();
+                    assert!(
+                        validate_interrupted_effects(
+                            &[start(), row(item)],
+                            &turns,
+                            &HashSet::new(),
+                            &[],
+                            &[],
+                            &[]
+                        )
+                        .is_err()
+                    );
+                }
+                for id in [serde_json::Value::Null, serde_json::json!("")] {
+                    let mut item = completed.clone();
+                    item["id"] = id;
+                    assert!(
+                        validate_interrupted_effects(
+                            &[start(), row(item)],
+                            &turns,
+                            &HashSet::new(),
+                            &[],
+                            &[],
+                            &[]
+                        )
+                        .is_err()
+                    );
+                }
+                let mut item = completed;
+                item["error"] = serde_json::json!({"message":"failed"});
+                assert!(
+                    validate_interrupted_effects(
+                        &[start(), row(item)],
+                        &turns,
+                        &HashSet::new(),
+                        &[],
+                        &[],
+                        &[]
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cold_interruption_requires_application_shell_ownership() {
+        let row = |value| {
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                serde_json::from_value(value).unwrap(),
+            ))
+        };
+        let mut history=vec![
+            RolloutItem::EventMsg(serde_json::from_value(serde_json::json!({"type":"task_started", "turn_id":"turn", "root_turn_id":"turn"})).unwrap()),
+            row(serde_json::json!({"type":"shell_call", "id":"command", "call_id":"shell", "status":"completed"})),
+            row(serde_json::json!({"type":"shell_call_output", "id":"receipt", "call_id":"shell", "status":"completed", "output":[]})),
+        ];
+        let turns = vec!["turn".to_owned()];
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
+        if let RolloutItem::ResponseItem(envelope) = &mut history[1] {
+            envelope.metadata = Some(codex_history::CodexHarnessMetadata {
+                sdk_application_tool: Some("shell".into()),
+                ..Default::default()
+            });
+        }
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_ok()
+        );
+        history.remove(1);
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
+    }
+
+    #[test]
+    fn cold_interruption_distinguishes_settled_hosted_and_historical_local_shells() {
+        let row = |value| {
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                serde_json::from_value(value).unwrap(),
+            ))
+        };
+        let start = || {
+            RolloutItem::EventMsg(serde_json::from_value(serde_json::json!({"type":"task_started", "turn_id":"settled", "root_turn_id":"settled"})).unwrap())
+        };
+        let completed = || {
+            RolloutItem::EventMsg(
+                serde_json::from_value(
+                    serde_json::json!({"type":"task_complete", "turn_id":"settled"}),
+                )
+                .unwrap(),
+            )
+        };
+        let historical = vec!["settled".to_owned()];
+        let commands = HashSet::from(["settled".to_owned()]);
+        let mut history = vec![
+            start(),
+            row(
+                serde_json::json!({"type":"shell_call", "id":"provider", "call_id":"shell", "status":"completed", "environment":{"type":"container_reference", "container_id":"hosted"}}),
+            ),
+            row(serde_json::json!({"type":"shell_call_output", "call_id":"shell", "output":[]})),
+            completed(),
+        ];
+        assert!(
+            validate_interrupted_effects(&history, &[], &commands, &[], &[], &historical).is_ok()
+        );
+        assert!(
+            validate_interrupted_effects(&history, &historical, &commands, &[], &[], &historical)
+                .is_err()
+        );
+        history[1] = row(
+            serde_json::json!({"type":"local_shell_call", "call_id":"shell", "status":"completed", "action":{"type":"exec", "command":["true"]}}),
+        );
+        history.remove(2);
+        assert!(
+            validate_interrupted_effects(&history, &[], &commands, &[], &[], &historical).is_err()
+        );
+        assert!(
+            validate_interrupted_effects(&history, &[], &HashSet::new(), &[], &[], &historical)
+                .is_err()
+        );
+        history.insert(2, row(serde_json::json!({"type":"function_call_output", "call_id":"shell", "output":"done"})));
+        assert!(
+            validate_interrupted_effects(&history, &[], &commands, &[], &[], &historical).is_ok()
+        );
+        history[1] = row(
+            serde_json::json!({"type":"shell_call", "call_id":"shell", "environment":{"type":"local"}}),
+        );
+        assert!(
+            validate_interrupted_effects(&history, &[], &commands, &[], &[], &historical).is_err()
+        );
+        if let RolloutItem::ResponseItem(envelope) = &mut history[1] {
+            envelope.metadata = Some(codex_history::CodexHarnessMetadata {
+                sdk_application_tool: Some("shell".into()),
+                ..Default::default()
+            });
+        }
+        history[2] =
+            row(serde_json::json!({"type":"shell_call_output", "call_id":"shell", "output":[]}));
+        assert!(
+            validate_interrupted_effects(&history, &[], &commands, &[], &[], &historical).is_ok()
+        );
+        history.remove(2);
+        assert!(
+            validate_interrupted_effects(&history, &[], &commands, &[], &[], &historical).is_err()
+        );
+        assert!(
+            validate_interrupted_effects(&history, &[], &HashSet::new(), &[], &[], &historical)
+                .is_err()
+        );
+        // Prior unrelated application-shell turns do not gain a new refusal.
+        assert!(validate_interrupted_effects(&history, &[], &commands, &[], &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn cold_interruption_requires_terminal_hosted_mcp_receipts() {
+        let row = |value| {
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                serde_json::from_value(value).unwrap(),
+            ))
+        };
+        let start = || {
+            RolloutItem::EventMsg(serde_json::from_value(serde_json::json!({"type":"task_started", "turn_id":"original", "root_turn_id":"original"})).unwrap())
+        };
+        let approval = serde_json::json!({"type":"mcp_approval_request", "id":"approval", "server_label":"docs", "name":"mutate", "arguments":"{}"});
+        let response = |approve| serde_json::json!({"type":"mcp_approval_response", "approval_request_id":"approval", "approve":approve});
+        let call = |status, output| serde_json::json!({"type":"mcp_call", "id":"remote", "server_label":"docs", "name":"mutate", "arguments":"{}", "approval_request_id":"approval", "status":status, "output":output});
+        let turns = ["original".into()];
+        assert!(
+            validate_interrupted_effects(
+                &[start(), row(approval.clone()), row(response(false))],
+                &turns,
+                &HashSet::new(),
+                &[],
+                &[],
+                &[]
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_interrupted_effects(
+                &[start(), row(approval.clone()), row(response(true))],
+                &turns,
+                &HashSet::new(),
+                &[],
+                &[],
+                &[]
+            )
+            .is_err()
+        );
+        for status in ["in_progress", "failed", "unknown"] {
+            let history = vec![
+                start(),
+                row(approval.clone()),
+                row(response(false)),
+                row(call(status, serde_json::Value::Null)),
+            ];
+            assert!(
+                validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[])
+                    .is_err()
+            );
+        }
+        let completed = call("completed", serde_json::json!(""));
+        assert!(
+            validate_interrupted_effects(
+                &[
+                    start(),
+                    row(approval.clone()),
+                    row(response(true)),
+                    row(completed.clone())
+                ],
+                &turns,
+                &HashSet::new(),
+                &[],
+                &[],
+                &[]
+            )
+            .is_ok()
+        );
+        let mut unrelated = completed.clone();
+        unrelated["approval_request_id"] = serde_json::json!("another");
+        assert!(
+            validate_interrupted_effects(
+                &[
+                    start(),
+                    row(approval.clone()),
+                    row(response(true)),
+                    row(unrelated)
+                ],
+                &turns,
+                &HashSet::new(),
+                &[],
+                &[],
+                &[]
+            )
+            .is_err()
+        );
+        let mut missing_output = completed.clone();
+        missing_output.as_object_mut().unwrap().remove("output");
+        assert!(
+            validate_interrupted_effects(
+                &[start(), row(missing_output)],
+                &turns,
+                &HashSet::new(),
+                &[],
+                &[],
+                &[]
+            )
+            .is_err()
+        );
+        let mut mismatched = completed;
+        mismatched["arguments"] = serde_json::json!("{\"different\":true}");
+        assert!(
+            validate_interrupted_effects(
+                &[start(), row(approval), row(response(true)), row(mismatched)],
+                &turns,
+                &HashSet::new(),
+                &[],
+                &[],
+                &[]
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn durable_resume_accepts_identified_fork_receipt() {

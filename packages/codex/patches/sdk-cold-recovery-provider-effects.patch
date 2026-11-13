@@ -1,0 +1,117 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -4255,6 +4255,75 @@
+     Session::assign_missing_response_item_id(item);
+ }
+ 
++// Provider execution has no local accepted-call owner, including capabilities
++// retained by a hosted prompt or a provider-owned history cursor.
++fn sdk_request_may_have_provider_effects(
++    prompt: &Prompt,
++    visible_tools: &[codex_tools::ToolSpec],
++) -> bool {
++    prompt
++        .request_controls
++        .hosted_prompt
++        .as_ref()
++        .is_some_and(Option::is_some)
++        || prompt.canonical_history_input.is_some()
++        || prompt.tools.iter().chain(visible_tools.iter()).any(|tool| {
++            matches!(
++                tool,
++                codex_tools::ToolSpec::Mcp(_)
++                    | codex_tools::ToolSpec::CodeInterpreter(_)
++                    | codex_tools::ToolSpec::Shell(_)
++                    | codex_tools::ToolSpec::ImageGeneration(_)
++            )
++        })
++}
++
++#[cfg(test)]
++#[test]
++fn sdk_cold_recovery_classifies_provider_effect_capabilities() {
++    let mut prompt = Prompt::default();
++    assert!(!sdk_request_may_have_provider_effects(&prompt, &[]));
++    assert!(!sdk_request_may_have_provider_effects(
++        &prompt,
++        &[codex_tools::ToolSpec::ApplyPatch {}]
++    ));
++    let hosted = vec![
++        codex_tools::ToolSpec::Mcp(
++            serde_json::from_value(serde_json::json!({"server_label":"remote"})).unwrap(),
++        ),
++        codex_tools::ToolSpec::CodeInterpreter(
++            serde_json::from_value(serde_json::json!({"container":{"type":"auto"}})).unwrap(),
++        ),
++        codex_tools::ToolSpec::Shell(
++            serde_json::from_value(serde_json::json!({"environment":{"type":"container_auto"}}))
++                .unwrap(),
++        ),
++        codex_tools::ToolSpec::ImageGeneration(
++            serde_json::from_value(serde_json::json!({})).unwrap(),
++        ),
++    ];
++    for tool in hosted {
++        assert!(sdk_request_may_have_provider_effects(
++            &prompt,
++            std::slice::from_ref(&tool)
++        ));
++        prompt.tools = vec![tool].into();
++        assert!(sdk_request_may_have_provider_effects(&prompt, &[]));
++        prompt.tools = Vec::new().into();
++    }
++    prompt.request_controls.hosted_prompt = Some(Some(Default::default()));
++    assert!(sdk_request_may_have_provider_effects(&prompt, &[]));
++    prompt
++        .request_controls
++        .hosted_prompt
++        .as_mut()
++        .unwrap()
++        .as_mut()
++        .unwrap()
++        .omit_tools = true;
++    assert!(sdk_request_may_have_provider_effects(&prompt, &[]));
++}
++
+ // Provider actions have no local accepted-call deduplication owner. Unknown
+ // output has lost its raw type, so its replay safety cannot be established.
+ fn provider_event_may_have_effects(event: &ResponseEvent, tools: &[codex_tools::ToolSpec]) -> bool {
+@@ -4361,21 +4430,29 @@
+     // Record settings from this actual sampling context without changing the resume baseline.
+     // A later request in the same turn may select different live settings.
+     struct LastSdkReceipt(serde_json::Value);
+-    if let Some(receipt) =
++    if let Some(mut receipt) =
+         step_context.sdk_sampling_receipt(sess.thread_id(), &prompt.input, effort.as_ref())
+-        && turn_context
++    {
++        receipt["provider_effects_possible"] =
++            serde_json::Value::Bool(sdk_request_may_have_provider_effects(
++                prompt,
++                &step_context.tool_router.model_visible_specs(),
++            ));
++        if turn_context
+             .extension_data
+             .get::<LastSdkReceipt>()
+             .as_deref()
+             .map(|last| &last.0)
+             != Some(&receipt)
+-    {
+-        let mut item = step_context.to_turn_context_item();
+-        item.sdk_receipt = Some(receipt.clone());
+-        if sess
+-            .persist_rollout_items(&[RolloutItem::TurnContext(item)])
+-            .await
+         {
++            let mut item = step_context.to_turn_context_item();
++            item.sdk_receipt = Some(receipt.clone());
++            if !sess
++                .persist_rollout_items(&[RolloutItem::TurnContext(item)])
++                .await
++            {
++                return Err(CodexErr::Fatal("Canonical sampling receipt persistence failed; execution stopped pending recovery".to_string()));
++            }
+             turn_context.extension_data.insert(LastSdkReceipt(receipt));
+         }
+     }
