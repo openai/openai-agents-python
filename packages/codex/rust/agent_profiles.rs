@@ -1144,6 +1144,9 @@ impl AgentProfiles {
             .get_or_insert_with(Default::default)
             .sdk_agent_graph = Some(self.opening.fingerprint.clone());
         let mut data = ExtensionDataInit::new();
+        data.insert(codex_extension_api::AgentProfileOutputStrict(
+            prepared.declaration.model.request_controls.output_schema_strict.unwrap_or(true),
+        ));
         insert_profile_provider(thread, &prepared.declaration, &mut data)?;
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
@@ -1407,6 +1410,9 @@ pub(crate) async fn configure(
         catalog.handoff_defaults = handoff_defaults(&prepared.declaration, default_handoffs)?;
         let generation = catalog.generation.id;
         let mut data = ExtensionDataInit::new();
+        data.insert(codex_extension_api::AgentProfileOutputStrict(
+            descriptor.model.request_controls.output_schema_strict.unwrap_or(true),
+        ));
         insert_profile_provider(thread, &prepared.declaration, &mut data)?;
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),

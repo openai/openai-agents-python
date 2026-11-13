@@ -1227,7 +1227,11 @@
     {
       "path": "sdk-provider-hosted-selector-completion.patch",
       "sha256": "603c562185ff239ac4b89d9b37a739e9eb4530af868b97a309f796a52dc8f4dc"
+    },
+    {
+      "path": "sdk-bind-declaration-output-strictness.patch",
+      "sha256": "723046d8ae5c31b90e4f23f83ea0be45311fb60fd674f031764807fb58b2d85d"
     }
   ],
-  "result_tree": "c5e7f150899f0174dc749edbb9dec1278022779e"
+  "result_tree": "6713fdc83f9c82eb7a69544c425f746ff2fab610"
 }
