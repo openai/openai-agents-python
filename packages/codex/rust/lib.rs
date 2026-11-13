@@ -4937,6 +4937,15 @@ fn dispatch_trace_event<'py>(py: Python<'py>, encoded: String) -> PyResult<Bound
 
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    let version: String = module
+        .py()
+        .import("agents.version")?
+        .getattr("__version__")?
+        .extract()?;
+    codex_login::default_client::set_default_originator("openai_agents_python".into())
+        .map_err(|error| py_error(format!("cannot initialize SDK originator: {error:?}")))?;
+    codex_login::default_client::set_default_client_version(version)
+        .map_err(|error| py_error(format!("cannot initialize SDK version: {error:?}")))?;
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime
         .enable_all()
