@@ -798,6 +798,10 @@ pub(crate) enum Reply {
     Continuation {
         request: PendingKey,
         continuation: Value,
+        #[serde(default)]
+        callback: Option<Value>,
+        #[serde(default)]
+        rollback: bool,
     },
 }
 
@@ -3558,11 +3562,8 @@ impl PythonTools {
         owner: &str,
         key: &PendingKey,
         continuation: Value,
+        callback_receipt: Option<&Value>,
     ) -> Result<bool> {
-        ensure!(
-            self.sdk_owned(),
-            "child continuation requires the SDK catalog"
-        );
         ensure!(
             continuation
                 .as_object()
@@ -3576,12 +3577,53 @@ impl PythonTools {
         let Some(call) = pending.get_mut(key) else {
             return Ok(false);
         };
+        let captured = call.phase == Phase::Admitted
+            && !call.retired
+            && !call.sender.is_closed()
+            && call.callback.as_ref().is_some_and(|callback| {
+                callback_receipt == Some(&callback.receipt)
+                    && callback.entered.load(Ordering::Acquire)
+                    && !callback.cancelled.load(Ordering::Acquire)
+                    && !callback.released.load(Ordering::Acquire)
+            });
         ensure!(
-            call.phase == Phase::Entered,
+            (self.sdk_owned() && call.phase == Phase::Entered) || captured,
             "child continuation requires a live entered call"
         );
         call.phase = Phase::Parked;
         call.continuation = Some(continuation);
+        Ok(true)
+    }
+
+    pub(crate) fn rollback_continuation(
+        &self,
+        owner: &str,
+        key: &PendingKey,
+        receipt: Option<&Value>,
+    ) -> Result<bool> {
+        ensure!(
+            key.reply.thread == owner,
+            "Expired configured continuation rollback"
+        );
+        let mut pending = self.pending.lock().expect("Python replies poisoned");
+        let call = pending
+            .get_mut(key)
+            .context("Expired configured continuation rollback")?;
+        ensure!(
+            call.phase == Phase::Parked
+                && call.continuation.is_some()
+                && !call.retired
+                && !call.sender.is_closed()
+                && call.callback.as_ref().is_some_and(|callback| {
+                    receipt == Some(&callback.receipt)
+                        && callback.entered.load(Ordering::Acquire)
+                        && !callback.cancelled.load(Ordering::Acquire)
+                        && !callback.released.load(Ordering::Acquire)
+                }),
+            "Expired configured continuation rollback"
+        );
+        call.phase = Phase::Admitted;
+        call.continuation = None;
         Ok(true)
     }
 
@@ -3592,7 +3634,11 @@ impl PythonTools {
             let call = pending
                 .get(key)
                 .ok_or_else(|| anyhow::anyhow!("expired parked SDK call"))?;
-            ensure!(call.phase == Phase::Parked, "SDK call is not parked");
+            ensure!(
+                call.phase == Phase::Parked
+                    || (call.manual_request.is_some() && call.continuation.is_none()),
+                "SDK call is not parked"
+            );
             if let Some(value) = &call.continuation {
                 values.insert(key.call.clone(), value.clone());
             }
@@ -3601,16 +3647,20 @@ impl PythonTools {
     }
 
     pub(crate) fn parked(&self, owner: &str) -> Result<Vec<PendingKey>> {
-        ensure!(
-            self.sdk_owned(),
-            "approval suspension requires the SDK catalog"
-        );
         let pending = self.pending.lock().expect("Python replies poisoned");
         ensure!(!pending.is_empty(), "no parked approval");
         ensure!(
-            pending
-                .iter()
-                .all(|(key, call)| key.reply.thread == owner && call.phase == Phase::Parked),
+            pending.iter().all(|(key, call)| key.reply.thread == owner
+                && call.phase == Phase::Parked
+                && (self.sdk_owned()
+                    || (call.continuation.is_some()
+                        && !call.retired
+                        && !call.sender.is_closed()
+                        && call.callback.as_ref().is_some_and(|callback| {
+                            callback.entered.load(Ordering::Acquire)
+                                && !callback.cancelled.load(Ordering::Acquire)
+                                && !callback.released.load(Ordering::Acquire)
+                        })))),
             "non-parked tool callbacks remain"
         );
         Ok(pending.keys().cloned().collect())
@@ -3855,9 +3905,15 @@ impl PythonTools {
 
     pub(crate) fn manual_approval_state(&self, key: &PendingKey) -> Result<(bool, Option<Value>)> {
         let pending = self.pending.lock().expect("Python replies poisoned");
-        let request = pending
+        let call = pending
             .get(key)
-            .and_then(|call| call.manual_request.as_ref())
+            .context("Manual approval call is no longer pending")?;
+        if call.phase == Phase::Parked && call.continuation.is_some() {
+            return Ok((false, None));
+        }
+        let request = call
+            .manual_request
+            .as_ref()
             .context("Manual approval call is no longer pending")?;
         Ok((
             request["msg"]["_sdk_approval_required"] == true,
@@ -3951,7 +4007,7 @@ impl PythonTools {
             .lock()
             .expect("Python replies poisoned")
             .get(key)
-            .filter(|call| call.approval_request.is_some())
+            .filter(|call| call.approval_request.is_some() || call.continuation.is_some())
             .map(|call| (call.invocation, call.original_payload.clone()));
         let Some((invocation, payload)) = captured else {
             return Ok(());
@@ -3973,6 +4029,73 @@ impl PythonTools {
 
     pub(crate) fn bind_manual_restore(&self, owner: crate::manual_checkpoint::WeakOwner) {
         *self.manual_restore.lock().expect("Manual restore poisoned") = Some(owner);
+    }
+
+    pub(crate) fn configured_continuation(&self, request: &Value) -> Result<Option<Value>> {
+        let key: PendingKey = serde_json::from_value(request.clone())?;
+        let invocation = request["_sdk_invocation"]
+            .as_u64()
+            .context("Missing continuation invocation")?;
+        let pending = self.pending.lock().expect("Python replies poisoned");
+        let call = pending
+            .get(&key)
+            .context("Expired configured continuation")?;
+        ensure!(
+            call.invocation == invocation && !call.retired && !call.sender.is_closed(),
+            "Expired configured continuation"
+        );
+        Ok(call.reentry.then(|| call.continuation.clone()).flatten())
+    }
+
+    pub(crate) fn enqueue_configured_reentry(
+        self: &Arc<Self>,
+        owner: &str,
+        turn: &str,
+        item: &ResponseItem,
+        model: Option<&str>,
+        continuation: Value,
+    ) -> Result<oneshot::Receiver<ToolReply>> {
+        ensure!(
+            continuation["kind"] == "configured-child-v1" && continuation["state"].is_object(),
+            "Invalid configured continuation"
+        );
+        let generation = self.snapshot();
+        let (name, call_id, arguments) = crate::manual_checkpoint::manual_request(item)?;
+        let slot = generation
+            .entries
+            .iter()
+            .enumerate()
+            .position(|(slot, entry)| {
+                !entry.manual
+                    && entry.name.clone().with_default_namespace()
+                        == name.clone().with_default_namespace()
+                    && matches!(generation.specs[slot], DynamicToolSpec::Function(_))
+            })
+            .context("Current configured continuation function is absent")?;
+        let (key, _, receiver) = self.enqueue_profile(
+            owner,
+            &generation,
+            slot,
+            turn,
+            &call_id,
+            arguments,
+            None,
+            &ToolCallSource::Direct,
+            model,
+            true,
+            None,
+            None,
+            None,
+            None,
+        )?;
+        // Opening has not published the Thread or started its Python reader yet.
+        self.pending
+            .lock()
+            .expect("Python replies poisoned")
+            .get_mut(&key)
+            .context("Configured continuation expired during opening")?
+            .continuation = Some(continuation);
+        Ok(receiver)
     }
 
     pub(crate) fn enqueue_manual_reentry(
@@ -4181,7 +4304,8 @@ impl PythonTools {
         ensure!(!pending.is_empty(), "No pending manual calls");
         ensure!(
             pending.iter().all(|(key, value)| key.reply.thread == owner
-                && value.manual_request.is_some()
+                && (value.manual_request.is_some()
+                    || (value.phase == Phase::Parked && value.continuation.is_some()))
                 && !value.sender.is_closed()),
             "Automatic work has not settled"
         );
@@ -10017,10 +10141,19 @@ pub(crate) mod managed_tests {
                 .unwrap()
         );
         assert!(tools.park("owner", &key).is_err());
-        assert!(tools.park_continuation("owner", &key, json!(true)).is_err());
         assert!(
             tools
-                .park_continuation("owner", &key, json!({"calls":["child1"],"receipts":[]}))
+                .park_continuation("owner", &key, json!(true), None)
+                .is_err()
+        );
+        assert!(
+            tools
+                .park_continuation(
+                    "owner",
+                    &key,
+                    json!({"calls":["child1"],"receipts":[]}),
+                    None,
+                )
                 .unwrap()
         );
         assert!(

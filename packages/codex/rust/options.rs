@@ -81,6 +81,8 @@ pub struct ThreadOptions {
     pub(crate) sdk_instruction_files: Option<Vec<crate::application_instructions::InstructionFile>>,
     #[serde(rename = "_manual_tool_slots")]
     pub(crate) manual_tool_slots: Vec<usize>,
+    #[serde(rename = "_configured_continuation_tool_slots")]
+    pub(crate) configured_continuation_tool_slots: Vec<usize>,
     #[serde(rename = "_terminal_tool_slots")]
     pub(crate) terminal_tool_slots: Vec<usize>,
     #[serde(rename = "_input_error_tool_slots")]
@@ -186,6 +188,7 @@ impl ThreadOptions {
             && self.thread_source.is_none()
             && self.dynamic_tools.is_empty()
             && self.manual_tool_slots.is_empty()
+            && self.configured_continuation_tool_slots.is_empty()
             && (functions || self.terminal_tool_slots.is_empty())
             && self.native_agent_tools.is_empty()
             && self.hosted_tools.is_empty()

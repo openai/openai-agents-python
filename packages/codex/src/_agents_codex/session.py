@@ -392,6 +392,7 @@ from .usage import (
     RunUsage,
     TokenUsage,
     TokenUsageInfo as TokenUsageInfo,
+    _merge_configured_child_restore_usage,
     _token_usage_info as _token_usage_info,
     _UsageCollector,
 )
@@ -1355,6 +1356,15 @@ class _ConfiguredChild:
     session: Session[Any, Any]
     admitted: Callable[[], bool]
     active: bool = True
+    callback_task: asyncio.Task[Any] | None = None
+    checkpoint: SessionState | None = None
+    recover: Callable[[], Coroutine[Any, Any, Any]] | None = None
+    recovery: asyncio.Task[Any] | None = None
+    recovery_ready: asyncio.Future[None] | None = None
+    parent_request: str = ""
+    parent_callback: dict[str, Any] | None = None
+    sealing: bool = False
+    seal_hold: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 def _native_callback_cancelled(state: _CallbackState) -> bool:
@@ -2867,6 +2877,11 @@ def _restore_operation_tools(
         catalog,
         current_selected,
         [pending.tool for pending in saved.native_continuation.pending_manual],
+        [
+            pending.tool
+            for pending in saved.native_continuation.pending_manual
+            if pending.continuation is not None
+        ],
     )
     return slots, refs, selected_mcp, declared
 
@@ -4510,6 +4525,18 @@ class Session(Generic[ContextT, OutputT]):
                     "_application_instructions": instructions,
                     "_sdk_instruction_files": instruction_receipts,
                     "_manual_tool_slots": manual_slots,
+                    "_configured_continuation_tool_slots": [
+                        slot
+                        for slot, tool in enumerate(restored_catalog.tools)
+                        if isinstance(tool, _CapturedFunction)
+                        and tool.configured_agent is not None
+                        and state is not None
+                        and saved.native_continuation is not None
+                        and any(
+                            pending.tool == tool.name and pending.continuation is not None
+                            for pending in saved.native_continuation.pending_manual
+                        )
+                    ],
                     "_terminal_tool_slots": restored_catalog.finish_slots(),
                     "_input_error_tool_slots": restored_catalog.input_error_slots(
                         run_formatter=tool_error_formatter is not None
@@ -4822,7 +4849,7 @@ class Session(Generic[ContextT, OutputT]):
                         retry_policy_override=restored_retry_policy,
                         raise_on_unknown_tool=session._native._manual_raises_unknown_tool(),
                         guardrail_results=session._restore_guardrail_records(saved),
-                        run_usage=_UsageCollector(saved.run_usage),
+                        run_usage=_UsageCollector(session._configured_checkpoint_usage(saved)),
                         original_input=saved.original_input,
                         restored_pending=True,
                         budget=restored_budget,
@@ -5208,6 +5235,7 @@ class Session(Generic[ContextT, OutputT]):
         self._url_completions: dict[tuple[str, str], ElicitationRequest] = {}
         self._url_completion_lock = asyncio.Lock()
         self._active: _Submission | None = None
+        self._configured_usage_parent: _UsageCollector | None = None
         self._usage_roots: weakref.WeakValueDictionary[str, _UsageCollector] = (
             weakref.WeakValueDictionary()
         )
@@ -7357,7 +7385,16 @@ class Session(Generic[ContextT, OutputT]):
             or state.stopping
             or state.failure.done()
             or state.terminal.done()
-            or any(not callback.done() for callback in state.callbacks)
+            or any(
+                not callback.done()
+                and not any(
+                    child.callback_task is callback
+                    and child.sealing
+                    and child.checkpoint is not None
+                    for child in self._configured_children
+                )
+                for callback in state.callbacks
+            )
         ):
             return False
         # Core persisted the full response sample before publishing its event.
@@ -7370,7 +7407,10 @@ class Session(Generic[ContextT, OutputT]):
             raise NativeError("Native checkpoint readiness could not be verified") from None
         if not ready:
             return False
-        return self._validate_pending_manual(state)
+        return self._validate_pending_manual(state) or any(
+            child.owner is state and child.sealing and child.checkpoint is not None
+            for child in self._configured_children
+        )
 
     async def _wait_manual_boundary(
         self, state: _Submission, *, require_request: bool = False
@@ -11954,8 +11994,56 @@ class Session(Generic[ContextT, OutputT]):
         ):
             self._observations.finish("failed")
 
+    @staticmethod
+    def _configured_checkpoint_usage(saved: SessionState) -> RunUsage:
+        total = saved.run_usage or RunUsage(0, 0, 0, 0, 0, 0, 0, 0)
+        if saved.native_continuation is None:
+            return total
+        children = [
+            entry for entry in saved.native_continuation.pending_manual if entry.continuation
+        ]
+        if len(children) > 1:
+            raise ValueError("Concurrent configured child usage is not supported")
+        for entry in children:
+            captured = entry.continuation
+            assert captured is not None
+            if captured.get("kind") != "configured-child-v1":
+                raise ValueError("Unsupported configured child continuation")
+            child = SessionState.from_json(json.dumps(captured["state"]))
+            accounted = (
+                RunUsage(**captured["usage_in_parent"]) if "usage_in_parent" in captured else None
+            )
+            total = _merge_configured_child_restore_usage(
+                total, Session._configured_checkpoint_usage(child), accounted
+            )
+        return total
+
+    def _bind_configured_usage(
+        self, parent: _UsageCollector, restored: SessionState | None = None
+    ) -> None:
+        if (
+            self._configured_usage_parent is not None
+            and self._configured_usage_parent is not parent
+        ):
+            raise NativeError("Configured child usage already has a parent")
+        if restored is not None:
+            active = self._active
+            if (
+                active is None
+                or active.handle is None
+                or restored.native_continuation is None
+                or active.handle.turn_id != restored.native_continuation.turn_id
+            ):
+                raise NativeError("Configured child usage has no restored turn")
+            parent.attach_configured_child(
+                active.run_usage, self._configured_checkpoint_usage(restored)
+            )
+        self._configured_usage_parent = parent
+
     def _register_request_observation(self, state: _Submission, handle: Turn[Any]) -> str:
         """Capture a fresh, nonpersistent route for this exact root handle."""
+        if self._configured_usage_parent is not None:
+            self._configured_usage_parent.attach_configured_child(state.run_usage)
         route_id = handle.submission_id
         self._request_observation_routes[route_id] = state
         state.completion.add_done_callback(
@@ -15787,11 +15875,19 @@ class Session(Generic[ContextT, OutputT]):
                 raise InteractionExpiredError("Configured parent invocation is expired")
             return cast(ActionReply[Any], result)
 
+        restored_child_json = self._native._configured_continuation(request)
+        restored_child = None
+        if restored_child_json is not None:
+            captured = json.loads(restored_child_json)
+            if captured.get("kind") != "configured-child-v1":
+                raise NativeError("Unsupported configured child continuation")
+            restored_child = SessionState.from_json(json.dumps(captured["state"]))
         session: Session[Any, Any] | None = None
         try:
             async with declaration.agent.session(
                 context=context.context,
                 environment=context._environment,
+                state=restored_child,
                 on_interaction=answer if handler is not None else None,
             ) as child_session:
                 session = child_session
@@ -15802,11 +15898,24 @@ class Session(Generic[ContextT, OutputT]):
                         context._environment,
                         context._sandbox_source,
                     )
-                child = _ConfiguredChild(state, child_session, admitted)
+                child_session._bind_configured_usage(state.run_usage, restored_child)
+                child = _ConfiguredChild(
+                    state,
+                    child_session,
+                    admitted,
+                    callback_task=asyncio.current_task(),
+                    parent_request=request,
+                    parent_callback=deepcopy(message.get("_sdk_callback")),
+                )
                 self._configured_children.append(child)
                 relay: asyncio.Task[None] | None = None
                 try:
-                    turn = await child_session.submit(input)
+                    turn = (
+                        child_session.restored_turn
+                        if restored_child is not None
+                        else await child_session.submit(input)
+                    )
+                    assert turn is not None
 
                     async def relay_requests() -> None:
                         async for _event in child_session.interactions():
@@ -15837,8 +15946,65 @@ class Session(Generic[ContextT, OutputT]):
                             self._observations.notify()
 
                     relay = _create_task(relay_requests())
-                    result = await turn.get_result()
-                    if not self._configured_child_active(child):
+
+                    async def recover_child() -> Any:
+                        nonlocal child_session
+                        assert child.checkpoint is not None and child.recovery_ready is not None
+                        try:
+                            async with declaration.agent.session(
+                                context=context.context,
+                                environment=context._environment,
+                                state=child.checkpoint,
+                                on_interaction=answer if handler is not None else None,
+                            ) as reopened:
+                                reopened._bind_configured_usage(state.run_usage, child.checkpoint)
+                                child_session = reopened
+                                if (
+                                    context._environment is not None
+                                    and context._sandbox_source is not None
+                                ):
+                                    reopened._configured_environment_source = (
+                                        context._environment,
+                                        context._sandbox_source,
+                                    )
+                                child.session = reopened
+                                child.checkpoint = None
+                                child.sealing = False
+                                reopened_turn = reopened.restored_turn
+                                assert reopened_turn is not None
+                                recovered_relay = _create_task(relay_requests())
+                                child.recovery_ready.set_result(None)
+                                self._observations.notify()
+                                try:
+                                    return await reopened_turn.get_result()
+                                finally:
+                                    recovered_relay.cancel()
+                                    await asyncio.gather(recovered_relay, return_exceptions=True)
+                        except BaseException as error:
+                            if not child.recovery_ready.done():
+                                child.recovery_ready.set_exception(error)
+                            raise
+
+                    child.recover = recover_child
+                    try:
+                        result = await turn.get_result()
+                    except BaseException:
+                        if not child.sealing and child.recovery is None:
+                            raise
+                        await child.seal_hold.wait()
+                        if child.recovery is None:
+                            raise
+                        result = await child.recovery
+                    recovered = (
+                        child.recovery is not None
+                        and child.recovery.done()
+                        and not child.recovery.cancelled()
+                    )
+                    if (
+                        not child.active
+                        or not admitted()
+                        or (not recovered and not self._configured_child_active(child))
+                    ):
                         raise InteractionExpiredError("Configured parent invocation is expired")
                     if declaration.extractor is not None:
                         output = await _call_callback(declaration.extractor, admitted, result)
@@ -17147,6 +17313,56 @@ class Session(Generic[ContextT, OutputT]):
         active = self._active
         self._check_manual_capture(active)
         assert active is not None
+        if self._configured_children:
+            configured_children = tuple(self._configured_children)
+            if len(configured_children) != 1 or configured_children[0].owner is not active:
+                raise RuntimeError("Concurrent configured continuations are not supported")
+            child = configured_children[0]
+            if any(
+                not task.done() and task is not child.callback_task for task in active.callbacks
+            ):
+                raise RuntimeError("Other automatic callbacks have not settled")
+            if child.checkpoint is None:
+                child.sealing = True
+                try:
+                    child.checkpoint = await child.session.suspend()
+                except BaseException:
+                    child.sealing = False
+                    raise
+                child_usage = self._configured_checkpoint_usage(child.checkpoint)
+                _merge_configured_child_restore_usage(
+                    active.run_usage.snapshot(), child_usage, child_usage
+                )
+                payload = {
+                    "request": json.loads(child.parent_request),
+                    "callback": child.parent_callback,
+                    "continuation": {
+                        "kind": "configured-child-v1",
+                        "state": json.loads(child.checkpoint.to_json()),
+                        "usage_in_parent": asdict(child_usage),
+                    },
+                }
+                if not await self._native._respond_python_tool(json.dumps(payload)):
+                    raise RuntimeError("Configured parent continuation expired")
+            try:
+                return await self._checkpoint(active, before_seal=before_seal)
+            except Exception:
+                # A known refusal leaves the same parent sender live. Rebind
+                # only that held invocation to its saved child, never submit anew.
+                if child.recover is not None and self._sealed_checkpoint is None:
+                    rollback = {
+                        "request": json.loads(child.parent_request),
+                        "callback": child.parent_callback,
+                        "continuation": None,
+                        "rollback": True,
+                    }
+                    await self._native._respond_python_tool(json.dumps(rollback))
+                    child.recovery_ready = asyncio.get_running_loop().create_future()
+                    child.recovery = _create_task(child.recover())
+                    active.add_callback(child.recovery)
+                    child.seal_hold.set()
+                    await asyncio.shield(child.recovery_ready)
+                raise
         # Waiting precedes checkpoint ownership: cancellation or close can
         # still stop a callback that has not reached a safe sealing boundary.
         if self._child_admissions:
