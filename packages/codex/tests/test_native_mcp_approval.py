@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import pytest
 
-from agents import Agent, ApprovalRequest, HttpMCP, MCPResultContext, NativeError
+from agents import Agent, ApprovalRequest, HttpMCP, MCPResultContext, NativeError, PendingRequests
 from agents.observation import ToolFinished, ToolStarted
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, responses as responses
@@ -76,8 +76,6 @@ async def test_nonreadonly_peer_uses_native_approval_and_exact_effect(
                 cursor = session.interactions()
                 request = await anext(cursor)
                 assert isinstance(request, ApprovalRequest)
-                from agents import PendingRequests
-
                 batch = await handle.wait_for_request_or_result()
                 assert isinstance(batch, PendingRequests) and batch.turn is handle
                 assert batch.requests == (request,)
@@ -129,6 +127,45 @@ async def test_nonreadonly_peer_uses_native_approval_and_exact_effect(
             assert calls[0]["arguments"] == {"key": "43"}
         if transport == "stdio":
             await assert_stopped(log)
+
+
+async def test_per_tool_approval_keeps_selected_raw_identity(
+    responses: ResponsesFixture,
+) -> None:
+    peer = Peer(names=("read-one", "read-two", "unselected"))
+    async with timeout(30), peer.serve() as url:
+        approvals = {"read-one": "prompt", "read-two": "preapproved", "unselected": "prompt"}
+        descriptor = HttpMCP(
+            name="docs",
+            url=url,
+            tools=["read-one", "read-two"],
+            tool_name_overrides={"read-one": "reviewed"},
+            tool_approval_overrides=cast(Any, approvals),
+        )
+        approvals["read-one"] = "preapproved"
+        responses.respond(mcp_call("reviewed", "mcp__docs", "needs-review"))
+        responses.respond(assistant_output("denied"))
+        responses.respond(mcp_call("read_two", "mcp__docs", "approved"))
+        responses.respond(assistant_output("allowed"))
+        async with Agent(
+            instructions="Use the selected tool.",
+            model="gpt-5.5",
+            provider=provider(responses),
+            tools=[descriptor],
+        ).session() as session:
+            turn = await session.submit("review", tools=[descriptor.tool("read-one")])
+            pending = await turn.wait_for_request_or_result()
+            assert isinstance(pending, PendingRequests)
+            assert len(pending.requests) == 1
+            request = pending.requests[0]
+            assert isinstance(request, ApprovalRequest)
+            assert peer.calls == []
+            await request.respond("deny")
+            assert (await turn.get_result()).final_output == "denied"
+            assert peer.calls == []
+            allowed = await session.submit("allow", tools=[descriptor.tool("read-two")])
+            assert (await allowed.get_result()).final_output == "allowed"
+        assert [call["name"] for call in peer.calls] == ["read-two"]
 
 
 async def test_replacement_and_restore_use_current_approval_without_expanding_ceiling(
