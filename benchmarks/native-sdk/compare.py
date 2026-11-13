@@ -92,6 +92,7 @@ def validate_sample(
     native_transport="http",
     default_host=False,
     native_provider_mode="caller-owned",
+    peer_http_mode="h1",
 ):
     """Check scheduling, declared identities and existing worker count receipts."""
     if bool(row.get("default_host", False)) != default_host:
@@ -105,6 +106,8 @@ def validate_sample(
     ):
         raise ValueError("Diagnostic/profiled/instrumented rows cannot enter a comparison")
     engine = reference_engine if side == "v0" else "v1"
+    if row.get("peer_http_mode", "h1") != peer_http_mode:
+        raise ValueError("Peer HTTP mode differs from its schedule")
     if (
         reference_engine not in ("v0", "v1")
         or native_transport not in ("http", "websocket")
@@ -206,6 +209,7 @@ def validate_sample(
             engine=engine,
             response_mode=v1_response_mode,
             native_transport=native_transport,
+            peer_http_mode=peer_http_mode,
         )
         charged = workload.concurrency * (workload.prefill + workload.iterations)
         if type(row.get("charged_operations")) is not int or row["charged_operations"] != charged:
@@ -274,6 +278,7 @@ def summarize(
     reference_transport=None,
     default_host=False,
     native_provider_mode="caller-owned",
+    peer_http_mode="h1",
 ):
     if reference_response_mode is not None and reference_engine != "v1":
         raise ValueError("Reference response mode requires a v1 reference")
@@ -312,6 +317,7 @@ def summarize(
                     else native_transport,
                     default_host=default_host,
                     native_provider_mode=native_provider_mode,
+                    peer_http_mode=peer_http_mode,
                 )
         fields = ["import_ms"]
         if case != "startup_import":
@@ -358,6 +364,7 @@ def summarize(
             if reference_engine == "v0"
             else (reference_transport or native_transport),
             "native_transport": native_transport,
+            "peer_http_mode": peer_http_mode,
             "native_provider_mode": native_provider_mode,
             "reference_response_mode": (reference_response_mode or v1_response_mode)
             if reference_engine == "v1" and case != "startup_import"
@@ -385,6 +392,7 @@ def main():
         choices=["http", "websocket"],
         help="Expected wire for a v1 reference arm in default-host mode",
     )
+    parser.add_argument("--peer-http-mode", choices=("h1", "dual"), default="h1")
     parser.add_argument("--reference-engine", choices=["v0", "v1"], default="v0")
     parser.add_argument("--native-transport", choices=["http", "websocket"], default="http")
     parser.add_argument(
@@ -421,6 +429,8 @@ def main():
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--require-parity", action="store_true")
     args = parser.parse_args()
+    if args.peer_http_mode == "dual" and not args.default_host_setup:
+        parser.error("Dual HTTP peer requires default-host TLS setup")
     if (
         args.samples < 1
         or args.iterations is not None
@@ -488,6 +498,9 @@ def main():
         path.name: hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(directory.glob("*.py"))
     }
+    manifest["requirements-http2-peer.txt"] = hashlib.sha256(
+        (directory / "requirements-http2-peer.txt").read_bytes()
+    ).hexdigest()
     if args.default_host_setup:
         manifest.update(
             {
@@ -518,6 +531,7 @@ def main():
         "expected_sdk_versions": expected_versions,
         "reference_engine": args.reference_engine,
         "native_transport": args.native_transport,
+        "peer_http_mode": args.peer_http_mode,
         "native_provider_mode": args.native_provider_mode,
         "reference_transport": args.reference_transport,
         "default_host_setup": str(args.default_host_setup) if args.default_host_setup else None,
@@ -592,6 +606,8 @@ def main():
                         command += ["--native-transport", scheduled_transport]
                     if engine == "v1" and args.native_provider_mode != "caller-owned":
                         command += ["--native-provider-mode", args.native_provider_mode]
+                    if args.peer_http_mode != "h1":
+                        command += ["--peer-http-mode", args.peer_http_mode]
                     if args.default_host_setup:
                         command += ["--default-host-setup", str(args.default_host_setup)]
                     if engine == "v1" and response_mode == "buffered":
@@ -681,6 +697,7 @@ def main():
                         native_transport=scheduled_transport,
                         default_host=bool(args.default_host_setup),
                         native_provider_mode=args.native_provider_mode,
+                        peer_http_mode=args.peer_http_mode,
                     )
                     records[case][side].append(data)
                     value = data.get("latency_p50_ms", data["import_ms"])
@@ -700,6 +717,7 @@ def main():
                 reference_transport=args.reference_transport,
                 default_host=bool(args.default_host_setup),
                 native_provider_mode=args.native_provider_mode,
+                peer_http_mode=args.peer_http_mode,
             )
             (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
             primary = summary[case]["primary"]
@@ -725,6 +743,9 @@ def main():
                     path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                     for path in sorted(directory.glob("*.py"))
                 }
+                after["requirements-http2-peer.txt"] = hashlib.sha256(
+                    (directory / "requirements-http2-peer.txt").read_bytes()
+                ).hexdigest()
                 if args.default_host_setup:
                     after.update(
                         {

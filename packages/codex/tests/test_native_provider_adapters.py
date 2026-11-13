@@ -434,6 +434,37 @@ def test_anyllm_responses_rejects_unqualified_provider_before_io(provider_name):
     assert AnyLLMModel(provider, api="auto") == AnyLLMModel(provider)
 
 
+@pytest.mark.parametrize("release", [None, "1.27.0", "1.28.0rc1", "1.28.0"])
+def test_anyllm_streaming_responses_requires_close_propagation(release, monkeypatch):
+    any_llm = pytest.importorskip("any_llm")
+    if release is None:
+        monkeypatch.delattr(any_llm, "__version__")
+    else:
+        monkeypatch.setattr(any_llm, "__version__", release)
+
+    async def aresponses(model, input_data, *, extra_body=None):
+        raise AssertionError("the provider must not be called during routing")
+
+    provider = any_llm.AnyLLM.create("openai", api_key="synthetic")
+    monkeypatch.setattr(provider, "aresponses", aresponses)
+    chat = AnyLLMModel(provider, stream=True)
+    auto = AnyLLMModel(provider, stream=True, api="auto")
+    if release == "1.28.0":
+        assert auto == AnyLLMModel(provider, stream=True, api="responses")
+        assert auto != chat
+    else:
+        with pytest.raises(ValueError, match="requires any-llm-sdk>=1.28.0"):
+            AnyLLMModel(provider, stream=True, api="responses")
+        assert auto == chat
+
+    assert AnyLLMModel(provider, api="auto") == AnyLLMModel(provider, api="responses")
+    assert AnyLLMModel(provider, api="responses") != AnyLLMModel(provider)
+    duck = SimpleNamespace(PROVIDER_NAME="openai", SUPPORTS_RESPONSES=True, aresponses=aresponses)
+    assert AnyLLMModel(duck, stream=True, api="auto") == AnyLLMModel(
+        duck, stream=True, api="responses"
+    )
+
+
 async def test_responses_reasoning_replays_through_native_tool_continuation(monkeypatch):
     await _exercise_borrowed_provider("responses", "complete", monkeypatch, reasoning=True)
 
