@@ -184,6 +184,7 @@ jobs:
           CURRENT_HEAD_REF: ${{ github.head_ref || github.ref_name }}
           CURRENT_BASE_REF: ${{ github.base_ref || steps.producer-identity.outputs.base_ref || '' }}
           REQUIRE_WINDOWS: ${{ steps.release-windows.outputs.run }}
+          REUSE_ARM64: ${{ github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness' && !inputs.native_only }}
         run: |
           python -I -S - <<'PYTHON'
           import json
@@ -384,8 +385,7 @@ jobs:
               platforms = {'linux': ('ubuntu-24.04', 'Linux-X64'), 'macos': ('macos-latest', 'macOS-ARM64')}
               if os.environ.get('REQUIRE_WINDOWS') != 'false':
                   platforms['windows'] = ('windows-latest', 'Windows-X64')
-              selected = {}
-              for platform, (runner, identity) in platforms.items():
+              def qualified_platform(platform, runner, identity):
                   qualifiers = [job for job in jobs if job['name'] == prefix + f'native-{platform} / Native package ({runner})']
                   if not qualifiers:
                       return None
@@ -428,7 +428,20 @@ jobs:
                                             **({} if dependencies else {'name': artifact['name']})})
                   if len(valid) != 1:
                       return None
-                  selected[identity] = valid[0]
+                  return valid[0]
+
+              selected = {}
+              for platform, (runner, identity) in platforms.items():
+                  artifact = qualified_platform(platform, runner, identity)
+                  if artifact is None:
+                      return None
+                  selected[identity] = artifact
+              # Preserve the chosen three-platform donor when its ARM64 snapshot
+              # cannot pass the same publication bound. Never mix donor runs.
+              if not dependencies and os.environ.get('REUSE_ARM64') == 'true':
+                  artifact = qualified_platform('linux-arm64', 'ubuntu-24.04-arm', 'Linux-ARM64')
+                  if artifact is not None:
+                      selected['Linux-ARM64'] = artifact
               if native_ready:
                   # Recheck the attempt and status after reading the qualification and artifact records.
                   current = get(run_api)
@@ -527,6 +540,11 @@ jobs:
     uses: ./.github/workflows/codex-python.yml
     with:
       runner: ubuntu-24.04-arm
+      native_source_run: >-
+        ${{ needs.changes.outputs.native_artifacts != '' &&
+        fromJSON(needs.changes.outputs.native_artifacts)['Linux-ARM64'] &&
+        needs.changes.outputs.native_source_run || '' }}
+      native_artifacts: ${{ needs.changes.outputs.native_artifacts }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
   native-linux-arm64-pr:

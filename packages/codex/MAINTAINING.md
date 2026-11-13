@@ -115,7 +115,7 @@ The **Tests** workflow checks each pull request's merge commit and runs on pushe
 
 Each selected platform publishes a `native-snapshot-<OS>-<ARCH>-<input-hash>` artifact. Qualification repacks the current Python SDK around the verified native payload, then publishes `native-<OS>-<ARCH>`. Installed-package, IPC, executable-symbol and receipt checks apply by platform.
 
-Preview code changes build Linux ARM64 on `ubuntu-24.04-arm`. Pull request and merge queue qualification start after the ARM64 producer succeeds. Preview push qualification also waits for the Linux x86_64, macOS, and Windows producers so the push can supply reusable artifacts. Linux ARM64 builds from source and qualifies the installed wheel with a local Session on CPython 3.10 and 3.14. Its `native-Linux-ARM64` artifact includes both Session test reports.
+Preview code changes build Linux ARM64 on `ubuntu-24.04-arm`. Pull request and merge queue qualification start after the ARM64 producer succeeds. Preview push qualification also waits for the Linux x86_64, macOS, and Windows producers so the push can supply reusable artifacts. Official preview pushes have been reusing Linux ARM64 only when the same selected donor has been passing the existing source, publication and qualification checks for ARM64; otherwise ARM64 has been building from source while the other selected snapshots have been remaining reusable. Linux ARM64 qualifies the installed wheel with a local Session on CPython 3.10 and 3.14. Its `native-Linux-ARM64` artifact includes both Session test reports.
 
 #### Check donor eligibility
 
