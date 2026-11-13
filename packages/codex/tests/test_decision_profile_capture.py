@@ -73,6 +73,7 @@ def callback_session(root):
     session._opening_agent = profiles[0].declaration
     session._decisions_provider = profiles[0].declaration.decisions
     session._profile_current = ("agent_0", 0)
+    session._repair_transport_settings = None
     return session
 
 

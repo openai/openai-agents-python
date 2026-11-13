@@ -47,13 +47,20 @@ jobs:
     runs-on: >-
       ${{ fromJSON(
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64-xl"}' ||
+        github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04-arm' && inputs.native_source_run == '' &&
+          github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09') &&
+          '{"group":"codex-runners","labels":"codex-linux-arm64"}' ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
-          (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
-           (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness' &&
-           inputs.native_source_run == '' && '{"group":"codex-runners","labels":"codex-windows-x64-xl"}' ||
+          (inputs.native_source_run == '' &&
+           ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
+             (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness') ||
+            (github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09'))) &&
+           '{"group":"codex-runners","labels":"codex-windows-x64-xl"}' ||
            '{"group":"codex-runners","labels":"codex-windows-x64"}') ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'macos-latest' &&
-          (inputs.native_source_run != '' && '"macos-15"' || '"macos-15-xlarge"') ||
+          (inputs.native_source_run != '' && '"macos-15"' ||
+           (github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09')) &&
+           '"macos-26-xlarge"' || '"macos-15-xlarge"') ||
         toJSON(inputs.runner)
       ) }}
     # PyPA manylinux 2026.11.07-1. See https://github.com/pypa/manylinux/actions/runs/42368406253.
@@ -87,7 +94,8 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
-      - name: Reject unbound build inputs
+      - &reject_unbound_build_inputs
+        name: Reject unbound build inputs
         run: |
           for config in .python-version uv.toml .venv; do
             if [[ -e "$config" || -L "$config" ]]; then
@@ -123,8 +131,12 @@ jobs:
           uname -m
           getconf GNU_LIBC_VERSION
           df -h "$RUNNER_TEMP"
-          # Leave one CPU and memory headroom on the standard 4-vCPU, 16-GB runner.
-          echo "CARGO_BUILD_JOBS=3" >> "$GITHUB_ENV"
+          # Leave CPU and memory headroom on either the 16-core or standard 4-core host.
+          echo "CARGO_BUILD_JOBS=$ARM_CARGO_BUILD_JOBS" >> "$GITHUB_ENV"
+        env:
+          ARM_CARGO_BUILD_JOBS: >-
+            ${{ github.repository == 'openai/openai-agents-python' && inputs.native_source_run == '' &&
+              github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09') && '14' || '3' }}
       - name: Select shared Cargo directories
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
@@ -262,7 +274,10 @@ jobs:
         if: inputs.native_source_run == ''
         run: uv build --wheel "$OPENAI_AGENTS_BUILD_SOURCE" --out-dir "$GITHUB_WORKSPACE/dist"
       - name: Test Windows project-search filename handling
-        if: runner.os == 'Windows' && inputs.native_source_run == ''
+        if: >-
+          runner.os == 'Windows' && inputs.native_source_run == '' &&
+          !(github.repository == 'openai/openai-agents-python' &&
+          github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09'))
         run: |
           python -I -S - <<'PYTHON'
           import os
@@ -306,12 +321,21 @@ jobs:
                   part for part in (libdir, environment.get("LD_LIBRARY_PATH")) if part
               )
           environment.setdefault("RUST_MIN_STACK", str(16 * 1024 * 1024))
-          subprocess.run(
-              ["cargo", "test", "--release", "--locked", *options, "--lib",
-               "python_tools::managed_tests::prepared_request_rechecks_admission_after_no_edit_reply",
-               "--", "--exact"],
-              cwd=root, env=environment, check=True,
-          )
+          # Compile the filtered binding regression without optimizing the entire
+          # test harness. Keep dependencies and every packaged product optimized.
+          if not (
+              os.environ.get("RUNNER_OS") == "Windows"
+              and os.environ.get("GITHUB_REPOSITORY") == "openai/openai-agents-python"
+              and os.environ.get("GITHUB_EVENT_NAME") == "push"
+              and os.environ.get("GITHUB_REF_NAME") in {"feat/codex-harness", "ci/hillclimb/python-production-09"}
+          ):
+              subprocess.run(
+                  ["cargo", "test", "--release", "--locked", *options,
+                   "--config", "profile.release.package.codex-agents-python.opt-level=0", "--lib",
+                   "python_tools::managed_tests::prepared_request_rechecks_admission_after_no_edit_reply",
+                   "--", "--exact"],
+                  cwd=root, env=environment, check=True,
+              )
           subprocess.run(["cargo", "build", "--release", "--locked", "--timings", *options, "--example", "exec-server-fixture"], cwd=root, env=environment, check=True)
           target = Path(environment["CARGO_TARGET_DIR"])
           if not target.is_absolute():
@@ -520,6 +544,91 @@ jobs:
           path: ${{ runner.temp }}/agents-native-target/cargo-timings/*.html
           if-no-files-found: ignore
           retention-days: 7
+
+  windows-regressions:
+    name: Windows native regressions
+    if: >-
+      inputs.runner == 'windows-latest' && inputs.native_source_run == '' &&
+      github.repository == 'openai/openai-agents-python' &&
+      github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09')
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTUP_TOOLCHAIN: 1.95.0
+      OPENAI_AGENTS_BUILD_SOURCE: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - *reject_unbound_build_inputs
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Select isolated Cargo directories
+        run: |
+          echo "CARGO_HOME=$RUNNER_TEMP/agents-filename-cargo" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/agents-filename-target" >> "$GITHUB_ENV"
+      - name: Install native build tools
+        uses: ./.github/actions/setup-native
+      - name: Prepare the pinned Codex and RMCP source
+        run: python -I -S packages/codex/scripts/prepare_codex.py
+      - name: Test Windows project-search filename handling
+        run: |
+          python -I -S - <<'PYTHON'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          root = Path(os.environ["OPENAI_AGENTS_BUILD_SOURCE"]) / "packages/codex"
+          sys.path.insert(0, str(root / "scripts"))
+          from native_env import cargo_build_options
+
+          options, _ = cargo_build_options(root, dict(os.environ))
+          subprocess.run(
+              ["cargo", "test", "--locked", "--release", *options, "-p", "codex-exec-server",
+               "--lib", "invalid_filename", "--", "--nocapture"],
+              cwd=root / ".upstream/codex/codex-rs", check=True,
+          )
+          PYTHON
+      - name: Run the exact native binding admission regression
+        run: |
+          python -I -S - <<'PYTHON'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+          root = Path(os.environ["OPENAI_AGENTS_BUILD_SOURCE"]) / "packages/codex"
+          sys.path.insert(0, str(root / "scripts"))
+          from native_env import build_environment, cargo_build_options
+          environment = build_environment(root)
+          options, _ = cargo_build_options(root, environment)
+          environment["PYO3_PYTHON"] = sys.executable
+          environment.setdefault("RUST_MIN_STACK", str(16 * 1024 * 1024))
+          subprocess.run(
+              ["cargo", "test", "--release", "--locked", *options,
+               "--config", "profile.release.package.codex-agents-python.opt-level=0", "--lib",
+               "python_tools::managed_tests::prepared_request_rechecks_admission_after_no_edit_reply",
+               "--", "--exact"],
+              cwd=root, env=environment, check=True,
+          )
+          PYTHON
+      - name: Verify the prepared native source after testing
+        run: |
+          python -I -S - <<'PYTHON'
+          import sys
+          from pathlib import Path
+          root = Path("packages/codex").resolve()
+          sys.path.insert(0, str(root / "scripts"))
+          from source_integrity import verify_pristine_source, verify_rmcp_source
+          verify_pristine_source(root)
+          verify_rmcp_source(root)
+          PYTHON
 
   qualify-manual:
     needs: build
