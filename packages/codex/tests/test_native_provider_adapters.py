@@ -478,6 +478,43 @@ def _assert_adapter_frames_released(error: BaseException, *, sdk_chain: bool = F
     )
 
 
+@pytest.mark.parametrize(
+    "input_value",
+    [
+        "prompt",
+        [{"type": "message", "role": "user", "content": "prompt"}],
+        [{"role": "user", "content": [{"type": "input_text", "text": "prompt"}]}],
+    ],
+)
+async def test_responses_accepts_text_input_shapes(input_value):
+    requests = []
+
+    async def create(**options):
+        requests.append(options["extra_body"]["input"])
+        return {"status": "completed", "output": []}
+
+    model = ResponsesModel(SimpleNamespace(responses=SimpleNamespace(create=create)))
+    await model.complete(ModelRequest({"input": input_value}, None, "session", "turn"))
+    assert requests == [input_value]
+
+
+@pytest.mark.parametrize("explicit_type", [False, True])
+async def test_responses_video_rejection_releases_request_payload(explicit_type):
+    async def create(**options):
+        pytest.fail("Video input reached the Responses client")
+
+    message = {
+        "role": "user",
+        "content": [{"type": "input_video", "video_url": "synthetic-private-prompt"}],
+    }
+    if explicit_type:
+        message["type"] = "message"
+    model = ResponsesModel(SimpleNamespace(responses=SimpleNamespace(create=create)))
+    with pytest.raises(ValueError, match="Video input requires") as caught:
+        await model.complete(ModelRequest({"input": [message]}, None, "session", "turn"))
+    _assert_adapter_frames_released(caught.value)
+
+
 @pytest.mark.parametrize("status", ["incomplete", "failed"])
 async def test_responses_failure_traceback_releases_sdk_payloads(status):
     async def create(**options):
