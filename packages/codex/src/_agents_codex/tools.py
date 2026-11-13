@@ -998,7 +998,12 @@ _capture_tools.__module__ = "agents.session"
 
 
 def _function_parameters(
-    callback: Callable[..., Any], *, name: str, hints: dict[str, Any], skip_first: bool = False
+    callback: Callable[..., Any],
+    *,
+    name: str,
+    hints: dict[str, Any],
+    skip_first: bool = False,
+    extra_arguments: Literal["forbid", "ignore"],
 ) -> type[BaseModel]:
     """Build the one argument model shared by native function declarations."""
     fields: dict[str, Any] = {}
@@ -1014,7 +1019,11 @@ def _function_parameters(
         default = ... if parameter.default is inspect.Parameter.empty else parameter.default
         fields[parameter_name] = (hints[parameter_name], default)
     model: type[BaseModel] = create_model(
-        f"{name}_arguments", __config__=ConfigDict(extra="forbid"), **fields
+        f"{name}_arguments",
+        __config__=ConfigDict(
+            extra=extra_arguments, json_schema_extra={"additionalProperties": False}
+        ),
+        **fields,
     )
     omitted = fields.keys() - model.model_fields.keys()
     if omitted:
