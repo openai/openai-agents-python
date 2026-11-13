@@ -2504,7 +2504,7 @@ async def test_entered_realtime_body_orders_later_response_callback(
             await entered.wait()
             await peer.function("later", {}, "later")
             if defer:
-                with pytest.raises(TimeoutError):
+                with pytest.raises(asyncio.TimeoutError):
                     await asyncio.wait_for(later_entered.wait(), timeout=0.1)
             else:
                 await later_entered.wait()
