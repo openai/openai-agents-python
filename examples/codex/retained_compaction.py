@@ -1,6 +1,8 @@
 """Keep an original message alongside an application-written summary.
 
-Set OPENAI_API_KEY and run `python examples/codex/retained_compaction.py`.
+From the matching SDK source archive root, set OPENAI_API_KEY and run
+`python -m examples.codex.retained_compaction`. Live requests can incur charges.
+The final answer follows restore with the retained metric-units instruction.
 """
 
 import asyncio

@@ -2,7 +2,7 @@
 
 Use `Agent.decide()` for a boolean, a choice, or a structured value. A decision provider sends the request. The SDK validates the result as it validates Agent output. Configure the provider on an Agent and use its decision method or its callback contexts.
 
-Decisions support is not in the latest published preview. [Build the matching source](../../CONTRIBUTING.md), then install that build with its `decisions` extra to use `OpenAIDecisions`. Custom providers do not require the OpenAI client dependency. Set `OPENAI_API_KEY` before running these examples.
+Decisions support is not in the latest published preview. [Build the matching source](../../CONTRIBUTING.md), then install that build with its `decisions` extra to use `OpenAIDecisions`. Custom providers do not require the OpenAI client dependency. The next two sections make live requests and require `OPENAI_API_KEY`. The routing recipe later in this guide uses scripted responses without credentials.
 
 ## Return a typed value
 
@@ -39,6 +39,8 @@ Omit `output_type` for a boolean. Pass `choices=["billing", "technical", "other"
 `output_type` also accepts Pydantic schema expressions such as `Annotated[float, Field(ge=0, le=1)]` and `Literal["yes", "no"]`. Type checkers may infer `Any` for these expressions; use an explicit result annotation when you need a narrower type. Class schemas keep their inferred result type.
 
 The built-in provider uses the supported Decisions backend without a model-selection option. A boolean answer uses a probability threshold of `0.5`. Typed objects can contain supported finite choices, booleans, bounded scores, and nested records. The provider rejects unsupported schemas before sending a request.
+
+The runnable [decisions.py](decisions.py) example combines a typed decision with a completion check. The [decision_coordinator.py](decision_coordinator.py) example selects a specialist, then runs that Agent; it also requires `OPENAI_SPECIALIST_MODEL`.
 
 ## Bind a provider to an Agent
 
@@ -82,28 +84,28 @@ asyncio.run(main())
 
 Decision usage stays separate from Agent model usage and run budgets. When tracing is configured and enabled, a `decision.usage` child span records safe token counts and request metadata. Missing usage stays unknown. Disabled tracing creates no recording sink; custom providers can still inspect `DecisionResponse.usage`. The helper does not append its question or answer to the conversation.
 
-Completion feedback does enter the conversation. Already streamed text remains visible and recorded. See [completion checks](../../docs/sdk/configuration.md#check-a-proposed-completion) for timing and continuation limits.
+Completion feedback does enter the conversation. Already streamed text remains visible and recorded. See [completion checks](../../docs/sdk/outputs.md#check-a-proposed-completion) for timing and continuation limits.
 
 ## Route to an authorized specialist
 
-The [routing recipe](recipes/decisions_routing.py) has been demonstrating application-side delegation through `ToolContext.decide()`. Its support workflow has been choosing between `billing` and `technical`; its research workflow has been choosing between `catalog` and `risk`. The orchestrator has been retaining its generative provider. The application has been supplying the request and specialist descriptions through `Routing`, with the Decisions provider receiving that request and only authorized candidate descriptions and IDs. The descriptions have been explaining each specialist's role independently of its ID.
+The [routing recipe](recipes/decisions_routing.py) demonstrates application-side delegation through `ToolContext.decide()`. Its support workflow chooses between `billing` and `technical`; its research workflow chooses between `catalog` and `risk`. The orchestrator retains its generative provider. The application supplies the request and specialist descriptions through `Routing`, with the Decisions provider receiving that request and only authorized candidate descriptions and IDs. The descriptions explain each specialist's role independently of its ID.
 
-The recipe has been using `ScriptedResponses` for generation and a synthetic `DecisionProvider` for routing. Both have been exercising the real SDK interfaces without credentials or live API calls. From the repository root, a Python environment with the matching SDK build has been supporting this command:
+The recipe uses `ScriptedResponses` for generation and a synthetic `DecisionProvider` for routing. Both exercise the real SDK interfaces without credentials or live API calls. From the repository root, a Python environment with the matching SDK build supports this command:
 
 ```sh
 python -m examples.codex.recipes.decisions_routing
 ```
 
-The application has been controlling these routing rules:
+The application controls these routing rules:
 
-- `use_decisions=False` has been selecting the application default without calling Decisions.
-- `use_decisions=True` has been passing only currently authorized, registered IDs as `choices`. The SDK has been validating the returned ID against those choices.
-- The application has been checking authorization again after awaiting Decisions and immediately before specialist invocation. The synthetic revocation scenario has been removing an ID during the decision call.
-- Invalid choices, refusals, and the decision timeout have been selecting the application default only while that default has been retaining authorization. Missing authorization has been raising `PermissionError` before specialist execution. Cancellation has been propagating rather than triggering fallback.
+- `use_decisions=False` selects the application default without calling Decisions.
+- `use_decisions=True` passes only currently authorized, registered IDs as `choices`. The SDK validates the returned ID against those choices.
+- The application checks authorization again after awaiting Decisions and immediately before specialist invocation. The synthetic revocation scenario removes an ID during the decision call.
+- Invalid choices, refusals, and the decision timeout select the application default only while that default retains authorization. Missing authorization raises `PermissionError` before specialist execution. Cancellation propagates rather than triggering fallback.
 
-Each specialist has been receiving its own `Catalog` context and explicit `read_catalog` tool, following the [separate specialist Session recipe](recipes/specialist_agents.py). `Agent.run()` has been owning that separate Session and its cleanup. The tool has been returning a typed `RoutedSummary` to the orchestrator, which has been continuing its original conversation. These Python closures have been sharing the application process; the recipe has been relying on application-controlled context and tool construction for authority.
+Each specialist receives its own `Catalog` context and explicit `read_catalog` tool, following the [separate specialist Session recipe](recipes/specialist_agents.py). `Agent.run()` owns that separate Session and its cleanup. The tool returns a typed `RoutedSummary` to the orchestrator, which continues its original conversation. These Python closures share the application process; the recipe relies on application-controlled context and tool construction for authority.
 
-The runnable assertions have been checking the selected context, the candidate schema and descriptions, orchestration resumption, opt-in and default behavior, authorization changes, invalid output, and timeout cleanup. The script has been bounding decision, specialist, and overall run work. Its 1-second decision deadline has been serving the synthetic fixture. Production applications have been choosing deadlines for their provider and checking authorization at their actual dispatch boundary. The fixture has been establishing SDK wiring and application policy, without measuring live routing quality or validating a tracing backend.
+The runnable assertions check the selected context, the candidate schema and descriptions, orchestration resumption, opt-in and default behavior, authorization changes, invalid output, and timeout cleanup. The script bounds decision, specialist, and overall run work. Its 1-second decision deadline serves the synthetic fixture. Production applications choose deadlines for their provider and check authorization at their actual dispatch boundary. The fixture establishes SDK wiring and application policy, without measuring live routing quality or validating a tracing backend.
 
 ## Replace the provider
 

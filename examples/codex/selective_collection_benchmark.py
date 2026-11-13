@@ -1,4 +1,10 @@
-"""Matched local staging measurements; no cloud throughput or model reasoning claim."""
+"""Matched local staging measurements; no cloud throughput or model reasoning claim.
+
+Run `python -m examples.codex.selective_collection_benchmark` from the root
+of a matching source checkout. No model credentials are needed. The script
+creates temporary files and prints JSON measurements; see selective_collection.md
+for the timed boundaries and limits of the comparison.
+"""
 
 import asyncio
 import json

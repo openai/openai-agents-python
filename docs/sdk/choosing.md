@@ -10,7 +10,7 @@ Use the Agents SDK to connect the model and tool loop to your Python code:
 
 - **[Functions as tools](tools.md#python-functions).** `@function_tool` declares a tool from supported type annotations, validates arguments, and calls the Python function.
 - **[Application objects](tools.md#application-context).** `ToolContext` gives a tool access to the application's context, such as an account or database client.
-- **[Python result types](configuration.md).** Set `output_type` to a supported type, such as a Pydantic model. The SDK validates the result and returns a value of that type in `final_output`.
+- **[Python result types](outputs.md).** Set `output_type` to a supported type, such as a Pydantic model. The SDK validates the result and returns a value of that type in `final_output`.
 
 Configure the agent's tools for your application. If the agent needs file or process access, also choose an executor and its [execution permissions](execution.md#executor-policies).
 
@@ -24,38 +24,19 @@ Choose where commands run separately: an OpenAI-hosted environment, a self-hoste
 
 ## Choose feature combinations
 
-Start with the smallest configuration that meets your needs. Check the limits below before combining features.
+After your first run, use these guides to choose the features your application needs. Each guide explains the supported combinations and their limits.
 
-### Choose output and storage
+<a id="choose-output-and-storage"></a>
+<a id="combine-approvals-generated-code-and-delegation"></a>
+<a id="check-endpoint-support-and-capture-readiness"></a>
 
-| Need | Choose | Limits |
-| --- | --- | --- |
-| A typed answer | `output_type=Answer` and `agent.run` | Native strict schemas have [restrictions](configuration.md#structured-output). `PromptedOutput` requests JSON and validates it in Python without provider schema enforcement. |
-| Continue on one machine | `LocalStorage` and the same profile | One native writer at a time. No portable `save_state`, `suspend`, or `fork`. Prompted output requires `max_retries=0`. |
-| Keep history in an application database | `CustomStorage` backed by a `SessionStore` | Start with the [storage guide](state.md) and check its preview limits. Reconcile uncertain tool effects before resuming. |
-| Move to another worker | An idle `SessionState` checkpoint in trusted application storage | Supply current tools, credentials, and context when restoring. Copy workspace artifacts separately. Check readiness before saving. |
+| Task | Start here |
+| --- | --- |
+| Return a typed answer | [Structured output](outputs.md) explains provider-enforced schemas and Python validation. |
+| Continue on one machine or store history in a database | [Storage choices](state.md#choose-how-to-store-a-conversation) compares `LocalStorage`, `CustomStorage`, and portable checkpoints. |
+| Move work to another worker or wait for a person | Check [capture readiness](state.md#check-support-and-capture-readiness) and the limits on [saving manual requests](state.md#save-a-settled-manual-request). |
+| Coordinate tools with generated JavaScript | [Programmatic tool calling](configuration.md#programmatic-tool-calling) explains the execution model and checkpoint limits. |
+| Delegate independent work | [Native children](delegation.md#native-children) explains shared tools, permissions, and child lifecycles. |
+| Use a custom model endpoint | Run the [endpoint checks](providers.md) for each required feature, including tools, strict output, and WebSockets. |
 
-### Combine approvals, generated code, and delegation
-
-To wait for a human reply after the current worker closes, [suspend a settled pending manual request on the root Session](state.md#save-a-settled-manual-request). Finish policy and preparation work before saving. On restore, supply the matching output declaration for plain text, native strict output, or supported prompted output.
-
-Keep the Session open instead when any of these limits applies:
-
-- The pending request belongs to a child thread.
-- The root or a child still has active code or background processes.
-- A native approval or MCP question still needs a reply.
-- The root operation uses `before_step`.
-
-For individual Python calls, use function tools directly. Set `programmatic_tool_calling=True` when the model needs generated JavaScript to coordinate tool calls and aggregate their results in V8. This JavaScript can call the declared tools; it cannot execute arbitrary Python.
-
-A checkpoint retains settled native stored values and terminal code-cell observations without replaying completed cells. It does not preserve active continuations or the arbitrary JavaScript heap. See [capture limits](state.md#save-a-settled-manual-request) before combining generated code with suspension.
-
-Declare `NativeAgents` to delegate with the same permissions. Children share selected tools, context, and policies and return text. Model metadata and nesting depth limit which children can start. Use separately configured Agents when tasks need different tool access.
-
-### Check endpoint support and capture readiness
-
-For a custom Responses endpoint, run separate [text, tools, strict-output, and WebSocket checks](providers.md). A text response and `websockets_allowed` do not prove full protocol support.
-
-In an open Session, `session.capabilities.get(feature)` reports configuration support. To check whether the Session is ready to save, call `await session.checkpoint_status(kind="idle")` or use `kind="manual_wait"`.
-
-A readiness check reserves no state. The SDK checks again when saving, and independent children can still be running when the root result arrives. See [support and readiness](state.md#check-support-and-capture-readiness).
+Configuration support and runtime readiness are different checks. A Session can support checkpoints but still have active work that prevents saving. The [state guide](state.md#check-support-and-capture-readiness) explains how to check both.

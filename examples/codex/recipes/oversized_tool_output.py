@@ -1,21 +1,18 @@
-"""Bounded application-tool results, with synthetic evidence and no live API key.
+"""Bound function results while retaining synthetic evidence, without API keys.
 
-The command has been running from the repository root after native SDK setup.
-    PYTHONPATH=. python -m examples.codex.recipes.oversized_tool_output
+Run `python -m examples.codex.recipes.oversized_tool_output` from the matching
+source checkout with its SDK and native extension installed.
 
-The recipe has been exercising ordinary application function tools.
-The before policy has been refusing predictable excessive row counts. The after
-policy has been replacing accepted text/rows with exact facts and evidence refs.
-This replacement has been entering canonical history. Full evidence has been
-staying in Python application_data, including portable state. Applications with
-sensitive evidence have been able to use a protected store for payloads and keep
-only references in checkpoints.
-Request-only transform_context edits have been leaving canonical history intact.
-Native truncation has sometimes been shortening input before the callback.
-The tool callback has been retaining full evidence before history admission.
-The fixture has been measuring serialized input in UTF-8 bytes. Usage counters
-have been reporting past requests.
-"""
+The before policy refuses a predictably excessive row count. The after policy
+replaces accepted text or rows with exact facts and evidence references.
+Canonical history keeps the replacement. Full evidence stays in Python
+application_data, including portable state. For sensitive evidence, use a
+protected payload store and keep only references in checkpoints.
+
+A transform_context edit changes a request and leaves canonical history intact.
+Native truncation can shorten the result presented to the after callback;
+this fixture retains full evidence before history admission. Its size checks
+measure serialized UTF-8 bytes. Usage counters describe past requests."""
 
 import asyncio
 import json

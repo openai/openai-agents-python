@@ -55,19 +55,19 @@ If the command reports no receipt, check the exporter endpoint and loopback prox
 
 ## Compare retry receipts with completed model requests
 
-The `retry` scenario has been using a [matching source build](../../../CONTRIBUTING.md#build-the-sdk-from-source) of the SDK.
+The `retry` scenario uses a [matching source build](../../../CONTRIBUTING.md#build-the-sdk-from-source) of the SDK.
 
 ```sh
 python -m examples.codex.observability.trace_walkthrough --scenario retry --output retry.json
 ```
 
-The scripted peer has been recording two HTTP requests. The collector has been receiving one `codex.api_request` log for HTTP 503 and one for HTTP 200. The successful Turn's `run_usage.requests` has been counting one completed model request. The artifact has been keeping these observations separate as `receipt.provider_requests`, received logs, and `receipt.completed_model_requests`.
+The scripted peer records two HTTP requests. The collector receives one `codex.api_request` log for HTTP 503 and one for HTTP 200. The successful Turn's `run_usage.requests` counts one completed model request. The artifact keeps these observations separate as `receipt.provider_requests`, received logs, and `receipt.completed_model_requests`.
 
-The logs have been recording settled HTTP exchanges from this build. A canceled send can lack a log, and an exporter can lose records. These receipts have been supporting diagnosis within the fixture. Exact attempt accounting requires instrumentation at the transport that sends each request.
+The logs record settled HTTP exchanges from this build. A canceled send can lack a log, and an exporter can lose records. These receipts support diagnosis within the fixture. Exact attempt accounting requires instrumentation at the transport that sends each request.
 
 ### Read native send counts
 
-`include_request_attempts=True` on a matching source build has been capturing a report for each new explicit Turn. `turn.request_attempts` has been making the report available once that native turn settles, including after a failed result.
+`include_request_attempts=True` on a matching source build captures a report for each new explicit Turn. `turn.request_attempts` makes the report available once that native turn settles, including after a failed result.
 
 ```python
 async with agent.session(include_request_attempts=True) as session:
@@ -78,9 +78,9 @@ async with agent.session(include_request_attempts=True) as session:
         report = turn.request_attempts
 ```
 
-Each count has been grouping SDK-owned send entries by root or child, operation, and transport. Each HTTP retry has been contributing one entry. WebSocket counts have been covering `response.create` sends. The report has been covering the issuing native turn through settlement, including linked child work and automatic compaction in that window. Session startup warmup, WebSocket handshakes and interrupts, and work detached from the turn have been falling outside this scope.
+Each count groups SDK-owned send entries by root or child, operation, and transport. Each HTTP retry contributes one entry. WebSocket counts cover `response.create` sends. The report covers the issuing native turn through settlement, including linked child work and automatic compaction in that window. Session startup warmup, WebSocket handshakes and interrupts, and work detached from the turn fall outside this scope.
 
-Applications have been using their own transport instrumentation for borrowed-client retries. `availability` and `borrowed_requests_unavailable` have been identifying missing coverage on that path. A remote service such as an A2A specialist has been owning its own sends and needs its own report. The report has been measuring send entries, while peer receipts, tokens, billing, and request-budget admissions have been keeping their own counts.
+Applications use their own transport instrumentation for borrowed-client retries. `availability` and `borrowed_requests_unavailable` identify missing coverage on that path. A remote service such as an A2A specialist owns its own sends and needs its own report. The report measures send entries, while peer receipts, tokens, billing, and request-budget admissions keep their own counts.
 
 ## Continue a parent trace into another worker
 

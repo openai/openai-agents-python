@@ -1,6 +1,6 @@
 # OpenAI Agents SDK
 
-The Agents SDK uses Codex to run model turns and keep conversation history. Your Python application defines instructions, tools, callbacks and application context.
+Build Python agents that call your functions, use MCP tools, and keep a conversation across messages. Your application defines the agent's instructions and tools. The SDK uses Codex to coordinate model requests and tool calls.
 
 ## Install
 
@@ -10,7 +10,7 @@ For an existing v0 application, prefer a [direct migration to native v1](https:/
 
 ## Agent and Session API
 
-Use guides from the same release as your installed wheel. The links below describe the development branch; for a published wheel, select its release tag on GitHub before following the API examples. Start with [Build agents with Codex](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/index.md).
+Use guides from the same release as your installed wheel. The links below describe the development branch. For a published wheel, follow the [versioned documentation links](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/versions.md) before using the examples. Start with the [quickstart](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/index.md).
 
 | Guide | Use it to |
 | --- | --- |
@@ -25,7 +25,7 @@ Use guides from the same release as your installed wheel. The links below descri
 | [Usage and tracing](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/observability.md) | Read usage and diagnose work with telemetry and history. |
 | [API reference](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/reference.md) | Find supported calls and defaults. |
 
-For current-branch native voice APIs, read the [native voice guide](../../examples/codex/native_voice.md). It covers Session-owned Realtime, credentials, custom adapters, and speech pipelines. Use it with the matching build; published wheels may not include these APIs.
+For current-branch native voice APIs, read the [native voice guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/native_voice.md). It covers Session-owned Realtime, credentials, custom adapters, and speech pipelines. Use it with the matching build; published wheels may not include these APIs.
 
 ## Hosted prompts
 
@@ -80,4 +80,4 @@ After restoration, the current Agent declaration has been supplying the prompt r
 
 This component owns the Codex Python implementation in `src/_agents_codex`, native inputs, tests, and examples. The root project builds one `openai-agents` wheel; application code continues to import `agents`.
 
-For SDK development and source builds, see [CONTRIBUTING.md](../../CONTRIBUTING.md). See the [maintenance guide](MAINTAINING.md) for native builds and artifact checks.
+For SDK development and source builds, see [CONTRIBUTING.md](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md). See the [maintenance guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/MAINTAINING.md) for native builds and artifact checks.

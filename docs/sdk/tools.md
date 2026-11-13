@@ -2,7 +2,7 @@
 
 Declare the functions and services an agent may call in its `tools` list. Codex selects and dispatches calls during the model loop. Python functions run in your application with its permissions. For [MCP tools](mcp.md), Codex manages the connection and the selected server executes the operation.
 
-Examples with `await` or `async with` are fragments for an async function. [Configure the provider and its credentials](configuration.md#provider-connection) before opening a Session.
+Examples with `await` or `async with` are fragments for an async function. [Configure the provider and its credentials](models.md#provider-connection) before opening a Session.
 
 ## Choose a tool
 
@@ -31,6 +31,54 @@ async def greeting(name: str) -> str:
     """Return a short greeting for a person."""
     return f"Hello, {name}!"
 ```
+
+Add `greeting` to `Agent.tools` to make it available to the model. The [quickstart](index.md#run-your-first-agent) shows the complete runnable script.
+
+Matching development builds also accept `is_enabled` to [enable a function for each step](guardrails.md#enable-a-function-for-a-step).
+
+### Application context
+
+When a function needs application state, use `ToolContext[Application]` as its first parameter. The SDK supplies that parameter and excludes it from the schema the model receives. Pass the application value when opening or running the agent.
+
+First complete the [installation](installation.md) and [API-key setup](index.md#run-your-first-agent). Save this complete script as `context_agent.py`:
+
+```python
+import asyncio
+from dataclasses import dataclass
+
+from agents import Agent, ToolContext, function_tool
+
+
+@dataclass
+class Account:
+    display_name: str
+
+
+@function_tool
+async def account_name(ctx: ToolContext[Account]) -> str:
+    return ctx.context.display_name
+
+
+async def main() -> None:
+    agent = Agent[Account, str](
+        instructions="Use account_name to address the user.",
+        tools=[account_name],
+    )
+    result = await agent.run("Greet me.", context=Account("Ada"))
+    print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+In your activated Python environment, run `python context_agent.py`. The script prints a greeting for Ada; the model chooses the wording.
+
+In `Agent[Account, str]`, `Account` is the application context type and `str` is the final output type. The SDK passes the `Account` instance to the Python function through `ctx.context`; the model does not supply that parameter. The context object itself is not model input. The function's returned display name is a tool result, so the model does receive `"Ada"`.
+
+Mypy can lose a tool's application context type when the tool returns `Any`. Use an explicit `Agent[Application, str]` with your context class, as in `Agent[Account, str]` above, to keep `context=` arguments checked when opening Sessions or starting runs. Use the same pattern if inference does not retain the context type.
+
+For context together with structured output, see the [complete typed-context example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/typed_context.py).
 
 ### Declare arguments and return types
 
@@ -102,7 +150,9 @@ Annotate functions that return these objects with `ToolOutput`, as above. In `0.
 
 Matching development builds also accept HTTP or HTTPS image URLs and provider-owned image IDs with `ToolOutput.image(...)` or `ToolOutputImage(...)`. Supply exactly one of `image_url` and `file_id`. Optional `detail` accepts `None`, `"auto"`, `"low"`, `"high"`, or `"original"`, subject to the current model's image support. Known combinations that would lose detail fail rather than silently changing the image. These additions require a [matching development build](versions.md).
 
-HTTP(S) URLs and file IDs require API-key authentication and a compatible model that uses standard Responses. Set `Agent.model` explicitly; the current default model uses Responses Lite. `CodexLogin` and Responses Lite do not support these references. Use inline base64 image data URLs on those routes, subject to the model's image and detail support. See [provider configuration](configuration.md#provider-connection).
+HTTP(S) URLs and file IDs require API-key authentication and a compatible model that uses standard Responses. Set `Agent.model` explicitly; the current default model uses Responses Lite. `CodexLogin` and Responses Lite do not support these references. Use inline base64 image data URLs on those routes, subject to the model's image and detail support. See [provider configuration](models.md#provider-connection).
+
+This fragment reuses the `ToolOutput` import above. Replace the example URL and file ID with image references accessible to your provider:
 
 ```python
 remote_reply = ToolOutput.image("https://example.com/preview.png", detail="low")
@@ -147,50 +197,6 @@ In result mode, supply `timeout_error_function(context, error)` to return your o
 
 A formatter whose first parameter is `ToolContext[Application]` uses the Session's application context. Pass `context=...` when you open the Session or run the Agent, even if the tool callback takes no context.
 
-## Application context
-
-When a function needs application state, use `ToolContext[Application]` as its first parameter. The SDK supplies that parameter and excludes it from the schema the model receives. Pass the application value when opening or running the agent.
-
-First complete the [installation](installation.md) and [API-key setup](index.md#run-your-first-agent). Save this complete script as `context_agent.py`:
-
-```python
-import asyncio
-from dataclasses import dataclass
-
-from agents import Agent, ToolContext, function_tool
-
-
-@dataclass
-class Account:
-    display_name: str
-
-
-@function_tool
-async def account_name(ctx: ToolContext[Account]) -> str:
-    return ctx.context.display_name
-
-
-async def main() -> None:
-    agent = Agent[Account, str](
-        instructions="Use account_name to address the user.",
-        tools=[account_name],
-    )
-    result = await agent.run("Greet me.", context=Account("Ada"))
-    print(result.final_output)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-In your activated Python environment, run `python context_agent.py`. The script prints a greeting for Ada; the model chooses the wording.
-
-In `Agent[Account, str]`, `Account` is the application context type and `str` is the final output type. The SDK passes the `Account` instance to the Python function through `ctx.context`; the model does not supply that parameter. The context object itself is not model input. The function's returned display name is a tool result, so the model does receive `"Ada"`.
-
-Mypy can lose a tool's application context type when the tool returns `Any`. Use an explicit `Agent[Application, str]` with your context class, as in `Agent[Account, str]` above, to keep `context=` arguments checked when opening Sessions or starting runs. Use the same pattern if inference does not retain the context type.
-
-For context together with structured output, see the [complete typed-context example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/typed_context.py).
-
 ## Native web search
 
 To enable native search, include `WebSearch` when opening the Session. Without it, neither search route is available.
@@ -209,7 +215,7 @@ search = WebSearch(mode="cached", route="standalone")
 agent = Agent(instructions="Research the user's question.", tools=[search])
 ```
 
-In `0.24.0-alpha.7` or later, explicit turn and step selections can omit `search` to disable search for that operation or preparation. To enable it, select the captured declaration, such as `tools=[search]`. Turns, steps, and idle updates cannot add a search capability absent at opening or change the declaration's settings. Open a new Session to change the declaration.
+In `0.24.0-alpha.7` or later, explicit turn and step selections can omit `search` to disable search for that turn or model step. To enable it, select the captured declaration, such as `tools=[search]`. Turns, steps, and idle updates cannot add a search capability absent at opening or change the declaration's settings. Open a new Session to change the declaration.
 
 The hosted route also accepts `allowed_domains`, `blocked_domains`, and approximate `location` settings. These controls require a compatible hosted-search provider and model; they are unsupported on the standalone route. Supply domains without a URL scheme. A location can contain `country`, `region`, `city`, and `timezone`; use a two-letter country code and an IANA timezone such as `America/Chicago`. The Session captures these settings at opening, and the provider applies them. Search history can retain cited URLs and consulted sources, but this interface does not return source passages.
 
@@ -248,7 +254,7 @@ For Code Interpreter, supply an existing container ID or an auto-container confi
 
 `Session.events()` and `Turn.events()` include `HostedToolCallProgress` observations from `agents.observation`. By default, hosted completion observations contain only item identity and status, and progress contains only the provider event type and SDK identities. For a trusted consumer, pass `include_execution_details=True` to either `events()` method. This exposes complete hosted items and provider progress, including code, search results, and image bytes. Keep these payloads private.
 
-Under the default bounded policy, these passive streams have been retaining up to 16 MiB of base64 per preview and 32 MiB across previews. `EventGap` has been reporting previews lost to these limits. Matching development builds have been offering [full observation retention](sessions.md#stream-observations) for readers that need to retain larger previews.
+Under the default bounded policy, these passive streams retain up to 16 MiB of base64 per preview and 32 MiB across previews. `EventGap` reports previews lost to these limits. Matching development builds offer [full observation retention](streaming.md#stream-observations) for readers that need to retain larger previews.
 
 Read `Session.items()` for the final image, including images too large for a completion observation. Final tool items also retain provider fields in `provider_data`, including failure details and image metadata. These items and text annotations survive saved-state restore. Restoring history does not grant tool access: declare the tools again in the current Agent to use them in later turns.
 
@@ -325,7 +331,7 @@ For MCP connection and process restrictions, see [replace and restore MCP connec
 
 Use `function.ref` to select a Python or manual tool. Use `server.tool(raw_name)` to select one MCP tool allowed when the Session opened. Both return a `ToolRef`. The MCP helper supplies the normalized native namespace. These references select the last accepted definitions without adding names or connections.
 
-This fragment uses `lookup` from the preceding staged example and a current MCP declaration named `server` that selects a raw tool named `search`:
+This fragment uses `lookup` from the preceding tool-replacement example and a current MCP declaration named `server` that selects a raw tool named `search`:
 
 ```python
 from agents import Agent, ToolRef
@@ -397,7 +403,7 @@ Read `ToolStarted` and `ToolFinished` records from `session.events()` to observe
 
 A Python start record means the SDK accepted a function call. An MCP start record can precede approval and server execution. Cancellation may leave an MCP call without a matching finish record. A completion status does not prove that earlier effects were rolled back.
 
-Observations have been reporting activity without delaying tool execution or completion. The default buffer has been dropping older records when full. For late readers, `EventGap` has been reporting the missing range. Matching development builds have been supporting [full observation retention](sessions.md#stream-observations) for late readers. Use the [supported tool controls](#inspect-or-change-tool-values) to validate or change tool values.
+Observations report activity without delaying tool execution or completion. The default buffer drops older records when full. For late readers, `EventGap` reports the missing range. Matching development builds support [full observation retention](streaming.md#stream-observations) for late readers. Use the [supported tool controls](#inspect-or-change-tool-values) to validate or change tool values.
 
 <a id="local-execution"></a>
 <a id="replace-write-roots-between-turns"></a>

@@ -1,7 +1,7 @@
 """Packaged Vercel UI streaming and application-owned response recipes.
 
-Matching source builds have been providing agents.ui.vercel_stream. The source
-setup in packages/codex/MAINTAINING.md#build-from-this-source has been covering
+Matching source builds provide agents.ui.vercel_stream. The source
+setup in packages/codex/MAINTAINING.md#build-from-this-source covers
 installation with the matching native extension. A framework-neutral response
 body using the packaged adapter:
 
@@ -20,27 +20,26 @@ body using the packaged adapter:
                 async for chunk in body:
                     yield chunk
 
-The application has been setting Content-Type: text/event-stream and
-x-vercel-ai-ui-message-stream: v1 on its HTTP response. This adapter has been
-accepting plain-text output, using the Agent's default output or str without
-prompted or structured overrides. The application has been owning authentication,
-history projection, and the Session lifetime. In this example the response has
-been owning the Session; closing the response body has been closing the Session
-and stopping its work. For work surviving disconnects, a worker has been keeping
-the Session open and passing its Turn to vercel_stream. Closing that iterator has
-been releasing only its reader.
+The application sets Content-Type: text/event-stream and
+x-vercel-ai-ui-message-stream: v1 on its HTTP response. This adapter accepts plain-text output, using the Agent's default output or str
+without prompted or structured overrides. The application owns authentication,
+history projection, and the Session lifetime. In this example the response owns the Session.
+Closing the response body closes the Session and stops its work. For work
+surviving disconnects, a worker keeps the Session open and passes its Turn to
+vercel_stream. Closing that iterator releases only its reader.
 
-The adapter has been omitting tool arguments and results by default. The explicit
-include_tool_data=True option has been sending retained function/MCP input and
-output after settlement. The application has been deciding whether the client
-has permission to receive that data. Each stream has been starting a fresh UI
-message; missing observations have been producing resync_required for recovery
+The adapter omits tool arguments and results by default. The explicit
+include_tool_data=True option sends retained function/MCP input and
+output after settlement. The application decides whether the client
+has permission to receive that data. Each stream starts a fresh UI
+message; missing observations produce resync_required for recovery
 through an application-authorized history view.
 
-The custom stream_turn and response_body recipes below have been illustrating
-separate ownership and projection choices with the sibling _ui_projection.py
-helper. The AG-UI recipe in ag_ui/README.md has been covering
-AG-UI events. Client tests have been checking the custom Vercel recipe with
+Import this module into your HTTP service; it has no command-line entrypoint.
+The custom stream_turn and response_body recipes below illustrate separate
+ownership and projection choices with the sibling _ui_projection.py
+helper. The AG-UI recipe in ag_ui/README.md covers
+AG-UI events. Client tests check the custom Vercel recipe with
 ai@6.0.315 and synthetic fetch, without browser rendering or real HTTP transport.
 """
 
