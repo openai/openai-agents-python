@@ -11,6 +11,7 @@ use codex_extension_api::{
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::{SessionSource, ThreadHistoryMode, ThreadSource, W3cTraceContext};
+use codex_protocol::provider_history::ProviderHistorySelection;
 use codex_protocol::{ThreadId, ToolName};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
@@ -52,6 +53,8 @@ impl ThreadInstructionsProvider for ThreadInstructions {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThreadOptions {
+    #[serde(rename = "_provider_history")]
+    provider_history: Option<ProviderHistorySelection>,
     // Set only by private one-shot constructors, never by JSON options.
     #[serde(skip)]
     pub(crate) private_http: bool,
@@ -290,6 +293,10 @@ impl ThreadOptions {
             RwLock::new(self.instructions),
             self.share_instructions_with_subagents,
         ));
+        if let Some(selection) = &self.provider_history {
+            selection.validate_shape().map_err(anyhow::Error::msg)?;
+        }
+        configuration.sdk_provider_history = self.provider_history;
         let mut options = StartThreadOptions::new(configuration);
         options
             .thread_extension_init

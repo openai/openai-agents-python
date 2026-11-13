@@ -232,7 +232,7 @@ from .mcp import (
     _tool_names as _tool_names,
 )
 from .model_context import ModelContextSnapshot, ModelRequestContext
-from .models import _capture_model_override
+from .models import ProviderHistory, _capture_model_override, _capture_provider_history
 from .native_agents import (
     _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
     ChildInvocation as ChildInvocation,
@@ -317,6 +317,7 @@ from .state import (
     _ManualContinuation,
     _RememberedApproval,
     _RequestRunBudgetCheckpoint,
+    _saved_thread_settings,
     _TokenRunBudgetCheckpoint,
 )
 from .subagents import Subagent as Subagent, _subagent as _subagent
@@ -505,17 +506,7 @@ def _manual_restore_model_settings(
     """Read only accepted model fields; connection and tool authority stay current."""
     metadata = state.root_metadata
     model = metadata.get("model") if metadata is not None else None
-    captured = None
-    for row in reversed(state.history):
-        payload = row.get("payload")
-        if (
-            row.get("type") == "event_msg"
-            and isinstance(payload, dict)
-            and payload.get("type") == "thread_settings_applied"
-            and payload.get("thread_id") == state.source_session_id
-        ):
-            captured = payload.get("thread_settings")
-            break
+    captured = _saved_thread_settings(state.history, state.source_session_id)
     if not isinstance(captured, dict):
         raise ValueError("Manual checkpoint has invalid accepted model settings")
     default = captured.get("model")
@@ -3372,6 +3363,7 @@ async def _opening_provider_config(
     captured_siwc_provider: str | None,
     saved_plan_provider: str | None,
     standalone_web_search: bool,
+    provider_history: ProviderHistory | None = None,
 ) -> dict[str, Any]:
     auth = provider.auth
     provider_id = "native_agent"
@@ -3408,7 +3400,8 @@ async def _opening_provider_config(
             "base_url": base_url,
             "wire_api": "responses",
             "requires_openai_auth": True,
-            "supports_websockets": provider._websockets_enabled,
+            "supports_websockets": provider._websockets_enabled
+            and not (provider_history is not None and provider.supports_websockets is None),
             **routing,
             # Both native web protocols require a compatible Responses
             # provider. The declaration admits that provider capability.
@@ -3613,6 +3606,7 @@ def _prepare_opening_model_settings(
     restored_model_settings: tuple[str, dict[str, Any]] | None,
     restored_profile: _ProfileRuntime | None,
     profile_roster: list[dict[str, Any]],
+    provider_history: ProviderHistory | None = None,
 ) -> tuple[str | None, dict[str, Any]]:
     settings = _native_model_settings(model, agent.model_settings)
     prompt_controls = _hosted_prompt_controls(
@@ -3630,14 +3624,17 @@ def _prepare_opening_model_settings(
         settings.setdefault("request_controls", {})["hosted_prompt"] = prompt_controls
     if codex_login is not None and settings.get("request_controls", {}).get("store") is True:
         raise ValueError("store=True requires API-key Responses authentication")
+    current_controls = settings.get("request_controls", {})
+    profile_model = (
+        next(row["model"] for row in profile_roster if row["id"] == restored_profile.profile.id)
+        if restored_profile is not None
+        else None
+    )
+    profile_controls = profile_model["request_controls"] if profile_model is not None else None
+    current_store = (profile_controls if profile_controls is not None else current_controls).get(
+        "store"
+    )
     if restored_model_settings is not None:
-        current_controls = settings.get("request_controls", {})
-        profile_model = (
-            next(row["model"] for row in profile_roster if row["id"] == restored_profile.profile.id)
-            if restored_profile is not None
-            else None
-        )
-        profile_controls = profile_model["request_controls"] if profile_model is not None else None
         attempt_controls = _current_attempt_controls(current_controls, profile_controls)
         invocation_timeout = (
             profile_model.get("invocation_timeout_ms")
@@ -3647,6 +3644,27 @@ def _prepare_opening_model_settings(
         model, settings = restored_model_settings
         settings.setdefault("request_controls", {}).update(attempt_controls)
         settings["invocation_timeout_ms"] = invocation_timeout
+    if provider_history is not None:
+        if provider_history["type"] == "previous_response" and current_store is not True:
+            raise ValueError("Previous-response HTTP history requires current store=True")
+        if provider_history["type"] == "previous_response" and profile_roster:
+            by_id = {row["id"]: row for row in profile_roster}
+            pending = [profile_roster[0]["id"]]
+            visited = set()
+            while pending:
+                profile_id = pending.pop()
+                if profile_id in visited:
+                    continue
+                visited.add(profile_id)
+                row = by_id[profile_id]
+                if row["model"]["request_controls"].get("store") is not True:
+                    raise ValueError("Every reachable handoff profile requires current store=True")
+                pending.extend(row["handoffs"].values())
+        controls = settings.setdefault("request_controls", {})
+        if current_store is None:
+            controls.pop("store", None)
+        else:
+            controls["store"] = current_store
     return model, settings
 
 
@@ -3718,6 +3736,7 @@ class Session(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         tool_selection: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
@@ -3743,6 +3762,7 @@ class Session(Generic[ContextT, OutputT]):
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
         authenticated_memory_history = isinstance(state, ManagedWorkspaceCheckpoint)
+        provider_history = _capture_provider_history(provider_history)
         state, managed_source = _prepare_open_state(
             state,
             environment,
@@ -4050,6 +4070,7 @@ class Session(Generic[ContextT, OutputT]):
                 restored_model_settings,
                 restored_profile,
                 profile_roster,
+                provider_history,
             )
             native_specs = catalog.native_specs()
             manual_slots = catalog.manual_slots()
@@ -4287,6 +4308,7 @@ class Session(Generic[ContextT, OutputT]):
                     saved_plan_provider=saved_plan_provider,
                     standalone_web_search=web_search is not None
                     and web_search.route == "standalone",
+                    provider_history=provider_history,
                 )
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
@@ -4307,7 +4329,9 @@ class Session(Generic[ContextT, OutputT]):
                     use_completed_owner = (
                         private_run and not available and _completed_input is not None
                     )
-                    websockets_enabled = provider._websockets_enabled
+                    websockets_enabled = provider._websockets_enabled and not (
+                        provider_history is not None and provider.supports_websockets is None
+                    )
                     private_http = False
                     # Conservative subset of SdkModelHttpPool::client eligibility;
                     # explicit CA/proxy profiles keep their existing transport selection.
@@ -4385,6 +4409,11 @@ class Session(Generic[ContextT, OutputT]):
                 startup_transport = settings.get("request_controls", {}).get("request_transport")
                 options = {
                     "_hosted_tools": hosted_tools,
+                    **(
+                        {"_provider_history": provider_history}
+                        if provider_history is not None
+                        else {}
+                    ),
                     **(
                         {"_sdk_request_transport": startup_transport}
                         if startup_transport is not None
@@ -4717,6 +4746,7 @@ class Session(Generic[ContextT, OutputT]):
                     include_request_attempts=include_request_attempts,
                     include_raw_provider_events=include_raw_provider_events,
                 )
+                session._provider_history = provider_history
                 session._input_guardrails = input_guardrails
                 session._output_guardrails = output_guardrails
                 session._managed_workspace = managed_source
@@ -4767,6 +4797,7 @@ class Session(Generic[ContextT, OutputT]):
                     settings=settings,
                     fresh=checkpoint is None and not _atomic_first_turn,
                     restored=checkpoint is not None or resume is not None,
+                    provider_history=provider_history,
                     manual_restore=manual_restore,
                     validate_provider_model=(
                         uses_siwc or (web_search is not None and web_search.route == "hosted")
@@ -5146,6 +5177,7 @@ class Session(Generic[ContextT, OutputT]):
             thread._enable_raw_provider_events()
         self._engine = engine
         self._native = thread
+        self._provider_history: ProviderHistory | None = None
         # Issued snapshots belong to this Session's current native thread.
         self._model_context_snapshots: weakref.WeakKeyDictionary[ModelContextSnapshot, str] = (
             weakref.WeakKeyDictionary()
@@ -5447,6 +5479,7 @@ class Session(Generic[ContextT, OutputT]):
         settings: dict[str, Any],
         fresh: bool,
         restored: bool = False,
+        provider_history: ProviderHistory | None = None,
         manual_restore: bool = False,
         validate_provider_model: bool,
         instructions: str,
@@ -5471,6 +5504,10 @@ class Session(Generic[ContextT, OutputT]):
                     "retry": None,
                 },
             }
+            if provider_history is not None:
+                # Restored startup contains saved controls. Rebind storage to the
+                # current declaration, including an explicit clear for omission.
+                reset["request_controls"]["store"] = controls.get("store")
             if invocation_settings is not None:
                 reset["invocation_timeout_ms"] = invocation_settings.get("invocation_timeout_ms")
             if (
@@ -5539,6 +5576,8 @@ class Session(Generic[ContextT, OutputT]):
                 controls = _current_attempt_controls(
                     settings.get("request_controls", {}), model["request_controls"]
                 )
+                if provider_history is not None:
+                    controls["store"] = model["request_controls"].get("store")
                 await publish_attempt_controls(controls, invocation_settings=model)
                 await self._refresh_profile_bindings(preserve_current=True)
 
@@ -8599,6 +8638,8 @@ class Session(Generic[ContextT, OutputT]):
         retained items remain in effect.
         """
         self._check_callback_operation("compact its own Session")
+        if self._provider_history is not None:
+            raise RuntimeError("Compaction is unavailable for provider-managed history")
         if (snapshot is None) != (retain is None) or (snapshot is not None and summary is None):
             raise ValueError("Pass snapshot and retain together with a supplied summary")
         if summary is not None:
@@ -9589,6 +9630,14 @@ class Session(Generic[ContextT, OutputT]):
             captured_update_settings.get("retry") if captured_update_settings else None
         )
         settings = _native_model_settings(model, captured_update_settings)
+        controls = settings.get("request_controls", {})
+        if (
+            "store" in controls
+            and self._provider_history is not None
+            and self._provider_history["type"] == "previous_response"
+            and controls["store"] is not True
+        ):
+            raise ValueError("Previous-response HTTP history requires current store=True")
         captured_tools = tuple(tools) if tools is not None else None
         target = None
         if agent is not None:
@@ -16675,6 +16724,8 @@ class Session(Generic[ContextT, OutputT]):
         through the same LocalStorage and current Agent; no portable conversion.
         """
         self._check_callback_operation("fork stored history of its own Session")
+        if self._provider_history is not None:
+            raise RuntimeError("Fork is unavailable for provider-managed history")
         self._check_idle_update()
         if self._realtime is not None:
             raise CapabilityError("Close native Realtime before a stored fork")
@@ -16774,6 +16825,12 @@ class Session(Generic[ContextT, OutputT]):
         self._check_idle_update()
         if self._close_task is not None or self._scope_close_task is not None:
             raise RuntimeError("Stored history operation requires an open Session before close")
+        if (
+            action["kind"] == "revert"
+            and self._provider_history is not None
+            and self._provider_history["type"] == "conversation"
+        ):
+            raise RuntimeError("Revert is unavailable for provider-managed conversations")
         self._stored_close_action = self._native._stored_history_close_action(json.dumps(action))
         await self.aclose()
 
@@ -17094,6 +17151,8 @@ class Session(Generic[ContextT, OutputT]):
         self._check_open()
         self._check_portable_capture()
         self._check_callback_operation("fork its own Session")
+        if self._provider_history is not None:
+            raise RuntimeError("Fork is unavailable for provider-managed history")
         if self._active is not None:
             raise RuntimeError("fork requires an idle Session")
         return await self._checkpoint(None, fork=True)
