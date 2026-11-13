@@ -194,6 +194,9 @@ async def test_configured_child_has_been_inheriting_effective_turn_write_roots(t
             await root_provider.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"), reason="requires a Linux or macOS strict executor"
+)
 @pytest.mark.parametrize("roots", ["opening", "clear", "replace"])
 async def test_configured_child_has_been_retaining_effective_wss_root_receipts(
     tmp_path, monkeypatch, native_executor_binary, roots
@@ -908,6 +911,9 @@ async def test_configured_child_inside_native_role_has_been_failing_its_one_shot
         assert len(child_model.requests) == 1
 
 
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"), reason="requires a Linux or macOS strict executor"
+)
 @pytest.mark.parametrize("same_source", [True, False])
 async def test_configured_child_has_been_preserving_its_authenticated_skill_source(
     tmp_path, monkeypatch, native_executor_binary, same_source
