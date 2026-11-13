@@ -13334,6 +13334,7 @@ class Session(Generic[ContextT, OutputT]):
                 try:
                     if factory is None:
                         return None
+                    matches_provider = factory._matches_provider
                     return await _run_responses_compaction(
                         factory,
                         request,
@@ -13347,7 +13348,7 @@ class Session(Generic[ContextT, OutputT]):
                         invoke=lambda callback, value: self._call_decision_callback(
                             state, message, callback, active, value
                         ),
-                        matches_provider=lambda: factory._matches_provider(
+                        matches_provider=lambda: matches_provider(
                             self._model_api_key,
                             json.loads(self._native_options or "{}").get("config", {}),
                         ),
