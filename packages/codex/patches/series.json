@@ -929,9 +929,13 @@
       "sha256": "708d7a5b452a6c2dcc799c5c64057888b64a302812272b522a2ecf4fad45fa06"
     },
     {
+      "path": "sdk-agent-harness-span-metadata.patch",
+      "sha256": "edac1f3bc0818c8454af005f8393dc583a5e579c625dab7f93489067ffaec9d7"
+    },
+    {
       "path": "sdk-final-step-builtin-tools.patch",
       "sha256": "e01c2fd4518cb72b33b4d440454baf0042160546d4d66958914c6478e6d4b94a"
     }
   ],
-  "result_tree": "414268f9d8e101fe2653f029c6d420a20c6d803c"
+  "result_tree": "b70d2effcca5e9f9cfd0541b3ee967855718afd7"
 }

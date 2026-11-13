@@ -24,6 +24,7 @@ from contextlib import contextmanager as contextmanager
 from contextvars import ContextVar as ContextVar, Token as Token
 from dataclasses import dataclass as dataclass, field as field, replace as replace
 from math import isfinite as _isfinite
+from os import getenv as _getenv
 from pathlib import Path as Path
 from threading import Event as Event, Lock as Lock, RLock as RLock
 from time import monotonic as monotonic
@@ -661,6 +662,30 @@ def _generated_scope_ids(
         del generator, options, parent, ambient, restrictions, native
 
 
+_default_agent_harness_id: str | None = None
+
+
+def _normalize_agent_harness_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("agent_harness_id must be a string or None")
+    return value.strip() or None
+
+
+def set_default_agent_harness_id(value: str | None) -> None:
+    """Set the process default for agent trace routing."""
+    global _default_agent_harness_id
+    _default_agent_harness_id = _normalize_agent_harness_id(value)
+
+
+def get_default_agent_harness_id() -> str | None:
+    """Return the process default or the value of OPENAI_AGENT_HARNESS_ID."""
+    return _default_agent_harness_id or _normalize_agent_harness_id(
+        _getenv("OPENAI_AGENT_HARNESS_ID")
+    )
+
+
 def set_tracing_disabled(disabled: bool) -> None:
     """Set capture policy for subsequently admitted scopes and operations.
 
@@ -1048,13 +1073,17 @@ def _capture(
     *,
     fallback_policy_only: bool = False,
     continuation_trace_id: str | None = None,
+    agent_harness_id: str | None = None,
 ) -> _CapturedTrace:
     try:
         scope = None
         captured = None
         native = None
+        fallback_data = None
+        trace_options = metadata = None
         context = current_context()
         handle = context._handle if context else fallback
+        # Automatic routing is a policy default and does not select ancestry.
         policy_only = options is None and handle is None and continuation_trace_id is None
         if (
             options is None
@@ -1062,11 +1091,31 @@ def _capture(
             and (fallback is None or fallback_policy_only)
             and continuation_trace_id is not None
         ):
+            if fallback is not None:
+                native = _native_tracing()
+                fallback_data = json.loads(native.trace_span_context(fallback))
+                encoded = fallback_data.get("root_metadata")
+                if encoded is not None:
+                    harness_id = json.loads(encoded).get("agent_harness_id")
+                    if harness_id is not None:
+                        metadata = {"agent_harness_id": harness_id}
             options = TraceOptions(
                 trace_id=continuation_trace_id,
                 include_sensitive_data=False,
+                metadata=metadata or {},
                 detached=fallback is not None,
             )
+        if agent_harness_id is not None and fallback is None:
+            trace_options = _options(options)
+            if trace_options.parent is None and (trace_options.detached or context is None):
+                metadata = trace_options.metadata
+                if metadata is None or (
+                    isinstance(metadata, Mapping) and "agent_harness_id" not in metadata
+                ):
+                    options = replace(
+                        trace_options,
+                        metadata={**(metadata or {}), "agent_harness_id": agent_harness_id},
+                    )
         if (
             options is not None
             or (context is not None and fallback is not None)
@@ -1082,11 +1131,12 @@ def _capture(
             )
             if context is None and fallback is not None:
                 # Session defaults contribute policy even when no public scope is active.
-                native = _native_tracing()
-                data = json.loads(native.trace_span_context(fallback))
-                data.pop("handle", None)
-                data.pop("root_metadata", None)
-                token = _current.set(SpanContext(_handle=fallback, **data))
+                if fallback_data is None:
+                    native = _native_tracing()
+                    fallback_data = json.loads(native.trace_span_context(fallback))
+                fallback_data.pop("handle", None)
+                fallback_data.pop("root_metadata", None)
+                token = _current.set(SpanContext(_handle=fallback, **fallback_data))
                 try:
                     scope.__enter__()
                     assert scope._token is not None
@@ -1118,7 +1168,7 @@ def _capture(
                 _retain_cleanup_error(error, cleanup, _error_contexts(error.__context__))
             raise
     finally:
-        del options, scope, context, captured
+        del options, scope, context, captured, trace_options, metadata, fallback_data
 
 
 class TraceLifecycleEvent(TypedDict):
