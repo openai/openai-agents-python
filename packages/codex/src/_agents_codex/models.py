@@ -6,6 +6,8 @@ import asyncio
 import inspect
 import json
 import math
+import re
+import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -1478,6 +1480,22 @@ class LitellmModel(ChatCompletionsModel):
             del request, options, response
 
 
+def _anyllm_responses_streaming_supported(client: Any) -> bool:
+    any_llm = sys.modules.get("any_llm")
+    provider_class = getattr(any_llm, "AnyLLM", None)
+    if not isinstance(provider_class, type) or not isinstance(client, provider_class):
+        return True  # Compatible application providers own their stream cleanup.
+    release = getattr(any_llm, "__version__", None)
+    if not isinstance(release, str):
+        return False
+    # AnyLLM 1.28.0 is the first release to propagate aclose to the underlying stream.
+    match = re.fullmatch(
+        r"([0-9]+)\.([0-9]+)\.[0-9]+(?:\.post[0-9]+)?(?:\+[a-z0-9]+(?:\.[a-z0-9]+)*)?",
+        release,
+    )
+    return match is not None and (int(match[1]), int(match[2])) >= (1, 28)
+
+
 @dataclass(frozen=True, init=False)
 class AnyLLMModel(ChatCompletionsModel):
     """Borrow an AnyLLM provider exposing asynchronous ``acompletion``.
@@ -1489,9 +1507,11 @@ class AnyLLMModel(ChatCompletionsModel):
     Explicit adapter cache overrides, including empty strings, remain provider-validated.
     Generic completion requests omit the native ``store=False`` default.
     Set ``api="responses"`` for the AnyLLM OpenAI provider with public
-    ``aresponses(extra_body=...)`` support. ``api="auto"`` selects Responses
-    when both conditions hold, otherwise it uses Chat Completions. The default
-    uses Chat Completions. ``include_usage`` applies to Chat Completions only.
+    ``aresponses(extra_body=...)`` support. Streaming Responses requires a stable
+    ``any-llm-sdk`` release at or above 1.28.0 for stream cleanup. ``api="auto"``
+    selects Responses when these requirements hold, otherwise it uses Chat
+    Completions. The default uses Chat Completions. ``include_usage`` applies to
+    Chat Completions only.
     """
 
     _responses: _AnyLLMResponsesModel | None = field(default=None, init=False, repr=False)
@@ -1528,6 +1548,14 @@ class AnyLLMModel(ChatCompletionsModel):
                     "AnyLLM Responses requires the OpenAI provider with public "
                     "aresponses extra_body support"
                 )
+            if (
+                use_responses
+                and stream is True
+                and not _anyllm_responses_streaming_supported(client)
+            ):
+                if api == "responses":
+                    raise ValueError("Streaming AnyLLM Responses requires any-llm-sdk>=1.28.0")
+                use_responses = False
             if use_responses and request_options is not None:
                 raise TypeError("request_options requires an OpenAI-compatible client adapter")
         super().__init__(
