@@ -18,6 +18,7 @@ import threading
 import time
 from collections.abc import Mapping
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -132,6 +133,7 @@ def _answer(fixture: ResponsesFixture, text: str) -> None:
         "flush_budget",
         "manual_restore",
         "manual_restore_state_only",
+        "manual_restore_state_only_harness",
         "shutdown_budget",
         "mcp_policy",
         "terminal_queue",
@@ -232,9 +234,21 @@ async def _native_case(case: str) -> None:
                     await _flush_budget()
                 elif case == "shutdown_budget":
                     await _flush_budget(shutdown=True)
-                elif case in ("manual_restore", "manual_restore_state_only"):
+                elif case in (
+                    "manual_restore",
+                    "manual_restore_state_only",
+                    "manual_restore_state_only_harness",
+                ):
                     await _manual_restore(
-                        fixture, provider, peer, state_only=case == "manual_restore_state_only"
+                        fixture,
+                        provider,
+                        peer,
+                        state_only=case != "manual_restore",
+                        harness_id=(
+                            "restore-harness"
+                            if case == "manual_restore_state_only_harness"
+                            else None
+                        ),
                     )
                 elif case == "mcp_policy":
                     await _mcp_policy(fixture, provider, recorder)
@@ -607,7 +621,10 @@ async def _manual_restore(
     peer: DecodedCollector,
     *,
     state_only: bool,
+    harness_id: str | None = None,
 ) -> None:
+    if harness_id is not None:
+        provider = replace(provider, agent_harness_id=harness_id)
     checking_restore = False
     expected_trace_id = ""
     restored_input_contexts = []
@@ -620,7 +637,6 @@ async def _manual_restore(
             if checking_restore:
                 current = telemetry.current_context()
                 assert current is not None
-                assert current.trace_id == expected_trace_id
                 assert not current.include_sensitive_data
                 with telemetry.span(
                     "restored validator nested work",
@@ -686,6 +702,10 @@ async def _manual_restore(
             ),
         ) as restored:
             assert len(restored_input_contexts) == 1
+            input_context = restored_input_contexts[0]
+            assert input_context.trace_id == expected_trace_id
+            if harness_id is not None:
+                assert input_context.trace_metadata == {"agent_harness_id": harness_id}
             async for interaction in restored.interactions():
                 request = manual.match(interaction)
                 if request is not None:
