@@ -517,13 +517,20 @@ def test_native_publication_is_a_global_barrier() -> None:
         ("workflow_dispatch", "feat/codex-harness", "true", False, False),
     ],
 )
+@pytest.mark.parametrize("repository", ["openai/openai-agents-python", "contributor/fork"])
+@pytest.mark.parametrize("snapshot", ["", "123"])
 def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
-    event: str, branch: str, code: str, pr: bool, push: bool
+    event: str, branch: str, code: str, pr: bool, push: bool, repository: str, snapshot: str
 ) -> None:
     jobs = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)[
         "jobs"
     ]
     values = {
+        "github.repository": repository,
+        "github.event.pull_request.head.repo.full_name": "",
+        "github.event.pull_request.stack.base.ref": "",
+        "inputs.runner": "ubuntu-24.04-arm",
+        "inputs.native_source_run": snapshot,
         "inputs.native_only": False,
         "needs.changes.outputs.code": code,
         "github.event_name": event,
@@ -531,6 +538,28 @@ def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
         "github.base_ref": branch,
         "github.event.merge_group.base_ref": f"refs/heads/{branch}",
     }
+    native = yaml.load(
+        (ROOT / ".github/workflows/codex-python.yml").read_text(), Loader=yaml.BaseLoader
+    )["jobs"]["build"]
+    fast = (
+        repository == "openai/openai-agents-python"
+        and event == "push"
+        and branch == "feat/codex-harness"
+        and not snapshot
+    )
+    expected = (
+        {"group": "codex-runners", "labels": "codex-linux-arm64"} if fast else "ubuntu-24.04-arm"
+    )
+    expression = native["runs-on"].removeprefix("${{ fromJSON(").removesuffix(") }}").strip()
+    expression = expression.replace("toJSON(inputs.runner)", repr(json.dumps("ubuntu-24.04-arm")))
+    assert _condition(
+        "(" + expression + ") == " + repr(json.dumps(expected, separators=(",", ":"))), values
+    )
+    host = next(
+        step for step in native["steps"] if step.get("name") == "Check the Linux ARM64 build host"
+    )
+    limit = host["env"]["ARM_CARGO_BUILD_JOBS"].removeprefix("${{ ").removesuffix(" }}")
+    assert _condition("(" + limit + ") == " + repr("14" if fast else "3"), values)
     producer = jobs["produce-linux-arm64"]
     assert producer["needs"] == "changes"
     assert producer["with"] == {

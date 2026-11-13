@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - feat/codex-harness
+      - ci/hillclimb/python-current-seed-33
   pull_request:
     # All PRs, including stacked PRs
   merge_group:
@@ -64,7 +65,9 @@ jobs:
         id: release-windows
         env:
           V1_QUALIFICATION: >-
-            ${{ inputs.native_only || github.ref_name == 'feat/codex-harness' ||
+            ${{ inputs.native_only ||
+            (github.repository == 'openai/openai-agents-python' && github.event_name == 'push' &&
+            github.ref == 'refs/heads/ci/hillclimb/python-current-seed-33') || github.ref_name == 'feat/codex-harness' ||
             github.base_ref == 'feat/codex-harness' ||
             github.event.pull_request.stack.base.ref == 'feat/codex-harness' ||
             github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness' }}
@@ -128,7 +131,7 @@ jobs:
                     "run_id": os.environ["GITHUB_RUN_ID"],
                     "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"], "pull_request": None}
           if (os.environ["GITHUB_EVENT_NAME"] == "push"
-                  and record["head_ref"] not in {os.environ["DEFAULT_BRANCH"], "feat/codex-harness"}):
+                  and record["head_ref"] not in {os.environ["DEFAULT_BRANCH"], "feat/codex-harness", "ci/hillclimb/python-current-seed-33"}):
               query = urllib.parse.urlencode({"state": "open", "head": os.environ["GITHUB_REPOSITORY_OWNER"] + ":" + record["head_ref"], "per_page": 100})
               url = os.environ["GITHUB_API_URL"] + "/repos/" + os.environ["GITHUB_REPOSITORY"] + "/pulls?" + query
               request = urllib.request.Request(url, headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
@@ -521,7 +524,8 @@ jobs:
     needs: changes
     if: >-
       !inputs.native_only && needs.changes.outputs.code == 'true' &&
-      ((github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness') ||
+      ((github.event_name == 'push' && (github.ref == 'refs/heads/feat/codex-harness' ||
+      (github.repository == 'openai/openai-agents-python' && github.ref == 'refs/heads/ci/hillclimb/python-current-seed-33'))) ||
       (github.event_name == 'pull_request' && github.base_ref == 'feat/codex-harness') ||
       (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness'))
     uses: ./.github/workflows/codex-python.yml

@@ -696,7 +696,10 @@ def test_committed_version_controls_windows_scheduling(
     gate = next(step for step in changes["steps"] if step.get("id") == "release-windows")
     assert gate["env"] == {
         "V1_QUALIFICATION": (
-            "${{ inputs.native_only || github.ref_name == 'feat/codex-harness' || "
+            "${{ inputs.native_only || "
+            "(github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && "
+            "github.ref == 'refs/heads/ci/hillclimb/python-current-seed-33') || "
+            "github.ref_name == 'feat/codex-harness' || "
             "github.base_ref == 'feat/codex-harness' || "
             "github.event.pull_request.stack.base.ref == 'feat/codex-harness' || "
             "github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness' }}"
