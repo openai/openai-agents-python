@@ -51,7 +51,7 @@ def test_failure_policy_selection_preserves_default_and_validates_callback() -> 
         replace(default, failure_error_function="unsafe")  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("policy", ["default", "custom", "raise", "caller_raise"])
+@pytest.mark.parametrize("policy", ["default", "native", "custom", "raise", "caller_raise"])
 async def test_native_mcp_transport_failure_preserves_selected_original_only(
     responses: ResponsesFixture, policy: str
 ) -> None:
@@ -69,13 +69,15 @@ async def test_native_mcp_transport_failure_preserves_selected_original_only(
         return "application-approved-failure"
 
     responses.respond(mcp_call("reviewed", "mcp__docs", "failed-transport"))
-    if policy in ("default", "custom"):
+    if policy in ("default", "native", "custom"):
         responses.respond(assistant_output("completed after safe failure"))
     native_provider = provider(responses)
     try:
         async with timeout(20), peer.serve() as url:
             selected = descriptor(url)
-            if policy == "raise":
+            if policy == "native":
+                selected = replace(selected, failure_error_function="native")
+            elif policy == "raise":
                 selected = replace(selected, failure_error_function=None)
             elif policy in ("custom", "caller_raise"):
                 selected = replace(selected, failure_error_function=format_failure)
@@ -114,7 +116,7 @@ async def test_native_mcp_transport_failure_preserves_selected_original_only(
                 assert len(calls) == (1 if policy in ("custom", "caller_raise") else 0)
                 if policy == "custom":
                     assert "application-approved-failure" in repr(responses.requests)
-                elif policy == "default":
+                elif policy in ("default", "native"):
                     assert "MCP tool invocation failed" in repr(responses.requests)
     finally:
         await native_provider.aclose()

@@ -16146,10 +16146,13 @@ class Session(Generic[ContextT, OutputT]):
                         nonce, notice["turn_id"], notice["call_id"]
                     )
                     if original_error is not None:
-                        if server.failure_error_function is None:
+                        failure_function = server.failure_error_function
+                        if failure_function is None:
                             raise _FunctionBodyFailure(original_error)
+                        if not callable(failure_function):
+                            raise NativeError("Native MCP failure policy is not callable")
                         formatted = await _call_callback(
-                            _RecoverableFunctionCallback(server.failure_error_function),
+                            _RecoverableFunctionCallback(failure_function),
                             admitted,
                             context,
                             original_error,
