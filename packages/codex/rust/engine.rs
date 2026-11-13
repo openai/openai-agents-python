@@ -746,6 +746,7 @@ impl EngineState {
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
         let private_http = options.private_http;
+        let private_function_wss_tls = options.private_function_scope;
         let force_http = private_http && !options.private_function_scope;
         let process_private_http = options.process_private_http
             && cfg!(target_os = "linux")
@@ -896,6 +897,7 @@ impl EngineState {
                     .collect(),
             );
         }
+        crate::private_wss::install(&mut startup, private_function_wss_tls);
         let native = self
             .start_prepared_with_transport(
                 startup,

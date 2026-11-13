@@ -88,6 +88,7 @@ sha2 = "0.10"
 tempfile = "3"
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "3e636cab26c013eca5131103c03d20237f12c4df", version = "=3.3.0", default-features = false }
 rustls-native-certs = "=0.8.3"
+openssl-probe = "=0.2.1"
 rustls = { version = "=0.23.45", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 tokio-tungstenite = { version = "=0.28.0", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
