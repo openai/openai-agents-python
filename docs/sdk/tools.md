@@ -259,11 +259,13 @@ preview_search = Agent(
 )
 
 mcp_servers = [
-    HostedMCP(tool_config={
-        "type": "mcp",
-        "server_label": label,
-        "server_url": f"https://{label}.example.com/mcp",
-    })
+    HostedMCP(
+        tool_config={
+            "type": "mcp",
+            "server_label": label,
+            "server_url": f"https://{label}.example.com/mcp",
+        }
+    )
     for label in ("docs", "support")
 ]
 any_offered_mcp = Agent(

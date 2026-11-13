@@ -220,7 +220,12 @@ def _capture_agent_graph(
         if declaration.programmatic_tool_calling != opening.programmatic_tool_calling:
             raise ValueError("Handoff profiles must share programmatic tool calling mode")
         output = _prepare_spec(declaration.output_type)
-        if opening.realtime is not None and (output.mode, output.schema, output.wrapped, output.strict) != (
+        if opening.realtime is not None and (
+            output.mode,
+            output.schema,
+            output.wrapped,
+            output.strict,
+        ) != (
             root_output.mode,
             root_output.schema,
             root_output.wrapped,

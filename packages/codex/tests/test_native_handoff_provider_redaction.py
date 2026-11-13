@@ -66,9 +66,7 @@ async def test_prepared_handoff_omits_source_developer_instructions(distinct: bo
             saved = (await session.save_state()).to_json()
 
         assert source_marker in json.dumps(source.requests[0]["input"])
-        first_target, follow_up = [
-            json.dumps(request["input"]) for request in target.requests[-2:]
-        ]
+        first_target, follow_up = [json.dumps(request["input"]) for request in target.requests[-2:]]
         assert destination_marker in first_target
         assert updated_marker in follow_up
         for wire in (first_target, follow_up):
