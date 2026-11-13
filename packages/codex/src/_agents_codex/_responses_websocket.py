@@ -317,7 +317,9 @@ def _decode_socket_frame(
             # Preserve the standard decoder's supported byte encodings.
             payload = payload.decode(json.detect_encoding(payload), "surrogatepass")
         if isinstance(payload, str):
-            nodes = _check_socket_json_structure(payload, budget.remaining if budget else None)
+            nodes = _check_socket_json_structure(
+                payload, budget.remaining if budget is not None else None
+            )
         decoded = json.loads(
             payload, parse_constant=_reject_json_constant, parse_float=_finite_json_float
         )
