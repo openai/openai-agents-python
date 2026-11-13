@@ -170,7 +170,8 @@ async def _resolve_retry(
                 if advice is not None:
                     from dataclasses import replace
 
-                    normalized = dict(advice.normalized or {})
+                    # RetryAdvice validates each field before capturing the mapping.
+                    normalized: dict[str, Any] = dict(advice.normalized or {})
                     if advice.retry_after_ms is not None:
                         normalized.setdefault("retry_after_ms", advice.retry_after_ms)
                     normalized["is_abort"] = context.normalized.is_abort or normalized.get(
