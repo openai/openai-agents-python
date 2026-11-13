@@ -196,6 +196,27 @@ assert "agents._native" not in sys.modules
     )
 
 
+def test_voice_workflow_uses_session_tool_selection_boundary() -> None:
+    path = _RUNTIME / "voice" / "workflow.py"
+    tree = ast.parse(path.read_text())
+    private_session_fields = {
+        "_check_open",
+        "_effective_agent",
+        "_bindings",
+        "_executor",
+        "_native_agents",
+        "_effective_handoffs",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            assert node.attr not in private_session_fields, (path, node.lineno, node.attr)
+        elif isinstance(node, ast.ImportFrom):
+            assert all(alias.name != "_split_tools" for alias in node.names), (
+                path,
+                node.lineno,
+            )
+
+
 def test_runtime_dependencies_do_not_use_public_facades() -> None:
     runtime = _RUNTIME
     assert runtime.is_dir()
