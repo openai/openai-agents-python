@@ -95,7 +95,7 @@ if TYPE_CHECKING:
         InputGuardrail as InputGuardrail,
         OutputGuardrail as OutputGuardrail,
     )
-    from .handoffs import Handoff as Handoff
+    from .handoffs import Handoff as Handoff, HandoffInput as HandoffInput
     from .hosted_mcp import (
         HostedMCP as HostedMCP,
         HostedMCPApprovalArguments as HostedMCPApprovalArguments,
@@ -251,9 +251,11 @@ if TYPE_CHECKING:
         ManagedAgentToolOrigin as ManagedAgentToolOrigin,
         NativeError as NativeError,
         ProducedItem as ProducedItem,
+        RecoverRun as RecoverRun,
         ResponseIntegrityReason as ResponseIntegrityReason,
         RunDiagnosticError as RunDiagnosticError,
         RunErrorDetails as RunErrorDetails,
+        RunFailure as RunFailure,
         Session as Session,
         SessionBusyError as SessionBusyError,
         StaleTurnError as StaleTurnError,
@@ -423,6 +425,7 @@ _MODULES = {
     "Interaction": ".manual",
     "Agent": ".agent",
     "Handoff": ".handoffs",
+    "HandoffInput": ".handoffs",
     "CodexAccount": ".agent",
     "CodexLogin": ".agent",
     "ModelSettings": ".agent",
@@ -555,7 +558,9 @@ _MODULES = {
     "ManagedAgentToolOrigin": ".session",
     "NativeError": ".session",
     "ProducedItem": ".session",
+    "RecoverRun": ".session",
     "RunErrorDetails": ".session",
+    "RunFailure": ".session",
     "RunDiagnosticError": ".session",
     "ResponseIntegrityReason": ".session",
     "Session": ".session",

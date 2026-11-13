@@ -1,3 +1,6 @@
+#[path = "handoff_inputs.rs"]
+pub(crate) mod handoff_inputs;
+
 #[path = "sandbox_events.rs"]
 mod sandbox_events;
 
@@ -232,6 +235,7 @@ pub struct PythonTools {
     before_compact_enabled: bool,
     post_turn_compact_enabled: bool,
     before_complete_enabled: bool,
+    hold_assistant_completion: bool,
     pub(crate) tool_batch_completion_enabled: bool,
     step_defaults: RwLock<Option<Vec<ToolName>>>,
     // None retires this native thread's selectors. Registration and retirement
@@ -241,6 +245,8 @@ pub struct PythonTools {
     #[cfg(test)]
     pub(crate) before_result: Mutex<Option<Arc<manual_checkpoint_tests::BeforeResult>>>,
 }
+
+pub(crate) struct HoldAssistantCompletion;
 
 pub(crate) enum ModelContextUpdate {
     Keep,
@@ -266,6 +272,7 @@ pub(crate) enum ToolCompletionReply {
 }
 
 enum PreparationReply {
+    HandoffInput(oneshot::Sender<std::result::Result<handoff_inputs::Groups, ()>>),
     ProviderResponseSpan(
         oneshot::Sender<
             std::result::Result<Option<codex_extension_api::SdkProviderResponseSpanAdmission>, ()>,
@@ -294,7 +301,7 @@ enum PreparationReply {
     CompactionPolicy(oneshot::Sender<std::result::Result<Option<bool>, ()>>),
     ManagedAgentResult(oneshot::Sender<std::result::Result<Option<String>, ()>>),
     Completion {
-        reply: oneshot::Sender<std::result::Result<Option<String>, ()>>,
+        reply: oneshot::Sender<std::result::Result<codex_extension_api::TurnCompletionDecision, ()>>,
         stop: crate::native_interception::CapturedTurnStop,
     },
 }
@@ -302,6 +309,7 @@ enum PreparationReply {
 impl PreparationReply {
     fn is_closed(&self) -> bool {
         match self {
+            Self::HandoffInput(reply) => reply.is_closed(),
             Self::ProviderResponseSpan(reply) => reply.is_closed(),
             Self::ModelRetry(reply) => reply.is_closed(),
             Self::PreparedRequest { ticket, reply } => reply.is_closed() || !ticket.admits(),
@@ -2342,6 +2350,10 @@ impl PythonTools {
             before_compact_enabled: before_compact,
             post_turn_compact_enabled: post_turn_compact,
             before_complete_enabled: before_complete,
+            hold_assistant_completion: startup
+                .thread_extension_init
+                .get::<HoldAssistantCompletion>()
+                .is_some(),
             tool_batch_completion_enabled: tool_batch_completion,
             step_defaults: RwLock::new(None),
             preparation_replies: Mutex::new(Some(HashMap::new())),
@@ -2489,6 +2501,7 @@ impl PythonTools {
             before_compact_enabled: parent.before_compact_enabled,
             post_turn_compact_enabled: parent.post_turn_compact_enabled,
             before_complete_enabled: parent.before_complete_enabled,
+            hold_assistant_completion: parent.hold_assistant_completion,
             tool_batch_completion_enabled: parent.tool_batch_completion_enabled,
             step_defaults: RwLock::new(
                 parent
@@ -3215,20 +3228,30 @@ impl PythonTools {
             .map_err(|_| anyhow::anyhow!("Expired compaction callback"))
     }
 
+    pub(crate) fn holds_assistant_completion(
+        &self,
+        step: &codex_extension_api::ExtensionData,
+    ) -> bool {
+        self.hold_assistant_completion && self.completion_callback_enabled(Some(step))
+    }
+
+    pub(crate) fn completion_callback_enabled(
+        &self,
+        step: Option<&codex_extension_api::ExtensionData>,
+    ) -> bool {
+        self.before_complete_enabled
+            && step
+                .and_then(|step| step.get::<ProfileCatalog>())
+                .is_none_or(|catalog| catalog.before_complete)
+    }
+
     pub(crate) async fn before_complete(
         self: &Arc<Self>,
         input: codex_extension_api::TurnCompletionInput<'_>,
-    ) -> Result<Option<String>> {
+    ) -> Result<codex_extension_api::TurnCompletionDecision> {
         let source = self.source_metadata(input.step_store)?;
-        if input
-            .step_store
-            .and_then(|step| step.get::<ProfileCatalog>())
-            .is_some_and(|catalog| !catalog.before_complete)
-        {
-            return Ok(None);
-        }
-        if !self.before_complete_enabled {
-            return Ok(None);
+        if !self.completion_callback_enabled(input.step_store) {
+            return Ok(codex_extension_api::TurnCompletionDecision::Accept);
         }
         let owner = self.admission_ready(input.turn_id)?;
         let stop =
@@ -3275,7 +3298,7 @@ impl PythonTools {
     pub(crate) fn reply_completion(
         self: &Arc<Self>,
         id: u64,
-        instructions: std::result::Result<Option<String>, ()>,
+        decision: std::result::Result<codex_extension_api::TurnCompletionDecision, ()>,
         thread: Option<&str>,
         instance: Option<&str>,
     ) -> Result<()> {
@@ -3285,7 +3308,7 @@ impl PythonTools {
             anyhow::bail!("Invalid completion reply");
         };
         reply
-            .send(instructions)
+            .send(decision)
             .map_err(|_| anyhow::anyhow!("Expired completion callback"))
     }
 
@@ -4524,6 +4547,42 @@ impl PythonTools {
             .unwrap_or_default()
     }
 
+    pub(crate) fn unpublished_tool_outputs(
+        &self,
+        turn: &str,
+    ) -> Vec<(codex_history::ResponseItemEnvelope, bool)> {
+        self.admission
+            .lock()
+            .expect("Python admission receipt poisoned")
+            .as_ref()
+            .filter(|receipt| receipt.turn_id == turn)
+            .map(|receipt| {
+                let completed = receipt
+                    .completed_calls
+                    .lock()
+                    .expect("Completed calls poisoned")
+                    .clone();
+                receipt
+                    .held_tool_outputs
+                    .unpublished_outputs
+                    .lock()
+                    .expect("unpublished tool outputs poisoned")
+                    .iter()
+                    .filter(|(output, _)| match &output.item {
+                        ResponseItem::FunctionCallOutput {
+                            call_id: Some(id), ..
+                        }
+                        | ResponseItem::CustomToolCallOutput { call_id: id, .. } => {
+                            completed.contains(id)
+                        }
+                        _ => false,
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn pending_manual_keys(&self, owner: &str) -> Result<Vec<PendingKey>> {
         let pending = self.pending.lock().expect("Python replies poisoned");
         ensure!(!pending.is_empty(), "No pending manual calls");
@@ -5292,6 +5351,17 @@ impl ToolLifecycleContributor for PythonContributor {
                 // including later native post-hook changes. A successful
                 // oneshot send alone cannot prove that settlement.
                 tools.record_completed_call(input.turn_id, input.call_id);
+                #[cfg(test)]
+                {
+                    let hold = tools.before_result.lock().unwrap().clone();
+                    if let Some(hold) = hold
+                        && hold.after_terminal
+                        && hold.call_id == input.call_id
+                    {
+                        hold.entered.add_permits(1);
+                        hold.release.acquire().await.unwrap().forget();
+                    }
+                }
             }
         })
     }
@@ -5808,6 +5878,15 @@ impl TurnLifecycleContributor for PythonContributor {
                 let Some(publication) = startup.lock_current() else {
                     return;
                 };
+                let manual_progress = tools.manual_progress.clone();
+                *receipt
+                    .held_tool_outputs
+                    .unpublished_progress
+                    .lock()
+                    .expect("unpublished tool progress poisoned") =
+                    Some(Arc::new(move || {
+                        manual_progress.send_modify(|version| *version = version.wrapping_add(1));
+                    }));
                 crate::native_interception::attach_sdk_admission(input.turn_store, &receipt);
                 input.turn_store.insert(receipt.clone());
                 if let Some(previous) = admission.replace(receipt) {
@@ -7236,6 +7315,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 let hold = self.tools.before_result.lock().unwrap().clone();
                 if let Some(hold) = hold
                     && hold.call_id == key.call
+                    && !hold.after_terminal
                 {
                     hold.entered.add_permits(1);
                     hold.release.acquire().await.unwrap().forget();
@@ -9360,7 +9440,7 @@ pub(crate) mod managed_tests {
             let recovery_state = resumed.clone();
             let manual = restored.manual.clone();
             let recovering = tokio::spawn(async move {
-                manual_checkpoint::continue_if_ready(&recovery_state, &manual, None, None, None).await.unwrap()
+                manual_checkpoint::continue_if_ready(&recovery_state, &manual, None, None, None, false).await.unwrap()
             });
             hold.flush.entered.acquire().await.unwrap().forget();
             assert_eq!(provider.requests.lock().unwrap().len(), 2,
@@ -9870,6 +9950,7 @@ pub(crate) mod managed_tests {
             before_compact_enabled: false,
             post_turn_compact_enabled: false,
             before_complete_enabled: false,
+            hold_assistant_completion: false,
             tool_batch_completion_enabled: false,
             step_defaults: RwLock::new(None),
             preparation_replies: Mutex::new(Some(HashMap::new())),
@@ -9948,6 +10029,30 @@ pub(crate) mod managed_tests {
                     .contains("invalid Python tool slot projection")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn handoff_reply_wrong_kind_preserves_the_original_preparation() {
+        let tools = sdk();
+        tools.family.members.write().unwrap()
+            .insert("thread".into(), Arc::downgrade(&tools));
+        let id = tools.family.next_invocation.fetch_add(1, Ordering::Relaxed);
+        let mut request = json!({"id":"turn", "msg":{"thread":"thread"}});
+        let callback = tools.preparation_callback(id, &mut request);
+        let receipt = callback.receipt.clone();
+        let (reply, mut receive) = oneshot::channel::<Option<ModelContextUpdate>>();
+        tools.preparation_replies.lock().unwrap().as_mut().unwrap().insert(id,
+            PreparationSlot {turn:"turn".into(), reply:Some(PreparationReply::Context(reply)), callback});
+        assert!(tools.callback_operation("thread", &receipt, "enter"));
+        assert!(tools.reply_handoff_input(id, Some(r#"{"input":[],"previous":[],"generated":[]}"#),
+            Some("thread"), None).is_err());
+        assert!(matches!(receive.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        let PreparationReply::Context(original) = tools.take_preparation(id).unwrap() else {
+            panic!("The original callback kind changed");
+        };
+        assert!(original.send(None).is_ok());
+        assert!(receive.await.unwrap().is_none());
+        assert!(tools.callback_operation("thread", &receipt, "release"));
     }
 
     fn sdk() -> Arc<PythonTools> {

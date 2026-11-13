@@ -1,0 +1,142 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 9744b6a0..7818379b 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -4348,6 +4348,11 @@ async fn drain_in_flight(
+                                 )
+                             })
+                     });
++                let unpublished_id = match &result.envelope.item {
++                    ResponseItem::FunctionCallOutput { call_id, .. } => call_id.clone(),
++                    ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.clone()),
++                    _ => None,
++                };
+                 if held {
+                     turn_context
+                         .extension_data
+@@ -4364,6 +4369,24 @@ async fn drain_in_flight(
+                     )
+                     .await;
+                 }
++                // Retire the copy only after canonical publication or terminal ownership.
++                if let Some(id) = unpublished_id
++                    && let Some(owner) = turn_context
++                        .extension_data
++                        .get::<codex_extension_api::HeldToolCompletionResults>()
++                {
++                    owner
++                        .unpublished_outputs
++                        .lock()
++                        .expect("unpublished tool outputs poisoned")
++                        .retain(|(envelope, _)| match &envelope.item {
++                            ResponseItem::FunctionCallOutput { call_id, .. } => {
++                                call_id.as_ref() != Some(&id)
++                            }
++                            ResponseItem::CustomToolCallOutput { call_id, .. } => call_id != &id,
++                            _ => true,
++                        });
++                }
+             }
+             Err(err) => return Err(err),
+         }
+diff --git a/codex-rs/core/src/session/turn_suspension.rs b/codex-rs/core/src/session/turn_suspension.rs
+index e38ae908..66543860 100644
+--- a/codex-rs/core/src/session/turn_suspension.rs
++++ b/codex-rs/core/src/session/turn_suspension.rs
+@@ -79,15 +79,16 @@ pub(super) async fn suspend_turn_and_shutdown(
+         .turn_metadata_state
+         .cancel_git_enrichment_task();
+     let mut task_handle = task.handle.detach();
+-    match tokio::time::timeout(
++    let joined = match tokio::time::timeout(
+         Duration::from_millis(crate::tasks::GRACEFULL_INTERRUPTION_TIMEOUT_MS),
+         &mut task_handle,
+     )
+     .await
+     {
+-        Ok(Ok(())) => {}
++        Ok(Ok(())) => true,
+         Ok(Err(error)) => {
+             warn!(thread_id = %session.thread_id, %error, "suspended turn task exited abnormally");
++            false
+         }
+         Err(_) => {
+             warn!(
+@@ -96,8 +97,9 @@ pub(super) async fn suspend_turn_and_shutdown(
+             );
+             task_handle.abort();
+             let _ = task_handle.await;
++            false
+         }
+-    }
++    };
+     // Pending accepted input and interactive waiters live only in this process. Handoff
+     // intentionally drops that state; persisting or replaying it needs a separate protocol.
+     session.input_queue.clear_pending(&turn).await;
+@@ -120,5 +122,11 @@ pub(super) async fn suspend_turn_and_shutdown(
+             msg: EventMsg::ShutdownComplete,
+         })
+         .await;
++    if !joined {
++        return Err(CodexErr::InvalidRequest(
++            "Root turn suspension did not join its tool results; no checkpoint was authorized"
++                .into(),
++        ));
++    }
+     Ok(SuspendTurnOutcome::Suspended { turn_id })
+ }
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 4ecd5021..c4c30992 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -334,6 +334,35 @@ impl ToolCallRuntime {
+                     .delivered_assistant_message = Some(text.clone());
+             }
+             recorder.attach_direct_call_to_output(&mut response.item, recorded_call);
++            if pending_exec.is_none()
++                && matches!(
++                    &response.item,
++                    ResponseItem::FunctionCallOutput {
++                        call_id: Some(_),
++                        ..
++                    } | ResponseItem::CustomToolCallOutput { .. }
++                )
++                && let Some(owner) = retained_step_context
++                    .turn
++                    .extension_data
++                    .get::<codex_extension_api::HeldToolCompletionResults>()
++            {
++                // The final envelope exists before FuturesOrdered can publish it.
++                // Retain it under the same turn owner used by SDK suspension.
++                owner
++                    .unpublished_outputs
++                    .lock()
++                    .expect("unpublished tool outputs poisoned")
++                    .push((response.clone(), succeeded));
++                if let Some(progress) = owner
++                    .unpublished_progress
++                    .lock()
++                    .expect("unpublished tool progress poisoned")
++                    .as_ref()
++                {
++                    progress.send_modify(|version| *version = version.wrapping_add(1));
++                }
++            }
+             Ok(DirectToolResult {
+                 succeeded,
+                 envelope: response,
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index ab16693b..ae1fdb0a 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -195,6 +195,10 @@ pub struct RecoveredToolCompletionCandidates {
+ /// Neither these rows nor a checkpoint can authorize terminal completion.
+ #[derive(Default)]
+ pub struct HeldToolCompletionResults {
++    /// Final Core envelopes waiting for the ordered result drain, never terminal policy candidates.
++    pub unpublished_outputs: std::sync::Mutex<Vec<(codex_history::ResponseItemEnvelope, bool)>>,
++    /// The admitted SDK owner's existing finite readiness counter.
++    pub unpublished_progress: std::sync::Mutex<Option<tokio::sync::watch::Sender<u64>>>,
+     pub outputs: std::sync::Mutex<Vec<(codex_history::ResponseItemEnvelope, bool)>>,
+     pub suspending: std::sync::atomic::AtomicBool,
+ }

@@ -75,6 +75,8 @@ pub struct ThreadOptions {
     pub(crate) application_instructions: Option<String>,
     #[serde(rename = "_agent_profiles")]
     pub(crate) agent_profiles: Option<crate::agent_profiles::OpeningProfiles>,
+    #[serde(rename = "_sdk_profile_provider_keys")]
+    profile_provider_keys: std::collections::BTreeMap<String, String>,
     #[serde(rename = "_sdk_request_transport")]
     sdk_request_transport:
         Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
@@ -98,6 +100,8 @@ pub struct ThreadOptions {
     pub(crate) post_turn_compact: bool,
     #[serde(rename = "_before_complete")]
     pub(crate) before_complete: bool,
+    #[serde(rename = "_hold_assistant_completion")]
+    hold_assistant_completion: bool,
     #[serde(rename = "_tool_batch_completion")]
     pub(crate) tool_batch_completion: bool,
     #[serde(rename = "_buffered_responses")]
@@ -309,6 +313,20 @@ impl ThreadOptions {
                 .map_err(anyhow::Error::msg)?;
         }
         let mut options = StartThreadOptions::new(configuration);
+        if !self.profile_provider_keys.is_empty() {
+            options.thread_extension_init.insert(
+                crate::agent_profiles::PendingProviderKeys(self.profile_provider_keys),
+            );
+        }
+        if self.hold_assistant_completion {
+            anyhow::ensure!(
+                options.config.sdk_provider_history.is_none(),
+                "Output guardrails require SDK-managed conversation history"
+            );
+            options
+                .thread_extension_init
+                .insert(crate::python_tools::HoldAssistantCompletion);
+        }
         options
             .thread_extension_init
             .insert(codex_core::BufferedResponsesPreference(

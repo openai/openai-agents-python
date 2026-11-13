@@ -31,6 +31,7 @@ class _AgentProfile:
     handoff_callbacks: Mapping[str, int] = field(default_factory=dict)
     handoff_options: Mapping[str, RealtimeHandoff] = field(default_factory=dict)
     decision_handoffs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    native_provider_id: str | None = None
     opening_tools: tuple[Tool[Any], ...] = ()
 
 
@@ -116,6 +117,7 @@ def _capture_agent_graph(
     )
     indices = {id(root): 0}
     resolved: dict[int, tuple[Callable[[], Agent[Any, Any]], Agent[Any, Any]]] = {}
+    provider_ids: dict[int, str] = {}
 
     def resolve(reference: Callable[[], Agent[Any, Any]]) -> Agent[Any, Any]:
         cached = resolved.get(id(reference))
@@ -178,6 +180,7 @@ def _capture_agent_graph(
             output_type=cast(OutputSpec[Any], source.output_type),
             programmatic_tool_calling=source.programmatic_tool_calling,
             transform_context=source.transform_context,
+            prepare_handoff_input=source.prepare_handoff_input,
             before_compact=source.before_compact,
             compaction=source.compaction,
             before_complete=source.before_complete,
@@ -185,18 +188,45 @@ def _capture_agent_graph(
             input_guardrails=source.input_guardrails,
             output_guardrails=source.output_guardrails,
         )
-        if declaration.provider is not None and declaration.provider is not opening.provider:
-            raise ValueError("Handoff profiles must share the Session provider")
+        target_provider = declaration.provider
+        native_provider_id = None
+        if target_provider is not None and target_provider is not opening.provider:
+            root_provider = opening.provider
+            borrowed = (
+                root_provider is not None
+                and root_provider.model_backend is not None
+                and target_provider.model_backend is not None
+            )
+            native = (
+                target_provider.auth is None
+                and target_provider.model_backend is None
+                and (
+                    root_provider is None
+                    and target_provider.response_mode == "streaming"
+                    or root_provider is not None
+                    and root_provider.auth is None
+                    and root_provider.model_backend is None
+                    and root_provider.response_mode == target_provider.response_mode
+                )
+            )
+            if opening.realtime is not None or not (borrowed or native):
+                raise ValueError(
+                    "Distinct handoff providers require compatible text inference providers"
+                )
+            if native:
+                native_provider_id = provider_ids.setdefault(
+                    id(target_provider), f"sdk_profile_{indices[id(agent)]}"
+                )
         if declaration.programmatic_tool_calling != opening.programmatic_tool_calling:
             raise ValueError("Handoff profiles must share programmatic tool calling mode")
         output = _prepare_spec(declaration.output_type)
-        if (output.mode, output.schema, output.wrapped, output.strict) != (
+        if opening.realtime is not None and (output.mode, output.schema, output.wrapped, output.strict) != (
             root_output.mode,
             root_output.schema,
             root_output.wrapped,
             root_output.strict,
         ):
-            raise ValueError("Handoff profiles must share output mode, schema and wrapping")
+            raise ValueError("Realtime handoff profiles must share output mode and prompted schema")
         roles = tuple(tool for tool in declaration.tools if isinstance(tool, NativeAgents))
         if roles != root_roles:
             raise ValueError("Handoff profiles must share native child-role configuration")
@@ -300,6 +330,7 @@ def _capture_agent_graph(
                 MappingProxyType(callbacks),
                 MappingProxyType(options),
                 MappingProxyType(decision_handoffs),
+                native_provider_id,
                 tools,
             )
         )

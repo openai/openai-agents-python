@@ -1,0 +1,334 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 20d70437..198572c0 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -288,6 +288,14 @@ pub struct ModelClient {
+     api_key_cyber_access_programs: cyber_access_program::ApiKeyCyberAccessPrograms,
+ }
+ 
++/// Current SDK-owned inference authority. Core never persists this value.
++#[derive(Clone)]
++pub struct SdkAgentProfileProvider {
++    pub id: Arc<str>,
++    pub info: ModelProviderInfo,
++    pub auth_manager: Arc<AuthManager>,
++}
++
+ /// A turn-scoped streaming session created from a [`ModelClient`].
+ ///
+ /// The session establishes a Responses WebSocket connection lazily and reuses it across multiple
+@@ -695,6 +703,44 @@ impl ModelClient {
+         self
+     }
+ 
++    pub(crate) fn remote_compaction_support(&self) -> codex_model_provider::RemoteCompactionSupport {
++        self.state.provider.capabilities().remote_compaction
++    }
++
++    pub(crate) fn websocket_connect_timeout(&self) -> std::time::Duration {
++        self.state.provider.info().websocket_connect_timeout()
++    }
++
++    pub(crate) fn for_sdk_profile(&self, provider: &SdkAgentProfileProvider) -> Self {
++        let state = self.state.as_ref();
++        let mut client = Self::new(
++            Some(Arc::clone(&provider.auth_manager)),
++            self.agent_identity_policy,
++            state.thread_id,
++            provider.info.clone(),
++            state.session_source.clone(),
++            state.originator.clone(),
++            state.model_verbosity,
++            state.content_item_kinds_enabled,
++            state.reasoning_effort_override_enabled,
++            state.enable_request_compression,
++            state.include_timing_metrics,
++            state.beta_features_header.clone(),
++            state.concurrent_reasoning_summaries_enabled,
++            state.attestation_provider.clone(),
++            self.http_client_factory.clone(),
++            state.workspace_routing.clone(),
++            self.request_contributors.clone(),
++        );
++        client.prompt_cache_key_override = self.prompt_cache_key_override.clone();
++        client.codex_responses_headers = self.codex_responses_headers.clone();
++        client.event_sender = self.event_sender.clone();
++        client.restored_history = self.restored_history;
++        client.executed_tool_calls = self.executed_tool_calls.clone();
++        client.api_key_cyber_access_programs = self.api_key_cyber_access_programs;
++        client
++    }
++
+     pub(crate) fn reasoning_effort_override_enabled(&self, model_info: &ModelInfo) -> bool {
+         self.state.reasoning_effort_override_enabled
+             && self.state.provider.info().is_openai()
+@@ -1940,6 +1986,18 @@ impl Drop for ModelClientSession {
+ }
+ 
+ impl ModelClientSession {
++    pub(crate) fn selects_client(&self, client: &ModelClient) -> bool {
++        Arc::ptr_eq(&self.client.state, &client.state)
++    }
++
++    pub(crate) fn provider_info(&self) -> &ModelProviderInfo {
++        self.client.state.provider.info()
++    }
++
++    pub(crate) fn remote_compaction_support(&self) -> codex_model_provider::RemoteCompactionSupport {
++        self.client.remote_compaction_support()
++    }
++
+     fn request_transport_mode(prompt: &Prompt) -> codex_protocol::model_request_transport::RequestTransportMode {
+         prompt.request_controls.request_transport.as_ref().and_then(Option::as_ref)
+             .and_then(|transport| transport.mode.flatten()).unwrap_or_default()
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index eced671a..1dc285ea 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -856,11 +856,13 @@ async fn run_compact_task_inner_impl(
+             .into(),
+     );
+ 
+-    let max_retries = turn_context.provider.info().stream_max_retries();
+     let mut retries = 0;
+     // Reuse one client session so turn-scoped state (sticky routing and websocket incremental
+     // request tracking) survives retries within this compact turn.
+-    let mut client_session = sess.services.model_client.new_session();
++    let mut client_session = sess
++        .model_client_for_profile(source_step_context.settings.agent_profile.as_deref())
++        .new_session();
++    let max_retries = client_session.provider_info().stream_max_retries();
+     let sampling_stop = if matches!(compaction_metadata.trigger(), CompactionTrigger::Auto) {
+         crate::model_request::turn_sampling_stop(&turn_context.extension_data)
+     } else {
+@@ -930,12 +932,7 @@ async fn run_compact_task_inner_impl(
+                 return Err(e);
+             }
+             Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
+-                if sess
+-                    .services
+-                    .model_client
+-                    .auth_manager()
+-                    .is_some_and(|manager| manager.uses_app_managed_model_oauth())
+-                {
++                if client_session.uses_chatgpt_plan() {
+                     return Err(e);
+                 }
+                 if turn_input_len > 1 {
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index e68c4f27..6a278792 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -128,9 +128,10 @@ pub(super) async fn run_remote_compact_v2_attempt(
+         "parallel_tool_calls": prompt.parallel_tool_calls,
+     }));
+     let mut owned_client_session = None;
++    let selected = sess.model_client_for_profile(step_context.settings.agent_profile.as_deref());
+     let client_session = match client_session {
+-        Some(client_session) => client_session,
+-        None => owned_client_session.insert(sess.services.model_client.new_session()),
++        Some(client_session) if client_session.selects_client(&selected) => client_session,
++        _ => owned_client_session.insert(selected.new_session()),
+     };
+     let compaction_output_result = run_remote_compaction_request_v2(
+         sess,
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 2d2591a7..0b431f43 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -246,6 +246,7 @@ pub use attestation::AttestationProvider;
+ pub use attestation::GenerateAttestationFuture;
+ pub use client::ModelClient;
+ pub use client::ModelClientSession;
++pub use client::SdkAgentProfileProvider;
+ pub use client::X_CODEX_INSTALLATION_ID_HEADER;
+ pub use client::X_CODEX_ROUTING_HINT_HEADER;
+ pub use client::X_CODEX_TURN_METADATA_HEADER;
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 009d7edd..43e27a76 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -3717,6 +3717,26 @@ impl Session {
+         }
+     }
+ 
++    pub(crate) fn model_client_for_profile(
++        &self,
++        profile: Option<&codex_extension_api::CapturedAgentProfile>,
++    ) -> crate::client::ModelClient {
++        struct ProfileClients(std::sync::Mutex<HashMap<Arc<str>, crate::client::ModelClient>>);
++
++        let root = &self.services.model_client;
++        let provider = profile.and_then(|profile| {
++            profile.profile.data.get::<crate::client::SdkAgentProfileProvider>()
++        });
++        let Some(provider) = provider else { return root.clone(); };
++        let clients = self.services.thread_extension_data.get_or_init(|| {
++            ProfileClients(std::sync::Mutex::new(HashMap::new()))
++        });
++        clients.0.lock().expect("profile model clients poisoned")
++            .entry(Arc::clone(&provider.id))
++            .or_insert_with(|| root.for_sdk_profile(&provider))
++            .clone()
++    }
++
+     pub(crate) fn response_item_create_time() -> serde_json::Number {
+         let create_time = SystemTime::now()
+             .duration_since(UNIX_EPOCH)
+diff --git a/codex-rs/core/src/session/startup_prewarm.rs b/codex-rs/core/src/session/startup_prewarm.rs
+index e0dae20e..a55375f1 100644
+--- a/codex-rs/core/src/session/startup_prewarm.rs
++++ b/codex-rs/core/src/session/startup_prewarm.rs
+@@ -207,11 +207,14 @@ impl SessionStartupPrewarmHandle {
+ 
+ impl Session {
+     pub(crate) async fn schedule_startup_prewarm(self: &Arc<Self>, input: PrewarmInput) {
+-        let websocket_connect_timeout = self.provider().await.websocket_connect_timeout();
+         let mut state = self.state.lock().await;
+         if state.shutting_down {
+             return;
+         }
++        let model_client = self.model_client_for_profile(
++            state.session_configuration.agent_profile.as_deref(),
++        );
++        let websocket_connect_timeout = model_client.websocket_connect_timeout();
+         // Publish the warmup before another turn can be admitted. No network work
+         // or awaits occur while these guards are held.
+         let Ok(active_turn) = self.active_turn.try_lock() else {
+@@ -241,10 +244,9 @@ impl Session {
+             });
+         }
+ 
+-        if !self.services.model_client.responses_websocket_enabled() {
++        if !model_client.responses_websocket_enabled() {
+             // Without websocket prewarm, resolve auth once so Agent Identity bootstrap can
+             // register or engage this session's bearer fallback before the first user request.
+-            let model_client = self.services.model_client.clone();
+             tokio::spawn(async move {
+                 if let Err(err) = model_client.prewarm_auth().await {
+                     warn!("startup auth prewarm failed: {err:#}");
+@@ -258,7 +260,7 @@ impl Session {
+         let startup_prewarm_session = Arc::clone(self);
+         let startup_prewarm = tokio::spawn(
+             async move {
+-                let result = schedule_startup_prewarm_inner(startup_prewarm_session, input).await;
++                let result = schedule_startup_prewarm_inner(startup_prewarm_session, model_client, input).await;
+                 let status = if result.is_ok() { "ready" } else { "failed" };
+                 session_telemetry.record_startup_phase(
+                     "startup_prewarm_total",
+@@ -304,10 +306,11 @@ impl Session {
+ 
+ async fn schedule_startup_prewarm_inner(
+     session: Arc<Session>,
++    model_client: crate::client::ModelClient,
+     input: PrewarmInput,
+ ) -> CodexResult<ModelClientSession> {
+     let prewarm_started_at = Instant::now();
+-    let mut client_session = session.services.model_client.new_session();
++    let mut client_session = model_client.new_session();
+     let websocket_ready = client_session.is_websocket_prewarmed().await;
+     // Count the decision before preparation can fail; fresh clients also need prewarm.
+     session.services.session_telemetry.counter(
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 60f8bdf4..e2c7c8eb 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -195,6 +195,11 @@ pub(crate) async fn run_turn(
+ 
+     let mut client_session =
+         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
++    select_sdk_profile_client(
++        &sess,
++        turn_context.next_step_settings.load().agent_profile.as_deref(),
++        &mut client_session,
++    );
+     let initial_window = if initial_step.is_some() {
+         Some(sess.current_window().await)
+     } else {
+@@ -698,6 +703,11 @@ pub(crate) async fn run_turn(
+             sess.ensure_rollout_durable().await?;
+             staged.acknowledge();
+         }
++        select_sdk_profile_client(
++            &sess,
++            step_context.settings.agent_profile.as_deref(),
++            &mut client_session,
++        );
+         let sampling_request_result: CodexResult<_> = async {
+             super::time_reminder::maybe_record_current_time_reminder(
+                 sess.as_ref(),
+@@ -1706,7 +1716,7 @@ async fn pre_sampling_compaction_or_report(
+             .await;
+         // Publish the failure only after prompt hooks finish, so clients cannot react to
+         // an error by steering follow-up input into a turn still preserving its prompt.
+-        let message_prefix = match turn_context.provider.capabilities().remote_compaction {
++        let message_prefix = match client_session.remote_compaction_support() {
+             RemoteCompactionSupport::V2 => Some("Error running remote compact task".to_string()),
+             RemoteCompactionSupport::Unsupported => None,
+         };
+@@ -2045,7 +2055,10 @@ async fn run_auto_compact(
+             return Err(CodexErr::TurnAborted);
+         }
+ 
+-        match turn_context.provider.capabilities().remote_compaction {
++        let compaction_client = sess.model_client_for_profile(
++            step_context.settings.agent_profile.as_deref(),
++        );
++        match compaction_client.remote_compaction_support() {
+             RemoteCompactionSupport::V2 => {
+                 emit_compact_metric(
+                     &sess.services.session_telemetry,
+@@ -2143,6 +2156,17 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
+     connector_ids
+ }
+ 
++fn select_sdk_profile_client(
++    sess: &Session,
++    profile: Option<&codex_extension_api::CapturedAgentProfile>,
++    current: &mut ModelClientSession,
++) {
++    let next = sess.model_client_for_profile(profile);
++    if !current.selects_client(&next) {
++        *current = next.new_session();
++    }
++}
++
+ // Keep native wire selection with the same immutable profile as model and tools.
+ pub(super) fn selected_profile_output_schema(
+     profile: Option<&codex_extension_api::CapturedAgentProfile>,
+@@ -2258,7 +2282,7 @@ async fn run_sampling_request(
+         Arc::clone(&step_context),
+         Arc::clone(&turn_diff_tracker),
+     );
+-    let max_retries = turn_context.provider.info().stream_max_retries();
++    let max_retries = client_session.provider_info().stream_max_retries();
+     let stop_at_saved_login_limit = client_session.saved_login_limits_need_attention();
+     let mut retry_state = ResponsesStreamRetryState::default();
+     let mut recovery_attempt = 0;
+@@ -2455,7 +2479,7 @@ async fn run_sampling_request(
+                     ));
+                 }
+                 if editors.len() != 1
+-                    || turn_context.provider.info().supports_websockets
++                    || client_session.provider_info().supports_websockets
+                     || step_context.settings.model_info.use_responses_lite
+                     || step_context.realtime.active
+                     || turn_context.config.features.enabled(Feature::CodeMode)
+@@ -4690,7 +4714,7 @@ async fn try_run_sampling_request(
+     let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(
+         turn_context.sub_id.as_str(),
+         step_context.settings.model_info.slug.as_str(),
+-        turn_context.provider.info().name.as_str(),
++        client_session.provider_info().name.as_str(),
+     );
+     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
+     if client_session.inference_tools_changed(&step_context.tool_router.model_visible_specs()) {
+@@ -4707,7 +4731,7 @@ async fn try_run_sampling_request(
+         .config
+         .features
+         .enabled(Feature::ConcurrentReasoningSummaries)
+-        && turn_context.provider.info().is_openai();
++        && client_session.provider_info().is_openai();
+     let mut preempt = step_context.preempt.clone().unwrap_or_default();
+     let effort = sess
+         .reasoning_effort_for_request(&step_context.settings, super::RequestEffortUsage::Sampling)

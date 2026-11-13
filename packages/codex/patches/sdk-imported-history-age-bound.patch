@@ -1,0 +1,134 @@
+diff --git a/codex-rs/core/src/sdk_history_retention.rs b/codex-rs/core/src/sdk_history_retention.rs
+index f33cf41f..dd7b182d 100644
+--- a/codex-rs/core/src/sdk_history_retention.rs
++++ b/codex-rs/core/src/sdk_history_retention.rs
+@@ -28,6 +28,27 @@ impl SdkHistoryRetention {
+         }
+     }
+ 
++    /// Bind newly imported ages to admission; caller data may only shorten retention.
++    pub fn stamp_imported_items(&self, items: &mut [ResponseItemEnvelope]) {
++        let admitted_at = crate::session::session::Session::response_item_create_time();
++        for envelope in items {
++            if !expires(&envelope.item) {
++                continue;
++            }
++            let created_at = envelope
++                .item
++                .create_time()
++                .filter(|provided| {
++                    !epoch_seconds(provided)
++                        .zip(epoch_seconds(&admitted_at))
++                        .is_some_and(|(provided, admitted)| provided > admitted)
++                })
++                .unwrap_or(&admitted_at)
++                .clone();
++            envelope.metadata.get_or_insert_default().sdk_created_at = Some(created_at);
++        }
++    }
++
+     pub(crate) fn retain(&self, envelope: &ResponseItemEnvelope, now: &Number) -> Result<bool> {
+         let Some(ttl) = self.ttl_seconds else {
+             return Ok(true);
+@@ -35,18 +56,22 @@ impl SdkHistoryRetention {
+         if !expires(&envelope.item) {
+             return Ok(true);
+         }
+-        let created_at = envelope.item.create_time().or_else(|| {
+-            envelope
+-                .metadata
+-                .as_ref()
+-                .and_then(|metadata| metadata.sdk_created_at.as_ref())
+-        });
++        let sdk_created_at = envelope
++            .metadata
++            .as_ref()
++            .and_then(|metadata| metadata.sdk_created_at.as_ref());
++        let created_at = sdk_created_at.or_else(|| envelope.item.create_time());
+         let created_at = created_at.and_then(epoch_seconds).ok_or_else(|| {
+             CodexErr::InvalidRequest("Encrypted history TTL cannot prove this item's creation time. Open this older snapshot without TTL, or import history with authenticated item ages; reopening never renews an item's age.".to_owned())
+         })?;
+         let now = epoch_seconds(now).ok_or_else(|| {
+             CodexErr::Fatal("Native history retention clock is invalid".to_owned())
+         })?;
++        if sdk_created_at.is_none() && created_at > now {
++            return Err(CodexErr::InvalidRequest(
++                "Encrypted history TTL cannot prove a future creation time without SDK admission metadata".to_owned(),
++            ));
++        }
+         Ok(now <= created_at.saturating_add(ttl))
+     }
+ }
+@@ -153,4 +178,59 @@ mod tests {
+         policy.stamp_new_items(std::slice::from_mut(&mut envelope));
+         assert!(envelope.metadata.is_none());
+     }
++
++    #[test]
++    fn imported_future_clock_cannot_extend_the_admitted_lifetime() {
++        let policy = SdkHistoryRetention::new(Some(10));
++        let mut envelope = message("user", Some(u64::MAX));
++        policy.stamp_imported_items(std::slice::from_mut(&mut envelope));
++        let admitted = envelope
++            .metadata
++            .as_ref()
++            .unwrap()
++            .sdk_created_at
++            .as_ref()
++            .unwrap();
++        let admitted = epoch_seconds(admitted).unwrap();
++        assert!(admitted < u64::MAX - 11);
++        assert_eq!(envelope.item.create_time(), Some(&Number::from(u64::MAX)));
++        assert!(policy.retain(&envelope, &(admitted + 10).into()).unwrap());
++        assert!(!policy.retain(&envelope, &(admitted + 11).into()).unwrap());
++        let restored: ResponseItemEnvelope =
++            serde_json::from_value(serde_json::to_value(envelope).unwrap()).unwrap();
++        assert!(!policy.retain(&restored, &(admitted + 11).into()).unwrap());
++    }
++
++    #[test]
++    fn imported_older_age_is_preserved_without_changing_its_wire_data() {
++        let policy = SdkHistoryRetention::new(Some(10));
++        let mut envelope = message("user", Some(50));
++        policy.stamp_imported_items(std::slice::from_mut(&mut envelope));
++        assert_eq!(
++            envelope.metadata.as_ref().unwrap().sdk_created_at,
++            Some(50.into())
++        );
++        assert_eq!(envelope.item.create_time(), Some(&Number::from(50)));
++        assert!(!policy.retain(&envelope, &61.into()).unwrap());
++    }
++
++    #[test]
++    fn future_wire_age_without_an_admission_bound_is_not_trusted() {
++        let policy = SdkHistoryRetention::new(Some(0));
++        assert!(
++            policy
++                .retain(&message("user", Some(u64::MAX)), &100.into())
++                .is_err()
++        );
++        assert!(
++            policy
++                .retain(&message("user", Some(100)), &100.into())
++                .unwrap()
++        );
++        assert!(
++            !policy
++                .retain(&message("user", Some(50)), &100.into())
++                .unwrap()
++        );
++    }
+ }
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 00ee8ccb..0c14e0ac 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -557,7 +557,7 @@ impl Session {
+                             .thread_extension_data
+                             .get::<crate::SdkHistoryRetention>()
+                         {
+-                            policy.stamp_new_items(std::slice::from_mut(&mut envelope));
++                            policy.stamp_imported_items(std::slice::from_mut(&mut envelope));
+                         }
+                         if !cache_breakpoints.is_empty()
+                             && let (Some(id), ResponseItem::Message { content, .. }) =

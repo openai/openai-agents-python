@@ -1,0 +1,83 @@
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -206,6 +206,21 @@
+ }
+
+ impl Session {
++    pub(crate) fn validate_handoff_input_retention(&self, enabled: bool) -> CodexResult<()> {
++        if enabled
++            && self
++                .services
++                .thread_extension_data
++                .get::<crate::SdkHistoryRetention>()
++                .is_some_and(|policy| policy.ttl_seconds.is_some())
++        {
++            return Err(invalid(
++                "Handoff input preparation cannot combine with encrypted history TTL",
++            ));
++        }
++        Ok(())
++    }
++
+     pub(crate) fn validate_voice_agent_profile(&self, target: &AgentProfile) -> CodexResult<()> {
+         self.check_agent_profile_admission()?;
+         validate_envelope(target)
+@@ -638,6 +653,13 @@
+                 "Handoff presentation differs from committed destination",
+             ));
+         }
++        self.validate_handoff_input_retention(
++            presentation.is_some()
++                || target
++                    .data
++                    .get::<codex_protocol::agent_profile::AgentProfileHandoffInputCapture>()
++                    .is_some(),
++        )?;
+         if let Some(presentation) = &presentation {
+             crate::prepared_request::validate_handoff_presentation(presentation)
+                 .map_err(invalid)?;
+@@ -828,6 +850,7 @@
+         handoff: &codex_protocol::agent_profile::AgentProfileHandoff,
+     ) -> CodexResult<codex_protocol::agent_profile::AgentProfileHandoffPresentation> {
+         use codex_protocol::agent_profile::AgentProfileHandoffPresentation;
++        self.validate_handoff_input_retention(true)?;
+         if self.services.model_client.provider_history_selection().is_some() {
+             return Err(invalid("Handoff preparation does not support provider-owned opaque history"));
+         }
+@@ -975,6 +998,23 @@
+                 .is_empty()
+         );
+         assert_eq!(source, durable);
++    }
++
++    #[tokio::test]
++    async fn handoff_retention_guard_preserves_ordinary_transfers_and_disabled_ttl() {
++        let (session, _) = make_session_and_context().await;
++        assert!(session.validate_handoff_input_retention(true).is_ok());
++        session
++            .services
++            .thread_extension_data
++            .insert(crate::SdkHistoryRetention::new(Some(0)));
++        assert!(session.validate_handoff_input_retention(true).is_err());
++        assert!(session.validate_handoff_input_retention(false).is_ok());
++        session
++            .services
++            .thread_extension_data
++            .insert(crate::SdkHistoryRetention::new(None));
++        assert!(session.validate_handoff_input_retention(true).is_ok());
+     }
+
+     #[tokio::test]
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2339,6 +2339,10 @@
+                         .map(|presentation| (profile, presentation))
+                 })
+                 .map(|(profile, presentation)| {
++                    // Retention can be installed after profile restoration. Recheck
++                    // at use so a saved view cannot resurrect expired source text.
++                    sess.validate_handoff_input_retention(true)
++                        .map_err(|error| error.to_string())?;
+                     crate::prepared_request::apply_handoff_presentation(
+                         &prompt,
+                         &presentation,

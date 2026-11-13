@@ -45,6 +45,9 @@ class AsyncSQLAlchemySessionStore:
     closing the store, and keep the engine available until cleanup completes.
     The caller owns a supplied engine. Use from_url to create an owned engine.
     The application owns database access control, encryption, and backups.
+    Pass ensure_ascii=True to store the exact snapshot inside an ASCII JSON
+    string. Both modes can read either form. The default stores JSON directly.
+    Older SDK readers cannot open rows written with ensure_ascii=True.
     """
 
     def __init__(
@@ -55,6 +58,7 @@ class AsyncSQLAlchemySessionStore:
         schema: str | None = None,
         create_tables: bool = False,
         lease_seconds: float = 30,
+        ensure_ascii: bool = False,
     ) -> None:
         from sqlalchemy import BigInteger, Column, DateTime, MetaData, String, Table, Text
         from sqlalchemy.ext.asyncio import AsyncEngine
@@ -66,6 +70,9 @@ class AsyncSQLAlchemySessionStore:
             raise ValueError("table_name must be nonempty")
         if not math.isfinite(lease_seconds) or lease_seconds < 3:
             raise ValueError("lease_seconds must be finite and at least 3")
+        if type(ensure_ascii) is not bool:
+            raise TypeError("ensure_ascii must be a bool")
+        self._ensure_ascii = ensure_ascii
         self.engine = engine
         self._driver = _StorageDriver(asynchronous=True, timeout=lease_seconds)
         self._lease_seconds = lease_seconds
@@ -103,6 +110,7 @@ class AsyncSQLAlchemySessionStore:
         schema: str | None = None,
         create_tables: bool = False,
         lease_seconds: float = 30,
+        ensure_ascii: bool = False,
         **engine_options: Any,
     ) -> AsyncSQLAlchemySessionStore:
         """Create a store that owns the async engine constructed from the URL."""
@@ -116,6 +124,7 @@ class AsyncSQLAlchemySessionStore:
                 schema=schema,
                 create_tables=create_tables,
                 lease_seconds=lease_seconds,
+                ensure_ascii=ensure_ascii,
             )
         except BaseException:
             await engine.dispose()
@@ -319,7 +328,10 @@ class AsyncSQLAlchemySessionStore:
             ).one_or_none()
             if row is None:
                 raise RuntimeError("Canonical storage writer was fenced")
-            return typing_cast(str | None, row[0])
+            payload = typing_cast(str | None, row[0])
+            if payload is not None and payload.startswith('"'):
+                return typing_cast(str, json.loads(payload))
+            return payload
 
     def read(self, session_id: str, token: str) -> str | None:
         self._check_process()
@@ -366,6 +378,9 @@ class AsyncSQLAlchemySessionStore:
         document = json.loads(payload)
         if document["revision"] != expected_revision + 1 or document["write_id"] != write_id:
             raise RuntimeError("Invalid canonical revision")
+        if self._ensure_ascii:
+            # Keep the original native bytes for commit acknowledgement recovery.
+            payload = json.dumps(payload, ensure_ascii=True)
         with self._mutex:
             self._owner(session_id, token)
             self._driver.call(self._commit, session_id, token, expected_revision, write_id, payload)

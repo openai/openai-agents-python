@@ -1,0 +1,85 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index c92ebe5e..7a22624c 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2513,6 +2513,41 @@ async fn run_sampling_request(
+                     }
+                     sampling_prompt.to_mut().prepared_request_admission = Some(output.admission);
+                 }
++                if let Some(guidance) = step_context
++                    .settings
++                    .agent_profile
++                    .as_ref()
++                    .and_then(|profile| {
++                        profile
++                            .profile
++                            .data
++                            .get::<codex_extension_api::AgentProfileOutputGuidance>()
++                    })
++                {
++                    let control = output_control
++                        .as_deref()
++                        .filter(|control| control.thread_id == sess.thread_id.to_string())
++                        .ok_or_else(|| {
++                            CodexErr::InvalidRequest(
++                                "Per-profile output guidance requires its managed SDK thread scope"
++                                    .into(),
++                            )
++                        })?;
++                    if !control.preserve_turn_output {
++                        let id = uuid::Uuid::new_v5(
++                            &uuid::Uuid::NAMESPACE_OID,
++                            format!("{}:{}:{}", sess.thread_id, turn_context.sub_id, guidance.0)
++                                .as_bytes(),
++                        );
++                        sampling_prompt.to_mut().input.push(ResponseItem::Message {
++                            id: Some(ResponseItemId::with_suffix("msg", id)),
++                            role: "developer".into(),
++                            content: vec![ContentItem::InputText { text: guidance.0.clone() }],
++                            phase: None,
++                            internal_chat_message_metadata_passthrough: None,
++                        });
++                    }
++                }
+                 crate::file_admission::validate_response_items(
+                     sess.captured_provider_image_reference_policy(),
+                     &step_context.settings.model_info,
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index ca7b6a0a..b878d363 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -71,6 +71,7 @@ pub use turn_lifecycle::AgentProfileHandoffTools;
+ pub use turn_lifecycle::AgentProfileInstructions;
+ pub use turn_lifecycle::AgentProfileModelSettings;
+ pub use turn_lifecycle::AgentProfileOutputControl;
++pub use turn_lifecycle::AgentProfileOutputGuidance;
+ pub use turn_lifecycle::AgentProfileOutputSchema;
+ pub use turn_lifecycle::AgentProfileReceipt;
+ pub use turn_lifecycle::CapturedAgentProfile;
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 3a67634a..8c55f6bc 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -264,6 +264,10 @@ impl AgentProfileModelSettings {
+ #[derive(Clone, Debug)]
+ pub struct AgentProfileOutputSchema(pub Option<serde_json::Value>);
+ 
++/// Per-sampling output instructions owned by the active SDK profile.
++#[derive(Clone, Debug)]
++pub struct AgentProfileOutputGuidance(pub String);
++
+ /// Live output selection scoped to its actual managed SDK thread.
+ #[derive(Clone, Debug)]
+ pub struct AgentProfileOutputControl {
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 7a1d8227..8f4acbde 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -59,6 +59,7 @@ pub use contributors::AgentProfileHandoffTools;
+ pub use contributors::AgentProfileInstructions;
+ pub use contributors::AgentProfileModelSettings;
+ pub use contributors::AgentProfileOutputControl;
++pub use contributors::AgentProfileOutputGuidance;
+ pub use contributors::AgentProfileOutputSchema;
+ pub use contributors::AgentProfileReceipt;
+ pub use contributors::ApprovalDecision;

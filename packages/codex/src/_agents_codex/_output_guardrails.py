@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from ._lifecycle import _join
 from .completion import CompletionContext
 from .guardrails import GuardrailRecord, GuardrailResult, GuardrailTripwire, OutputGuardrail
 
@@ -22,6 +23,8 @@ async def _settle_output_guardrails(
     records: list[GuardrailRecord],
     invoke: Callable[[OutputGuardrail[Any], CompletionContext[Any]], Awaitable[Any]],
     active: Callable[[], bool],
+    *,
+    revoke: Callable[[], None] | None = None,
 ) -> None:
     async def check(guardrail: OutputGuardrail[Any]) -> GuardrailRecord:
         result = await invoke(
@@ -53,9 +56,11 @@ async def _settle_output_guardrails(
                 tripped = record
                 break
     finally:
+        if revoke is not None:
+            revoke()
         for task in tasks:
             if not task.done():
                 task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await _join(asyncio.gather(*tasks, return_exceptions=True))
     if tripped is not None:
         raise GuardrailTripwire(tripped, tuple(records))

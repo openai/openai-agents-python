@@ -690,6 +690,10 @@ def _native_provider_response_span_id(context: str) -> dict[str, str | None] | N
 
 
 def _create_provider_response_span() -> bool:
+    return _should_create_span("response", "model")
+
+
+def _should_create_span(name: str, kind: str) -> bool:
     # Match the current processor routes selected by native event emission.
     # Snapshot objects under the lock; run application policy without it.
     with _processor_lock:
@@ -701,7 +705,7 @@ def _create_provider_response_span() -> bool:
             callback = getattr(processor, "should_create_span", None)
             if callback is None:
                 continue
-            value = callback("response", "model")
+            value = callback(name, kind)
             if not isinstance(value, bool):
                 if _inspect.iscoroutine(value):
                     value.close()
@@ -933,7 +937,22 @@ class TraceScope:
             }
             if value.span_id is not None:
                 wire["span_id"] = value.span_id
-            wire.update(_generated_scope_ids(value, parent, ambient, self._restrictions, native))
+            enabled = (
+                not wire["disabled"]
+                and not (parent is not None and parent.disabled)
+                and not (ambient is not None and ambient.disabled)
+                and not any(
+                    json.loads(native.trace_span_context(restriction))["disabled"]
+                    for restriction in self._restrictions
+                )
+            )
+            if enabled:
+                if _should_create_span(self._name, self._kind):
+                    wire.update(
+                        _generated_scope_ids(value, parent, ambient, self._restrictions, native)
+                    )
+                else:
+                    wire["disabled"] = True
             if self._restrictions:
                 wire["restrictions_parents"] = list(self._restrictions)
             json.dumps(wire, allow_nan=False)
@@ -1250,11 +1269,12 @@ class TraceProcessor(Protocol):
     """Receive immutable native lifecycle snapshots; callbacks may be async.
 
     A processor may define should_create_span(name, kind) -> bool as a
-    synchronous creation policy on the host loop. The SDK calls it only for
-    logical response/model spans, before ID allocation and provider I/O.
-    Any False result suppresses that logical span; native transport tracing
-    and operation parentage remain intact. Exceptions or non-boolean results
-    fail admission. Policy-created scopes inherit recursion suppression.
+    synchronous policy before creating a host-owned span or a logical model
+    response span. A False result disables recording for a host scope and its
+    descendants. For logical response spans, it suppresses only that response
+    span. Native transport spans follow the admitted operation's policy.
+    Exceptions or non-boolean results fail admission. Scopes opened inside
+    the callback inherit recursion suppression.
 
     A processor may define on_trace_events(events) to consume a native-drain
     batch instead of individual callbacks. The SDK awaits that callback before

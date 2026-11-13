@@ -25,6 +25,7 @@ async def test_history_exhaustion_rejects_before_dispatch_and_further_growth(quo
             ).final_output == "Before quota."
             if quota == "records":
                 initial = await session.history_snapshot()
+                model_window = await session.model_context()
                 await session.transact_history(
                     expected_revision=initial.revision,
                     keep=initial.total,
@@ -35,7 +36,7 @@ async def test_history_exhaustion_rejects_before_dispatch_and_further_growth(quo
                             "id": f"quota-{index}",
                             "content": [{"type": "input_text", "text": f"retained-{index}"}],
                         }
-                        for index in range(4096 - initial.total)
+                        for index in range(4096 - len(model_window.items))
                     ],
                 )
                 text = "One more input."
@@ -167,7 +168,7 @@ async def test_output_admission_preserves_receipt_and_fences_accepted_effects(ou
             instructions="Continue.",
             model="gpt-5.5",
             provider=provider,
-            model_settings={"store": True},
+            model_settings={"store": True, "parallel_tool_calls": True},
             tools=[effect],
         )
         async with agent.session(provider_history={"type": "previous_response"}) as session:
@@ -177,6 +178,7 @@ async def test_output_admission_preserves_receipt_and_fences_accepted_effects(ou
                 text = "x" * (5 * 1024 * 1024)
             else:
                 initial = await session.history_snapshot()
+                model_window = await session.model_context()
                 await session.transact_history(
                     expected_revision=initial.revision,
                     keep=initial.total,
@@ -187,7 +189,7 @@ async def test_output_admission_preserves_receipt_and_fences_accepted_effects(ou
                             "id": f"quota-{index}",
                             "content": [{"type": "input_text", "text": f"retained-{index}"}],
                         }
-                        for index in range(4092 - initial.total)
+                        for index in range(4092 - len(model_window.items))
                     ],
                 )
                 model.respond(

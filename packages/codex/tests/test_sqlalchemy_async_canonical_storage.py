@@ -309,3 +309,51 @@ async def test_async_sqlalchemy_validates_legacy_limits(database_url, name, valu
         stack.push_async_callback(store.aclose)
         with pytest.raises(ValueError, match="positive integer"):
             await store.read_legacy_history("source", **{name: value})
+
+
+@pytest.mark.asyncio
+async def test_async_sqlalchemy_ascii_encoding_survives_lost_commit_ack(responses, database_url):
+    from sqlalchemy import text
+
+    class LostAckStore(AsyncSQLAlchemySessionStore):
+        lost = False
+
+        def commit(self, session_id, token, expected_revision, write_id, payload):
+            super().commit(session_id, token, expected_revision, write_id, payload)
+            if not self.lost and "café" in payload:
+                self.lost = True
+                raise RuntimeError("synthetic lost acknowledgement")
+
+    table = f"agents_test_{uuid4().hex}"
+    async with AsyncExitStack() as stack:
+        store = await LostAckStore.from_url(
+            database_url, table_name=table, create_tables=True, ensure_ascii=True
+        )
+        stack.push_async_callback(store.aclose)
+        responses.respond(assistant_output("first café"))
+        responses.respond(assistant_output("restored"))
+        async with NativeProvider(
+            base_url=responses.url, api_key="synthetic-ascii-store"
+        ) as provider:
+            agent = Agent(instructions="Answer.", provider=provider)
+            async with agent.session(storage=CustomStorage(store)) as session:
+                identity = session.id
+                result = await (await session.submit("remember café ☕")).get_result()
+                assert result.final_output == "first café"
+            assert store.lost
+            async with store.engine.begin() as connection:
+                payload = await connection.scalar(text(f"SELECT payload FROM {table}"))
+            assert payload.isascii()
+            assert r"caf\u00e9 \u2615" in payload
+
+            # Readers can reopen the same stored data with the existing default.
+            reader = AsyncSQLAlchemySessionStore(store.engine, table_name=table)
+            stack.push_async_callback(reader.aclose)
+            async with agent.session(storage=CustomStorage(reader), resume=identity) as session:
+                result = await (await session.submit("continue")).get_result()
+                assert result.final_output == "restored"
+            assert "remember café ☕" in json.dumps(responses.requests[-1], ensure_ascii=False)
+            async with store.engine.begin() as connection:
+                payload = await connection.scalar(text(f"SELECT payload FROM {table}"))
+                assert "remember café ☕" in payload
+                await connection.execute(text(f"DROP TABLE {table}"))

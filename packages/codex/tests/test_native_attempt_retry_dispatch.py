@@ -189,9 +189,10 @@ async def test_different_update_policy_rejects_before_any_native_publication():
     )
 
     async def refresh_profile():
-        return None
+        assert owner._update_generation == 1
 
     owner = SimpleNamespace(
+        _update_generation=0,
         _check_idle_update=lambda: None,
         _opening_agent=agent,
         _refresh_profile_bindings=refresh_profile,
@@ -202,6 +203,7 @@ async def test_different_update_policy_rejects_before_any_native_publication():
         await Session.update(
             owner, model_settings={"retry": ModelRetrySettings(policy=lambda _context: True)}
         )
+    assert owner._update_generation == 1
 
 
 def test_error_diagnostics_cannot_replace_the_retained_provider_failure():
@@ -276,6 +278,7 @@ async def test_producer_captures_its_complete_property_once_before_callback_entr
     )
     owner = SimpleNamespace(
         _active=state,
+        _profiles=None,
         _model_backend=Model(),
         _native=native,
         _catalog_for_message=lambda *args: None,
@@ -434,6 +437,7 @@ async def test_revoked_producer_retains_expected_abort_only_for_advice(error_kin
 
     owner = SimpleNamespace(
         _active=state,
+        _profiles=None,
         _model_backend=Model(),
         _native=object(),
         _catalog_for_message=lambda *args: None,

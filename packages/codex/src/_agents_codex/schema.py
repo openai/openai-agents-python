@@ -100,6 +100,7 @@ class OutputValidationError(ValueError):
         super().__init__("Final output did not match the requested output type")
         self.raw_output = raw_output
         self.issues = issues
+        self._run_recoverable = False
 
 
 @dataclass(frozen=True)

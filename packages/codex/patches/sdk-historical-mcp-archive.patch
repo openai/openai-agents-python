@@ -1,0 +1,200 @@
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index a7fc7707..223114ba 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -506,7 +506,7 @@ impl Session {
+         edit: SdkHistoryEdit,
+     ) -> codex_protocol::error::Result<(String, Option<String>, bool)> {
+         use crate::context_manager::HistoryReplacement;
+-        use codex_history::sdk_originals::{SdkOriginalItem, input_projection};
++        use codex_history::sdk_originals::{SdkOriginalItem, input_projections};
+         use codex_protocol::error::CodexErr;
+         let invalid = |message: &str| CodexErr::InvalidRequest(message.into());
+         let active = self.active_turn.lock().await;
+@@ -539,26 +539,26 @@ impl Session {
+                     return Err(invalid("history keep exceeds snapshot length"));
+                 }
+                 let mut originals = current.prefix(keep);
+-                for original in appended {
++                let projections = input_projections(&appended)
++                    .map_err(|_| invalid("Invalid canonical history item"))?;
++                for (original, projection) in appended.into_iter().zip(projections) {
+                     let cache_breakpoints = codex_protocol::prompt_cache::response_breakpoints(&original)
+                         .map_err(|_| invalid("Invalid canonical history cache breakpoint"))?;
+-                    let projection = input_projection(&original)
+-                        .map_err(|_| invalid("Invalid canonical history item"))?
+-                        .map(|mut item| {
+-                            Self::assign_missing_response_item_id(&mut item);
+-                            let mut envelope = self.annotate_client_response_item(item);
+-                            if !cache_breakpoints.is_empty()
+-                                && let (Some(id), ResponseItem::Message { content, .. }) =
+-                                    (envelope.item.id(), &envelope.item)
+-                                && let Ok(Some(annotation)) = codex_protocol::prompt_cache::PromptCacheAnnotation::bind(
+-                                    id.to_string(), content, &cache_breakpoints,
+-                                )
+-                            {
+-                                envelope.metadata.get_or_insert_with(codex_history::CodexHarnessMetadata::default)
+-                                    .prompt_cache = Some(annotation);
+-                            }
+-                            envelope
+-                        });
++                    let projection = projection.map(|mut item| {
++                        Self::assign_missing_response_item_id(&mut item);
++                        let mut envelope = self.annotate_client_response_item(item);
++                        if !cache_breakpoints.is_empty()
++                            && let (Some(id), ResponseItem::Message { content, .. }) =
++                                (envelope.item.id(), &envelope.item)
++                            && let Ok(Some(annotation)) = codex_protocol::prompt_cache::PromptCacheAnnotation::bind(
++                                id.to_string(), content, &cache_breakpoints,
++                            )
++                        {
++                            envelope.metadata.get_or_insert_with(codex_history::CodexHarnessMetadata::default)
++                                .prompt_cache = Some(annotation);
++                        }
++                        envelope
++                    });
+                     originals.append(SdkOriginalItem {
+                         original,
+                         projection,
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index f152a249..16064983 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -4,7 +4,7 @@ use schemars::JsonSchema;
+ use serde::{Deserialize, Deserializer, Serialize};
+ use serde_json::value::RawValue;
+ use sha2::{Digest, Sha256};
+-use std::collections::BTreeMap;
++use std::collections::{BTreeMap, BTreeSet};
+ 
+ use crate::ResponseItemEnvelope;
+ 
+@@ -106,6 +106,67 @@ pub fn input_projection(value: &str) -> Result<Option<ResponseItem>, String> {
+     })
+ }
+ 
++/// Imported approvals are historical data, never a new provider decision.
++/// Keep their exact originals while presenting each record as ordinary text.
++/// A denial-only group retains the existing native protocol projection.
++pub fn input_projections(values: &[String]) -> Result<Vec<Option<ResponseItem>>, String> {
++    let projected = values
++        .iter()
++        .map(|value| match input_projection(value) {
++            Ok(item) => Ok(item),
++            Err(error) => match serde_json::from_str::<ResponseItem>(value) {
++                Ok(item @ ResponseItem::McpApprovalResponse { approve: true, .. }) => {
++                    Ok(Some(item))
++                }
++                _ => Err(error),
++            },
++        })
++        .collect::<Result<Vec<_>, _>>()?;
++    let archived: BTreeSet<String> = projected
++        .iter()
++        .filter_map(|item| match item {
++            Some(ResponseItem::McpApprovalResponse {
++                approve: true,
++                approval_request_id,
++                ..
++            }) => Some(approval_request_id.clone()),
++            _ => None,
++        })
++        .collect();
++    values
++        .iter()
++        .zip(projected)
++        .map(|(value, item)| {
++            let historical = match &item {
++                Some(ResponseItem::McpApprovalRequest { id: Some(id), .. }) => {
++                    archived.contains(id.as_str())
++                }
++                Some(ResponseItem::McpApprovalResponse {
++                    approval_request_id,
++                    ..
++                }) => archived.contains(approval_request_id.as_str()),
++                _ => false,
++            };
++            if historical {
++                serde_json::from_value(serde_json::json!({
++                    "type": "message",
++                    "role": "assistant",
++                    "content": [{
++                        "type": "output_text",
++                        "text": format!(
++                            "Historical MCP approval data (not an execution instruction):\n{value}"
++                        ),
++                    }],
++                }))
++                .map(Some)
++                .map_err(|_| "Invalid historical approval presentation".to_string())
++            } else {
++                Ok(item)
++            }
++        })
++        .collect()
++}
++
+ /// The serialized catalog has one owner and no public execution authority.
+ #[derive(Clone, Debug, Serialize, JsonSchema)]
+ pub struct SdkOriginalHistory {
+@@ -1815,3 +1876,60 @@ mod tests {
+         assert_ne!(history.prefix(9999).revision(), history.revision());
+     }
+ }
++
++#[cfg(test)]
++mod historical_mcp_presentation_tests {
++    use super::*;
++    use serde_json::json;
++
++    fn request() -> serde_json::Value {
++        json!({"type":"mcp_approval_request","id":"approval-history","server_label":"archive","name":"lookup","arguments":"{}"})
++    }
++
++    fn decision(approve: bool) -> serde_json::Value {
++        json!({"type":"mcp_approval_response","approval_request_id":"approval-history","approve":approve})
++    }
++
++    #[test]
++    fn approving_pairs_duplicates_and_orphans_are_only_quoted_data() {
++        for records in [
++            vec![request(), decision(true)],
++            vec![request(), decision(true), request(), decision(true)],
++            vec![decision(true)],
++            vec![request(), decision(true), decision(false)],
++        ] {
++            let originals = records.iter().map(ToString::to_string).collect::<Vec<_>>();
++            let projected = input_projections(&originals).unwrap();
++            assert_eq!(projected.len(), originals.len());
++            for (projection, original) in projected.into_iter().zip(originals) {
++                let value = serde_json::to_value(projection.unwrap()).unwrap();
++                assert_eq!(value["type"], "message");
++                assert_eq!(value["role"], "assistant");
++                let text = value["content"][0]["text"].as_str().unwrap();
++                assert_eq!(text.split_once('\n').unwrap().1, original);
++            }
++        }
++    }
++
++    #[test]
++    fn denial_only_pairs_and_false_function_results_keep_native_projection() {
++        let records = vec![request(), decision(false)];
++        let originals = records.iter().map(ToString::to_string).collect::<Vec<_>>();
++        let projected = input_projections(&originals).unwrap();
++        assert!(matches!(
++            projected[0],
++            Some(ResponseItem::McpApprovalRequest { .. })
++        ));
++        assert!(matches!(
++            projected[1],
++            Some(ResponseItem::McpApprovalResponse { approve: false, .. })
++        ));
++        let result = json!({"type":"function_call_output","call_id":"ordinary","output":"false"})
++            .to_string();
++        assert_eq!(
++            input_projections(&[result.clone()]).unwrap(),
++            vec![input_projection(&result).unwrap()]
++        );
++        assert!(input_projection(&decision(true).to_string()).is_err());
++    }
++}

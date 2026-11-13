@@ -1,0 +1,529 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 3281e628..7a327ca2 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1492,6 +1492,34 @@ impl CodexThread {
+         self.session.conversation_history_snapshot().await
+     }
+ 
++    /// Applies a current SDK history policy without changing persisted thread identity.
++    pub async fn configure_sdk_history_retention(
++        &self,
++        ttl_seconds: Option<u64>,
++    ) -> codex_protocol::error::Result<()> {
++        let policy = crate::SdkHistoryRetention::new(ttl_seconds);
++        self.session
++            .clone_history()
++            .await
++            .with_sdk_history_retention(
++                &policy,
++                &crate::session::session::Session::response_item_create_time(),
++            )?;
++        self.thread_extension_data().insert(policy);
++        Ok(())
++    }
++
++    /// Captures the current retained model window without changing canonical audit history.
++    pub async fn retained_conversation_history_snapshot(
++        &self,
++    ) -> codex_protocol::error::Result<Arc<dyn ConversationHistorySnapshot>> {
++        Ok(self
++            .session
++            .clone_retained_history()
++            .await?
++            .conversation_history_snapshot())
++    }
++
+     /// Returns the current user-authorization revision for Guardian.
+     pub async fn guardian_authorization_version(&self) -> GuardianAuthorizationVersion {
+         let history = self.conversation_history_snapshot().await;
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 51f373d2..a95656f7 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -405,7 +405,7 @@ pub(crate) async fn run_custom_post_turn_compaction(
+         return Err(CodexErr::TurnAborted);
+     }
+     sess.ensure_rollout_durable().await?;
+-    let history = sess.clone_history().await;
++    let history = sess.clone_retained_history().await?;
+     let items = history
+         .clone()
+         .for_prompt(&step_context.settings.model_info.input_modalities);
+@@ -476,7 +476,7 @@ pub(crate) async fn try_custom_compaction(
+     metadata: CompactionTurnMetadata,
+     cancellation_token: &CancellationToken,
+ ) -> CodexResult<Option<String>> {
+-    let history = sess.clone_history().await;
++    let history = sess.clone_retained_history().await?;
+     try_custom_compaction_with_history(
+         sess,
+         source_step_context,
+@@ -662,7 +662,7 @@ async fn publish_compaction_summary(
+         ),
+         None => (None, None),
+     };
+-    let history_snapshot = sess.clone_history().await;
++    let history_snapshot = sess.clone_retained_history().await?;
+     let history_items = history_snapshot.model_items();
+     let compaction_model_hash = compaction_response_id
+         .as_ref()
+@@ -675,6 +675,13 @@ async fn publish_compaction_summary(
+         // This replacement history skips `record_conversation_items`; only the appended summary
+         // belongs to this compaction turn.
+         summary_item.set_turn_id_if_missing(&turn_context.sub_id);
++        if let Some(policy) = sess
++            .services
++            .thread_extension_data
++            .get::<crate::SdkHistoryRetention>()
++        {
++            policy.stamp_new_items(std::slice::from_mut(summary_item));
++        }
+     }
+     publish_compaction_history(
+         sess,
+@@ -779,7 +786,7 @@ async fn run_compact_task_inner_impl(
+     let (history, captured_input) = match captured_history {
+         Some((history, input)) => (history, Some(input)),
+         None => {
+-            current_history = sess.clone_history().await;
++            current_history = sess.clone_retained_history().await?;
+             (&current_history, None)
+         }
+     };
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 43f35d46..5f9540cb 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -354,6 +354,10 @@ async fn run_remote_compact_task_inner_impl(
+         } else {
+             RetainedImageBudget::Disabled
+         },
++        sess.services
++            .thread_extension_data
++            .get::<crate::SdkHistoryRetention>()
++            .as_deref(),
+     );
+     analytics_details.retained_image_count = Some(retained_images);
+     let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
+@@ -605,6 +609,7 @@ fn build_v2_compacted_history(
+     compaction_output: ResponseItem,
+     retain_client_developer_messages: bool,
+     image_budget: RetainedImageBudget,
++    retention: Option<&crate::SdkHistoryRetention>,
+ ) -> (Vec<ResponseItemEnvelope>, usize) {
+     debug_assert_eq!(prompt_input.len(), prompt_input_metadata.len());
+     let prompt_input = prompt_input
+@@ -624,7 +629,11 @@ fn build_v2_compacted_history(
+         .iter()
+         .map(|envelope| retained_input_image_count(&envelope.item))
+         .sum::<usize>();
+-    retained.push(ResponseItemEnvelope::new(compaction_output));
++    let mut output = ResponseItemEnvelope::new(compaction_output);
++    if let Some(policy) = retention {
++        policy.stamp_new_items(std::slice::from_mut(&mut output));
++    }
++    retained.push(output);
+     (retained, retained_image_count)
+ }
+ 
+@@ -959,6 +968,7 @@ mod tests {
+             output,
+             /*retain_client_developer_messages*/ false,
+             RetainedImageBudget::Disabled,
++            None,
+         )
+     }
+ 
+@@ -1085,6 +1095,7 @@ mod tests {
+                 output.clone(),
+                 enabled,
+                 RetainedImageBudget::Disabled,
++                None,
+             );
+             let mut expected = vec![
+                 ResponseItemEnvelope {
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index 089aa2fe..c6414bf9 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -40,7 +40,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
+     analytics_details: &mut CompactionAnalyticsDetails,
+ ) -> CodexResult<RemoteCompactV2Attempt> {
+     let turn_context = &step_context.turn;
+-    let mut history = sess.clone_history().await;
++    let mut history = sess.clone_retained_history().await?;
+     let input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());
+     let base_instructions = sess.get_prompt_base_instructions().await;
+     let (rewritten_outputs, estimated_deleted_tokens) =
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 8ce64c45..c07fdcaf 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -616,6 +616,33 @@ impl ContextManager {
+         source
+     }
+ 
++    pub(crate) fn with_sdk_history_retention(
++        mut self,
++        policy: &crate::SdkHistoryRetention,
++        now: &serde_json::Number,
++    ) -> codex_protocol::error::Result<Self> {
++        if policy.ttl_seconds.is_none() {
++            return Ok(self);
++        }
++        // Select the existing provider-compaction suffix before expiry. Removing its
++        // boundary must never make the excluded audit prefix visible again.
++        let model_items = self.model_items();
++        let keep = model_items
++            .iter()
++            .map(|envelope| policy.retain(envelope, now))
++            .collect::<codex_protocol::error::Result<Vec<_>>>()?;
++        if model_items.len() != self.items.len() || keep.iter().any(|keep| !keep) {
++            self.items = Arc::new(
++                model_items
++                    .iter()
++                    .zip(keep)
++                    .filter_map(|(envelope, keep)| keep.then(|| envelope.clone()))
++                    .collect(),
++            );
++        }
++        Ok(self)
++    }
++
+     /// Returns the history prepared for sending to the model. This applies a proper
+     /// normalization and drops un-suited items. Unsupported image and audio content
+     /// is stripped from messages and tool outputs according to `input_modalities`.
+@@ -1598,3 +1625,55 @@ fn user_message_positions(items: &[ResponseItemEnvelope]) -> Vec<usize> {
+ #[cfg(test)]
+ #[path = "history_tests.rs"]
+ mod tests;
++
++#[cfg(test)]
++mod sdk_retention_tests {
++    use super::*;
++    use serde_json::json;
++
++    fn envelope(value: serde_json::Value, created_at: u64) -> ResponseItemEnvelope {
++        let mut envelope = ResponseItemEnvelope::new(serde_json::from_value(value).unwrap());
++        envelope.metadata.get_or_insert_default().sdk_created_at = Some(created_at.into());
++        envelope
++    }
++
++    #[test]
++    fn expired_provider_boundary_never_resurrects_the_audit_prefix() {
++        let prefix = envelope(
++            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"excluded prefix"}]}),
++            95,
++        );
++        let mut boundary = envelope(
++            json!({"type":"compaction","encrypted_content":"opaque"}),
++            50,
++        );
++        boundary.metadata.as_mut().unwrap().provider_compaction = true;
++        let tail = envelope(
++            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"fresh tail"}]}),
++            95,
++        );
++        let mut history = ContextManager::new();
++        history.items = Arc::new(vec![prefix, boundary, tail.clone()]);
++        let projected = history
++            .clone()
++            .with_sdk_history_retention(&crate::SdkHistoryRetention::new(Some(10)), &100.into())
++            .unwrap();
++        assert_eq!(projected.annotated_items(), std::slice::from_ref(&tail));
++        assert_eq!(history.annotated_items().len(), 3);
++    }
++
++    #[test]
++    fn unexpired_projection_preserves_the_existing_shared_history() {
++        let item = envelope(
++            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"fresh"}]}),
++            95,
++        );
++        let mut history = ContextManager::new();
++        history.items = Arc::new(vec![item]);
++        let projected = history
++            .clone()
++            .with_sdk_history_retention(&crate::SdkHistoryRetention::new(Some(10)), &100.into())
++            .unwrap();
++        assert!(Arc::ptr_eq(&history.items, &projected.items));
++    }
++}
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 6c8461d9..2d2591a7 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -281,3 +281,6 @@ pub use project_read_path::ProjectReadPathMapping;
+ 
+ /// Opt-in managed child result admission.
+ pub mod managed_agent_result;
++
++mod sdk_history_retention;
++pub use sdk_history_retention::SdkHistoryRetention;
+diff --git a/codex-rs/core/src/sdk_history_retention.rs b/codex-rs/core/src/sdk_history_retention.rs
+new file mode 100644
+index 00000000..f33cf41f
+--- /dev/null
++++ b/codex-rs/core/src/sdk_history_retention.rs
+@@ -0,0 +1,156 @@
++use codex_history::ResponseItemEnvelope;
++use codex_protocol::error::{CodexErr, Result};
++use codex_protocol::models::ResponseItem;
++use serde_json::Number;
++
++/// Current SDK retention policy. This value is deliberately not serialized into history.
++#[derive(Clone, Debug)]
++pub struct SdkHistoryRetention {
++    pub ttl_seconds: Option<u64>,
++}
++
++impl SdkHistoryRetention {
++    pub fn new(ttl_seconds: Option<u64>) -> Self {
++        Self { ttl_seconds }
++    }
++
++    /// Stamps only newly accepted items. Restored or retained envelopes must not pass here.
++    pub fn stamp_new_items(&self, items: &mut [ResponseItemEnvelope]) {
++        let created_at = crate::session::session::Session::response_item_create_time();
++        for envelope in items {
++            if expires(&envelope.item) && envelope.item.create_time().is_none() {
++                envelope
++                    .metadata
++                    .get_or_insert_default()
++                    .sdk_created_at
++                    .get_or_insert_with(|| created_at.clone());
++            }
++        }
++    }
++
++    pub(crate) fn retain(&self, envelope: &ResponseItemEnvelope, now: &Number) -> Result<bool> {
++        let Some(ttl) = self.ttl_seconds else {
++            return Ok(true);
++        };
++        if !expires(&envelope.item) {
++            return Ok(true);
++        }
++        let created_at = envelope.item.create_time().or_else(|| {
++            envelope
++                .metadata
++                .as_ref()
++                .and_then(|metadata| metadata.sdk_created_at.as_ref())
++        });
++        let created_at = created_at.and_then(epoch_seconds).ok_or_else(|| {
++            CodexErr::InvalidRequest("Encrypted history TTL cannot prove this item's creation time. Open this older snapshot without TTL, or import history with authenticated item ages; reopening never renews an item's age.".to_owned())
++        })?;
++        let now = epoch_seconds(now).ok_or_else(|| {
++            CodexErr::Fatal("Native history retention clock is invalid".to_owned())
++        })?;
++        Ok(now <= created_at.saturating_add(ttl))
++    }
++}
++
++fn expires(item: &ResponseItem) -> bool {
++    match item {
++        ResponseItem::Message { role, .. } if matches!(role.as_str(), "system" | "developer") => {
++            false
++        }
++        ResponseItem::AdditionalTools { .. }
++        | ResponseItem::ConfigurationUpdate { .. }
++        | ResponseItem::CompactionTrigger { .. } => false,
++        _ => true,
++    }
++}
++
++fn epoch_seconds(number: &Number) -> Option<u64> {
++    number.as_u64().or_else(|| {
++        number
++            .as_f64()
++            .filter(|value| value.is_finite() && *value >= 0.0 && *value < u64::MAX as f64)
++            .map(|value| value.floor() as u64)
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    fn message(role: &str, created_at: Option<u64>) -> ResponseItemEnvelope {
++        let mut value = json!({"type":"message", "role":role, "content":[{"type":"input_text", "text":"retained"}]});
++        if let Some(created_at) = created_at {
++            value["internal_chat_message_metadata_passthrough"] = json!({"create_time":created_at});
++        }
++        ResponseItemEnvelope::new(serde_json::from_value(value).unwrap())
++    }
++
++    #[test]
++    fn default_opens_older_items_without_an_age() {
++        assert!(
++            SdkHistoryRetention::new(None)
++                .retain(&message("assistant", None), &100.into())
++                .unwrap()
++        );
++    }
++
++    #[test]
++    fn explicit_ttl_rejects_missing_age_without_restamping() {
++        let envelope = message("assistant", None);
++        assert!(
++            SdkHistoryRetention::new(Some(10))
++                .retain(&envelope, &100.into())
++                .unwrap_err()
++                .to_string()
++                .contains("Open this older snapshot without TTL")
++        );
++        assert!(envelope.metadata.is_none());
++    }
++
++    #[test]
++    fn preserved_native_creation_time_controls_expiry() {
++        let envelope = message("user", Some(50));
++        let policy = SdkHistoryRetention::new(Some(10));
++        assert!(policy.retain(&envelope, &60.into()).unwrap());
++        assert!(!policy.retain(&envelope, &61.into()).unwrap());
++    }
++
++    #[test]
++    fn zero_ttl_preserves_only_the_creation_second() {
++        let envelope = message("user", Some(50));
++        let policy = SdkHistoryRetention::new(Some(0));
++        assert!(policy.retain(&envelope, &50.into()).unwrap());
++        assert!(!policy.retain(&envelope, &51.into()).unwrap());
++    }
++
++    #[test]
++    fn current_instructions_are_not_conversation_expiry() {
++        let policy = SdkHistoryRetention::new(Some(0));
++        for role in ["developer", "system"] {
++            assert!(policy.retain(&message(role, None), &100.into()).unwrap());
++        }
++    }
++
++    #[test]
++    fn fallback_survives_serialization_and_never_renews() {
++        let policy = SdkHistoryRetention::new(Some(10));
++        let mut envelope = message("assistant", None);
++        envelope.metadata.get_or_insert_default().sdk_created_at = Some(50.into());
++        let mut restored: ResponseItemEnvelope =
++            serde_json::from_value(serde_json::to_value(envelope).unwrap()).unwrap();
++        policy.stamp_new_items(std::slice::from_mut(&mut restored));
++        assert_eq!(
++            restored.metadata.as_ref().unwrap().sdk_created_at,
++            Some(50.into())
++        );
++        assert!(!policy.retain(&restored, &61.into()).unwrap());
++    }
++
++    #[test]
++    fn existing_native_clock_does_not_receive_another_clock() {
++        let policy = SdkHistoryRetention::new(None);
++        let mut envelope = message("user", Some(50));
++        policy.stamp_new_items(std::slice::from_mut(&mut envelope));
++        assert!(envelope.metadata.is_none());
++    }
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index a7033ae0..bacbd003 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -3949,6 +3949,13 @@ impl Session {
+                 }
+             }
+         }
++        if let Some(policy) = self
++            .services
++            .thread_extension_data
++            .get::<crate::SdkHistoryRetention>()
++        {
++            policy.stamp_new_items(&mut items);
++        }
+         // Save the originating history budget for replay.
+         // Preserve any existing tool-specific override.
+         let policy: codex_utils_output_truncation::TruncationPolicy =
+@@ -5392,6 +5399,20 @@ impl Session {
+         state.clone_history()
+     }
+ 
++    pub(crate) async fn clone_retained_history(&self) -> CodexResult<ContextManager> {
++        let history = self.clone_history().await;
++        match self
++            .services
++            .thread_extension_data
++            .get::<crate::SdkHistoryRetention>()
++        {
++            Some(policy) => {
++                history.with_sdk_history_retention(&policy, &Self::response_item_create_time())
++            }
++            None => Ok(history),
++        }
++    }
++
+     /// Captures the history lifetime without exposing mutable session state.
+     pub(crate) async fn history_reset(&self) -> (u64, CancellationToken) {
+         let state = self.state.lock().await;
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index d8f44f03..3b0c894e 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -729,12 +729,14 @@ pub(crate) async fn run_turn(
+             check_provider_history_budget(&sess, &[] as &[TurnInput]).await?;
+             // Construct the input that we will send to the model.
+             let sampling_request_input: Vec<ResponseItem> = async {
+-                sess.clone_history()
+-                    .await
+-                    .for_prompt(&step_context.settings.model_info.input_modalities)
++                Ok::<_, CodexErr>(
++                    sess.clone_retained_history()
++                        .await?
++                        .for_prompt(&step_context.settings.model_info.input_modalities),
++                )
+             }
+             .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
+-            .await;
++            .await?;
+ 
+             run_sampling_request(
+                 Arc::clone(&sess),
+@@ -2254,8 +2256,8 @@ async fn run_sampling_request(
+                 input
+             } else {
+                 check_provider_history_budget(&sess, &[] as &[TurnInput]).await?;
+-                sess.clone_history()
+-                    .await
++                sess.clone_retained_history()
++                    .await?
+                     .for_prompt(&step_context.settings.model_info.input_modalities)
+             };
+             let mut prompt_input = prompt_input;
+diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
+index adad060f..982533d6 100644
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -73,6 +73,9 @@ pub struct CodexHarnessMetadata {
+     /// Accepted native background-result disposition; absent means foreground.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub sdk_start_response: Option<bool>,
++    /// Native acceptance time for SDK history items without an existing creation clock.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub sdk_created_at: Option<serde_json::Number>,
+     /// Accepted SDK handoff outcome; canonical provenance, never execution authority.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub sdk_agent_handoff: Option<codex_protocol::agent_profile::AgentProfileHandoff>,
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index 71488c50..8354c350 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -1605,6 +1605,12 @@ impl ResponseItem {
+             .filter(|turn_id| !turn_id.is_empty())
+     }
+ 
++    /// Returns the preserved native creation time, when this item carries one.
++    pub fn create_time(&self) -> Option<&serde_json::Number> {
++        self.internal_chat_message_metadata_passthrough()
++            .and_then(|metadata| metadata.create_time.as_ref())
++    }
++
+     /// Stamps the item with `turn_id` unless it already has a non-empty turn ID.
+     pub fn set_turn_id_if_missing(&mut self, turn_id: &str) {
+         let Some(metadata) = self.internal_chat_message_metadata_passthrough_mut() else {

@@ -1,0 +1,427 @@
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 2432a193..a6bf9fcf 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1136,40 +1136,50 @@ pub(crate) fn is_provider_compaction_boundary(envelope: &ResponseItemEnvelope) -
+         }
+ }
+
+-/// SDK originals omit the instruction receipts validated by the SDK admission paths.
+-/// Unknown, mixed, or caller-authored developer content remains visible in originals.
+-pub(crate) fn is_sdk_original_item(
++/// Native instruction receipts are model context, separate from SDK originals.
++pub(crate) fn is_sdk_model_only_instruction(
+     item: &ResponseItem,
+     metadata: Option<&CodexHarnessMetadata>,
+ ) -> bool {
+-    if let ResponseItem::Message {
++    use codex_protocol::protocol::{COLLABORATION_MODE_CLOSE_TAG, COLLABORATION_MODE_OPEN_TAG};
++
++    let ResponseItem::Message {
+         role,
+         content,
+         internal_chat_message_metadata_passthrough: Some(message_metadata),
+         ..
+     } = item
+-        && role == "developer"
+-        && !metadata.is_some_and(|metadata| metadata.client_authored)
+-        && message_metadata
+-            .content_item_kinds
+-            .as_ref()
+-            .is_some_and(|kinds| {
+-                !kinds.is_empty()
+-                    && kinds.len() == content.len()
+-                    && kinds.iter().all(|kind| {
+-                        matches!(
+-                            kind.0.as_str(),
+-                            "sdk_application.accepted" | "sdk_application.instructions"
+-                        )
+-                    })
+-            })
+-    {
++    else {
+         return false;
+-    }
+-    is_api_message(item, metadata)
++    };
++    role == "developer"
++        && !metadata.is_some_and(|metadata| metadata.client_authored)
++        && message_metadata.content_item_kinds.as_ref().is_some_and(|kinds| {
++            !kinds.is_empty()
++                && kinds.len() == content.len()
++                && kinds.iter().zip(content).all(|(kind, part)| match kind.0.as_str() {
++                    "sdk_application.accepted" | "sdk_application.instructions" => true,
++                    "collaboration_mode.instructions" => matches!(
++                        part,
++                        ContentItem::InputText { text }
++                            if message_metadata.turn_id.is_some()
++                                && message_metadata.create_time.is_some()
++                                && text.trim().starts_with(COLLABORATION_MODE_OPEN_TAG)
++                                && text.trim().ends_with(COLLABORATION_MODE_CLOSE_TAG)
++                    ),
++                    _ => false,
++                })
++        })
++}
++
++/// Unknown, mixed, or caller-authored developer content remains visible in originals.
++pub(crate) fn is_sdk_original_item(
++    item: &ResponseItem,
++    metadata: Option<&CodexHarnessMetadata>,
++) -> bool {
++    !is_sdk_model_only_instruction(item, metadata) && is_api_message(item, metadata)
+ }
+
+-/// Configuration updates require harness provenance; raw system messages are never retained.
+ pub(crate) fn is_api_message(
+     message: &ResponseItem,
+     metadata: Option<&CodexHarnessMetadata>,
+diff --git a/codex-rs/core/src/context_manager/mod.rs b/codex-rs/core/src/context_manager/mod.rs
+index 4a9d726f..d6a844ec 100644
+--- a/codex-rs/core/src/context_manager/mod.rs
++++ b/codex-rs/core/src/context_manager/mod.rs
+@@ -11,6 +11,7 @@ pub(crate) use history::is_provider_compaction_boundary;
+ pub(crate) use history::is_user_turn_boundary;
+
+ pub(crate) use history::is_api_message;
++pub(crate) use history::is_sdk_model_only_instruction;
+ pub(crate) use history::is_sdk_original_item;
+
+ pub(crate) use history::rollback_context_update;
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index c0363d14..7b1c2347 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -368,6 +368,7 @@ impl Session {
+     pub(crate) async fn sdk_load_original_history(
+         &self,
+     ) -> codex_protocol::error::Result<codex_history::sdk_originals::SdkOriginalHistory> {
++        use codex_history::sdk_originals::SdkOriginalHistory;
+         use codex_protocol::error::CodexErr;
+         let unavailable =
+             || CodexErr::InvalidRequest("Canonical original history is unavailable".into());
+@@ -394,12 +395,9 @@ impl Session {
+             .load_original_history(false)
+             .await
+             .map_err(|_| unavailable())?;
+-        let originals = codex_history::sdk_originals::SdkOriginalHistory::replay(
++        let originals = SdkOriginalHistory::replay_with_original_filter(
+             &persisted.items,
+             |row| {
+-                if !crate::context_manager::is_sdk_original_item(&row.item, row.metadata.as_ref()) {
+-                    return None;
+-                }
+                 let mut projected = crate::context_manager::ContextManager::new();
+                 // Captured per-record limits take precedence over the scalar legacy restore policy.
+                 let normalized = if matches!(&row.item, ResponseItem::Message { .. }) {
+@@ -420,6 +418,7 @@ impl Session {
+                     .replay_annotated_item(normalized.as_ref().unwrap_or(row), fallback_policy);
+                 projected.annotated_items().last().cloned()
+             },
++            |row| crate::context_manager::is_sdk_original_item(&row.item, row.metadata.as_ref()),
+             |items, turns| {
+                 let mut history = crate::context_manager::ContextManager::new();
+                 history.replace_annotated(items.to_vec());
+@@ -519,6 +518,9 @@ impl Session {
+         if state.sdk_originals.revision() != Some(expected_revision) {
+             return Err(invalid("canonical history revision conflict"));
+         }
++        let model_only = |row: &ResponseItemEnvelope| {
++            crate::context_manager::is_sdk_model_only_instruction(&row.item, row.metadata.as_ref())
++        };
+         let (originals, envelopes, popped, rebuilt_context) = match edit {
+             SdkHistoryEdit::Replace { keep, appended } => {
+                 if keep > current.items.len() {
+@@ -538,7 +540,7 @@ impl Session {
+                     });
+                 }
+                 let mut envelopes = current
+-                    .retained_projection(state.history.annotated_items(), keep)
++                    .retained_projection_preserving(state.history.annotated_items(), keep, model_only)
+                     .map_err(invalid)?;
+                 envelopes.extend(
+                     originals.items[keep..]
+@@ -549,7 +551,7 @@ impl Session {
+             }
+             SdkHistoryEdit::Pop { allow_rebuild } => {
+                 let Some(pop) = current
+-                    .prepare_pop(state.history.annotated_items(), allow_rebuild)
++                    .prepare_pop_preserving(state.history.annotated_items(), allow_rebuild, model_only)
+                     .map_err(|error| {
+                         invalid(&format!(
+                             "{error}; raw pop can explicitly rebuild model context"
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index 614adb1b..ece80543 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -667,6 +667,15 @@ impl SdkOriginalHistory {
+         &self,
+         current: &[ResponseItemEnvelope],
+         allow_rebuild: bool,
++    ) -> Result<Option<SdkOriginalHistoryPop>, &'static str> {
++        self.prepare_pop_preserving(current, allow_rebuild, |_| false)
++    }
++
++    pub fn prepare_pop_preserving(
++        &self,
++        current: &[ResponseItemEnvelope],
++        allow_rebuild: bool,
++        model_only: impl Fn(&ResponseItemEnvelope) -> bool,
+     ) -> Result<Option<SdkOriginalHistoryPop>, &'static str> {
+         let Some(last) = self.items.last() else {
+             return Ok(None);
+@@ -680,8 +689,10 @@ impl SdkOriginalHistory {
+         }
+         let (projection, rebuilt_context) = if last.projection.is_none() {
+             (current.to_vec(), false)
++        } else if keep == 0 {
++            (current.iter().filter(|row| model_only(row)).cloned().collect(), false)
+         } else {
+-            match self.retained_projection_excluding(current, keep, partner) {
++            match self.retained_projection_excluding(current, keep, partner, model_only) {
+                 Ok(projection) => (projection, false),
+                 Err(error) => {
+                     if let Some(projection) =
+@@ -828,7 +839,16 @@ impl SdkOriginalHistory {
+         current: &[ResponseItemEnvelope],
+         keep: usize,
+     ) -> Result<Vec<ResponseItemEnvelope>, &'static str> {
+-        self.retained_projection_excluding(current, keep, None)
++        self.retained_projection_preserving(current, keep, |_| false)
++    }
++
++    pub fn retained_projection_preserving(
++        &self,
++        current: &[ResponseItemEnvelope],
++        keep: usize,
++        model_only: impl Fn(&ResponseItemEnvelope) -> bool,
++    ) -> Result<Vec<ResponseItemEnvelope>, &'static str> {
++        self.retained_projection_excluding(current, keep, None, model_only)
+     }
+
+     fn retained_projection_excluding(
+@@ -836,6 +856,7 @@ impl SdkOriginalHistory {
+         current: &[ResponseItemEnvelope],
+         keep: usize,
+         exclude: Option<usize>,
++        model_only: impl Fn(&ResponseItemEnvelope) -> bool,
+     ) -> Result<Vec<ResponseItemEnvelope>, &'static str> {
+         if keep > self.items.len() {
+             return Err("history keep exceeds snapshot length");
+@@ -865,27 +886,36 @@ impl SdkOriginalHistory {
+             stored_metadata == current_metadata
+         };
+         let unavailable = "cannot shorten original history across model compaction; use keep=0 to replace it explicitly";
++        let model_only: Vec<_> = current.iter().map(model_only).collect();
+         let mut earliest = Vec::with_capacity(current.len());
+         let mut originals = self.items.iter().enumerate();
+-        for row in current {
+-            let Some((index, _)) = originals.find(|(_, item)| matches(item, row)) else {
+-                return Err(unavailable);
+-            };
+-            earliest.push(index);
++        for (row, model_only) in current.iter().zip(&model_only) {
++            if *model_only {
++                earliest.push(None);
++            } else {
++                let (index, _) = originals.find(|(_, item)| matches(item, row)).ok_or(unavailable)?;
++                earliest.push(Some(index));
++            }
+         }
+         // The reverse match detects repeated equal items whose position relative to
+         // keep is ambiguous after model truncation. Neither pass reconstructs content.
+         let mut originals = self.items.iter().enumerate().rev();
+         let mut latest = Vec::with_capacity(current.len());
+-        for row in current.iter().rev() {
+-            let Some((index, _)) = originals.find(|(_, item)| matches(item, row)) else {
+-                return Err(unavailable);
+-            };
+-            latest.push(index);
++        for (row, model_only) in current.iter().zip(&model_only).rev() {
++            if *model_only {
++                latest.push(None);
++            } else {
++                let (index, _) = originals.find(|(_, item)| matches(item, row)).ok_or(unavailable)?;
++                latest.push(Some(index));
++            }
+         }
+         latest.reverse();
+         let mut retained = Vec::new();
+         for ((row, first), last) in current.iter().zip(earliest).zip(latest) {
++            let (Some(first), Some(last)) = (first, last) else {
++                retained.push(row.clone());
++                continue;
++            };
+             let ambiguous_exclusion = exclude.is_some_and(|index| {
+                 first != last && (first..=last).contains(&index) && matches(&self.items[index], row)
+             });
+@@ -906,6 +936,15 @@ impl SdkOriginalHistory {
+         records: &[crate::RolloutItem],
+         project: impl Fn(&ResponseItemEnvelope) -> Option<ResponseItemEnvelope>,
+         rewind: impl Fn(&[ResponseItemEnvelope], u32) -> Vec<ResponseItemEnvelope>,
++    ) -> Self {
++        Self::replay_with_original_filter(records, project, |_| true, rewind)
++    }
++
++    pub fn replay_with_original_filter(
++        records: &[crate::RolloutItem],
++        project: impl Fn(&ResponseItemEnvelope) -> Option<ResponseItemEnvelope>,
++        is_original: impl Fn(&ResponseItemEnvelope) -> bool,
++        rewind: impl Fn(&[ResponseItemEnvelope], u32) -> Vec<ResponseItemEnvelope>,
+     ) -> Self {
+         let mut history = Self::default();
+         let mut previous_window: Option<Vec<ResponseItemEnvelope>> = None;
+@@ -916,11 +955,13 @@ impl SdkOriginalHistory {
+                         if let Some(window) = &mut previous_window {
+                             window.push(projection.clone());
+                         }
+-                        history.append(SdkOriginalItem {
+-                            original: serde_json::to_string(&envelope.item)
+-                                .expect("response items serialize"),
+-                            projection: Some(projection),
+-                        });
++                        if is_original(envelope) {
++                            history.append(SdkOriginalItem {
++                                original: serde_json::to_string(&envelope.item)
++                                    .expect("response items serialize"),
++                                projection: Some(projection),
++                            });
++                        }
+                     }
+                     if envelope
+                         .metadata
+@@ -954,7 +995,9 @@ impl SdkOriginalHistory {
+                         // Never resurrect values removed by an older canonical transaction.
+                         history = Self::default();
+                         for envelope in items {
+-                            if let Some(projection) = project(envelope) {
++                            if is_original(envelope)
++                                && let Some(projection) = project(envelope)
++                            {
+                                 history.append(SdkOriginalItem {
+                                     original: serde_json::to_string(&envelope.item)
+                                         .expect("response items serialize"),
+@@ -1925,4 +1968,123 @@ mod historical_mcp_presentation_tests {
+         );
+         assert!(input_projection(&decision(true).to_string()).is_err());
+     }
++
++    #[test]
++    fn raw_edits_keep_model_only_rows_without_admitting_them_as_originals() {
++        let row = |id: &str, role: &str| {
++            ResponseItemEnvelope::new(
++                serde_json::from_value(json!({
++                    "type":"message", "id":id, "role":role,
++                    "content":[{"type":"input_text", "text":id}]
++                }))
++                .unwrap(),
++            )
++        };
++        let configuration = row("config", "developer");
++        let user = row("user", "user");
++        let assistant = row("assistant", "assistant");
++        let model_only = |row: &ResponseItemEnvelope| row == &configuration;
++        let mut history = SdkOriginalHistory::default();
++        for item in [&user, &assistant] {
++            history.append(SdkOriginalItem::from_native(item.clone()));
++        }
++        let current = vec![configuration.clone(), user.clone(), assistant];
++        let pop = history.prepare_pop_preserving(&current, false, model_only).unwrap().unwrap();
++        assert_eq!(pop.projection, vec![configuration.clone(), user]);
++        assert!(!pop.rebuilt_context);
++        let final_pop = pop.originals.prepare_pop_preserving(&pop.projection, false, model_only)
++            .unwrap().unwrap();
++        assert_eq!(final_pop.projection, vec![configuration]);
++        assert!(!final_pop.rebuilt_context);
++    }
++
++    #[test]
++    fn filtered_publications_keep_the_cold_pop_window_proof() {
++        let envelope = |id: &str, role: &str| {
++            ResponseItemEnvelope::new(
++                serde_json::from_value(json!({
++                    "type":"message", "id":id, "role":role,
++                    "content":[{"type":"input_text", "text":id}]
++                }))
++                .unwrap(),
++            )
++        };
++        let summary = envelope("summary", "user");
++        let before_config = envelope("before-configuration", "developer");
++        let after_config = envelope("after-configuration", "developer");
++        let late_user = envelope("late-user", "user");
++        let answer = envelope("late-answer", "assistant");
++        let replay = |records: &[crate::RolloutItem]| {
++            SdkOriginalHistory::replay_with_original_filter(
++                records,
++                |row| Some(row.clone()),
++                |row| !matches!(&row.item, ResponseItem::Message { role, .. } if role == "developer"),
++                |items, _| items.to_vec(),
++            )
++        };
++        for legacy in [false, true] {
++            let mut checkpoint: crate::RolloutItem = serde_json::from_value(json!({
++                "type":"compacted", "payload":{"message":"summary"}
++            }))
++            .unwrap();
++            let crate::RolloutItem::Compacted(payload) = &mut checkpoint else {
++                panic!("checkpoint")
++            };
++            if !legacy {
++                payload.sdk_originals =
++                    Some(SdkOriginalHistoryCheckpoint::Preserve { preserve: true });
++            }
++            payload.replacement_history = Some(vec![summary.clone(), before_config.clone()]);
++            let mut records = vec![
++                crate::RolloutItem::ResponseItem(envelope("covered-user", "user")),
++                checkpoint.clone(),
++                crate::RolloutItem::ResponseItem(after_config.clone()),
++                crate::RolloutItem::ResponseItem(late_user.clone()),
++                crate::RolloutItem::ResponseItem(answer.clone()),
++            ];
++            let history = replay(&records);
++            assert_eq!(history.items.len(), 3);
++            assert!(
++                history
++                    .items
++                    .iter()
++                    .all(|row| { !row.original.contains("configuration") })
++            );
++            let current = vec![
++                summary.clone(),
++                before_config.clone(),
++                after_config.clone(),
++                late_user.clone(),
++                answer.clone(),
++            ];
++            let first = history.prepare_pop(&current, false).unwrap().unwrap();
++            let crate::RolloutItem::Compacted(payload) = &mut checkpoint else {
++                panic!("checkpoint")
++            };
++            payload.sdk_originals = Some(first.originals.into());
++            payload.replacement_history = Some(first.projection.clone());
++            records.push(checkpoint.clone());
++            let cold = replay(
++                &serde_json::from_slice::<Vec<crate::RolloutItem>>(
++                    &serde_json::to_vec(&records).unwrap(),
++                )
++                .unwrap(),
++            );
++            assert_eq!(cold.post_checkpoint_start, Some(1));
++            let second = cold.prepare_pop(&first.projection, false).unwrap().unwrap();
++            assert!(!second.rebuilt_context);
++            assert_eq!(
++                second.projection,
++                vec![summary.clone(), before_config.clone(), after_config.clone()]
++            );
++            records.push(crate::RolloutItem::EventMsg(
++                codex_protocol::protocol::EventMsg::ThreadRolledBack(
++                    codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 0 },
++                ),
++            ));
++            let rolled_back = replay(&records);
++            assert_eq!(rolled_back.post_checkpoint_start, None);
++            assert!(rolled_back.prepare_pop(&first.projection, false).is_err());
++        }
++    }
+ }

@@ -1,0 +1,192 @@
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index f6a86036..c7f633b9 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -849,6 +849,16 @@ fn handoff_prefix_digest(items: &[&ResponseItem]) -> CodexResult<String> {
+
+ impl Session {
+     pub(crate) async fn record_handoff_input_frontier(&self, context: &Arc<TurnContext>) -> CodexResult<()> {
++        self.capture_handoff_input_frontier(context, false).await
++    }
++
++    pub(super) async fn rebase_handoff_input_frontier(&self, context: &Arc<TurnContext>) -> CodexResult<()> {
++        self.capture_handoff_input_frontier(context, true).await
++    }
++
++    async fn capture_handoff_input_frontier(
++        &self, context: &Arc<TurnContext>, rebased: bool,
++    ) -> CodexResult<()> {
+         if self.services.thread_extension_data.get::<
+             codex_protocol::agent_profile::AgentProfileHandoffInputCapture,
+         >().is_none() { return Ok(()); }
+@@ -856,18 +866,27 @@ impl Session {
+         crate::prepared_request::check_handoff_budget(history.raw_items()).map_err(invalid)?;
+         let items: Vec<_> = history.raw_items().collect();
+         let owner = context.extension_data.get_or_init(HandoffInputFrontierOwner::default);
+-        let mut prior = owner.0.lock().map_err(|_| invalid("Handoff frontier owner poisoned"))?.clone();
+-        if prior.is_none() {
+-            prior = self.restored_handoff_input_frontier(context).await?;
+-        }
+-        let (root_count, root_sha256) = if let Some(prior) = prior {
+-            if prior.root_count > items.len() || handoff_prefix_digest(&items[..prior.root_count])? != prior.root_sha256 {
+-                return Err(invalid("Handoff original input prefix changed"));
++        let sample_sha256 = handoff_prefix_digest(&items)?;
++        let (root_count, root_sha256) = if rebased {
++            // The committed replacement is the only remaining input prefix.
++            (items.len(), sample_sha256.clone())
++        } else {
++            let prior = owner.0.lock().map_err(|_| invalid("Handoff frontier owner poisoned"))?.clone();
++            let prior = match prior {
++                Some(prior) => Some(prior),
++                None => self.restored_handoff_input_frontier(context).await?,
++            };
++            if let Some(prior) = prior {
++                if prior.root_count > items.len() || handoff_prefix_digest(&items[..prior.root_count])? != prior.root_sha256 {
++                    return Err(invalid("Handoff original input prefix changed"));
++                }
++                (prior.root_count, prior.root_sha256)
++            } else {
++                (items.len(), sample_sha256.clone())
+             }
+-            (prior.root_count, prior.root_sha256)
+-        } else { (items.len(), handoff_prefix_digest(&items)?) };
++        };
+         let frontier = HandoffInputFrontiers { root_count, root_sha256,
+-            sample_count:items.len(), sample_sha256:handoff_prefix_digest(&items)? };
++            sample_count:items.len(), sample_sha256 };
+         *owner.0.lock().map_err(|_| invalid("Handoff frontier owner poisoned"))? = Some(frontier);
+         Ok(())
+     }
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index cc36a511..b1b5f895 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1956,7 +1956,7 @@ async fn run_auto_compact(
+     reason: CompactionReason,
+     phase: CompactionPhase,
+ ) -> CodexResult<()> {
+-    let turn_context = &step_context.turn;
++    let turn_context = Arc::clone(&step_context.turn);
+     if sess
+         .services
+         .extensions
+@@ -1978,6 +1978,15 @@ async fn run_auto_compact(
+     {
+         return Ok(());
+     }
++    let previous_window = if matches!(phase, CompactionPhase::MidTurn)
++        && sess.services.thread_extension_data.get::<
++            codex_protocol::agent_profile::AgentProfileHandoffInputCapture,
++        >().is_some()
++    {
++        Some(sess.current_window().await.2)
++    } else {
++        None
++    };
+     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
+     let _compaction_span = trace_span!(
+         "codex.compaction",
+@@ -1994,53 +2003,58 @@ async fn run_auto_compact(
+             world_state,
+         )
+         .await?;
+-        return Ok(());
+-    }
+-
+-    if crate::model_request::turn_sampling_stop(&turn_context.extension_data)
+-        .is_some_and(|stop| stop.requested())
+-    {
+-        // The native interrupt still owns task cancellation and cleanup.
+-        cancellation_token.cancelled().await;
+-        return Err(CodexErr::TurnAborted);
+-    }
+-
+-    match turn_context.provider.capabilities().remote_compaction {
+-        RemoteCompactionSupport::V2 => {
+-            emit_compact_metric(
+-                &sess.services.session_telemetry,
+-                "remote_v2",
+-                /*manual*/ false,
+-            );
+-            run_inline_remote_auto_compact_task_v2(
+-                Arc::clone(sess),
+-                step_context,
+-                replacement_step_context,
+-                client_session,
+-                world_state,
+-                reason,
+-                phase,
+-                cancellation_token,
+-            )
+-            .await?;
++    } else {
++        if crate::model_request::turn_sampling_stop(&turn_context.extension_data)
++            .is_some_and(|stop| stop.requested())
++        {
++            // The native interrupt still owns task cancellation and cleanup.
++            cancellation_token.cancelled().await;
++            return Err(CodexErr::TurnAborted);
+         }
+-        RemoteCompactionSupport::Unsupported => {
+-            emit_compact_metric(
+-                &sess.services.session_telemetry,
+-                "local",
+-                /*manual*/ false,
+-            );
+-            run_inline_auto_compact_task(
+-                Arc::clone(sess),
+-                Arc::clone(&step_context),
+-                replacement_step_context,
+-                world_state,
+-                reason,
+-                phase,
+-                cancellation_token,
+-            )
+-            .await?;
++
++        match turn_context.provider.capabilities().remote_compaction {
++            RemoteCompactionSupport::V2 => {
++                emit_compact_metric(
++                    &sess.services.session_telemetry,
++                    "remote_v2",
++                    /*manual*/ false,
++                );
++                run_inline_remote_auto_compact_task_v2(
++                    Arc::clone(sess),
++                    step_context,
++                    replacement_step_context,
++                    client_session,
++                    world_state,
++                    reason,
++                    phase,
++                    cancellation_token,
++                )
++                .await?;
++            }
++            RemoteCompactionSupport::Unsupported => {
++                emit_compact_metric(
++                    &sess.services.session_telemetry,
++                    "local",
++                    /*manual*/ false,
++                );
++                run_inline_auto_compact_task(
++                    Arc::clone(sess),
++                    Arc::clone(&step_context),
++                    replacement_step_context,
++                    world_state,
++                    reason,
++                    phase,
++                    cancellation_token,
++                )
++                .await?;
++            }
+         }
+     }
++    if let Some(previous) = previous_window
++        && sess.current_window().await.2 != previous
++        && sess.rebase_handoff_input_frontier(&turn_context).await.is_err()
++    {
++        super::agent_profile::forget_handoff_sampling_frontier(&turn_context.extension_data);
++    }
+     Ok(())
+ }

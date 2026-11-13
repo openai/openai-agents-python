@@ -2442,13 +2442,24 @@ impl ThreadLifecycleContributor<Config> for Boundary {
 }
 
 impl TurnLifecycleContributor for Boundary {
+    fn hold_assistant_completion(
+        &self,
+        thread: &codex_extension_api::ExtensionData,
+        step: &codex_extension_api::ExtensionData,
+    ) -> bool {
+        thread
+            .get::<crate::python_tools::PythonTools>()
+            .is_some_and(|tools| tools.holds_assistant_completion(step))
+    }
+
     fn before_turn_complete<'a>(
         &'a self,
         input: codex_extension_api::TurnCompletionInput<'a>,
-    ) -> ExtensionFuture<'a, std::result::Result<Option<String>, String>> {
+    ) -> ExtensionFuture<'a, std::result::Result<codex_extension_api::TurnCompletionDecision, String>>
+    {
         Box::pin(async move {
             let Some(tools) = input.thread_store.get::<crate::python_tools::PythonTools>() else {
-                return Ok(None);
+                return Ok(codex_extension_api::TurnCompletionDecision::Accept);
             };
             tools
                 .before_complete(input)

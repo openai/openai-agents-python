@@ -8,6 +8,7 @@ from abc import abstractmethod
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, replace
+from hashlib import sha256
 from typing import Any, Literal, Protocol
 
 from a2a.server.agent_execution import (
@@ -80,6 +81,8 @@ class NativeA2ATask:
     Atomically commit each record and desired snapshot. generation protects private
     writes and identifies that snapshot independently of official TaskVersion.
     Keep the desired snapshot after completion so publication can be retried safely.
+    The store has been retaining checkpoint_sha256 atomically with checkpoint;
+    the SDK has been minting this receipt only from native suspension bytes.
     """
 
     binding: NativeA2ABinding
@@ -88,6 +91,7 @@ class NativeA2ATask:
     snapshot: bytes
     checkpoint: str | None = None
     challenge: str | None = None
+    checkpoint_sha256: str | None = None
 
     def task(self) -> p.Task:
         """Return a fresh mutable protocol snapshot, never the stored object."""
@@ -275,7 +279,9 @@ class NativeA2AExecutor(AgentExecutor):
             _json(value, self.limits.message_bytes)
             if record.checkpoint is None:
                 raise ValueError("Waiting task has no checkpoint")
-            state = SessionState.from_json(record.checkpoint)
+            state = SessionState.from_json(
+                record.checkpoint, expected_sha256=record.checkpoint_sha256
+            )._capture_for_restore()
             continuation = state.native_continuation
             if continuation is None or len(continuation.pending_manual) != 1:
                 raise ValueError("Expected one settled root manual request")
@@ -333,6 +339,8 @@ class NativeA2AExecutor(AgentExecutor):
             if record is None
             else record
         )
+        if "checkpoint" in changes and changes["checkpoint"] is None:
+            changes["checkpoint_sha256"] = None
         next_record = replace(
             next_record,
             generation=next_record.generation + 1,
@@ -653,6 +661,7 @@ class NativeA2AExecutor(AgentExecutor):
                                                 checkpoint,
                                                 request.name,
                                                 arguments,
+                                                sha256(checkpoint.encode()).hexdigest(),
                                             )
                                     else:
                                         result = await turn.get_result()
@@ -697,7 +706,7 @@ class NativeA2AExecutor(AgentExecutor):
                 challenge=None,
             )
         if captured is not None:
-            checkpoint, tool, arguments = captured
+            checkpoint, tool, arguments, checkpoint_sha256 = captured
             generation = record.generation + 1
             challenge = secrets.token_urlsafe(32)
             proposal = {
@@ -720,6 +729,7 @@ class NativeA2AExecutor(AgentExecutor):
                 status="waiting",
                 checkpoint=checkpoint,
                 challenge=challenge,
+                checkpoint_sha256=checkpoint_sha256,
             )
         if result is None:
             raise RuntimeError("Native task has no settled result")

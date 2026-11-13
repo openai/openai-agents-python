@@ -1460,6 +1460,12 @@ impl EngineState {
                     "fork requires current managed tools"
                 );
                 tools.check_idle(&thread).await?;
+                if let Some(providers) = thread
+                    .thread_extension_data()
+                    .get::<Arc<crate::agent_profiles::ProfileProviders>>()
+                {
+                    startup.thread_extension_init.insert(providers.as_ref().clone());
+                }
                 source_code = crate::checkpoint::code_state_for_thread(self, id).await?;
                 ensure!(
                     !stored || source_code.is_none(),
@@ -2137,6 +2143,7 @@ impl EngineState {
             .thread_extension_init
             .insert(crate::python_tools::InputErrorToolSlots(input_error_slots));
         self.apply_deferred_environment(&mut startup)?;
+        crate::agent_profiles::bind_profile_providers(&mut startup).await?;
         if startup.environments.is_none()
             && startup
                 .thread_extension_init

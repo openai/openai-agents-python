@@ -1,8 +1,10 @@
 """Encryption preserves the real canonical backend's ownership and CAS contract."""
 
+import asyncio
 import json
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -148,6 +150,102 @@ async def test_encrypted_store_native_session_restores_canonical_context(
         assert "SYNTHETIC_PRIVATE" not in encrypted and "first answer" not in encrypted
     finally:
         backend.release(identity, token)
+
+
+@pytest.mark.parametrize("cold", [False, True])
+async def test_encrypted_ttl_excludes_old_items_from_native_model_context(
+    tmp_path: Path, responses, cold: bool
+) -> None:
+    backend = SQLiteSessionStore(tmp_path / "canonical-ttl.sqlite")
+    key = "synthetic-encrypted-ttl-key"
+    storage = CustomStorage(EncryptedSessionStore(backend, encryption_key=key, ttl=0))
+    responses.respond(assistant_output("OLD_ANSWER"))
+    responses.respond(assistant_output("NEW_ANSWER"))
+
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-native-encrypted-ttl"
+    ) as provider:
+        agent = Agent(instructions="TTL controls model context.", provider=provider)
+
+        async def check_expiry(session):
+            assert "OLD_REQUEST" not in str((await session.model_context()).items)
+            assert "OLD_ANSWER" not in str((await session.model_context()).items)
+            assert "OLD_REQUEST" in str((await session.history_snapshot()).items)
+            assert (await (await session.submit("NEW_REQUEST")).get_result()).final_output == (
+                "NEW_ANSWER"
+            )
+
+        async with agent.session(storage=storage) as session:
+            identity = session.id
+            assert (await (await session.submit("OLD_REQUEST")).get_result()).final_output == (
+                "OLD_ANSWER"
+            )
+            # Wait for the second containing the acknowledged turn to expire.
+            until = int(time.time()) + 1
+            while time.time() < until:
+                await asyncio.sleep(0.01)
+            if not cold:
+                await check_expiry(session)
+        if cold:
+            reopened = CustomStorage(EncryptedSessionStore(backend, encryption_key=key, ttl=0))
+            async with agent.session(storage=reopened, resume=identity) as session:
+                await check_expiry(session)
+    assert len(responses.requests) == 2
+    input_json = json.dumps(responses.requests[-1]["input"])
+    assert "OLD_REQUEST" not in input_json and "OLD_ANSWER" not in input_json
+    assert "NEW_REQUEST" in input_json
+
+
+@pytest.mark.parametrize(
+    "selection", [{"type": "previous_response"}, {"type": "conversation", "id": "conv_fixture"}]
+)
+async def test_encrypted_ttl_rejects_provider_history_before_opening(
+    tmp_path: Path, responses, selection
+) -> None:
+    path = tmp_path / "canonical-incompatible.sqlite"
+
+    class UnopenedStore(SQLiteSessionStore):
+        def acquire(self, session_id: str) -> str:
+            pytest.fail("The incompatible Session acquired persistent storage")
+
+    storage = CustomStorage(
+        EncryptedSessionStore(UnopenedStore(path), encryption_key="synthetic-key", ttl=0)
+    )
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-history-retention", supports_websockets=False
+    ) as provider:
+        agent = Agent(
+            instructions="Do not submit.", provider=provider, model_settings={"store": True}
+        )
+        with pytest.raises(ValueError, match="TTL cannot combine with provider-owned history"):
+            async with agent.session(storage=storage, provider_history=selection):
+                pytest.fail("An incompatible Session opened")
+    assert responses.requests == []
+
+
+async def test_encrypted_ttl_rejects_prepared_handoff_before_opening(tmp_path: Path, responses):
+    path = tmp_path / "canonical-handoff-incompatible.sqlite"
+
+    class UnopenedStore(SQLiteSessionStore):
+        def acquire(self, session_id: str) -> str:
+            pytest.fail("The incompatible Session acquired persistent storage")
+
+    storage = CustomStorage(
+        EncryptedSessionStore(UnopenedStore(path), encryption_key="synthetic-key", ttl=0)
+    )
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-history-retention", supports_websockets=False
+    ) as provider:
+        agent = Agent(
+            instructions="Do not submit.",
+            provider=provider,
+            handoffs=[Agent(name="destination", instructions="Do not enter.")],
+            prepare_handoff_input=lambda view: view,
+        )
+        with pytest.raises(ValueError, match="Handoff input preparation cannot combine"):
+            async with agent.session(storage=storage):
+                pytest.fail("An incompatible Session opened")
+    assert responses.requests == []
 
 
 @pytest.mark.parametrize(

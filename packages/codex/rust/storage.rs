@@ -1200,6 +1200,111 @@ pub(crate) struct CompletionHold {
     pub release: tokio::sync::Semaphore,
 }
 
+// Scoped to one native checkpoint export. Closed graph members use the same
+// OS exclusion as recovery; live members retain their current native writer.
+pub(crate) struct CheckpointReader<'a> {
+    store: &'a LocalChecklistStore,
+    closed: HashSet<ThreadId>,
+    _leases: Vec<codex_rollout::WriterLockGuard>,
+}
+
+impl CheckpointReader<'_> {
+    fn check(
+        &self,
+        writers: &HashMap<ThreadId, ChecklistWriter>,
+        id: ThreadId,
+    ) -> ThreadStoreResult<()> {
+        self.store.check_durability()?;
+        if let Some(writer) = writers.get(&id) {
+            writer.check()?;
+            if writer.loss.is_some() {
+                return Err(checklist_error("local writer is suspending its lost owner"));
+            }
+        } else if !self.closed.contains(&id) {
+            return Err(checklist_error(
+                "native writer changed during checkpoint capture",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn history(&self, id: ThreadId) -> ThreadStoreResult<Vec<RolloutItem>> {
+        let writers = self.store.writers.lock().await;
+        self.check(&writers, id)?;
+        let path = if writers.contains_key(&id) {
+            self.store.inner.flush_thread(id).await?;
+            self.store.inner.live_rollout_path(id).await?
+        } else {
+            self.store
+                .inner
+                .read_thread(ReadThreadParams {
+                    thread_id: id,
+                    include_archived: true,
+                    include_history: false,
+                })
+                .await?
+                .rollout_path
+                .ok_or_else(|| checklist_error("checkpoint thread has no rollout"))?
+        };
+        let mut header = codex_rollout::read_session_meta_line(&path)
+            .await
+            .map_err(checklist_error)?;
+        if header.meta.id != id {
+            return Err(checklist_error(
+                "checkpoint rollout belongs to another thread",
+            ));
+        }
+        let mut history = ThreadStore::load_original_history(
+            &self.store.inner,
+            LoadThreadHistoryParams {
+                thread_id: id,
+                include_archived: true,
+            },
+        )
+        .await?
+        .items;
+        let Some(RolloutItem::SessionMeta(first)) = history.first_mut() else {
+            return Err(checklist_error(
+                "checkpoint history has no canonical header",
+            ));
+        };
+        // Replace one header with one header. Later copied headers and absolute
+        // lineage ordinals remain intact; memory restore never follows paths.
+        header.meta.history_base = None;
+        *first = header;
+        self.check(&writers, id)?;
+        Ok(history)
+    }
+
+    pub(crate) async fn checklist(
+        &self,
+        id: ThreadId,
+        history: &[RolloutItem],
+    ) -> ThreadStoreResult<Option<ChecklistState>> {
+        let writers = self.store.writers.lock().await;
+        self.check(&writers, id)?;
+        let path = checklist_path(&self.store.directory, id);
+        let saved =
+            tokio::task::spawn_blocking(move || -> ThreadStoreResult<Option<ChecklistState>> {
+                let file = match std::fs::File::open(path) {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(error) => return Err(checklist_error(error)),
+                };
+                serde_json::from_reader(file)
+                    .map(Some)
+                    .map_err(checklist_error)
+            })
+            .await
+            .map_err(checklist_error)??;
+        if let Some(saved) = &saved {
+            saved.validate(id, history).map_err(checklist_error)?;
+        }
+        self.check(&writers, id)?;
+        Ok(saved)
+    }
+}
+
 /// Local checklist records have the lifetime of a native thread, including across
 /// new engines. Only a successful native live append can replace a record.
 pub struct LocalChecklistStore {
@@ -1805,6 +1910,35 @@ fn observe_turn(turn_id: &mut Option<String>, item: &RolloutItem) {
 }
 
 impl LocalChecklistStore {
+    pub(crate) async fn checkpoint_reader(
+        &self,
+        mut ids: Vec<ThreadId>,
+    ) -> ThreadStoreResult<CheckpointReader<'_>> {
+        ids.sort_unstable_by_key(ToString::to_string);
+        ids.dedup();
+        let writers = self.writers.lock().await;
+        let mut closed = HashSet::new();
+        let mut leases = Vec::new();
+        for id in ids {
+            if let Some(writer) = writers.get(&id) {
+                writer.check()?;
+                if writer.loss.is_some() {
+                    return Err(checklist_error("local writer is suspending its lost owner"));
+                }
+            } else {
+                let lease = tokio::task::block_in_place(|| self.recovery_locks.acquire(id))
+                    .map_err(checklist_error)?;
+                closed.insert(id);
+                leases.push(lease);
+            }
+        }
+        Ok(CheckpointReader {
+            store: self,
+            closed,
+            _leases: leases,
+        })
+    }
+
     pub(crate) async fn retire_thread_owner(&self, id: ThreadId) -> ThreadStoreResult<()> {
         let mut writers = self.writers.lock().await;
         self.check_durability()?;

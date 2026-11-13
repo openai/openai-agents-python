@@ -1,0 +1,17 @@
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -784,7 +784,12 @@
+                 Arc::make_mut(&mut target)
+                     .data
+                     .insert(HandoffPresentationAnchor::new(anchor.clone()));
+-            } else if !expected_transfer {
++            } else if expected_transfer {
++                let anchor = target.application_instructions.item.clone();
++                Arc::make_mut(&mut target)
++                    .data
++                    .insert(HandoffPresentationAnchor::new(anchor));
++            } else {
+                 return Err(invalid("Handoff presentation differs from committed destination"));
+             }
+         }

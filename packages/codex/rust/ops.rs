@@ -473,6 +473,8 @@ impl Default for Mode {
 params!(TurnParams {
     input: Value,
     #[serde(default)]
+    profile_output_override: bool,
+    #[serde(default)]
     raise_on_unknown_tool: bool,
     operation_declaration_source: Option<codex_extension_api::AgentProfileReceipt>,
     observation_submission_id: Option<String>,
@@ -872,6 +874,8 @@ params!(RecoveryOptions {
     observation_submission_id: Option<String>,
     #[serde(default)]
     output_schema: Option<serde_json::Map<String, Value>>,
+    #[serde(default)]
+    profile_output_override: bool,
 });
 
 pub async fn recover_prepared(
@@ -926,6 +930,10 @@ pub async fn recover_prepared(
     init.insert(crate::agent_profiles::OperationDeclarationSource(
         p.operation_declaration_source,
     ));
+    init.insert(codex_extension_api::AgentProfileOutputControl {
+        thread_id: state.id.to_string(),
+        preserve_turn_output: p.profile_output_override,
+    });
     crate::recovery_guard::Seed::attach(&mut init, &turn_id, original_call_ids);
     if let Some(staged) = staged_input {
         init.insert(staged);
@@ -1014,6 +1022,23 @@ async fn start_with_params<'a>(
             p.operation_declaration_source.is_none(),
             "Operation declaration provenance requires a managed Session"
         );
+        turn_init
+    };
+    let turn_init = if let Some((state, _)) = managed.as_ref() {
+        if matches!(p.mode, Mode::Steer) {
+            turn_init
+        } else {
+            let mut init = match turn_init {
+                Some(init) => init,
+                None => thread.config_snapshot().await.turn_extension_init,
+            };
+            init.insert(codex_extension_api::AgentProfileOutputControl {
+                thread_id: state.id.to_string(),
+                preserve_turn_output: p.profile_output_override,
+            });
+            Some(init)
+        }
+    } else {
         turn_init
     };
     let mut prompt_cache_breakpoints = Vec::new();

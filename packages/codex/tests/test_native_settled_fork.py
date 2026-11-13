@@ -264,7 +264,7 @@ async def test_fork_does_not_export_native_local_profile(responses, tmp_path):
     original = Agent(instructions="Read.", provider=provider(responses))
     responses.respond(assistant_output("source-live"))
     async with timeout(35), original.session(storage=LocalStorage(tmp_path)) as source:
-        with pytest.raises(ValueError, match="cannot export portable"):
+        with pytest.raises(ValueError, match="cannot export this portable"):
             await source.fork()
         assert (
             await (await source.submit("Still live")).get_result()

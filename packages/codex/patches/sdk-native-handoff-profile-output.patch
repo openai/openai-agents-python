@@ -1,0 +1,134 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index b06ec131..d74ef81a 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2110,6 +2110,31 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
+     connector_ids
+ }
+
++// Keep native wire selection with the same immutable profile as model and tools.
++pub(super) fn selected_profile_output_schema(
++    profile: Option<&codex_extension_api::CapturedAgentProfile>,
++    control: Option<&codex_extension_api::AgentProfileOutputControl>,
++    turn_schema: Option<&serde_json::Value>,
++    thread_id: &str,
++) -> Result<Option<serde_json::Value>, String> {
++    let Some(schema) = profile.and_then(|profile| {
++        profile
++            .profile
++            .data
++            .get::<codex_extension_api::AgentProfileOutputSchema>()
++    }) else {
++        return Ok(turn_schema.cloned());
++    };
++    let control = control
++        .filter(|control| control.thread_id == thread_id)
++        .ok_or("Per-profile output schemas require their managed SDK thread scope")?;
++    Ok(if control.preserve_turn_output {
++        turn_schema.cloned()
++    } else {
++        schema.0.clone()
++    })
++}
++
+ #[instrument(level = "trace", skip_all)]
+ pub(crate) fn build_prompt(
+     input: Vec<ResponseItem>,
+@@ -2283,6 +2308,17 @@ async fn run_sampling_request(
+                 step_context.as_ref(),
+                 base_instructions.clone(),
+             );
++            let output_control = step_context
++                .turn
++                .extension_data
++                .get::<codex_extension_api::AgentProfileOutputControl>();
++            prompt.output_schema = selected_profile_output_schema(
++                step_context.settings.agent_profile.as_deref(),
++                output_control.as_deref(),
++                prompt.output_schema.as_ref(),
++                &sess.thread_id.to_string(),
++            )
++            .map_err(CodexErr::InvalidRequest)?;
+             let mut canonical = sess
+                 .services
+                 .model_client
+diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
+index ff10d506..e058672f 100644
+--- a/codex-rs/core/src/session/turn_input.rs
++++ b/codex-rs/core/src/session/turn_input.rs
+@@ -995,8 +995,26 @@ impl Session {
+         // Compare JSON values directly instead of serialized schema text.
+         // Value equality ignores object key order while preserving array and
+         // scalar distinctions; broader JSON Schema equivalence is out of scope.
++        let current_profile = self
++            .state
++            .lock()
++            .await
++            .session_configuration
++            .agent_profile
++            .clone();
++        let output_control = active_task
++            .turn_context
++            .extension_data
++            .get::<codex_extension_api::AgentProfileOutputControl>();
++        let active_schema = super::turn::selected_profile_output_schema(
++            current_profile.as_deref(),
++            output_control.as_deref(),
++            active_task.turn_context.final_output_json_schema.as_ref(),
++            &self.thread_id.to_string(),
++        )
++        .map_err(|_| NotSubmittedReason::ActiveTurnOutputSchemaMismatch)?;
+         if let Some(required_schema) = required_final_output_json_schema
+-            && active_task.turn_context.final_output_json_schema.as_ref() != Some(required_schema)
++            && active_schema.as_ref() != Some(required_schema)
+         {
+             return Err(NotSubmittedReason::ActiveTurnOutputSchemaMismatch);
+         }
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 4c484d61..ca7b6a0a 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -70,6 +70,8 @@ pub use turn_lifecycle::AgentProfileDecisionHandoffTools;
+ pub use turn_lifecycle::AgentProfileHandoffTools;
+ pub use turn_lifecycle::AgentProfileInstructions;
+ pub use turn_lifecycle::AgentProfileModelSettings;
++pub use turn_lifecycle::AgentProfileOutputControl;
++pub use turn_lifecycle::AgentProfileOutputSchema;
+ pub use turn_lifecycle::AgentProfileReceipt;
+ pub use turn_lifecycle::CapturedAgentProfile;
+ pub use turn_lifecycle::HeldToolCompletionResults;
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 1af8bc2f..2d539c1c 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -260,6 +260,17 @@ impl AgentProfileModelSettings {
+     }
+ }
+
++/// Native wire schema selection owned by an admitted SDK profile.
++#[derive(Clone, Debug)]
++pub struct AgentProfileOutputSchema(pub Option<serde_json::Value>);
++
++/// Live output selection scoped to its actual managed SDK thread.
++#[derive(Clone, Debug)]
++pub struct AgentProfileOutputControl {
++    pub thread_id: String,
++    pub preserve_turn_output: bool,
++}
++
+ /// Immutable in-process profile supplied by an admitted host roster.
+ #[derive(Clone)]
+ pub struct AgentProfile {
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 9efcd608..7a1d8227 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -58,6 +58,8 @@ pub use contributors::AgentProfileDecisionHandoffTools;
+ pub use contributors::AgentProfileHandoffTools;
+ pub use contributors::AgentProfileInstructions;
+ pub use contributors::AgentProfileModelSettings;
++pub use contributors::AgentProfileOutputControl;
++pub use contributors::AgentProfileOutputSchema;
+ pub use contributors::AgentProfileReceipt;
+ pub use contributors::ApprovalDecision;
+ pub use contributors::ApprovalDecisionInput;
