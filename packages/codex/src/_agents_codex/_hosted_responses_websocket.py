@@ -24,6 +24,7 @@ from ._responses_websocket import (
     _decode_socket_frame,
     _limited,
     _socket_frame_size,
+    _socket_scope,
 )
 from .models import (
     ModelRequest,
@@ -67,6 +68,7 @@ class _Active:
 
 @dataclass
 class _Run:
+    socket_scope: str | None = None
     active: _Active | None = None
     request: ModelRequest | None = None
     account: Callable[[dict[str, Any]], str | None] | None = None
@@ -100,6 +102,9 @@ class HostedResponsesWebSocketModel:
         async def connect(request: ModelRequest, options: ResponsesSocketOptions) -> Any:
             assert request.run_owner is not None
             run = self._runs.setdefault(request.run_owner, _Run())
+            scope = _socket_scope(options)
+            if run.socket_scope is not None and run.socket_scope != scope:
+                raise ValueError("Hosted active response cannot change provider scope")
             selected = deepcopy(options)
             headers = selected["headers"]
             betas: list[str] = []
@@ -109,8 +114,10 @@ class HostedResponsesWebSocketModel:
                         value.strip() for value in headers.pop(key).split(",") if value.strip()
                     )
             headers["OpenAI-Beta"] = ",".join(dict.fromkeys([*betas, "responses_multi_agent=v1"]))
+            socket = await factory(request, selected)
+            run.socket_scope = scope
             return _Socket(
-                await factory(request, selected),
+                socket,
                 run,
                 config,
                 selected["websocket_options"].get("max_size"),
@@ -374,12 +381,16 @@ class _Socket:
         finally:
             del self, frame, active, items, input_items, original_user_ids, ids
 
-    async def _replace_before_send(self, frame: dict[str, Any], replacing: bool) -> bool:
+    async def _replace_before_send(
+        self, frame: dict[str, Any], replacing: bool, *, scope_changed: bool
+    ) -> bool:
         active = None
         try:
             active = self._run.active
             if active is None:
                 return replacing
+            if scope_changed:
+                raise ValueError("Hosted active response cannot change provider scope")
             changed = _response_configuration(active.create) != _response_configuration(frame)
             if not replacing and not changed:
                 return False

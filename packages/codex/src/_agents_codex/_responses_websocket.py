@@ -46,6 +46,17 @@ class ResponsesSocketOptions(TypedDict):
     websocket_options: ResponsesWebSocketOptions
 
 
+def _socket_scope(options: ResponsesSocketOptions) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "url": options["url"],
+                "headers": sorted((k.lower(), v) for k, v in options["headers"].items()),
+            }
+        ).encode()
+    ).hexdigest()
+
+
 ResponsesSocketFactory: TypeAlias = Callable[[ModelRequest, ResponsesSocketOptions], Awaitable[Any]]
 
 
@@ -458,23 +469,19 @@ class ResponsesWebSocketModel(ResponsesModel):
             body["type"] = "response.create"
             selected = await _request_options_for(self._request_options_source, request)
             options = await _socket_options(self.client, selected, self._websocket_options)
-            key = hashlib.sha256(
-                json.dumps(
-                    {
-                        "url": options["url"],
-                        "headers": sorted((k.lower(), v) for k, v in options["headers"].items()),
-                    }
-                ).encode()
-            ).hexdigest()
+            key = _socket_scope(options)
             if state.connection is not None:
                 socket = state.connection.socket
-                replace_connection = state.connection.key != key or _socket_closed(socket)
+                scope_changed = state.connection.key != key
+                replace_connection = scope_changed or _socket_closed(socket)
                 # Only the SDK-owned hosted wrapper needs to reconcile a pause
                 # before retiring its connection or sending a new configuration.
                 from ._hosted_responses_websocket import _Socket
 
                 if isinstance(socket, _Socket):
-                    replace_connection = await socket._replace_before_send(body, replace_connection)
+                    replace_connection = await socket._replace_before_send(
+                        body, replace_connection, scope_changed=scope_changed
+                    )
                 if replace_connection:
                     await _join(state.connection.close())
                     state.connection = None
