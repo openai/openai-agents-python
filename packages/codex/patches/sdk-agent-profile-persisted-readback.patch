@@ -1,0 +1,12 @@
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -482,7 +482,8 @@
+         destination.agent_profile = Some(Arc::clone(&profile));
+         configuration.agent_profile = Some(profile);
+         configuration.step_settings = Arc::new(destination.selected().clone());
+-        let settings = configuration.thread_settings_snapshot(&configuration.environments);
++        let mut settings = configuration.thread_settings_snapshot(&configuration.environments);
++        settings.request_controls = settings.request_controls.for_persistence();
+         let batch = [
+             RolloutItem::ResponseItem(envelope.clone()),
+             RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(

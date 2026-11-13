@@ -3671,6 +3671,98 @@ def _configure_session_features(
         config["features.apps"] = False
 
 
+def _opening_tool_policy(
+    *,
+    allowed_mcp: Sequence[_MCP[Any]],
+    allowed_tools: Sequence[FunctionTool[Any, Any, Any]],
+    mcp_names: list[dict[str, str]],
+    hosted_tools: list[dict[str, Any]],
+    web_search: WebSearch | None,
+    deferred_schemas: bool,
+    available: Sequence[Tool[Any]],
+    checklist: bool,
+    guidance_tools: list[dict[str, str]],
+    goals: bool,
+    native_agents: NativeAgents[Any] | None,
+    executor: Environment[Any] | None,
+    inherited_executor_tools: tuple[str, ...] | None,
+    programmatic_tool_calling: bool,
+) -> dict[str, Any]:
+    return {
+        "allowed_mcp_tools": [
+            [server.name, raw, ref]
+            for server in allowed_mcp
+            for raw, ref in zip(server.tools, _tool_names((server,)), strict=True)
+        ],
+        "allowed_tools": [
+            {
+                "name": entry.name,
+                "namespace": entry.ref.namespace or "functions",
+            }
+            for entry in allowed_tools
+        ]
+        + mcp_names
+        + [
+            {"name": tool["type"], "namespace": "functions"}
+            for tool in hosted_tools
+            if tool["type"] != "mcp"
+        ]
+        + (
+            [{"name": "run", "namespace": "web"}]
+            if web_search is not None and web_search.route == "standalone"
+            else [{"name": "web_search", "namespace": "functions"}]
+            if web_search is not None
+            else []
+        )
+        + (
+            [{"name": "tool_search", "namespace": "functions"}]
+            if deferred_schemas and not any(isinstance(tool, ToolSearch) for tool in available)
+            else []
+        )
+        + ([{"name": "update_plan", "namespace": "functions"}] if checklist else [])
+        + guidance_tools
+        + (
+            [
+                {"name": name, "namespace": "functions"}
+                for name in ("create_goal", "get_goal", "update_goal")
+            ]
+            if goals
+            else []
+        )
+        + (
+            [
+                {"name": name, "namespace": "collaboration"}
+                for name in native_agents._collaboration_tool_names
+            ]
+            if native_agents is not None
+            else []
+        )
+        + (
+            [
+                {"name": name, "namespace": "functions"}
+                for name in executor.tools
+                if inherited_executor_tools is None or name in inherited_executor_tools
+            ]
+            if executor is not None
+            else []
+        )
+        + (
+            [{"name": name, "namespace": "functions"} for name in ("exec", "wait")]
+            if programmatic_tool_calling
+            else []
+        ),
+        **(
+            {
+                "require_managed_sandbox": True,
+                "require_unified_exec": True,
+                "expose_additional_permissions": False,
+            }
+            if executor is not None
+            else {}
+        ),
+    }
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -4444,81 +4536,22 @@ class Session(Generic[ContextT, OutputT]):
                         run_formatter=tool_error_formatter is not None
                     ),
                     **_native_agent_options(native_agents),
-                    "tool_policy": {
-                        "allowed_mcp_tools": [
-                            [server.name, raw, ref]
-                            for server in allowed_mcp
-                            for raw, ref in zip(server.tools, _tool_names((server,)), strict=True)
-                        ],
-                        "allowed_tools": [
-                            {
-                                "name": entry.name,
-                                "namespace": entry.ref.namespace or "functions",
-                            }
-                            for entry in allowed_tools
-                        ]
-                        + mcp_names
-                        + [
-                            {"name": tool["type"], "namespace": "functions"}
-                            for tool in hosted_tools
-                            if tool["type"] != "mcp"
-                        ]
-                        + (
-                            [{"name": "run", "namespace": "web"}]
-                            if web_search is not None and web_search.route == "standalone"
-                            else [{"name": "web_search", "namespace": "functions"}]
-                            if web_search is not None
-                            else []
-                        )
-                        + (
-                            [{"name": "tool_search", "namespace": "functions"}]
-                            if deferred_schemas
-                            and not any(isinstance(tool, ToolSearch) for tool in available)
-                            else []
-                        )
-                        + ([{"name": "update_plan", "namespace": "functions"}] if checklist else [])
-                        + guidance_tools
-                        + (
-                            [
-                                {"name": name, "namespace": "functions"}
-                                for name in ("create_goal", "get_goal", "update_goal")
-                            ]
-                            if goals
-                            else []
-                        )
-                        + (
-                            [
-                                {"name": name, "namespace": "collaboration"}
-                                for name in native_agents._collaboration_tool_names
-                            ]
-                            if native_agents is not None
-                            else []
-                        )
-                        + (
-                            [
-                                {"name": name, "namespace": "functions"}
-                                for name in executor.tools
-                                if inherited_executor_tools is None
-                                or name in inherited_executor_tools
-                            ]
-                            if executor is not None
-                            else []
-                        )
-                        + (
-                            [{"name": name, "namespace": "functions"} for name in ("exec", "wait")]
-                            if programmatic_tool_calling
-                            else []
-                        ),
-                        **(
-                            {
-                                "require_managed_sandbox": True,
-                                "require_unified_exec": True,
-                                "expose_additional_permissions": False,
-                            }
-                            if executor is not None
-                            else {}
-                        ),
-                    },
+                    "tool_policy": _opening_tool_policy(
+                        allowed_mcp=allowed_mcp,
+                        allowed_tools=allowed_tools,
+                        mcp_names=mcp_names,
+                        hosted_tools=hosted_tools,
+                        web_search=web_search,
+                        deferred_schemas=deferred_schemas,
+                        available=available,
+                        checklist=checklist,
+                        guidance_tools=guidance_tools,
+                        goals=goals,
+                        native_agents=native_agents,
+                        executor=executor,
+                        inherited_executor_tools=inherited_executor_tools,
+                        programmatic_tool_calling=programmatic_tool_calling,
+                    ),
                 }
                 _install_profile_options(options, profiles, profile_roster, profile_fingerprint)
                 # The private merged opener owns paths for eligible runtime scopes.
