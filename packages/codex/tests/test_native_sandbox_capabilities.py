@@ -1,6 +1,7 @@
 """Application capabilities use the existing provider and native opening owners."""
 
 import json
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,8 +60,9 @@ class WorkspaceGuidance(SandboxCapability):
         )
 
 
+@pytest.mark.parametrize("executor_platform", [None, "windows"])
 async def test_sandbox_capability_reaches_the_live_resource_and_model(
-    tmp_path, monkeypatch, responses
+    tmp_path, monkeypatch, responses, executor_platform
 ):
     declaration = WorkspaceGuidance()
     root = tmp_path / "executor"
@@ -73,7 +75,7 @@ async def test_sandbox_capability_reaches_the_live_resource_and_model(
     responses.respond(function_call("sandbox_record", {}, "sandbox-second"))
     responses.respond(assistant_output("done again"))
     try:
-        async with ExecutorPeer(root).serve() as peer:
+        async with ExecutorPeer(root, advertised_platform=executor_platform).serve() as peer:
             child.mkdir()
             trust(peer, tmp_path, monkeypatch)
 
@@ -85,6 +87,11 @@ async def test_sandbox_capability_reaches_the_live_resource_and_model(
                     url=peer.url,
                     headers={"Authorization": "Bearer " + peer.token},
                     cwd=str(child),
+                    write_policy=(
+                        "legacy"
+                        if sys.platform == "win32" or executor_platform == "windows"
+                        else "strict"
+                    ),
                     tools=(),
                 )
                 await peer.wait_disconnected()
@@ -190,6 +197,7 @@ async def test_sandbox_capability_tools_use_normal_catalog_collision_rules(
                     url=peer.url,
                     headers={"Authorization": "Bearer " + peer.token},
                     cwd=str(child),
+                    write_policy="legacy" if sys.platform == "win32" else "strict",
                 )
                 client.events.append("disconnect")
 
@@ -265,3 +273,48 @@ def test_sandbox_capability_workspace_has_been_rejecting_other_roots_and_authori
     environment = Environment(url="wss://executor.invalid", cwd=cwd)
     with pytest.raises(ValueError, match="gateway cwd within the workspace"):
         _capability_workspace(session, environment)
+
+
+async def test_sandbox_capability_keeps_strict_windows_executor_rejection(
+    tmp_path, monkeypatch, responses
+):
+    client = Client([])
+    native = provider(responses)
+    declaration = WorkspaceGuidance()
+    try:
+        async with ExecutorPeer(
+            tmp_path / "executor", advertised_platform="windows"
+        ).serve() as peer:
+            trust(peer, tmp_path, monkeypatch)
+            child = peer.root / "child"
+            child.mkdir()
+
+            @asynccontextmanager
+            async def connect(sandbox):
+                yield Environment(
+                    url=peer.url,
+                    headers={"Authorization": "Bearer " + peer.token},
+                    cwd=str(child),
+                )
+                client.events.append("disconnect")
+
+            source = sandbox_environment(
+                client,
+                manifest=Manifest(root=str(peer.root)),
+                options=Options(),
+                connect=connect,
+                capabilities=[declaration],
+            )
+            agent = Agent(instructions="Read the workspace.", provider=native)
+            with pytest.raises(
+                RuntimeError,
+                match="strict executor write policy requires a Linux or macOS executor",
+            ):
+                async with agent.session(environment=source):
+                    pytest.fail("Published a strict environment on a Windows executor")
+            assert not responses.requests
+            assert not any(request.get("method") == "process/start" for request in peer.requests)
+        assert declaration.bound is None
+        assert client.events == ["create", "start", "disconnect", "close", "delete"]
+    finally:
+        await native.aclose()
