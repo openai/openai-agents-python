@@ -3604,9 +3604,9 @@ class RealtimeSession:
                 call_id, "completed" if value["succeeded"] else "failed", value.get("output")
             )
             self._finished_functions.add(call_id)
-            owned = self._functions.get(call_id)
-            if owned is not None and owned.automatic_order is not None:
-                settled = owned.automatic_order.get(call_id)
+            finished_call = self._functions.get(call_id)
+            if finished_call is not None and finished_call.automatic_order is not None:
+                settled = finished_call.automatic_order.get(call_id)
                 if settled is not None:
                     settled.set()
             if call_id not in self._functions and call_id not in self._pending_functions:
