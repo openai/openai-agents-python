@@ -130,6 +130,69 @@ async def test_tripwire_keeps_completed_siblings_and_arbitrary_host_diagnostics(
         assert "local diagnostic" not in json.dumps([item async for item in session.items()])
 
 
+@pytest.mark.parametrize("error_first", [False, True])
+async def test_first_observed_output_failure_joins_declared_earlier_sibling(responses, error_first):
+    entered = asyncio.Event()
+    passed = asyncio.Event()
+    joined = asyncio.Event()
+    primary = ValueError("first observed callback failure")
+    cleanup = RuntimeError("later sibling cleanup failure")
+    marker = object()
+    context = object()
+
+    async def declared_first(request, source):
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            joined.set()
+            raise cleanup
+
+    async def passing(request, source):
+        await entered.wait()
+        passed.set()
+        return GuardrailResult(False, marker)
+
+    async def observed_first(request, source):
+        await passed.wait()
+        await asyncio.sleep(0)
+        assert source is agent
+        assert request.context is context
+        if error_first:
+            raise primary
+        return GuardrailResult(True)
+
+    responses.respond(assistant_output("candidate"))
+    agent = Agent(
+        instructions="Answer.",
+        provider=provider(responses),
+        output_guardrails=[
+            OutputGuardrail("declared-first", declared_first),
+            OutputGuardrail("passed", passing),
+            OutputGuardrail("observed-first", observed_first),
+        ],
+    )
+    async with timeout(20), agent.session(context=context) as session:
+        turn = await session.submit("begin")
+        with pytest.raises(ValueError if error_first else GuardrailTripwire) as caught:
+            await turn.get_result()
+        assert joined.is_set()
+        records = turn.guardrail_results
+        assert [record.name for record in records] == (
+            ["passed"] if error_first else ["passed", "observed-first"]
+        )
+        assert records[0].result.output_info is marker
+        assert all(record.agent is agent for record in records)
+        assert all(
+            record.turn_id == turn.turn_id and record.session_id == session.id for record in records
+        )
+        if error_first:
+            assert caught.value is primary
+        else:
+            assert caught.value.record is records[-1]
+            assert caught.value.results == records
+
+
 async def test_blocked_terminal_output_placeholder_precedes_history_and_stream_publication(
     responses,
 ):
