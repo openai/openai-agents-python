@@ -21,7 +21,7 @@ from ._public import (
     preserve_module_identity as _preserve_module_identity,
     type_alias_constructor as _type_alias_constructor,
 )
-from .input import InputAudio as _InputAudio
+from .input import InputAudio as _InputAudio, InputVideo as _InputVideo
 from .subagents import Subagent as Subagent
 
 if TYPE_CHECKING:
@@ -821,7 +821,7 @@ class UserMessageItem(TypedDict):
     role: Literal["user"]
     status: Literal["completed"]
     phase: None
-    content: list[InputText | InputImage | InputFile | _InputAudio]
+    content: list[InputText | InputImage | InputFile | _InputAudio | _InputVideo]
 
 
 SessionItem = _PublicTypeAliasType(

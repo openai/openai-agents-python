@@ -559,7 +559,7 @@ class EventProjector:
                 [
                     part
                     for part in native["content"]
-                    if part["type"] in {"text", "image", "file", "audio"}
+                    if part["type"] in {"text", "image", "file", "audio", "video"}
                 ]
             )
             return [

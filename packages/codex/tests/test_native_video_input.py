@@ -9,6 +9,7 @@ from aiohttp.test_utils import TestServer
 from openai import AsyncOpenAI
 
 from _agents_codex._media import _capture_video
+from _agents_codex._projection import EventProjector
 from agents import (
     Agent,
     ChatCompletionsModel,
@@ -131,10 +132,22 @@ async def test_native_video_keeps_its_position_across_turns_and_restore(stream: 
             async with agent.session() as session:
                 first = await session.submit(INPUT)
                 assert (await first.get_result()).final_output == "accepted"
+                recorded = [
+                    item["content"]
+                    async for item in session.items()
+                    if item["type"] == "message" and item["role"] == "user"
+                ]
+                assert recorded == [INPUT["content"]]
                 second = await session.submit("keep the context")
                 assert (await second.get_result()).final_output == "accepted"
                 state = await session.save_state()
             async with agent.session(state=SessionState.from_json(state.to_json())) as restored:
+                restored_items = [
+                    item["content"]
+                    async for item in restored.items()
+                    if item["type"] == "message" and item["role"] == "user"
+                ]
+                assert any(content == INPUT["content"] for content in restored_items)
                 third = await restored.submit("keep the restored context")
                 assert (await third.get_result()).final_output == "accepted"
     assert len(requests) == 4
@@ -142,6 +155,28 @@ async def test_native_video_keeps_its_position_across_turns_and_restore(stream: 
     for body in requests:
         assert body["stream"] is stream
         assert next(item["content"] for item in body["messages"] if item["role"] == "user") == WIRE
+
+
+def test_user_message_item_event_keeps_a_video_only_body() -> None:
+    projector = EventProjector("session")
+    events = projector.project(
+        {
+            "id": "turn",
+            "msg": {
+                "type": "item_completed",
+                "turnId": "turn",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "message",
+                    "content": [{"type": "video", "video_url": URL}],
+                },
+            },
+        }
+    )
+    [event] = events
+    assert event["type"] == "agent.session.turn.item.added"
+    assert event["item"]["type"] == "message" and event["item"]["role"] == "user"
+    assert event["item"]["content"] == [{"type": "input_video", "video_url": URL}]
 
 
 async def test_borrowed_responses_rejects_video_without_sending_it() -> None:

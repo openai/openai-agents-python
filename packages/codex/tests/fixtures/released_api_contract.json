@@ -3402,7 +3402,7 @@
           "class CloseSubagentCallItem(_RecipientSubagentCallItem):\n    type: Literal['close_subagent_call']",
           "class WaitForSubagentsCallItem(_SubagentCallItem):\n    type: Literal['wait_for_subagents_call']\n    sender_agent_id: str",
           "OutputItem = TypeAliasType('OutputItem', MessageItem | ReasoningItem | FunctionCallItem | ExecutionItem | CreateSubagentCallItem | SendSubagentInputCallItem | ResumeSubagentCallItem | InterruptSubagentCallItem | CloseSubagentCallItem | WaitForSubagentsCallItem | WebSearchCallItem | McpListToolsItem | HostedMcpCallItem | FileSearchCallItem | CodeInterpreterCallItem | ShellCallItem | LocalShellCallItem | ShellCallOutputItem | ImageGenerationCallItem)",
-          "class UserMessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['user']\n    status: Literal['completed']\n    phase: None\n    content: list[InputText | InputImage | InputFile | _InputAudio]",
+          "class UserMessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['user']\n    status: Literal['completed']\n    phase: None\n    content: list[InputText | InputImage | InputFile | _InputAudio | _InputVideo]",
           "SessionItem = TypeAliasType('SessionItem', OutputItem | FunctionCallOutputItem | ToolSearchCallItem | ToolSearchOutputItem | UserMessageItem)"
         ],
         "exports": {},
@@ -3411,11 +3411,12 @@
           "from typing import Literal as Literal",
           "from typing_extensions import NotRequired as NotRequired, TypeAliasType as TypeAliasType, TypedDict as TypedDict",
           "from .config import JsonValue as JsonValue",
-          "from .input import InputAudio as _InputAudio"
+          "from .input import InputAudio as _InputAudio, InputVideo as _InputVideo"
         ],
         "references": {
           "JsonValue": "agents.config.JsonValue",
-          "_InputAudio": "agents.input.InputAudio"
+          "_InputAudio": "agents.input.InputAudio",
+          "_InputVideo": "agents.input.InputVideo"
         }
       },
       "agents._function_tools": {
