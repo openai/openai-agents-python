@@ -16,7 +16,7 @@ from weakref import WeakKeyDictionary
 
 from typing_extensions import TypedDict
 
-from ._lifecycle import _error_contexts, _join, _retain_cleanup_error
+from ._lifecycle import _clear_error_frames, _error_contexts, _join, _retain_cleanup_error
 from ._public import preserve_module_identity as _preserve_module_identity
 from .models import (
     _MAX_CHAT_STREAM_BYTES,
@@ -416,9 +416,13 @@ class ResponsesWebSocketModel(ResponsesModel):
                 raise RuntimeError("Responses socket owner retired")
             assert connection is not None
             sent = True
-            sending = connection.socket.send(json.dumps(body, allow_nan=False))
-            if inspect.isawaitable(sending):
-                await _limited(sending, _timeout(self.client, selected, "write"))
+            try:
+                sending = connection.socket.send(json.dumps(body, allow_nan=False))
+                if inspect.isawaitable(sending):
+                    await _limited(sending, _timeout(self.client, selected, "write"))
+            except BaseException as error:
+                _clear_error_frames(error)
+                raise
             response_id = None
             while True:
                 payload = await _limited(

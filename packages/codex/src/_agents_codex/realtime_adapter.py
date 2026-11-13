@@ -1,11 +1,8 @@
 """Application-owned I/O below the native Realtime protocol owner."""
 
 import asyncio
-import builtins
 import inspect
 import json
-import sys
-import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -13,7 +10,7 @@ from functools import partial
 from types import MappingProxyType
 from typing import Protocol
 
-from ._lifecycle import _join
+from ._lifecycle import _clear_error_frames as _clear_adapter_error_frames, _join
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
@@ -67,22 +64,6 @@ class _AdapterHandle(Protocol):
     def end(self, success: bool) -> None: ...
 
     def finish(self) -> None: ...
-
-
-def _clear_adapter_error_frames(error: BaseException) -> None:
-    pending, seen = [error], set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        traceback.clear_frames(current.__traceback__)
-        if sys.version_info >= (3, 11):
-            if isinstance(current, builtins.BaseExceptionGroup):
-                pending.extend(current.exceptions)
-        pending.extend(
-            item for item in (current.__cause__, current.__context__) if item is not None
-        )
 
 
 @dataclass
