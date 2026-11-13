@@ -99,7 +99,11 @@ async def test_vercel_client_reports_observation_loss_without_success(
     responses: ResponsesFixture, node: str
 ) -> None:
     responses.respond(*text_response("native_lost", "old"))
-    responses.respond(*text_response("native_flood", *(["雪"] * 350)))
+    # Exceed retained characters even when provider text fragments coalesce.
+    # Keep the completed item below the native input-frame size limit.
+    flood_chunk = "雪" + "x" * 199
+    flood_output = flood_chunk * 350
+    responses.respond(*text_response("native_flood", *([flood_chunk] * 350)))
     async with (
         timeout(20),
         Agent(instructions="Reply.", provider=provider(responses)).session() as session,
@@ -107,7 +111,7 @@ async def test_vercel_client_reports_observation_loss_without_success(
         old = await session.submit("First")
         assert (await old.get_result()).final_output == "old"
         later = await session.submit("Fill the bounded observation buffer")
-        assert (await later.get_result()).final_output == "雪" * 350
+        assert (await later.get_result()).final_output == flood_output
         body = b"".join([frame async for frame in stream_turn(old, session=session)])
     result = read_client(node, body)
     assert result["error"] == "resync_required"

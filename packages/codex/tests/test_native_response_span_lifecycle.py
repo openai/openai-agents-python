@@ -147,13 +147,15 @@ async def run(case):
         ]
 
     async def wait_ends(count):
+        async def wait():
+            while len(responses("end")) < count:
+                processor_changed.clear()
+                if len(responses("end")) < count:
+                    await processor_changed.wait()
+
         try:
-            async with asyncio.timeout(5):
-                while len(responses("end")) < count:
-                    processor_changed.clear()
-                    if len(responses("end")) < count:
-                        await processor_changed.wait()
-        except TimeoutError:
+            await asyncio.wait_for(wait(), timeout=5)
+        except asyncio.TimeoutError:
             raise AssertionError(
                 "logical response did not end while approval remained pending"
             ) from None
