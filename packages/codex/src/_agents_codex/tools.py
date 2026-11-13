@@ -754,11 +754,12 @@ class _CapturedFunction:
 
     def _parse_arguments(self, arguments: Any) -> BaseModel:
         if isinstance(arguments, str):
-            arguments = json.loads(arguments)
-        else:
-            # Validators may mutate nested JSON values in place.
-            arguments = deepcopy(arguments)
-        return self.model.model_validate(arguments)
+            return self.model.model_validate(json.loads(arguments))
+        return self._validate_decoded_arguments(arguments)
+
+    def _validate_decoded_arguments(self, arguments: Any) -> BaseModel:
+        # Validators may mutate nested JSON values in place.
+        return self.model.model_validate(deepcopy(arguments))
 
     def _parse_replacement(self, arguments: Any, /) -> BaseModel:
         return self._parse_arguments(arguments)

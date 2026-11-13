@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -108,6 +109,10 @@ async def test_standalone_configured_input_and_body_failures():
     assert await broken.invoke({"amount": "bad"}, context="application") == ToolOutput.error(
         "ValidationError {'amount': 'bad'}"
     )
+    encoded_object = '{"amount": 2}'
+    assert await broken.invoke(
+        json.dumps(encoded_object), context="application"
+    ) == ToolOutput.error(f"ValidationError {encoded_object!r}")
     assert await broken.invoke({"amount": 2}, context="application") == ToolOutput.error(
         "application failure"
     )

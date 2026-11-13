@@ -964,7 +964,7 @@ async def _invoke_application_tool(
             raw = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
             if entry.input_error_function is not None and not isinstance(arguments, str):
                 raw = dict(_snapshot_function_arguments(raw, entry._ref))
-            parsed = entry._parse_arguments(raw)
+            parsed = entry._validate_decoded_arguments(raw)
         except (json.JSONDecodeError, ValidationError) as error:
             if entry.input_error_function is not None:
                 return await _application_error_output(
