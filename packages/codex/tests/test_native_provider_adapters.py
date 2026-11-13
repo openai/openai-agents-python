@@ -541,6 +541,78 @@ def _assert_adapter_frames_released(error: BaseException, *, sdk_chain: bool = F
     )
 
 
+@pytest.mark.parametrize("adapter", ["responses", "anyllm"])
+@pytest.mark.parametrize(
+    "input",
+    [
+        "synthetic-private-prompt",
+        [{"role": "user", "content": "synthetic-private-prompt"}],
+        [{"type": "message", "role": "user", "content": "synthetic-private-prompt"}],
+    ],
+)
+async def test_responses_text_input_reaches_provider(adapter, input):
+    received = []
+
+    async def create(*, extra_body=None, **options):
+        received.append(extra_body["input"] if adapter == "responses" else options["input_data"])
+        return {"status": "completed", "output": []}
+
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=create),
+        aresponses=create,
+        PROVIDER_NAME="openai",
+        SUPPORTS_RESPONSES=True,
+    )
+    model = (
+        ResponsesModel(client) if adapter == "responses" else AnyLLMModel(client, api="responses")
+    )
+    result = await model.complete(
+        ModelRequest({"model": "fixture", "input": input}, None, "s", "t")
+    )
+    assert result.output == []
+    assert received == [input]
+
+
+@pytest.mark.parametrize("adapter", ["responses", "anyllm"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("typed_message", [False, True])
+async def test_responses_video_rejection_releases_payloads(adapter, stream, typed_message):
+    calls = []
+
+    async def create(*, extra_body=None, **options):
+        calls.append(options)
+        raise AssertionError("Video input reached the provider")
+
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=create),
+        aresponses=create,
+        PROVIDER_NAME="openai",
+        SUPPORTS_RESPONSES=True,
+    )
+    model = (
+        ResponsesModel(client, stream=stream)
+        if adapter == "responses"
+        else AnyLLMModel(client, api="responses", stream=stream)
+    )
+    message = {
+        "role": "user",
+        "content": [
+            {"type": "input_video", "video_url": "https://synthetic-private-prompt.invalid/v.mp4"}
+        ],
+        **({"type": "message"} if typed_message else {}),
+    }
+    request = ModelRequest({"model": "fixture", "input": [message]}, None, "s", "t")
+    with pytest.raises(ValueError, match="Video input requires") as caught:
+        if stream:
+            assert model.stream is not None
+            async for _ in model.stream(request):
+                pass
+        else:
+            await model.complete(request)
+    assert calls == []
+    _assert_adapter_frames_released(caught.value)
+
+
 @pytest.mark.parametrize("status", ["incomplete", "failed"])
 async def test_responses_failure_traceback_releases_sdk_payloads(status):
     async def create(**options):

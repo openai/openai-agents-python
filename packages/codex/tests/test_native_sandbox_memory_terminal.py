@@ -18,6 +18,12 @@ if os.name != "nt":
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="UnixLocal memory fixture")
 
+if os.name != "nt":
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
+
 
 @pytest.mark.parametrize("capture", [False, True], ids=["flush", "suspend"])
 @pytest.mark.parametrize("failed", [False, True], ids=["compact", "private-error"])

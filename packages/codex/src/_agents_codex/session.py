@@ -3121,6 +3121,26 @@ def _restore_operation_tools(
     return slots, refs, selected_mcp, declared
 
 
+def _configured_continuation_slots(
+    catalog: _ToolCatalog,
+    operation_slots: tuple[int, ...] | None,
+    continuation: _ManualContinuation | None,
+) -> list[int]:
+    if continuation is None:
+        return []
+    return [
+        slot
+        for slot, tool in enumerate(catalog.tools)
+        if isinstance(tool, _CapturedFunction)
+        and tool.configured_agent is not None
+        and (operation_slots is None or slot in operation_slots)
+        and any(
+            pending.tool == tool.name and pending.continuation is not None
+            for pending in continuation.pending_manual
+        )
+    ]
+
+
 def _handoff_restore_targets(profile: _AgentProfile) -> Iterator[str]:
     yield from profile.handoffs.values()
     for decision in profile.decision_handoffs.values():
@@ -4008,25 +4028,15 @@ def _opening_callback_options(
 
 def _opening_continuation_slot_options(
     restored_catalog: _ToolCatalog,
-    operation_slots: Sequence[int] | None,
-    saved: SessionState | None,
+    operation_slots: tuple[int, ...] | None,
+    continuation: _ManualContinuation | None,
     *,
     run_formatter: bool,
 ) -> dict[str, Any]:
     return {
-        "_configured_continuation_tool_slots": [
-            slot
-            for slot, tool in enumerate(restored_catalog.tools)
-            if isinstance(tool, _CapturedFunction)
-            and tool.configured_agent is not None
-            and (operation_slots is None or slot in operation_slots)
-            and saved is not None
-            and saved.native_continuation is not None
-            and any(
-                pending.tool == tool.name and pending.continuation is not None
-                for pending in saved.native_continuation.pending_manual
-            )
-        ],
+        "_configured_continuation_tool_slots": _configured_continuation_slots(
+            restored_catalog, operation_slots, continuation
+        ),
         "_terminal_tool_slots": restored_catalog.finish_slots(),
         "_input_error_tool_slots": restored_catalog.input_error_slots(run_formatter=run_formatter),
     }
@@ -5167,7 +5177,7 @@ class Session(Generic[ContextT, OutputT]):
                     **_opening_continuation_slot_options(
                         restored_catalog,
                         operation_slots,
-                        saved if state is not None else None,
+                        continuation,
                         run_formatter=tool_error_formatter is not None,
                     ),
                     **_native_agent_options(native_agents),
