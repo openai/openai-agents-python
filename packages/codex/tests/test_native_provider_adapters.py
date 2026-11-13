@@ -65,6 +65,7 @@ async def _exercise_borrowed_provider(
     reasoning=False,
     streaming=False,
     anyllm_api=None,
+    anyllm_provider="openai",
 ):
     seen = []
     effects = []
@@ -250,7 +251,7 @@ async def _exercise_borrowed_provider(
             else:
                 any_llm = pytest.importorskip("any_llm")
                 borrowed = any_llm.AnyLLM.create(
-                    "openai", api_key="synthetic", api_base=base, max_retries=0
+                    anyllm_provider, api_key="synthetic", api_base=base, max_retries=0
                 )
                 if anyllm_api is not None:
                     options["api"] = anyllm_api
@@ -376,15 +377,29 @@ async def test_native_chat_penalties_reach_borrowed_clients(adapter, monkeypatch
 
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("api", ["responses", "auto"])
-async def test_anyllm_responses_uses_native_tool_continuation(api, streaming, monkeypatch):
+@pytest.mark.parametrize("provider_name", ["openai", "openrouter"])
+async def test_anyllm_responses_uses_native_tool_continuation(
+    api, streaming, monkeypatch, provider_name
+):
     await _exercise_borrowed_provider(
-        "any_llm_responses", "complete", monkeypatch, streaming=streaming, anyllm_api=api
+        "any_llm_responses",
+        "complete",
+        monkeypatch,
+        streaming=streaming,
+        anyllm_api=api,
+        anyllm_provider=provider_name,
     )
 
 
-async def test_anyllm_responses_cancel_keeps_borrowed_client_owned(monkeypatch):
+@pytest.mark.parametrize("provider_name", ["openai", "openrouter"])
+async def test_anyllm_responses_cancel_keeps_borrowed_client_owned(monkeypatch, provider_name):
     await _exercise_borrowed_provider(
-        "any_llm_responses", "cancel", monkeypatch, streaming=True, anyllm_api="responses"
+        "any_llm_responses",
+        "cancel",
+        monkeypatch,
+        streaming=True,
+        anyllm_api="responses",
+        anyllm_provider=provider_name,
     )
 
 
@@ -401,7 +416,9 @@ def test_anyllm_responses_rejects_unqualified_provider_before_io(provider_name):
         SUPPORTS_RESPONSES=True,
         aresponses=old_openai_responses if provider_name == "openai" else gemini_responses,
     )
-    with pytest.raises(ValueError, match="OpenAI provider with public aresponses extra_body"):
+    with pytest.raises(
+        ValueError, match="OpenAI or OpenRouter provider with public aresponses extra_body"
+    ):
         AnyLLMModel(provider, api="responses")
     assert AnyLLMModel(provider, api="auto") == AnyLLMModel(provider)
 

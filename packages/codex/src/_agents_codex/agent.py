@@ -143,6 +143,7 @@ class HostedToolChoice(TypedDict, total=False, closed=True):
             "shell",
             "apply_patch",
             "tool_search",
+            "programmatic_tool_calling",
             "mcp",
         ]
     ]
@@ -211,6 +212,7 @@ class ModelSettings(TypedDict, total=False, closed=True):
     store: bool | None
     prompt_cache_retention: Literal["in_memory", "24h"] | None
     prompt_cache_ttl: Literal["30m", "12h"] | None
+    prompt_cache_mode: Literal["explicit"] | None
     invocation_timeout_ms: int | None
     attempt_timeout_ms: int | None
     retry: ModelRetrySettings | None

@@ -14,6 +14,32 @@ from agents import (
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 
 
+async def test_native_explicit_cache_mode_preserves_ttl_when_cleared(responses):
+    for _ in range(3):
+        responses.respond(assistant_output("done"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-cache-controls"
+    ) as provider:
+        agent = Agent(
+            model="fixture-cache-controls",
+            instructions="Use the captured cache settings.",
+            provider=provider,
+        )
+        async with agent.session() as session:
+            await (await session.submit("Provider default.")).get_result()
+            await session.update(
+                model_settings={"prompt_cache_mode": "explicit", "prompt_cache_ttl": "30m"}
+            )
+            await (await session.submit("Explicit cache.")).get_result()
+            await session.update(model_settings={"prompt_cache_mode": None})
+            await (await session.submit("Retain the TTL.")).get_result()
+    assert [r.get("prompt_cache_options") for r in responses.requests] == [
+        None,
+        {"mode": "explicit", "ttl": "30m"},
+        {"ttl": "30m"},
+    ]
+
+
 async def test_native_hosted_choice_updates_and_restores(responses):
     for _ in range(4):
         responses.respond(assistant_output("done"))
@@ -163,3 +189,41 @@ async def test_native_mcp_choice_keeps_read_only_filter_without_name_list(respon
     assert next(tool for tool in request["tools"] if tool["type"] == "mcp")["allowed_tools"] == {
         "read_only": True
     }
+
+
+@pytest.mark.parametrize("declared", [True, False])
+async def test_provider_programmatic_selector_requires_its_hosted_declaration(responses, declared):
+    from agents import CodeInterpreter, HostedProgrammaticToolCalling, NativeError
+
+    responses.respond(assistant_output("provider completed"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-provider-programmatic"
+    ) as provider:
+        agent = Agent(
+            model="gpt-5.5",
+            instructions="Use the configured provider declaration.",
+            provider=provider,
+            tools=[
+                CodeInterpreter(container="cntr_fixture", allowed_callers=["programmatic"]),
+                *([HostedProgrammaticToolCalling()] if declared else []),
+            ],
+            model_settings={"tool_choice": {"type": "programmatic_tool_calling"}},
+        )
+        if declared:
+            assert (await agent.run("Inspect the synthetic program.")).final_output == (
+                "provider completed"
+            )
+        else:
+            with pytest.raises(NativeError, match="outside the final offered catalog"):
+                await agent.run("Inspect the synthetic program.")
+    if not declared:
+        assert not responses.requests
+        return
+    [request] = responses.requests
+    assert request["tool_choice"] == {"type": "programmatic_tool_calling"}
+    assert {"type": "programmatic_tool_calling"} in request["tools"]
+    assert {
+        "type": "code_interpreter",
+        "container": "cntr_fixture",
+        "allowed_callers": ["programmatic"],
+    } in request["tools"]

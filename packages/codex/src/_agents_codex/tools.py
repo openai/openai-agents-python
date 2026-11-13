@@ -358,11 +358,32 @@ class ToolSearch:
         )
 
 
-_HOSTED_TOOLS = (FileSearch, CodeInterpreter, HostedShell, ImageGeneration, ToolSearch)
+@dataclass(frozen=True, kw_only=True)
+class HostedProgrammaticToolCalling:
+    """Declare provider-side programmatic tool calling for Responses.
+
+    Use with a provider tool that permits programmatic callers or with tool
+    search. The Responses provider owns execution of the program.
+    """
+
+
+_HOSTED_TOOLS = (
+    FileSearch,
+    CodeInterpreter,
+    HostedShell,
+    ImageGeneration,
+    ToolSearch,
+    HostedProgrammaticToolCalling,
+)
 
 
 def _hosted_tool_name(
-    tool: FileSearch | CodeInterpreter | HostedShell | ImageGeneration | ToolSearch,
+    tool: FileSearch
+    | CodeInterpreter
+    | HostedShell
+    | ImageGeneration
+    | ToolSearch
+    | HostedProgrammaticToolCalling,
 ) -> str:
     if isinstance(tool, FileSearch):
         return "file_search"
@@ -372,6 +393,8 @@ def _hosted_tool_name(
         return "shell"
     if isinstance(tool, ToolSearch):
         return "tool_search"
+    if isinstance(tool, HostedProgrammaticToolCalling):
+        return "programmatic_tool_calling"
     return "image_generation"
 
 
@@ -418,6 +441,14 @@ def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
         if isinstance(tool, ToolSearch):
             if tool.execution != "client":
                 specs.append(tool._provider_spec())
+            continue
+        if isinstance(tool, HostedProgrammaticToolCalling):
+            specs.append(
+                {
+                    "type": "provider_only",
+                    "definition": {"type": "programmatic_tool_calling"},
+                }
+            )
             continue
         fields = asdict(tool)
         provider_data = fields.pop("provider_data")

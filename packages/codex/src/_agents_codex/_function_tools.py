@@ -74,6 +74,7 @@ from .tools import (
     Checklist as Checklist,
     CodeInterpreter as CodeInterpreter,
     FileSearch as FileSearch,
+    HostedProgrammaticToolCalling as HostedProgrammaticToolCalling,
     HostedShell as HostedShell,
     ImageGeneration as ImageGeneration,
     NativeGoals as NativeGoals,
@@ -868,6 +869,7 @@ Tool: TypeAlias = (
     | FileSearch
     | CodeInterpreter
     | HostedShell
+    | HostedProgrammaticToolCalling
     | ImageGeneration
     | HostedMCP[ToolContextT]
     | ToolSearch

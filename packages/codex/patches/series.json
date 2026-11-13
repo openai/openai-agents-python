@@ -979,7 +979,11 @@
     {
       "path": "sdk-video-input.patch",
       "sha256": "614b311673b21959d58608111dea2d351ec98e4f1acbbb083a710c07c4fa2ebb"
+    },
+    {
+      "path": "sdk-provider-programmatic-cache-controls.patch",
+      "sha256": "3c8f6ccee574f9f906a62eee9abdfd4680d8830a04fca1bd070638fd4d0b642f"
     }
   ],
-  "result_tree": "c52f01c4f053a339bbecb45fabf6830ec522cacc"
+  "result_tree": "d4f6846045fbc87cb12bd91e2b48b63b05c417f2"
 }

@@ -1488,7 +1488,7 @@ class AnyLLMModel(ChatCompletionsModel):
     Inherited native cache hints are omitted for providers declaring them unsupported.
     Explicit adapter cache overrides, including empty strings, remain provider-validated.
     Generic completion requests omit the native ``store=False`` default.
-    Set ``api="responses"`` for the AnyLLM OpenAI provider with public
+    Set ``api="responses"`` for an AnyLLM OpenAI or OpenRouter provider with public
     ``aresponses(extra_body=...)`` support. ``api="auto"`` selects Responses
     when both conditions hold, otherwise it uses Chat Completions. The default
     uses Chat Completions. ``include_usage`` applies to Chat Completions only.
@@ -1511,9 +1511,9 @@ class AnyLLMModel(ChatCompletionsModel):
             raise ValueError("AnyLLMModel api must be chat_completions, responses or auto")
         use_responses = False
         if api != "chat_completions":
-            is_openai = getattr(client, "PROVIDER_NAME", None) == "openai"
+            is_qualified = getattr(client, "PROVIDER_NAME", None) in ("openai", "openrouter")
             advertises_responses = getattr(client, "SUPPORTS_RESPONSES", False) is True
-            if is_openai and advertises_responses:
+            if is_qualified and advertises_responses:
                 create = getattr(client, "aresponses", None)
                 if callable(create):
                     create = inspect.unwrap(create)
@@ -1525,7 +1525,7 @@ class AnyLLMModel(ChatCompletionsModel):
                         )
             if api == "responses" and not use_responses:
                 raise ValueError(
-                    "AnyLLM Responses requires the OpenAI provider with public "
+                    "AnyLLM Responses requires an OpenAI or OpenRouter provider with public "
                     "aresponses extra_body support"
                 )
             if use_responses and request_options is not None:
@@ -1673,13 +1673,18 @@ class ResponsesModel:
 
     @staticmethod
     def _check_video_input(request: ModelRequest) -> None:
-        if any(
-            part.get("type") == "input_video"
-            for item in request.body.get("input", [])
-            if item.get("type") == "message"
-            for part in item.get("content", [])
-        ):
-            raise ValueError("Video input requires a compatible Chat Completions model")
+        items: Any = None
+        try:
+            items = request.body.get("input")
+            if isinstance(items, (list, tuple)) and any(
+                isinstance(part, Mapping) and part.get("type") == "input_video"
+                for item in items
+                if isinstance(item, Mapping) and item.get("type") == "message"
+                for part in item.get("content", [])
+            ):
+                raise ValueError("Video input requires a compatible Chat Completions model")
+        finally:
+            del request, items
 
     @asynccontextmanager
     async def _opened_stream(self, response: Any) -> AsyncIterator[AsyncIterator[Any]]:

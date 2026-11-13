@@ -78,6 +78,7 @@ def _capture_hosted_tool_choice(value: Mapping[str, Any]) -> Mapping[str, Any]:
         "shell",
         "apply_patch",
         "tool_search",
+        "programmatic_tool_calling",
         "mcp",
     }
     if (
@@ -210,11 +211,17 @@ def _capture_model_settings(
             captured[key] = json.loads(
                 json.dumps(dict(value) if isinstance(value, Mapping) else value, allow_nan=False)
             )
-        elif key in ("verbosity", "prompt_cache_retention", "prompt_cache_ttl"):
+        elif key in (
+            "verbosity",
+            "prompt_cache_retention",
+            "prompt_cache_ttl",
+            "prompt_cache_mode",
+        ):
             allowed = {
                 "verbosity": ("low", "medium", "high"),
                 "prompt_cache_retention": ("in_memory", "24h"),
                 "prompt_cache_ttl": ("30m", "12h"),
+                "prompt_cache_mode": ("explicit",),
             }[key]
             if value not in allowed:
                 raise ValueError(f"Unsupported {key}")

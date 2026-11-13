@@ -460,6 +460,7 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
         "store",
         "prompt_cache_retention",
         "prompt_cache_ttl",
+        "prompt_cache_mode",
         "truncation",
         "include",
         "context_management",
@@ -577,6 +578,7 @@ def _manual_restore_model_settings(
             "store",
             "prompt_cache_retention",
             "prompt_cache_ttl",
+            "prompt_cache_mode",
             "truncation",
             "include",
             "context_management",
@@ -3718,7 +3720,12 @@ def _opening_tool_policy(
         ]
         + mcp_names
         + [
-            {"name": tool["type"], "namespace": "functions"}
+            {
+                "name": tool["definition"]["type"]
+                if tool["type"] == "provider_only"
+                else tool["type"],
+                "namespace": "functions",
+            }
             for tool in hosted_tools
             if tool["type"] != "mcp"
         ]
