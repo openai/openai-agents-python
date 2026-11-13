@@ -60,12 +60,15 @@ class SandboxMemoryOptions:
     """Configure the two native Agents that extract and consolidate memory.
 
     Remote workspaces need image-owned Python 3 for bounded, no-follow file reads.
+    Media stays as type-only markers unless include_media_content explicitly
+    authorizes its known content fields in stored rollouts and extraction requests.
     """
 
     phase_one: Agent[None, Any]
     phase_two: Agent[None, Any]
     layout: MemoryLayoutConfig = field(default_factory=MemoryLayoutConfig)
     max_raw_memories: int = 16
+    include_media_content: bool = False
 
 
 class _Extraction(RolloutExtractionArtifacts):
@@ -86,24 +89,63 @@ def _bounded_json(value: object) -> str:
     return encoded
 
 
-def _memory_content_parts(parts: list[Any], *, tool_output: bool = False) -> list[dict[str, str]]:
-    content: list[dict[str, str]] = []
+_MEMORY_MEDIA_FIELDS = {
+    "input_image": ("image_url", "file_id", "detail"),
+    "input_file": ("file_id", "file_data", "file_url", "filename"),
+    "input_audio": ("audio_url",),
+    "image": ("url",),
+    "computer_screenshot": ("image_url", "file_id", "detail"),
+}
+
+
+def _memory_media_value(value: Any, *, include_media_content: bool) -> Any:
+    if isinstance(value, list):
+        return [
+            _memory_media_value(item, include_media_content=include_media_content) for item in value
+        ]
+    if not isinstance(value, dict):
+        return value
+    kind = value.get("type")
+    fields = _MEMORY_MEDIA_FIELDS.get(kind) if isinstance(kind, str) else None
+    if fields is not None:
+        return {
+            "type": kind,
+            **(
+                {key: value[key] for key in fields if isinstance(value.get(key), str)}
+                if include_media_content
+                else {}
+            ),
+        }
+    return {
+        key: _memory_media_value(item, include_media_content=include_media_content)
+        for key, item in value.items()
+    }
+
+
+def _memory_content_parts(
+    parts: list[Any], *, include_media_content: bool = False
+) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = []
     for part in parts:
-        if isinstance(part, dict):
-            kind = part.get("type")
-            if kind in ("input_text", "output_text") and isinstance(part.get("text"), str):
-                content.append({"type": kind, "text": part["text"]})
-                continue
-            if tool_output and kind in ("input_image", "input_file"):
-                # Memory records only the presence and kind of tool output media.
-                content.append({"type": kind})
-                continue
-        raise ValueError("Native sandbox memory requires text message history")
+        if not isinstance(part, dict) or not isinstance(part.get("type"), str):
+            raise ValueError("Invalid native memory content")
+        kind = part["type"]
+        if kind in ("input_text", "output_text"):
+            if not isinstance(part.get("text"), str):
+                raise ValueError("Invalid native memory text")
+            content.append({"type": kind, "text": part["text"]})
+        elif kind in ("input_image", "input_file", "input_audio"):
+            content.append(_memory_media_value(part, include_media_content=include_media_content))
     return content
 
 
 def _memory_transcript(
-    thread_id: str, snapshot: CanonicalHistorySnapshot, sandbox_id: str
+    thread_id: str,
+    snapshot: CanonicalHistorySnapshot,
+    sandbox_id: str,
+    terminal_metadata: dict[str, Any] | None = None,
+    *,
+    include_media_content: bool = False,
 ) -> dict[str, Any]:
     if snapshot.total > _MAX_RECORDS:
         raise ValueError("Native sandbox memory supports at most 256 original records")
@@ -111,6 +153,8 @@ def _memory_transcript(
     for item in snapshot.items:
         kind = item.get("type")
         role = item.get("role")
+        if role in ("system", "developer"):
+            continue
         if kind == "reasoning":
             continue
         if kind == "function_call":
@@ -121,16 +165,20 @@ def _memory_transcript(
                 call["namespace"] = namespace
             messages.append({"type": kind, **call})
             continue
-        if kind == "function_call_output":
+        if kind in ("function_call_output", "custom_tool_call_output"):
             call_id, output = item.get("call_id"), item.get("output")
-            if not isinstance(call_id, str):
+            if call_id is not None and not isinstance(call_id, str):
                 raise ValueError("Invalid native memory function output")
-            result: dict[str, Any] = {"type": kind, "call_id": call_id}
+            result: dict[str, Any] = {"type": kind}
+            if isinstance(call_id, str):
+                result["call_id"] = call_id
+            if isinstance(item.get("name"), str):
+                result["name"] = item["name"]
             if item.get("status") == "failed":
                 result["status"] = "failed"
             if isinstance(output, (str, list)):
                 result["output"] = (
-                    _memory_content_parts(output, tool_output=True)
+                    _memory_content_parts(output, include_media_content=include_media_content)
                     if isinstance(output, list)
                     else output
                 )
@@ -144,13 +192,15 @@ def _memory_transcript(
             messages.append(result)
             continue
         if kind != "message":
-            if isinstance(kind, str) and (
-                kind in _INCLUDED_MEMORY_ITEM_TYPES
-                or kind in _EXCLUDED_MEMORY_ITEM_TYPES
-                or kind in _HOSTED_RESPONSE_ITEM_FIELDS
+            if (
+                isinstance(kind, str)
+                and kind not in _EXCLUDED_MEMORY_ITEM_TYPES
+                and (kind in _INCLUDED_MEMORY_ITEM_TYPES or kind in _HOSTED_RESPONSE_ITEM_FIELDS)
             ):
-                raise ValueError(
-                    "Native sandbox memory requires text messages and function tool history"
+                record = dict(item)
+                record.pop("internal_chat_message_metadata_passthrough", None)
+                messages.append(
+                    _memory_media_value(record, include_media_content=include_media_content)
                 )
             continue
         if role not in ("user", "assistant"):
@@ -171,14 +221,29 @@ def _memory_transcript(
             ]
             if not parts:
                 continue
-        messages.append({"role": role, "content": _memory_content_parts(parts)})
+        messages.append(
+            {
+                "role": role,
+                "content": _memory_content_parts(
+                    parts, include_media_content=include_media_content
+                ),
+            }
+        )
     return {
         "rollout_id": thread_id,
         "native_thread_id": thread_id,
         "sandbox_session_id": sandbox_id,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "terminal_metadata": {
-            "terminal_state": "completed",
+            **(
+                terminal_metadata
+                or {
+                    "terminal_state": "completed",
+                    "exception_type": None,
+                    "exception_message": None,
+                    "has_final_output": True,
+                }
+            ),
             "native_history_revision": snapshot.revision,
         },
         "items": messages,
@@ -198,6 +263,8 @@ def _capture_sandbox_memory(
     options: SandboxMemoryOptions,
 ) -> Callable[[SandboxSession], _SandboxMemoryOwner]:
     limit = options.max_raw_memories
+    if not isinstance(options.include_media_content, bool):
+        raise TypeError("include_media_content must be a bool")
     if not 1 <= limit <= 256:
         raise ValueError("max_raw_memories must be between 1 and 256")
     layout = MemoryLayoutConfig(
@@ -208,7 +275,9 @@ def _capture_sandbox_memory(
     consolidate = options.phase_two.with_output_type(_Consolidation)
 
     def create(resource: SandboxSession) -> _SandboxMemoryOwner:
-        return _SandboxMemoryOwner(resource, layout, extract, consolidate, limit)
+        return _SandboxMemoryOwner(
+            resource, layout, extract, consolidate, limit, options.include_media_content
+        )
 
     return create
 
@@ -221,6 +290,7 @@ class _SandboxMemoryOwner:
         extract: Agent[None, _Extraction],
         consolidate: Agent[None, _Consolidation],
         max_raw_memories: int,
+        include_media_content: bool,
     ) -> None:
         from agents.classic.sandbox.memory.storage import SandboxMemoryStorage
 
@@ -231,6 +301,7 @@ class _SandboxMemoryOwner:
         self._extract = extract
         self._consolidate = consolidate
         self._max_raw_memories = max_raw_memories
+        self._include_media_content = include_media_content
         self._thread: str | None = None
         self._completed_revision: str | None = None
 
@@ -255,14 +326,26 @@ class _SandboxMemoryOwner:
             raise ValueError("Sandbox memory rollout exceeds 4000000 bytes")
         await self._storage.write_text(path, (prior + next_line).decode("utf-8"))
 
-    async def flush(self, thread: str, snapshot: CanonicalHistorySnapshot) -> None:
+    async def flush(
+        self,
+        thread: str,
+        snapshot: CanonicalHistorySnapshot,
+        *,
+        terminal_metadata: dict[str, Any] | None = None,
+    ) -> None:
         thread = validate_rollout_id(thread)
         if self._thread is not None and self._thread != thread:
             raise RuntimeError("Sandbox memory belongs to another native Session")
         if self._completed_revision == snapshot.revision:
             return
         sandbox_id = str(self._resource.state.session_id)
-        transcript = _memory_transcript(thread, snapshot, sandbox_id)
+        transcript = _memory_transcript(
+            thread,
+            snapshot,
+            sandbox_id,
+            terminal_metadata,
+            include_media_content=self._include_media_content,
+        )
         line = _bounded_json(transcript)
         self._thread = thread
         scope = _MemoryPhaseScope(self)
@@ -297,7 +380,7 @@ class _SandboxMemoryOwner:
             rollout_id=thread,
             rollout_path=rollout_path.as_posix(),
             rollout_summary_file=f"rollout_summaries/{thread}.md",
-            terminal_state="completed",
+            terminal_state=transcript["terminal_metadata"]["terminal_state"],
             raw_memory=artifacts.raw_memory,
         )
         await storage.write_text(storage.raw_memories_dir / f"{thread}.md", raw)
@@ -307,7 +390,7 @@ class _SandboxMemoryOwner:
                 updated_at=transcript["updated_at"],
                 rollout_path=rollout_path.as_posix(),
                 session_id=sandbox_id,
-                terminal_state="completed",
+                terminal_state=transcript["terminal_metadata"]["terminal_state"],
                 rollout_summary=artifacts.rollout_summary,
             ),
         )

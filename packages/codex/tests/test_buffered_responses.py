@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections import deque
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -665,6 +665,9 @@ async def test_cancel_buffered_body_joins_and_provider_remains_usable(operation:
                 else:
                     async with agent.session() as session:
                         turn = await session.submit("cancel this body")
+                        # Known admission before cancellation of the buffered body.
+                        async with aclosing(turn.events()) as observations:
+                            assert isinstance(await anext(observations), TurnStarted)
                         await peer.body_entered.wait()
                         await turn.cancel()
                         with pytest.raises(TurnStoppedError):

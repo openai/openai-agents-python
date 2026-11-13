@@ -939,7 +939,11 @@
     {
       "path": "sdk-client-version.patch",
       "sha256": "1fae03966cd574d2522aea5e036fc4fdd02bba45716952cf7991cae32ec642b1"
+    },
+    {
+      "path": "sdk-provider-history-lineage.patch",
+      "sha256": "6080a8a7da76718c431a73a53136244af8e87d8108d79314e054d066db30ace6"
     }
   ],
-  "result_tree": "462a79cba6158169bf5212ad217325afaecfb530"
+  "result_tree": "bae0ede6894150d4f5d7b5e786e81ad7b48cf5dd"
 }

@@ -386,6 +386,7 @@ enum Message {
 pub enum Decision {
     Continue,
     Replace { value: Value },
+    ReplaceMcpArguments { value: Value },
     Deny,
 }
 
@@ -1921,7 +1922,9 @@ impl Control {
                     .expect("interception control poisoned");
                 match reply {
                     Ok(Reply::Decision(
-                        decision @ (Decision::Continue | Decision::Replace { .. }),
+                        decision @ (Decision::Continue
+                        | Decision::Replace { .. }
+                        | Decision::ReplaceMcpArguments { .. }),
                     )) if !state.revoked
                         && !owner
                             .as_ref()
@@ -3131,8 +3134,10 @@ impl DirectRequest {
         {
             return Err(rejected());
         }
+        let original_mcp_call =
+            matches!(&decision, Decision::ReplaceMcpArguments { .. }).then(|| item.clone());
         let mut changed = false;
-        if let Decision::Replace { value } = decision {
+        if let Decision::Replace { value } | Decision::ReplaceMcpArguments { value } = decision {
             changed = match &mut item {
                 ResponseItem::FunctionCall {
                     arguments,
@@ -3189,6 +3194,13 @@ impl DirectRequest {
                 _ => return Err(rejected()),
             };
             if changed {
+                if let Some(original) = original_mcp_call {
+                    self.tool_admission
+                        .as_ref()
+                        .ok_or_else(rejected)?
+                        .admit_mcp_argument_rewrite(&original, &item)
+                        .map_err(|_| rejected())?;
+                }
                 // The rewritten item is local content, not the provider item
                 // identified by its original ID. Keep call_id for execution
                 // and results; let Core assign its normal local history ID.

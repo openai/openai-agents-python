@@ -36,6 +36,7 @@ def test_provider_dataclass_declaration_does_not_load_native(response_mode):
         "stream_idle_timeout_ms": None,
         "websocket_connect_timeout_ms": None,
         "websocket_base_url": None,
+        "agent_harness_id": None,
     }
     assert [field.name for field in fields(provider)] == list(expected)
     assert asdict(provider) == expected

@@ -222,7 +222,7 @@ class ConversationsHistory:
         """One native Session, with remote history import and accepted public output append."""
         if any(
             session_options.get(key) is not None
-            for key in ("state", "resume", "storage", "initial_messages")
+            for key in ("state", "resume", "storage", "initial_messages", "provider_history")
         ):
             raise ValueError("Conversations history requires a fresh native Session history owner")
         parts = _native_input(input)

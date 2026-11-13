@@ -324,7 +324,9 @@ async def test_interrupted_opening_exposes_existing_provider_cleanup(
 
     monkeypatch.setattr(NativeProvider, "_defer_opening", defer)
     monkeypatch.setattr(_native, "create_engine", engine)
-    monkeypatch.setattr(native_session, "_close_after_error", observe_interruption)
+    monkeypatch.setattr(
+        f"{native_session._EnvironmentLease.__module__}._close_after_error", observe_interruption
+    )
     monkeypatch.setattr(_native.NativeThread, "_submit", forbid_submission)
     shared = None if implicit_provider else provider(responses)
     agent = Agent(
