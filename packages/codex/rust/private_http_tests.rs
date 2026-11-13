@@ -210,10 +210,8 @@ async fn private_function_scope_preserves_wss_and_borrows_http_pool() {
     ] {
         assert!(serde_json::from_value::<crate::options::ThreadOptions>(untrusted).is_err());
     }
-    let private = crate::options::ThreadOptions {
-        private_function_scope: true,
-        ..Default::default()
-    };
+    let mut private = crate::options::ThreadOptions::default();
+    private.private_function_scope = true;
     let original = parent.model_provider.clone();
     let catalog = parent.model_providers.clone();
     let mut child = StartThreadOptions::new(parent.clone());
