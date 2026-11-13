@@ -73,6 +73,8 @@ pub(crate) struct ProfileSpec {
     #[serde(default)]
     selecting_steps: bool,
     output_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wire_output_schema: Option<Value>,
     #[serde(default)]
     mcp_servers: BTreeMap<String, Value>,
     #[serde(default)]
@@ -324,6 +326,13 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
         ensure!(
             !profile.id.is_empty() && !profile.output_fingerprint.is_empty(),
             "Incomplete captured Agent declaration"
+        );
+        ensure!(
+            profile
+                .wire_output_schema
+                .as_ref()
+                .is_none_or(Value::is_object),
+            "Captured Agent wire output schema must be an object"
         );
         let mut all_declarations = profile.tools.clone();
         for name in profile.handoffs.keys() {
@@ -1046,6 +1055,11 @@ impl AgentProfiles {
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
         });
+        if let Some(schema) = &prepared.declaration.wire_output_schema {
+            data.insert(codex_extension_api::AgentProfileOutputSchema(
+                schema.clone(),
+            ));
+        }
         data.insert(accepted);
         data.insert(prepared.catalog.clone());
         data.insert(prepared.plugins.clone());
@@ -1296,6 +1310,11 @@ pub(crate) async fn configure(
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
         });
+        if let Some(schema) = &prepared.declaration.wire_output_schema {
+            data.insert(codex_extension_api::AgentProfileOutputSchema(
+                schema.clone(),
+            ));
+        }
         data.insert(accepted);
         data.insert(catalog);
         data.insert(codex_extension_api::AgentProfileDecisionHandoffTools {

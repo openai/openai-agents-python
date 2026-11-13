@@ -61,6 +61,7 @@ from ._agent_profiles import (
 )
 from ._agent_tool import _ConfiguredAgentTool
 from ._callback_execution import (
+    _call_application_callback,
     _call_callback as _call_callback,
     _call_callback_body as _call_callback_body,
     _call_callback_entered as _call_callback_entered,
@@ -2606,6 +2607,14 @@ def _needs_before_complete(
     )
 
 
+def _distinct_profile_wire_outputs(outputs: Sequence[_PreparedOutput]) -> bool:
+    return (
+        bool(outputs)
+        and outputs[0].mode == "native"
+        and any(output.schema != outputs[0].schema for output in outputs[1:])
+    )
+
+
 def _capture_profile_runtimes(
     profiles: tuple[_AgentProfile, ...],
     root_catalog: _ToolCatalog,
@@ -2616,6 +2625,9 @@ def _capture_profile_runtimes(
     *,
     run_error_formatter: bool = False,
 ) -> tuple[dict[str, _ProfileRuntime], list[dict[str, Any]]]:
+    distinct_wire_outputs = _distinct_profile_wire_outputs(
+        tuple(_prepare_spec(profile.declaration.output_type) for profile in profiles)
+    )
     captured: dict[str, _ProfileRuntime] = {}
     roster: list[dict[str, Any]] = []
     for index, profile in enumerate(profiles):
@@ -2725,6 +2737,7 @@ def _capture_profile_runtimes(
                 )
                 or any(server.tool_filter is not None for server in mcp),
                 "output_fingerprint": output.fingerprint,
+                **({"wire_output_schema": output.schema} if distinct_wire_outputs else {}),
                 # Fingerprinting uses admitted MCP identities, not credentials.
                 # Connection configs are completed only after environment entry.
                 "mcp_servers": {server.name: {} for server in mcp},
@@ -3143,7 +3156,9 @@ def _prepare_open_state(
     if isinstance(state, ManagedWorkspaceCheckpoint):
         if managed_source is None:
             raise ValueError("Managed checkpoint requires a current managed sandbox source")
-        state = managed_source.validate_resume(state).conversation
+        state = SessionState._from_native_capture(
+            managed_source.validate_resume(state).conversation_json
+        )
     if resume_budget is not None and (
         not isinstance(state, SessionState) or state.run_budget is None
     ):
@@ -4051,7 +4066,7 @@ class Session(Generic[ContextT, OutputT]):
                     raise TypeError("state must be a SessionState")
                 # Capture caller-owned data before the first await. The native
                 # importer validates identities, revision, and current tool specs.
-                saved = SessionState.from_json(state.to_json())
+                saved = state._capture_for_restore()
                 approval_checkpoint = saved
                 restored_budget = _RunBudget.restore_checkpoint(saved.run_budget, resume_budget)
                 saved_plan_provider = _checkpoint_plan_provider(saved, auth)
@@ -4065,6 +4080,16 @@ class Session(Generic[ContextT, OutputT]):
                 ) = _prepare_native_checkpoint(
                     saved, has_output_override=restored_output_type is not None
                 )
+                if (saved.native_continuation is not None or saved.pending_actions) and (
+                    _distinct_profile_wire_outputs(
+                        tuple(
+                            _prepare_spec(profile.declaration.output_type) for profile in profiles
+                        )
+                    )
+                ):
+                    raise ValueError(
+                        "Per-profile output schemas do not support pending checkpoints"
+                    )
                 manual_restore = saved.native_continuation is not None
                 continuation = saved.native_continuation
             if isinstance(storage, LocalStorage) and programmatic_tool_calling:
@@ -9538,7 +9563,7 @@ class Session(Generic[ContextT, OutputT]):
         scope = _Invocation(self)
         token = _invocation.set(scope)
         try:
-            recovery = await _call_callback(handler, lambda: scope.active, failure)
+            recovery = await _call_application_callback(handler, (failure,), {})
         finally:
             scope.active = False
             _invocation.reset(token)
@@ -11743,6 +11768,7 @@ class Session(Generic[ContextT, OutputT]):
                             request["tracing_context"] = state.tracing.context
                         if state.continued_from is not None:
                             request["expected_previous_turn_id"] = state.continued_from
+                        request["profile_output_override"] = state.output_override
                         if state.output.mode == "native" and state.realtime_tool is None:
                             request["start"] = {"final_output_json_schema": state.output.schema}
                         if state.model_override is not None:
@@ -17911,7 +17937,7 @@ class Session(Generic[ContextT, OutputT]):
         self._check_loop()
         self._check_callback_operation("suspend its own Session")
         if self._sealed_checkpoint is not None:
-            return SessionState.from_json(self._sealed_checkpoint)
+            return SessionState._from_native_capture(self._sealed_checkpoint)
         return await self._suspend()
 
     async def _suspend(self, *, before_seal: Callable[[], None] | None = None) -> SessionState:
@@ -17978,10 +18004,14 @@ class Session(Generic[ContextT, OutputT]):
         *,
         before_seal: Callable[[], None] | None = None,
     ) -> SessionState:
+        if _distinct_profile_wire_outputs(
+            tuple(profile.output for profile in self._profiles.values())
+        ):
+            raise ValueError("Per-profile output schemas do not support pending checkpoints")
         if self._configured_capture is not None:
             return cast(SessionState, await _join(self._configured_capture))
         if self._sealed_checkpoint is not None:
-            return SessionState.from_json(self._sealed_checkpoint)
+            return SessionState._from_native_capture(self._sealed_checkpoint)
         self._check_portable_capture()
         active = self._active
         self._check_manual_capture(active)
@@ -18146,8 +18176,8 @@ class Session(Generic[ContextT, OutputT]):
                 if active is None and not fork:
                     # This owner cancels a read-only export and joins its native receipt.
                     await pending
-                    return SessionState.from_json(outcome.result())
-                return SessionState.from_json(await _join(pending, outcome=outcome))
+                    return SessionState._from_native_capture(outcome.result())
+                return SessionState._from_native_capture(await _join(pending, outcome=outcome))
             finally:
                 self._checkpoint_task = None
 
@@ -18444,7 +18474,7 @@ class Session(Generic[ContextT, OutputT]):
                     name: getattr(usage, name) for name in RunUsage.__dataclass_fields__
                 }
             _redact_checkpoint_executor_receipts(payload)
-            state = SessionState.from_json(json.dumps(payload))
+            state = SessionState._from_native_capture(json.dumps(payload))
             _check_checkpoint(state, self._instructions, graph=bool(self._profiles))
             raw = state.to_json()
             if active is not None:

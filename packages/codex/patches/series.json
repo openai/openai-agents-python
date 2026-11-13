@@ -1079,7 +1079,11 @@
     {
       "path": "sdk-stamp-imported-history-retention.patch",
       "sha256": "d9c3191b8fa82db77a7415e30480be559d293c3067acd1cab52d6316930d0844"
+    },
+    {
+      "path": "sdk-native-handoff-profile-output.patch",
+      "sha256": "aae60b21b3ca20db7f1fe373380cf18a6786740e9ec7e267a487c55a89ca5059"
     }
   ],
-  "result_tree": "5cc6b4e3a846dd087b4e58ed8cec9cc30ac54e11"
+  "result_tree": "d8c6114b79d81ad2aee60e6a16b1ed0cdbd75ee2"
 }

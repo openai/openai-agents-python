@@ -111,10 +111,8 @@ def _capture_agent_graph(
         if declaration.programmatic_tool_calling != opening.programmatic_tool_calling:
             raise ValueError("Handoff profiles must share programmatic tool calling mode")
         output = _prepare_spec(declaration.output_type)
-        if (output.mode, output.schema, output.wrapped) != (
-            root_output.mode,
-            root_output.schema,
-            root_output.wrapped,
+        if (output.mode, output.wrapped) != (root_output.mode, root_output.wrapped) or (
+            output.mode != "native" and output.schema != root_output.schema
         ):
             raise ValueError("Handoff profiles must share output mode, schema and wrapping")
         roles = tuple(tool for tool in declaration.tools if isinstance(tool, NativeAgents))

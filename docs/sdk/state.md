@@ -228,6 +228,8 @@ To run a Windows named-pipe command after restore, supply the current `Environme
 
 To store a checkpoint across processes, serialize it with `state.to_json()` and load it with `SessionState.from_json()` from `agents.state`.
 
+A checkpoint with a prepared handoff also needs an independently trusted SHA-256 digest. At capture, compute `hashlib.sha256(encoded.encode("utf-8")).hexdigest()` from the exact string returned by `state.to_json()`. Store the digest in a trusted record that a caller cannot edit alongside the checkpoint. At restore, pass the original string and the trusted digest to `SessionState.from_json(encoded, expected_sha256=digest)`. The SDK checks the digest before decoding and checks again that the loaded state has not changed before restoring the presentation. An unmodified checkpoint object returned directly by the SDK can restore in the same process without supplying a digest.
+
 The read-only `state.instructions` accessor returns the latest accepted instructions and validates stored history. Use it only when your application trusts checkpoint storage as its instruction source:
 
 ```python

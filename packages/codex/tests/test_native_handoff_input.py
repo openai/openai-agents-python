@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+from hashlib import sha256
 
 import pytest
 from pydantic import BaseModel
@@ -158,14 +159,18 @@ async def test_handoff_input_restores_presentation_after_settled_sibling_effects
             ):
                 async with source.session(
                     context=application,
-                    state=SessionState.from_json(json.dumps(imported)),
+                    state=SessionState.from_json(
+                        encoded := json.dumps(imported),
+                        expected_sha256=sha256(encoded.encode()).hexdigest(),
+                    ),
                 ):
                     pytest.fail("Imported presentation must not acquire a live session")
             assert len(responses.requests) == 2
             assert effects == ["sibling"]
-        async with source.session(
-            context=application, state=SessionState.from_json(saved.to_json())
-        ) as restored:
+        staged = saved.with_pending_input("extra authorized input")
+        cleared = staged.without_pending_input()
+        assert cleared.pending_input == []
+        async with source.session(context=application, state=cleared) as restored:
             pending = await restored.restored_turn.wait_for_request_or_result()
             assert isinstance(pending, PendingRequests)
             matched = confirm.match(pending.requests[0])
@@ -353,7 +358,8 @@ async def test_callback_backed_live_preparation_preserves_restored_acceptance_de
         assert len(responses.requests) == 2
 
 
-async def test_handoff_presentation_survives_idle_update_and_cold_restore(responses):
+@pytest.mark.parametrize("case", ["memory", "authenticated", "unverified", "mutated"])
+async def test_handoff_presentation_survives_idle_update_and_cold_restore(responses, case):
     retained = "filtered source context"
     responses.respond(function_call("transfer_to_destination", {}, "source-handoff"))
     responses.respond(assistant_output("destination reached"))
@@ -393,7 +399,33 @@ async def test_handoff_presentation_survives_idle_update_and_cold_restore(respon
             result = await (await session.submit("first follow-up")).get_result()
             assert result.final_output == "first follow-up complete"
             await session.update(instructions="Use the final instruction.")
-            saved = SessionState.from_json((await session.save_state()).to_json())
+            saved = await session.save_state()
+        original = saved.to_json()
+        digest = sha256(original.encode()).hexdigest()
+        if case == "authenticated":
+            saved = SessionState.from_json(original, expected_sha256=digest)
+        elif case == "unverified":
+            saved = SessionState.from_json(original)
+        elif case == "mutated":
+            saved = SessionState.from_json(original, expected_sha256=digest)
+            views = [
+                row["metadata"]["sdk_agent_profile"]["presentation"]
+                for row in saved.history
+                if (row.get("metadata") or {}).get("sdk_agent_profile", {}).get("presentation")
+            ]
+            assert views
+            for view in views:
+                view["input"][0]["content"][0]["text"] = "forged portable presentation"
+            with pytest.raises(ValueError, match="expected SHA-256"):
+                SessionState.from_json(saved.to_json(), expected_sha256=digest)
+        if case in ("unverified", "mutated"):
+            with pytest.raises(
+                ValueError, match="handoff presentation requires authenticated state"
+            ):
+                async with source.session(state=saved):
+                    pytest.fail("Unverified presentation must not acquire restore authority")
+            assert len(responses.requests) == 3
+            return
         async with source.session(state=saved) as restored:
             result = await (await restored.submit("cold follow-up")).get_result()
             assert result.final_output == "cold follow-up complete"

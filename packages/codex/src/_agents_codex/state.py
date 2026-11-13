@@ -5,6 +5,8 @@ import json as json
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass as dataclass
+from hashlib import sha256
+from hmac import compare_digest
 from pathlib import Path as Path
 from typing import Any as Any, Literal as Literal
 
@@ -13,6 +15,7 @@ from pydantic import (
     ConfigDict as ConfigDict,
     Field as Field,
     JsonValue,
+    PrivateAttr as _PrivateAttr,
     TypeAdapter as TypeAdapter,
     field_validator as _field_validator,
     model_validator as model_validator,
@@ -377,6 +380,8 @@ class SessionState(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
 
+    _handoff_presentation_digest: str | None = _PrivateAttr(default=None)
+
     format_version: Literal[2, 3, 4, 5, 6, 7, 8, 9]
     codex_revision: str
     source_session_id: str
@@ -548,7 +553,7 @@ class SessionState(BaseModel):
         pending = [*continuation.pending_input, *items]
         _check_audio_json(pending)
         staged = continuation.model_copy(update={"pending_input": deepcopy(pending)})
-        return self.model_copy(update={"native_continuation": staged})
+        return self._with_pending_continuation(staged)
 
     def without_pending_input(self) -> "SessionState":
         """Return a checkpoint with the staged input cleared."""
@@ -556,7 +561,14 @@ class SessionState(BaseModel):
         if continuation is None or not continuation.pending_input:
             return self
         cleared = continuation.model_copy(update={"pending_input": []})
-        return self.model_copy(update={"native_continuation": cleared})
+        return self._with_pending_continuation(cleared)
+
+    def _with_pending_continuation(self, continuation: _ManualContinuation) -> "SessionState":
+        state = self.model_copy(update={"native_continuation": continuation})
+        authority = self._handoff_presentation_digest
+        if authority is not None and authority == sha256(self.to_json().encode()).hexdigest():
+            state._record_handoff_presentation_authority()
+        return state
 
     @property
     def instructions(self) -> str:
@@ -587,10 +599,56 @@ class SessionState(BaseModel):
         """Serialize for storage; the payload may contain sensitive conversation data."""
         return self.model_dump_json(exclude_defaults=True)
 
+    def _has_handoff_presentation(self) -> bool:
+        for history in (self.history, *(child.history for child in self.descendants)):
+            for row in history:
+                if row.get("type") != "response_item":
+                    continue
+                metadata = row.get("metadata")
+                profile = metadata.get("sdk_agent_profile") if isinstance(metadata, dict) else None
+                if isinstance(profile, dict) and profile.get("presentation") is not None:
+                    return True
+        return False
+
+    def _record_handoff_presentation_authority(self) -> None:
+        if self._has_handoff_presentation():
+            self._handoff_presentation_digest = sha256(self.to_json().encode()).hexdigest()
+
+    def _capture_for_restore(self) -> "SessionState":
+        encoded = self.to_json()
+        captured = SessionState.from_json(encoded)
+        if (
+            captured._has_handoff_presentation()
+            and self._handoff_presentation_digest != sha256(encoded.encode()).hexdigest()
+        ):
+            raise ValueError("Restoring a handoff presentation requires authenticated state")
+        return captured
+
     @classmethod
-    def from_json(cls, value: str) -> "SessionState":
-        """Validate a checkpoint read from application storage."""
-        return cls.model_validate_json(value)
+    def from_json(cls, value: str, *, expected_sha256: str | None = None) -> "SessionState":
+        """Validate saved conversation data.
+
+        To restore a prepared handoff across processes, pass the SHA-256 digest
+        of the exact UTF-8 text from a trusted source. Do not take the digest
+        from the same untrusted input as the checkpoint. Later edits to the
+        loaded state revoke authorization to restore its presentation.
+        """
+        if expected_sha256 is not None and (
+            not isinstance(expected_sha256, str)
+            or not expected_sha256.isascii()
+            or not compare_digest(expected_sha256, sha256(value.encode()).hexdigest())
+        ):
+            raise ValueError("Session state does not match its expected SHA-256 digest")
+        state = cls.model_validate_json(value)
+        if expected_sha256 is not None:
+            state._record_handoff_presentation_authority()
+        return state
+
+    @classmethod
+    def _from_native_capture(cls, value: str) -> "SessionState":
+        state = cls.from_json(value)
+        state._record_handoff_presentation_authority()
+        return state
 
 
 _preserve_module_identity(globals(), "agents.state")
