@@ -958,16 +958,26 @@ def _restore_operation_slots(
     catalog: _ToolCatalog,
     selected: Sequence[FunctionTool[Any, Any, Any]],
     pending_names: Sequence[str],
+    continuation_names: Sequence[str] = (),
 ) -> tuple[int, ...]:
     available = {tool._ref: slot for slot, tool in enumerate(catalog.tools)}
     if any(tool.ref not in available for tool in selected):
         raise ValueError("Saved operation names tools outside its native generation")
+    slots = tuple(available[tool.ref] for tool in selected)
+    selected_bindings = (catalog.tools[slot] for slot in slots)
     manual_names = {
         tool.name for tool in selected if tool._bind is None or tool.needs_approval is not False
     }
+    manual_names.update(
+        tool.name
+        for tool in selected_bindings
+        if isinstance(tool, _CapturedFunction)
+        and tool.configured_agent is not None
+        and tool.name in continuation_names
+    )
     if any(name not in manual_names for name in pending_names):
         raise ValueError("Saved operation does not admit its pending manual tools")
-    return tuple(available[tool.ref] for tool in selected)
+    return slots
 
 
 def _capture_tools(

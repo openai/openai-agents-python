@@ -11,6 +11,7 @@ from ._media import (
     _capture_audio,
     _capture_file,
     _capture_image,
+    _capture_video,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 
@@ -35,6 +36,13 @@ class InputImage(TypedDict):
     detail: NotRequired[ImageDetail | None]
 
 
+class InputVideo(TypedDict):
+    """A video URL for a compatible Chat Completions model."""
+
+    type: Literal["input_video"]
+    video_url: str
+
+
 class InputImageFile(TypedDict):
     """An opaque provider image ID; never a host path."""
 
@@ -55,7 +63,10 @@ class InputFile(TypedDict):
 
 class UserMessage(TypedDict):
     role: Literal["user"]
-    content: str | Sequence[InputText | InputImage | InputImageFile | InputFile | InputAudio]
+    content: (
+        str
+        | Sequence[InputText | InputImage | InputImageFile | InputFile | InputAudio | InputVideo]
+    )
     type: NotRequired[Literal["message"]]
 
 
@@ -108,6 +119,8 @@ def _native_input(
             parts.append({"type": "audio", **_capture_audio(part, _audio_budget)})
         elif kind == "input_image":
             parts.append({"type": "image", **_capture_image(part)})
+        elif kind == "input_video":
+            parts.append({"type": "video", **_capture_video(part)})
         elif kind == "input_file":
             parts.append({"type": "file", **_capture_file(part)})
         else:
@@ -123,6 +136,7 @@ def _response_content(parts: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
         "image": "input_image",
         "file": "input_file",
         "audio": "input_audio",
+        "video": "input_video",
         "inputText": "input_text",
         "inputImage": "input_image",
         "inputFile": "input_file",
@@ -144,6 +158,7 @@ def _response_content(parts: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
         fields = {
             "input_text": {"text"},
             "input_audio": {"audio_url"},
+            "input_video": {"video_url"},
             "input_image": {"image_url", "file_id", "detail"},
             "input_file": {"file_id", "file_data", "file_url", "filename"},
         }[tag]

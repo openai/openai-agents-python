@@ -963,7 +963,23 @@
     {
       "path": "sdk-original-history-pop.patch",
       "sha256": "b4ce1552baddbd0eb7cf2864733a53a61cc3bddb6f2810cf0acd253f60f1716a"
+    },
+    {
+      "path": "sdk-cold-recovery-provider-effects.patch",
+      "sha256": "3d594c3ecacf75fa4e3db81fa61010bc6171ab70877ff4f8d20aed4ba18d16fc"
+    },
+    {
+      "path": "sdk-websocket-provider-history.patch",
+      "sha256": "816fba1cbd547ccfbbf6829ceb33f3a37a105ac86c3522fc86305918ce20dcf4"
+    },
+    {
+      "path": "sdk-conversation-locked-retry.patch",
+      "sha256": "7bc0e9ec17b708ef304aba7f060b21bbd104b5b4dd887f028f96f1d4f2d86583"
+    },
+    {
+      "path": "sdk-video-input.patch",
+      "sha256": "614b311673b21959d58608111dea2d351ec98e4f1acbbb083a710c07c4fa2ebb"
     }
   ],
-  "result_tree": "27b1c22429ee9a14edfd9e512a712a327831e42f"
+  "result_tree": "c52f01c4f053a339bbecb45fabf6830ec522cacc"
 }

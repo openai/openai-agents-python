@@ -232,3 +232,25 @@ def test_manual_history_restore_keeps_current_root_transport():
     assert settings["request_controls"]["request_transport"]["headers"] == {
         "x-history-route": "current"
     }
+
+
+@pytest.mark.parametrize("store", [False, None])
+def test_explicit_native_websocket_history_keeps_current_storage_choice(store):
+    from agents import NativeProvider
+
+    agent = Agent(
+        instructions="Current declaration.",
+        provider=NativeProvider(supports_websockets=True),
+        model_settings={} if store is None else {"store": store},
+    )
+    _, settings = _prepare_opening_model_settings(
+        agent,
+        "current-model",
+        "Current declaration.",
+        None,
+        ("current-model", {"request_controls": {"store": True}}),
+        None,
+        [],
+        {"type": "previous_response"},
+    )
+    assert settings["request_controls"].get("store") is store

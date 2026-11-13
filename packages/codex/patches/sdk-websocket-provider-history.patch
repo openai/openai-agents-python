@@ -1,0 +1,645 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 236b02ee..379effb2 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -362,6 +362,7 @@ struct WebsocketContinuation {
+ #[derive(Debug, Default)]
+ struct WebsocketSession {
+     connection: Option<ApiWebSocketConnection>,
++    physical_connection: Option<Arc<()>>,
+     responses_headers: ApiHeaderMap,
+     /// Owner of the cached state, including before a connection is opened.
+     auth_owner_generation: Option<u64>,
+@@ -2117,9 +2118,8 @@ impl ModelClientSession {
+             return Ok(());
+         }
+         if self.client.provider_history.is_some() {
+-            return Err(CodexErr::InvalidRequest(
+-                "Provider history WebSocket cursor integration is pending".into(),
+-            ));
++            // The cursor must validate restored ownership before connection I/O.
++            return Ok(());
+         }
+         let provider = Arc::clone(&self.client.state.provider);
+         let auth_manager = provider.auth_manager();
+@@ -2164,6 +2164,7 @@ impl ModelClientSession {
+                     request_route_telemetry: RequestRouteTelemetry::for_endpoint("/responses"),
+                     responses_headers: &responses_headers,
+                     request_transport: None,
++                    require_existing: false,
+                 })
+                 .await
+             {
+@@ -2234,6 +2235,7 @@ impl ModelClientSession {
+             request_route_telemetry,
+             responses_headers,
+             request_transport,
++            require_existing,
+         } = params;
+         let api_auth = codex_model_provider::prepare_websocket_auth(
+             self.client.state.provider.info(),
+@@ -2264,6 +2266,11 @@ impl ModelClientSession {
+         }
+ 
+         if needs_new || owner_changed {
++            if require_existing {
++                return Err(ApiError::InvalidRequest {
++                    message: "Unstored provider history requires its live WebSocket connection".into(),
++                });
++            }
+             self.websocket_session.reset(if owner_changed {
+                 Some("other")
+             } else {
+@@ -2283,6 +2290,7 @@ impl ModelClientSession {
+                 )
+                 .await?;
+             self.websocket_session.connection = Some(new_conn);
++            self.websocket_session.physical_connection = Some(Arc::new(()));
+             self.websocket_session.responses_headers = responses_headers.clone();
+             self.websocket_session.auth_owner_generation = auth_owner_generation;
+             self.websocket_session.connection_key = Some(connection_key);
+@@ -2478,6 +2486,7 @@ impl ModelClientSession {
+                     &mut request, &client_setup, transport.clone(), options.extra_headers.clone(),
+                     prompt.request_controls.request_transport.as_ref().and_then(Option::as_ref),
+                     prompt.tool_admission.as_ref().and_then(|admission| admission.model_attempt()),
++                    provider_history::HistoryTransport::Http,
+                 ).await?;
+                 client_setup.api_provider.retry.max_attempts = 0;
+                 if let Some(attempt) = prompt.tool_admission.as_ref().and_then(|admission| admission.model_attempt()) {
+@@ -2728,9 +2737,6 @@ impl ModelClientSession {
+         inference_trace: &InferenceTraceContext,
+         auth_recovery: &mut RequestAuthRecovery,
+     ) -> Result<WebsocketStreamOutcome> {
+-        if self.client.provider_history.is_some() {
+-            return Err(CodexErr::InvalidRequest("Provider history WebSocket cursor integration is pending".into()));
+-        }
+         let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
+         let provider = Arc::clone(&self.client.state.provider);
+         loop {
+@@ -2783,6 +2789,45 @@ impl ModelClientSession {
+                 self.client.api_key_cyber_access_programs,
+             )?;
+             let mut websocket_metadata = responses_metadata.clone();
++            let mut interceptor_metadata = None;
++            let interceptors = crate::model_request::prepare(
++                &self.client.request_contributors,
++                &self.client.state.thread_id.to_string(),
++                &model_info.slug,
++                request.model.is_none(),
++                if warmup {
++                    codex_extension_api::ModelRequestKind::Warmup
++                } else {
++                    codex_extension_api::ModelRequestKind::Generation
++                },
++                &mut interceptor_metadata,
++                prompt.tool_admission.clone(),
++            );
++            let mut logical_history_input = None;
++            let require_existing = if let Some(cursor) = &self.client.provider_history {
++                if interceptors.iter().any(|interceptor| interceptor.produces_response()) {
++                    return Err(CodexErr::InvalidRequest("Provider history requires a supported owning Responses transport".into()));
++                }
++                let url = client_setup.api_provider.websocket_url_for_path("/responses")
++                    .map_err(|_| CodexErr::InvalidRequest("Invalid provider history WebSocket route".into()))?;
++                let connection = match self.websocket_session.connection.as_ref() {
++                    Some(connection) if !connection.is_closed().await =>
++                        self.websocket_session.physical_connection.clone(),
++                    _ => None,
++                };
++                logical_history_input = cursor.prepare(
++                    &mut request,
++                    &client_setup,
++                    self.client.build_api_transport(&client_setup.api_provider, "/responses", client_setup.redirect_policy.clone())?,
++                    responses_headers.clone(),
++                    prompt.request_controls.request_transport.as_ref().and_then(Option::as_ref),
++                    prompt.tool_admission.as_ref().and_then(|admission| admission.model_attempt()),
++                    provider_history::HistoryTransport::Websocket { url: url.as_str(), connection: connection.as_ref() },
++                ).await?;
++                cursor.needs_live_websocket()
++            } else {
++                false
++            };
+             websocket_metadata.routing_hint = self.client.build_routing_hint_header(
+                 client_setup.auth.as_ref(),
+                 &responses_headers,
+@@ -2795,7 +2840,7 @@ impl ModelClientSession {
+             } else {
+                 session_telemetry_for_request(session_telemetry, &request)
+             };
+-            match self
++            let connection_result = self
+                 .websocket_connection(WebsocketConnectParams {
+                     session_telemetry,
+                     api_provider: client_setup.api_provider,
+@@ -2812,9 +2857,17 @@ impl ModelClientSession {
+                         .request_transport
+                         .as_ref()
+                         .and_then(Option::as_ref),
++                    require_existing,
+                 })
+                 .await
++                .map(|_| ());
++            if connection_result.is_err()
++                && let Some(cursor) = &self.client.provider_history
+             {
++                // Connection negotiation has not sent response.create.
++                cursor.reject_pre_stream().await?;
++            }
++            match connection_result {
+                 Ok(_) => {}
+                 Err(ApiError::Transport(TransportError::Http { status, .. }))
+                     if status == StatusCode::UPGRADE_REQUIRED =>
+@@ -2862,6 +2915,11 @@ impl ModelClientSession {
+                 include_internal,
+                 model_info.use_responses_lite,
+             );
++            if let Some(additions) = interceptor_metadata {
++                for (key, value) in additions {
++                    client_metadata.entry(key).or_insert(value);
++                }
++            }
+             if let Some(turn_state) = self.turn_state.get() {
+                 client_metadata.insert(X_CODEX_TURN_STATE_HEADER.to_string(), turn_state.clone());
+             }
+@@ -2931,40 +2989,12 @@ impl ModelClientSession {
+                 ),
+                 ..ResponseCreateWsRequest::from(&request)
+             };
+-            if !warmup {
+-                if let Some(attempt) = prompt
+-                    .tool_admission
+-                    .as_ref()
+-                    .and_then(|admission| admission.model_attempt())
+-                {
+-                    attempt
+-                        .observe_request(
+-                            "responses_ws",
+-                            ws_payload.previous_response_id.as_deref(),
+-                            None,
+-                        )
+-                        .map_err(CodexErr::Fatal)?;
+-                }
+-            }
+             self.client.set_guardian_metadata(
+                 &mut ws_payload.client_metadata,
+                 responses_metadata.parent_response_id.as_deref(),
+                 client_setup.auth.as_ref(),
+                 &responses_headers,
+             );
+-            let interceptors = crate::model_request::prepare(
+-                &self.client.request_contributors,
+-                &self.client.state.thread_id.to_string(),
+-                &model_info.slug,
+-                ws_payload.model.is_none(),
+-                if warmup {
+-                    codex_extension_api::ModelRequestKind::Warmup
+-                } else {
+-                    codex_extension_api::ModelRequestKind::Generation
+-                },
+-                &mut ws_payload.client_metadata,
+-                prompt.tool_admission.clone(),
+-            );
+             let mut ws_request = ResponsesWsRequest::ResponseCreate(ws_payload);
+             stamp_ws_stream_request_start_ms(&mut ws_request);
+             let ResponsesWsRequest::ResponseCreate(payload) = &ws_request;
+@@ -2977,15 +3007,17 @@ impl ModelClientSession {
+                 payload.input = input;
+             }
+             if !previous_response_id_from_untraced_warmup {
+-                inference_trace_attempt.record_started(&ws_request);
++                if let Some(logical) = logical_history_input.as_deref() {
++                    let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
++                    let wire = std::mem::replace(&mut payload.input, logical);
++                    inference_trace_attempt.record_started(&ws_request);
++                    let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
++                    payload.input = wire;
++                } else {
++                    inference_trace_attempt.record_started(&ws_request);
++                }
+             }
+ 
+-            let websocket_connection =
+-                self.websocket_session.connection.as_ref().ok_or_else(|| {
+-                    self.client.state.provider.map_api_error(ApiError::Stream(
+-                        "websocket connection is unavailable".to_string(),
+-                    ))
+-                })?;
+             request_session_telemetry.counter(
+                 WEBSOCKET_CONTINUATION_COUNT_METRIC,
+                 /*inc*/ 1,
+@@ -3000,7 +3032,50 @@ impl ModelClientSession {
+                 ],
+             );
+             crate::model_request::wait_if_sampling_stopped(prompt.sampling_stop.as_deref()).await;
+-            crate::model_request::admit_request(&interceptors).map_err(CodexErr::InvalidRequest)?;
++            let pre_send_admission = (|| -> Result<&ApiWebSocketConnection> {
++                if let Some(cursor) = &self.client.provider_history {
++                    let connection = self.websocket_session.physical_connection.as_ref()
++                        .ok_or_else(|| CodexErr::InvalidRequest("Provider history has no live WebSocket connection".into()))?;
++                    cursor.bind_websocket(connection)?;
++                }
++                if !warmup
++                    && let Some(attempt) = prompt.tool_admission.as_ref().and_then(|admission| admission.model_attempt())
++                {
++                    let ResponsesWsRequest::ResponseCreate(payload) = &ws_request;
++                    let (previous, conversation) = match payload.request_controls.provider_history.as_ref() {
++                        Some(codex_protocol::provider_history::ProviderHistorySelection::PreviousResponse { id }) => (id.as_deref(), None),
++                        Some(codex_protocol::provider_history::ProviderHistorySelection::Conversation { id }) => (None, Some(id.as_str())),
++                        None => (payload.previous_response_id.as_deref(), None),
++                    };
++                    attempt.observe_request("responses_ws", previous, conversation).map_err(CodexErr::Fatal)?;
++                }
++                let connection = self.websocket_session.connection.as_ref().ok_or_else(|| {
++                    self.client.state.provider.map_api_error(ApiError::Stream(
++                        "websocket connection is unavailable".to_string(),
++                    ))
++                })?;
++                if let Some(admission) = &prompt.prepared_request_admission {
++                    admission.admit_request().map_err(CodexErr::Fatal)?;
++                }
++                crate::model_request::admit_request(&interceptors)
++                    .map_err(CodexErr::InvalidRequest)?;
++                Ok(connection)
++            })();
++            let websocket_connection = match pre_send_admission {
++                Ok(connection) => connection,
++                Err(error) => {
++                    if let Some(cursor) = &self.client.provider_history {
++                        cursor.reject_pre_stream().await?;
++                    }
++                    return Err(error);
++                }
++            };
++            if self.client.provider_history.is_some()
++                && let Some(attempt) = prompt.tool_admission.as_ref().and_then(|admission| admission.model_attempt())
++            {
++                attempt.observe_provider_tools(true);
++                attempt.mark_provider_effect();
++            }
+             let request_observation = if warmup || is_guardian_reviewer(&responses_headers) {
+                 None
+             } else {
+@@ -3036,6 +3111,13 @@ impl ModelClientSession {
+                     send_observer,
+                 )
+                 .await;
++            if stream_result.is_err()
++                && let Some(cursor) = &self.client.provider_history
++            {
++                // This API error precedes spawning the sender. Errors on the
++                // returned stream retain pending because a write may have begun.
++                cursor.reject_pre_stream().await?;
++            }
+             if let Some(original_item_ids) = original_item_ids {
+                 for (item, original_item_id) in request.input.iter_mut().zip(original_item_ids) {
+                     item.set_id(original_item_id);
+@@ -3059,6 +3141,7 @@ impl ModelClientSession {
+                 inference_trace_attempt,
+                 Arc::clone(&self.client.state.provider),
+                 interceptors,
++                self.client.provider_history.clone(),
+                 prompt
+                     .request_controls
+                     .max_output_tokens
+@@ -3066,7 +3149,11 @@ impl ModelClientSession {
+                     .is_some(),
+             );
+             stream.request_observation = request_observation;
+-            self.websocket_session.last_response_rx = Some(last_request_rx);
++            if self.client.provider_history.is_some() {
++                self.provider_history_rx = Some(last_request_rx);
++            } else {
++                self.websocket_session.last_response_rx = Some(last_request_rx);
++            }
+             return Ok(WebsocketStreamOutcome::Stream(stream));
+         }
+     }
+@@ -3465,15 +3552,29 @@ fn map_response_stream(
+     inference_trace_attempt: InferenceTraceAttempt,
+     provider: SharedModelProvider,
+     interceptors: Vec<Box<dyn codex_extension_api::ModelResponseInterceptor>>,
++    provider_history: Option<Arc<provider_history::Cursor>>,
+     explicit_output_cap: bool,
+ ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
+     let producer_task = api_stream.producer_task.take();
+     let producer_stop = api_stream.producer_stop.take();
+     let upstream_request_id = api_stream.upstream_request_id.take();
+     let interrupt = api_stream.interrupt.take();
++    let events: codex_extension_api::ModelResponseStream = Box::pin(api_stream);
++    let events: codex_extension_api::ModelResponseStream = if let Some(cursor) = provider_history {
++        Box::pin(events.map(move |event| {
++            if let Ok(ResponseEvent::OutputItemDone(item)) = &event {
++                cursor.observe_wire_output(item).map_err(|error| ApiError::InvalidRequest {
++                    message: error.to_string(),
++                })?;
++            }
++            event
++        }))
++    } else {
++        events
++    };
+     let (mut stream, last_response) = map_response_events(
+         upstream_request_id,
+-        crate::model_request::intercept_stream(Box::pin(api_stream), interceptors),
++        crate::model_request::intercept_stream(events, interceptors),
+         session_telemetry,
+         inference_trace_attempt,
+         provider,
+@@ -3793,6 +3894,7 @@ struct WebsocketConnectParams<'a> {
+     responses_headers: &'a ApiHeaderMap,
+     request_transport:
+         Option<&'a codex_protocol::model_request_transport::RequestTransportOverrides>,
++    require_existing: bool,
+ }
+ 
+ fn emit_auth_recovery_event(
+diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
+index 32ced8e6..fb966db8 100644
+--- a/codex-rs/core/src/client/provider_history.rs
++++ b/codex-rs/core/src/client/provider_history.rs
+@@ -13,14 +13,39 @@ pub(crate) struct Start {
+     pub reference: Option<ProviderHistoryReference>,
+ }
+ 
+-#[derive(Clone, PartialEq, Eq)]
++pub(crate) enum HistoryTransport<'a> {
++    Http,
++    Websocket {
++        url: &'a str,
++        connection: Option<&'a Arc<()>>,
++    },
++}
++
++#[derive(Clone)]
+ struct Scope {
+     generation: Option<u64>,
+     revision: Option<u64>,
+     headers: HeaderMap,
+     effective_url: String,
++    connection: Option<Weak<()>>,
++}
++
++impl PartialEq for Scope {
++    fn eq(&self, other: &Self) -> bool {
++        self.generation == other.generation
++            && self.revision == other.revision
++            && self.headers == other.headers
++            && self.effective_url == other.effective_url
++            && match (&self.connection, &other.connection) {
++                (None, None) => true,
++                (Some(left), Some(right)) => Weak::ptr_eq(left, right),
++                _ => false,
++            }
++    }
+ }
+ 
++impl Eq for Scope {}
++
+ impl std::fmt::Debug for Scope {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         f.debug_struct("Scope")
+@@ -507,6 +532,28 @@ impl Cursor {
+         self.snapshot().selection
+     }
+ 
++    pub(crate) fn needs_live_websocket(&self) -> bool {
++        let state = self.state.lock().unwrap();
++        state.reference.stored_response == Some(false)
++            && matches!(state.reference.selection, ProviderHistorySelection::PreviousResponse { id: Some(_) })
++    }
++
++    pub(crate) fn bind_websocket(&self, connection: &Arc<()>) -> Result<()> {
++        let mut state = self.state.lock().unwrap();
++        let requires_live = state.reference.stored_response == Some(false)
++            && matches!(state.reference.selection, ProviderHistorySelection::PreviousResponse { id: Some(_) });
++        let pending = state.pending.as_mut()
++            .ok_or_else(|| invalid("Provider history has no admitted dispatch"))?;
++        let current = Arc::downgrade(connection);
++        if requires_live && pending.scope.connection.as_ref()
++            .is_none_or(|expected| !Weak::ptr_eq(expected, &current))
++        {
++            return Err(invalid("Unstored provider history requires its live WebSocket connection"));
++        }
++        pending.scope.connection = Some(current);
++        Ok(())
++    }
++
+     async fn persist(&self) -> Result<()> {
+         let session = self
+             .session
+@@ -527,6 +574,7 @@ impl Cursor {
+         headers: HeaderMap,
+         request_transport: Option<&codex_protocol::model_request_transport::RequestTransportOverrides>,
+         attempt: Option<std::sync::Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
++        history_transport: HistoryTransport<'_>,
+     ) -> Result<Option<Vec<ResponseItem>>> {
+         check_items(request.input.iter())?;
+         let canonical_input = request
+@@ -536,7 +584,11 @@ impl Cursor {
+             .ok_or_else(|| invalid("Provider history has no admitted canonical input"))?;
+         let mut auth_headers = setup.api_provider.headers.clone();
+         setup.api_auth.add_auth_headers(&mut auth_headers);
+-        let mut effective_url = setup.api_provider.url_for_path("/responses");
++        let (mut effective_url, connection) = match history_transport {
++            HistoryTransport::Http => (setup.api_provider.url_for_path("/responses"), None),
++            HistoryTransport::Websocket { url, connection } =>
++                (url.to_owned(), connection.map(Arc::downgrade)),
++        };
+         let prepared = codex_api::prepare_request_transport(&effective_url, request_transport)
+             .map_err(self_error)?;
+         prepared.apply_parts(&mut effective_url, &mut auth_headers);
+@@ -545,6 +597,7 @@ impl Cursor {
+             revision: setup.auth_revision,
+             headers: auth_headers,
+             effective_url,
++            connection,
+         };
+         let current_route = route(&setup.api_provider.base_url)?;
+         let (saved, needs_read) = {
+@@ -561,6 +614,12 @@ impl Cursor {
+                     "Provider history belongs to a different provider route",
+                 ));
+             }
++            if state.reference.stored_response == Some(false)
++                && matches!(state.reference.selection, ProviderHistorySelection::PreviousResponse { id: Some(_) })
++                && (scope.connection.is_none() || state.live_scope.as_ref() != Some(&scope))
++            {
++                return Err(invalid("Unstored provider history requires its live WebSocket connection"));
++            }
+             (
+                 state.reference.clone(),
+                 state.live_scope.as_ref() != Some(&scope),
+diff --git a/codex-rs/core/tests/provider_history.rs b/codex-rs/core/tests/provider_history.rs
+index 934feaa8..2851adb8 100644
+--- a/codex-rs/core/tests/provider_history.rs
++++ b/codex-rs/core/tests/provider_history.rs
+@@ -24,6 +24,169 @@ use serde_json::json;
+ use wiremock::matchers::{method, path};
+ use wiremock::{Mock, ResponseTemplate};
+ 
++#[tokio::test]
++async fn websocket_history_advances_on_the_same_socket_with_only_new_input() -> Result<()> {
++    for store in [true, false] {
++        let server = responses::start_websocket_server(vec![
++            vec![
++                vec![
++                    responses::ev_response_created("resp_before"),
++                    responses::ev_assistant_message("answer_before", "Before."),
++                    responses::ev_completed("resp_before"),
++                ],
++                vec![
++                    responses::ev_response_created("resp_after"),
++                    responses::ev_assistant_message("answer_after", "After."),
++                    responses::ev_completed("resp_after"),
++                ],
++            ],
++            vec![vec![responses::ev_completed("resp_unsafe_reconnect")]],
++        ])
++        .await;
++        let mut builder = test_codex().with_config(move |config| {
++            config.sdk_provider_history =
++                Some(ProviderHistorySelection::PreviousResponse { id: None });
++            config.sdk_request_controls.store = Some(Some(store));
++            config.model_provider.request_max_retries = Some(0);
++            config.model_provider.stream_max_retries = Some(0);
++        });
++        let test = builder.build_with_websocket_server(&server).await?;
++        for text in ["Before reopen.", "After reopen."] {
++            test.codex
++                .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++                    text: text.into(),
++                    text_elements: vec![],
++                }]))
++                .await?;
++            let terminal = wait_for_event(&test.codex, |event| {
++                matches!(event, EventMsg::TurnComplete(_))
++            })
++            .await;
++            assert!(
++                matches!(&terminal, EventMsg::TurnComplete(done) if done.error.is_none()),
++                "{terminal:?}"
++            );
++        }
++        let requests = server.single_connection();
++        assert_eq!(requests.len(), 2);
++        let first = requests[0].body_json();
++        assert!(first.get("previous_response_id").is_none(), "{first}");
++        let second = requests[1].body_json();
++        assert_eq!(second["type"], "response.create");
++        assert_eq!(second["previous_response_id"], "resp_before");
++        assert_eq!(second["store"], store);
++        let input = second["input"].as_array().unwrap();
++        assert_eq!(input.len(), 1, "{second}");
++        assert_eq!(input[0]["role"], "user");
++        assert_eq!(input[0]["content"][0]["text"], "After reopen.");
++        let reference = test
++            .codex
++            .thread_settings_snapshot()
++            .await
++            .provider_history
++            .unwrap();
++        assert!(!reference.pending);
++        assert_eq!(reference.stored_response, Some(store));
++        assert_eq!(
++            reference.selection,
++            ProviderHistorySelection::PreviousResponse {
++                id: Some("resp_after".into()),
++            }
++        );
++        let rollout = test.codex.rollout_path().unwrap();
++        test.codex.submit(Op::Shutdown).await?;
++        wait_for_event(&test.codex, |event| {
++            matches!(event, EventMsg::ShutdownComplete)
++        })
++        .await;
++        if !store {
++            test.thread_manager
++                .remove_thread(&test.session_configured.thread_id)
++                .await;
++            drop(test.codex);
++            let mut config = test.config.clone();
++            config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse {
++                id: Some("resp_after".into()),
++            });
++            let resumed = test
++                .thread_manager
++                .resume_legacy_thread_from_rollout(
++                    config,
++                    rollout,
++                    test.thread_manager.auth_manager(),
++                    None,
++                    Default::default(),
++                )
++                .await?;
++            resumed
++                .thread
++                .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++                    text: "Do not reuse the saved unstored anchor.".into(),
++                    text_elements: vec![],
++                }]))
++                .await?;
++            let terminal = wait_for_event(&resumed.thread, |event| {
++                matches!(event, EventMsg::TurnComplete(_))
++            })
++            .await;
++            assert!(
++                matches!(&terminal, EventMsg::TurnComplete(done) if done.error.is_some()),
++                "{terminal:?}"
++            );
++            assert_eq!(server.handshakes().len(), 1);
++            assert_eq!(server.single_connection().len(), 2);
++            resumed.thread.submit(Op::Shutdown).await?;
++        }
++        server.shutdown().await;
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn websocket_unacknowledged_dispatch_never_resends() -> Result<()> {
++    let server = responses::start_websocket_server(vec![
++        vec![vec![responses::ev_response_created("resp_unacknowledged")]],
++        vec![vec![responses::ev_completed("resp_unsafe_resend")]],
++    ])
++    .await;
++    let mut builder = test_codex().with_config(|config| {
++        config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse { id: None });
++        config.sdk_request_controls.store = Some(Some(true));
++        config.model_provider.request_max_retries = Some(2);
++        config.model_provider.stream_max_retries = Some(2);
++    });
++    let test = builder.build_with_websocket_server(&server).await?;
++    for text in ["Dispatch once.", "Never resend the pending input."] {
++        test.codex
++            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++                text: text.into(),
++                text_elements: vec![],
++            }]))
++            .await?;
++        let terminal = wait_for_event(&test.codex, |event| {
++            matches!(event, EventMsg::TurnComplete(_))
++        })
++        .await;
++        assert!(
++            matches!(&terminal, EventMsg::TurnComplete(done) if done.error.is_some()),
++            "{terminal:?}"
++        );
++    }
++    assert_eq!(server.handshakes().len(), 1);
++    assert_eq!(server.single_connection().len(), 1);
++    assert!(
++        test.codex
++            .thread_settings_snapshot()
++            .await
++            .provider_history
++            .unwrap()
++            .pending
++    );
++    test.codex.submit(Op::Shutdown).await?;
++    server.shutdown().await;
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn cold_resume_requires_current_anchor_and_only_sends_new_input() -> Result<()> {
+     let server = responses::start_mock_server().await;

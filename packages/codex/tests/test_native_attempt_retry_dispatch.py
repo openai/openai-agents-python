@@ -474,3 +474,35 @@ async def test_revoked_producer_retains_expected_abort_only_for_advice(error_kin
     assert advice[0].error is error
     assert advice[0].request is state.model_failure.request
     assert seen[0].error is None and seen[0].normalized.is_timeout
+
+
+@pytest.mark.parametrize("evidence", [None, False, True])
+async def test_provider_response_start_evidence_preserves_unknown_and_native_facts(evidence):
+    class Backend:
+        def get_retry_advice(self, _request):
+            return RetryAdvice(response_started=evidence)
+
+    seen = []
+
+    def policy(value):
+        seen.append(value)
+        return RetryDecision(
+            retry=True,
+            approve_unsafe_replay=(
+                not value.response_started and value.provider_advice.response_started is False
+            ),
+        )
+
+    native = context()
+    native["local_effects"] = True
+    native["retry_unsafe_output"] = True
+    reply = await _resolve_retry(native, failed(Backend()), policy, invoke)
+    assert seen[-1].response_started is (evidence is True)
+    assert seen[-1].provider_advice.response_started is evidence
+    assert reply["decision"]["approve_unsafe_replay"] is (evidence is False)
+    assert seen[-1].local_effects is True
+    assert seen[-1].retry_unsafe_output is True
+    assert "response_started" not in reply["provider_advice"]
+    native["response_started"] = True
+    await _resolve_retry(native, failed(Backend()), policy, invoke)
+    assert seen[-1].response_started is True
