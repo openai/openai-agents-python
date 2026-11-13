@@ -931,7 +931,11 @@
     {
       "path": "sdk-agent-harness-span-metadata.patch",
       "sha256": "edac1f3bc0818c8454af005f8393dc583a5e579c625dab7f93489067ffaec9d7"
+    },
+    {
+      "path": "sdk-final-step-builtin-tools.patch",
+      "sha256": "e01c2fd4518cb72b33b4d440454baf0042160546d4d66958914c6478e6d4b94a"
     }
   ],
-  "result_tree": "ccf4295bbfa1a1f4c65426a53b8c45a886a48d82"
+  "result_tree": "b70d2effcca5e9f9cfd0541b3ee967855718afd7"
 }

@@ -17,6 +17,91 @@ from tests.test_native_sandbox_memory import _workspace_gateway
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="UnixLocal memory fixture")
 
 
+@pytest.mark.parametrize("capture", [False, True], ids=["flush", "suspend"])
+@pytest.mark.parametrize("failed", [False, True], ids=["compact", "private-error"])
+async def test_memory_keeps_source_admission_and_excludes_private_diagnostics(
+    tmp_path, monkeypatch, capture, failed
+):
+    from agents.sandbox import LocalSnapshotSpec
+
+    workspace = tmp_path / "workspace"
+    marker = "SYNTHETIC_PRIVATE_TERMINAL_DETAIL"
+    original = ValueError(marker)
+
+    @function_tool(error_function=None)
+    def failing_lookup() -> str:
+        raise original
+
+    extraction = {
+        "rollout_slug": "settled",
+        "rollout_summary": "Context.",
+        "raw_memory": "Context.",
+    }
+    consolidation = {"summary": "Context.", "memory": "Context."}
+    replies = (
+        [[tool_call("failing_lookup", {}, call_id="private-error")]]
+        if failed
+        else [[text("Accepted source answer.")], [text("SYNTHETIC_COMPACTION_SUMMARY")]]
+    )
+    replies += [[text(json.dumps(extraction))], [text(json.dumps(consolidation))]]
+    async with (
+        timeout(30),
+        _workspace_gateway(workspace, monkeypatch) as connect,
+        ScriptedResponses(*replies) as peer,
+    ):
+        environment = sandbox_environment(
+            UnixLocalSandboxClient(),
+            manifest=Manifest(root=str(workspace)),
+            options=UnixLocalSandboxClientOptions(),
+            connect=connect,
+            managed_workspace=capture,
+            snapshot=LocalSnapshotSpec(base_path=tmp_path / "archives") if capture else None,
+            memory=SandboxMemoryOptions(
+                phase_one=Agent(instructions="Extract.", provider=peer.provider),
+                phase_two=Agent(instructions="Consolidate.", provider=peer.provider),
+            ),
+        )
+        agent = Agent(
+            instructions="Answer.", provider=peer.provider, tools=[failing_lookup] if failed else []
+        )
+        async with agent.session(environment=environment) as session:
+            turn = await session.submit("SYNTHETIC_ADMITTED_SOURCE_CONTEXT")
+            if failed:
+                with pytest.raises(ValueError) as caller:
+                    await turn.get_result()
+                assert caller.value is original and marker in str(caller.value)
+            else:
+                assert (await turn.get_result()).final_output == "Accepted source answer."
+                await session.compact()
+            if capture:
+                helper_root = workspace / ".fixture-config" / "tmp"
+                if helper_root.exists():
+                    for helper in helper_root.iterdir():
+                        if helper.is_symlink():
+                            helper.unlink()
+                await session.suspend_workspace()
+            else:
+                await session.flush_memory()
+                await session.flush_memory()
+            rollout = (workspace / "sessions" / f"{session.id}.jsonl").read_text()
+            metadata = json.loads(rollout)["terminal_metadata"]
+            assert metadata["terminal_state"] == ("failed" if failed else "completed")
+            assert metadata["exception_message"] is None
+            assert marker not in rollout
+            phase_one = json.dumps(peer.requests[1 if failed else 2]["input"])
+            assert marker not in phase_one
+            assert "SYNTHETIC_ADMITTED_SOURCE_CONTEXT" in rollout
+            assert "SYNTHETIC_COMPACTION_SUMMARY" not in rollout
+            if failed:
+                assert metadata["exception_type"] == "ValueError"
+                with pytest.raises(ValueError) as after:
+                    await turn.get_result()
+                assert after.value is original
+            else:
+                assert (await turn.get_result()).final_output == "Accepted source answer."
+            assert len(peer.requests) == (3 if failed else 4)
+
+
 @pytest.mark.parametrize("cancelled", [False, True])
 async def test_terminal_continuation_keeps_public_root_memory_ownership(
     tmp_path, monkeypatch, cancelled

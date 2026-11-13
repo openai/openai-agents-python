@@ -162,6 +162,9 @@ class ToolContext(Generic[ContextT_co]):
     _usage_reporter: Callable[[TokenUsage | None, int], None] | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    _configured_agent_invoker: Callable[[str], Awaitable[str]] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     _environment: Environment[Any] | None = field(
         default=None, init=False, repr=False, compare=False
