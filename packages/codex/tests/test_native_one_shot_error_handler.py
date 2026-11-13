@@ -387,3 +387,56 @@ async def test_error_recovery_rejects_an_advanced_session(responses, persist, ch
             sibling.cancel()
         await asyncio.gather(sibling, return_exceptions=True)
         await native.aclose()
+
+
+@pytest.mark.parametrize("max_retries", [0, 1])
+async def test_recovered_output_preserves_only_current_native_repair_receipts(
+    responses, max_retries
+):
+    native = provider(responses)
+    agent = Agent(
+        instructions="Return a record.",
+        provider=native,
+        output_type=PromptedOutput(Record, max_retries=max_retries),
+    )
+    saved = None
+    parent_turn_ids = []
+    async with timeout(30):
+        try:
+            for round_number in range(2):
+                responses.respond(assistant_output("invalid original"))
+                if max_retries:
+                    responses.respond(assistant_output("invalid correction"))
+                result = await agent.run(
+                    "Return a record.",
+                    state=saved,
+                    return_state=True,
+                    error_handler=lambda _: RecoverRun({"count": 9}, include_in_history=False),
+                )
+                assert result.final_output == Record(count=9)
+                assert result.state is not None
+                assert len(result.repair_attempts) == max_retries
+                parent_turn_ids.append(result.turn.turn_id)
+                assert result.thread_usage.total_token_usage.total_tokens == 14 * (round_number + 1)
+                if max_retries:
+                    attempt = result.repair_attempts[0]
+                    assert attempt["parent_turn_id"] == result.turn.turn_id
+                    assert attempt["parent_session_id"] == result.state.source_session_id
+                    assert attempt["session_id"] != attempt["parent_session_id"]
+                    assert attempt["id"] and attempt["id"] != result.turn.turn_id
+                    assert attempt["usage"]["total_tokens"] == 14
+                    assert (
+                        tuple(
+                            row
+                            for row in result.state.repair_turns
+                            if row.get("parent_turn_id") == result.turn.turn_id
+                        )
+                        == result.repair_attempts
+                    )
+                saved = result.state
+            assert len(set(parent_turn_ids)) == 2
+            assert saved is not None
+            assert len(saved.repair_turns) == 2 * max_retries
+            assert len(responses.requests) == 2 * (1 + max_retries)
+        finally:
+            await native.aclose()

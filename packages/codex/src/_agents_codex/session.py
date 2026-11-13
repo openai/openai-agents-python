@@ -9672,6 +9672,11 @@ class Session(Generic[ContextT, OutputT]):
             usage,
             guardrail_results=tuple(records),
             items=items,
+            repair_attempts=tuple(
+                deepcopy(t)
+                for t in self._repair_turns
+                if "parent_turn_id" in t and t["parent_turn_id"] == turn_id
+            ),
         )
         object.__setattr__(submission, "_recovered_result", result)
         return result

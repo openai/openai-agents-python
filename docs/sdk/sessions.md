@@ -310,7 +310,9 @@ async with triage.session() as session:
 
 When the Session opens, the SDK captures the Agents reachable through `handoffs` and exposes tools that let the model select declared targets. `get_active_agent()` returns the original Agent object currently selected in native history. To switch from application code, pass a captured Agent to a separate idle `update(agent=...)` call. A new Agent object with the same name cannot replace that captured object.
 
-Agents in the handoff graph share the Session provider, programmatic-tool-calling mode, and native runtime grants. Their output modes, schemas, and wrapping must be compatible. Each target supplies its captured instructions, model settings, callbacks, and default tools. An explicit tool selection keeps the original operation's tool limit across handoffs. Omitting the selection uses the destination's defaults; `tools=[]` disables model tools.
+Agents in the handoff graph share the Session provider, programmatic-tool-calling mode, and native runtime grants. They use the same output mode. Native structured outputs can use different schemas, including object and scalar outputs, and the active Agent supplies the schema. A per-turn output override keeps its schema across handoffs. Profiles that use prompted output share a schema.
+
+Each target supplies its captured instructions, model settings, callbacks, and default tools. An explicit tool selection keeps the original operation's tool limit across handoffs. Omitting the selection uses the destination's defaults; `tools=[]` disables model tools.
 
 To restore a portable checkpoint, open it through the original graph root, even if another Agent was active when you saved it. Supply a matching graph with current callbacks and tool bindings. Saved names do not restore callbacks or grant tools. The restored active Agent is the corresponding object in the graph you supplied.
 
