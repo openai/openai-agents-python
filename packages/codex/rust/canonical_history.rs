@@ -53,6 +53,7 @@ pub async fn snapshot(
 enum HistoryEdit {
     Replace { keep: usize, items: Vec<String> },
     Pop { allow_rebuild: bool },
+    Recover { id: String, text: String },
 }
 
 pub async fn replace(
@@ -70,6 +71,66 @@ pub async fn pop(
     allow_rebuild: bool,
 ) -> anyhow::Result<Value> {
     edit(state, expected, HistoryEdit::Pop { allow_rebuild }).await
+}
+
+pub async fn append_recovered(
+    state: &ThreadState,
+    expected: String,
+    id: String,
+    text: String,
+) -> anyhow::Result<Value> {
+    ensure!(!id.is_empty(), "recovered answer requires a message ID");
+    edit(state, expected, HistoryEdit::Recover { id, text }).await
+}
+
+async fn check_recovery_children(state: &ThreadState) -> anyhow::Result<()> {
+    let children = crate::subagents::list(state).await?;
+    let loaded: HashSet<_> = state
+        .engine
+        .manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .collect();
+    let child_ids: HashSet<_> = children.iter().map(|child| child.id).collect();
+    ensure!(
+        loaded.contains(&state.id)
+            && loaded
+                .iter()
+                .all(|id| *id == state.id || child_ids.contains(id)),
+        "recovery requires an exclusively owned root and its native children"
+    );
+    for child in children {
+        if !loaded.contains(&child.id) {
+            ensure!(
+                child.status == "closed",
+                "recovery requires settled native children"
+            );
+            continue;
+        }
+        let thread = state.engine.manager.get_thread(child.id).await?;
+        let status = thread.agent_status().await;
+        ensure!(
+            thread.active_turn_environment_selections().await.is_none()
+                && matches!(
+                    status,
+                    AgentStatus::Completed(_)
+                        | AgentStatus::Errored(_)
+                        | AgentStatus::Interrupted
+                        | AgentStatus::Shutdown
+                )
+                && thread.list_background_terminals().await.is_empty(),
+            "recovery requires settled native children"
+        );
+        if !matches!(status, AgentStatus::Shutdown)
+            && let Some(tools) = thread
+                .thread_extension_data()
+                .get::<crate::python_tools::PythonTools>()
+        {
+            tools.check_idle(&thread).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn edit(state: &ThreadState, expected: String, edit: HistoryEdit) -> anyhow::Result<Value> {
@@ -95,14 +156,18 @@ async fn edit(state: &ThreadState, expected: String, edit: HistoryEdit) -> anyho
         .try_lock()
         .context("native mutation is in progress")?;
     idle(&state).await?;
-    ensure!(
-        state.engine.manager.list_thread_ids().await == vec![state.id],
-        "history transactions require an exclusively owned root without native children"
-    );
-    ensure!(
-        crate::subagents::list(&state).await?.is_empty(),
-        "history transactions do not rewrite child graphs"
-    );
+    if matches!(&edit, HistoryEdit::Recover { .. }) {
+        check_recovery_children(state).await?;
+    } else {
+        ensure!(
+            state.engine.manager.list_thread_ids().await == vec![state.id],
+            "history transactions require an exclusively owned root without native children"
+        );
+        ensure!(
+            crate::subagents::list(state).await?.is_empty(),
+            "history transactions do not rewrite child graphs"
+        );
+    }
     ensure!(
         state.thread.list_background_terminals().await.is_empty(),
         "history transactions require completed background execution"
@@ -139,6 +204,27 @@ async fn edit(state: &ThreadState, expected: String, edit: HistoryEdit) -> anyho
             state
                 .thread
                 .sdk_replace_history(&expected, keep, items)
+                .await
+                .map(|revision| json!({"revision": revision}))
+        }
+        HistoryEdit::Recover { id, text } => {
+            let (current_revision, total, _) = state.thread.sdk_history_snapshot(Some(0)).await?;
+            ensure!(
+                current_revision == expected,
+                "canonical history revision conflict"
+            );
+            let projected = state.thread.sdk_history_projection(None).await?;
+            crate::context::check_pairs(&projected, &(0..projected.len()).collect::<Vec<_>>())
+                .context("canonical history requires complete tool call/result pairs")?;
+            let item = json!({
+                "type": "message",
+                "id": id,
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            });
+            state
+                .thread
+                .sdk_replace_history(&expected, total, vec![item.to_string()])
                 .await
                 .map(|revision| json!({"revision": revision}))
         }

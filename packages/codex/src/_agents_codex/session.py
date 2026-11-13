@@ -9571,12 +9571,14 @@ class Session(Generic[ContextT, OutputT]):
             agent = failure.details.last_agent
             assert agent is not None
             item_id = f"msg_{uuid4().hex}"
-            content = [{"type": "output_text", "text": text}]
-            await self.transact_history(
-                expected_revision=revision.revision,
-                keep=revision.total,
-                items=[{"type": "message", "id": item_id, "role": "assistant", "content": content}],
-            )
+
+            async def append_recovered() -> None:
+                self._history_mutation_value(
+                    await self._native._append_recovered_history(revision.revision, item_id, text)
+                )
+                self._model_context_snapshots.clear()
+
+            await self._join_mutation(asyncio.create_task(append_recovered()))
             items = (
                 *items,
                 ProducedItem(

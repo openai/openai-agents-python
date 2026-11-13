@@ -1161,6 +1161,22 @@ impl NativeThread {
         })
     }
 
+    fn _append_recovered_history<'py>(
+        &self,
+        py: Python<'py>,
+        expected_revision: String,
+        id: String,
+        text: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let value = canonical_history::append_recovered(&inner, expected_revision, id, text)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&value).map_err(py_error)
+        })
+    }
+
     fn _pop_history<'py>(
         &self,
         py: Python<'py>,
