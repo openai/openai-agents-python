@@ -1,4 +1,9 @@
-"""Keep application context out of the model-visible function schema."""
+"""Keep application context out of the model-visible function schema.
+
+Run `python -m examples.codex.typed_context` from the repository root with
+the matching SDK and OPENAI_API_KEY. It prints a greeting using the account
+name supplied through application context. Live requests can incur charges.
+"""
 
 import asyncio
 from dataclasses import dataclass

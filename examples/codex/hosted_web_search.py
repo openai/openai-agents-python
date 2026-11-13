@@ -1,4 +1,9 @@
-"""Run hosted Responses web search and print its citations and source URLs."""
+"""Run hosted Responses web search and print its citations and source URLs.
+
+Run `python -m examples.codex.hosted_web_search` from the repository root
+with the matching SDK and OPENAI_API_KEY. The account must support gpt-5.5
+and hosted web search. Live requests can incur charges.
+"""
 
 import asyncio
 

@@ -1,5 +1,7 @@
 # Repo code review
 
+The [sandbox setup guide](../../README.md) covers source installation, model credentials, and the Unix-local isolation limits. These tutorials also import `rich`; use `uv run --with rich` in place of `uv run` in the commands below when the environment does not install it.
+
 ## Goal
 
 Review a small public git repository, run its tests, leave line-level review comments in the structured output, and write a patch-oriented review artifact.
@@ -17,20 +19,24 @@ uv run python examples/classic/sandbox/tutorials/repo_code_review/main.py
 uv run python examples/classic/sandbox/tutorials/repo_code_review/evals.py
 ```
 
-This demo exits after the scripted review so the generated artifacts and eval contract stay deterministic.
+The demo exits after one scripted review. The task and evaluator use a fixed scope, but model-generated findings and patch text can vary. A successful evaluation prints `Repo review eval checks passed.`; it checks the artifact contract rather than independently verifying the reported test execution or review quality.
 
-This tutorial has been using Unix-local because Docker sandboxes have been rejecting `GitRepo` entries.
+This tutorial uses Unix-local because Docker sandboxes reject `GitRepo` entries.
 
 ## Expected artifacts
 
-- `output/review.md`
-- `output/findings.jsonl`
-- Optional `output/fix.patch`
+The wrapper writes these host files under `examples/classic/sandbox/tutorials/repo_code_review/output/`:
+
+- `review.md`
+- `findings.jsonl`
+- `fix.patch`, required by the default evaluation command
+
+The agent returns proposed patch text; it does not apply that patch to the mounted repository.
 
 ## Demo shape
 
 - Inputs: `pypa/sampleproject` at a pinned git ref, mounted into the workspace as `repo/`.
-- Runtime primitives: sandbox-local bash, optional file edits, and a typed `RepoReviewResult` final output.
-- Workflow: one sandbox reviewer agent is enough here; there is no handoff because the task is a linear inspect -> test -> patch -> summarize loop.
+- Runtime primitives: sandbox-local bash for inspection and tests, and a typed `RepoReviewResult` final output containing findings and proposed patch text.
+- Workflow: one reviewer agent inspects the repository, runs tests, and returns findings plus a patch proposal. The example instructions forbid edits to the mounted repository.
 - Scratch space: the reviewer can use `scratchpad/` for notes or draft diffs, then return the final review object for the wrapper to persist.
-- Evals: `evals.py` checks that the two findings stay focused on `uv` in the test workflow and type hints in `src/sample/simple.py`, and that the patch only edits `simple.py`.
+- Evals: `evals.py` checks the two expected finding paths, test-tooling and type-hint wording, and expected patch text. It does not apply the patch or rerun the repository tests.

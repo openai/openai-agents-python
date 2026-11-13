@@ -1,7 +1,12 @@
 """Refresh reference material before each request without adding a history message.
 
-Run with:
-    python examples/codex/model_context.py reference.txt "What does the reference say?"
+From the matching SDK source archive root with OPENAI_API_KEY configured:
+    printf '%s' 'Orchid revenue: 17 million.' > synthetic-reference.txt
+    python -m examples.codex.model_context synthetic-reference.txt "What revenue does Orchid report?"
+
+The command prints an answer based on the file, such as 17 million. Live model
+wording varies and requests can incur charges. The reference file remains after
+the run; remove the synthetic file when finished.
 """
 
 import argparse

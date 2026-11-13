@@ -33,13 +33,16 @@ if TYPE_CHECKING:
     from ._agent_tool import _ConfiguredAgentTool
     from ._function_tools import (
         FunctionTool,
+        Tool,
         ToolContext,
         ToolInputErrorContext,
         ToolTimeoutBehavior,
         ToolTimeoutError,
     )
     from .agent import ContextT
+    from .executor import Environment
     from .manual import ActionRequested
+    from .native_agents import NativeAgents
     from .native_interception import Allow, Deny, ReplaceArguments
 
 _TOOL_RESPONSE = TypeAdapter(FunctionCallResponse)
@@ -760,6 +763,92 @@ class _ToolCatalog:
 
     def native_specs(self) -> str:
         return json.dumps([json.loads(tool.spec_json) for tool in self.tools])
+
+
+@dataclass(frozen=True)
+class _MCPResourceRef:
+    """Select a current ordinary server without granting any model tools."""
+
+    name: str
+
+
+def _ordinary_default_slots(
+    catalog: _ToolCatalog, selection: Sequence[ToolRef | _MCPResourceRef] | None
+) -> list[int] | None:
+    if selection is None:
+        return None
+    return [slot for slot, tool in enumerate(catalog.tools) if tool._ref in selection]
+
+
+@dataclass(frozen=True)
+class _ToolUpdatePlan:
+    bound_tools: tuple[_CapturedFunction | _CapturedManual, ...]
+    bindings: tuple[Tool[Any], ...]
+    defaults: tuple[
+        ToolRef | _MCPResourceRef | Tool[Any] | Environment[Any] | NativeAgents[Any], ...
+    ]
+
+    def select(
+        self, python: Sequence[FunctionTool[Any, Any, Any]]
+    ) -> tuple[_CapturedFunction | _CapturedManual, ...]:
+        refs = {tool.ref for tool in python}
+        return tuple(tool for tool in self.bound_tools if tool._ref in refs)
+
+    def catalog(
+        self, generation: int, selected: tuple[_CapturedFunction | _CapturedManual, ...]
+    ) -> _ToolCatalog:
+        return _ToolCatalog(generation, selected)
+
+
+def _plan_tool_update(
+    selection: Sequence[ToolRef | Tool[Any] | Environment[Any] | NativeAgents[Any]],
+    current_bindings: Sequence[Tool[Any]],
+    current_bound_tools: tuple[_CapturedFunction | _CapturedManual, ...],
+    context: Any,
+) -> _ToolUpdatePlan:
+    """Plan an admitted idle replacement without publishing Session state."""
+    from ._function_tools import FunctionTool
+    from .hosted_mcp import HostedMCP
+    from .mcp import HttpMCP, StdioMCP
+
+    # MCP defaults select current bindings by name, never by captured
+    # endpoints or credentials. Empty declarations select only a server.
+    defaults = tuple(
+        ref
+        for tool in selection
+        for ref in (
+            tuple(tool.tool(raw) for raw in tool.tools)
+            if isinstance(tool, (HttpMCP, StdioMCP)) and tool.tools
+            else (_MCPResourceRef(tool.name),)
+            if isinstance(tool, (HttpMCP, StdioMCP)) and type(tool) in (HttpMCP, StdioMCP)
+            else (tool,)
+        )
+    )
+    # Explicit idle declarations replace bindings; refs only select.
+    # Preserve every omitted opening slot and alias for later operations.
+    supplied_python = {
+        tool.ref: tool._binding if isinstance(tool, HostedMCP) else tool
+        for tool in selection
+        if isinstance(tool, (FunctionTool, HostedMCP))
+    }
+    supplied_mcp = tuple(tool for tool in selection if isinstance(tool, (HttpMCP, StdioMCP)))
+    bindings: list[Tool[Any]] = []
+    for bound in current_bindings:
+        if isinstance(bound, (FunctionTool, HostedMCP)):
+            bindings.append(supplied_python.get(bound.ref, bound))
+        elif isinstance(bound, (HttpMCP, StdioMCP)):
+            if not any(server.name == bound.name for server in supplied_mcp):
+                bindings.append(bound)
+        else:
+            bindings.append(bound)
+    # A validated alias can contain several disjoint descriptor identities.
+    # Replace its old identities once; keep all current ones selectable.
+    bindings.extend(supplied_mcp)
+    selected = tuple(
+        supplied_python[bound._ref]._capture(context) if bound._ref in supplied_python else bound
+        for bound in current_bound_tools
+    )
+    return _ToolUpdatePlan(selected, tuple(bindings), defaults)
 
 
 def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:

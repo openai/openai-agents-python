@@ -1,10 +1,10 @@
-"""Decisions has been selecting offered native handoffs before model submission.
+"""Select one offered native handoff through Decisions before model submission.
 
-Run: python -m examples.codex.recipes.decisions_handoffs
-The fixture has been using synthetic loopback responses without credentials.
-Selection has been preserving one Session, its main model and application context.
-It has not been intercepting submitted handoffs or supporting active checkpoints.
-"""
+Run `python -m examples.codex.recipes.decisions_handoffs` from the root of
+an SDK checkout with its matching native build installed. The fixture uses
+synthetic loopback responses without credentials. It preserves one Session,
+its main model, and application context. It does not intercept submitted
+handoffs or restore active checkpoints. See README.md for the recipe index."""
 
 import asyncio
 import json

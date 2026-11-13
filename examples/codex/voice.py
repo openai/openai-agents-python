@@ -1,7 +1,9 @@
 """Transcribe a WAV file, run a native Session, and write spoken output.
 
 Install the matching SDK's voice extra. Set OPENAI_API_KEY for speech and native
-API requests. Run: python examples/codex/voice.py input.wav output.wav
+API requests. From the matching source archive root, run:
+python examples/codex/voice.py input.wav output.wav
+See native_voice.md for setup and the native-versus-pipeline task choices.
 Input must be mono PCM16 at 24 kHz. No microphone or speaker is opened.
 Speech begins after native completion accepts and validates the final text.
 """

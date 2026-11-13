@@ -25,10 +25,7 @@ This example shows how to handle OpenAI Realtime SIP calls with the Agents SDK. 
 
 Use this example only for controlled testing. It accepts any incoming caller routed to the configured number; the event signature does not authenticate the telephone caller. Calls incur charges. The example has no caller admission, concurrency, call duration, or spending limits. Applications must choose and enforce any required restrictions before `accept_call`.
 
-1. Install dependencies:
-   ```bash
-   uv pip install -r examples/classic/realtime/twilio_sip/requirements.txt
-   ```
+1. Complete [contributor setup](../../../../CONTRIBUTING.md) for the matching source. The launch command in step 4 supplies this example's requirements without changing the project dependency declarations. All commands below use the repository root.
 2. Export required environment variables:
    ```bash
    export OPENAI_API_KEY="sk-..."
@@ -37,7 +34,7 @@ Use this example only for controlled testing. It accepts any incoming caller rou
 3. (Optional) Adjust the multi-agent logic in `examples/classic/realtime/twilio_sip/agents.py` if you want to change the specialist agents or tools.
 4. Run the FastAPI server:
    ```bash
-   uv run uvicorn examples.classic.realtime.twilio_sip.server:app --host 0.0.0.0 --port 8000
+   uv run --extra classic --with-requirements examples/classic/realtime/twilio_sip/requirements.txt uvicorn examples.classic.realtime.twilio_sip.server:app --host 0.0.0.0 --port 8000
    ```
 5. Expose the server publicly (example with ngrok):
    ```bash
@@ -58,7 +55,7 @@ Use this example only for controlled testing. It accepts any incoming caller rou
 To deliberately log caller text, assistant text, and assistant audio transcripts, set `TWILIO_SIP_LOG_TRANSCRIPTS=1` before starting the server:
 
 ```bash
-TWILIO_SIP_LOG_TRANSCRIPTS=1 uv run uvicorn examples.classic.realtime.twilio_sip.server:app --host 0.0.0.0 --port 8000
+TWILIO_SIP_LOG_TRANSCRIPTS=1 uv run --extra classic --with-requirements examples/classic/realtime/twilio_sip/requirements.txt uvicorn examples.classic.realtime.twilio_sip.server:app --host 0.0.0.0 --port 8000
 ```
 
 Use this option only with test conversations whose content you intend to store in logs. Unset the variable and restart the server to disable transcript logging. Only the exact value `1` enables this option; changing the general log level does not enable it. Raw provider errors and exception tracebacks remain omitted from the example's logs even when transcript logging is enabled. This setting controls only this example's transcript logging, not SDK tracing or logging configured separately for dependencies.

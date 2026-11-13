@@ -1,4 +1,9 @@
-"""Continue and restore a native conversation after its work settles."""
+"""Continue and restore a native conversation after its work settles.
+
+Run `python -m examples.codex.conversation` from the repository root with
+the matching SDK and OPENAI_API_KEY. The answer before and after restore
+should recall atlas. All three turns make live requests and can incur charges.
+"""
 
 import asyncio
 from contextlib import suppress

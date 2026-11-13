@@ -12,6 +12,7 @@ from collections.abc import (
     Mapping as Mapping,
     Sequence as Sequence,
 )
+from copy import deepcopy as _deepcopy
 from dataclasses import dataclass as dataclass, field as field
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
@@ -26,13 +27,14 @@ from urllib.parse import unquote as unquote, urlsplit as urlsplit
 
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict, TypeVar as TypeVar
 
+from ._callback_execution import _call_callback, _RecoverableFunctionCallback
 from ._mcp_errors import _protect_mcp_initializer, _protect_mcp_methods
 from ._mcp_names import (
     _project_name as _project_name,
     _project_tool_names as _project_tool_names,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
-from .tools import ToolCallInfo as ToolCallInfo, ToolRef as ToolRef
+from .tools import ToolCallInfo as ToolCallInfo, ToolRef as ToolRef, _capture_application_data
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -796,6 +798,27 @@ def _launch_text(value: object, name: str, *, allow_empty: bool = False) -> None
         value.encode("utf-8")
     except UnicodeError:
         raise ValueError(f"MCP {name} must contain valid Unicode") from None
+
+
+async def _transform_and_extract_result(
+    callback: Callable[..., Any] | None,
+    extractor: Callable[..., Any] | None,
+    context: MCPResultContext[Any],
+    value: Any,
+    admitted: Callable[[], bool],
+) -> tuple[Any, dict[str, Any] | None]:
+    application_data = None
+    if callback is not None:
+        value = await _call_callback(
+            _RecoverableFunctionCallback(callback), admitted, context, value
+        )
+    if extractor is not None and admitted() and isinstance(value, dict):
+        application_data = _capture_application_data(
+            await _call_callback(
+                _RecoverableFunctionCallback(extractor), admitted, context, _deepcopy(value)
+            )
+        )
+    return value, application_data
 
 
 def _tool_names(servers: tuple[_MCP[Any], ...]) -> list[dict[str, str]]:

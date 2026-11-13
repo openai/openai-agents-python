@@ -1,18 +1,17 @@
-"""Native MCP result reduction with synthetic data and no live API key.
+"""Reduce native MCP results with synthetic data and no live API key.
 
-    python -m examples.codex.recipes.oversized_mcp_output
+Run `python -m examples.codex.recipes.oversized_mcp_output` from the matching
+source checkout with its SDK installed. This recipe also requires aiohttp.
 
-The MCP result policy has been running after the remote effect and before native
-history admission. Full evidence has been staying in an application-owned dict
-for this process only. Production applications have been needing durable storage
-for evidence that must survive exit. Saved SDK state has been retaining bounded
-summaries and references only. Refusal has not been undoing remote effects.
+The MCP result policy runs after the remote effect and before history admission.
+Full evidence stays in an application-owned dictionary for this process only.
+Use durable storage for evidence that must survive exit. Saved SDK state keeps
+bounded summaries and references. Refusing a result does not undo remote effects.
 
-Provider-hosted tools have been running outside this MCP callback. A request-only
-transform_context fallback has been operating after accepted hosted results,
-before a later SDK request; it has not been reducing provider-internal context.
-All size checks below have been measuring serialized UTF-8 bytes, not tokens.
-"""
+Provider-hosted tools run outside this MCP callback. A transform_context edit
+can change a later SDK request after an accepted hosted result, but cannot reduce
+the provider's internal context. Size checks below measure serialized UTF-8 bytes,
+not tokens."""
 
 import asyncio
 import json

@@ -15,8 +15,8 @@ from tests.test_native_environment_protocol import delayed_native_join as delaye
 
 ROOT = Path(__file__).resolve().parents[3]
 _SNIPPETS = {
-    "saved_login": ("configuration.md", "NativeProvider(auth=CodexLogin())"),
-    "opening_cleanup": ("configuration.md", 'recovery = getattr(error, "provider", None)'),
+    "saved_login": ("models.md", "NativeProvider(auth=CodexLogin())"),
+    "opening_cleanup": ("models.md", 'recovery = getattr(error, "provider", None)'),
     "cleanup_owner": ("sessions.md", "cleanup = get_cleanup(error)"),
     "timeout": ("troubleshooting.md", "timeout=30"),
     "stdio": ("mcp.md", 'command="/opt/docs-server/bin/server"'),

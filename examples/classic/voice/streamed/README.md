@@ -4,9 +4,9 @@ This is an interactive demo, where you can talk to an Agent conversationally. It
 
 Install the matching SDK with its `classic-voice` extra and install `sounddevice` with its PortAudio system library and `textual`. Set `OPENAI_API_KEY` and connect a microphone and an audio output device before running the demo. See [Classic setup](../../../../CLASSIC.md).
 
-Run via:
+From the repository root:
 
-```
+```sh
 python -m examples.classic.voice.streamed.main
 ```
 

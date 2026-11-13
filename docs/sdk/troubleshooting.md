@@ -8,6 +8,7 @@ Find the symptom below, then inspect the failed operation and any completed tool
 | --- | --- |
 | Installation fails, a wheel is unsupported, or GitHub returns 404 | Check [installation](installation.md#if-installation-fails) and match the guide version to the wheel. |
 | `get_result` or another documented method is missing | Check the version with your application's `python -m pip show openai-agents`. Use the matching [preview guide](installation.md). |
+| A local executor fails to start, or macOS `gh` reports a certificate error | Check the [local executor prerequisites](execution.md#local-execution) and the matching [platform procedure](execution.md#platform-troubleshooting). |
 | A notebook reports that an event loop is already running | Use `await agent.run(...)`. Use `run_sync()` or a script's `asyncio.run(main())` only outside a running event loop. |
 
 ## Run and observe work
@@ -18,10 +19,10 @@ Find the symptom below, then inspect the failed operation and any completed tool
 | A one-shot run raises `InteractionRequired` | Inspect its optional checkpoint and [continue the pending request](approvals.md#continue-a-one-shot-manual-request). Do not resubmit the original prompt. |
 | A Python tool raises an exception | Inspect the [tool error contract](tools.md#return-text-images-and-tool-errors) and any completed effects before submitting new work. |
 | The agent is waiting for your application | Check for [manual results or approvals](approvals.md#answer-interactions-during-a-one-shot-run). Reply to the exact live request. |
-| Streamed text is incomplete or an `EventGap` appears | The observation stream can drop records. Use `turn.get_result()` and its final output; see [streaming](sessions.md#stream-observations). |
-| A result fails validation | Catch [`OutputValidationError`](configuration.md#structured-output). A new submission can repeat completed tool effects; validation does not undo them. |
+| Streamed text is incomplete or an `EventGap` appears | The observation stream can drop records. Use `turn.get_result()` and its final output; see [streaming](streaming.md#stream-observations). |
+| A result fails validation | Catch [`OutputValidationError`](outputs.md#return-a-typed-result). A new submission can repeat completed tool effects; validation does not undo them. |
 | A provider or native operation fails | Inspect available `NativeError` metadata and [effect status](sessions.md#failures-and-recovery). Missing metadata remains unknown. |
-| A provider stream succeeds but the SDK rejects its output | With `0.24.0-alpha.7` or later, inspect the typed [response integrity reason](sessions.md#diagnose-response-integrity-failures) and compare [retained response facts](sessions.md#inspect-response-attempts) with the SDK result. Earlier tool effects can remain. |
+| A provider stream succeeds but the SDK rejects its output | With `0.24.0-alpha.7` or later, inspect the typed [response integrity reason](streaming.md#diagnose-response-integrity-failures) and compare [retained response facts](streaming.md#inspect-response-attempts) with the SDK result. Earlier tool effects can remain. |
 | Usage totals appear inflated or usage is missing | Check [usage accounting](observability.md#read-usage-without-double-counting). Replace cumulative snapshots when updating a display, and keep missing usage as unknown. |
 | A scripted test uses an unexpected request or leaves responses unused | Each script entry is one model response. Check [request snapshots and exact exhaustion](testing.md). |
 
@@ -31,12 +32,14 @@ Find the symptom below, then inspect the failed operation and any completed tool
 | --- | --- |
 | Portable restore reports an unsupported Codex revision or `checkpoint core revision differs` | Use a wheel with the saving SDK's pinned Codex revision. Editing `codex_revision` does not migrate state. See [compatibility](state.md#save-and-restore-a-portable-checkpoint). |
 | Local resume reports an unknown tool outcome or an active descendant | Keep the profile. If reopening raises `LocalRecoveryRequired`, verify the outcomes in `error.calls` against trusted records. Keep the conversation closed while an outcome remains unknown or a writer is active. See [local recovery and wheel version limits](state.md#recover-after-interruption). |
-| Opening fails and cleanup also fails | Follow [provider cleanup recovery](configuration.md#recover-a-failed-managed-environment-opening) before discarding the owning event loop. |
+| Opening fails and cleanup also fails | Follow [provider cleanup recovery](models.md#recover-a-failed-managed-environment-opening) before discarding the owning event loop. |
 | A checkpoint cannot be saved or restored | Check [capture readiness and supported boundaries](state.md#check-support-and-capture-readiness), matching tools and instructions, and current permissions. |
 
 ## Bound a wait and stop owned work
 
 Choose cancellation based on the work your application owns. Timing out `turn.get_result()` stops waiting without canceling the Turn. If your application owns the whole Session and needs that work to stop, let the timeout leave the Session's async context. Session exit stops its work and waits for cleanup before propagating the original exception:
+
+First [configure your provider and credentials](models.md#provider-connection). Save the script as `bounded_run.py` and run `python bounded_run.py`. This makes live model requests that can incur charges.
 
 ```python
 import asyncio
@@ -81,7 +84,7 @@ Include these details in a failure report:
 - SDK version, Python version, operating system and failed operation.
 - A small reproduction with synthetic inputs, and whether it fails with [scripted responses](testing.md) or only with the live provider.
 - Available `NativeError` fields `status_code`, `code`, `request_id`, `category` and `effects`, if your data policy permits them.
-- In `0.24.0-alpha.7` or later, the optional `response_integrity_reason`. See [response integrity failures](sessions.md#diagnose-response-integrity-failures) for its values and limits.
+- In `0.24.0-alpha.7` or later, the optional `response_integrity_reason`. See [response integrity failures](streaming.md#diagnose-response-integrity-failures) for its values and limits.
 
 Messages, request snapshots, prompts, tool results and checkpoints can contain private data. Inspect and redact reports before sending them to [GitHub issues](https://github.com/openai/openai-agents-python/issues). Never include credentials. Report vulnerabilities through [private security reporting](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/SECURITY.md).
 

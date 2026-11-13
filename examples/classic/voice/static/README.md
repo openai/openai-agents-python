@@ -4,16 +4,16 @@ This demo operates by capturing a recording, then running a voice pipeline on it
 
 Install the matching SDK with its `classic-voice` extra and install `sounddevice` with its PortAudio system library. Set `OPENAI_API_KEY` and connect a microphone and an audio output device before running the demo. See [Classic setup](../../../../CLASSIC.md).
 
-Run via:
+From the repository root:
 
-```
+```sh
 python -m examples.classic.voice.static.main
 ```
 
 ## How it works
 
 1. We create a `VoicePipeline` with a `SingleAgentVoiceWorkflow` that runs an Agent with tools and handoffs.
-2. When you speak, audio is forwarded to the voice pipeline. When you stop speaking, the agent runs.
+2. The terminal uses **Space** to start recording and **Space** again to stop. The completed recording then enters the voice pipeline.
 3. The pipeline is run with the audio, which causes it to:
     1. Transcribe the audio
     2. Feed the transcription to the workflow, which runs the agent.

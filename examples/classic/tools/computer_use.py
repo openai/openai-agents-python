@@ -1,6 +1,5 @@
 # How to run this example:
-# uv run python -m playwright install chromium
-# uv run -m examples.classic.tools.computer_use
+# Setup and launch commands: examples/classic/tools/README.md#browser-setup.
 
 import asyncio
 import base64

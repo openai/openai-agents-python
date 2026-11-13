@@ -35,12 +35,26 @@
       ]
     },
     {
-      "id": "choose",
-      "path": "choosing.md#choose-feature-combinations",
+      "id": "concepts",
+      "path": "concepts.md",
       "aliases": [
-        "feature combinations",
+        "core concepts",
+        "architecture"
+      ]
+    },
+    {
+      "id": "choose",
+      "path": "choosing.md",
+      "aliases": [
         "deployment",
         "SDK or hosted API"
+      ]
+    },
+    {
+      "id": "feature-combinations",
+      "path": "choosing.md#choose-feature-combinations",
+      "aliases": [
+        "feature combinations"
       ]
     },
     {
@@ -48,28 +62,65 @@
       "path": "providers.md",
       "aliases": [
         "custom endpoint",
-        "Responses",
-        "OpenAI base URL",
+        "Responses compatibility",
         "WebSockets"
+      ]
+    },
+    {
+      "id": "models",
+      "path": "models.md",
+      "aliases": [
+        "model settings",
+        "NativeProvider",
+        "API key",
+        "authentication",
+        "OpenAI base URL",
+        "tool_choice",
+        "CodexLogin",
+        "rate limits"
       ]
     },
     {
       "id": "recipes",
       "path": "recipes.md",
       "aliases": [
-        "RAG",
-        "PDF",
-        "memory",
-        "specialist",
-        "image input",
-        "programmatic tools",
-        "attachments",
-        "citations",
+        "recipes",
+        "task examples"
+      ]
+    },
+    {
+      "id": "tool-recipes",
+      "path": "recipes.md#validate-tools-and-control-effects",
+      "aliases": [
         "parallel",
         "concurrency",
-        "FastAPI",
-        "supervised workers",
-        "prepared requests"
+        "deduplication"
+      ]
+    },
+    {
+      "id": "memory-recipes",
+      "path": "recipes.md#add-memory-retrieval-and-specialists",
+      "aliases": [
+        "RAG",
+        "retrieval",
+        "memory",
+        "specialist",
+        "citations"
+      ]
+    },
+    {
+      "id": "worker-recipes",
+      "path": "recipes.md#run-supervised-workers",
+      "aliases": [
+        "supervised workers"
+      ]
+    },
+    {
+      "id": "browser-starter",
+      "path": "recipes.md#start-a-local-browser-application",
+      "aliases": [
+        "browser application",
+        "aiohttp starter"
       ]
     },
     {
@@ -99,14 +150,34 @@
       "path": "sessions.md",
       "aliases": [
         "conversation",
-        "streaming",
-        "Stop",
-        "EventGap",
         "Turn",
         "submission_id",
-        "response history",
-        "request metadata",
-        "observation cursor"
+        "queue",
+        "steer",
+        "handoff"
+      ]
+    },
+    {
+      "id": "streaming",
+      "path": "streaming.md",
+      "aliases": [
+        "streaming",
+        "events",
+        "EventGap",
+        "observation cursor",
+        "request metadata"
+      ]
+    },
+    {
+      "id": "media-input",
+      "path": "sessions.md#typed-input",
+      "aliases": [
+        "PDF",
+        "image input",
+        "attachments",
+        "file input",
+        "audio input",
+        "video input"
       ]
     },
     {
@@ -124,7 +195,8 @@
         "code mode limits",
         "model_context",
         "retain",
-        "before_compact"
+        "before_compact",
+        "response history"
       ]
     },
     {
@@ -181,10 +253,20 @@
       "id": "configure",
       "path": "configuration.md",
       "aliases": [
-        "structured output",
         "prepare_request",
         "PreparedRequest",
-        "tool_choice",
+        "transform_context",
+        "programmatic tools",
+        "Agent.decide"
+      ]
+    },
+    {
+      "id": "outputs",
+      "path": "outputs.md",
+      "aliases": [
+        "structured output",
+        "output_type",
+        "PromptedOutput",
         "before_complete",
         "ContinueTurn"
       ]
@@ -214,8 +296,6 @@
         "timeout",
         "error",
         "diagnose",
-        "rate limits",
-        "token budget",
         "retry",
         "response_integrity_reason"
       ]

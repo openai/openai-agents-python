@@ -1,14 +1,18 @@
-# Financial Research Agent Example
+# Financial research agent
 
-This example shows how you might compose a richer financial research agent using the Agents SDK. The pattern is similar to the `research_bot` example, but with more specialized sub‑agents and a verification step.
+<a id="financial-research-agent-example"></a>
+
+Complete [Classic setup](../../../CLASSIC.md), install `rich` in that environment with `python -m pip install rich`, and set `OPENAI_API_KEY`. Commands below use the repository root. The bot makes multiple model and web-search requests per query, with corresponding usage charges.
+
+This example builds on the [research bot](../research_bot/README.md) by adding financial specialists, source evidence, and report verification with one possible revision.
 
 The flow is:
 
-1. **Planning**: A planner agent turns the end user’s request into a list of search terms relevant to financial analysis – recent news, earnings calls, corporate filings, industry commentary, etc.
-2. **Search**: A search agent uses the built‑in `WebSearchTool` to retrieve terse summaries for each search term. (You could also add `FileSearchTool` if you have indexed PDFs or 10‑Ks.)
-3. **Sub‑analysts**: Additional agents (e.g. a fundamentals analyst and a risk analyst) are exposed as tools so the writer can call them inline and incorporate their outputs.
-4. **Writing**: A senior writer agent brings together the search snippets and any sub‑analyst summaries into a long‑form markdown report plus a short executive summary.
-5. **Verification**: A final verifier agent audits the report for obvious inconsistencies or missing sourcing.
+1. **Planning**: A planner turns the request into search queries for financial analysis, such as earnings, filings, and industry news.
+2. **Search**: A search agent uses `WebSearchTool` to gather summaries and source URLs for the queries.
+3. **Specialist tools**: The writer can call fundamentals and risk analysts as tools and receive their summaries.
+4. **Writing**: The writer combines the evidence and specialist summaries into a Markdown report, executive summary, and follow-up questions.
+5. **Verification**: A verifier checks the report against the gathered evidence. If verification fails, the writer revises the report once and the verifier checks it again. A second failure raises an error instead of printing the report. Model-based verification does not establish financial correctness.
 
 You can run the example with:
 
@@ -22,17 +26,10 @@ and enter a query like:
 Write up an analysis of Apple Inc.'s most recent quarter.
 ```
 
-### Starter prompt
+After a successful run, the terminal prints the report, follow-up questions, and verification result. The wording and search results vary. If evidence verification still fails after the revision, inspect the verification issues in the error before changing the prompts or source data.
 
-The writer agent is seeded with instructions similar to:
+<a id="starter-prompt"></a>
 
-```
-You are a senior financial analyst. You will be provided with the original query
-and a set of raw search summaries. Your job is to synthesize these into a
-long‑form markdown report (at least several paragraphs) with a short executive
-summary. You also have access to tools like `fundamentals_analysis` and
-`risk_analysis` to get short specialist write‑ups if you want to incorporate them.
-Add a few follow‑up questions for further research.
-```
+## Customize the workflow
 
-You can tweak these prompts and sub‑agents to suit your own data sources and preferred report structure.
+[`manager.py`](manager.py) coordinates searches, specialist tools, writing, revision, and verification. [`agents/writer_agent.py`](agents/writer_agent.py) contains the writer and revision prompts; [`agents/verifier_agent.py`](agents/verifier_agent.py) defines the verification checks. Update those instructions when adapting the example to your data sources and report requirements.

@@ -11,13 +11,15 @@ Pass an `Environment` to a Session to give the model selected process and file t
 | With explicit network or local-socket access | [Network policy](#network-and-local-socket-access) |
 | After an application decision | [Executor policies](#executor-policies) |
 
-Use an SDK wheel and native helpers that match the documented API, then [configure the model provider](configuration.md#provider-connection). Use a [preview wheel](installation.md) for `0.24.0-alpha.7` or later. Examples with `await` or `async with` belong inside an async application. The remote examples also require an already deployed compatible exec-server and current credentials.
+Use an SDK wheel and native helpers that match the documented API, then [configure the model provider](models.md#provider-connection). Use a [preview wheel](installation.md) for `0.24.0-alpha.7` or later. Examples with `await` or `async with` belong inside an async application. The remote examples also require an already deployed compatible exec-server and current credentials.
 
 ## Local execution
 
 `Environment.local()` requires `0.24.0-alpha.7` or later. Install a [matching preview wheel](installation.md).
 
 Use `Environment.local()` to run selected tools with the SDK's native sandbox on a supported Linux or macOS host. The matching wheel supplies the local executor helper. Give the executor an existing absolute working directory and select the tools the model may call. Use a workspace your application owns.
+
+For platform-specific setup failures, see [Platform troubleshooting](#platform-troubleshooting).
 
 On macOS, local execution needs a usable per-user `launchd` domain and OS support for signaling a specific process instance. If either capability is unavailable, the SDK fails before running local commands. You can import the wheel and use model-only or WSS sessions on supported hosts that lack either capability.
 
@@ -43,74 +45,126 @@ The example asks the model to list files in that workspace. The final answer des
 
 Local commands can read the workspace, any additional `writable_roots`, and the platform files they need to run. The SDK starts them with a minimal environment and a system `PATH`. Command output can reach the model provider. For untrusted prompts or files, run each job in a job-private OS sandbox or VM. Keep host credentials and other jobs' data outside that boundary.
 
-On macOS, the local sandbox has been isolating commands from host `launchd` services, including with `write_policy="trusted_workspace_write"`. Directory-backed account lookup in `id -F` and `ssh` has been failing inside that sandbox. For an authenticated Git push, use a Python function tool that runs in the application process and uses its Git credentials. The application selects the reviewed commit and destination before the model calls the tool. [Host Git example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/README.md#push-a-reviewed-git-commit-from-macos) · [Python functions](tools.md#python-functions)
-
-### Configure GitHub CLI TLS on macOS
-
-Sandboxed `gh` can report `x509: OSStatus -26276` when macOS certificate verification needs access to host services. With `gh` built using Go 1.27 or later, `SSL_CERT_FILE` selects a CA bundle for Go's certificate verifier. The SDK still applies the sandbox and its network policy. [Go 1.27 certificate changes](https://go.dev/doc/go1.27#crypto/x509)
-
-Use this setup with SDK version `0.24.0-alpha.8` or later. Use this environment with the Agent and Session in the local execution example above.
-
-```python
-from pathlib import Path
-
-from agents import Environment, NetworkPolicy
-
-environment = Environment.local(
-    cwd=Path("/jobs/worker/work"),
-    tools=("exec_command", "write_stdin"),
-    write_policy="trusted_workspace_write",
-    env={"SSL_CERT_FILE": "/etc/ssl/cert.pem"},
-    network=NetworkPolicy(allowed_domains=("api.github.com",)),
-)
-```
-
-Select a readable CA bundle maintained by your operating system or administrator. Keep it outside the job's writable roots. If your GitHub server uses an organization CA, select a bundle that includes the required roots and allow the server's API hostname. In this mode, Go uses file-based roots in place of macOS Keychain trust settings.
-
-GitHub authentication needs separate credentials. Use `trusted_workspace_write` only for trusted jobs because commands can read the application's files and inherit its environment. When Git credentials need to stay in the application, use the [host Git example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/README.md#push-a-reviewed-git-commit-from-macos).
-
-### Allow the Linux sandbox helper to use user namespaces on Ubuntu 24.04
-
-Ubuntu 24.04 uses AppArmor to restrict unprivileged user namespaces. The local executor needs these namespaces to start its sandbox. If a local Session fails to start, ask an administrator to check the kernel log. [Ubuntu 24.04 release notes](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions)
-
-```sh
-sudo journalctl -k -b --grep='apparmor="DENIED"'
-```
-
-Find the capability denial for the failed bubblewrap invocation (`comm="bwrap"` and `operation="capable"`). For a loopback setup failure, look for `capname="net_admin"`. If several Sessions start at the same time, retry one Session to identify its audit record. Ubuntu's default policy can deny capabilities after bubblewrap creates a user namespace. The audit record identifies that policy as `profile="unprivileged_userns"`. If the record names a different profile, ask the administrator who manages that profile to investigate.
-
-For a denial from `unprivileged_userns`, an administrator can grant `userns` to the SDK's installed `codex-linux-sandbox` helper. AppArmor applies the grant when an account executes that helper, including outside a Session. Child processes can inherit the profile. Use a trusted SDK installation in an administrator-controlled directory outside the job workspace and writable roots. Limit access to the helper to trusted application accounts.
-
-Find the helper's exact path using the application's Python interpreter.
-
-```sh
-python -c 'from pathlib import Path; import agents; print((Path(agents.__file__).parent / "bin" / "codex-linux-sandbox").resolve(strict=True))'
-```
-
-Create `/etc/apparmor.d/agents-sdk-linux-sandbox-worker` as an administrator. Replace the example attachment path with the resolved helper path. Avoid AppArmor pattern characters such as `*`, `?`, `[` and `{` in the installation path. Give each helper path its own profile name and file.
-
-```text
-abi <abi/4.0>,
-include <tunables/global>
-
-profile agents-sdk-linux-sandbox-worker "/opt/agents-sdk/venv/lib/python3.12/site-packages/agents/bin/codex-linux-sandbox" flags=(unconfined) {
-  userns,
-}
-```
-
-Load the profile, then retry the same local Session as the application user.
-
-```sh
-sudo apparmor_parser -r /etc/apparmor.d/agents-sdk-linux-sandbox-worker
-```
-
-Keep the system-wide AppArmor user namespace restriction enabled. The SDK still requires its native sandbox before it runs local commands. If the SDK installation path changes, update the profile attachment and reload the profile before retrying.
+On macOS, the local sandbox isolates commands from host `launchd` services, including with `write_policy="trusted_workspace_write"`. Directory-backed account lookup in `id -F` and `ssh` fails inside that sandbox. For an authenticated Git push, use a Python function tool that runs in the application process and uses its Git credentials. The application selects the reviewed commit and destination before the model calls the tool. [Host Git example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/README.md#push-a-reviewed-git-commit-from-macos) · [Python functions](tools.md#python-functions)
 
 ### Add read-only directories on Linux
 
 SDK version `0.24.0-alpha.7` or later supports `Environment.local(mounts=[...])` on Linux. Import `LocalStorageMount` from `agents` and declare each directory as `LocalStorageMount(source=path)`. Destination defaults to source, strategy defaults to `"local_bind"`, and `read_only` defaults to `True`; writable mounts are unsupported. Source and destination must name the same existing canonical absolute directory without symlink components. The caller owns the directory and its contents; the mount grants native commands read-only access without changing the host directory's permissions.
 
 Mounts are unsupported on macOS and WSS Environments. The SDK rejects overlapping mounts, overlaps with `cwd`, write roots, or SDK storage, and files hard-linked to writable directories. Keep the mount paths stable while the Session runs. Active mounts prohibit per-turn `writable_roots` replacement, including an empty list. Restore requires the same applied executor policy, including the mounted directories. Mounts do not copy files into a checkpoint or limit the application's Python callbacks.
+
+## Remote execution
+
+Remote execution requires an application-owned service that implements the Codex exec-server protocol. Use a version compatible with the SDK's pinned Codex runtime. This guide assumes that service is already deployed and has an authenticated WSS endpoint.
+
+Pass `Environment` to a Session or one-shot run to connect to that service. The Environment configures the Session and does not belong in the Agent's `tools` list. Set `EXECUTOR_URL` to the service's WSS endpoint and `EXECUTOR_TOKEN` to its current credential:
+
+```python
+import os
+
+from agents import Agent, Environment
+
+
+environment = Environment(
+    url=os.environ["EXECUTOR_URL"],
+    cwd="/workspace",
+    headers={"Authorization": f"Bearer {os.environ['EXECUTOR_TOKEN']}"},
+    tools=("exec_command", "write_stdin", "apply_patch"),
+)
+agent = Agent(instructions="Inspect the assigned workspace.")
+async with agent.session(environment=environment) as session:
+    turn = await session.submit("List the workspace files.")
+    result = await turn.get_result()
+```
+
+`agent.run(..., environment=environment)` and `agent.run_sync(..., environment=environment)` accept the same connection data. `Environment.tools` defaults to an empty tuple, so process and file tools must be selected explicitly. If the WSS connection fails, the SDK reports a startup cause, such as a certificate error, HTTP status, or timeout. To run tools on the application host, select [local execution](#local-execution) explicitly.
+
+### Workspace and connection limits
+
+Selected tools can modify the assigned remote workspace. By default the SDK requests writes in `cwd`, protects native metadata, and requests restricted networking. Supply [additional write roots](#replace-write-roots-between-turns) through application code. A model's `workdir` argument only sets a command's working directory.
+
+The application must isolate workspaces and tenants and choose an executor that enforces the required OS limits. Selecting tools does not approve permission escalation. `Environment` has no `sandbox_mode` option.
+
+Configure the connection with current application-owned credentials:
+
+- Supply credentials in `headers`. The declaration's representation omits header values and the URL.
+- Use WSS with the native system trust store. TLS verification cannot be bypassed.
+- Set `connect_timeout` to positive finite seconds, or `None` for the native default.
+- Omit userinfo, query parameters, and fragments from URLs.
+
+### Cancel remote work
+
+On cancellation, the SDK waits for native work to settle and its callbacks to finish. Closing also asks the native owner to terminate known background processes.
+
+An acknowledgment confirms only that the executor accepted the termination attempt. It does not prove process exit, complete output collection, or rollback. Rejected or timed-out termination attempts raise an error while the Session closes.
+
+A lost process-start acknowledgment can leave earlier effects and pending cleanup. Do not retry a consequential command merely because its result is missing.
+
+## Select executor tools
+
+Set `cwd` to an absolute executor path or `file:` URI. The selected native model and runtime must support the tools:
+
+- `exec_command` starts commands.
+- `write_stdin` polls commands or writes to a TTY. It requires `exec_command`; ordinary pipe-mode stdin is unsupported.
+- `apply_patch` edits files.
+- `project_glob` finds project files by glob pattern.
+- `project_grep` searches project text with a Rust regular expression.
+
+For search-only execution, select `project_glob` and `project_grep` without shell tools. The [project search example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/project_search.py) explains result limits, incomplete searches, path restrictions, and local or remote runtime requirements.
+
+There is no separate Python process or file client.
+
+### Supply native skills
+
+To make a trusted skill available to the model, place its files on the selected executor. Each discovery root contains a `skills` directory. For example:
+
+```text
+/workspace/capabilities/
+└── skills/
+    └── report-style/
+        └── SKILL.md
+```
+
+Save this content in `SKILL.md`. The frontmatter supplies the name and description used for discovery; the body contains the skill's instructions.
+
+```markdown
+---
+name: report-style
+description: Write reports with an evidence section.
+---
+
+Include an Evidence section that names the files you inspected.
+```
+
+Select the parent of `skills`, rather than the skill directory itself. This async fragment uses `environment` and `agent` from [local execution](#local-execution) or [remote execution](#remote-execution). Provision the directory above before opening the new Session:
+
+```python
+from dataclasses import replace
+
+environment = replace(
+    environment,
+    capability_directories=["/workspace/capabilities"],
+)
+async with agent.session(environment=environment) as session:
+    turn = await session.submit("Use report-style to summarize the workspace.")
+    result = await turn.get_result()
+```
+
+The `capability_directories` option selects files on either the local or remote executor. The SDK disables host and bundled skill discovery. Selecting a discovery root does not widen command permissions. Keep any files or scripts that commands need within the executor's existing readable roots.
+
+An empty sequence selects no discovery roots. `None` omits the override and keeps the native defaults. When restoring a checkpoint, supply the current executor's roots again. Restore does not recover discovery roots from the saved Environment or fall back to the Python controller's files.
+
+### Argument validation
+
+Before dispatch, the SDK checks `exec_command` and `write_stdin` arguments against their pinned object schemas. It rejects malformed JSON, missing fields, unknown keys, wrong types, and invalid enum values. Omitting an optional field differs from passing `null`.
+
+A rejection fails the turn without automatic retry. Earlier calls may have effects or be cancelled; later calls are not admitted. The rejected call does not enter accepted history. Its error names the tool and includes a SHA-256 digest of the call ID to match an application-owned provider record.
+
+These checks cover the two pinned schemas, not arbitrary JSON Schema or the freeform `apply_patch` grammar. They do not guarantee rollback.
+
+The schemas currently advertise `number` for numeric fields. Codex applies narrower integer and range requirements, with unsigned values for time and token budgets. A schema-valid number can therefore pass admission and still fail native parsing. The SDK passes accepted arguments unchanged; it does not round values or insert defaults.
+
+## Configure workspace permissions
 
 ### Inspect a read-only workspace
 
@@ -174,130 +228,19 @@ await turn.get_result()
 
 The output directory must already exist on the executor. The working directory stays writable. On executors that support replacement, an empty list clears the additional grants. Omit `writable_roots` to keep the last applied policy. Start a new conversation to change the [network policy](#network-and-local-socket-access). See [restore executor policy](state.md#restore-executor-policy) for when the current Environment must match the last applied policy.
 
-## Remote execution
-
-Remote execution requires an application-owned service that implements the Codex exec-server protocol. Use a version compatible with the SDK's pinned Codex runtime. This guide assumes that service is already deployed and has an authenticated WSS endpoint.
-
-Pass `Environment` to a Session or one-shot run to connect to that service. The Environment configures the Session and does not belong in the Agent's `tools` list. Set `EXECUTOR_URL` to the service's WSS endpoint and `EXECUTOR_TOKEN` to its current credential:
-
-```python
-import os
-
-from agents import Agent, Environment
-
-
-environment = Environment(
-    url=os.environ["EXECUTOR_URL"],
-    cwd="/workspace",
-    headers={"Authorization": f"Bearer {os.environ['EXECUTOR_TOKEN']}"},
-    tools=("exec_command", "write_stdin", "apply_patch"),
-)
-agent = Agent(instructions="Inspect the assigned workspace.")
-async with agent.session(environment=environment) as session:
-    turn = await session.submit("List the workspace files.")
-    result = await turn.get_result()
-```
-
-`agent.run(..., environment=environment)` and `agent.run_sync(..., environment=environment)` accept the same connection data. `Environment.tools` defaults to an empty tuple, so process and file tools must be selected explicitly. If the WSS connection fails, the SDK reports a startup cause, such as a certificate error, HTTP status, or timeout. To run tools on the application host, select [local execution](#local-execution) explicitly.
-
-### Select executor tools
-
-Set `cwd` to an absolute executor path or `file:` URI. The selected native model and runtime must support the tools:
-
-- `exec_command` starts commands.
-- `write_stdin` polls commands or writes to a TTY. It requires `exec_command`; ordinary pipe-mode stdin is unsupported.
-- `apply_patch` edits files.
-- `project_glob` finds project files by glob pattern.
-- `project_grep` searches project text with a Rust regular expression.
-
-For search-only execution, select `project_glob` and `project_grep` without shell tools. The [project search example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/project_search.py) explains result limits, incomplete searches, path restrictions, and local or remote runtime requirements.
-
-There is no separate Python process or file client.
-
-### Supply native skills
-
-To make a trusted skill available to the model, place its files on the selected executor. Each discovery root contains a `skills` directory. For example:
-
-```text
-/workspace/capabilities/
-└── skills/
-    └── report-style/
-        └── SKILL.md
-```
-
-Save this content in `SKILL.md`. The frontmatter supplies the name and description used for discovery; the body contains the skill's instructions.
-
-```markdown
----
-name: report-style
-description: Write reports with an evidence section.
----
-
-Include an Evidence section that names the files you inspected.
-```
-
-Select the parent of `skills`, rather than the skill directory itself. This async fragment uses `environment` and `agent` from [remote execution](#remote-execution). Provision the directory above before opening the new Session:
-
-```python
-from dataclasses import replace
-
-environment = replace(
-    environment,
-    capability_directories=["/workspace/capabilities"],
-)
-async with agent.session(environment=environment) as session:
-    turn = await session.submit("Use report-style to summarize the workspace.")
-    result = await turn.get_result()
-```
-
-Use the same `capability_directories` option with `Environment.local()` for files on a local executor. The SDK disables host and bundled skill discovery. Selecting a discovery root does not widen command permissions. Keep any files or scripts that commands need within the executor's existing readable roots.
-
-An empty sequence selects no discovery roots. `None` omits the override and keeps the native defaults. When restoring a checkpoint, supply the current executor's roots again. Restore does not recover discovery roots from the saved Environment or fall back to the Python controller's files.
-
-### Argument validation
-
-Before dispatch, the SDK checks `exec_command` and `write_stdin` arguments against their pinned object schemas. It rejects malformed JSON, missing fields, unknown keys, wrong types, and invalid enum values. Omitting an optional field differs from passing `null`.
-
-A rejection fails the turn without automatic retry. Earlier calls may have effects or be cancelled; later calls are not admitted. The rejected call does not enter accepted history. Its error names the tool and includes a SHA-256 digest of the call ID to match an application-owned provider record.
-
-These checks cover the two pinned schemas, not arbitrary JSON Schema or the freeform `apply_patch` grammar. They do not guarantee rollback.
-
-The schemas currently advertise `number` for numeric fields. Codex applies narrower integer and range requirements, with unsigned values for time and token budgets. A schema-valid number can therefore pass admission and still fail native parsing. The SDK passes accepted arguments unchanged; it does not round values or insert defaults.
-
-### Workspace and connection limits
-
-Selected tools can modify the assigned remote workspace. By default the SDK requests writes in `cwd`, protects native metadata, and requests restricted networking. Supply [additional write roots](#replace-write-roots-between-turns) through application code. A model's `workdir` argument only sets a command's working directory.
-
-The application must isolate workspaces and tenants and choose an executor that enforces the required OS limits. Selecting tools does not approve permission escalation. `Environment` has no `sandbox_mode` option.
-
-Configure the connection with current application-owned credentials:
-
-- Supply credentials in `headers`. The declaration's representation omits header values and the URL.
-- Use WSS with the native system trust store. TLS verification cannot be bypassed.
-- Set `connect_timeout` to positive finite seconds, or `None` for the native default.
-- Omit userinfo, query parameters, and fragments from URLs.
-
 ### Replace or restore an Environment
 
 A Session captures one Environment. Tool replacement cannot change the Environment, and it does not belong in `update(tools=...)`. To change the connection or selected executor tools, open a new Session. The same Agent can serve Sessions with different Environments. Restore uses the current Environment you supply. Check the [executor policy matching rules](state.md#restore-executor-policy) for your type of restore. Supply current credentials and start new processes through the current Session.
 
 Python, manual, HTTP MCP and stdio MCP tools can coexist with an Environment. A `StdioMCP` server runs on the host by default, or on the executor with `location="environment"`.
 
-### Cancel remote work
-
-On cancellation, the SDK waits for native work to settle and its callbacks to finish. Closing also asks the native owner to terminate known background processes.
-
-An acknowledgment confirms only that the executor accepted the termination attempt. It does not prove process exit, complete output collection, or rollback. Rejected or timed-out termination attempts raise an error while the Session closes.
-
-A lost process-start acknowledgment can leave earlier effects and pending cleanup. Do not retry a consequential command merely because its result is missing.
-
-### Manage the executor lifetime
+## Manage the executor lifetime
 
 Closing the Session closes the SDK's connection. Your application still owns the executor service and workspace.
 
 To manage provisioning and release, pass an async context manager that yields an `Environment`. The SDK enters it when opening the Session and exits after releasing native resources, including after opening fails or is cancelled. The manager can then release the executor.
 
-If opening fails and automatic cleanup cannot finish, follow the [provider recovery procedure](configuration.md#recover-a-failed-managed-environment-opening).
+If opening fails and automatic cleanup cannot finish, follow the [provider recovery procedure](models.md#recover-a-failed-managed-environment-opening).
 
 This async fragment uses `agent` from [remote execution](#remote-execution) and application functions `acquire_executor()` and `release_executor(job)`. The acquired job supplies its authenticated WSS `url`, assigned absolute `cwd`, and current `headers`. Your application implements provisioning, release, and rollback if acquisition fails:
 
@@ -357,9 +300,9 @@ On a macOS executor, `NetworkPolicy(allowed_domains=("api.example.com",))` permi
 
 ### Allow outbound public hosts
 
-Matching [development builds](installation.md#preview-availability) have been providing `NetworkPolicy.allow_all()`. The `0.24.0-alpha.7` wheel has not been including this factory. The factory has been selecting the existing `allowed_domains=("**",)` public-host wildcard, with explicit denials retaining precedence. Unix-socket access and local binding have been requiring separate choices.
+Matching [development builds](installation.md#use-development-branch-examples) provide `NetworkPolicy.allow_all()`. The `0.24.0-alpha.7` wheel does not include this factory. The factory selects the existing `allowed_domains=("**",)` public-host wildcard, with explicit denials retaining precedence. Unix-socket access and local binding require separate choices.
 
-This declaration has been enabling the required socket grant for a job-private Linux executor with an existing `/workspace` directory:
+This declaration enables the required socket grant for a job-private Linux executor with an existing `/workspace` directory:
 
 ```python
 from agents import Environment, NetworkPolicy
@@ -374,7 +317,7 @@ environment = Environment.local(
 )
 ```
 
-The wildcard has been permitting uploads and downloads to public hosts through the managed proxy. Linux has been requiring `allow_all_unix_sockets=True` for every explicit network policy, including this factory. That grant has been permitting every reachable Unix socket, so the application has been retaining responsibility for executor isolation. On macOS, `NetworkPolicy.allow_all()` has been allowing public hosts without the socket grant. Local binding has been requiring the separate `allow_local_binding=True` choice.
+The wildcard permits uploads and downloads to public hosts through the managed proxy. Linux requires `allow_all_unix_sockets=True` for every explicit network policy, including this factory. That grant permits every reachable Unix socket, so your application must isolate the executor from host services and other jobs. On macOS, `NetworkPolicy.allow_all()` allows public hosts without the socket grant. Local binding requires the separate `allow_local_binding=True` choice.
 
 ### Grant local access
 
@@ -495,3 +438,68 @@ The accepted whole result still reaches the model or generated code. The callbac
 `policy_timeout` bounds transform decisions in seconds and defaults to 30. The SDK rejects invalid, late, or failed decisions. These callbacks cover root and native child calls.
 
 See [programmatic tool calling](configuration.md#programmatic-tool-calling). Saved configuration contains no policy callbacks, credentials, endpoints or network-policy names. The [network-policy support](#network-and-local-socket-access) also compares the current Environment policy with the recorded digest on restore. This does not redact command history or native debug logs.
+
+## Platform troubleshooting
+
+Use these procedures for the matching startup or command failure after checking the [local executor prerequisites](#local-execution).
+
+### Configure GitHub CLI TLS on macOS
+
+Sandboxed `gh` can report `x509: OSStatus -26276` when macOS certificate verification needs access to host services. With `gh` built using Go 1.27 or later, `SSL_CERT_FILE` selects a CA bundle for Go's certificate verifier. The SDK still applies the sandbox and its network policy. [Go 1.27 certificate changes](https://go.dev/doc/go1.27#crypto/x509)
+
+These local-environment options require a [matching development build](installation.md#use-development-branch-examples). The alpha.7 wheel does not include them. Use this environment with the Agent and Session in the [local execution example](#local-execution).
+
+```python
+from pathlib import Path
+
+from agents import Environment, NetworkPolicy
+
+environment = Environment.local(
+    cwd=Path("/jobs/worker/work"),
+    tools=("exec_command", "write_stdin"),
+    write_policy="trusted_workspace_write",
+    env={"SSL_CERT_FILE": "/etc/ssl/cert.pem"},
+    network=NetworkPolicy(allowed_domains=("api.github.com",)),
+)
+```
+
+Select a readable CA bundle maintained by your operating system or administrator. Keep it outside the job's writable roots. If your GitHub server uses an organization CA, select a bundle that includes the required roots and allow the server's API hostname. In this mode, Go uses file-based roots in place of macOS Keychain trust settings.
+
+GitHub authentication needs separate credentials. Use `trusted_workspace_write` only for trusted jobs because commands can read the application's files and inherit its environment. When Git credentials need to stay in the application, use the [host Git example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/README.md#push-a-reviewed-git-commit-from-macos).
+
+### Allow the Linux sandbox helper to use user namespaces on Ubuntu 24.04
+
+Ubuntu 24.04 uses AppArmor to restrict unprivileged user namespaces. The local executor needs these namespaces to start its sandbox. If a local Session fails to start, ask an administrator to check the kernel log. [Ubuntu 24.04 release notes](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions)
+
+```sh
+sudo journalctl -k -b --grep='apparmor="DENIED"'
+```
+
+Find the capability denial for the failed bubblewrap invocation (`comm="bwrap"` and `operation="capable"`). For a loopback setup failure, look for `capname="net_admin"`. If several Sessions start at the same time, retry one Session to identify its audit record. Ubuntu's default policy can deny capabilities after bubblewrap creates a user namespace. The audit record identifies that policy as `profile="unprivileged_userns"`. If the record names a different profile, ask the administrator who manages that profile to investigate.
+
+For a denial from `unprivileged_userns`, an administrator can grant `userns` to the SDK's installed `codex-linux-sandbox` helper. AppArmor applies the grant when an account executes that helper, including outside a Session. Child processes can inherit the profile. Use a trusted SDK installation in an administrator-controlled directory outside the job workspace and writable roots. Limit access to the helper to trusted application accounts.
+
+Find the helper's exact path using the application's Python interpreter.
+
+```sh
+python -c 'from pathlib import Path; import agents; print((Path(agents.__file__).parent / "bin" / "codex-linux-sandbox").resolve(strict=True))'
+```
+
+Create `/etc/apparmor.d/agents-sdk-linux-sandbox-worker` as an administrator. Replace the example attachment path with the resolved helper path. Avoid AppArmor pattern characters such as `*`, `?`, `[` and `{` in the installation path. Give each helper path its own profile name and file.
+
+```text
+abi <abi/4.0>,
+include <tunables/global>
+
+profile agents-sdk-linux-sandbox-worker "/opt/agents-sdk/venv/lib/python3.12/site-packages/agents/bin/codex-linux-sandbox" flags=(unconfined) {
+  userns,
+}
+```
+
+Load the profile, then retry the same local Session as the application user.
+
+```sh
+sudo apparmor_parser -r /etc/apparmor.d/agents-sdk-linux-sandbox-worker
+```
+
+Keep the system-wide AppArmor user namespace restriction enabled. The SDK still requires its native sandbox before it runs local commands. If the SDK installation path changes, update the profile attachment and reload the profile before retrying.

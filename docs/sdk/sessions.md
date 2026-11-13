@@ -1,10 +1,21 @@
-# Run and observe conversations
+# Conversations
+
+<a id="run-and-observe-conversations"></a>
 
 <a id="conversations-events-and-state"></a>
 
-A Session owns one native conversation. Submit each prompt as a Turn, wait for its result, and submit the next prompt in the same Session to keep the conversation history. Open the Session with an async context manager so its callbacks and native work close together.
+Open a Session to keep a conversation across prompts. Each `session.submit()` returns a Turn that tracks the submitted work, including continuations after accepted steering. Use the Turn to wait for a result, observe progress, or stop that work. Submit the next prompt in the same Session to keep the conversation history.
 
-To continue after closing the Session, [save a checkpoint or use local storage](state.md#choose-how-to-store-a-conversation).
+Open the Session with an async context manager. Closing the Session stops its remaining work and waits for callback and native cleanup.
+
+| Task | Start here |
+| --- | --- |
+| Send a follow-up while work is active | [Queue or steer active work](#queue-or-steer-active-work) |
+| Show text as it arrives | [Streaming and events](streaming.md) |
+| Wait for application input | [Wait for a decision or a result](#wait-for-a-decision-or-a-result) |
+| Stop work and wait for cleanup | [Interrupt work](#interrupt-work) |
+| Change the tools, instructions, or model | [Update the Session](#update-tools-instructions-and-model-settings) |
+| Continue after closing the Session | [Save a checkpoint or use local storage](state.md#choose-how-to-store-a-conversation) |
 
 First complete the [SDK setup](index.md#before-you-begin), including model credentials. Save this complete script as `conversation.py`:
 
@@ -50,7 +61,7 @@ Do not pass manual results to `Session.submit()`. Reply to the exact live `Actio
 
 ### Images and files in development builds
 
-The extended media types require a [build from matching development source](installation.md#preview-availability). The alpha.7 wheel does not include them.
+The extended media types require a [build from matching development source](installation.md#use-development-branch-examples). The alpha.7 wheel does not include them.
 
 Development builds accept these additional content sources:
 
@@ -165,104 +176,12 @@ Other failures still raise. If a connection is lost, check retained history and 
 
 ## Stream observations
 
-`turn.events()` observes the captured Turn's work, including its owned continuations. Run the observer alongside `Turn.get_result()`. The following complete script prints observed text while waiting for the result, then stops its observer. Save it as `stream.py` and run it with the same interpreter and credentials as `conversation.py`:
+Read [Streaming and events](streaming.md) to display text and progress while waiting for a Turn's result. Observations are separate from [live requests](approvals.md) that your application can answer.
 
-```python
-import asyncio
-from contextlib import suppress
+<a id="read-observations-safely"></a>
+<a id="reconnect-an-observer"></a>
 
-from agents import Agent, Turn
-from agents.observation import OutputTextDelta
-
-
-async def print_text(turn: Turn[str]) -> None:
-    async for event in turn.events():
-        if isinstance(event, OutputTextDelta):
-            print(event.delta, end="", flush=True)
-
-
-async def main() -> None:
-    agent = Agent(instructions="Answer briefly.")
-    async with agent.session() as session:
-        turn = await session.submit("Explain the label atlas.")
-        observer = asyncio.create_task(print_text(turn))
-        try:
-            result = await turn.get_result()
-        finally:
-            observer.cancel()
-            with suppress(asyncio.CancelledError):
-                await observer
-        print()
-        print("Final answer:", result.final_output)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-The script prints text deltas as they arrive, then prints the final answer after the turn finishes. The final answer can repeat text already printed from deltas.
-
-### Read observations safely
-
-Use `session.events()` to observe the whole Session until it ends. Session-wide lifecycle and gap records do not identify a submission.
-
-The default observation buffer has been retaining a limited suffix. Slow readers have been receiving `EventGap` after the SDK drops records. Observations have been providing passive progress; completed results and canonical history have been providing accepted output.
-
-Matching [development builds](installation.md#preview-availability) have been accepting the explicit choices `observation_retention="bounded"` and `observation_retention="all"`. The `0.24.0-alpha.7` wheel has not been accepting this keyword. Full retention has been supporting late readers:
-
-```python
-async with agent.session(observation_retention="all") as session:
-    turn = await session.submit("Explain the result.")
-    result = await turn.get_result()
-    async for event in turn.events(after=0):
-        print(event.type, event.sequence)
-    print(result.final_output)
-```
-
-Full retention has been keeping every emitted observation in memory while Session references remain reachable. Memory use has been growing with emitted payloads. Source gaps have still been appearing when the runtime cannot supply an observation; full retention has not been reconstructing missing source records. Text deltas have also been preceding final output validation.
-
-The same development-build option has been supporting late observation after an asynchronous one-shot run. This fragment has been keeping the run and reader on the same event loop:
-
-```python
-result = await agent.run("Explain the result.", observation_retention="all")
-async for event in result.turn.events():
-    print(event.type, event.sequence)
-print(result.final_output)
-```
-
-`run_sync()` has been returning a `Completed` result for synchronous callers. Callers have been retaining access to its `final_output`, `thread_usage`, and optional `state` after return. Its Turn has been retaining its opening-loop ownership, so a new `asyncio.run()` call has not been providing a supported way to read that Turn's observations.
-
-`TurnFinished` marks the end of one native step. Accepted steering can start a continuation after that step. Use `await turn.get_result()` to wait for the captured root and its continuations, including when observations have been dropped.
-
-### Reconnect an observer
-
-Record `event.sequence` to resume an observer with `events(after=last_seen)`. The sequence belongs to one live Session and its in-memory buffer. It is not a durable restart token. Reopening from a profile or checkpoint has been starting a fresh buffer and sequence. Checkpoints have not been storing the retention choice. Each new opening has been accepting its own retention setting; canonical history has been retaining earlier conversation records.
-
-This async helper reads one record, then disconnects only its reader. Call it again with the returned sequence to resume on the same open `session`:
-
-```python
-from contextlib import aclosing
-
-from agents import Session
-from agents.observation import EventGap, OutputTextDelta
-
-
-async def read_one(session: Session, last_seen: int = 0) -> int:
-    async with aclosing(session.events(after=last_seen)) as events:
-        event = await anext(events, None)
-        if event is None:
-            return last_seen
-        if isinstance(event, EventGap):
-            items = [item async for item in session.items()]
-            print("Recovered history:", items)
-        elif isinstance(event, OutputTextDelta):
-            print(event.delta, end="", flush=True)
-        return event.sequence
-```
-
-Use the recovered history to refresh your application's view after a gap; the missing observations cannot be replayed. Choose what history your application may display or log.
-
-An existing `turn.events()` iterator ends when its owned steps settle. Keep reading `session.events()` to observe later background completions. To replay a late completion still in the buffer, open a fresh Turn cursor with `turn.events(after=last_seen)`. The detailed execution-completion observations require `0.24.0-alpha.7` or later; see [completed execution](#inspect-completed-execution).
+Follow [observation retention and cursor lifetimes](streaming.md#read-observations-safely) when reconnecting a reader or reading after work finishes.
 
 ## Interrupt work
 
@@ -284,119 +203,17 @@ A root Turn and a child Turn have separate lifetimes. Waiting for the root does 
 
 ## Observation details
 
-### Provider frames and text identity
+<a id="provider-frames-and-text-identity"></a>
+<a id="reply-to-live-requests"></a>
+<a id="identify-child-lifecycle-records"></a>
+<a id="interpret-tool-events"></a>
+<a id="inspect-completed-execution"></a>
 
-Codex parses the provider stream before the SDK receives events and can discard malformed frames. Its text events do not retain the provider's wire item ID. `OutputTextDelta.item_id` identifies Codex's active native item but does not authenticate the wire ID. You cannot use observations to validate raw frames.
+Inspect [observation identities, tool events, and recorded execution](streaming.md#inspect-observations-and-retained-history). Reply through the [live interaction API](approvals.md#reply-to-live-manual-requests).
 
-Providers must send each text delta before its output item closes. Codex handles provider events that arrive out of order.
+<a id="inspect-response-attempts"></a>
 
-### Reply to live requests
-
-Use `session.interactions()` for requests that your application can answer. These requests are separate from passive observations. [Reply to the exact live request](approvals.md#reply-to-live-manual-requests), or use `turn.wait_for_request_or_result()` to wait for a captured root's requests or completion.
-
-For requests that must survive closing the Session, [save a settled manual request](state.md#save-a-settled-manual-request).
-
-### Identify child lifecycle records
-
-`SubagentLifecycle` records describe Session-wide child changes and do not identify a submission. Before interacting with a child, [read its current lifecycle state](delegation.md#observe-child-results).
-
-### Interpret tool events
-
-`ToolStarted` and `ToolFinished` cover declared Python tools and HTTP or stdio MCP tools on the root and its descendants. They do not cover native built-in tools. `session.events()` includes root and child work. Filter tool records by submission identity.
-
-The records contain `family` (`"function"` or `"mcp"`), submission identity, native turn and call IDs, and the model-visible name and namespace. They omit arguments, results, and private error text.
-
-Event timing depends on the tool family:
-
-- For a Python function, `ToolStarted` means native code accepted the call, before argument validation. `ToolFinished` follows native reply acceptance or local cleanup.
-- For MCP, `ToolStarted` means native handling began, possibly before approval or server execution. `ToolFinished` reports `"completed"` for success or `"failed"` for an error, including `isError: true`. Result policies run before this end event.
-
-An MCP result policy can edit the output body, but cannot clear a server's `isError: true` flag. The model receives the accepted body, but `ToolFinished` still reports the failure. A failed tool can still lead to a successful final answer. Check the tool status and submission outcome separately.
-
-Cancelling an observer leaves tool work running. Native cancellation may produce no MCP end event. Use `await turn.get_result()` for the exact turn's final outcome. Check your application records to learn which effects occurred before an error or cancellation.
-
-### Inspect completed execution
-
-By default, `ExecutionItemCompleted` from `agents.observation` reports the kind, status, and IDs of a completed command, patch, or MCP call in `event.item`.
-
-For a trusted reader, pass `include_execution_details=True` to `session.events()` or `turn.events()`. Command details include `argv`, `cwd`, and `exit_code`. Patch details include the changes. MCP details include the arguments and accepted result.
-
-Match the event item's native `thread_id`, `turn_id`, and `call_id` to the typed completion from `session.items()`. If another row uses the event item's `id`, the typed history item can have a different `id` as its history cursor.
-
-`session.items()` retains provider `function_call` and `function_call_output` rows alongside typed execution items. After an SDK upgrade, the same retained history can yield additional provider rows. After an `EventGap` or a reopen, read the retained items. Pass `subagent_id` to read a child's history.
-
-Execution items carry a call ID and a status when the runtime records them. Command records can include the original `argv`, working directory, exit code, and output. Patch records can include the changes and output. MCP records can include arguments and the result or error. Core can shorten command output and MCP results in history. An interrupted call can lack a completion item. When a field or completion is missing, treat that evidence as unknown and check your application records before assuming the outcome.
-
-### Inspect response attempts
-
-Retained response facts and the `ModelRequestDispatching` and `ModelResponseLinked` observations require `0.24.0-alpha.7` or later. Use a [matching preview wheel](installation.md) for this recipe.
-
-`session.turns()` can include `RecordedTurn.responses`, a list of retained `RecordedResponse` occurrences. A provider can report `status="completed"` while `get_result()` fails because the SDK rejects its output. Inspect both outcomes. Save the following complete script as `response_diagnostics.py` and run it with the interpreter and credentials from [SDK setup](index.md#before-you-begin):
-
-```python
-import asyncio
-
-from agents import Agent, NativeError, Turn
-from agents.observation import ModelRequestDispatching, ModelResponseLinked
-
-
-async def main() -> None:
-    dispatches = {}
-    links = {}
-
-    async def observe(turn: Turn[str]) -> None:
-        async for event in turn.events():
-            if isinstance(event, ModelRequestDispatching):
-                dispatches[event.request_id] = event
-            elif isinstance(event, ModelResponseLinked):
-                key = (event.thread_id, event.turn_id, event.response_observation_id)
-                links[key] = event.request_id
-
-    agent = Agent(instructions="Answer briefly.")
-    async with agent.session() as session:
-        turn = await session.submit("Reply with the word atlas.")
-        observer = asyncio.create_task(observe(turn))
-        try:
-            await turn.get_result()
-            print("SDK result completed")
-        except NativeError as error:
-            print("SDK result failed:", error.category, error.response_integrity_reason)
-        await observer
-
-        async for recorded_turn in session.turns():
-            for response in recorded_turn.get("responses", []):
-                key = (response["thread_id"], response["turn_id"], response["id"])
-                request_id = links.get(key)
-                dispatch = dispatches.get(request_id)
-                print(
-                    {
-                        "occurrence_id": response["id"],
-                        "provider_response_id": response["response_id"],
-                        "provider_status": response.get("status"),
-                        "incomplete_reason": response.get("incomplete_reason"),
-                        "usage_source": response["usage_source"],
-                        "usage": response["usage"],
-                        "request_id": request_id,
-                        "dispatched_model": dispatch.model if dispatch else None,
-                    }
-                )
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-Interpret the records as follows:
-
-- `id` identifies a retained occurrence. `response_id` comes from the provider and can repeat across occurrences. Join `ModelResponseLinked.response_observation_id` to the occurrence `id`, retaining its thread and turn identity.
-- `usage_source="received"` preserves counters the provider supplied. Missing counters stay unknown; a reported zero is zero. `"native_normalized"` describes older accounting records and does not prove which counters arrived from the provider.
-- `status` and `incomplete_reason` are optional provider terminal facts. Older records can omit them, and older turns can omit `responses` entirely. Missing response data does not prove that no model request occurred.
-
-`ModelRequestDispatching` describes resolved root sampling fields before entering the transport client. Its model, reasoning settings, service tier, wire format, and transport help compare client dispatch with a [settings receipt](#check-applied-instructions-and-settings). A `None` wire field means the client omitted it; the server's default remains unknown. Transport retries share a `request_id`; later client invocations have new IDs.
-
-Dispatch can precede encoding failure or any socket write. It does not prove provider receipt, success, or billing. The observations cover root sampling, including separate output-correction roots with their parent submission link. They exclude native children, compaction, warmup, and background or reviewer requests. Restored manual work emits fresh events; earlier dispatch events are not replayed.
-
-Event readers have been following the selected retention policy and receiving best-effort source records. Cancellation or retirement can suppress a link even when history retains the response. A missing join stays unknown. Retained responses do not guarantee complete attempt coverage and are not a billing ledger. This example prints identifiers and counters; apply your application's data policy before logging them.
+Compare [retained response attempts with live request observations](streaming.md#inspect-response-attempts) when diagnosing model dispatch or provider outcomes.
 
 ## Failures and recovery
 
@@ -404,20 +221,9 @@ Event readers have been following the selected retention policy and receiving be
 
 `error.effects` describes only the exact failed operation. Its value is `"not_started"`, `"recorded"`, or `"unknown"`. It does not describe earlier tool effects or promise to undo them. An unknown outcome does not mean that retrying is safe. Before deciding how to recover, inspect canonical history and your application's records of external effects.
 
-### Diagnose response integrity failures
+<a id="diagnose-response-integrity-failures"></a>
 
-The read-only `NativeError.response_integrity_reason` and its public `ResponseIntegrityReason` type are available in `0.24.0-alpha.7` or later. Use a [matching preview wheel](installation.md) to inspect this field. It identifies the captured cause of a supported-output failure, even when several failures share the same generic error message or category:
-
-| Reason | Meaning |
-| --- | --- |
-| `"undecodable_output_item"` | The response contained an output item the runtime could not decode as supported output. |
-| `"provider_owned_tool_receipt"` | The provider supplied a tool-result receipt that belongs to the runtime's tool execution. |
-| `"unfinished_assistant_item"` | The response ended with an assistant item still unfinished. |
-| `"missing_supported_terminal_output"` | The response ended without the supported terminal output needed to complete the work. |
-
-The value can be `None` when no cause was captured, including restored or ambiguously attributed errors. It does not replace `category` or provider metadata. A reason does not prove that earlier tools had no effects: an already-started tool can finish before the SDK reports the failure. Check history and application receipts before deciding whether to submit new work.
-
-See [response-attempt diagnostics](#inspect-response-attempts) to compare retained provider status with the SDK's result.
+For supported-output failures, inspect the [response integrity reason](streaming.md#diagnose-response-integrity-failures) together with recorded provider responses.
 
 ### Handle lifecycle errors
 
@@ -435,41 +241,6 @@ These types are public imports from `agents`. `InteractionRequired` can carry a 
 ## Update tools, instructions and model settings
 
 Declare the available tools when you open the Session. By default, the Session uses the Agent's tools. `agent.session(tools=[...])` replaces that opening tool list for this Session. Include `NativeAgents()` in the list if this Session needs subagents.
-
-### Hand off the conversation to another Agent
-
-Matching [development builds](installation.md#preview-availability) have been supporting a captured graph of native Agents through `Agent.handoffs`. This feature has not been shipping in `0.24.0-alpha.7`. Graph handoffs have been continuing the same Session conversation under a separately configured Agent; [native children](delegation.md) have been supporting independent child turns in a shared workspace.
-
-This async fragment has been declaring the original target before opening, then switching Agents while idle:
-
-```python
-from agents import Agent
-
-billing = Agent(
-    name="billing",
-    model="gpt-5.5",
-    instructions="Answer billing questions using the conversation so far.",
-)
-triage = Agent(
-    name="triage",
-    model="gpt-5.5",
-    instructions="Record the account label and answer briefly.",
-    handoffs=[billing],
-)
-async with triage.session() as session:
-    first = await session.submit("My account label is atlas.")
-    await first.get_result()
-    await session.update(agent=billing)
-    assert await session.get_active_agent() is billing
-    second = await session.submit("What account label did I give you?")
-    print((await second.get_result()).final_output)
-```
-
-The SDK has been capturing reachable declarations at opening and exposing model-selected handoff tools for declared targets. `get_active_agent()` has been returning the original Agent object currently selected in native history. `update(agent=...)` has been accepting one captured Agent in a separate idle update; a same-named replacement object has not been acquiring that identity.
-
-Graph Agents have been sharing the Session provider, programmatic-tool-calling mode, compatible output mode/schema/wrapping, and native runtime grants. Each target has been supplying its captured instructions, model/settings, callbacks, and default tools. Explicit per-operation tool selections have been retaining the original operation's ceiling across handoffs. Omitted selections have been inheriting the destination's defaults, and `tools=[]` has been withholding model tools.
-
-Portable restore has been requiring the original graph root, even when another Agent had been active at capture. Reconstructed caller-supplied Agents have been supplying current callbacks and bindings through a matching graph. Saved names have not been restoring executable callbacks or granting new tools. The restored active Agent has been resolving to its corresponding object in that current graph.
 
 ### Update default tools
 
@@ -508,15 +279,50 @@ The update waits for native acceptance. If you cancel the call, it waits until t
 
 For instruction matching and trust during restore, see [store and trust checkpoint data](state.md#store-and-trust-checkpoint-data).
 
-### Check applied instructions and settings
+### Hand off the conversation to another Agent
+
+Matching [development builds](installation.md#use-development-branch-examples) support `Agent.handoffs` to continue the same Session conversation under another configured Agent. The `0.24.0-alpha.7` wheel does not include handoffs. Use [native children](delegation.md) when tasks need independent turns in a shared workspace.
+
+Declare the target Agent before opening the Session, then switch Agents while the Session is idle:
+
+```python
+from agents import Agent
+
+billing = Agent(
+    name="billing",
+    model="gpt-5.5",
+    instructions="Answer billing questions using the conversation so far.",
+)
+triage = Agent(
+    name="triage",
+    model="gpt-5.5",
+    instructions="Record the account label and answer briefly.",
+    handoffs=[billing],
+)
+async with triage.session() as session:
+    first = await session.submit("My account label is atlas.")
+    await first.get_result()
+    await session.update(agent=billing)
+    assert await session.get_active_agent() is billing
+    second = await session.submit("What account label did I give you?")
+    print((await second.get_result()).final_output)
+```
+
+When the Session opens, the SDK captures the Agents reachable through `handoffs` and exposes tools that let the model select declared targets. `get_active_agent()` returns the original Agent object currently selected in native history. To switch from application code, pass a captured Agent to a separate idle `update(agent=...)` call. A new Agent object with the same name cannot replace that captured object.
+
+Agents in the handoff graph share the Session provider, programmatic-tool-calling mode, and native runtime grants. Their output modes, schemas, and wrapping must be compatible. Each target supplies its captured instructions, model settings, callbacks, and default tools. An explicit tool selection keeps the original operation's tool limit across handoffs. Omitting the selection uses the destination's defaults; `tools=[]` disables model tools.
+
+To restore a portable checkpoint, open it through the original graph root, even if another Agent was active when you saved it. Supply a matching graph with current callbacks and tool bindings. Saved names do not restore callbacks or grant tools. The restored active Agent is the corresponding object in the graph you supplied.
+
+## Load trusted instruction files
 
 Pass `instruction_files=[Path("method.md")]` to `agent.session()` to load trusted UTF-8 files as part of the application instructions. The SDK reads these paths on the application host. Choose them in trusted code. When restoring a portable checkpoint, supply matching instructions and file content.
 
-Matching source builds have also been supporting opt-in discovery through `discover_agents_md=True`. The [source setup](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/MAINTAINING.md#build-from-this-source) has been covering installation with the matching native extension. Discovery has been defaulting to `False`.
+Matching source builds also support `discover_agents_md=True` to load guidance from `AGENTS.md` files. Follow the [source setup](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/MAINTAINING.md#build-from-this-source) to install the matching native extension. Discovery defaults to `False`.
 
-With discovery enabled, Codex has been loading user guidance from `CODEX_HOME` on the application host, with `~/.codex` as the default. For a selected `Environment`, Codex has then been reading project guidance from the nearest Git root down to the Environment's working directory, within the executor's read policy. Without a Git root, Codex has been checking only that working directory. Without an Environment, discovery has been loading only user guidance.
+With discovery enabled, Codex loads user guidance from `CODEX_HOME` on the application host, defaulting to `~/.codex`. If you select an `Environment`, Codex then reads project guidance from the nearest Git root down to the Environment's working directory, within the executor's read policy. Without a Git root, Codex checks only that working directory. Without an Environment, Codex loads only user guidance.
 
-At each location, Codex has been checking `AGENTS.override.md` before `AGENTS.md`. More specific project files have been taking priority over broader guidance. Application instructions, including explicit `instruction_files`, have been retaining developer priority. Enabling discovery has been trusting the discovered files as instructions; application code has been choosing trusted files and parent directories. The option has been enabling instruction discovery only, without loading user configuration.
+At each location, Codex checks `AGENTS.override.md` before `AGENTS.md`. More specific project files take priority over broader guidance. Application instructions, including explicit `instruction_files`, retain developer priority. Enable discovery only for trusted files and parent directories because Codex treats discovered content as instructions. This option does not load user configuration.
 
 For an async application using a trusted, existing workspace at `/jobs/worker/work` and a configured model provider:
 
@@ -548,24 +354,13 @@ async with agent.session(
     print((await turn.get_result()).final_output)
 ```
 
-Each opening has been requiring its own opt-in, including `state=` restore and `storage=`/`resume=` reopen. Omitting the option on restore has been disabling discovery for the new opening. Previously supplied instructions have still been appearing in saved conversation history. The [local execution guide](execution.md#local-execution) has been explaining workspace and sandbox prerequisites.
+Enable discovery separately for each Session, including checkpoint restore with `state=` and storage reopen with `storage=` and `resume=`. Omitting the option disables discovery for the new Session, although saved history can still contain earlier instructions. See [local execution](execution.md#local-execution) for workspace and sandbox prerequisites.
 
-Read `recorded_turn.get("receipt")` from `session.turns()` to inspect the settings selected for the turn's latest recorded model sampling attempt. The receipt can include:
+<a id="check-applied-instructions-and-settings"></a>
 
-- The model, reasoning effort, Codex revision and source tree, and whether user configuration applied.
-- The executor and approval policy, including the environment ID, transport, working directory, explicit write roots, and network settings.
-- Loaded instruction file paths, source categories, and SHA-256 hashes, plus the hash of the developer instructions.
+Read [settings receipts](streaming.md#check-applied-instructions-and-settings) to inspect the model, instructions, and executor policy selected for a recorded sampling attempt.
 
-Live Sessions and trusted `LocalStorage` report these details for each executor the step selected. On `LocalStorage` reopen, the SDK compares the full native policy for a local executor or a strict WSS Environment. An explicitly selected legacy WSS Environment follows the [relocation and model-only reopen rules](state.md#restore-executor-policy).
-
-Interpret `receipt["executors"]` as follows:
-
-- `[]` means the observed step selected no executor.
-- After portable restore, `None` means the checkpoint withheld executor policy details. Other recorded settings remain available.
-
-Use the file hash to check the version of a method file the runtime loaded. The receipt describes the runtime's settings. The provider can still reject or route the request. To verify later tool reads or external effects, use their records separately. Treat missing receipts or fields as unknown.
-
-### Select tools before each model step
+## Select tools before each model step
 
 To select tools before each model step, pass `before_step` to `submit()`, `agent.run()`, or `agent.run_sync()`. The callback receives the root `Turn` as its positional argument and `step_index` as a keyword argument. The callback may be synchronous or asynchronous.
 

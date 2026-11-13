@@ -1087,6 +1087,7 @@ def _capture(
         captured = None
         native = None
         fallback_data = None
+        metadata: Mapping[str, Any] | None
         trace_options = metadata = None
         context = current_context()
         handle = context._handle if context else fallback

@@ -1,4 +1,9 @@
-"""Check and repair a JSON artifact with the packaged tool and native Session."""
+"""Check and repair a JSON artifact with the packaged tool and native Session.
+
+See packaged_artifact.md for matching-source setup and expected output.
+Run `python -m examples.codex.packaged_artifact` from the repository root.
+It uses scripted responses without model credentials or external writes.
+"""
 
 import asyncio
 import json

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio as asyncio
 import json as json
 from collections.abc import (
     Awaitable as Awaitable,
@@ -9,7 +10,8 @@ from collections.abc import (
     Mapping as Mapping,
     Sequence as Sequence,
 )
-from dataclasses import dataclass as dataclass, field as field
+from copy import deepcopy as deepcopy
+from dataclasses import dataclass as dataclass, field as field, replace as replace
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
@@ -24,6 +26,7 @@ if TYPE_CHECKING:
     from openai import AsyncOpenAI as AsyncOpenAI
 
 from ._public import preserve_module_identity as _preserve_module_identity
+from .model_context import ModelRequestContext, _ContextTransform
 from .usage import TokenUsage, _UsageCollector
 
 ContextT = TypeVar("ContextT")
@@ -228,6 +231,112 @@ class ResponsesCompaction(Generic[ContextT]):
                 observe(None)
             del self, request, provider_response, observe, response, body, value, window, usage
             del model, control_echoes, original_controls
+
+
+def _compaction_context(
+    context: ContextT, session_id: str, message: dict[str, Any]
+) -> CompactionContext[ContextT]:
+    return CompactionContext(
+        context=context,
+        items=tuple(message["items"]),
+        session_id=session_id,
+        turn_id=message["turn_id"],
+        subagent_id=message["thread"] if message["instance"] is not None else None,
+        model=message["model"],
+        trigger=message["trigger"],
+    )
+
+
+def _validate_compaction_summary(summary: Any) -> None:
+    if summary is not None:
+        if not isinstance(summary, str):
+            raise TypeError("before_compact must return a summary string or None")
+        if not summary.strip():
+            raise ValueError("before_compact summary must not be empty")
+
+
+async def _run_responses_compaction(
+    factory: ResponsesCompaction[ContextT],
+    request: CompactionContext[ContextT],
+    *,
+    policy: bool,
+    transform: _ContextTransform[ContextT] | None,
+    provider_response: dict[str, Any] | None,
+    candidate_indexes: Sequence[int],
+    model_omitted: bool,
+    step_id: int,
+    active: Callable[[], bool],
+    invoke: Callable[[Callable[..., Any], Any], Awaitable[Any]],
+    matches_provider: Callable[[], bool],
+    observe: Callable[[TokenUsage | None], None],
+) -> Any:
+    """Run borrowed provider work inside the Session-owned awaited callback."""
+    provider_response = (
+        provider_response
+        if transform is None
+        and provider_response is not None
+        and factory.mode != "input"
+        and matches_provider()
+        else None
+    )
+    prepared = factory._context(
+        request,
+        candidates=tuple(request.items[index] for index in candidate_indexes),
+        provider_response=provider_response,
+        model_omitted=model_omitted,
+    )
+    if policy:
+        predicate = factory.should_compact
+        if predicate is None:
+            decision = len(prepared.candidates) >= 10
+        else:
+            decision = await invoke(predicate, prepared)
+        if not active():
+            raise asyncio.CancelledError
+        if type(decision) is not bool:
+            raise TypeError("should_compact must return a bool")
+        if decision and prepared.mode == "previous_response_id" and not matches_provider():
+            raise ValueError("Compaction client provider scope changed before dispatch")
+        return decision
+    if not active():
+        raise asyncio.CancelledError
+    original_controls: tuple[dict[str, Any], ...] = ()
+    if prepared.mode == "input" and transform is not None:
+        original_controls = deepcopy(_compaction_instruction_messages(prepared.items))
+        replacement = await invoke(
+            transform,
+            ModelRequestContext(
+                context=prepared.context,
+                items=prepared.items,
+                session_id=prepared.session_id,
+                turn_id=prepared.turn_id,
+                subagent_id=prepared.subagent_id,
+                request_id=str(step_id),
+                model=prepared.model,
+                purpose="compaction",
+            ),
+        )
+        if not active():
+            raise asyncio.CancelledError
+        if replacement is not None:
+            if (
+                not isinstance(replacement, Sequence)
+                or isinstance(replacement, (str, bytes, bytearray))
+                or any(not isinstance(item, Mapping) for item in replacement)
+            ):
+                raise TypeError("transform_context must return input items or None")
+            prepared = replace(prepared, items=tuple(replacement))
+    verified_provider_scope = matches_provider()
+    if prepared.mode == "previous_response_id" and not verified_provider_scope:
+        raise ValueError("Compaction client provider scope changed before dispatch")
+    window = await factory._window(
+        prepared,
+        provider_response=provider_response,
+        observe=observe,
+        original_controls=original_controls,
+    )
+    verified_provider_scope = verified_provider_scope and matches_provider()
+    return window, verified_provider_scope
 
 
 def _responses_client_scope(client: Any) -> tuple[str, str, str | None, str | None] | None:

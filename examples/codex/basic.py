@@ -1,4 +1,9 @@
-"""Run a typed Python function through a native agent."""
+"""Run a typed Python function through a native agent.
+
+Run `python -m examples.codex.basic` from the repository root with the matching
+SDK installed and OPENAI_API_KEY configured. The answer greets Ada; live wording
+can vary. The model request can incur charges.
+"""
 
 import asyncio
 

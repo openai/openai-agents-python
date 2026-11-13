@@ -29,7 +29,7 @@ PYTHONPATH=. python -m examples.codex.web_starter --directory /tmp/agents-web-st
 
 ### Approve and download a report
 
-1. Open `http://127.0.0.1:8080`, select `alice`, and click **Choose user**.
+1. Open [the local service](http://127.0.0.1:8080), select `alice`, and click **Choose user**.
 2. Click **Send** to submit the default request. The browser displays a report card for 10,000 rows and asks whether to publish the report XML.
 3. Click **Approve**. After the Turn settles, the browser shows `completed`, the typed final result, and a **Download validated XML** link.
 4. Open a second browser profile, select `bob`, and click **Choose user**. Try the first profile's download URL in this profile to check that the service denies access to Alice's artifact.
@@ -45,6 +45,8 @@ Live model calls can incur provider charges. To use a live model, set `OPENAI_AP
 Send the service process `SIGTERM` to shut it down. aiohttp stops accepting requests, and application cleanup signals admitted work and waits for the workers before closing MCP and SQLite.
 
 Do not kill workers merely to meet the request deadline. Cancellation and cleanup can take longer than the deadline. A crash or forced kill leaves unfinished receipts `unknown` at the next start.
+
+After shutdown finishes, keep the private state directory to inspect or reuse its receipts. Delete that application-owned directory only when you want to discard all receipts, reports, artifacts, and checkpoints. Expiry alone does not delete their bytes.
 
 ## Ownership and recovery
 

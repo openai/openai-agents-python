@@ -1,6 +1,8 @@
 """Use typed decisions and check an Agent's proposed completion.
 
-Set OPENAI_API_KEY and OPENAI_MODEL before running. Install
+From the matching source checkout root, run `python -m examples.codex.decisions`.
+See decisions-guide.md for source setup, output, and provider restrictions.
+Set OPENAI_API_KEY and OPENAI_MODEL before running. Live calls can incur charges. Install
 the matching SDK build with its decisions extra for the optional OpenAI provider.
 """
 

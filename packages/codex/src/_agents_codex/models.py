@@ -19,6 +19,7 @@ from agents.config import JsonValue
 
 from ._compat import cancellation_requested
 from ._public import preserve_module_identity as _preserve_module_identity
+from .retry import RetryAdvice
 
 
 class ProviderConversation(TypedDict):
@@ -128,6 +129,8 @@ class ModelRetryAdviceRequest:
     attempt_id: str
     attempt: int
     request_attempt: int
+    stream: bool | None = field(default=None, kw_only=True)
+    """Whether the failed request selected a streaming producer, when known."""
 
 
 class ModelRequestOptions(TypedDict, total=False):
@@ -512,6 +515,14 @@ class _RawChatChunk(_ChatStreamEvent):
     """A process-local source tag; never part of provider JSON."""
 
 
+class _BorrowedResponsesEvent(dict[str, Any]):
+    """Carry the borrowed response header outside provider event data."""
+
+    def __init__(self, event: Mapping[str, Any], request_id: str) -> None:
+        super().__init__(event)
+        self.request_id = request_id
+
+
 async def _close_chat_stream(value: Any) -> None:
     close = result = None
     try:
@@ -624,6 +635,11 @@ class ChatCompletionsModel:
             return self._completed_response(request, response, apply_patch_wire)
         finally:
             del request, parameters, response, apply_patch_wire
+
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> RetryAdvice | None:
+        from ._openai_retry import openai_retry_advice
+
+        return openai_retry_advice(request)
 
     def _parameters(
         self, request: ModelRequest, streaming: bool
@@ -1431,6 +1447,9 @@ class LitellmModel(ChatCompletionsModel):
     Set ``stream=True`` to receive text and function calls incrementally.
     """
 
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> RetryAdvice | None:
+        return None
+
     async def _create(self, request: ModelRequest, **options: Any) -> Any:
         response: Any = None
         try:
@@ -1462,6 +1481,9 @@ class AnyLLMModel(ChatCompletionsModel):
     Generic completion requests omit the native ``store=False`` default.
     """
 
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> RetryAdvice | None:
+        return None
+
     async def _create(self, request: ModelRequest, **options: Any) -> Any:
         try:
             if request.disable_provider_retries:
@@ -1485,12 +1507,13 @@ class AnyLLMModel(ChatCompletionsModel):
             del request, options
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ResponsesModel:
     """Borrow an asynchronous Responses client for the native Core model loop.
 
     Native request fields reach ``responses.create`` without a second formatter.
-    The client remains application-owned; only complete responses are admitted.
+    The client remains application-owned. Set ``stream=True`` for incremental
+    native events. Each response stream closes when the turn ends or is cancelled.
     ``prompt_cache_key`` overrides only this borrowed client's outgoing cache
     affinity; ``None`` retains the native request key. ``request_options`` captures
     HTTP options or a per-native-request factory, as on ``ChatCompletionsModel``.
@@ -1505,6 +1528,25 @@ class ResponsesModel:
     _request_options_source: ModelRequestOptions | ModelRequestOptionsFactory | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    _stream_enabled: bool = field(default=False, init=False, repr=False)
+
+    def __init__(
+        self,
+        client: Any,
+        model: str | None = None,
+        *,
+        prompt_cache_key: str | None = None,
+        request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = None,
+        stream: bool = False,
+    ) -> None:
+        if type(stream) is not bool:
+            raise TypeError("stream must be a bool")
+        object.__setattr__(self, "client", client)
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "prompt_cache_key", prompt_cache_key)
+        object.__setattr__(self, "request_options", request_options)
+        object.__setattr__(self, "_stream_enabled", stream)
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         if self.prompt_cache_key is not None and not isinstance(self.prompt_cache_key, str):
@@ -1514,18 +1556,20 @@ class ResponsesModel:
             source = _capture_request_options(source)
         object.__setattr__(self, "_request_options_source", source)
 
-    async def complete(self, request: ModelRequest) -> ModelResponse:
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> RetryAdvice | None:
+        from ._openai_retry import openai_retry_advice
+
+        return openai_retry_advice(request)
+
+    @property
+    def stream(self) -> Callable[[ModelRequest], AsyncIterator[Mapping[str, Any]]] | None:
+        return self._stream_response if self._stream_enabled else None
+
+    async def _create(self, request: ModelRequest, *, stream: bool) -> Any:
         body: dict[str, Any] = {}
         selected: dict[str, Any] | None = None
         client: Any = None
-        response: Any = None
-        value: Any = None
-        output: list[dict[str, Any]] = []
-        raw_usage: Any = None
-        usage: dict[str, int] | None = None
-        item: Any = None
-        part: Any = None
-        returned: ModelResponse | None = None
+        create: Any = None
         try:
             selected = await _request_options_for(self._request_options_source, request)
             client = self.client
@@ -1544,9 +1588,46 @@ class ResponsesModel:
             if self.prompt_cache_key is not None:
                 body["prompt_cache_key"] = self.prompt_cache_key
             body.pop("stream", None)
-            response = await create(
-                stream=False, extra_body=body, **_client_request_options(selected)
-            )
+            return await create(stream=stream, extra_body=body, **_client_request_options(selected))
+        finally:
+            del request, body, selected, client, create
+
+    async def _stream_response(self, request: ModelRequest) -> AsyncIterator[Mapping[str, Any]]:
+        response: Any = None
+        event: Any = None
+        headers: Any = None
+        request_id: Any = None
+        payload: Any = None
+        try:
+            response = await self._create(request, stream=True)
+            async with response:
+                headers = getattr(getattr(response, "response", None), "headers", None)
+                if headers is not None:
+                    request_id = headers.get("x-request-id")
+                async for event in response:
+                    payload = (
+                        event.model_dump(mode="json", exclude_unset=True)
+                        if hasattr(event, "model_dump")
+                        else event
+                    )
+                    if isinstance(request_id, str) and request_id and isinstance(payload, Mapping):
+                        payload = _BorrowedResponsesEvent(payload, request_id)
+                    request_id = None
+                    yield payload
+        finally:
+            del request, response, event, headers, request_id, payload
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        response: Any = None
+        value: Any = None
+        output: list[dict[str, Any]] = []
+        raw_usage: Any = None
+        usage: dict[str, int] | None = None
+        item: Any = None
+        part: Any = None
+        returned: ModelResponse | None = None
+        try:
+            response = await self._create(request, stream=False)
             value = response.model_dump() if hasattr(response, "model_dump") else response
             raw_usage = value.get("usage")
             usage = (
@@ -1614,9 +1695,6 @@ class ResponsesModel:
             # Traceback-local logging must not retain SDK-owned request/response payloads.
             del (
                 request,
-                body,
-                selected,
-                client,
                 response,
                 value,
                 output,

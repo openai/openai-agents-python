@@ -1,6 +1,14 @@
 # Observe usage and diagnose agent work
 
-Read token usage from completed results and configure telemetry to trace work across agents and workers. When a run fails, compare telemetry with recorded history and your application's effect records before deciding whether to retry. For live text and passive events, follow [Session observation streaming](sessions.md#stream-observations).
+Read token usage from completed results and configure telemetry to trace work across agents and workers. When a run fails, compare telemetry with recorded history and your application's effect records before deciding whether to retry. Choose the evidence for your task:
+
+| Task | Use |
+| --- | --- |
+| Display text and progress while a Turn runs | [Session observations](streaming.md#stream-observations) |
+| Read reported tokens after completion | [Completed-result usage](#read-usage-without-double-counting) |
+| Bound later model requests | [Run budgets](#limit-a-runs-model-requests-and-usage) |
+| Trace a workflow or send records to a collector | [Native telemetry](#configure-telemetry) |
+| Investigate a failure before retrying | [History and application receipts](#diagnose-a-trace-with-history-and-application-receipts) |
 
 ## Read usage without double counting
 
@@ -22,7 +30,7 @@ Read usage with these accounting rules:
 - `total_token_usage` is cumulative for the native thread, including restored history. Do not add successive snapshots as separate costs.
 - `last_token_usage` may cover only one response from a Turn that needed several. A snapshot may repeat when no new usage arrives.
 - Cached and reasoning tokens are already included in totals. Do not add them again.
-- Root usage excludes child threads. [Prompted-output repairs](configuration.md#structured-output) have separate records.
+- Root usage excludes child threads. [Prompted-output repairs](outputs.md#return-a-typed-result) have separate records.
 
 Both `total_token_usage` and `last_token_usage` expose the fields listed in [usage types](reference.md#tokenusageinfo-and-tokenusage). `model_context_window` can be `None`. These counts are not billing records.
 
@@ -46,7 +54,9 @@ For a cost limit, supply a synchronous `estimate_cost_micros(usage)` callback. I
 
 A blocked admission raises `NativeError` with code `"run_budget_exceeded"` or `"run_budget_usage_unavailable"`. An invalid or failed estimator produces `"run_budget_invalid_estimate"`. Inspect earlier tool effects before starting another run. [`wait_for_attention()`](sessions.md#wait-for-a-decision-or-a-result) reports a budget stop as `reason="budget_exceeded"`.
 
-Each queued submission has its own budget. Steering and live manual replies keep the active run's budget. A budgeted active run cannot suspend or restore from a pending checkpoint; one-shot manual tools need `on_interaction`. After completion, an idle checkpoint can save the result and start a new run with a fresh budget.
+Each queued submission has its own budget. Steering and live manual replies keep the active run's budget. In the alpha.7 wheel, an active budgeted run cannot suspend or restore a pending checkpoint, so one-shot manual tools need `on_interaction`. After completion, an idle checkpoint can save the result and start a new run with a fresh budget.
+
+Matching [development builds](installation.md#use-development-branch-examples) also support [manual checkpoints](state.md#save-a-settled-manual-request) with request or token budgets. The checkpoint retains the original limits and consumed allowance. Token budgets also retain the effective `missing_usage` policy. Restore an explicit Session with `resume_budget=RunBudget(...)`, or a one-shot run with `budget=...`, using those same limits and policy from current application configuration. A mismatch is rejected; restore cannot reset or increase the remaining allowance. Estimated-cost budgets still require live replies. See [budgeted recovery](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/budgeted-recovery.md) for supported operations and error cases.
 
 ## Configure telemetry
 

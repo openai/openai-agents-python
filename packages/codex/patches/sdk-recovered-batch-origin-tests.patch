@@ -1,0 +1,18 @@
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -165,6 +165,7 @@
+ }
+ fn settled_test_calls() -> SettledDirectTools {
+     SettledDirectTools {
++        recovered: false,
+         calls: ["first", "second", "third"]
+             .iter()
+             .map(|id| {
+@@ -373,6 +374,7 @@
+ fn tool_terminal_recovery_resolves_written_prefix_across_same_id_start() {
+     let (thread, candidates, history) = recovered_batch_fixture();
+     let tools = recovered_tools_from_history(&candidates, thread, "recovered", &history).unwrap();
++    assert!(tools.recovered);
+     assert!(tools.all_succeeded);
+     assert_eq!(tools.calls.len(), 3);
+     for (index, output) in tools.outputs.iter().enumerate() {

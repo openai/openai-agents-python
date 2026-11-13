@@ -1,4 +1,10 @@
-"""Discover metadata and fetch only selected decoded UTF-8 documents."""
+"""Discover metadata and fetch only selected decoded UTF-8 documents.
+
+See selective_collection.md for matching-source setup and backend ownership.
+Run `python -m examples.codex.selective_collection` from the repository root.
+It creates 10,000 temporary fixture files, makes live model requests with
+OPENAI_API_KEY, and removes the fixture on exit. Requests can incur charges.
+"""
 
 from __future__ import annotations
 

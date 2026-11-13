@@ -1,5 +1,7 @@
 # Dataroom metric extract
 
+The [sandbox setup guide](../../README.md) covers source installation, model credentials, and the Unix-local isolation limits. These tutorials also import `rich`; use `uv run --with rich` in place of `uv run` in the commands below when the environment does not install it.
+
 ## Goal
 
 Extract financial metrics from a synthetic 10-K packet, write the resulting table as CSV or JSONL, then validate the generated artifact with a deterministic eval script.
@@ -16,25 +18,25 @@ Run the fixture generator and then the Unix-local example from the repository ro
 
 ```bash
 uv run python examples/classic/sandbox/tutorials/data/dataroom/setup.py
-uv run python examples/classic/sandbox/tutorials/dataroom_metric_extract/main.py --output-format csv
+uv run python examples/classic/sandbox/tutorials/dataroom_metric_extract/main.py --no-interactive --output-format csv
 uv run python examples/classic/sandbox/tutorials/dataroom_metric_extract/evals.py --artifact-path examples/classic/sandbox/tutorials/dataroom_metric_extract/output/financial_metrics.csv
 ```
 
-After the initial extraction, the demo keeps the sandbox session open for Rich-rendered follow-up prompts before writing the final artifact. Pass `--no-interactive` for a one-shot run.
+The commands use `--no-interactive` to write the artifact after the initial extraction. Omit that flag to ask follow-up questions in the same sandbox. Press **Ctrl-D** or **Ctrl-C** at the follow-up prompt to finish and write the final artifact.
 
-To run extraction in Docker, build the shared tutorial image once and add `--docker`
-to `main.py`:
+To run extraction in Docker, build the shared tutorial image once and add `--docker` to `main.py`:
 
 ```bash
 docker build --tag sandbox-tutorials:latest examples/classic/sandbox/tutorials
-uv run python examples/classic/sandbox/tutorials/dataroom_metric_extract/main.py --docker --output-format csv
+uv run python examples/classic/sandbox/tutorials/dataroom_metric_extract/main.py --docker --no-interactive --output-format csv
 uv run python examples/classic/sandbox/tutorials/dataroom_metric_extract/evals.py --artifact-path examples/classic/sandbox/tutorials/dataroom_metric_extract/output/financial_metrics.csv
 ```
 
 ## Expected artifacts
 
-- `output/financial_metrics.csv`
-- `output/financial_metrics.jsonl`
+The shown commands write `examples/classic/sandbox/tutorials/dataroom_metric_extract/output/financial_metrics.csv`. Use `--output-format jsonl` to write `financial_metrics.jsonl` instead, and pass that path to `evals.py`. Each run writes only its selected format.
+
+The evaluator prints `Eval checks passed for 41 metric row(s).` after checking the fixture values, metadata, and row count. A failed check requires inspecting the generated artifact; model output can vary.
 
 ## Demo shape
 

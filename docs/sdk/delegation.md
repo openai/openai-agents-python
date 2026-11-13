@@ -2,13 +2,19 @@
 
 Use `NativeAgents` for workspace delegation within one conversation. Native children share the parent's executor workspace and selected tools, so give each child a task that can safely run alongside the others.
 
-`NativeAgents` requires an `Environment` with `exec_command`, `write_stdin`, and `apply_patch`, even when the delegated task only calls Python or MCP tools. For delegation without an executor workspace, call separately configured `Agent` instances and let your application coordinate their inputs, results, and lifetimes. Matching development builds have also been supporting [Agent handoffs within the same conversation](sessions.md#hand-off-the-conversation-to-another-agent), using `Agent.handoffs`, `session.get_active_agent()` and idle `session.update(agent=...)`.
+`NativeAgents` requires an `Environment` with `exec_command`, `write_stdin`, and `apply_patch`, even when the delegated task only calls Python or MCP tools. Choose the conversation structure before enabling native children:
+
+| Need | Use |
+| --- | --- |
+| Delegate independent tasks in a shared executor workspace | `NativeAgents`, as shown below. |
+| Coordinate agents without a shared executor workspace | Separate configured `Agent` instances, with inputs, results, and lifetimes coordinated by your application. |
+| Continue one conversation under a different Agent | [Agent handoffs](sessions.md#hand-off-the-conversation-to-another-agent) in a matching development build. The alpha.7 wheel does not include handoffs. |
 
 Before running the examples:
 
 1. [Configure an Environment](execution.md) with `exec_command`, `write_stdin`, and `apply_patch`.
 2. Choose an explicit model that supports those tools. See [model and role limits](#configure-roles-and-delegation-limits).
-3. [Configure the provider](configuration.md#provider-connection).
+3. [Configure the provider](models.md#provider-connection).
 
 The examples run inside an async application. The first example uses the `environment` you configured.
 
@@ -49,7 +55,13 @@ Set delegation limits on `NativeAgents`:
 
 ### Select tools for each child step
 
-To narrow a child's tools before each model step, set `NativeAgents(before_step=select)`. The synchronous or asynchronous `select(step)` callback receives a typed `ChildStepContext`. `step.context` is the Session application context, `step.child` is the `ChildInvocation` for that exact child instance and turn, and `step.step_index` counts preparations. The callback can apply tenant policy without an external context lookup. Return `None` to use that child operation's default selection. Return a sequence to narrow the admitted tools, or `[]` to disable all model tools for that preparation. Return `StopTurn(...)` to stop that exact child turn; other children and the root can continue. The selection cannot add tools or replace their definitions.
+To narrow a child's tools before each model step, set `NativeAgents(before_step=select)`. The synchronous or asynchronous `select(step)` callback receives a `ChildStepContext` with these fields:
+
+- `context`: the Session application context, such as your current tenant policy.
+- `child`: the `ChildInvocation` for that exact child instance and turn.
+- `step_index`: the count of preparations in that child turn.
+
+Return `None` to use the child operation's default tools, a sequence to narrow that selection, or `[]` to disable all model tools for that preparation. The callback cannot add tools or replace definitions. Return `StopTurn(...)` to stop only that child turn; the root and other children can continue.
 
 `step.step_index` starts at zero for each child turn and counts preparations, which can end before a model request. Root turns use the separate [`before_step` callback on submission](sessions.md#select-tools-before-each-model-step).
 

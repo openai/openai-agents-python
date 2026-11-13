@@ -1,4 +1,9 @@
-"""Choose a failed timeout result or a typed exception for each tool invocation."""
+"""Choose a failed timeout result or a typed exception for each tool invocation.
+
+Run `python -m examples.codex.tool_timeout` from the repository root with
+the matching SDK and OPENAI_API_KEY. The synthetic lookup exceeds its timeout;
+the model receives the error as a tool result. Live requests can incur charges.
+"""
 
 import asyncio
 

@@ -992,6 +992,33 @@ impl NativeThread {
         })
     }
 
+    fn _record_memory_input_admission<'py>(
+        &self,
+        py: Python<'py>,
+        turn_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            canonical_history::record_memory_input_admission(&inner, &turn_id)
+                .await
+                .map_err(py_error)
+        })
+    }
+
+    fn _memory_history<'py>(
+        &self,
+        py: Python<'py>,
+        turn_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let value = canonical_history::memory_snapshot(&inner, &turn_id)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&value).map_err(py_error)
+        })
+    }
+
     fn _stored_history<'py>(
         &self,
         py: Python<'py>,
@@ -2426,8 +2453,13 @@ impl NativeThread {
             .is_some_and(|tools| tools.check_model_producer(request_id)))
     }
 
-    #[pyo3(signature = (request_id, *, chat_stream=false))]
-    fn _start_model_producer_stream(&self, request_id: u64, chat_stream: bool) -> PyResult<bool> {
+    #[pyo3(signature = (request_id, *, chat_stream=false, upstream_request_id=None))]
+    fn _start_model_producer_stream(
+        &self,
+        request_id: u64,
+        chat_stream: bool,
+        upstream_request_id: Option<String>,
+    ) -> PyResult<bool> {
         let Some(inner) = self.live()? else {
             return Ok(false);
         };
@@ -2438,7 +2470,12 @@ impl NativeThread {
         Ok(store
             .get::<python_tools::PythonTools>()
             .is_some_and(|tools| {
-                tools.start_model_producer_stream(request_id, observe_raw, chat_stream)
+                tools.start_model_producer_stream(
+                    request_id,
+                    observe_raw,
+                    chat_stream,
+                    upstream_request_id,
+                )
             }))
     }
 
