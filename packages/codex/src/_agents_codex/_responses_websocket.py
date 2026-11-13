@@ -204,12 +204,19 @@ class _Connection:
     def close(self) -> asyncio.Task[None]:
         if self.closing is None:
 
-            async def finish() -> None:
-                result = self.socket.close()
-                if inspect.isawaitable(result):
-                    await result
+            async def finish(socket: Any) -> None:
+                result = None
+                try:
+                    result = socket.close()
+                    if inspect.isawaitable(result):
+                        await result
+                except BaseException as error:
+                    _clear_error_frames(error)
+                    raise
+                finally:
+                    del socket, result
 
-            self.closing = asyncio.create_task(finish())
+            self.closing = asyncio.create_task(finish(self.socket))
         return self.closing
 
 
