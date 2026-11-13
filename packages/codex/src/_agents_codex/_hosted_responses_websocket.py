@@ -68,6 +68,7 @@ class _Active:
     passive: Counter[bytes] = field(default_factory=Counter)
     passive_count: int = 0
     queued: list[dict[str, Any]] = field(default_factory=list)
+    item_budget: _SocketJsonBudget = field(default_factory=_SocketJsonBudget)
     injecting: set[str] | None = None
     terminal: dict[str, Any] | None = None
     size: int = 0
@@ -736,9 +737,22 @@ class _Socket:
             del self, active, event, response, output, usage
 
     def _queue_item(self, active: _Active, item: dict[str, Any]) -> None:
-        if len(active.emitted) + active.passive_count + len(active.queued) >= _MAX_RESPONSE_ITEMS:
-            raise ValueError("Hosted response exceeds the native output-item limit")
-        active.queued.append(deepcopy(item))
+        encoded = None
+        try:
+            if (
+                len(active.emitted) + active.passive_count + len(active.queued)
+                >= _MAX_RESPONSE_ITEMS
+            ):
+                raise ValueError("Hosted response exceeds the native output-item limit")
+            encoded = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            budget = active.item_budget
+            budget.remaining -= _check_socket_json_structure(encoded, budget.remaining)
+            active.queued.append(deepcopy(item))
+        except BaseException as error:
+            _clear_error_frames(error)
+            raise
+        finally:
+            del self, active, item, encoded
 
     def _enqueue(self, event: dict[str, Any]) -> None:
         self._queue.append(_ResponsesWebSocketFrame(event))
