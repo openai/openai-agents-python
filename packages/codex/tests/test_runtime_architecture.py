@@ -287,9 +287,16 @@ def test_facades_preserve_public_object_identity(module: str) -> None:
     runtime = importlib.import_module(
         ("agents.classic." if module in _CLASSIC_VOICE_MODULES else "_agents_codex.") + module
     )
+    generated_bases = {}
+    if module == "experimental._mcp_tasks_wire":
+        for model_name in ("GetOrCancel", "Update"):
+            base = getattr(runtime, model_name).__bases__[0]
+            generated_bases[base.__name__] = base
     for name, value in vars(public).items():
         if module == "experimental.mcp_tasks" and name == "wire":
             assert value is importlib.import_module("agents.experimental._mcp_tasks_wire")
+        elif name in generated_bases:
+            assert value is generated_bases[name], (module, name)
         elif not name.startswith("_"):
             owner = (
                 importlib.import_module("agents.classic.voice.workflow")
@@ -337,8 +344,19 @@ def test_generated_mcp_generic_bases_keep_their_public_pickle_paths() -> None:
     _require_mcp_tasks()
     from agents.experimental._mcp_tasks_wire import GetOrCancel, Update
 
-    for value in (GetOrCancel.__bases__[0], Update.__bases__[0]):
-        assert value.__module__ == "agents.experimental._mcp_tasks_wire"
+    for value, public_lookup in (
+        (
+            GetOrCancel.__bases__[0],
+            b"cagents.experimental._mcp_tasks_wire\n"
+            b"Request[TaskParams, Literal['tasks/get', 'tasks/cancel']]\n.",
+        ),
+        (
+            Update.__bases__[0],
+            b"cagents.experimental._mcp_tasks_wire\n"
+            b"Request[UpdateParams, Literal['tasks/update']]\n.",
+        ),
+    ):
+        assert pickle.loads(public_lookup) is value
         assert pickle.loads(pickle.dumps(value)) is value
 
 
