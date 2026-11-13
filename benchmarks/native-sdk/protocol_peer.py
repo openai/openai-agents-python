@@ -1,7 +1,8 @@
 """Standalone, loopback-only synthetic Responses peer for SDK benchmarks.
 
-Run with the native checkout's Python (aiohttp is its only dependency). Receipt
-storage is bounded; operation counters and output verification remain exact.
+The default H1 peer has been using aiohttp only; optional dual mode has been
+using requirements-http2-peer.txt. Receipt storage has been remaining bounded,
+with exact operation counters and output verification.
 """
 
 from __future__ import annotations
@@ -12,13 +13,16 @@ import hashlib
 import json
 import re
 import ssl
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 MARKER = re.compile(r"\bBENCH_RUN=([A-Za-z0-9-]+)(?![A-Za-z0-9-])")
 RECEIPT_LIMIT = 4096
+PEER_DIRECTORY = Path(__file__).resolve().parent
 
 
 def final_text(op_id: str, size: int) -> str:
@@ -133,6 +137,7 @@ class Peer:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.tls_names = {}
+        self.tls_connections = {}
         self.operations: dict[str, Operation] = {}
         self.receipts: deque[dict[str, Any]] = deque(maxlen=RECEIPT_LIMIT)
         self.requests = self.errors = self.body_bytes = self.response_bytes = 0
@@ -171,6 +176,16 @@ class Peer:
                 for op_id, op in self.operations.items()
             },
             "receipts": list(self.receipts),
+            **(
+                {
+                    "http_server": getattr(self, "http_server", None),
+                    "tls_transports": {
+                        str(row["id"]): row for row in self.tls_connections.values()
+                    },
+                }
+                if getattr(self.args, "peer_http_mode", "h1") == "dual"
+                else {}
+            ),
         }
 
     def response(
@@ -296,10 +311,10 @@ class Peer:
             event["sequence_number"] = sequence
         return events
 
-    async def websocket(self, request):
+    async def websocket(self, request, *, socket=None):
         from aiohttp import WSMsgType, web
 
-        socket = web.WebSocketResponse()
+        socket = socket if socket is not None else web.WebSocketResponse()
         await socket.prepare(request)
         self.websocket_connections += 1
         self.websocket_open_connections += 1
@@ -378,6 +393,7 @@ class Peer:
         raw_body=None,
         resolved_input=None,
         websocket_connection_id=None,
+        deliver=None,
     ):
         from aiohttp import web
 
@@ -396,6 +412,26 @@ class Peer:
         op = None
         try:
             secure = request.transport.get_extra_info("ssl_object")
+            if getattr(self.args, "peer_http_mode", "h1") == "dual":
+                version = "2" if request.version.major == 2 else "1.1"
+                connection = self.tls_connections.setdefault(
+                    secure,
+                    {
+                        "id": len(self.tls_connections) + 1,
+                        "http_version": version,
+                        "alpn_protocol": secure.selected_alpn_protocol(),
+                        "tls_version": secure.version(),
+                        "session_reused": secure.session_reused,
+                        "requests": 0,
+                    },
+                )
+                assert connection["http_version"] == version
+                connection["requests"] += 1
+                receipt.update(
+                    tls_connection_id=connection["id"],
+                    http_version=version,
+                    tls_alpn_protocol=connection["alpn_protocol"],
+                )
             receipt.update(
                 request_host=request.headers.get("Host"), tls_sni=self.tls_names.get(secure)
             )
@@ -524,7 +560,10 @@ class Peer:
                 raise ValueError("stream must be boolean")
             if self.args.delay_ms:
                 await asyncio.sleep(self.args.delay_ms / 1000)
-            if websocket is not None:
+            if deliver is not None:
+                result = await deliver(response, chunks, streaming)
+                receipt["response_body_complete"] = True
+            elif websocket is not None:
                 result = None
                 for event in self.events(response, chunks):
                     payload = encode(event)
@@ -574,6 +613,10 @@ class Peer:
             payload = encode(
                 {"type": "error", **error_body} if websocket is not None else error_body
             )
+            if deliver is not None:
+                await deliver(error_body, [], False, status=400)
+                receipt["response_body_complete"] = True
+                return None
             self.response_bytes += len(payload)
             if websocket is not None:
                 await websocket.send_str(payload.decode())
@@ -587,6 +630,12 @@ async def serve(args: argparse.Namespace) -> None:
     from aiohttp import web
 
     peer = Peer(args)
+    if args.peer_http_mode == "dual":
+        sys.path.insert(0, str(PEER_DIRECTORY))
+        from http2_peer import serve as serve_dual
+
+        await serve_dual(args, peer, encode)
+        return
     app = web.Application(client_max_size=64 * 1024 * 1024)
     app.router.add_post("/v1/responses", peer.handle)
     app.router.add_get("/v1/responses", peer.websocket)
@@ -613,7 +662,7 @@ async def serve(args: argparse.Namespace) -> None:
         context.set_servername_callback(
             lambda connection, name, _context: peer.tls_names.__setitem__(connection, name)
         )
-        await web.TCPSite(runner, "127.0.0.1", 443, ssl_context=context).start()
+        await web.TCPSite(runner, "127.0.0.1", args.tls_port, ssl_context=context).start()
         ready.update(
             base_url="https://api.openai.com/v1", control_base_url=f"http://127.0.0.1:{port}/v1"
         )
@@ -627,6 +676,8 @@ async def serve(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--tls-port", type=int, default=443)
+    parser.add_argument("--peer-http-mode", choices=("h1", "dual"), default="h1")
     parser.add_argument("--tls-cert")
     parser.add_argument("--tls-key")
     parser.add_argument("--tools-per-round", type=int, default=1)
@@ -635,10 +686,15 @@ def main() -> None:
     parser.add_argument("--output-chars", type=int, default=256)
     parser.add_argument("--delay-ms", type=float, default=0)
     args = parser.parse_args()
+    if args.peer_http_mode == "h1" and args.tls_port != 443:
+        parser.error("A custom TLS port requires dual HTTP mode")
+    if args.peer_http_mode == "dual" and not args.tls_cert:
+        parser.error("Dual HTTP mode requires TLS certificate and key")
     if bool(args.tls_cert) != bool(args.tls_key):
         parser.error("Both TLS certificate and key are required")
     if not (
         0 <= args.port <= 65535
+        and 0 <= args.tls_port <= 65535
         and args.tools_per_round >= 0
         and args.tool_rounds >= 0
         and args.chunks > 0
