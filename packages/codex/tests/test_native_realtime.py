@@ -210,6 +210,93 @@ async def realtime_peer() -> AsyncIterator[RealtimePeer]:
         yield peer
 
 
+@pytest.mark.parametrize("defer", [False, True])
+async def test_entered_tool_can_defer_public_media_without_stopping_native_reader(
+    realtime_peer: RealtimePeer, defer: bool
+) -> None:
+    from agents.realtime import RealtimeAudio
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    @function_tool
+    async def hold() -> str:
+        entered.set()
+        await release.wait()
+        return "finished"
+
+    peer = realtime_peer
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="synthetic-voice-inline", supports_websockets=False
+        ) as provider,
+        Agent(
+            instructions="Wait for the tool.", provider=provider, tools=[hold]
+        ).session() as session,
+        session.realtime(
+            config=RealtimeConfig(
+                model="fixture-realtime", tools=(hold,), defer_media_while_tool_runs=defer
+            )
+        ) as voice,
+    ):
+        async with aclosing(voice.events()) as events, aclosing(voice.subscribe()) as observations:
+
+            async def audio(reader) -> RealtimeAudio:
+                async for event in reader:
+                    if isinstance(event, RealtimeAudio):
+                        return event
+                raise AssertionError("Expected observed audio")
+
+            readers = [asyncio.create_task(audio(reader)) for reader in (events, observations)]
+            try:
+                start = len(peer.frames)
+                await peer.function("hold", {}, "held")
+                await entered.wait()
+                assert peer.socket is not None
+                await peer.socket.send_json(
+                    {"type": "response.created", "response": {"id": "independent-audio"}}
+                )
+                await peer.socket.send_json(
+                    {
+                        "type": "response.output_audio.delta",
+                        "response_id": "independent-audio",
+                        "item_id": "fixture-audio",
+                        "content_index": 0,
+                        "output_index": 0,
+                        "delta": "AAA=",
+                    }
+                )
+                if defer:
+                    assert not (await asyncio.wait(readers, timeout=0.1))[0]
+                else:
+                    await asyncio.gather(*readers)
+                assert not any(
+                    frame["type"] == "response.create"
+                    or frame.get("item", {}).get("call_id") == "held"
+                    for frame in peer.frames[start:]
+                )
+                await peer.socket.send_json(
+                    {"type": "response.done", "response": {"id": "independent-audio"}}
+                )
+                release.set()
+                assert all(
+                    event.response_id == "independent-audio"
+                    for event in await asyncio.gather(*readers)
+                )
+                output = await peer.frame(
+                    lambda frame: frame.get("item", {}).get("call_id") == "held", after=start
+                )
+                await peer.frame(
+                    lambda frame: frame["type"] == "response.create",
+                    after=peer.frames.index(output) + 1,
+                )
+            finally:
+                release.set()
+                for reader in readers:
+                    reader.cancel()
+                await asyncio.gather(*readers, return_exceptions=True)
+
+
 @dataclass
 class Application:
     marker: str
@@ -2378,3 +2465,51 @@ async def test_native_voice_history_keeps_interleaved_call_fragments_separate(
             assert row.item_id == row.provider_item_id == item["id"]
             assert row.output == "found:" + json.loads(item["arguments"])["key"]
             assert row.status == "completed"
+
+
+@pytest.mark.parametrize("concurrency, defer", [(None, False), (1, True)])
+async def test_entered_realtime_body_orders_later_response_callback(
+    realtime_peer: RealtimePeer, concurrency: int | None, defer: bool
+) -> None:
+    entered, later_entered, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @function_tool
+    async def first() -> str:
+        entered.set()
+        await release.wait()
+        return "first"
+
+    @function_tool
+    async def later() -> str:
+        later_entered.set()
+        return "later"
+
+    peer = realtime_peer
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="synthetic-voice-inline", supports_websockets=False
+        ) as provider,
+        Agent(
+            instructions="Wait for the tool.",
+            provider=provider,
+            tools=[first, later],
+        ).session(max_function_concurrency=concurrency) as session,
+        session.realtime(
+            config=RealtimeConfig(model="fixture-realtime", defer_media_while_tool_runs=defer)
+        ),
+    ):
+        try:
+            await peer.function("first", {}, "first")
+            await entered.wait()
+            await peer.function("later", {}, "later")
+            if defer:
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(later_entered.wait(), timeout=0.1)
+            else:
+                await later_entered.wait()
+        finally:
+            release.set()
+        await later_entered.wait()
+        await peer.frame(lambda frame: frame.get("item", {}).get("call_id") == "first")
+        await peer.frame(lambda frame: frame.get("item", {}).get("call_id") == "later")
