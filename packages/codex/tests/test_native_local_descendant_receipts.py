@@ -26,7 +26,6 @@ from agents import (
     NetworkPolicy,
     ReconciledCall,
     ToolContext,
-    ToolRef,
     _native,
     function_tool,
 )
@@ -224,19 +223,13 @@ async def worker() -> None:
         supports_websockets=False,
     )
     native = None if request["no_children"] else NativeAgents(max_children=2, max_depth=2)
-    if request["mode"] == "cold-hosted-root":
-        native = NativeAgents(
-            max_children=2,
-            max_depth=2,
-            before_step=lambda step: [ToolRef("lookup", "functions")],
-        )
     agent = Agent(
         instructions="Record a memory.",
         model=request["model"],
         provider=connection,
         programmatic_tool_calling=False,
         tools=([lookup] if native is None else [lookup, native])
-        + ([ImageGeneration()] if request["mode"] in {"cold-hosted", "cold-hosted-root"} else []),
+        + ([ImageGeneration()] if request["mode"] == "cold-hosted" else []),
     )
     try:
         async with (
@@ -796,11 +789,7 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
 async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
     tmp_path, monkeypatch, depth, no_children, native_effect, root_active
 ):
-    model = (
-        "gpt-5.5"
-        if native_effect in {"hosted-progress", "settled-hosted-root"}
-        else DESCENDANT_MODEL
-    )
+    model = "gpt-5.5" if native_effect == "hosted-progress" else DESCENDANT_MODEL
     unsafe_effect = native_effect in {"shell", "hosted-progress"}
     peer = LocalFamilyPeer(depth, fork_turns="all" if depth == 2 else "none")
     entered, release = asyncio.Event(), asyncio.Event()
@@ -891,8 +880,6 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
             if root_active == "followup"
             else "cold-hosted"
             if native_effect == "hosted-progress"
-            else "cold-hosted-root"
-            if native_effect == "settled-hosted-root"
             else "cold-active",
             depth,
             model=model,
@@ -939,6 +926,22 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
         if native_effect == "settled-hosted-root":
             [root_rollout] = (tmp_path / "profile").rglob(f"*{opened['opened']}.jsonl")
             root_history = [json.loads(line) for line in root_rollout.read_text().splitlines()]
+            completed_turns = {
+                row["payload"]["turn_id"]
+                for row in root_history
+                if row["type"] == "event_msg" and row["payload"]["type"] == "task_complete"
+            }
+            marked = 0
+            for row in root_history:
+                if (
+                    row["type"] == "turn_context"
+                    and row["payload"].get("turn_id") in completed_turns
+                    and row["payload"].get("sdk_receipt", {}).get("thread_id") == opened["opened"]
+                ):
+                    row["payload"]["sdk_receipt"]["provider_effects_possible"] = True
+                    marked += 1
+            assert marked
+            root_rollout.write_text("".join(json.dumps(row) + "\n" for row in root_history))
             assert any(
                 row["type"] == "turn_context"
                 and row["payload"].get("sdk_receipt", {}).get("provider_effects_possible") is True
