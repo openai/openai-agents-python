@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, Protocol, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, cast
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -21,10 +21,25 @@ from typing_extensions import NotRequired, TypedDict
 from agents.config import JsonValue
 
 from ._compat import cancellation_requested
+from ._hosted_agent_metadata import (
+    HostedAgentMetadata as HostedAgentMetadata,
+    get_hosted_agent_metadata as get_hosted_agent_metadata,
+)
 from ._media import _capture_video
 from ._public import preserve_module_identity as _preserve_module_identity
 from .input import _capture_prompt_cache_breakpoint
 from .retry import RetryAdvice
+
+if TYPE_CHECKING:
+    from ._hosted_responses_websocket import (
+        HostedResponsesWebSocketModel as HostedResponsesWebSocketModel,
+    )
+    from ._responses_websocket import (
+        ResponsesSocketFactory as ResponsesSocketFactory,
+        ResponsesSocketOptions as ResponsesSocketOptions,
+        ResponsesWebSocketModel as ResponsesWebSocketModel,
+        ResponsesWebSocketOptions as ResponsesWebSocketOptions,
+    )
 
 
 class ProviderConversation(TypedDict):
@@ -1916,3 +1931,24 @@ class _AnyLLMResponsesModel(ResponsesModel):
 
 
 _preserve_module_identity(globals(), "agents.models")
+
+
+def __getattr__(name: str) -> Any:
+    # The socket adapters depend on the request types defined here.
+    if name == "HostedResponsesWebSocketModel":
+        from . import _hosted_responses_websocket
+
+        value = _hosted_responses_websocket.HostedResponsesWebSocketModel
+    elif name in {
+        "ResponsesSocketFactory",
+        "ResponsesSocketOptions",
+        "ResponsesWebSocketModel",
+        "ResponsesWebSocketOptions",
+    }:
+        from . import _responses_websocket
+
+        value = getattr(_responses_websocket, name)
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value

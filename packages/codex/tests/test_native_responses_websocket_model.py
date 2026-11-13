@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from openai import AsyncOpenAI
 
+from _agents_codex._responses_websocket import _limited
 from agents import (
     Agent,
     ModelRequest,
@@ -321,6 +322,42 @@ async def test_cancelled_socket_request_joins_one_physical_close() -> None:
             await task
         await model.cleanup_on_run_end(owner)
         assert socket.closed == 1 and not client.is_closed()
+
+
+async def test_socket_timeout_remains_distinct_from_caller_cancellation() -> None:
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+
+    async def read() -> str:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+            await release.wait()
+        return "unreachable"
+
+    async with timeout(5):
+        task = asyncio.create_task(_limited(read(), 0.05))
+        try:
+            await entered.wait()
+            await cancelled.wait()
+            task.cancel()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        release.clear()
+        cancelled.clear()
+        task = asyncio.create_task(_limited(read(), 0.05))
+        try:
+            await cancelled.wait()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.TimeoutError):
+            await task
 
 
 async def test_native_result_waits_for_model_cleanup_after_passive_waiter_cancellation() -> None:

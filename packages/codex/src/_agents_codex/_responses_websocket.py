@@ -164,7 +164,35 @@ async def _socket_options(
 
 
 async def _limited(value: Awaitable[Any], timeout: float | None) -> Any:
-    return await value if timeout is None else await asyncio.wait_for(value, timeout)
+    if timeout is None:
+        return await value
+
+    # wait_for can lose the caller's cancellation on Python 3.10 when the
+    # child finishes in the same event-loop cycle.
+    task = asyncio.ensure_future(value)
+    try:
+        if timeout > 0 and not task.done():
+            await asyncio.wait((task,), timeout=timeout)
+        if task.done():
+            return task.result()
+
+        task.cancel()
+        # Wait on an independent completion signal so task cancellation means
+        # timeout, while cancellation of this caller continues to propagate.
+        await _join(asyncio.create_task(asyncio.wait((task,))))
+        if task.cancelled():
+            raise asyncio.TimeoutError()
+        return task.result()
+    except asyncio.CancelledError as error:
+        if not task.done():
+            task.cancel()
+        try:
+            await _join(task)
+        except asyncio.CancelledError:
+            pass
+        except BaseException as cleanup_error:
+            _retain_cleanup_error(error, cleanup_error, _error_contexts(error.__context__))
+        raise
 
 
 @dataclass(eq=False, repr=False)

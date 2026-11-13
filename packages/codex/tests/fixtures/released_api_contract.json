@@ -888,12 +888,22 @@
           "from typing import Any, Literal, Protocol, TypeAlias",
           "from uuid import uuid4",
           "from typing_extensions import NotRequired, TypedDict",
+          "from ._hosted_agent_metadata import HostedAgentMetadata as HostedAgentMetadata, get_hosted_agent_metadata as get_hosted_agent_metadata",
           "from .config import JsonValue",
-          "from .retry import RetryAdvice"
+          "from .retry import RetryAdvice",
+          "from ._hosted_responses_websocket import HostedResponsesWebSocketModel as HostedResponsesWebSocketModel",
+          "from ._responses_websocket import ResponsesSocketFactory as ResponsesSocketFactory, ResponsesSocketOptions as ResponsesSocketOptions, ResponsesWebSocketModel as ResponsesWebSocketModel, ResponsesWebSocketOptions as ResponsesWebSocketOptions"
         ],
         "references": {
+          "HostedAgentMetadata": "_agents_codex._hosted_agent_metadata.HostedAgentMetadata",
+          "HostedResponsesWebSocketModel": "_agents_codex._hosted_responses_websocket.HostedResponsesWebSocketModel",
           "JsonValue": "agents.config.JsonValue",
-          "RetryAdvice": "agents.retry.RetryAdvice"
+          "ResponsesSocketFactory": "_agents_codex._responses_websocket.ResponsesSocketFactory",
+          "ResponsesSocketOptions": "_agents_codex._responses_websocket.ResponsesSocketOptions",
+          "ResponsesWebSocketModel": "_agents_codex._responses_websocket.ResponsesWebSocketModel",
+          "ResponsesWebSocketOptions": "_agents_codex._responses_websocket.ResponsesWebSocketOptions",
+          "RetryAdvice": "agents.retry.RetryAdvice",
+          "get_hosted_agent_metadata": "_agents_codex._hosted_agent_metadata.get_hosted_agent_metadata"
         }
       },
       "agents.native_agents": {
@@ -2614,6 +2624,41 @@
           "_ObservationBuffer": "agents.observation._ObservationBuffer"
         }
       },
+      "_agents_codex._hosted_agent_metadata": {
+        "declarations": [
+          "@dataclass(frozen=True, slots=True)\nclass HostedAgentMetadata:\n    agent_name: str\n    phase: str | None = None",
+          "def get_hosted_agent_metadata(value: object) -> HostedAgentMetadata | None:\n    pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from dataclasses import dataclass"
+        ],
+        "references": {}
+      },
+      "_agents_codex._hosted_responses_websocket": {
+        "declarations": [
+          "class HostedResponsesWebSocketModel:\n\n    def __init__(self, client: Any, model: str | None=None, *, prompt_cache_key: str | None=None, request_options: ModelRequestOptions | ModelRequestOptionsFactory | None=None, websocket_options: ResponsesWebSocketOptions | None=None, socket_factory: ResponsesSocketFactory | None=None, max_concurrent_subagents: int | None=None) -> None:\n        pass\n\n    async def stream(self, request: ModelRequest) -> AsyncIterator[Mapping[str, Any]]:\n        pass\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass\n\n    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> RetryAdvice | None:\n        pass\n\n    async def cleanup_on_run_end(self, owner: ModelRunOwner) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import AsyncIterator, Mapping",
+          "from typing import Any",
+          "from ._responses_websocket import ResponsesSocketFactory, ResponsesWebSocketOptions",
+          "from .models import ModelRequest, ModelRequestOptions, ModelRequestOptionsFactory, ModelResponse, ModelRetryAdviceRequest, ModelRunOwner",
+          "from .retry import RetryAdvice"
+        ],
+        "references": {
+          "ModelRequest": "agents.models.ModelRequest",
+          "ModelRequestOptions": "agents.models.ModelRequestOptions",
+          "ModelRequestOptionsFactory": "agents.models.ModelRequestOptionsFactory",
+          "ModelResponse": "agents.models.ModelResponse",
+          "ModelRetryAdviceRequest": "agents.models.ModelRetryAdviceRequest",
+          "ModelRunOwner": "agents.models.ModelRunOwner",
+          "ResponsesSocketFactory": "_agents_codex._responses_websocket.ResponsesSocketFactory",
+          "ResponsesWebSocketOptions": "_agents_codex._responses_websocket.ResponsesWebSocketOptions",
+          "RetryAdvice": "agents.retry.RetryAdvice"
+        }
+      },
       "_agents_codex._managed_workspace": {
         "declarations": [
           "@dataclass(frozen=True)\nclass ManagedWorkspaceCheckpoint:\n    conversation_json: str\n    workspace_json: str\n    association: str\n    _capture_provenance: ClassVar[tuple[str, str, str] | None] = None\n\n    @property\n    def conversation(self) -> SessionState:\n        pass\n\n    @property\n    def workspace(self) -> dict[str, Any]:\n        pass\n\n    def to_json(self) -> str:\n        pass\n\n    @classmethod\n    def from_json(cls, source: str) -> ManagedWorkspaceCheckpoint:\n        pass"
@@ -2643,6 +2688,36 @@
           "from openai import Omit as Omit"
         ],
         "references": {}
+      },
+      "_agents_codex._responses_websocket": {
+        "declarations": [
+          "class ResponsesWebSocketOptions(TypedDict, total=False):\n    ping_interval: float | None\n    ping_timeout: float | None\n    max_size: int | None",
+          "class ResponsesSocketOptions(TypedDict):\n    url: str\n    headers: dict[str, str]\n    open_timeout: float | None\n    websocket_options: ResponsesWebSocketOptions",
+          "ResponsesSocketFactory: TypeAlias = Callable[[ModelRequest, ResponsesSocketOptions], Awaitable[Any]]",
+          "@dataclass(eq=False, repr=False)\nclass _Connection:\n    socket: Any\n    key: str\n    closing: asyncio.Task[None] | None = None\n\n    def close(self) -> asyncio.Task[None]:\n        pass",
+          "@dataclass(eq=False, repr=False)\nclass _Owner:\n    busy: bool = False\n    retired: bool = False\n    connection: _Connection | None = None\n    opening: asyncio.Task[_Connection] | None = None\n    closing: asyncio.Task[None] | None = None",
+          "class ResponsesWebSocketModel(ResponsesModel):\n    _socket_factory: ResponsesSocketFactory\n    _websocket_options: ResponsesWebSocketOptions\n    _owners: WeakKeyDictionary[ModelRunOwner, _Owner]\n\n    def __init__(self, client: Any, model: str | None=None, *, prompt_cache_key: str | None=None, request_options: ModelRequestOptions | ModelRequestOptionsFactory | None=None, websocket_options: ResponsesWebSocketOptions | None=None, socket_factory: ResponsesSocketFactory | None=None) -> None:\n        pass\n\n    @property\n    def stream(self) -> Callable[[ModelRequest], AsyncIterator[Mapping[str, Any]]]:\n        pass\n\n    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> RetryAdvice | None:\n        pass\n\n    async def cleanup_on_run_end(self, owner: ModelRunOwner) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "import asyncio",
+          "from collections.abc import AsyncIterator, Awaitable, Callable, Mapping",
+          "from dataclasses import dataclass",
+          "from typing import Any, TypeAlias",
+          "from weakref import WeakKeyDictionary",
+          "from typing_extensions import TypedDict",
+          "from .models import ModelRequest, ModelRequestOptions, ModelRequestOptionsFactory, ModelRetryAdviceRequest, ModelRunOwner, ResponsesModel",
+          "from .retry import RetryAdvice"
+        ],
+        "references": {
+          "ModelRequest": "agents.models.ModelRequest",
+          "ModelRequestOptions": "agents.models.ModelRequestOptions",
+          "ModelRequestOptionsFactory": "agents.models.ModelRequestOptionsFactory",
+          "ModelRetryAdviceRequest": "agents.models.ModelRetryAdviceRequest",
+          "ModelRunOwner": "agents.models.ModelRunOwner",
+          "ResponsesModel": "agents.models.ResponsesModel",
+          "RetryAdvice": "agents.retry.RetryAdvice"
+        }
       },
       "_agents_codex._sandbox_events": {
         "declarations": [
