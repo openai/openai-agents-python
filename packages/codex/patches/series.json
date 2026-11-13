@@ -947,7 +947,15 @@
     {
       "path": "sdk-agent-profile-durable-transport-comparison.patch",
       "sha256": "331ceb875035ae10cdd6c23ab34c43642b4978da51137ad1c0998cb28b024ab0"
+    },
+    {
+      "path": "sdk-recovered-batch-origin.patch",
+      "sha256": "911df52c6cc95e43771daa4cf958786dfacb918ad72cc5c91594f01806d935c9"
+    },
+    {
+      "path": "sdk-recovered-batch-origin-tests.patch",
+      "sha256": "51798c6b4c28ece8c868be4994f2401a99f0aae2e9c9f83fc96cdd4a42741bbe"
     }
   ],
-  "result_tree": "eb449dd7230a2585cf56b79bbf6bf9f0aea36e4d"
+  "result_tree": "6e65af7c248e20ac862ac0a82690ff7c0f4b46e4"
 }
