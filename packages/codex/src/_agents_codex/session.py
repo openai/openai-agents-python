@@ -16282,6 +16282,27 @@ class Session(Generic[ContextT, OutputT]):
             ref = entry._ref
             if message["tool"] != ref.name or message.get("namespace") != ref.namespace:
                 raise NativeError("Native tool request does not match its captured declaration")
+            realtime_source = message.get("_sdk_realtime_tool_call")
+            realtime_name = message.get("_sdk_realtime_tool_name")
+            if (
+                self._max_function_concurrency == 1
+                and self._realtime is not None
+                and isinstance(realtime_source, dict)
+                and isinstance(realtime_name, str)
+            ):
+                automatic_names = frozenset(
+                    function.name
+                    for candidate in catalog.tools
+                    for function in (
+                        candidate.function
+                        if isinstance(candidate, _CapturedApproval)
+                        else candidate,
+                    )
+                    if isinstance(function, _CapturedFunction) and function._ref.namespace is None
+                )
+                await self._realtime._wait_function_order(
+                    realtime_source, realtime_name, automatic_names
+                )
             if self._max_function_concurrency is not None:
                 if state.function_admission is None:
                     state.function_admission = asyncio.Semaphore(self._max_function_concurrency)
