@@ -22,6 +22,7 @@ from typing import Any
 
 MARKER = re.compile(r"\bBENCH_RUN=([A-Za-z0-9-]+)(?![A-Za-z0-9-])")
 RECEIPT_LIMIT = 4096
+PEER_DIRECTORY = Path(__file__).resolve().parent
 
 
 def final_text(op_id: str, size: int) -> str:
@@ -617,7 +618,7 @@ async def serve(args: argparse.Namespace) -> None:
 
     peer = Peer(args)
     if args.peer_http_mode == "dual":
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        sys.path.insert(0, str(PEER_DIRECTORY))
         from http2_peer import serve as serve_dual
 
         await serve_dual(args, peer, encode)

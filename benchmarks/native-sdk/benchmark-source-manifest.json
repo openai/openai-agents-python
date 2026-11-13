@@ -2,7 +2,7 @@
   "compare.py": "ac2c357a8611b2da22af47150bccb054a79bd66a57fbbd0443b47e1d68b89760",
   "http2_peer.py": "412fb55f384f5850acf6512ba0f52c0f09fe92be183ed175e49fd5e5a635e6da",
   "owned_process.py": "9be3bd2a11154dec666a943172fd7645e040ef7279f0f53633d5c3f22d168e4e",
-  "protocol_peer.py": "d2912a5776ebcda6945fb63b5a79e2f41e8e7b34c4a87ecf4cab87710048d3c8",
+  "protocol_peer.py": "d2f0688316e73cd51cebdead232886530f6c6fc7b0fc50d4485f54d2523f837c",
   "requirements-http2-peer.txt": "48f4a1ac96b99d27cfa9b2e01f11db3305c73ffafc441cae1b38c1cbdd06762d",
   "v0_adapter.py": "9ed442de1513879b62298cedf29f4ceef7071e31b3a5cad9b2986fa3f36bc0cc",
   "v1_adapter.py": "535974cf6b3eb71da59e604b89f1f7fe84f432e8b092523424a11995818d391d",
