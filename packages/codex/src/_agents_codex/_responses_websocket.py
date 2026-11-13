@@ -472,9 +472,13 @@ class ResponsesWebSocketModel(ResponsesModel):
                 raise
             response_id = None
             while True:
-                payload = await _limited(
-                    connection.socket.recv(), _timeout(self.client, selected, "read")
-                )
+                try:
+                    payload = await _limited(
+                        connection.socket.recv(), _timeout(self.client, selected, "read")
+                    )
+                except BaseException as error:
+                    _clear_error_frames(error)
+                    raise
                 if isinstance(payload, _ResponsesWebSocketFrame):
                     event = payload
                     if event.raw:
