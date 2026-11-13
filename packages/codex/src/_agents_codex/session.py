@@ -363,6 +363,7 @@ from .tools import (
     _restore_operation_slots as _restore_operation_slots,
     _restore_python_catalog as _restore_python_catalog,
     _saved_python_ref as _saved_python_ref,
+    _snapshot_function_arguments,
     _ToolCatalog as _ToolCatalog,
 )
 from .turn import (
@@ -2486,46 +2487,6 @@ def _same_approval_arguments(
     return bool(left == right)
 
 
-def _snapshot_function_arguments(arguments: dict[str, Any], tool: ToolRef) -> Mapping[str, Any]:
-    # deepcopy cannot copy mappingproxy, which a validated Mapping can produce.
-    # Prepare only those copies; deepcopy still owns copying all other values.
-    memo: dict[int, Any] = {}
-    proxies: list[tuple[Mapping[Any, Any], dict[Any, Any]]] = []
-    seen: set[int] = set()
-    pending: list[Any] = [arguments]
-    while pending:
-        value = pending.pop()
-        identity = id(value)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        if isinstance(value, MappingProxyType):
-            backing: dict[Any, Any] = {}
-            memo[identity] = MappingProxyType(backing)
-            proxies.append((value, backing))
-            pending.extend(value.values())
-        elif type(value) is dict:
-            pending.extend(value.values())
-        elif type(value) in (list, tuple, set, frozenset):
-            pending.extend(value)
-        elif isinstance(value, BaseModel):
-            pending.extend(
-                value.__dict__[name] for name in type(value).model_fields if name in value.__dict__
-            )
-            pending.append(value.__pydantic_extra__)
-    # Register every proxy first so shared and recursive values use one memo.
-    try:
-        for original, backing in proxies:
-            backing.update(deepcopy(dict(original), memo))
-        return MappingProxyType(deepcopy(arguments, memo))
-    except Exception as error:
-        tool_identity = f"{tool.namespace}.{tool.name}" if tool.namespace else tool.name
-        raise TypeError(
-            f"Tool {tool_identity!r} requires deep-copyable validated arguments for "
-            "ToolContext.effective_arguments, including private model state"
-        ) from error
-
-
 @dataclass(frozen=True)
 class _ProfileRuntime:
     profile: _AgentProfile
@@ -3683,6 +3644,98 @@ def _configure_session_features(
         config["features.apps"] = False
 
 
+def _opening_tool_policy(
+    *,
+    allowed_mcp: Sequence[_MCP[Any]],
+    allowed_tools: Sequence[FunctionTool[Any, Any, Any]],
+    mcp_names: list[dict[str, str]],
+    hosted_tools: list[dict[str, Any]],
+    web_search: WebSearch | None,
+    deferred_schemas: bool,
+    available: Sequence[Tool[Any]],
+    checklist: bool,
+    guidance_tools: list[dict[str, str]],
+    goals: bool,
+    native_agents: NativeAgents[Any] | None,
+    executor: Environment[Any] | None,
+    inherited_executor_tools: tuple[str, ...] | None,
+    programmatic_tool_calling: bool,
+) -> dict[str, Any]:
+    return {
+        "allowed_mcp_tools": [
+            [server.name, raw, ref]
+            for server in allowed_mcp
+            for raw, ref in zip(server.tools, _tool_names((server,)), strict=True)
+        ],
+        "allowed_tools": [
+            {
+                "name": entry.name,
+                "namespace": entry.ref.namespace or "functions",
+            }
+            for entry in allowed_tools
+        ]
+        + mcp_names
+        + [
+            {"name": tool["type"], "namespace": "functions"}
+            for tool in hosted_tools
+            if tool["type"] != "mcp"
+        ]
+        + (
+            [{"name": "run", "namespace": "web"}]
+            if web_search is not None and web_search.route == "standalone"
+            else [{"name": "web_search", "namespace": "functions"}]
+            if web_search is not None
+            else []
+        )
+        + (
+            [{"name": "tool_search", "namespace": "functions"}]
+            if deferred_schemas and not any(isinstance(tool, ToolSearch) for tool in available)
+            else []
+        )
+        + ([{"name": "update_plan", "namespace": "functions"}] if checklist else [])
+        + guidance_tools
+        + (
+            [
+                {"name": name, "namespace": "functions"}
+                for name in ("create_goal", "get_goal", "update_goal")
+            ]
+            if goals
+            else []
+        )
+        + (
+            [
+                {"name": name, "namespace": "collaboration"}
+                for name in native_agents._collaboration_tool_names
+            ]
+            if native_agents is not None
+            else []
+        )
+        + (
+            [
+                {"name": name, "namespace": "functions"}
+                for name in executor.tools
+                if inherited_executor_tools is None or name in inherited_executor_tools
+            ]
+            if executor is not None
+            else []
+        )
+        + (
+            [{"name": name, "namespace": "functions"} for name in ("exec", "wait")]
+            if programmatic_tool_calling
+            else []
+        ),
+        **(
+            {
+                "require_managed_sandbox": True,
+                "require_unified_exec": True,
+                "expose_additional_permissions": False,
+            }
+            if executor is not None
+            else {}
+        ),
+    }
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -4456,81 +4509,22 @@ class Session(Generic[ContextT, OutputT]):
                         run_formatter=tool_error_formatter is not None
                     ),
                     **_native_agent_options(native_agents),
-                    "tool_policy": {
-                        "allowed_mcp_tools": [
-                            [server.name, raw, ref]
-                            for server in allowed_mcp
-                            for raw, ref in zip(server.tools, _tool_names((server,)), strict=True)
-                        ],
-                        "allowed_tools": [
-                            {
-                                "name": entry.name,
-                                "namespace": entry.ref.namespace or "functions",
-                            }
-                            for entry in allowed_tools
-                        ]
-                        + mcp_names
-                        + [
-                            {"name": tool["type"], "namespace": "functions"}
-                            for tool in hosted_tools
-                            if tool["type"] != "mcp"
-                        ]
-                        + (
-                            [{"name": "run", "namespace": "web"}]
-                            if web_search is not None and web_search.route == "standalone"
-                            else [{"name": "web_search", "namespace": "functions"}]
-                            if web_search is not None
-                            else []
-                        )
-                        + (
-                            [{"name": "tool_search", "namespace": "functions"}]
-                            if deferred_schemas
-                            and not any(isinstance(tool, ToolSearch) for tool in available)
-                            else []
-                        )
-                        + ([{"name": "update_plan", "namespace": "functions"}] if checklist else [])
-                        + guidance_tools
-                        + (
-                            [
-                                {"name": name, "namespace": "functions"}
-                                for name in ("create_goal", "get_goal", "update_goal")
-                            ]
-                            if goals
-                            else []
-                        )
-                        + (
-                            [
-                                {"name": name, "namespace": "collaboration"}
-                                for name in native_agents._collaboration_tool_names
-                            ]
-                            if native_agents is not None
-                            else []
-                        )
-                        + (
-                            [
-                                {"name": name, "namespace": "functions"}
-                                for name in executor.tools
-                                if inherited_executor_tools is None
-                                or name in inherited_executor_tools
-                            ]
-                            if executor is not None
-                            else []
-                        )
-                        + (
-                            [{"name": name, "namespace": "functions"} for name in ("exec", "wait")]
-                            if programmatic_tool_calling
-                            else []
-                        ),
-                        **(
-                            {
-                                "require_managed_sandbox": True,
-                                "require_unified_exec": True,
-                                "expose_additional_permissions": False,
-                            }
-                            if executor is not None
-                            else {}
-                        ),
-                    },
+                    "tool_policy": _opening_tool_policy(
+                        allowed_mcp=allowed_mcp,
+                        allowed_tools=allowed_tools,
+                        mcp_names=mcp_names,
+                        hosted_tools=hosted_tools,
+                        web_search=web_search,
+                        deferred_schemas=deferred_schemas,
+                        available=available,
+                        checklist=checklist,
+                        guidance_tools=guidance_tools,
+                        goals=goals,
+                        native_agents=native_agents,
+                        executor=executor,
+                        inherited_executor_tools=inherited_executor_tools,
+                        programmatic_tool_calling=programmatic_tool_calling,
+                    ),
                 }
                 _install_profile_options(options, profiles, profile_roster, profile_fingerprint)
                 # The private merged opener owns paths for eligible runtime scopes.
@@ -16394,33 +16388,14 @@ class Session(Generic[ContextT, OutputT]):
             output: ToolOutput | None = failure_output
             background = False
             if failure_output is None:
-                background = isinstance(value, BackgroundResult)
-                content: Any = None
-                try:
-                    value = entry.output_adapter.validate_python(value)
-                    content = value.value if isinstance(value, BackgroundResult) else value
-                    if isinstance(content, ToolOutput):
-                        output = content
-                    else:
-                        wire = entry.output_adapter.dump_json(value, warnings="error").decode()
-                        if isinstance(value, BackgroundResult):
-                            wire = json.dumps(
-                                json.loads(wire)["value"], ensure_ascii=False, separators=(",", ":")
-                            )
-                        # Declared strings retain raw text; other results keep JSON wire semantics.
-                        text = json.loads(wire) if isinstance(content, str) else wire
-                        output = ToolOutput.text(text if isinstance(text, str) else wire)
-                        del wire, text
-                    output._validate()
-                except Exception:
-                    output = None
-                finally:
-                    del content
-                if output is None:
+                result = entry._validated_result(value)
+                if result is None:
                     # End ownership of the original admission request and every
                     # invocation data reference without altering caller-owned objects.
                     del request, message, formatter_arguments, parsed, kwargs, context, args, value
                     raise ValueError("Tool result failed validation")
+                value, output, background = result
+                del result
             if entry.after is not None and failure_output is None:
                 assert context is not None
                 original_output = output

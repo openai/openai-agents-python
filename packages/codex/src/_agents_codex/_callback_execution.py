@@ -9,6 +9,8 @@ from contextvars import copy_context
 from dataclasses import dataclass
 from typing import Any, cast
 
+from ._compat import cancel_once
+from ._lifecycle import _close_after_error, _join
 from .telemetry import _owned_span
 
 
@@ -49,6 +51,79 @@ async def _call_callback_entered(
     finally:
         # Release SDK-owned callback arguments only after the admitted body exits.
         del callback, admit, args, kwargs, enter
+
+
+async def _call_application_callback(
+    callback: Callable[..., Any] | _RecoverableFunctionCallback,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    timeout_seconds: float | None = None,
+    timeout_error: TimeoutError | None = None,
+) -> Any:
+    """Own a callback without a Session, including any worker that entered it."""
+    loop = asyncio.get_running_loop()
+    cutoff = None if timeout_seconds is None else loop.time() + timeout_seconds
+    active = True
+    settled_at: float | None = None
+    control_error: SystemExit | KeyboardInterrupt | None = None
+
+    def admit() -> bool:
+        return active and (cutoff is None or loop.time() < cutoff)
+
+    async def run() -> Any:
+        nonlocal settled_at, control_error
+        try:
+            if admit():
+                return await _call_callback_entered(callback, admit, args, kwargs)
+            return None
+        except (SystemExit, KeyboardInterrupt) as error:
+            # A child asyncio task must not propagate these to the event loop.
+            control_error = error
+            return None
+        finally:
+            settled_at = loop.time()
+
+    pending = asyncio.create_task(run())
+
+    def revoke() -> None:
+        nonlocal active
+        if active and not pending.done():
+            active = False
+            cancel_once(pending)
+
+    timer = None if cutoff is None else loop.call_at(cutoff, revoke)
+    try:
+        try:
+            await asyncio.wait((pending,))
+        except asyncio.CancelledError as error:
+            revoke()
+
+            async def join() -> None:
+                try:
+                    await _join(pending)
+                except asyncio.CancelledError:
+                    if not pending.cancelled():
+                        raise
+
+            await _close_after_error(error, join)
+            raise
+        if control_error is not None:
+            raise control_error
+        if cutoff is not None and (not active or settled_at is not None and settled_at >= cutoff):
+            failure = None if pending.cancelled() else pending.exception()
+            if isinstance(failure, _FunctionBodyFailure):
+                failure = failure.original
+            assert timeout_error is not None
+            raise timeout_error from failure
+        return pending.result()
+    finally:
+        if timer is not None:
+            timer.cancel()
+        args = ()
+        kwargs = {}
+        callback = pending = cast(Any, None)
+        control_error = None
 
 
 async def _call_callback_body(

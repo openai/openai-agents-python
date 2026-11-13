@@ -37,6 +37,7 @@ from pydantic import (
     PydanticSchemaGenerationError as PydanticSchemaGenerationError,
     RootModel,
     TypeAdapter as TypeAdapter,
+    ValidationError,
 )
 from typing_extensions import ParamSpec as ParamSpec, TypeVar as TypeVar
 
@@ -45,6 +46,11 @@ from _agents_shared.strict_schema import (
     ensure_strict_json_schema,
 )
 
+from ._callback_execution import (
+    _call_application_callback,
+    _FunctionBodyFailure,
+    _RecoverableFunctionCallback,
+)
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext
 from .hosted_mcp import HostedMCP
@@ -82,6 +88,7 @@ from .tools import (
     _function_parameters as _function_parameters,
     _hosted_tool_spec,
     _rebuild_tool_output_adapter,
+    _snapshot_function_arguments,
 )
 from .turn import Turn as Turn
 
@@ -117,6 +124,34 @@ class ToolTimeoutError(TimeoutError):
         super().__init__(
             f"Tool {tool_name!r} exceeded its callback timeout after {timeout_seconds:g} seconds"
         )
+
+
+class ToolInvocationInputContext(Protocol[ContextT_co]):
+    """Application context shared by live and standalone argument error formatters."""
+
+    @property
+    def context(self) -> ContextT_co: ...
+
+
+class ToolInvocationContext(ToolInvocationInputContext[ContextT_co], Protocol[ContextT_co]):
+    """Context for callbacks and policies that run with or without a live Session."""
+
+    @property
+    def original_arguments(self) -> Mapping[str, Any]: ...
+
+    @property
+    def effective_arguments(self) -> Mapping[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class _ApplicationToolInputContext(Generic[ContextT_co]):
+    context: ContextT_co = field(repr=False)
+
+
+@dataclass(frozen=True)
+class _ApplicationToolContext(_ApplicationToolInputContext[ContextT_co]):
+    original_arguments: Mapping[str, Any] = field(repr=False)
+    effective_arguments: Mapping[str, Any] = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -687,6 +722,53 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             _rebuild_tool_output_adapter(TypeAdapter(self.output_type), self.output_type),
         )
 
+    async def invoke(
+        self, arguments: str | Mapping[str, Any], *, context: object = None
+    ) -> ResultT | ToolOutput:
+        """Validate and execute an application-owned function call without a Session.
+
+        A context-aware callback can use ToolInvocationContext. Native approval,
+        dynamic enablement, and live ToolContext callbacks require a Session.
+        The return value is the validated callback result or the ToolOutput from
+        a configured policy or failure formatter.
+        """
+        try:
+            if (
+                self._bind is None
+                or self.needs_approval is not False
+                or self.is_enabled is not True
+            ):
+                raise TypeError(
+                    "Standalone invocation requires an enabled function without approval"
+                )
+            entry = self._capture(context)
+            if type(entry) is not _CapturedFunction:
+                raise TypeError("Standalone invocation requires an application function callback")
+            parameter = entry.context_parameter
+            if (
+                parameter is not None
+                and (get_origin(parameter.annotation) or parameter.annotation) is ToolContext
+            ):
+                raise TypeError("Standalone function callbacks require ToolInvocationContext")
+            for callback in (
+                entry.before,
+                entry.after,
+                entry.error_function,
+                entry.input_error_function,
+                entry.timeout_error_function
+                if entry.callback_timeout is not None
+                and entry.timeout_behavior == "error_as_result"
+                else None,
+            ):
+                if _uses_live_tool_context(callback):
+                    raise TypeError(
+                        "Standalone function policies cannot require a live ToolContext"
+                    )
+            self._check_context(context)
+            return cast("ResultT | ToolOutput", await _invoke_application_tool(entry, arguments))
+        finally:
+            del arguments, context
+
     def _check_context(self, context: object) -> None:
         if context is None and self._requires_context:
             raise TypeError(
@@ -712,6 +794,8 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
                         if get_origin(annotation) in (
                             ToolContext,
                             ToolInputErrorContext,
+                            ToolInvocationContext,
+                            ToolInvocationInputContext,
                         ) and _requires_context(annotation):
                             raise TypeError(
                                 f"Function tool {self.name!r} {name} requires application "
@@ -834,6 +918,148 @@ def _policy_hints(policy: Callable[..., Any]) -> dict[str, Any]:
     if not (inspect.isfunction(annotated) or inspect.ismethod(annotated)):
         annotated = annotated.__call__
     return get_type_hints(annotated)
+
+
+def _uses_live_tool_context(callback: Callable[..., Any] | None) -> bool:
+    if callback is None:
+        return False
+    parameter = next(iter(inspect.signature(callback).parameters), None)
+    if parameter is None:
+        return False
+    annotation = _policy_hints(callback).get(parameter)
+    alternatives = (
+        get_args(annotation) if get_origin(annotation) in (Union, UnionType) else (annotation,)
+    )
+    return any(
+        (get_origin(alternative) or alternative) in (ToolContext, ToolInputErrorContext)
+        for alternative in alternatives
+    )
+
+
+async def _application_error_output(
+    name: str, formatter: Callable[..., Any], *arguments: Any
+) -> ToolOutput:
+    text: Any = None
+    invalid: TypeError | None = None
+    try:
+        text = await _call_application_callback(formatter, arguments, {})
+        if not isinstance(text, str):
+            invalid = TypeError(f"Function {name} must return str")
+            raise invalid from None
+        return ToolOutput.error(text)
+    finally:
+        if invalid is not None:
+            # A formatter may be running inside a validation exception handler.
+            invalid.__context__ = None
+        del text, formatter, arguments, invalid
+
+
+async def _invoke_application_tool(
+    entry: _CapturedFunction, arguments: str | Mapping[str, Any]
+) -> Any:
+    raw: Any = arguments
+    parsed = kwargs = call_context = args = value = decision = result = replacement = None
+    try:
+        try:
+            raw = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
+            if entry.input_error_function is not None and not isinstance(arguments, str):
+                raw = dict(_snapshot_function_arguments(raw, entry._ref))
+            parsed = entry._validate_decoded_arguments(raw)
+        except (json.JSONDecodeError, ValidationError) as error:
+            if entry.input_error_function is not None:
+                return await _application_error_output(
+                    "input_error_function",
+                    entry.input_error_function,
+                    _ApplicationToolInputContext(entry.context),
+                    error,
+                    raw,
+                )
+        if parsed is None:
+            raise ValueError("Tool arguments failed validation")
+
+        kwargs = entry._arguments(parsed)
+        duration = entry.callback_timeout
+        timeout_error = None if duration is None else ToolTimeoutError(entry.name, duration)
+        timeout_formatter = (
+            entry.timeout_error_function
+            if timeout_error is not None and entry.timeout_behavior == "error_as_result"
+            else None
+        )
+        if entry.context_parameter is not None or any(
+            policy is not None
+            for policy in (entry.before, entry.after, entry.error_function, timeout_formatter)
+        ):
+            call_context = _ApplicationToolContext(
+                entry.context,
+                _snapshot_function_arguments(raw, entry._ref),
+                _snapshot_function_arguments(kwargs, entry._ref),
+            )
+        if entry.before is not None:
+            assert call_context is not None
+            decision = await _call_application_callback(entry.before, (call_context,), {})
+            if isinstance(decision, Deny):
+                if not isinstance(decision.reason, str):
+                    raise TypeError("Tool denial requires a reason")
+                return ToolOutput.error(decision.reason)
+            if isinstance(decision, ReplaceArguments):
+                try:
+                    parsed = entry._parse_replacement(decision.arguments)
+                except (json.JSONDecodeError, ValidationError):
+                    parsed = None
+                if parsed is None:
+                    raise ValueError("Tool replacement arguments failed validation")
+                kwargs = entry._arguments(parsed)
+                call_context = replace(
+                    call_context,
+                    effective_arguments=_snapshot_function_arguments(kwargs, entry._ref),
+                )
+            elif not isinstance(decision, Allow):
+                raise TypeError("Function before must return Allow, Deny, or ReplaceArguments")
+
+        args = (call_context,) if entry.context_parameter is not None else ()
+        callback = (
+            entry.callback
+            if entry.error_function is None
+            else _RecoverableFunctionCallback(entry.callback)
+        )
+        try:
+            value = await _call_application_callback(
+                callback, args, kwargs, timeout_seconds=duration, timeout_error=timeout_error
+            )
+        except ToolTimeoutError as error:
+            if error is not timeout_error or entry.timeout_behavior != "error_as_result":
+                raise
+            if timeout_formatter is None:
+                return ToolOutput.error(str(error))
+            return await _application_error_output(
+                "timeout_error_function", timeout_formatter, call_context, error
+            )
+        except _FunctionBodyFailure as error:
+            assert entry.error_function is not None and call_context is not None
+            return await _application_error_output(
+                "error_function", entry.error_function, call_context, error.original
+            )
+
+        result = entry._validated_result(value)
+        if result is None:
+            raise ValueError("Tool result failed validation")
+        if entry.after is None:
+            return result[0]
+        assert call_context is not None
+        replacement = await _call_application_callback(entry.after, (call_context, result[1]), {})
+        if isinstance(replacement, BackgroundResult):
+            replacement = replacement.value
+        if not isinstance(replacement, ToolOutput):
+            raise TypeError("Function after must return ToolOutput or BackgroundResult[ToolOutput]")
+        try:
+            replacement._validate()
+        except Exception:
+            replacement = None
+        if replacement is None:
+            raise ValueError("Tool result failed validation")
+        return replacement
+    finally:
+        del arguments, raw, parsed, kwargs, call_context, args, value, decision, result, replacement
 
 
 _BeforePolicy: TypeAlias = Callable[
@@ -1240,13 +1466,13 @@ def function_tool(
             annotation = hints.get(parameter.name)
             if get_origin(annotation) is Annotated:
                 annotation = get_args(annotation)[0]
-            if annotation is ToolContext or get_origin(annotation) is ToolContext:
+            if (get_origin(annotation) or annotation) in (ToolContext, ToolInvocationContext):
                 if parameter is not parameters[0] or parameter.kind not in (
                     inspect.Parameter.POSITIONAL_ONLY,
                     inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 ):
                     raise TypeError("ToolContext must be the first positional parameter")
-                context_parameter = parameter
+                context_parameter = parameter.replace(annotation=annotation)
                 requires_context = _requires_context(annotation)
         selected_description = (
             description if description is not None else inspect.getdoc(callback) or ""
