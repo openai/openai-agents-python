@@ -110,6 +110,21 @@ def function_declarations(request):
     return declarations
 
 
+async def test_native_request_identifies_python_sdk_and_installed_version(responses):
+    from agents.version import __version__
+
+    responses.respond(assistant_output("identified"))
+    async with Agent(
+        instructions="Identify the client.", provider=provider(responses)
+    ).session() as session:
+        result = await (await session.submit("identify client")).get_result()
+        assert result.final_output == "identified"
+
+    [headers] = responses.request_headers
+    assert headers["originator"] == "openai_agents_python"
+    assert headers["user-agent"].split(" ", 1)[0] == f"openai_agents_python/{__version__}"
+
+
 async def test_native_tool_context_output_history_and_exact_wait(responses):
     application = Application()
 

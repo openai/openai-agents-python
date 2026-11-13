@@ -935,7 +935,11 @@
     {
       "path": "sdk-final-step-builtin-tools.patch",
       "sha256": "e01c2fd4518cb72b33b4d440454baf0042160546d4d66958914c6478e6d4b94a"
+    },
+    {
+      "path": "sdk-client-version.patch",
+      "sha256": "1fae03966cd574d2522aea5e036fc4fdd02bba45716952cf7991cae32ec642b1"
     }
   ],
-  "result_tree": "b70d2effcca5e9f9cfd0541b3ee967855718afd7"
+  "result_tree": "462a79cba6158169bf5212ad217325afaecfb530"
 }
