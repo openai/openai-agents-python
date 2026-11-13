@@ -966,8 +966,8 @@
     },
     {
       "path": "sdk-api-demand-text-coalescing.patch",
-      "sha256": "8c655a4856186d25d88f5ccf25b51747ff7e3a9d8b8b7ab84e1fcd14300ea204"
+      "sha256": "f582480575237dae4ed26d7891c73d79f2ba933997401c73a8778d99548cf264"
     }
   ],
-  "result_tree": "ad939332d8c08999432907e83b846a16d3356f27"
+  "result_tree": "d3e3bf8cf71d0bda172047a50922e1b157b7bcf4"
 }
