@@ -1,10 +1,16 @@
 # Sandbox examples
 
-These examples show how to run agents with a managed workspace. Start with the small API examples when you want the smallest surface area, or use the tutorial scaffold when you want the shared layout for guided sandbox tutorials.
+These examples run agents with a managed workspace. Complete [Classic source setup](../../../CLASSIC.md#install-from-the-matching-source) before running the commands from the repository root. Start with `basic.py` to create a workspace and run one sandbox agent, or choose a tutorial for a complete task with generated artifacts.
 
 Unix-local examples run commands as host processes. On Linux, `UnixLocalSandboxClient` adds no OS-level confinement; on macOS, it applies filesystem restrictions through `sandbox-exec` without providing network isolation. Use these examples for trusted local development or within external isolation. For untrusted commands, including commands influenced by untrusted inputs, choose an appropriately configured Docker or hosted backend, or provide external isolation. Separate Unix-local workspaces or sessions do not establish an OS isolation boundary.
 
-Most examples call a model through `Runner`, so set `OPENAI_API_KEY` in the repository-root `.env` file, in the example's `.env` file when it has one, or in your shell environment.
+Most examples call a model through `Runner`. Export the credential in the shell before running them:
+
+```sh
+export OPENAI_API_KEY="your-project-api-key"
+```
+
+Some examples also load `.env` files, but the supported locations vary. The tutorials load their own example-directory `.env`; they do not load the repository-root `.env`. Use the shell variable for a shared setup.
 
 `sandbox_agent_with_tools.py` starts the repository's MCP v2 reference server and is intended to run with the locked development environment. The Agents SDK client itself supports both MCP v1 and v2.
 
@@ -116,7 +122,7 @@ Keep this environment separate from the locked MCP v2 development environment. P
 
 ## Tutorial scaffold
 
-[`tutorials/`](tutorials) contains the shared helper code, Docker image, and folder conventions for guided sandbox tutorials. Tutorial folders are added in separate focused changes.
+[`tutorials/`](tutorials) contains shared helpers and the Docker image used by the tutorials below. Each guide identifies its input files, generated artifacts, and supported backend.
 
 ## Tutorials
 

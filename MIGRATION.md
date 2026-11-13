@@ -4,7 +4,7 @@ For an existing v0 application, migrate directly to the native v1 API when you a
 
 You can continue using v0. Upgrading to v1 is optional, and classic is not a required intermediate step.
 
-This guide describes the v1 design on `feat/codex-harness`. It does not announce a published v1 release. The published `v0.24.0-alpha.6` preview predates classic and some native APIs shown in the current guides. Use the [contributor setup](CONTRIBUTING.md) for this source, or follow the [guides for your installed release](docs/sdk/versions.md). Keep the SDK build, documentation, and examples aligned.
+This guide tracks the v1 design on `feat/codex-harness`, rather than announcing a GA release. The source guides include APIs absent from earlier preview wheels. The [contributor setup](CONTRIBUTING.md) covers this source; the [version guide](docs/sdk/versions.md) links documentation for installed releases. Keep the SDK build, documentation, and examples aligned.
 
 ## Choose your path
 
@@ -33,7 +33,7 @@ Classify each required contract before editing imports. Port a whole workflow on
 | Required contract | Decision before native cutover |
 | --- | --- |
 | Business functions, typed application context, structured output | **Port** declarations and validation, then test actual tool inputs, outputs, and effects. |
-| Custom Python models/clients or non-Responses endpoints | Matching source builds have been supporting [application-owned model clients](docs/sdk/configuration.md#use-an-application-owned-model-client), including Chat Completions. Applications have been checking adapter limits and required behavior before native cutover. The published alpha.7 wheel has been requiring Responses support. |
+| Custom Python models/clients or non-Responses endpoints | Matching source builds support [application-owned model clients](docs/sdk/models.md#use-an-application-owned-model-client), including Chat Completions. Applications check adapter limits and required behavior before native cutover. The published alpha.7 wheel requires Responses support. |
 | Handoffs, guardrails, hooks, or specialized agent settings | **Redesign and test** routing, policy timing, context transfer, and next-turn ownership. A specialist that returns a result is not a handoff. Keep the original engine until those contracts are verified. |
 | Existing sessions, serialized runs, or pending approvals | **Keep existing work on its owning engine.** Start native conversations separately from reviewed business facts; do not convert execution state. |
 | Streaming, cancellation, tracing, and effect recovery | **Port and verify** consumers and resource cleanup. A completed effect is not rolled back by a later failure or cancellation. |
@@ -42,7 +42,7 @@ Classify each required contract before editing imports. Port a whole workflow on
 
 ## Port one workflow
 
-Follow the [read-only invoice walkthrough](examples/codex/migration/README.md) for a direct released-v0-to-native port. It uses one agent, one useful tool, typed application context, and typed output. Its matching-source setup keeps the SDK and example code on the same source commit; the published alpha.6 wheel cannot run the current migration APIs.
+Follow the [read-only invoice walkthrough](examples/codex/migration/README.md) for a direct released-v0-to-native port. It uses one agent, one useful tool, typed application context, and typed output. Its matching-source setup keeps the SDK and example code on the same source commit; older preview wheels do not include every migration API from this source snapshot.
 
 The port keeps the business function and data models. Change `RunContextWrapper[Application]` to `ToolContext[Application]`, declare the tool with the native `function_tool`, and replace `Runner.run(agent, ...)` with `agent.run(...)`. The walkthrough includes complete source files, live run commands, and tests without model credentials. Its optional classic step changes imports before applying the same native port.
 
@@ -53,18 +53,18 @@ Native and classic objects are not interchangeable. Keep each workflow's Agent, 
 | v0 or v1 classic | Native v1 migration |
 | --- | --- |
 | `Runner.run()` / `Runner.run_sync()` | `await agent.run()` / `agent.run_sync()`. Use the synchronous form outside an existing event loop. |
-| `Runner.run_streamed()` and classic stream events | Open `agent.session()`, submit a Turn, and read `turn.events()` while awaiting its result. Update event consumers to [native observations](docs/sdk/sessions.md#stream-observations). |
+| `Runner.run_streamed()` and classic stream events | Open `agent.session()`, submit a Turn, and read `turn.events()` while awaiting its result. Update event consumers to [native observations](docs/sdk/streaming.md#stream-observations). |
 | `RunContextWrapper[T]` in a function tool | Use native `ToolContext[T]` as the first parameter and pass the application object as `context=`. See [application context](docs/sdk/tools.md#application-context). |
 | Decorator options such as `name_override` | Re-declare the tool using the native options, such as `name=`. Check [argument, result, and callback rules](docs/sdk/tools.md). |
 | `RunConfig`, `ModelSettings`, and mutable Agent fields | Set native Agent and Session options explicitly. Native Agents are immutable and native `ModelSettings` has a different contract. See [configuration](docs/sdk/configuration.md). |
-| `Model`, `ModelProvider`, custom OpenAI clients, or a Chat Completions endpoint | Configure `NativeProvider` for a compatible Responses endpoint. Matching source builds have also been accepting application-owned clients through `NativeProvider(model_backend=...)`, including `ChatCompletionsModel(client)` and `ResponsesModel(client)` adapters. The `0.24.0-alpha.7` wheel has not been including this option. See [application models](docs/sdk/configuration.md#use-an-application-owned-model-client) and [provider compatibility](docs/sdk/providers.md). |
-| `output_type` and result processing | Declare the native output type and validate the returned `final_output`. Check [schema limits and validation failures](docs/sdk/configuration.md#structured-output). |
+| `Model`, `ModelProvider`, custom OpenAI clients, or a Chat Completions endpoint | Configure `NativeProvider` for a compatible Responses endpoint. Matching source builds also accept application-owned clients through `NativeProvider(model_backend=...)`, including `ChatCompletionsModel(client)` and `ResponsesModel(client)` adapters. The `0.24.0-alpha.7` wheel does not include this option. See [application models](docs/sdk/models.md#use-an-application-owned-model-client) and [provider compatibility](docs/sdk/providers.md). |
+| `output_type` and result processing | Declare the native output type and validate the returned `final_output`. Check [schema limits and validation failures](docs/sdk/outputs.md#return-a-typed-result). |
 | Handoffs or agents used as tools | Port the application routing or choose [native child agents](docs/sdk/delegation.md) when their model, environment, and lifecycle requirements fit. These are not automatic handoff conversions. |
 | Guardrails, approval callbacks, and lifecycle hooks | Map each policy to application validation, [native tool policies](docs/sdk/tools.md#execution-and-cancellation), or [live interactions](docs/sdk/approvals.md). Preserve when an action is blocked; do not drop a policy to make the port run. |
 | Classic tracing and usage consumers | Configure [native telemetry](docs/sdk/observability.md) separately and update consumers to the native events and usage contract. |
 | Classic `Session` stores and `RunState` | Choose native storage separately. Keep existing work on its original engine as described below. |
 
-Model defaults, request shapes, tool timing, and event ordering can change when the harness changes. Port the behavior your application needs instead of assuming a name-for-name substitution. In particular, native provider configuration does not read `OPENAI_BASE_URL`; pass a custom URL explicitly as described in [provider configuration](docs/sdk/configuration.md#provider-connection).
+Model defaults, request shapes, tool timing, and event ordering can change when the harness changes. Port the behavior your application needs instead of assuming a name-for-name substitution. In particular, native provider configuration does not read `OPENAI_BASE_URL`; pass a custom URL explicitly as described in [provider configuration](docs/sdk/models.md#provider-connection).
 
 ## Keep conversation state with its engine
 
@@ -104,13 +104,27 @@ Native sandbox and voice integrations remain available under their existing APIs
 
 `agents.migration.mcp` adapts tools from an application-owned Classic MCP client. Use a matching development build for the [adapter](docs/sdk/mcp.md#reuse-an-application-owned-mcp-client). If the SDK can own the connection, use [native MCP declarations](docs/sdk/mcp.md).
 
-Create an `MCPNamespace` with a namespace name and your application-owned Classic `MCPServer`. Open the client connection before discovery, either directly or through the namespace's `authenticate` callback. Call `await select_mcp_tools(namespace, context=app_context, tool_names=["search"])` to select a tool named `search` before opening a native Session. Attach the returned tools to a native Agent, and pass the exact same `app_context` object to the Session or run. An equal but different context object is rejected. Omit `tool_names` to select all tools allowed by the client's filter; an empty list selects none. A missing or filtered-out requested name fails selection.
+Follow the [adapter procedure](docs/sdk/mcp.md#reuse-an-application-owned-mcp-client) for imports and a runnable selection fragment. The sequence is:
 
-The optional namespace `authenticate` callback runs before discovery. Selection refreshes the client's supported tool cache. Your application owns authentication and connection cleanup; closing a native Session does not close the Classic client. Use a separate client for each credential scope and keep that scope stable while the selected tools are in use. If the Classic client uses a callable tool filter, pass `filter_context=(run_context, agent)`. Both objects must come from `agents.classic`, and `run_context.context` must be the same application context object.
+1. Create an `MCPNamespace` for your Classic `MCPServer`. Open the server connection before discovery, either directly or through the namespace's `authenticate` callback.
+2. Call `select_mcp_tools()` before opening a native Session. Selection refreshes the client's supported tool cache.
+3. Attach the returned tools to the native Agent. Pass the exact same application context object to selection and execution; an equal but different object is rejected.
 
-Selected names use ASCII letters, digits, underscores, or hyphens. Each namespace and tool name together, including the two separator bytes, must fit within 128 bytes. Tool input schemas must describe JSON objects. The optional per-call `approval` callback receives a native `ToolContext` and returns `Allow()` or `Deny(reason)`, either directly or through an awaitable. Classic approval requirements, metadata or result hooks, custom error policies, and tool guardrails are unsupported for selected tools; keep those workflows on Classic Runner.
+Your application owns authentication and connection cleanup. Closing the native Session leaves the Classic client open. Use a separate client for each credential scope and keep that scope stable while its selected tools are in use.
 
-To restore an idle native checkpoint, select tools again from the current clients with the destination application's context. Match the saved namespace, tool names, and schemas. A Session whose catalog contains selected MCP tools cannot suspend for portable manual restore; answer manual requests in the live Session. Discovery and selection do not transfer credentials or persist client connections.
+#### Select tools and preserve policies
+
+Pass `tool_names=["search"]` to select one tool, omit `tool_names` to select all tools allowed by the client's filter, or pass an empty list to select none. A missing or filtered-out requested name fails selection. A callable Classic filter also requires `filter_context=(run_context, agent)`, using Classic objects whose `run_context.context` is the same application context object.
+
+Classic approval requirements, metadata or result hooks, custom error policies, and tool guardrails are unsupported for selected tools. Keep workflows that need them on Classic Runner until you port those policies. For a per-call native policy, the optional `approval` callback receives a native `ToolContext` and returns `Allow()` or `Deny(reason)`, directly or through an awaitable.
+
+Selected namespace and tool names use ASCII letters, digits, underscores, or hyphens. Each namespace and tool name together, including the two separator bytes, must fit within 128 bytes. Tool input schemas must describe JSON objects.
+
+#### Restore selected tools
+
+To restore an idle native checkpoint, select tools again from the current clients with the destination application's context. Match the saved namespace, tool names, and schemas. Discovery and selection do not transfer credentials or persist client connections.
+
+A Session whose catalog contains selected MCP tools cannot suspend for portable manual restore. Answer manual requests in the live Session.
 
 ## Migrate with a coding agent
 

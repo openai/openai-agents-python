@@ -1,6 +1,6 @@
 # Approvals and manual tool results
 
-Use a manual `FunctionTool` when your application must obtain or supply a tool result. Handle supported native approvals and MCP forms through the same interaction API. Your application owns the decision or result. The live request identifies the call that may receive the reply.
+Use a manual `FunctionTool` when your application must supply a tool result, for example after a person answers a question. A manual declaration has no function body to execute. Native approvals, MCP forms, and URL consent use the same interaction API, with their own request and reply types. Reply through the exact live request so the SDK can deliver the decision or result to the correct call.
 
 | Your application needs to | Use |
 | --- | --- |
@@ -13,11 +13,13 @@ Use a manual `FunctionTool` when your application must obtain or supply a tool r
 | Expire a live request | [Force cancellation](#expire-pending-requests) |
 | Recover an external job after a host restart | [Experimental job recovery](#experimental-job-recovery) |
 
-[Install the matching SDK](installation.md) and [configure the provider](configuration.md#provider-connection) before running these examples. Snippets with top-level `await` belong inside an async application. For conversation checkpoints and suspension eligibility, use [state and recovery](state.md).
+[Install the matching SDK](installation.md) and [configure the provider](models.md#provider-connection) before running these examples. Snippets with top-level `await` belong inside an async application. For conversation checkpoints and suspension eligibility, use [state and recovery](state.md).
 
 ## Manual tool results
 
-Use `FunctionTool` when the application must supply a tool result later. The declaration has no function body. Its `input_type` is a Pydantic model. The SDK validates the result against `output_type` before sending it to the native runtime.
+Declare the question or operation with `FunctionTool`. Its `input_type` is a Pydantic model, and `output_type` defines the result your application must supply. The SDK validates that result before sending it to the native runtime.
+
+This async fragment declares a lookup and answers it in an `on_interaction` handler. It uses a synthetic label instead of reading an external service:
 
 ```python
 from agents import Agent, FunctionTool
@@ -99,7 +101,7 @@ To wait for one Turn's requests or completion, use `await turn.wait_for_request_
 The method returns one of two public types from `agents`:
 
 - `Completed` contains the result.
-- `PendingRequests` contains the captured `turn` and a tuple of live `requests`. The snapshot reserves nothing, so another consumer can answer first.
+- `PendingRequests` contains the captured `turn` and a tuple of live `requests`. The snapshot does not reserve the requests. Another consumer can answer a request before you do.
 
 After answering a batch, wait again for later requests or completion.
 
@@ -175,9 +177,9 @@ Applications that own their interaction tasks can keep using `session.interactio
 
 Pass `on_interaction` to `agent.run()` or `agent.run_sync()`. The handler returns the reply created by the exact request it receives, directly or through an awaitable. For a manual function, use the [`answer` handler](#manual-tool-results). The SDK validates and submits the reply. Do not call `respond()` in a handler and return `None`. That fails, as does a reply for a different, expired or already answered request.
 
-#### Handle native approvals and forms
+## Handle native approvals and forms
 
-The handler can receive supported native root requests too. Approval requests use `request.reply("allow_once")` or `request.reply("deny")`. Form requests use `request.reply(values)`; `request.reply(None)` declines a form or URL request. Native acknowledgement means the reply was enqueued, not that an external approval or URL verification succeeded. Native child requests require `NativeAgents(interactions=True)`; manual child requests do not require that option.
+Interaction handlers can receive supported native root requests too. Approval requests use `request.reply("allow_once")` or `request.reply("deny")`. Form requests use `request.reply(values)`; `request.reply(None)` declines a form or URL request. Native acknowledgement means the reply was enqueued, not that an external approval or URL verification succeeded. Native child requests require `NativeAgents(interactions=True)`; manual child requests do not require that option.
 
 Import `ApprovalRequest`, `FormRequest` and `UrlRequest` from `agents` to distinguish native approval, form and URL requests. `ElicitationRequest` is the union of the form and URL variants. Their `mode` fields are `"form"` and `"url"`, respectively:
 
@@ -204,15 +206,13 @@ async def answer_native(request):
     raise TypeError("Unexpected interaction")
 ```
 
-#### Form schemas and handler lifetime
+<a id="form-schemas-and-handler-lifetime"></a>
+
+### Validate form replies
 
 `FormRequest.reply(values)` validates the full supported schema immediately and captures detached JSON. A handler can catch `ValueError` around that call and request a corrected answer before returning. Delivery still verifies the live request. Manual tool output validation happens at delivery and has a separate contract.
 
-`FormRequest.schema` is a detached schema mapping. The SDK validates form replies against the supported supplied field constraints. The SDK never visits a URL. A Session-scoped URL request has `turn_id=None` and `submission_id=None`, even while a turn is active. Do not infer an originating turn from the Session's current work.
-
-URL consent does not establish completion or verification. In an explicit Session, after consent, `await request.wait_url_completion(timeout=30)` waits for the issuing server to report completion for that URL interaction. The application decides whether to trust that server's report. A timeout raises `TimeoutError` and stops only that observer. Cancelling the waiter also stops only that wait. To expire the shared lifecycle, call `await request.cancel_url_completion()` explicitly; other completion waiters then receive `InteractionExpiredError`. Keep the Session open while waiting. The preceding handler declines URLs by default.
-
-Handlers may run concurrently. Synchronous handlers run in worker threads and must support concurrent calls. When root work finishes, fails, or is cancelled, the run closes its Session and waits for handlers to finish. Python cannot forcibly stop synchronous worker threads. Use an explicit Session if children must continue after the root finishes or if you need to retry an invalid manual result.
+`FormRequest.schema` is a detached schema mapping. The SDK validates form replies against the supported supplied field constraints.
 
 Standard MCP forms and OpenAI extension forms support these schema modes:
 
@@ -223,9 +223,19 @@ Standard MCP forms and OpenAI extension forms support these schema modes:
 
 A standard form that does not fit the strict primitive subset uses general validation. For example, its schema can require a nested `profile.active` boolean and a `scores` array of integers. General schemas do not support regex keywords, resource identifiers, dynamic references or references beyond single-hop local `$defs`. The SDK does not fetch schema resources.
 
+### Wait for URL completion
+
+The SDK never visits a URL. A Session-scoped URL request has `turn_id=None` and `submission_id=None`, even while a turn is active. Do not infer an originating turn from the Session's current work.
+
+URL consent does not establish completion or verification. In an explicit Session, after consent, `await request.wait_url_completion(timeout=30)` waits for the issuing server to report completion for that URL interaction. The application decides whether to trust that server's report. A timeout raises `TimeoutError` and stops only that observer. Cancelling the waiter also stops only that wait. To expire the shared lifecycle, call `await request.cancel_url_completion()` explicitly; other completion waiters then receive `InteractionExpiredError`. Keep the Session open while waiting. The preceding handler declines URLs by default.
+
+### Handle request lifetime
+
+One-shot handlers may run concurrently. Synchronous handlers run in worker threads and must support concurrent calls. When root work finishes, fails, or is cancelled, the run closes its Session and waits for handlers to finish. Python cannot forcibly stop synchronous worker threads. Use an explicit Session if children must continue after the root finishes or if you need to retry an invalid manual result.
+
 Native child interactions require the [explicit opt-in](delegation.md#shared-tools-and-permissions). Use manual tools for application-owned questions, including supported child manual requests. Live replies do not make code cells, processes or child turns portable.
 
-### Answer a verification challenge
+## Answer a verification challenge
 
 `VerificationRequest` is separate from a form or URL consent request. It is available only with an explicit [trusted verification or personal Apps registration](mcp.md#service-specific-integrations). These integrations require separately provisioned service access and credentials. SDK installation does not provide enrollment, signing keys or access to the service.
 
@@ -248,7 +258,7 @@ async def answer_verification(request):
 
 Return `request.reply(None)` to decline instead of signing. In an explicit Session, use `await request.respond(proof)` or `await request.decline()`. A reply acknowledges enqueueing, not acceptance by the authoritative verification service. The service must verify and consume the challenge before reporting success. URL consent or completed connector OAuth does not automatically sign a later challenge.
 
-### Ask for application approval
+## Ask for application approval
 
 Choose the policy that owns the operation:
 

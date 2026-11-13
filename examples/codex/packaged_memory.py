@@ -1,4 +1,9 @@
-"""Save explicit facts with the packaged store across fresh native Sessions."""
+"""Save explicit facts with the packaged store across fresh native Sessions.
+
+See packaged_memory.md for matching-source setup and expected output.
+Run `python -m examples.codex.packaged_memory` from the repository root.
+It uses scripted responses and removes its temporary database on exit.
+"""
 
 import asyncio
 import tempfile

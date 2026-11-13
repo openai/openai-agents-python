@@ -12757,6 +12757,7 @@ class Session(Generic[ContextT, OutputT]):
                 return
             declaration = self._agent_for_message(message)
             retry = declaration.model_settings.get("retry")
+            policy: RetryPolicy | None
             if isinstance(state, _Submission) and state.retry_policy_override is not None:
                 policy = state.retry_policy_override
             else:

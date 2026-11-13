@@ -1,8 +1,17 @@
 # API reference
 
-Use this reference to look up supported calls, defaults and value types. `*` marks keyword-only arguments. Type parameters describe application context and final output. The linked task guides explain setup, behavior and limits.
+Selected call signatures, defaults, and value types for the native SDK. These abbreviated signatures omit some advanced options and type overloads; they are not a complete export inventory. `*` marks keyword-only arguments. Type parameters describe application context and final output. The linked task guides provide complete examples, setup, and behavioral limits.
 
-Unless a section gives another import path, import the named types and functions from `agents`.
+Unless a section gives another import path, import the named types and functions from `agents`. Release labels distinguish the `0.24.0-alpha.7` preview wheel from matching development builds; see [preview availability](installation.md#preview-availability).
+
+| Lookup | Entries |
+| --- | --- |
+| Declare and run an Agent | [Agent and one-shot runs](#agent-and-one-shot-runs), [typed input](#typed-input) |
+| Keep and control a conversation | [Sessions and turns](#sessions-and-turns), [saved conversations](#saved-conversations) |
+| Customize a model step | [Callbacks and request preparation](#callbacks-and-request-preparation), [model connections](#model-connections) |
+| Read results and diagnose failures | [Results and usage](#results-and-usage), [errors](#errors), [tracing](#tracing) |
+| Declare tools and answer requests | [Tools and connection data](#tools-and-connection-data), [manual results and interactions](#manual-results-and-interactions), [MCP connections](#mcp-connections) |
+| Grant execution or delegation | [Execution environments](#execution-environments), [native tools and delegation](#native-tools-and-delegation) |
 
 ## Agent and one-shot runs
 
@@ -10,7 +19,7 @@ Unless a section gives another import path, import the named types and functions
 
 An Agent declares instructions, tools and final output. Its constructor does not start the runtime. A Session captures the declaration when it opens. See [configuration](configuration.md).
 
-Matching development builds have also been supporting the `decisions` constructor option and `Agent.decide()` below. The `0.24.0-alpha.7` preview has not been including these APIs. The [typed decision configuration](configuration.md#make-typed-decisions) has been linking matching-source setup and complete examples.
+Matching development builds also support the `decisions` constructor option and `Agent.decide()` below. The `0.24.0-alpha.7` preview does not include these APIs. The [typed decision configuration](configuration.md#make-typed-decisions) links matching-source setup and complete examples.
 
 ```text
 Agent(*, instructions: str, name=None, tools=None, model=None,
@@ -32,29 +41,38 @@ agent.run_sync(input, *, context=None, on_interaction=None,
                parent_trace=None, trace_options=None, prepare_request=None, budget=None) -> Completed
 agent.session(*, context=None, state=None, storage=None, resume=None, provider=None, model=None,
               model_settings=None, environment=None, tools=None,
-              instruction_files=(), discover_agents_md=False, reconciled_calls=(),
+              instruction_files=(), reconciled_calls=(),
               parent_trace=None, trace_options=None, on_interaction=None)
               -> async context manager[Session]
 ```
 
-Matching source builds have been supporting `discover_agents_md=False` on `agent.session()`. With `True`, native discovery has been loading trusted user and project instruction files. The [instruction guide](sessions.md#check-applied-instructions-and-settings) has been covering file selection, priority, and renewed opt-in on restore.
+Matching source builds support `discover_agents_md=False` on `agent.session()`. With `True`, native discovery loads trusted user and project instruction files. The [instruction guide](sessions.md#load-trusted-instruction-files) covers file selection, priority, and renewed opt-in on restore.
 
 The call options follow these rules:
 
 - `instructions` and `input` are required. `input=None` is allowed only when a handler resumes a supported pending manual checkpoint.
 - `on_interaction` returns the exact request's `reply(value)`, directly or through an awaitable. Sending the reply itself and returning `None` is invalid. See [manual requests](approvals.md#answer-interactions-during-a-one-shot-run).
 - `return_state` must be a bool. `True` captures state after successful completion. A capture failure fails the run. Otherwise, `Completed.state` defaults to `None`.
-- `output_type=None` or bare `str` returns text. `with_output_type(...)` creates a variant. There is no one-shot `output_type` argument. See [structured output](configuration.md#structured-output) for formats, validation and restore limits.
+- `output_type=None` or bare `str` returns text. `with_output_type(...)` creates a variant. There is no one-shot `output_type` argument. See [structured output](outputs.md#return-a-typed-result) for formats, validation and restore limits.
 
-`Agent.decide()` has been returning a boolean by default, a selected value with `choices=...`, or a validated typed value with `output_type=...`. Calls have been requiring explicit `input` and accepting at most one of `choices` and `output_type`. The call's `provider=` has been overriding the Agent's `decisions` provider, independently of the generative connection. These calls have not been starting Agent runs or reading conversation history. The [decision guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md) has been explaining callback helpers, provider ownership, errors and usage.
+`Agent.decide()` returns a boolean by default, a selected value with `choices=...`, or a validated typed value with `output_type=...`. Calls require explicit `input` and accept at most one of `choices` and `output_type`. The call's `provider=` overrides the Agent's `decisions` provider, independently of the generative connection. These calls do not start Agent runs or read conversation history. The [decision guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md) explains callback helpers, provider ownership, errors and usage.
 
 `validate()` returns `None` for a valid declaration or raises its first `TypeError` or `ValueError`. It opens no Session, reads no credentials and connects to no services. Context, environment, overrides and native model support still require opening-time checks. It produces no validation report.
 
 Restore uses the checkpoint's model and settings. Any non-`None` opening `model` or `model_settings`, including `{}`, raises `ValueError`. Idle updates can change them after restore, except with `NativeAgents`. See [save and restore](state.md#save-and-restore-a-portable-checkpoint).
 
-Matching development builds have also been supporting `Agent.handoffs`, `await session.get_active_agent()` and idle `await session.update(agent=target)`. The [Agent handoff guide](sessions.md#hand-off-the-conversation-to-another-agent) has been explaining captured targets, operation tool limits and restore through the original graph root.
+Matching development builds also support `Agent.handoffs`, `await session.get_active_agent()` and idle `await session.update(agent=target)`. The [Agent handoff guide](sessions.md#hand-off-the-conversation-to-another-agent) explains captured targets, operation tool limits and restore through the original graph root.
 
-Matching development builds have been accepting `input_guardrails=` and `output_guardrails=` on `Agent`, `run()`, `run_sync()`, and `session()`. The [guardrail example](guardrails.md) has been showing how to read check results and handle `GuardrailTripwire`.
+Matching development builds accept `input_guardrails=` and `output_guardrails=` on `Agent`, `run()`, `run_sync()`, and `session()`. The [guardrail example](guardrails.md) shows how to read check results and handle `GuardrailTripwire`.
+
+#### Additional opening and run options
+
+These options require a matching development build. The alpha.7 wheel does not accept them.
+
+| Option | Accepted calls and behavior |
+| --- | --- |
+| `observation_retention="bounded"` or `"all"` | `session()`, `run()`, and `run_sync()`. Default: `"bounded"`, retaining a limited observation suffix with gap reports. `"all"`: every emitted observation in memory for the live Session, including for late readers; memory growth with emitted payloads. No checkpoint persistence. See [observation retention](streaming.md#read-observations-safely). |
+| `resume_budget=RunBudget(...)` | `session(state=...)` for a supported manual checkpoint with request or token limits. Supply the original limits from current application configuration. For token budgets, also supply the original effective `missing_usage` policy. The consumed allowance remains spent. For one-shot continuation, use `budget=...` on `run(None, state=...)` or `run_sync(None, state=...)`. Estimated-cost limits and adding a budget to an unbudgeted checkpoint are unsupported. See [budgeted recovery](observability.md#limit-a-runs-model-requests-and-usage). |
 
 ## Sessions and turns
 
@@ -69,8 +87,8 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 | Call | Result |
 | --- | --- |
 | `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject", writable_roots=None, parent_trace=None, trace_options=None, prepare_request=None, budget=None)` | Return a root Turn after local registration, before native admission or completion. Busy handling defaults to rejection. `"queue"` adds first-in, first-out work. `"steer"` targets the captured busy root or starts a new root when idle, without overrides. On a supported local or Linux WSS executor, use [additional write roots](execution.md#replace-write-roots-between-turns) to replace grants for new work. |
-| `session.rate_limits()` | Latest available `ApiRateLimits` snapshot. See [API-key limits](configuration.md#read-api-key-rate-limits). |
-| `session.events(*, after=0, include_execution_details=False)` | Observe the Session until it ends, using the retained global observation sequence. Execution arguments and results require `include_execution_details=True` for a trusted reader. See [streaming](sessions.md#stream-observations). |
+| `session.rate_limits()` | Latest available `ApiRateLimits` snapshot. See [API-key limits](models.md#read-api-key-rate-limits). |
+| `session.events(*, after=0, include_execution_details=False)` | Observe the Session until it ends, using the retained global observation sequence. Execution arguments and results require `include_execution_details=True` for a trusted reader. See [streaming](streaming.md#stream-observations). |
 | `session.interactions()` | Receive live requests, separate from passive observations. |
 | `await session.respond(reply)` | Deliver a bound reply prepared by an exact live request. Preparing the reply does not reserve its request. See [retained Session handlers](approvals.md#handle-requests-for-a-retained-session). |
 | `await session.pending_interactions()` | Snapshot tuple of pending live requests. Inspection leaves them available for reply. |
@@ -84,16 +102,16 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 
 | Call | Result |
 | --- | --- |
-| `await session.history_snapshot(*, limit=None)` | Matching source builds have been returning `CanonicalHistorySnapshot(revision, total, items)` for original JSON records while idle. `limit=0` has been returning only revision and count. See [original history](state.md#read-and-edit-original-history). |
-| `await session.transact_history(*, expected_revision, keep, items=())` | Matching source builds have been retaining `keep` original records and replacing the suffix atomically, returning the accepted revision. Stale revisions have been failing before commit. See [transaction limits](state.md#read-and-edit-original-history). |
+| `await session.history_snapshot(*, limit=None)` | Matching source builds return `CanonicalHistorySnapshot(revision, total, items)` for original JSON records while idle. `limit=0` returns only revision and count. See [original history](state.md#read-and-edit-original-history). |
+| `await session.transact_history(*, expected_revision, keep, items=())` | Matching source builds retain `keep` original records and replace the suffix atomically, returning the accepted revision. Stale revisions fail before commit. See [transaction limits](state.md#read-and-edit-original-history). |
 | `await session.model_context()` | Capture detached current model input while idle. Use the issued `ModelContextSnapshot` to [retain selected originals during compaction](state.md#retain-selected-context-items). |
 | `await session.compact(*, summary=None, snapshot=None, retain=None)` | Compact an idle Session. A nonempty supplied summary replaces model context without a model request and preserves canonical history. See [compaction limits](state.md#compact-conversation-context). |
 | `await session.save_state()` | Capture an idle conversation without retiring it. |
 | `await session.fork()` | Return independent `SessionState`, leaving the source usable. Workspace files are not copied. See [save and restore](state.md#save-and-restore-a-portable-checkpoint) for storage, descendant and programmatic-state limits. |
 | `await session.suspend()` | Capture a supported manual boundary and retire the Session. See [manual suspension](state.md#save-a-settled-manual-request). |
 | `await session.checkpoint_status(*, kind)` | Return `CheckpointStatus` with `status` (`"ready"`, `"not_ready"`, or `"unknown"`) and `reasons` for `kind="idle"` or `"manual_wait"`. It reserves nothing. Capture checks readiness again. |
-| `session.items(*, subagent_id=None)` | Async iterator over a snapshot of recorded items, including provider call and output rows and [typed execution completions](sessions.md#inspect-completed-execution). |
-| `session.turns(*, subagent_id=None)` | Async iterator over recorded turns and any [settings receipts](sessions.md#check-applied-instructions-and-settings). |
+| `session.items(*, subagent_id=None)` | Async iterator over a snapshot of recorded items, including provider call and output rows and [typed execution completions](streaming.md#inspect-completed-execution). |
+| `session.turns(*, subagent_id=None)` | Async iterator over recorded turns and any [settings receipts](streaming.md#check-applied-instructions-and-settings). |
 | `session.subagents()` | Async iterator over captured Subagent records. |
 
 History and descendant iterators have no pagination arguments.
@@ -108,32 +126,6 @@ History and descendant iterators have no pagination arguments.
 | `session.capabilities.require(feature, allow_limited=False)` | Raise `CapabilityError` for unsupported or, by default, limited coverage. |
 
 `session.capabilities.websockets_allowed` reports provider permission, not negotiated transport. Capability reports describe configuration support. They grant no permissions and do not establish checkpoint readiness. See [conversations and state](sessions.md).
-
-### get_cleanup
-
-Import `get_cleanup` from `agents` for native failures and cancellation. `get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | SessionStoreCleanup | None` finds the retained cleanup owner through the error and its exception context. It returns the existing owner, or `None` when it finds no owner. Retain a returned owner until `await cleanup.aclose()` succeeds. Do not close the provider separately while a Session owns cleanup.
-
-In `0.24.0-alpha.7` or later, a failed or cancelled `CustomStorage.reconcile()` can retain a `SessionStoreCleanup` owner, also exported from `agents`. Its `aclose()` retries release of the original storage lease without repeating reconciliation.
-
-Use this helper instead of reading `error.cleanup` directly. On Python 3.10, a Task boundary can replace a `CancelledError` and leave the owner on an error in its context. Cancellation still propagates; the helper does not wrap or replace the error.
-
-### PreparedRequest and prepare_request
-
-Request editing requires `0.24.0-alpha.7` or later; use the [matching preview wheel](installation.md). Import `PreparedRequest` and `PreparedToolPresentation` from `agents`.
-
-`prepare_request(turn, request, *, preparation_index, recovery_attempt)` may return a complete `PreparedRequest`, `None`, or an awaitable of either. The value contains `instructions: str`, `input: list[dict]`, and `tools: list[PreparedToolPresentation]`. Input uses native ResponseItem JSON. A tool presentation contains `namespace`, `name`, `kind`, `strict`, `defer_loading`, `description`, and `parameters`; only the last two can change. Edits affect sampling, leaving canonical history and execution authority unchanged. See [request-editing profiles and lifecycle limits](configuration.md#edit-the-next-sampling-request).
-
-### CompletionContext, ContinueTurn, and CompactionContext
-
-These types require `0.24.0-alpha.7` or later. `Agent.before_complete` receives `CompletionContext` and returns `None`, `ContinueTurn(instructions)`, or `StopTurn(...)`. See [proposed completion checks](configuration.md#check-a-proposed-completion) for callback timing and limits.
-
-`Agent.before_compact` receives `CompactionContext` and returns a nonempty summary string or `None`. See [compaction callbacks](state.md#supply-summaries-through-a-callback) for retained history, fallback, and callback ownership.
-
-### before_step
-
-The synchronous or asynchronous callback receives root `Turn` positionally and `step_index` by keyword. It returns `None` to keep the turn's tool selection, a sequence of selectors for that preparation, or `StopTurn(...)` to stop the root before the next model request.
-
-`step_index` counts preparations from zero. Cancellation can end a preparation before a model request. Selectors obey [tool-selection limits](tools.md#replace-tools-between-turns). With programmatic tool calling, the SDK includes `exec` and `wait` helpers for nonempty selections; an empty selection disables all tools. See the [per-step example](sessions.md#select-tools-before-each-model-step).
 
 ### Turn
 
@@ -151,7 +143,7 @@ A root Turn's `get_result()` follows accepted continuations. A captured child Tu
 | `await turn.steer_exact(input, *, expected_turn_id)` | Steer the exact native root turn and return a `SteeringReceipt` upon acceptance. See [strict steering](sessions.md#steer-one-exact-root-turn). |
 | `await turn.cancel(*, mode="force")` | Stop the root or withdraw it from the queue. Return `None` after cleanup. Children use `Subagent.try_cancel`, which returns a boolean; see [interruption](sessions.md#interrupt-work) for its confirmation and cleanup limits. |
 
-Observation `after` cursors apply only to the same live Session and reset on restore or reopen. A Turn iterator ends at owned settlement; use the Session stream for later background completions. See [observation cursor lifetime](sessions.md#reconnect-an-observer).
+Observation `after` cursors apply only to the same live Session and reset on restore or reopen. A Turn iterator ends at owned settlement; use the Session stream for later background completions. See [observation cursor lifetime](streaming.md#reconnect-an-observer).
 
 Turn calls use the Session's opening event loop. After `run_sync()`, that loop has closed, so use `Completed` directly. IDs alone grant no control. See [Turn lifetime](sessions.md).
 
@@ -162,6 +154,32 @@ A `Subagent` record contains a captured descendant's identity, status, `is_live`
 `await child.start(input)` checks that the child is still the same live instance and returns a `ChildTurn` only while the child is idle. To steer an active child turn, use `await child.turn.steer(input)`. It cannot create or resume a closed child. Manual replies use live requests, not input to this method. See [native children](delegation.md#native-children).
 
 `ChildTurn` exposes result waits, events, identifiers and ordinary steering. It does not advertise root-only `cancel()` or `steer_exact()`. Use `Subagent.try_cancel(child_turn)` for the weaker native child interruption guarantee. Child results retain the same `ChildTurn` view in `Completed.turn`.
+
+## Callbacks and request preparation
+
+### PreparedRequest and prepare_request
+
+Request editing requires `0.24.0-alpha.7` or later; use the [matching preview wheel](installation.md). Import `PreparedRequest` and `PreparedToolPresentation` from `agents`.
+
+`prepare_request(turn, request, *, preparation_index, recovery_attempt)` may return a complete `PreparedRequest`, `None`, or an awaitable of either. The value contains `instructions: str`, `input: list[dict]`, and `tools: list[PreparedToolPresentation]`. Input uses native ResponseItem JSON. A tool presentation contains `namespace`, `name`, `kind`, `strict`, `defer_loading`, `description`, and `parameters`; only the last two can change. Edits affect sampling, leaving canonical history and execution authority unchanged. See [request-editing profiles and lifecycle limits](configuration.md#edit-the-next-sampling-request).
+
+### CompletionContext, ContinueTurn, and CompactionContext
+
+These types require `0.24.0-alpha.7` or later. `Agent.before_complete` receives `CompletionContext` and returns `None`, `ContinueTurn(instructions)`, or `StopTurn(...)`. See [proposed completion checks](outputs.md#check-a-proposed-completion) for callback timing and limits.
+
+`Agent.before_compact` receives `CompactionContext` and returns a nonempty summary string or `None`. See [compaction callbacks](state.md#supply-summaries-through-a-callback) for retained history, fallback, and callback ownership.
+
+Matching development builds also supply `CompletionContext.final_output` for terminal tool and tool-batch completions, where `text` is `None`. `tool_call` identifies a single terminal tool; `tool_batch_call_ids` identifies a terminal batch. See [completion checks](outputs.md#check-a-proposed-completion).
+
+### InputGuardrail, OutputGuardrail, and GuardrailTripwire
+
+These APIs require a matching development build. `InputGuardrail(name, callback, run_in_parallel=True, child_callback=None)` checks original input. `OutputGuardrail(name, callback)` checks converted final output. Callbacks return `GuardrailResult(tripwire_triggered, output_info=None)`. A true tripwire raises `GuardrailTripwire`, whose `record` identifies the blocking check and whose `results` contains completed records. Read `Turn.guardrail_results` or `Completed.guardrail_results` for completed checks. See [guardrail timing and examples](guardrails.md).
+
+### before_step
+
+The synchronous or asynchronous callback receives root `Turn` positionally and `step_index` by keyword. It returns `None` to keep the turn's tool selection, a sequence of selectors for that preparation, or `StopTurn(...)` to stop the root before the next model request.
+
+`step_index` counts preparations from zero. Cancellation can end a preparation before a model request. Selectors obey [tool-selection limits](tools.md#replace-tools-between-turns). With programmatic tool calling, the SDK includes `exec` and `wait` helpers for nonempty selections; an empty selection disables all tools. See the [per-step example](sessions.md#select-tools-before-each-model-step).
 
 ## Results and usage
 
@@ -175,7 +193,7 @@ Usage is a cumulative thread snapshot or `None`, not a per-turn cost. Root usage
 
 ### RecordedTurn and RecordedResponse
 
-Import these history value types from `agents.history`. In `0.24.0-alpha.7` or later, a `RecordedTurn` can include `responses`, a list of retained `RecordedResponse` occurrences. Each occurrence has origin `thread_id`/`turn_id`, optional observation `id` and provider `response_id`, `usage_source`, and available usage or terminal facts. `usage_source` is `"received"` or `"native_normalized"`; missing counters are unknown and differ from zero. Optional `status` and `incomplete_reason` retain reported terminal facts. Occurrence `id` differs from a provider `response_id`, which can repeat. Missing response coverage is unknown, and retained responses do not prove SDK acceptance or billing. See [response-attempt inspection](sessions.md#inspect-response-attempts) and the [matching preview wheel](installation.md).
+Import these history value types from `agents.history`. In `0.24.0-alpha.7` or later, a `RecordedTurn` can include `responses`, a list of retained `RecordedResponse` occurrences. Each occurrence has origin `thread_id`/`turn_id`, optional observation `id` and provider `response_id`, `usage_source`, and available usage or terminal facts. `usage_source` is `"received"` or `"native_normalized"`; missing counters are unknown and differ from zero. Optional `status` and `incomplete_reason` retain reported terminal facts. Occurrence `id` differs from a provider `response_id`, which can repeat. Missing response coverage is unknown, and retained responses do not prove SDK acceptance or billing. See [response-attempt inspection](streaming.md#inspect-response-attempts) and the [matching preview wheel](installation.md).
 
 Live `ModelRequestDispatching` and `ModelResponseLinked` observations come from `agents.observation`. They describe resolved sampling fields and best-effort links to retained occurrences. Dispatch can precede encoding failure or zero socket writes; links can be lost. Neither event proves provider receipt or success. Follow the same response-attempt guide for correlation and coverage limits.
 
@@ -200,6 +218,14 @@ Pass `budget` to a one-shot run or `Session.submit()`. At least one limit is req
 
 ## Errors
 
+### get_cleanup
+
+Import `get_cleanup` from `agents` for native failures and cancellation. `get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | SessionStoreCleanup | None` finds the retained cleanup owner through the error and its exception context. It returns the existing owner, or `None` when it finds no owner. Retain a returned owner until `await cleanup.aclose()` succeeds. Do not close the provider separately while a Session owns cleanup.
+
+In `0.24.0-alpha.7` or later, a failed or cancelled `CustomStorage.reconcile()` can retain a `SessionStoreCleanup` owner, also exported from `agents`. Its `aclose()` retries release of the original storage lease without repeating reconciliation.
+
+Use this helper instead of reading `error.cleanup` directly. On Python 3.10, a Task boundary can replace a `CancelledError` and leave the owner on an error in its context. Cancellation still propagates; the helper does not wrap or replace the error.
+
 ### InteractionRequired
 
 The run needs an application decision. A supported one-shot run using Python or manual tools can raise this error with a portable checkpoint in `state`. Unsupported automatic-save combinations have `state=None`. Always check it. Resuming a pending checkpoint without a handler retains the supplied checkpoint in `state`. See [manual continuation](approvals.md#continue-a-one-shot-manual-request) for the limits and resume call.
@@ -211,10 +237,10 @@ The run needs an application decision. A supported one-shot run using Python or 
 | Field | Meaning |
 | --- | --- |
 | `status_code` | Available provider HTTP status, or `None`. |
-| `code` | Available upstream provider error code, or `None`. |
+| `code` | Available SDK or upstream provider error code, such as `"run_budget_exceeded"`, or `None`. |
 | `request_id` | Available provider request ID, or `None`. |
 | `category` | Normalized native failure category, or `None`. |
-| `response_integrity_reason` | Read-only `ResponseIntegrityReason` or `None` for the captured originating model-output integrity failure. Available in `0.24.0-alpha.7` or later; see [integrity diagnostics](sessions.md#diagnose-response-integrity-failures) and use the [matching preview wheel](installation.md). |
+| `response_integrity_reason` | Read-only `ResponseIntegrityReason` or `None` for the captured originating model-output integrity failure. Available in `0.24.0-alpha.7` or later; see [integrity diagnostics](streaming.md#diagnose-response-integrity-failures) and use the [matching preview wheel](installation.md). |
 | `effects` | `"not_started"`, `"unknown"`, or `"recorded"` for the exact failed operation. The default is `"unknown"`. |
 
 Missing or discarded metadata is `None`. Messages and metadata may contain provider-supplied information. `effects="unknown"` does not establish that replay is safe. Even `"not_started"` describes only this failed operation, not earlier actions.
@@ -249,6 +275,27 @@ An unknown call outcome raises `LocalRecoveryRequired`. Verify the effects of un
 
 Import `LocalRecoveryRequired` from `agents`. The exception carries `calls`, `turns`, and `items`. Each `UncertainCall` has a `reconcile(outcome=..., result=...)` method that carries over the original thread, turn, and call IDs. Set `outcome` to `"applied"` or `"not_applied"` after you verify the effect. Supply text for `result`. If you saved a confirmation in a journal, reconstruct it with `ReconciledCall` using the original IDs, outcome, and result.
 
+### CustomStorage and SessionStore
+
+Import `CustomStorage` and `SessionStore` from `agents` in `0.24.0-alpha.7` or later. `CustomStorage` selects an application-owned backend implementing the synchronous `SessionStore` protocol:
+
+```text
+CustomStorage(backend: SessionStore)
+await storage.reconcile(session_id: str, *, turn_id: str, call_id: str,
+                        output: str | ToolOutput) -> None
+
+SessionStore.acquire(session_id: str) -> str
+SessionStore.read(session_id: str, token: str) -> str | None
+SessionStore.commit(session_id: str, token: str, expected_revision: int,
+                    write_id: str, payload: str) -> None
+SessionStore.flush(session_id: str, token: str) -> None
+SessionStore.release(session_id: str, token: str) -> None
+```
+
+Pass `storage=CustomStorage(backend)` to `agent.session()`. Retain `session.id` and reopen with the same backend and `resume=saved_id`. The backend stores opaque native records under exclusive writer ownership. Its methods run on native worker threads and must not reenter the SDK. See [application-owned storage](state.md#store-history-in-an-application-backend) for supported tools, durable commit requirements, adapters, and portable-state restrictions.
+
+`reconcile()` records an externally verified result for an unresolved original call after the Session closes. It requires the original IDs, never executes the tool, and cannot replace a known receipt. Unlike local-profile recovery, custom-store recovery uses this method rather than `reconciled_calls`. Recover unfinished writer release through [`get_cleanup`](#get_cleanup) before reopening.
+
 ## Tools and connection data
 
 ### function_tool
@@ -261,6 +308,8 @@ The decorator declares a Python function without starting a runtime. Input annot
                before=None, after=None, defer_loading=False,
                timeout_behavior="raise_exception", timeout_error_function=None)
 ```
+
+Matching development builds also accept `is_enabled=True` or a predicate receiving application context and the current `Turn` or `ChildStepContext`. A false value omits the function schema for that step. See [function enablement](guardrails.md#enable-a-function-for-a-step).
 
 Names and descriptions default to the function declaration. `callback_timeout=None` leaves the callback body without a deadline. See [callback deadlines](tools.md#callback-deadlines) for timeout behavior. With `defer_loading=True`, supported models discover selected schemas when needed. Other models receive the schemas directly. See [tool notifications](tools.md#tool-notifications).
 
@@ -444,11 +493,11 @@ NativeProvider(*, base_url=None, api_key=None, supports_websockets=None, auth=No
 await provider.aclose() -> None
 ```
 
-Use the [provider configuration guide](configuration.md#provider-connection) for connection defaults, WebSocket selection and provider lifetime. The default transport has been requiring Responses support from custom endpoints. In [buffered mode](configuration.md#buffer-model-responses), the SDK has been reading the complete HTTP JSON response before delivering its output events. Matching source builds have also been accepting `model_backend` with [application models](#application-models). Close every Session using the provider before calling `aclose()`.
+Use the [provider configuration guide](models.md#provider-connection) for connection defaults, WebSocket selection and provider lifetime. The default transport requires Responses support from custom endpoints. In [buffered mode](models.md#buffer-model-responses), the SDK reads the complete HTTP JSON response before delivering its output events. Matching source builds also accept `model_backend` with [application models](#application-models). Close every Session using the provider before calling `aclose()`.
 
 ### Application models
 
-These APIs have been requiring a [matching source build](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source); the alpha.7 wheel has not been including them. The [application-client guide](configuration.md#use-an-application-owned-model-client) has been providing a complete example and lifecycle limits.
+These APIs require a [matching source build](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source). The alpha.7 wheel does not include them. The [application-client guide](models.md#use-an-application-owned-model-client) provides a complete example and lifecycle limits.
 
 ```text
 NativeProvider(..., model_backend: NativeModel | ModelProvider | None = None)
@@ -464,7 +513,7 @@ LitellmModel(client, model=None, *, prompt_cache_key=None)
 AnyLLMModel(client, model=None, *, prompt_cache_key=None)
 ```
 
-The runtime has been accepting synchronous or asynchronous `complete()` methods. The packaged client adapters have been requiring asynchronous clients and complete responses. `ModelResponse.output` has been using Responses item JSON. `usage` has been accepting nonnegative native token counters: `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, and `total_tokens`. Omitted usage has been representing unknown counts.
+The runtime accepts synchronous or asynchronous `complete()` methods. The packaged client adapters require asynchronous clients and complete responses. `ModelResponse.output` uses Responses item JSON. `usage` accepts nonnegative native token counters: `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, and `total_tokens`. Omitted usage represents unknown counts.
 
 An application model can provide `stream()` as well as `complete()`. Yield Responses events in provider order, including finished output items and one terminal event with its response ID. A turn emits text deltas as they arrive. Core admits tool calls after the iterator has finished with a valid completion. Cancellation closes the iterator before the session accepts another turn.
 
@@ -474,17 +523,17 @@ An application model can provide `stream()` as well as `complete()`. Yield Respo
 CodexLogin(*, codex_home: str | Path | None = None, account_id: str | None = None)
 ```
 
-Import `CodexLogin` from `agents` and pass it as `NativeProvider(auth=CodexLogin())`. `codex_home` selects the existing file-backed Codex ChatGPT login directory; omission uses standard `CODEX_HOME` discovery. `account_id` requires the expected workspace ID. The native runtime owns token refresh for the same user and workspace. See [experimental Codex login reuse](configuration.md#reuse-a-codex-login-experimental) for setup and limits. The public beta and general availability of the Agents SDK may ship without this feature.
+Import `CodexLogin` from `agents` and pass it as `NativeProvider(auth=CodexLogin())`. `codex_home` selects the existing file-backed Codex ChatGPT login directory; omission uses standard `CODEX_HOME` discovery. `account_id` requires the expected workspace ID. The native runtime owns token refresh for the same user and workspace. See [experimental Codex login reuse](models.md#reuse-a-codex-login-experimental) for setup and limits. The public beta and general availability of the Agents SDK may ship without this feature.
 
 ### CodexAccount
 
-`session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type`, or `None` in API-key mode. Import `CodexAccount` from `agents`. `account_id` identifies the saved workspace and is `None` for personal logins without a workspace ID. `plan_type` comes from saved login metadata. See [account identity, refresh, and usage](configuration.md#account-identity-refresh-and-usage).
+`session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type`, or `None` in API-key mode. Import `CodexAccount` from `agents`. `account_id` identifies the saved workspace and is `None` for personal logins without a workspace ID. `plan_type` comes from saved login metadata. See [account identity, refresh, and usage](models.md#account-identity-refresh-and-usage).
 
 ### ModelSettings
 
-Supports `reasoning_effort`, `reasoning_summary`, `service_tier`, and, in `0.24.0-alpha.7` or later, `tool_choice`. Omitted settings keep native defaults. `service_tier=None` clears that override. `tool_choice` accepts `"auto"`, `"none"`, or `"required"`; see [model settings](configuration.md#model-and-session-settings).
+Supports `reasoning_effort`, `reasoning_summary`, `service_tier`, and, in `0.24.0-alpha.7` or later, `tool_choice`. Omitted settings keep native defaults. `service_tier=None` clears that override. `tool_choice` accepts `"auto"`, `"none"`, or `"required"`; see [model settings](models.md#model-and-session-settings).
 
-Matching development builds also accept a `ToolRef` to require one selected tool with `defer_loading=False`. They add sampling, cache, storage, and model invocation controls. `None` clears these SDK overrides. See [development model controls](configuration.md#additional-controls-in-development-builds) for supported values and provider restrictions. These additions do not establish alpha.7 wheel availability.
+Matching development builds also accept a `ToolRef` to require one selected tool with `defer_loading=False`. They add sampling, cache, storage, and model invocation controls. `None` clears these SDK overrides. See [development model controls](models.md#additional-controls-in-development-builds) for supported values and provider restrictions. These additions do not establish alpha.7 wheel availability.
 
 ## Tracing
 

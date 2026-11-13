@@ -20,7 +20,14 @@ PYTHONPATH=. python -m examples.codex.external_job.model
 
 The command prints `MODEL_PORT=` followed by its selected port when the loopback server is ready. Keep a direct connection or proxy bypass for `127.0.0.1`. The server uses `ScriptedResponses` to request one blue thumbnail and finish after the resumed call returns its byte count. No API key or additional package is needed. It does not evaluate live model behavior.
 
-In a second terminal, activate the same environment and open the same repository root. Set `MODEL_PORT` to the number printed by the first terminal, then set `THUMBNAIL_STATE_DIR` to the private absolute path described above. Use a new, empty state directory for this demonstration; an already completed order would not consume the new model script.
+In a second terminal, activate the same environment and open the same repository root. Set `MODEL_PORT` to the number printed by the first terminal, then choose a fresh private directory under a trusted temporary parent:
+
+```sh
+export MODEL_PORT=12345  # Replace with the printed port.
+export THUMBNAIL_STATE_DIR="$(mktemp -d)"
+```
+
+Keep this directory outside all model-visible mounts, as described above. Use a new, empty state directory for this demonstration; an already completed order would not consume the new model script.
 
 You can also supply your own local Responses endpoint. It must request `render_thumbnail` and continue after receiving its result.
 

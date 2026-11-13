@@ -1,5 +1,7 @@
 # Research bot
 
+Complete [Classic setup](../../../CLASSIC.md), install `rich` in that environment with `python -m pip install rich`, and set `OPENAI_API_KEY`. Commands below use the repository root. The bot makes multiple model and web-search requests per query, with corresponding usage charges.
+
 This is a simple example of a multi-agent research bot. To run it:
 
 ```bash

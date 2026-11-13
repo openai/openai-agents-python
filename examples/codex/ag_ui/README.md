@@ -4,9 +4,11 @@ Use `stream_turn` to convert a worker's Turn observations into AG-UI server-sent
 
 This example uses the event models and encoder in `ag-ui-protocol==0.1.9`. Compatibility covers the [event subset below](#supported-events). Later AG-UI versions and browser clients need separate verification.
 
+`stream.py` is an integration helper, not a standalone HTTP server. Keep [the shared projection helper](../_ui_projection.py) alongside the `ag_ui` directory when copying this recipe. Your application supplies the worker, HTTP endpoint, and browser client.
+
 ## Install the example dependency
 
-Install the [SDK preview wheel](../../../docs/sdk/installation.md) and use example files from the same release. Activate that Python environment, then run this command from the source archive's root directory:
+Use this guide and helper files from the same checkout as your SDK build. For the alpha.7 wheel, use the [alpha.7 AG-UI guide and helper](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.7/examples/codex/ag_ui/README.md); that release keeps its projection logic in `stream.py`. The current helper also needs the sibling `_ui_projection.py` mentioned above. Activate that Python environment, then run this command from the source archive's root directory:
 
 ```sh
 python -m pip install -r examples/codex/ag_ui/requirements.txt

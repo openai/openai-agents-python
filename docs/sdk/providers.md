@@ -2,7 +2,7 @@
 
 Use `NativeProvider` to connect the SDK to a custom Responses endpoint. Before using that endpoint in your application, check the endpoint and model against each feature the application needs. A Chat Completions-compatible route alone is insufficient.
 
-First test HTTP text responses, then Python tools and strict output. Use the same endpoint and model configuration that the application will use. A successful text response does not establish tool, strict-output, image, MCP or WebSocket support.
+First test HTTP text responses, then Python tools, then strict output. Use the same endpoint and model configuration that the application will use. A successful text response does not establish tool, strict-output, image, MCP or WebSocket support.
 
 `session.capabilities` reports support in the SDK configuration. It does not send a request to test the remote service. The checks below exercise the endpoint through real model requests.
 
@@ -30,6 +30,8 @@ class Answer(BaseModel):
 
 
 async def main() -> None:
+    if len(sys.argv) != 2:
+        raise SystemExit("Usage: python check_endpoint.py text|tools|strict")
     mode = sys.argv[1]
     if mode not in {"text", "tools", "strict"}:
         raise ValueError("Choose text, tools or strict")
@@ -82,7 +84,7 @@ The checks cover only their selected cases:
 
 If a check fails, inspect the assertion or service error and the corresponding request. Separate a protocol failure from a model that did not follow the prompt. For example, a tool check fails if the model returns text without calling `lookup_label`, even when the endpoint supports tool calls.
 
-The script closes each one-shot Session before leaving the provider context. Follow the same order with shared providers: close every Session that uses the provider before closing the provider.
+Each `agent.run()` call closes its one-shot Session before the script leaves the provider context. Follow the same order with shared providers: close every Session that uses the provider before closing the provider.
 
 ## Check WebSockets independently
 
@@ -94,4 +96,4 @@ The script forces HTTP. To check WebSockets:
 
 Record the SDK source revision, wheel version, endpoint and model settings, transport evidence and case outcomes without secrets. Repeat the relevant checks when the endpoint, model, SDK build or feature configuration changes. Add representative cases for images and any additional tool combinations your application uses.
 
-See [provider configuration](configuration.md), [structured output limits](configuration.md#structured-output) and [feature combinations](choosing.md#choose-feature-combinations).
+See [model connections](models.md#provider-connection), [structured output limits](outputs.md#return-a-typed-result) and [feature combinations](choosing.md#choose-feature-combinations).

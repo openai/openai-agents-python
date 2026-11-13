@@ -1,6 +1,9 @@
 """Select a specialist through an application decision, then run that Agent.
 
-Set OPENAI_API_KEY and OPENAI_SPECIALIST_MODEL. Install
+From the matching source checkout root, run
+`python -m examples.codex.decision_coordinator`. See decisions-guide.md for setup.
+The script prints the selected specialist's final answer. Live calls can
+incur charges. Set OPENAI_API_KEY and OPENAI_SPECIALIST_MODEL. Install
 the matching SDK build with its decisions extra for the optional OpenAI provider.
 Each specialist uses the existing native Agent runtime.
 """

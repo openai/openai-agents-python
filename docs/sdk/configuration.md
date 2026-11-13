@@ -1,67 +1,21 @@
-# Configure an agent
+# Configure agent behavior
 
-Configure an `Agent` with instructions, tools and an optional output type. The constructor records those defaults without starting the runtime. Opening a Session captures its configuration and starts native resources. `Agent.name` supplies a diagnostic label; it grants no permissions and adds no instructions.
+<a id="configure-an-agent"></a>
 
-Agent fields are immutable. Construct a new Agent to change defaults for future Sessions, or use `agent.with_output_type(...)` to change the output type. Unknown constructor options and Python model objects fail before native resources open.
+Configure an `Agent` with instructions, tools, and an optional output type. The constructor records those defaults without starting the runtime. Opening a Session captures its configuration and starts native resources. `Agent.name` supplies a diagnostic label; it grants no permissions and adds no instructions.
 
-## Model and Session settings
+Agent fields are immutable. Construct a new Agent to change defaults for future Sessions, or use `agent.with_output_type(...)` to change the output type. Unknown constructor options fail before native resources open.
 
-Set `model` to a native model identifier, or omit it for the pinned runtime's default. `ModelSettings` supports `reasoning_effort`, `reasoning_summary` and `service_tier`. Omitted settings keep native defaults. `service_tier=None` clears that override. These settings grant no tool or workspace access.
-
-When opening a Session:
-
-- `agent.session(model=...)` overrides the Agent model.
-- Supplied `model_settings` keys override Agent settings. Omitted keys keep the Agent or native defaults.
-- [Portable restore](state.md#save-and-restore-a-portable-checkpoint) keeps the saved model and settings instead.
-
-SDK version `0.24.0-alpha.7` or later also supports `tool_choice` in `ModelSettings`, for example `model_settings={"tool_choice": "auto"}`. The default is `"auto"`. `"auto"` lets the model choose whether to call tools; `"none"` disables model tool calls; `"required"` requires a call to an offered tool. These string modes do not select a specific tool or add tool permissions. Use the [matching preview wheel](installation.md) for this option.
-
-An open Session keeps its captured configuration. Change instructions or native model settings with the idle [Session update methods](sessions.md#update-tools-instructions-and-model-settings). Another Agent cannot change it. Sessions opened with `NativeAgents` keep these settings fixed.
-
-### Additional controls in development builds
-
-The controls in this section require a [build from matching development source](installation.md#preview-availability). The alpha.7 wheel does not include these controls.
-
-Pass these fields through `model_settings` on the Agent, when opening a Session, or in an idle `session.update(model_settings=...)`. Omitted keys preserve the accepted settings. `None` clears the corresponding SDK override. Providers still determine which settings their models support and which numeric ranges they accept.
-
-| Setting | Value and effect |
+| Task | Guide or section |
 | --- | --- |
-| `max_output_tokens` | An integer from `0` through `2**64 - 1` for the output cap on an ordinary model request. Internal compaction and reviewer requests do not use this cap. This is separate from a run's total usage budget. |
-| `temperature`, `top_p` | Finite numbers forwarded as sampling controls. The provider owns their supported ranges and combinations. |
-| `top_logprobs` | An integer from `0` through `255`, requesting token alternatives where the provider supports them. |
-| `parallel_tool_calls` | A bool controlling model-side parallel tool calls. It does not set Python callback concurrency. |
-| `verbosity` | `"low"`, `"medium"`, or `"high"`, forwarded as response verbosity. |
-| `metadata` | A mapping of strings to strings attached to model requests. Keep credentials and private application data out of this mapping. |
-| `store` | A bool requesting provider-side response storage. `True` requires API-key authentication. Provider policy determines retention. |
-| `prompt_cache_retention` | `"in_memory"` or `"24h"`. |
-| `prompt_cache_ttl` | `"30m"` or `"12h"`, sent as `prompt_cache_options.ttl`. TTL and retention are independent; omitting one does not set the other. The provider determines cache behavior. |
-| `invocation_timeout_ms` | A positive integer through `4_294_967_295` setting a local deadline for each model invocation, including its internal waits and retries. |
-
-For example, this declaration requests a response cap and a local invocation deadline. It starts no model work:
-
-```python
-from agents import Agent
-
-agent = Agent(
-    instructions="Answer briefly.",
-    model="gpt-5.5",
-    model_settings={"max_output_tokens": 512, "invocation_timeout_ms": 30_000},
-)
-```
-
-Use a standard Responses model for the additional wire controls; known Responses Lite combinations fail locally rather than silently dropping settings. A provider rejection remains a failed request. The SDK does not remove a rejected setting and replay the work.
-
-An invocation deadline raises `NativeError` with `code="model_invocation_deadline_exceeded"`. It is separate from an application deadline for an entire turn: Python tool execution and application waits can outlast a model invocation. Cleanup can also finish after the deadline. An accepted terminal response disarms that invocation's clock before Python result settlement. Check earlier tool effects before retrying. To limit the whole wait, see [bound a wait and stop owned work](troubleshooting.md#bound-a-wait-and-stop-owned-work).
-
-Development builds also accept a `ToolRef` for `tool_choice`, such as a declared function tool's `tool.ref`. This narrows sampling to one currently admitted eager tool and requires it. It cannot add a tool, restore one removed by `tools` or `before_step`, or select a deferred tool. Set `tool_choice="auto"` or `None` to clear a named target. A required choice can request the same tool on later sampling steps, so bound repeated work with a [run budget](observability.md#limit-a-runs-model-requests-and-usage) or change the selection when idle.
-
-## Make typed decisions
-
-Matching development builds have been supporting `Agent.decide()` for booleans, choices and structured values. The `0.24.0-alpha.7` preview has not been including this API. The [typed decision guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md) has been providing matching-source setup, complete examples and supported output types.
-
-Applications have been selecting a decision provider through `Agent(decisions=provider)`, separately from the generative `model` and `provider`. Each `await agent.decide(question, input=...)` call has been requiring explicit input and returning a boolean by default. Calls with `choices=[...]` have been returning one of those values; calls with `output_type=...` have been returning a validated value of that type. The SDK has been rejecting calls that combine `choices` and `output_type`.
-
-Decision calls have been using only their explicit input, without starting an Agent run or adding conversation history. A per-call `provider=` has been overriding the Agent's `decisions` default. Calls without either provider have been raising `ValueError`. Applications have been owning decision-provider cleanup; Agent and Session have been borrowing that provider. The [provider guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md#replace-the-provider) has been describing `DecisionProvider` and the optional `OpenAIDecisions` adapter.
+| Select a model, credentials, or custom endpoint | [Models and authentication](models.md) |
+| Return a validated Python value or check completion | [Structured output](outputs.md) |
+| Choose tools and workspace permissions | [Tools and workspace access](#choose-tools-and-workspace-access) |
+| Ask a separate typed decision question | [Typed decisions](#make-typed-decisions) |
+| Filter input sent to the model | [Model-context hooks](#choose-a-model-context-hook) |
+| Edit an advanced HTTP sampling request | [Request editing](#edit-the-next-sampling-request) |
+| Let generated JavaScript coordinate tools | [Programmatic tool calling](#programmatic-tool-calling) |
+| Manage ownership, persistence, and shutdown | [Application lifecycle](#plan-the-application-lifecycle) |
 
 ## Choose tools and workspace access
 
@@ -71,304 +25,13 @@ Pass `environment=...` to `agent.session()` or a one-shot method for a [local wo
 
 Pass application state through `context=...` and read it in a callback with `ToolContext[Application]`. This state stays separate from model input and tool arguments. See [application context](tools.md#application-context).
 
-## Provider connection
+## Make typed decisions
 
-Pass `NativeProvider(base_url=..., api_key=...)` to configure the native Responses connection for model requests. The SDK uses Codex's built-in model client. The default transport has been accepting endpoint settings rather than an OpenAI client instance. Matching source builds have also been accepting [application-owned model clients](#use-an-application-owned-model-client) through an adapter.
+Matching development builds support `Agent.decide()` for booleans, choices and structured values. The `0.24.0-alpha.7` preview does not include this API. The [typed decision guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md) provides matching-source setup, complete examples and supported output types.
 
-The default transport has been requiring Responses support from custom endpoints. The [endpoint checks](providers.md) have been exercising that transport. The application-model route below has been supporting Chat Completions separately.
+Applications select a decision provider through `Agent(decisions=provider)`. This provider answers explicit decision questions; it is separate from the [generative model connection](models.md#provider-connection) used for Agent runs. Setting `Agent.provider` does not configure `Agent.decide()`. Each `await agent.decide(question, input=...)` call requires explicit input and returns a boolean by default. Calls with `choices=[...]` return one of those values; calls with `output_type=...` return a validated value of that type. The SDK rejects calls that combine `choices` and `output_type`.
 
-API-key connections use these defaults.
-
-- `base_url=None` sends model requests to `https://api.openai.com/v1`. The SDK does not read `OPENAI_BASE_URL`. To use it, import `os` and pass `base_url=os.environ["OPENAI_BASE_URL"]`.
-- An omitted key reads `OPENAI_API_KEY` when the Session opens. Keep credentials in current application configuration, outside saved conversation state.
-- `response_mode="streaming"` delivers model progress as it arrives.
-- In streaming mode, `supports_websockets=None` enables WebSockets for `base_url=None` and disables them for any explicit `base_url`. Set `True` for a compatible custom provider or `False` to require HTTP. When enabled, the native runtime selects the final transport for the provider and model.
-
-The pinned Codex bypasses HTTP proxies with `CODEX_SANDBOX=seatbelt`. To prevent unintended direct requests, the SDK rejects Session startup if `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or their lowercase forms are nonempty in that mode. The check applies even with a `NO_PROXY` exemption or WebSockets enabled. Run outside that sandboxed environment, or remove unneeded proxy settings.
-
-### Use an application-owned model client
-
-Matching [source builds](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source) have been accepting `NativeProvider(model_backend=...)`. The `0.24.0-alpha.7` wheel has not been including this option. The native runtime has been retaining ownership of the tool loop and conversation history while the application has been supplying each completed model response.
-
-The complete script below has been illustrating an asynchronous OpenAI client borrowed through `ChatCompletionsModel`. Its prerequisites have been including a wheel built and installed from the same checkout and `OPENAI_API_KEY` in the environment. Running `python borrowed_client.py` has been starting a live model request with possible charges.
-
-```python
-import asyncio
-
-from openai import AsyncOpenAI
-
-from agents import Agent, ChatCompletionsModel, NativeProvider
-
-
-async def main() -> None:
-    async with AsyncOpenAI() as client:
-        async with NativeProvider(
-            model_backend=ChatCompletionsModel(client),
-        ) as provider:
-            agent = Agent(
-                instructions="Answer briefly.",
-                model="gpt-4.1",
-                provider=provider,
-            )
-            result = await agent.run("Reply with atlas.")
-            print(result.final_output)
-
-
-asyncio.run(main())
-```
-
-The application has been owning the client and its credentials. The nested context managers have been closing the one-shot Session, then the provider, then the borrowed client. `ChatCompletionsModel` has been requesting one complete response per model step rather than token streaming. The application has been choosing its endpoint through `AsyncOpenAI(base_url=...)` when needed.
-
-Other public adapters have been supporting the following clients:
-
-| Adapter from `agents` | Borrowed client |
-| --- | --- |
-| `ResponsesModel(client)` | An asynchronous client with `responses.create`. |
-| `LitellmModel(client, model=...)` | An installed LiteLLM module or compatible object with `acompletion`. |
-| `AnyLLMModel(client, model=...)` | An application-created AnyLLM provider with `acompletion`. |
-
-Applications have also been implementing `NativeModel.complete(request)` or `ModelProvider.get_model(model_name)` directly. `ModelRequest.body` has been carrying the native request, and `ModelResponse` has been carrying completed Responses-format output items and optional usage counters. The [model reference](reference.md#application-models) has been describing these signatures.
-
-This route has been using the HTTP-mode native loop and rejecting `supports_websockets=True`, `CodexLogin`, and native child agents configured through `NativeAgents`. Cancellation has been joining the admitted model callback and discarding its late response. The runtime has not been falling back to its built-in HTTP client after an adapter failure. Providers have been determining which request settings they support; the adapters have been rejecting unsupported conversions rather than silently replaying work. Applications have been checking their required tools, output formats, and model controls before migration.
-
-### Buffer model responses
-
-Use `NativeProvider(response_mode="buffered")` when the endpoint supports nonstreaming Responses and your application can wait for each complete model response. The SDK requests JSON over HTTP and delivers that response's output events after reading its full body. Tool calls start after that model response completes. Tool events remain available while tools execute, and subsequent model requests follow the normal tool loop.
-
-Each buffered HTTP response body is limited to 64 MiB and one million structural characters (`{}[],:`) outside strings. Exceeding either limit fails without retry. Use streaming mode for larger responses.
-
-Set the agent's `model` explicitly to a model that uses standard Responses. The current default model uses Responses Lite and cannot use buffered mode.
-
-If the provider reports failure or an incomplete response that cannot continue, such as a token-limit error, that response's output is not delivered. An undecodable response body also yields no partial output. Any validated response metadata remains in the turn record.
-
-Buffering avoids processing individual streaming fragments. The option applies to every model request in sessions opened with that provider, including restored sessions. Saved state does not choose the mode; the current provider does. Repeat the [endpoint checks](providers.md) with `response_mode="buffered"` for the features your application uses.
-
-Buffered mode requires API-key authentication. It does not support `CodexLogin`, Responses Lite, or native child agents declared with `NativeAgents`. An explicit `supports_websockets=True` conflicts with buffered mode. Unsupported combinations fail before model dispatch; the SDK does not retry the request as a stream.
-
-### Reuse a Codex login (experimental)
-
-Pass `NativeProvider(auth=CodexLogin())` to reuse an existing Codex-managed ChatGPT OAuth login. API-key authentication remains the default when `auth` is omitted.
-
-!!! warning "Local experimental use only"
-    This feature may change or be removed. The public beta and general availability of the Agents SDK may ship without this feature. Follow the official [Codex authentication guidance](https://learn.chatgpt.com/docs/auth) and [application authentication policy](https://learn.chatgpt.com/docs/app-server#auth-endpoints) for permitted uses.
-
-Complete `codex login` separately before opening an SDK Session. This mode reads the ChatGPT login saved in `auth.json`. If Codex uses the operating system credential store, configure file storage and sign in again. See [Codex credential storage](https://learn.chatgpt.com/docs/auth#credential-storage) to configure file storage. Protect the login file and keep its tokens out of logs and source control.
-
-`CodexLogin()` looks in `CODEX_HOME` if set and in `~/.codex` otherwise. Pass `CodexLogin(codex_home=...)` to select another existing Codex directory. Pass `account_id=...` to require the expected ChatGPT workspace ID. The Session fails to open if the saved login has a different workspace ID or has no workspace ID.
-
-#### Set up a login on a headless host
-
-1. Ask your ChatGPT workspace admin to enable device-code sign-in in the workspace permissions. For a personal account, enable it in your ChatGPT security settings.
-2. On the headless host, run `codex login --device-auth`. Open the displayed link in a browser on another device and enter the one-time code. Use the ChatGPT account and workspace you want the SDK to use.
-3. Make sure the CLI saved `auth.json` in the directory that `CodexLogin` will read. If your setup uses a credential store, see the [file storage settings](https://learn.chatgpt.com/docs/auth#credential-storage).
-
-If device-code sign-in is unavailable, use a copied login if your workspace permits file storage. Sign in with `codex login` on a machine with a browser and file storage enabled. Then [copy `auth.json` over a secure connection](https://learn.chatgpt.com/docs/auth#fallback-authenticate-locally-and-copy-your-auth-cache) to the Codex directory on the headless host. Use the default directory or set `CodexLogin(codex_home=...)` to the destination directory. Give the user running the SDK write access to that directory and restrict access to the cache file to that user. Treat the file like a password and keep it out of source control, logs, and shared artifacts.
-
-Sessions in one SDK process can share the same saved login. The SDK coordinates token refresh in that process and writes renewed credentials back to the file. Keep the updated file so the next process can use it after a restart. Use a single process at a time to refresh a saved login, even if copies of the file exist on other hosts.
-
-#### Run a coding turn without an API key
-
-This complete script makes a live model request using the saved login. Run it with an SDK build that includes this experimental API:
-
-```python
-import asyncio
-
-from agents import Agent, CodexLogin, NativeProvider
-
-
-async def main() -> None:
-    async with NativeProvider(auth=CodexLogin()) as provider:
-        agent = Agent(
-            instructions="Write concise Python code with unit tests.",
-            provider=provider,
-        )
-        async with agent.session() as session:
-            account = session.codex_account
-            if account is None:
-                raise RuntimeError("Expected a saved Codex login")
-            print("Saved workspace ID:", account.account_id)
-            print("Saved plan:", account.plan_type)
-            turn = await session.submit(
-                "Write an is_prime(n: int) -> bool function and three unit tests."
-            )
-            result = await turn.get_result()
-            print(result.final_output)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-Save the script as `coding_turn.py`. On macOS or Linux, run it with both API-key variables unset.
-
-```bash
-env -u OPENAI_API_KEY -u CODEX_API_KEY python coding_turn.py
-```
-
-The example asks for code and tests in the answer. To execute commands or edit workspace files, configure an [execution Environment](execution.md).
-
-#### Account identity, refresh, and usage
-
-`session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type` for a Session opened with `CodexLogin`, or `None` in API-key mode. Check `account_id` to identify the saved ChatGPT workspace before submitting work. Some personal logins have no workspace ID and report `account_id=None`. Pass the expected ID to `CodexLogin(account_id=...)` to check it when opening the Session. The saved `plan_type` may be `"unknown"`. For actual usage on that account, check the [Codex usage dashboard](https://chatgpt.com/codex/settings/usage).
-
-The native runtime refreshes the saved login for the same user and workspace. Portable restore and local conversation resume must use that same identity. If you switch users or workspaces, start a new conversation. See [save and restore](state.md#save-and-restore-a-portable-checkpoint).
-
-This mode uses HTTPS on the standard Codex backend. Workspaces that require a separate backend need their own integration. Omit `api_key` and `base_url`, and leave `supports_websockets` unset or set it to `False`. If the saved login fails, the SDK stops even when API keys or other credentials are set.
-
-### Read Codex plan usage
-
-Matching development builds have been supporting `plan_usage()` and its UTC reset datetimes. The `0.24.0-alpha.7` preview has not been including this API. The [source-build guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source) has been providing setup for the matching source commit.
-
-`await session.plan_usage()` has been requesting a fresh usage snapshot through the Session's saved `CodexLogin`. API-key Sessions have been returning `None` without an account request. Each call has been reading current provider data rather than reusing the previous snapshot. `observed_at` has been tracking the snapshot receipt time. Applications have been choosing how long to reuse the snapshot before another read.
-
-Inside an open Session, this fragment has been showing each reported primary-window reset:
-
-```python
-usage = await session.plan_usage()
-if usage is None:
-    print("API-key Session: no Codex plan snapshot")
-else:
-    print("Observed:", usage.observed_at)
-    print("Identity verified:", usage.identity_verified)
-    print("Included usage allowed:", usage.ordinary_usage_allowed)
-    print("Available window resets:", usage.reset_credits_available)
-    for limit in usage.limits:
-        window = limit.primary
-        if window is not None and window.resets_at is not None:
-            print(limit.limit_id, window.used_percent)
-            print("Time until reset at observation:", window.resets_at - usage.observed_at)
-```
-
-Window `resets_at`, individual spend-limit `resets_at`, and `observed_at` have been using timezone-aware UTC datetimes. Missing windows, credits, and optional fields have been representing unknown data. `CodexPlanSpendLimit.limit` and `.used` and `CodexPlanCredits.balance` have been preserving the provider's strings. Additional usage buckets have been appearing in `limits` alongside the main Codex bucket.
-
-`account_id` has been naming the Session's saved workspace when available. `identity_verified=True` has been indicating that the response identified both the saved account and user. Omitted identity fields have been leaving verification false; conflicting identities have been raising `RuntimeError`. `ordinary_usage_allowed` has been reporting the provider's evidence for included usage only with verified identity, and otherwise has been remaining `None`. `reset_credits_available` has been counting available window resets rather than credit balance.
-
-These values have been serving as scheduling hints before `submit()`. The provider has been deciding admission for each turn; the snapshot has been offering no reservation of capacity. Failed account reads have been raising `RuntimeError`. Reads have been using the Session's cached credentials. After token expiry, applications have been renewing the saved login and opening a new Session before retrying. Closing the Session has been cancelling pending reads. The [Codex usage dashboard](https://chatgpt.com/codex/settings/usage) has been providing a separate account view.
-
-### Read API-key rate limits
-
-Read `session.rate_limits()` for the latest snapshot from a response with usable rate-limit data. The snapshot starts with unknown values. Each reported window can contain a limit, a remaining count, and the number of seconds until reset as measured at the response. `requests`, `tokens`, and `project_tokens` can each be absent. The provider can also supply a retry delay or an absolute retry time. Treat every `None` as unknown.
-
-For live updates, observe `ApiRateLimitsUpdated` from `agents.observation`. Use its `snapshot` field or read the current Session snapshot after an observation gap. Rate-limit updates can arrive independently of token usage. These snapshots describe the API-key connection. Account plan limits, credits, and billing are outside their scope.
-
-Read a settled failure with [`wait_for_attention()`](sessions.md#wait-for-a-decision-or-a-result). A reported temporary rate limit yields `reason="rate_limited"`. A reported blocking limit, such as exhausted quota, yields `reason="quota_blocked"`. Base that distinction on the failure reason. A remaining count alone cannot tell you whether the next request will succeed.
-
-### Provider lifetime
-
-Each Session captures provider settings and owns its native connections. If neither the Agent nor the Session supplies a provider, the Session creates its own and attempts to close it automatically. Reusing an Agent does not share default providers.
-
-To share a provider, pass the same `NativeProvider` to the Agents or Sessions. After all its Sessions close, call `await provider.aclose()`. Closing while a Session is open or opening raises an error. A successful close prevents reuse. Create a new provider for later Sessions.
-
-### Recover a failed managed-environment opening
-
-If opening a [managed Environment](execution.md#manage-the-executor-lifetime) fails and automatic cleanup cannot finish, the exception can carry the implicit provider in `error.provider`. It may still own an executor manager or native resources. Check this optional attribute and retry `aclose()` before discarding the owning event loop.
-
-This applies only to opening failures from `agent.session()`, `agent.run()` and `agent.run_sync()`. An explicit provider remains application-owned and is not attached to the error. Close it after its other Sessions close.
-
-This fragment uses your `agent` and the linked example's `executor_lease()` manager:
-
-```python
-from agents import NativeProvider
-
-try:
-    result = await agent.run("Inspect the workspace.", environment=executor_lease())
-except BaseException as error:
-    recovery = getattr(error, "provider", None)
-    if isinstance(recovery, NativeProvider):
-        try:
-            await recovery.aclose()
-        except BaseException as cleanup_error:
-            raise error from cleanup_error
-    raise
-```
-
-Run async cleanup on the failed opening's event loop. If cleanup fails again, this handler keeps the opening error and its provider, with the cleanup error as its cause. Retain the provider and retry cleanup before discarding the loop.
-
-After `run_sync()` fails, a caller outside an event loop can use `asyncio.run(recovery.aclose())`. The provider routes cleanup to the retained run loop.
-
-## Structured output
-
-Set `output_type` on the Agent to choose the final output format. For example, `output_type=Answer` requests a structured object and validates it in Python. This example runs inside an async application:
-
-```python
-from pydantic import BaseModel
-
-from agents import Agent
-
-
-class Answer(BaseModel):
-    greeting: str
-    topics: list[str]
-
-
-agent = Agent(instructions="Return a greeting and its topics.", output_type=Answer)
-result = await agent.run("Greet Ada about astronomy.")
-print(result.final_output.greeting)
-```
-
-### Choose an output type
-
-| Desired output | Configuration | Behavior |
-| --- | --- | --- |
-| Plain text | Omit `output_type` or pass bare `str`. | Return the final text. |
-| Native strict schema | Pass a structured type or `NativeOutput(Answer)`. | Request native schema output and validate it in Python. `NativeOutput(str)` requests a native response object rather than plain text. |
-| Prompted JSON | Pass `PromptedOutput(Answer)`. | Ask for JSON in the prompt and validate the text in Python. The provider does not enforce a native schema. |
-
-Native output supports objects with declared fields and non-object roots such as `int` and `list[int]`. For a union or nullable root, use `RootModel[int | str]` or `RootModel[int | None]`. The static `Agent` constructor rejects bare unions such as `int | str`. Use `type(None)` for output that must be `null`.
-
-`PromptedOutput` defaults to `max_retries=0`, so invalid output fails without a correction attempt. Nonzero retries request separate corrections without tools; they do not replay the task. `LocalStorage` supports only `max_retries=0`.
-
-For a native non-object root, the model returns an object with a required `response` field. The SDK unwraps that field. With `output_type=list[int]`, model output `{"response": [1, 2]}` becomes `result.final_output == [1, 2]`. A `RootModel` result keeps its class. Native history and observations retain the JSON object. Object outputs with their own `response` field remain unchanged.
-
-### Native schema limits
-
-These limits also apply inside non-object roots and `RootModel` types:
-
-- Every nested object must reject extra fields. Open maps such as `dict[str, str]`, including maps inside Pydantic models, and models allowing extra fields are rejected.
-- `Any`, sets, fixed-length tuples, and schemas using `oneOf`, `allOf`, `prefixItems` or `uniqueItems` are unsupported. The SDK rejects unsupported schemas when the Session opens.
-- Every declared field is required, even with a Python default. The SDK removes defaults from the model request. Use nullable fields for explicit `null` values. A nullable `response` field is still required.
-
-These restrictions do not automatically apply to prompted output or Python function parameters.
-
-### Handle validation failures
-
-Invalid final output raises `OutputValidationError`, including after prompted corrections exhaust their retries. Catch it around `agent.run()` or `turn.get_result()`. Its message omits the rejected text. Its `raw_output` contains that text and may contain private data, so keep it out of routine logs.
-
-Access `error.issues` deliberately when diagnosing a failure. Each `OutputValidationIssue` contains a validator `code` and a tuple `path` into the application output. For example, `("items", 0, "count")` identifies the first item's count. Native non-object roots omit the SDK's `response` prefix. Failures in that wrapper use the root path `()`. Invalid JSON also uses the root path. The SDK captures these diagnostics during the original validation. It does not run application validators again. It retains no validator exception or message as a cause. Codes and field names can themselves contain private data, so treat `issues` with the same care as `raw_output`.
-
-This fragment reuses the typed `agent` above:
-
-```python
-from agents import OutputValidationError
-
-try:
-    result = await agent.run("Greet Ada about astronomy.")
-except OutputValidationError:
-    print("The answer did not match the required format.")
-else:
-    print(result.final_output.greeting)
-```
-
-Validation does not undo completed tools or replay the task. Waiting on the same Turn raises the same failure. An explicit Session can accept a new turn, but inspect history and application effect records before submitting input that could repeat an effect.
-
-### Inspect corrections and saved state
-
-On a successful run, `Completed.repair_attempts` records each correction attempt as a `RecordedTurn` value. Each has native session and turn IDs, `parent_session_id` and `parent_turn_id` for the original task, and usage for that correction turn:
-
-```python
-for repair in result.repair_attempts:
-    print(repair["id"], repair["parent_turn_id"], repair["usage"])
-```
-
-`Completed.thread_usage` is cumulative for the original thread and excludes correction threads. Missing usage is `None`, not zero. Follow the [usage accounting limits](observability.md#read-usage-without-double-counting) when comparing successive snapshots.
-
-Corrections receive the invalid output, schema and effective model connection. They receive none of the original tools, application context or instructions. `final_output` may come from a correction, while the original native history stays intact. `session.turns()` and `session.items()` retain correction records beside their parent.
-
-Corrections have been retaining the accepted model, reasoning effort, reasoning summary and service tier. Matching development builds have also been applying the accepted `invocation_timeout_ms` afresh to each correction. The alpha.7 preview has not been including this timeout setting. Corrections have not been inheriting the other [development model controls](#additional-controls-in-development-builds), including output caps, sampling controls, metadata, provider storage and prompt-cache settings.
-
-Live manual replies and idle restore support structured output. An explicit Session can suspend a settled manual turn with `NativeOutput`, a bare structured output type, or `PromptedOutput`. Restore must match the saved output mode and schema, including the retry setting for prompted output.
-
-Automatic one-shot checkpoints support native strict output but exclude `PromptedOutput`. See [saving a settled manual request](state.md#save-a-settled-manual-request) for output matching, active repair and `before_step` limits, and [automatic checkpoint limits](state.md#automatic-checkpoint-limits) for one-shot restrictions.
+Decision calls use only their explicit input, without starting an Agent run or adding conversation history. A per-call `provider=` overrides the Agent's `decisions` default. Calls without either provider raise `ValueError`. Applications own decision-provider cleanup; Agent and Session borrow that provider. The [provider guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md#replace-the-provider) describes `DecisionProvider` and the optional `OpenAIDecisions` adapter.
 
 ## Choose a model-context hook
 
@@ -406,27 +69,17 @@ Choose the hook by what it owns:
 | Desired change | Supported hook |
 | --- | --- |
 | Replace model input for roots, children, compaction, or repair | `transform_context` with `ModelRequestContext`. |
-| Select or narrow admitted tools before a step | [`before_step`](sessions.md#update-tools-instructions-and-model-settings). Tool authority remains bounded by the Session's opening selection. |
+| Select or narrow admitted tools before a step | [`before_step`](sessions.md#select-tools-before-each-model-step). Tool authority remains bounded by the Session's opening selection. |
 | Edit advanced HTTP request presentation in a restricted profile | [`prepare_request`](#edit-the-next-sampling-request). |
 | Transform execution arguments or results | [Tool hooks](tools.md#inspect-or-change-tool-values). |
 
 These hooks have separate owners. A context projection does not change admitted tools or execution policy.
 
-## Check a proposed completion
-
-`before_complete` requires [`0.24.0-alpha.7` or later](installation.md). Set `Agent(before_complete=callback)` to check a proposed root or child answer before the turn completes. The callback receives `CompletionContext` from `agents`, including application `context`, proposed `text`, native identity, and `continuation_count`.
-
-Return `None` to accept, `ContinueTurn("specific feedback")` to continue the same turn, or `StopTurn(...)` to stop it. Continuation feedback becomes model-visible conversation data and saved history. Bound root continuations with [`RunBudget`](observability.md#limit-a-runs-model-requests-and-usage). Root budgets exclude children, so use `continuation_count` and `StopTurn` to bound child continuations.
-
-The callback sees proposed text before output-type validation. Rejected text may already have streamed and remains in history. The callback does not run for provider failures, cancellation, compaction, or separate prompted-output repairs. A raised exception fails the turn. Async callbacks run on the Session loop; sync callbacks run in a worker. Cancellation joins started callbacks. A callback must not mutate its own Session.
-
-Matching development builds have also been supplying `CompletionContext.decide()` for checks with the captured [decision provider](#make-typed-decisions). The [completion-check example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md#bind-a-provider-to-an-agent) has been combining a typed decision with a bounded continuation.
-
 ## Edit the next sampling request
 
 `prepare_request` requires `0.24.0-alpha.7` or later. Install a [matching preview wheel](installation.md) before using it.
 
-Pass `prepare_request=callback` to `agent.run()`, `agent.run_sync()`, or `session.submit()` for advanced edits to a detached copy of the next HTTP model request. Use it to change sampling instructions or selected tool descriptions and parameter schemas within the profile below. Prefer [`transform_context`](#choose-a-model-context-hook) for model input, [`before_step`](sessions.md#update-tools-instructions-and-model-settings) for tool selection, and [tool policies](tools.md#inspect-or-change-tool-values) for execution arguments or results.
+Pass `prepare_request=callback` to `agent.run()`, `agent.run_sync()`, or `session.submit()` for advanced edits to a detached copy of the next HTTP model request. Use it to change sampling instructions or selected tool descriptions and parameter schemas within the profile below. Prefer [`transform_context`](#choose-a-model-context-hook) for model input, [`before_step`](sessions.md#select-tools-before-each-model-step) for tool selection, and [tool policies](tools.md#inspect-or-change-tool-values) for execution arguments or results.
 
 The synchronous or asynchronous callback receives `callback(turn, request, *, preparation_index, recovery_attempt)`. `request` is a `PreparedRequest` imported from `agents`, with `instructions`, `input`, and `tools`. Return the complete edited value, or `None` to use the original request. Mutating the copy and returning `None` discards the edits. The SDK captures returned JSON when the callback settles.
 
@@ -446,14 +99,6 @@ An active edited operation cannot suspend or export portable state. Save after i
 
 The complete synthetic [prepared-request recipe](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/prepared_request.py) edits a request after a real Python tool result and checks the outgoing instructions, input, and schema. From the matching source root, run `python -m examples.codex.recipes.prepared_request`. It needs no model key and uses a local HTTP Responses peer.
 
-## Telemetry
-
-Configure exporters, startup, shutdown, and content controls in the [observability guide](observability.md#configure-telemetry).
-
-### Continue a trace across workers
-
-Use [trace context and worker propagation](observability.md#continue-a-trace-across-workers) to connect Session and tool work across workers.
-
 ## Programmatic tool calling
 
 Set `programmatic_tool_calling=True` on `Agent` to let the model generate JavaScript cells that call declared Python, manual and MCP tools. Cells can combine calls with loops, conditions and result processing. Ordinary tool calls do not require this option, which defaults to off.
@@ -471,6 +116,14 @@ In `0.24.0-alpha.7` or later, `LocalStorage` rejects `programmatic_tool_calling=
 
 Restore uses the current Agent declaration. Set `programmatic_tool_calling=True` again if the restored conversation needs it. [Executor argument and result transforms](execution.md#executor-policies) also support direct calls without this option.
 
+## Telemetry
+
+Configure exporters, startup, shutdown, and content controls in the [observability guide](observability.md#configure-telemetry).
+
+### Continue a trace across workers
+
+Use [trace context and worker propagation](observability.md#continue-a-trace-across-workers) to connect Session and tool work across workers.
+
 ## Plan the application lifecycle
 
 The SDK runs inside your application, which manages its workers, storage and credentials. Saving a checkpoint does not provide a hosted recovery service.
@@ -479,7 +132,36 @@ The SDK runs inside your application, which manages its workers, storage and cre
 | --- | --- |
 | When to initialize diagnostics | Configure [telemetry](observability.md#configure-telemetry) before the first Session opens. |
 | Which work belongs to a conversation | Own each [Session](sessions.md) explicitly and choose queueing or steering when submissions overlap. |
-| Where history survives a restart | Choose [portable checkpoints or a local profile](state.md#choose-how-to-store-a-conversation). Retain the required state or conversation ID in application storage. |
+| Where history survives a restart | Choose [a local profile, application database, or portable checkpoint](state.md#choose-how-to-store-a-conversation). Retain the required state or conversation ID in application storage. |
 | What tools may do | Supply current [tools and execution permissions](tools.md). Restored history does not supply current credentials or grant new authority. |
 | Whether work can be retried | Inspect [effect metadata and history](sessions.md#failures-and-recovery), together with your application's records of external effects. |
-| How to shut down | Close owned Sessions, then close any [explicit providers](#provider-lifetime) after their Sessions are closed. Shut down [telemetry](observability.md#configure-telemetry) after all Sessions close. |
+| How to shut down | Close owned Sessions, then close any [explicit providers](models.md#provider-lifetime) after their Sessions are closed. Shut down [telemetry](observability.md#configure-telemetry) after all Sessions close. |
+
+<a id="model-and-session-settings"></a>
+<a id="additional-controls-in-development-builds"></a>
+<a id="provider-connection"></a>
+<a id="use-an-application-owned-model-client"></a>
+<a id="buffer-model-responses"></a>
+<a id="reuse-a-codex-login-experimental"></a>
+<a id="set-up-a-login-on-a-headless-host"></a>
+<a id="run-a-coding-turn-without-an-api-key"></a>
+<a id="account-identity-refresh-and-usage"></a>
+<a id="read-codex-plan-usage"></a>
+<a id="read-api-key-rate-limits"></a>
+<a id="provider-lifetime"></a>
+<a id="recover-a-failed-managed-environment-opening"></a>
+
+## Models and authentication
+
+Choose credentials and a connection in [provider setup](models.md#provider-connection), select [model settings](models.md#model-and-session-settings), and manage [provider lifetime](models.md#provider-lifetime). The model guide also covers [borrowed clients](models.md#use-an-application-owned-model-client), [experimental Codex login](models.md#reuse-a-codex-login-experimental), and [rate limits](models.md#read-api-key-rate-limits).
+
+<a id="structured-output"></a>
+<a id="choose-an-output-type"></a>
+<a id="native-schema-limits"></a>
+<a id="handle-validation-failures"></a>
+<a id="inspect-corrections-and-saved-state"></a>
+<a id="check-a-proposed-completion"></a>
+
+## Structured output and completion checks
+
+[Return a typed result](outputs.md#return-a-typed-result), compare [output modes and schema limits](outputs.md#choose-an-output-type), and [handle validation failures](outputs.md#handle-validation-failures). Use [completion checks](outputs.md#check-a-proposed-completion) to accept an answer or request more work before the turn finishes.

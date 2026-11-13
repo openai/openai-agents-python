@@ -1,6 +1,6 @@
 # Releasing an accepted answer
 
-The application in [accepted_output.py](accepted_output.py) has been keeping draft text private while displaying its own progress messages. It has been releasing an answer only after `await turn.get_result()` and application validation. This pattern has been serving report generation, support replies, and structured results using the existing native `Agent` and `Session` APIs.
+The application in [accepted_output.py](accepted_output.py) keeps draft text private while displaying its own progress messages. It releases an answer only after `await turn.get_result()` and application validation. This pattern serves report generation, support replies, and structured results using the existing native `Agent` and `Session` APIs.
 
 ## Running the example
 
@@ -10,9 +10,9 @@ Use an SDK build from the same checkout as this example. Follow the [source buil
 PYTHONPATH=. python -m examples.codex.recipes.accepted_output
 ```
 
-`ScriptedResponses` has been supplying synthetic model responses through a loopback HTTP server and the normal native provider. The recipe has been running without API credentials or model charges. The peer has been requiring direct access or proxy bypass for `127.0.0.1` throughout execution. The section scenario has been using one application function tool. Its in-memory lists and section map have been representing application publication.
+`ScriptedResponses` supplies synthetic model responses through a loopback HTTP server and the normal native provider. The recipe runs without API credentials or model charges. The peer requires direct access or proxy bypass for `127.0.0.1` throughout execution. The section scenario uses one application function tool. Its in-memory lists and section map represent application publication.
 
-The run has been checking these observable outcomes with assertions:
+The run checks these observable outcomes with assertions:
 
 | Scenario | Released content |
 | --- | --- |
@@ -24,29 +24,29 @@ The run has been checking these observable outcomes with assertions:
 | Wrong case identifier in completed JSON | No answer |
 | Same-turn section publication | Inventory section before the next request; no delivery section or final summary |
 
-The console has been displaying application-owned progress, accepted content, and fixed failure statuses. The script has been withholding the first report draft with its unsupported success claim.
+The console displays application-owned progress, accepted content, and fixed failure statuses. The script withholds the first report draft with its unsupported success claim.
 
 ## Checking completion before publication
 
-`check_report` has been inspecting each proposed completion through `CompletionContext.text`. On the first incomplete report, it has been returning `ContinueTurn` with corrective feedback. The same turn has been requesting a revised report within `RunBudget(max_requests=2)`. On another incomplete report, the callback has been returning `StopTurn`. `continuation_count` has been bounding the example's content retries as well.
+`check_report` inspects each proposed completion through `CompletionContext.text`. On the first incomplete report, it returns `ContinueTurn` with corrective feedback. The same turn requests a revised report within `RunBudget(max_requests=2)`. On another incomplete report, the callback returns `StopTurn`. `continuation_count` bounds the example's content retries as well.
 
-The application has been retaining `OutputTextDelta` observations privately, including the rejected draft. The SDK has been retaining streamed observations and recorded history after completion rejection. `before_complete` has not been retracting them. The application has therefore been withholding model deltas, tool output, traces, and history from its customer-facing response. It has been managing access and retention separately for those stores.
+The application retains `OutputTextDelta` observations privately, including the rejected draft. The SDK retains streamed observations and recorded history after completion rejection. `before_complete` does not retract them. The application therefore withholds model deltas, tool output, traces, and history from its customer-facing response. It manages access and retention separately for those stores.
 
-The support example has been obtaining approval from trusted application context. It has been checking the completed text with Pydantic and matching `case_id` against the application's expected case. Only then has it been appending to `published`. A successful completion has been preceding these application checks; it has not been replacing them. The existing [structured-output guide](../../../docs/sdk/configuration.md#structured-output) has been covering SDK output conversion.
+The support example obtains approval from trusted application context. It checks the completed text with Pydantic and matches `case_id` against the application's expected case. Only then does it append to `published`. A successful completion precedes these application checks; it does not replace them. The existing [structured-output guide](../../../docs/sdk/outputs.md#return-a-typed-result) covers SDK output conversion.
 
 ## Handling interruption and failure
 
-The rejected and cancelled turns have been raising `TurnStoppedError` through `get_result()`. An approval callback exception has been failing the turn. A wrong case identifier has been failing the application's post-completion validation. Each path has been skipping the publication statement and displaying only an application-owned status. The cancellation example has been waiting for approval checking before calling `await turn.cancel()`.
+The rejected and cancelled turns raise `TurnStoppedError` through `get_result()`. An approval callback exception fails the turn. A wrong case identifier fails the application's post-completion validation. Each path skips publication and displays only an application-owned status. The cancellation example waits for approval checking before calling `await turn.cancel()`.
 
-The recipe has been demonstrating private computation, accepted completion, application checks, then publication. The same sequence has been applying to a response body, an answer record, or an artifact download. Cancellation has not been undoing completed tool effects or earlier publication. The application's publishing operation has been managing durable writes, retries, concurrent updates, and delivery failures separately.
+The recipe demonstrates private computation, accepted completion, application checks, then publication. The same sequence applies to a response body, an answer record, or an artifact download. Cancellation does not undo completed tool effects or earlier publication. The application's publishing operation manages durable writes, retries, concurrent updates, and delivery failures separately.
 
-The synthetic report check has been matching a phrase to keep the example focused. Real report validation has been requiring application-specific checks for facts, citations, and format. The scripted peer has been exercising application control flow and the native runtime; it has not been evaluating live model quality.
+The synthetic report check matches a phrase to keep the example focused. Real report validation requires application-specific checks for facts, citations, and format. The scripted peer exercises application control flow and the native runtime; it does not evaluate live model quality.
 
 ## Publishing independent sections
 
-The inventory and dispatch sections have been passing their own checks in separate turns. The example has been publishing each section before starting the next. The delivery section has been failing its check, so the example has been withholding it while keeping the earlier sections available.
+The inventory and dispatch sections pass their own checks in separate turns. The example publishes each section before starting the next. The delivery section fails its check, so the example withholds it while keeping the earlier sections available.
 
-This pattern has been applying when each section has its own evidence and permission to publish. When a later check can invalidate an earlier section, the whole answer has been requiring a successful final result before delivery.
+This pattern applies when each section has its own evidence and permission to publish. When a later check can invalidate an earlier section, the whole answer requires a successful final result before delivery.
 
 ## Publishing sections within one turn
 
@@ -58,9 +58,9 @@ This pattern has been supporting independently checked inventory facts and indiv
 
 ## Observing accepted output
 
-On the matching source build, `agent.session(include_output_accepted=True)` has been enabling `OutputAccepted` from `agents.observation`. Turn and Session readers have been receiving this metadata after a successful logical result, including any continuation and output validation. `submission_id` has been identifying the original submission. For a manually restored Turn, it has been identifying the restored handle in the current Session. `turn_id` has been identifying the final native step.
+On the matching source build, `agent.session(include_output_accepted=True)` enables `OutputAccepted` from `agents.observation`. Turn and Session readers receive this metadata after a successful logical result, including any continuation and output validation. `submission_id` identifies the original submission. For a manually restored Turn, it identifies the restored handle in the current Session. `turn_id` identifies the final native step.
 
-The event has been carrying identity only. `await turn.get_result()` has been supplying the accepted result for the application's own checks and publication. Bounded readers have still been able to report gaps, so the event has been serving as a notification rather than a delivery receipt.
+The event carries identity only. `await turn.get_result()` supplies the accepted result for the application's own checks and publication. Bounded readers can still report gaps, so the event serves as a notification rather than a delivery receipt.
 
 ## Approving text during generation
 

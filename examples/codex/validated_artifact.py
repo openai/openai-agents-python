@@ -2,6 +2,11 @@
 
 For owner-scoped artifact IDs, expiry and an authenticated download, see
 examples/codex/web_starter/README.md. That service stores and serves the validated bytes.
+
+
+Run `python -m examples.codex.validated_artifact` from the repository root
+with the matching SDK and OPENAI_API_KEY. It prints the answer and any saved
+XML, then removes the temporary artifact. Live requests can incur charges.
 """
 
 from __future__ import annotations

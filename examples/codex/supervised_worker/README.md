@@ -4,7 +4,7 @@ Run independent coding jobs, check their saved status, and record publication af
 
 ## Set up the workers
 
-This example uses APIs added after `0.24.0-alpha.6`. Use a wheel and native helpers built from this revision. See [the source build guide](../../../packages/codex/MAINTAINING.md#build-from-this-source). Run the example from the repository root on a supported Linux or macOS host.
+This development-branch example requires a matching source build. Keep its wheel, native helpers, and example files on the same revision. See [the source build guide](../../../packages/codex/MAINTAINING.md#build-from-this-source). Run the example from the repository root on a supported Linux or macOS host.
 
 Supply `OPENAI_API_KEY` through your usual credential setup. Model requests can incur charges. Set `WORKER_MODEL` to select a different model.
 
@@ -28,7 +28,9 @@ PYTHONPATH=. python -m examples.codex.supervised_worker status "$job_dir/alpha"
 PYTHONPATH=. python -m examples.codex.supervised_worker publish "$job_dir/alpha"
 ```
 
-Each worker prints a JSON outcome. When a worker succeeds, its workspace contains `summary.txt` and its saved status includes an `accepted` record. The final `publish` command prints `{"status": "published"}`. Repeating publication prints `{"status": "already_published"}`.
+Each worker prints a JSON outcome. When a worker succeeds, its workspace contains `summary.txt` and its saved status includes an `accepted` record. Publication here writes a local JSON marker; it does not upload the artifact or contact an external service. The final `publish` command prints `{"status": "published"}`. Repeating publication prints `{"status": "already_published"}`.
+
+Wait for both worker processes to exit before deleting `job_dir`. That application-owned directory contains both workspaces, native history, and status records. Retain it if you need to inspect or recover either job.
 
 ## Reconnect to saved worker status
 
@@ -101,21 +103,9 @@ The fixture tests use synthetic Responses and MCP peers to check these workflows
 
 ## Watch account quota in your application
 
-If your application already has a trusted account feed, pass a `QuotaWatch` to
-`supervise`. Feed it `account/rateLimits/read` results and
-`account/rateLimits/updated` notifications on the worker's event loop. Call
-`attach(account_id)` when you connect, reconnect, or switch accounts. Keep the
-returned binding with callbacks from that feed. A matching read establishes the
-account before the watcher accepts sparse updates.
+If your application already has a trusted account feed, pass a `QuotaWatch` to `supervise`. Feed it `account/rateLimits/read` results and `account/rateLimits/updated` notifications on the worker's event loop. Call `attach(account_id)` when you connect, reconnect, or switch accounts. Keep the returned binding with callbacks from that feed. A matching read establishes the account before the watcher accepts sparse updates.
 
-The example uses your application's `read_account_limits` helper. It returns
-the raw read and its arrival time. Use unrounded epoch seconds from the
-worker's local clock for reads and updates. The watcher accepts observations
-with timestamps strictly later than both the attachment and the last accepted
-observation. Equal timestamps leave the order ambiguous, so the watcher keeps
-the existing evidence. If your feed overlaps reads, discard superseded
-responses before forwarding them. Choose the maximum age for your feed. Here
-it is 30 seconds.
+The example uses your application's `read_account_limits` helper. It returns the raw read and its arrival time. Use unrounded epoch seconds from the worker's local clock for reads and updates. The watcher accepts observations with timestamps strictly later than both the attachment and the last accepted observation. Equal timestamps leave the order ambiguous, so the watcher keeps the existing evidence. If your feed overlaps reads, discard superseded responses before forwarding them. Choose the maximum age for your feed. Here it is 30 seconds.
 
 ```python
 from agents import PendingRequests
@@ -135,17 +125,9 @@ elif isinstance(outcome, PendingRequests):
     await handle_requests(outcome.requests)  # Use your application's request handler.
 ```
 
-Use `account_view()` to inspect the current binding, the raw read, and the
-latest available fields from the default bucket. Each observation records its
-source and local observation and expiry times. Check `is_current` before using
-a value. Sparse updates leave the other fields' expiry times in place. The raw
-read also carries any extra buckets from the service.
+Use `account_view()` to inspect the current binding, the raw read, and the latest available fields from the default bucket. Each observation records its source and local observation and expiry times. Check `is_current` before using a value. Sparse updates leave the other fields' expiry times in place. The raw read also carries any extra buckets from the service.
 
-Percentages, reset times, and the balance string are display values. The
-watcher wakes for a fresh explicit limit or spend-control stop. It also wakes
-when the backend denies ordinary usage and both credit flags are false. Missing
-facts leave the block unproven. API-key request and token limits stay separate
-in `Session.rate_limits()`.
+Percentages, reset times, and the balance string are display values. The watcher wakes for a fresh explicit limit or spend-control stop. It also wakes when the backend denies ordinary usage and both credit flags are false. Missing facts leave the block unproven. API-key request and token limits stay separate in `Session.rate_limits()`.
 
 The worker still denies approvals. An account block or native question hands the live turn back to the application. The worker keeps observing the turn so it can steer when the brief tool starts.
 

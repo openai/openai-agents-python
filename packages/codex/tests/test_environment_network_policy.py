@@ -1272,7 +1272,6 @@ async def test_linux_network_policy_enforces_proxy_rules(
         assert received == expected_requests
 
 
-@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
 async def test_default_strict_rejects_unsupported_remote_platform(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -15,6 +15,8 @@ python examples/codex/canonical_storage/main.py ./conversation.sqlite --resume S
 
 Use the Session ID printed by the first process. Both processes must use the same database. Each open uses the application's current tool callbacks, context and credentials. Saved history never supplies credentials or executable callbacks. Only load trusted application history: it includes instructions and tool data.
 
+The script prints the Session ID and the model's answer. Its `order_status` callback returns a synthetic shipping status, while the model request uses the configured provider. After both processes have exited, retain the database for later resume or delete the application-owned database and its sidecars to discard the conversation. Never remove writer lock files while a Session is open.
+
 ## Backend contract
 
 Pass `CustomStorage(backend)` to `Agent.session(storage=...)`. The backend implements the public `SessionStore` protocol. Methods are synchronous and run on native worker threads. They must be thread-safe and must not call back into the SDK.

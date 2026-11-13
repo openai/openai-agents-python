@@ -2586,13 +2586,15 @@
       },
       "_agents_codex._model_settings": {
         "declarations": [
+          "if TYPE_CHECKING:\n    pass\nelse:\n    Omit = getattr(sys.modules.get('openai'), 'Omit', type(None))",
           "class _StaticProviderCompaction(TypedDict, closed=True):\n    type: Literal['static']\n    threshold: int",
           "class _DynamicProviderCompaction(TypedDict, total=False, closed=True):\n    type: Required[Literal['dynamic']]\n    threshold_ratio: float\n    fallback_threshold: int",
           "ProviderCompactionPolicy: TypeAlias = _StaticProviderCompaction | _DynamicProviderCompaction"
         ],
         "exports": {},
         "imports": [
-          "from typing import Literal, TypeAlias",
+          "import sys",
+          "from typing import TYPE_CHECKING, Literal, TypeAlias",
           "from typing_extensions import Required, TypedDict",
           "from openai import Omit"
         ],

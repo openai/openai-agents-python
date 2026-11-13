@@ -358,7 +358,10 @@ async def test_configured_child_has_been_preserving_issuing_executor_tools(
                 cwd=str(executor.root),
                 tools=["exec_command", "write_stdin", "apply_patch"]
                 + (["project_glob", "project_grep"] if search_case else []),
-                write_policy="legacy" if selection == "legacy" else "strict",
+                # Strict mode requires a Linux or macOS executor.
+                write_policy="legacy"
+                if selection == "legacy" or sys.platform == "win32"
+                else "strict",
             )
             effects = []
 

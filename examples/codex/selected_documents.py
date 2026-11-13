@@ -1,4 +1,9 @@
-"""Run bounded document tools over decoded text selected by the application."""
+"""Run bounded document tools over decoded text selected by the application.
+
+See selected_documents.md for setup, permissions, and file limits.
+Run `python -m examples.codex.selected_documents` from the repository root.
+It requires OPENAI_API_KEY, makes live requests, and can incur charges.
+"""
 
 import asyncio
 from pathlib import Path
