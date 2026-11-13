@@ -1,0 +1,1974 @@
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index b6bfd171..5df3b5c2 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -224,6 +224,7 @@ fn register_session_root_skips_threads_with_explicit_parent() {
+ 
+ fn spawn_agent_call(call_id: &str) -> ResponseItem {
+     ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "spawn_agent".to_string(),
+         namespace: None,
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index f92ae078..da6fa1ab 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -4329,11 +4329,29 @@ fn validate_programmatic_tool_catalog(
+     let has_caller = |callers: Option<&[String]>, expected: &str| {
+         callers.is_some_and(|values| values.iter().any(|value| value == expected))
+     };
++    let function_callers = |tool: &codex_tools::ResponsesApiTool| {
++        let callers = tool.allowed_callers.as_deref().unwrap_or(&[]);
++        (
++            callers.contains(&codex_tools::ProviderToolCaller::Programmatic),
++            callers.contains(&codex_tools::ProviderToolCaller::Direct),
++        )
++    };
+     let mut declarations = 0;
+     let mut has_companion = false;
+     let mut requires_declaration = false;
+     for tool in tools {
+         let (programmatic, direct) = match tool {
++            ToolSpec::Function(tool) => function_callers(tool),
++            ToolSpec::Namespace(namespace) => {
++                for tool in &namespace.tools {
++                    if let codex_tools::ResponsesApiNamespaceTool::Function(tool) = tool {
++                        let (programmatic, direct) = function_callers(tool);
++                        has_companion |= programmatic;
++                        requires_declaration |= programmatic && !direct;
++                    }
++                }
++                continue;
++            }
+             ToolSpec::ProviderOnly(tool) if tool.tool_type() == "programmatic_tool_calling" => {
+                 declarations += 1;
+                 continue;
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 1ae3d69d..9d1cd64f 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -2427,6 +2427,7 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
+     let telemetry = test_session_telemetry();
+     let model_info = test_model_info();
+     let alpha = ResponsesApiTool {
++        allowed_callers: None,
+         name: "alpha".into(),
+         description: "Original".into(),
+         strict: false,
+@@ -2435,6 +2436,7 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
+         output_schema: None,
+     };
+     let beta = ResponsesApiTool {
++        allowed_callers: None,
+         name: "beta".into(),
+         ..alpha.clone()
+     };
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 43f35d46..30d14091 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -1015,6 +1015,7 @@ mod tests {
+             message("assistant", "commentary", Some(MessagePhase::Commentary)),
+             message("assistant", "final", Some(MessagePhase::FinalAnswer)),
+             ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "shell_command".to_string(),
+                 namespace: None,
+diff --git a/codex-rs/core/src/compact_tests.rs b/codex-rs/core/src/compact_tests.rs
+index 03f3c272..08b173a3 100644
+--- a/codex-rs/core/src/compact_tests.rs
++++ b/codex-rs/core/src/compact_tests.rs
+@@ -53,6 +53,7 @@ async fn local_compaction_respects_tool_metadata_state(
+         let arguments = json!({"plan": [{"step": "x".repeat(7 * 1024), "status": "completed"}]});
+         assert!(serde_json::to_vec(&arguments)?.len() < 8 * 1024);
+         items.push(ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "update_plan".to_string(),
+             namespace: None,
+diff --git a/codex-rs/core/src/context_manager/history_tests.rs b/codex-rs/core/src/context_manager/history_tests.rs
+index 7acab46c..71903f61 100644
+--- a/codex-rs/core/src/context_manager/history_tests.rs
++++ b/codex-rs/core/src/context_manager/history_tests.rs
+@@ -1189,6 +1189,7 @@ fn for_prompt_strips_media_when_model_does_not_support_it() {
+             ),
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "view_image".to_string(),
+             namespace: None,
+@@ -1289,6 +1290,7 @@ fn for_prompt_strips_media_when_model_does_not_support_it() {
+             ),
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "view_image".to_string(),
+             namespace: None,
+@@ -1522,6 +1524,7 @@ fn estimate_token_count_with_base_instructions_uses_provided_text() {
+ fn remove_first_item_removes_matching_output_for_function_call() {
+     let items = vec![
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "do_it".to_string(),
+             namespace: None,
+@@ -1558,6 +1561,7 @@ fn remove_first_item_removes_matching_call_for_output() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "do_it".to_string(),
+             namespace: None,
+@@ -2399,6 +2403,7 @@ fn normalize_mixed_inserts_and_removals() {
+     let items = vec![
+         // Will get an inserted output
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "f1".to_string(),
+             namespace: None,
+@@ -2451,6 +2456,7 @@ fn normalize_mixed_inserts_and_removals() {
+         raw_items(&h),
+         vec![
+             ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "f1".to_string(),
+                 namespace: None,
+@@ -2513,6 +2519,7 @@ fn normalize_mixed_inserts_and_removals() {
+ #[test]
+ fn normalize_adds_missing_output_for_function_call_inserts_output() {
+     let items = vec![ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "do_it".to_string(),
+         namespace: None,
+@@ -2529,6 +2536,7 @@ fn normalize_adds_missing_output_for_function_call_inserts_output() {
+         raw_items(&h),
+         vec![
+             ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "do_it".to_string(),
+                 namespace: None,
+@@ -2570,6 +2578,7 @@ fn normalize_preserves_named_function_call_output_without_call_id() {
+ fn for_prompt_assigns_stable_id_to_synthetic_output_without_reordering_history() {
+     let items = vec![
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: Some(ResponseItemId::with_suffix("fc", "existing")),
+             name: "do_it".to_string(),
+             namespace: None,
+@@ -2785,6 +2794,7 @@ fn normalize_keeps_server_tool_search_output_without_matching_call() {
+ fn normalize_mixed_inserts_and_removals_panics_in_debug() {
+     let items = vec![
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "f1".to_string(),
+             namespace: None,
+diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
+index a0f475f3..dead0b13 100644
+--- a/codex-rs/core/src/guardian/tests.rs
++++ b/codex-rs/core/src/guardian/tests.rs
+@@ -263,6 +263,7 @@ async fn seed_guardian_parent_history(session: &Arc<Session>, turn: &Arc<TurnCon
+                     internal_chat_message_metadata_passthrough: None,
+                 },
+                 ResponseItem::FunctionCall {
++                    caller: None,
+                     id: None,
+                     name: "gh_repo_view".to_string(),
+                     namespace: None,
+@@ -1087,6 +1088,7 @@ fn collect_guardian_transcript_entries_includes_recent_tool_calls_and_output() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "read_file".to_string(),
+             namespace: None,
+@@ -1791,6 +1793,7 @@ fn build_guardian_transcript_reserves_separate_budget_for_tool_evidence() {
+     })
+     .collect::<Vec<_>>();
+     items.extend((0..12).map(|index| ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: format!("tool_{index}"),
+         namespace: None,
+@@ -1847,6 +1850,7 @@ fn build_guardian_transcript_preserves_recent_tool_context_when_user_history_is_
+         .collect::<Vec<_>>();
+     items.extend([
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "shell".to_string(),
+             namespace: None,
+diff --git a/codex-rs/core/src/prepared_request.rs b/codex-rs/core/src/prepared_request.rs
+index e19d63cb..3db50e85 100644
+--- a/codex-rs/core/src/prepared_request.rs
++++ b/codex-rs/core/src/prepared_request.rs
+@@ -196,6 +196,7 @@ mod tests {
+ 
+     fn function(name: &str) -> ResponsesApiTool {
+         ResponsesApiTool {
++            allowed_callers: None,
+             name: name.into(),
+             description: "original".into(),
+             strict: false,
+diff --git a/codex-rs/core/src/realtime_conversation/tool_task.rs b/codex-rs/core/src/realtime_conversation/tool_task.rs
+index 5c18bf94..dedb090c 100644
+--- a/codex-rs/core/src/realtime_conversation/tool_task.rs
++++ b/codex-rs/core/src/realtime_conversation/tool_task.rs
+@@ -794,6 +794,7 @@ impl RealtimeToolCall {
+         let native_call_id = self.native_call_id.clone();
+         let ignored = runtime.ignores_handoff(&self.native_name, &native_call_id);
+         let mut item = ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: self.native_name.name.clone(),
+             namespace: self.native_name.namespace.clone(),
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index ec4f3b1b..42b762b7 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -14356,6 +14356,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+         .await;
+ 
+     let item = ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "test_tool".to_string(),
+         namespace: None,
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 1898ee43..5fd3271f 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -405,6 +405,22 @@ pub(crate) async fn handle_output_item_done(
+         ));
+     }
+ 
++    let programmatic_declared = ctx
++        .step_context
++        .tool_router
++        .has_provider_programmatic_tool();
++    crate::tools::program_callers::observe(&ctx.turn_store, &item, programmatic_declared)
++        .map_err(CodexErr::InvalidRequest)?;
++    let provider_programmatic_call = match &item {
++        ResponseItem::FunctionCall {
++            caller: Some(codex_protocol::models::ProviderFunctionCaller::Program { caller_id }),
++            ..
++        } => Some(
++            crate::tools::program_callers::admit(&ctx.turn_store, caller_id, programmatic_declared)
++                .map_err(CodexErr::InvalidRequest)?,
++        ),
++        _ => None,
++    };
+     let mut routed = ctx.tool_runtime.build_model_tool_call(item.clone());
+     let passive = matches!(&routed, Ok(None));
+     // This turn store tracks completed stream items independently of provider
+@@ -467,7 +483,12 @@ pub(crate) async fn handle_output_item_done(
+             let tool_future: InFlightFuture<'static> = Box::pin(
+                 ctx.tool_runtime
+                     .clone()
+-                    .handle_tool_call_with_provider_metadata(call, cancellation_token, provider_agent_metadata),
++                    .handle_tool_call_with_provider_admission(
++                        call,
++                        cancellation_token,
++                        provider_agent_metadata,
++                        provider_programmatic_call,
++                    ),
+             );
+ 
+             output.needs_follow_up = true;
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+index e84be4e4..bc29ba4e 100644
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -112,6 +112,7 @@ fn external_context_pollution_items_exclude_local_tool_calls() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "shell".to_string(),
+             namespace: None,
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+index 48543173..970c5333 100644
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -697,6 +697,7 @@ fn truncates_before_requested_user_message() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             call_id: "c1".to_string(),
+             name: "tool".to_string(),
+diff --git a/codex-rs/core/src/thread_rollout_truncation_tests.rs b/codex-rs/core/src/thread_rollout_truncation_tests.rs
+index 114cafee..028b3e55 100644
+--- a/codex-rs/core/src/thread_rollout_truncation_tests.rs
++++ b/codex-rs/core/src/thread_rollout_truncation_tests.rs
+@@ -282,6 +282,7 @@ fn truncates_rollout_from_start_before_nth_user_only() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             call_id: "c1".to_string(),
+             name: "tool".to_string(),
+diff --git a/codex-rs/core/src/tools/code_mode/delegate_tests.rs b/codex-rs/core/src/tools/code_mode/delegate_tests.rs
+index 1a8e575e..8d529771 100644
+--- a/codex-rs/core/src/tools/code_mode/delegate_tests.rs
++++ b/codex-rs/core/src/tools/code_mode/delegate_tests.rs
+@@ -77,6 +77,7 @@ impl ToolExecutor<ToolInvocation> for TestHandler {
+ 
+     fn spec(&self) -> codex_tools::ToolSpec {
+         codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++            allowed_callers: None,
+             name: "audit_probe".to_string(),
+             description: "Return a marker for the code-mode dispatch test.".to_string(),
+             strict: false,
+diff --git a/codex-rs/core/src/tools/code_mode/wait_spec.rs b/codex-rs/core/src/tools/code_mode/wait_spec.rs
+index 01b713e5..fc2d9b83 100644
+--- a/codex-rs/core/src/tools/code_mode/wait_spec.rs
++++ b/codex-rs/core/src/tools/code_mode/wait_spec.rs
+@@ -33,6 +33,7 @@ pub(crate) fn create_wait_tool(
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: codex_code_mode::WAIT_TOOL_NAME.to_string(),
+         description: description_override.map(str::to_owned).unwrap_or_else(|| {
+             format!(
+@@ -78,6 +79,7 @@ mod tests {
+         assert_eq!(
+             create_wait_tool(/*description_override*/ None, /*parameters_override*/ None),
+             ToolSpec::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: codex_code_mode::WAIT_TOOL_NAME.to_string(),
+                 description: format!(
+                     "Waits on a yielded `{}` cell and returns new output or completion.\n{}",
+diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
+index f436bfa6..a7977536 100644
+--- a/codex-rs/core/src/tools/context.rs
++++ b/codex-rs/core/src/tools/context.rs
+@@ -47,6 +47,8 @@ pub type SharedTurnDiffTracker = Arc<Mutex<TurnDiffTracker>>;
+ /// Delivery does not finish the call: post-tool hooks can still be cancelled.
+ #[derive(Default)]
+ pub(crate) struct ToolCallState {
++    pub(crate) provider_programmatic_call:
++        OnceLock<super::program_callers::ProgrammaticCallReceipt>,
+     pub(crate) provider_agent_metadata: OnceLock<serde_json::Value>,
+     pub(crate) terminal_outcome_reached: AtomicBool,
+     pub(crate) dispatch_started_at: OnceLock<std::time::Instant>,
+diff --git a/codex-rs/core/src/tools/context_tests.rs b/codex-rs/core/src/tools/context_tests.rs
+index bd0cb0c5..31203a91 100644
+--- a/codex-rs/core/src/tools/context_tests.rs
++++ b/codex-rs/core/src/tools/context_tests.rs
+@@ -348,6 +348,7 @@ fn tool_search_payloads_roundtrip_as_tool_search_outputs() {
+     };
+     let response = ToolSearchOutput {
+         tools: vec![LoadableToolSpec::Function(codex_tools::ResponsesApiTool {
++            allowed_callers: None,
+             name: "create_event".to_string(),
+             description: String::new(),
+             strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/current_time.rs b/codex-rs/core/src/tools/handlers/current_time.rs
+index 527701b9..348dcbf6 100644
+--- a/codex-rs/core/src/tools/handlers/current_time.rs
++++ b/codex-rs/core/src/tools/handlers/current_time.rs
+@@ -58,6 +58,7 @@ impl ToolExecutor<ToolInvocation> for CurrentTimeHandler {
+             name: NAMESPACE.to_string(),
+             description: "Tools for reading and waiting on time.".to_string(),
+             tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: TOOL_NAME.to_string(),
+                 description: "Return the current time in UTC.".to_string(),
+                 strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index ec797646..c1e22cd8 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -47,6 +47,10 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
+         self.0.spec()
+     }
+ 
++    fn allowed_provider_callers(&self) -> Option<codex_tools::ProviderToolCallers> {
++        self.0.allowed_provider_callers()
++    }
++
+     fn allowed_callers(&self) -> Option<codex_tools::ToolExposures> {
+         self.0.allowed_callers()
+     }
+@@ -400,6 +404,7 @@ mod tests {
+ 
+         fn spec(&self) -> codex_tools::ToolSpec {
+             codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++                allowed_callers: None,
+                 name: "extension_echo".to_string(),
+                 description: "Echoes arguments.".to_string(),
+                 strict: true,
+@@ -447,6 +452,7 @@ mod tests {
+ 
+         fn spec(&self) -> codex_tools::ToolSpec {
+             codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++                allowed_callers: None,
+                 name: "extension_echo".to_string(),
+                 description: "Captures arguments.".to_string(),
+                 strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/get_context_remaining_spec.rs b/codex-rs/core/src/tools/handlers/get_context_remaining_spec.rs
+index 102dfbd1..3a7aaf23 100644
+--- a/codex-rs/core/src/tools/handlers/get_context_remaining_spec.rs
++++ b/codex-rs/core/src/tools/handlers/get_context_remaining_spec.rs
+@@ -9,6 +9,7 @@ pub(crate) const GET_CONTEXT_REMAINING_TOOL_NAME: &str = "get_context_remaining"
+ 
+ pub fn create_get_context_remaining_tool() -> ToolSpec {
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: GET_CONTEXT_REMAINING_TOOL_NAME.to_string(),
+         description: "Get the remaining tokens in the current context window.".to_string(),
+         strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/list_available_plugins_to_install_spec.rs b/codex-rs/core/src/tools/handlers/list_available_plugins_to_install_spec.rs
+index ac312075..0d056c4a 100644
+--- a/codex-rs/core/src/tools/handlers/list_available_plugins_to_install_spec.rs
++++ b/codex-rs/core/src/tools/handlers/list_available_plugins_to_install_spec.rs
+@@ -10,6 +10,7 @@ pub(crate) fn create_list_available_plugins_to_install_tool() -> ToolSpec {
+     );
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: LIST_AVAILABLE_PLUGINS_TO_INSTALL_TOOL_NAME.to_string(),
+         description,
+         strict: false,
+@@ -29,6 +30,7 @@ mod tests {
+         assert_eq!(
+             create_list_available_plugins_to_install_tool(),
+             ToolSpec::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: "list_available_plugins_to_install".to_string(),
+                 description: "# List plugin/connector install candidates\n\nUse this tool only when both are true:\n- The user explicitly asks to use a specific plugin or connector that is not already available in the current context or active `tools` list.\n- `tool_search` is not available, or it has already been called and did not find or make the requested tool callable.\n\nReturns known plugins and connectors that can be passed to `request_plugin_install`. When both a plugin and a connector match, prefer the plugin; use the connector only when its corresponding plugin is already installed.\n".to_string(),
+                 strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/mcp_resource_spec.rs b/codex-rs/core/src/tools/handlers/mcp_resource_spec.rs
+index 4c6d41f0..e85481b1 100644
+--- a/codex-rs/core/src/tools/handlers/mcp_resource_spec.rs
++++ b/codex-rs/core/src/tools/handlers/mcp_resource_spec.rs
+@@ -22,6 +22,7 @@ pub fn create_list_mcp_resources_tool(messages: Option<&ToolMessage>) -> ToolSpe
+     ]);
+ 
+     let tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: "list_mcp_resources".to_string(),
+         description: "Lists resources provided by MCP servers. Resources allow servers to share data that provides context to language models, such as files, database schemas, or application-specific information. Prefer resources over web search when possible.".to_string(),
+         strict: false,
+@@ -51,6 +52,7 @@ pub fn create_list_mcp_resource_templates_tool(messages: Option<&ToolMessage>) -
+     ]);
+ 
+     let tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: "list_mcp_resource_templates".to_string(),
+         description: "Lists resource templates provided by MCP servers. Parameterized resource templates allow servers to share data that takes parameters and provides context to language models, such as files, database schemas, or application-specific information. Prefer resource templates over web search when possible.".to_string(),
+         strict: false,
+@@ -80,6 +82,7 @@ pub fn create_read_mcp_resource_tool(messages: Option<&ToolMessage>) -> ToolSpec
+     ]);
+ 
+     let tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: "read_mcp_resource".to_string(),
+         description:
+             "Read a specific resource from an MCP server given the server name and resource URI."
+diff --git a/codex-rs/core/src/tools/handlers/mcp_resource_spec_tests.rs b/codex-rs/core/src/tools/handlers/mcp_resource_spec_tests.rs
+index ec6839e4..561d5e16 100644
+--- a/codex-rs/core/src/tools/handlers/mcp_resource_spec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/mcp_resource_spec_tests.rs
+@@ -8,6 +8,7 @@ fn list_mcp_resources_tool_matches_expected_spec() {
+     assert_eq!(
+         create_list_mcp_resources_tool(/*messages*/ None),
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "list_mcp_resources".to_string(),
+             description: "Lists resources provided by MCP servers. Resources allow servers to share data that provides context to language models, such as files, database schemas, or application-specific information. Prefer resources over web search when possible.".to_string(),
+             strict: false,
+@@ -38,6 +39,7 @@ fn list_mcp_resource_templates_tool_matches_expected_spec() {
+     assert_eq!(
+         create_list_mcp_resource_templates_tool(/*messages*/ None),
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "list_mcp_resource_templates".to_string(),
+             description: "Lists resource templates provided by MCP servers. Parameterized resource templates allow servers to share data that takes parameters and provides context to language models, such as files, database schemas, or application-specific information. Prefer resource templates over web search when possible.".to_string(),
+             strict: false,
+@@ -68,6 +70,7 @@ fn read_mcp_resource_tool_matches_expected_spec() {
+     assert_eq!(
+         create_read_mcp_resource_tool(/*messages*/ None),
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "read_mcp_resource".to_string(),
+             description:
+                 "Read a specific resource from an MCP server given the server name and resource URI."
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
+index 92bae000..49933e22 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
+@@ -89,6 +89,7 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
+         name: MULTI_AGENT_V1_NAMESPACE.to_string(),
+         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "spawn_agent".to_string(),
+             description: spawn_agent_tool_description(
+                 available_models_description.as_deref(),
+@@ -139,6 +140,7 @@ pub fn create_spawn_agent_tool_v2(
+     );
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "spawn_agent".to_string(),
+         description: spawn_agent_tool_description_v2(
+             available_models_description.as_deref(),
+@@ -190,6 +192,7 @@ pub fn create_send_input_tool_v1() -> ToolSpec {
+         name: MULTI_AGENT_V1_NAMESPACE.to_string(),
+         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "send_input".to_string(),
+             description: "Send a message to an existing agent. Use interrupt=true to redirect work immediately. You should reuse the agent by send_input if you believe your assigned task is highly dependent on the context of a previous task."
+                 .to_string(),
+@@ -219,6 +222,7 @@ pub fn create_send_message_tool() -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "send_message".to_string(),
+         description: "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn."
+             .to_string(),
+@@ -252,6 +256,7 @@ pub fn create_followup_task_tool() -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "followup_task".to_string(),
+         description: "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes."
+             .to_string(),
+@@ -272,6 +277,7 @@ pub fn create_resume_agent_tool() -> ToolSpec {
+         name: MULTI_AGENT_V1_NAMESPACE.to_string(),
+         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "resume_agent".to_string(),
+             description:
+                 "Resume a previously closed agent by id so it can receive send_input and wait_agent calls."
+@@ -289,6 +295,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
+         name: MULTI_AGENT_V1_NAMESPACE.to_string(),
+         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "wait_agent".to_string(),
+             description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
+                 .to_string(),
+@@ -302,6 +309,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
+ 
+ pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "wait_agent".to_string(),
+         description: "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline."
+             .to_string(),
+@@ -322,6 +330,7 @@ pub fn create_list_agents_tool() -> ToolSpec {
+     )]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "list_agents".to_string(),
+         description:
+             "List live agents in the current root thread tree. Optionally filter by task-path prefix."
+@@ -343,6 +352,7 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
+         name: MULTI_AGENT_V1_NAMESPACE.to_string(),
+         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "close_agent".to_string(),
+             description: "Close an agent and any open descendants when they are no longer needed, and return the target agent's previous status before shutdown was requested. Completed agents remain open and count toward the concurrency limit until closed. Don't keep agents open for too long if they are not needed anymore.".to_string(),
+             strict: false,
+@@ -367,6 +377,7 @@ pub fn create_interrupt_agent_tool_v2() -> ToolSpec {
+     )]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "interrupt_agent".to_string(),
+         description: "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.".to_string(),
+         strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/new_context_window_spec.rs b/codex-rs/core/src/tools/handlers/new_context_window_spec.rs
+index d2bde1f1..418bb0f0 100644
+--- a/codex-rs/core/src/tools/handlers/new_context_window_spec.rs
++++ b/codex-rs/core/src/tools/handlers/new_context_window_spec.rs
+@@ -7,6 +7,7 @@ pub(crate) const NEW_CONTEXT_WINDOW_TOOL_NAME: &str = "new_context";
+ 
+ pub fn create_new_context_window_tool() -> ToolSpec {
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: NEW_CONTEXT_WINDOW_TOOL_NAME.to_string(),
+         description: "Start a new context window. Does not clear, reset, or otherwise affect environment state.".to_string(),
+         strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/plan_spec.rs b/codex-rs/core/src/tools/handlers/plan_spec.rs
+index d8ce9576..46f4ec86 100644
+--- a/codex-rs/core/src/tools/handlers/plan_spec.rs
++++ b/codex-rs/core/src/tools/handlers/plan_spec.rs
+@@ -40,6 +40,7 @@ pub fn create_update_plan_tool() -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "update_plan".to_string(),
+         description: r#"Updates the task plan.
+ Provide an optional explanation and a list of plan items, each with a step and status.
+diff --git a/codex-rs/core/src/tools/handlers/request_plugin_install_spec.rs b/codex-rs/core/src/tools/handlers/request_plugin_install_spec.rs
+index ec09be07..d3e8c9ed 100644
+--- a/codex-rs/core/src/tools/handlers/request_plugin_install_spec.rs
++++ b/codex-rs/core/src/tools/handlers/request_plugin_install_spec.rs
+@@ -71,6 +71,7 @@ pub(crate) fn create_request_plugin_install_tool(
+     };
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: REQUEST_PLUGIN_INSTALL_TOOL_NAME.to_string(),
+         description,
+         strict: false,
+@@ -99,6 +100,7 @@ mod tests {
+         assert_eq!(
+             create_request_plugin_install_tool(ToolSuggestPresentation::ListTool),
+             ToolSpec::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: "request_plugin_install".to_string(),
+                 description: expected_description.to_string(),
+                 strict: false,
+@@ -158,6 +160,7 @@ mod tests {
+         assert_eq!(
+             create_request_plugin_install_tool(ToolSuggestPresentation::RecommendationContext),
+             ToolSpec::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: "request_plugin_install".to_string(),
+                 description: expected_description.to_string(),
+                 strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_async.rs b/codex-rs/core/src/tools/handlers/request_user_input_async.rs
+index f35e1d1a..975307e1 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input_async.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_async.rs
+@@ -77,6 +77,7 @@ impl ToolExecutor<ToolInvocation> for RequestUserInputAsyncHandler {
+         }
+ 
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: TOOL_NAME.to_string(),
+             description: self.description.clone(),
+             strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_spec.rs b/codex-rs/core/src/tools/handlers/request_user_input_spec.rs
+index ede0d85b..26187d34 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input_spec.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_spec.rs
+@@ -75,6 +75,7 @@ pub fn create_request_user_input_tool(description: String) -> ToolSpec {
+     let properties = BTreeMap::from([("questions".to_string(), questions_schema)]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: REQUEST_USER_INPUT_TOOL_NAME.to_string(),
+         description,
+         strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs b/codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs
+index 6d2e25ec..181ba6bf 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs
+@@ -24,6 +24,7 @@ fn request_user_input_tool_includes_questions_schema() {
+     assert_eq!(
+         create_request_user_input_tool("Ask the user to choose.".to_string()),
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "request_user_input".to_string(),
+             description: "Ask the user to choose.".to_string(),
+             strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/send_message_to_user_async.rs b/codex-rs/core/src/tools/handlers/send_message_to_user_async.rs
+index 075a7e7f..efb292ba 100644
+--- a/codex-rs/core/src/tools/handlers/send_message_to_user_async.rs
++++ b/codex-rs/core/src/tools/handlers/send_message_to_user_async.rs
+@@ -42,6 +42,7 @@ impl ToolExecutor<ToolInvocation> for SendMessageToUserAsyncHandler {
+         )]);
+ 
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: TOOL_NAME.to_string(),
+             description: "Send a concise message that needs the user's attention during ongoing work. The tool returns immediately without ending the turn or waiting for a reply; any reply arrives asynchronously as a new user message. Use this tool to report a critical blocker or a finding that may change the task's direction, or to answer a user question or status request received while work is still in progress. Use this tool when a message needs the user's immediate attention; use commentary for routine progress and intermediate context. Use clear formatting, such as bolding questions, to make requests easy to notice and answer."
+                 .to_string(),
+diff --git a/codex-rs/core/src/tools/handlers/shell_spec.rs b/codex-rs/core/src/tools/handlers/shell_spec.rs
+index ac3dcf99..b92a85e2 100644
+--- a/codex-rs/core/src/tools/handlers/shell_spec.rs
++++ b/codex-rs/core/src/tools/handlers/shell_spec.rs
+@@ -93,6 +93,7 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
+     ));
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "exec_command".to_string(),
+         description: if include_windows_shell_guidance {
+             format!(
+@@ -143,6 +144,7 @@ pub fn create_write_stdin_tool() -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "write_stdin".to_string(),
+         description:
+             "Writes characters to an existing unified exec session and returns recent output."
+@@ -177,6 +179,7 @@ pub fn create_request_permissions_tool(description: String) -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "request_permissions".to_string(),
+         description,
+         strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/shell_spec_tests.rs b/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
+index c3d1afff..531cd3c0 100644
+--- a/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
+@@ -77,6 +77,7 @@ fn exec_command_tool_matches_expected_spec() {
+     assert_eq!(
+         tool,
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "exec_command".to_string(),
+             description,
+             strict: false,
+@@ -125,6 +126,7 @@ fn write_stdin_tool_matches_expected_spec() {
+     assert_eq!(
+         tool,
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "write_stdin".to_string(),
+             description:
+                 "Writes characters to an existing unified exec session and returns recent output."
+@@ -166,6 +168,7 @@ fn request_permissions_tool_includes_full_permission_schema() {
+     assert_eq!(
+         tool,
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "request_permissions".to_string(),
+             description: "Request extra permissions for this turn.".to_string(),
+             strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/sleep.rs b/codex-rs/core/src/tools/handlers/sleep.rs
+index 45db1a3b..bc87637a 100644
+--- a/codex-rs/core/src/tools/handlers/sleep.rs
++++ b/codex-rs/core/src/tools/handlers/sleep.rs
+@@ -47,6 +47,7 @@ fn create_sleep_tool() -> ToolSpec {
+         name: NAMESPACE.to_string(),
+         description: "Tools for reading and waiting on time.".to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: TOOL_NAME.to_string(),
+             description: "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time."
+                 .to_string(),
+diff --git a/codex-rs/core/src/tools/handlers/test_sync_spec.rs b/codex-rs/core/src/tools/handlers/test_sync_spec.rs
+index 33bd720c..752d37ff 100644
+--- a/codex-rs/core/src/tools/handlers/test_sync_spec.rs
++++ b/codex-rs/core/src/tools/handlers/test_sync_spec.rs
+@@ -56,6 +56,7 @@ pub fn create_test_sync_tool() -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "test_sync_tool".to_string(),
+         description: "Internal synchronization helper used by Codex integration tests.".to_string(),
+         strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/test_sync_spec_tests.rs b/codex-rs/core/src/tools/handlers/test_sync_spec_tests.rs
+index adcb2a2e..25246930 100644
+--- a/codex-rs/core/src/tools/handlers/test_sync_spec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/test_sync_spec_tests.rs
+@@ -8,6 +8,7 @@ fn test_sync_tool_matches_expected_spec() {
+     assert_eq!(
+         create_test_sync_tool(),
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "test_sync_tool".to_string(),
+             description: "Internal synchronization helper used by Codex integration tests."
+                 .to_string(),
+diff --git a/codex-rs/core/src/tools/handlers/tool_search.rs b/codex-rs/core/src/tools/handlers/tool_search.rs
+index d0c086e5..e33db501 100644
+--- a/codex-rs/core/src/tools/handlers/tool_search.rs
++++ b/codex-rs/core/src/tools/handlers/tool_search.rs
+@@ -431,6 +431,7 @@ mod tests {
+                     description: "Tools in the mcp__calendar namespace.".to_string(),
+                     tools: vec![
+                         ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                            allowed_callers: None,
+                             name: "create_event".to_string(),
+                             description: "Create events desktop tool".to_string(),
+                             strict: false,
+@@ -443,6 +444,7 @@ mod tests {
+                             output_schema: None,
+                         }),
+                         ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                            allowed_callers: None,
+                             name: "list_events".to_string(),
+                             description: "List events desktop tool".to_string(),
+                             strict: false,
+@@ -460,6 +462,7 @@ mod tests {
+                     name: "codex_app".to_string(),
+                     description: "Tools in the codex_app namespace.".to_string(),
+                     tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                        allowed_callers: None,
+                         name: "automation_update".to_string(),
+                         description: "Create, update, view, or delete recurring automations."
+                             .to_string(),
+diff --git a/codex-rs/core/src/tools/handlers/view_image_spec.rs b/codex-rs/core/src/tools/handlers/view_image_spec.rs
+index 6107caf8..02904003 100644
+--- a/codex-rs/core/src/tools/handlers/view_image_spec.rs
++++ b/codex-rs/core/src/tools/handlers/view_image_spec.rs
+@@ -40,6 +40,7 @@ pub fn create_view_image_tool(options: ViewImageToolOptions) -> ToolSpec {
+     }
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: VIEW_IMAGE_TOOL_NAME.to_string(),
+         description: "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk."
+             .to_string(),
+diff --git a/codex-rs/core/src/tools/handlers/wait_for_environment.rs b/codex-rs/core/src/tools/handlers/wait_for_environment.rs
+index 449413a3..134b0b3d 100644
+--- a/codex-rs/core/src/tools/handlers/wait_for_environment.rs
++++ b/codex-rs/core/src/tools/handlers/wait_for_environment.rs
+@@ -88,6 +88,7 @@ impl ToolExecutor<ToolInvocation> for WaitForEnvironmentHandler {
+ 
+     fn spec(&self) -> ToolSpec {
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: WAIT_FOR_ENVIRONMENT_TOOL_NAME.to_string(),
+             description: self.tool_description.clone(),
+             strict: false,
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+index 0b25a323..642eefcf 100644
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -148,3 +148,5 @@ fn build_content_with_timeout(exec_output: &ExecToolCallOutput) -> String {
+         exec_output.aggregated_output.text.clone()
+     }
+ }
++
++pub(crate) mod program_callers;
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 1d673f9f..6e948755 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -219,6 +219,21 @@ impl ToolCallRuntime {
+         call: ToolCall,
+         cancellation_token: CancellationToken,
+         provider_agent_metadata: Option<serde_json::Value>,
++    ) -> impl std::future::Future<Output = Result<DirectToolResult, CodexErr>> {
++        self.handle_tool_call_with_provider_admission(
++            call,
++            cancellation_token,
++            provider_agent_metadata,
++            None,
++        )
++    }
++
++    pub(crate) fn handle_tool_call_with_provider_admission(
++        self,
++        call: ToolCall,
++        cancellation_token: CancellationToken,
++        provider_agent_metadata: Option<serde_json::Value>,
++        provider_programmatic_call: Option<super::program_callers::ProgrammaticCallReceipt>,
+     ) -> impl std::future::Future<Output = Result<DirectToolResult, CodexErr>> {
+         self.observe_requested_handoff(&call.tool_name, &call.call_id);
+         let ignored = self.ignores_handoff(&call.tool_name, &call.call_id);
+@@ -229,6 +244,9 @@ impl ToolCallRuntime {
+         let recorded_call = recorder.prepare_direct_call(&call, &source, &self.step_context);
+         let step_context = Arc::clone(&self.step_context);
+         let call_state = Arc::new(ToolCallState::default());
++        if let Some(receipt) = provider_programmatic_call {
++            let _ = call_state.provider_programmatic_call.set(receipt);
++        }
+         if let Some(metadata) = provider_agent_metadata {
+             let _ = call_state.provider_agent_metadata.set(metadata);
+         }
+@@ -968,6 +986,7 @@ mod tests {
+ 
+         fn spec(&self) -> codex_tools::ToolSpec {
+             codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++                allowed_callers: None,
+                 name: self.tool_name.name.clone(),
+                 description: "Immediate test tool.".to_string(),
+                 strict: false,
+diff --git a/codex-rs/core/src/tools/program_callers.rs b/codex-rs/core/src/tools/program_callers.rs
+new file mode 100644
+index 00000000..836137a6
+--- /dev/null
++++ b/codex-rs/core/src/tools/program_callers.rs
+@@ -0,0 +1,162 @@
++use codex_extension_api::ExtensionData;
++use codex_protocol::models::ResponseItem;
++use std::collections::HashMap;
++use std::sync::{Arc, Mutex, Weak};
++
++const MAX_PROGRAMS: usize = 4096;
++const MAX_PROGRAM_BYTES: usize = 1024 * 1024;
++#[derive(Default)]
++struct LivePrograms {
++    entries: HashMap<String, bool>,
++    bytes: usize,
++    exhausted: bool,
++}
++#[derive(Default)]
++struct ProgramOwner(Mutex<LivePrograms>);
++
++/// Existing per-call state owns this after the exact live parent is admitted.
++#[derive(Clone)]
++pub(crate) struct ProgrammaticCallReceipt {
++    owner: Weak<ExtensionData>,
++}
++impl ProgrammaticCallReceipt {
++    pub(crate) fn belongs_to(&self, owner: &Arc<ExtensionData>) -> bool {
++        Weak::ptr_eq(&self.owner, &Arc::downgrade(owner))
++    }
++}
++
++pub(crate) fn observe(
++    store: &Arc<ExtensionData>,
++    item: &ResponseItem,
++    declared: bool,
++) -> Result<(), String> {
++    let (id, opening) = match item {
++        ResponseItem::Program { call_id, .. } => (call_id, true),
++        ResponseItem::ProgramOutput { call_id, .. } => (call_id, false),
++        _ => return Ok(()),
++    };
++    if id.is_empty() {
++        return Ok(());
++    }
++    let state = store.get_or_init(ProgramOwner::default);
++    let mut state = state
++        .0
++        .lock()
++        .map_err(|_| "Provider program owner poisoned")?;
++    if state.exhausted {
++        return Ok(());
++    }
++    if let Some(active) = state.entries.get_mut(id) {
++        *active = false;
++        return Ok(());
++    }
++    let cost = serde_json::to_vec(id)
++        .map_err(|_| "Invalid provider program identity")?
++        .len()
++        .saturating_add(64);
++    if state.entries.len() >= MAX_PROGRAMS || state.bytes.saturating_add(cost) > MAX_PROGRAM_BYTES {
++        state.entries.clear();
++        state.bytes = 0;
++        state.exhausted = true;
++        return Ok(());
++    }
++    state.bytes += cost;
++    state.entries.insert(id.clone(), opening && declared);
++    Ok(())
++}
++
++pub(crate) fn admit(
++    store: &Arc<ExtensionData>,
++    caller_id: &str,
++    declared: bool,
++) -> Result<ProgrammaticCallReceipt, String> {
++    if !declared {
++        return Err(
++            "Programmatic caller requires a currently declared provider program tool".into(),
++        );
++    }
++    let state = store
++        .get::<ProgramOwner>()
++        .ok_or("Programmatic caller has no live parent program")?;
++    if !state
++        .0
++        .lock()
++        .map_err(|_| "Provider program owner poisoned")?
++        .entries
++        .get(caller_id)
++        .copied()
++        .unwrap_or(false)
++    {
++        return Err("Programmatic caller has no unique active parent program".into());
++    }
++    Ok(ProgrammaticCallReceipt {
++        owner: Arc::downgrade(store),
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn program(id: &str) -> ResponseItem {
++        serde_json::from_value(serde_json::json!({"type":"program","call_id":id,"code":"passive"}))
++            .unwrap()
++    }
++    fn output(id: &str) -> ResponseItem {
++        serde_json::from_value(serde_json::json!({"type":"program_output","call_id":id,"status":"completed","result":"done"})).unwrap()
++    }
++    #[test]
++    fn receipts_require_a_unique_live_parent_in_the_exact_turn_owner() {
++        let owner = Arc::new(ExtensionData::default());
++        assert!(admit(&owner, "parent", true).is_err());
++        observe(&owner, &program("parent"), true).unwrap();
++        assert!(admit(&owner, "parent", false).is_err());
++        let receipt = admit(&owner, "parent", true).unwrap();
++        assert!(receipt.belongs_to(&owner));
++        assert!(!receipt.belongs_to(&Arc::new(ExtensionData::default())));
++        observe(&owner, &output("parent"), true).unwrap();
++        assert!(admit(&owner, "parent", true).is_err());
++        // Completion cannot revoke an already admitted occurrence.
++        assert!(receipt.belongs_to(&owner));
++        observe(&owner, &program("parent"), true).unwrap();
++        assert!(admit(&owner, "parent", true).is_err());
++        let weak = Arc::downgrade(&owner);
++        drop(owner);
++        assert!(weak.upgrade().is_none());
++    }
++    #[test]
++    fn repeated_and_unavailable_programs_do_not_grant_admission() {
++        let owner = Arc::new(ExtensionData::default());
++        observe(&owner, &program("duplicate"), true).unwrap();
++        observe(&owner, &program("duplicate"), true).unwrap();
++        assert!(admit(&owner, "duplicate", true).is_err());
++        observe(&owner, &program("undeclared"), false).unwrap();
++        assert!(admit(&owner, "undeclared", true).is_err());
++        observe(&owner, &output("closed"), true).unwrap();
++        observe(&owner, &program("closed"), true).unwrap();
++        assert!(admit(&owner, "closed", true).is_err());
++        observe(&owner, &program(""), true).unwrap();
++        assert!(admit(&owner, "", true).is_err());
++    }
++    #[test]
++    fn retained_parent_limits_fail_closed_without_rejecting_passive_items() {
++        for bytes in [false, true] {
++            let owner = Arc::new(ExtensionData::default());
++            observe(&owner, &program("first"), true).unwrap();
++            if bytes {
++                observe(&owner, &program(&"x".repeat(MAX_PROGRAM_BYTES)), true).unwrap();
++            } else {
++                for n in 0..MAX_PROGRAMS {
++                    observe(&owner, &program(&n.to_string()), true).unwrap();
++                }
++            }
++            assert!(admit(&owner, "first", true).is_err());
++            observe(&owner, &program("later"), true).unwrap();
++            assert!(admit(&owner, "later", true).is_err());
++            let state = owner.get::<ProgramOwner>().unwrap();
++            let state = state.0.lock().unwrap();
++            assert!(state.exhausted);
++            assert!(state.entries.is_empty());
++            assert_eq!(state.bytes, 0);
++        }
++    }
++}
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index c792f9a1..e8ae476e 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -677,6 +677,29 @@ impl ToolRegistry {
+                 return Err(err);
+             }
+         };
++        if !matches!(
++            &invocation.source,
++            crate::tools::context::ToolCallSource::CodeMode { .. }
++        ) {
++            let programmatic = call_state
++                .as_ref()
++                .and_then(|state| state.provider_programmatic_call.get());
++            let policy = tool
++                .allowed_provider_callers()
++                .unwrap_or(codex_tools::ProviderToolCallers::DIRECT);
++            let allowed = match programmatic {
++                Some(receipt) => {
++                    receipt.belongs_to(&invocation.turn.extension_data)
++                        && policy.contains(codex_tools::ProviderToolCallers::PROGRAMMATIC)
++                }
++                None => policy.contains(codex_tools::ProviderToolCallers::DIRECT),
++            };
++            if !allowed {
++                return Err(FunctionCallError::Fatal(
++                    "Selected tool does not permit this provider caller".into(),
++                ));
++            }
++        }
+         if let Some(callers) = tool.allowed_callers() {
+             let allowed = match &invocation.source {
+                 crate::tools::context::ToolCallSource::CodeMode { .. } => {
+diff --git a/codex-rs/core/src/tools/registry_tests.rs b/codex-rs/core/src/tools/registry_tests.rs
+index 5e8870df..6e1171ee 100644
+--- a/codex-rs/core/src/tools/registry_tests.rs
++++ b/codex-rs/core/src/tools/registry_tests.rs
+@@ -124,6 +124,7 @@ impl CoreToolRuntime for LifecycleTestHandler {}
+ 
+ fn test_spec(tool_name: &codex_tools::ToolName) -> codex_tools::ToolSpec {
+     codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++        allowed_callers: None,
+         name: tool_name.name.clone(),
+         description: "Test tool.".to_string(),
+         strict: false,
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+index 3e154eb4..93a46da5 100644
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -400,6 +400,12 @@ impl ToolRouter {
+         }))
+     }
+ 
++    pub(crate) fn has_provider_programmatic_tool(&self) -> bool {
++        self.model_visible_specs.iter().any(|spec| {
++            matches!(spec, ToolSpec::ProviderOnly(tool) if tool.tool_type() == "programmatic_tool_calling")
++        })
++    }
++
+     /// Check the retained dispatch plan without hooks, accounting, or parse-error logging.
+     pub(crate) fn admits_response_item(&self, item: &ResponseItem) -> bool {
+         if let ResponseItem::McpApprovalRequest { server_label, .. } = item
+diff --git a/codex-rs/core/src/tools/router_tests.rs b/codex-rs/core/src/tools/router_tests.rs
+index 6aac3130..719f7712 100644
+--- a/codex-rs/core/src/tools/router_tests.rs
++++ b/codex-rs/core/src/tools/router_tests.rs
+@@ -164,6 +164,7 @@ impl<'call> ToolExecutor<ExtensionToolCall<'call>> for ExtensionEchoExecutor {
+             name: "extension/".to_string(),
+             description: default_namespace_description("extension/"),
+             tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: "echo".to_string(),
+                 description: "Echoes arguments through an extension tool.".to_string(),
+                 strict: true,
+@@ -394,6 +395,7 @@ async fn build_tool_call_uses_namespace_for_registry_name() -> anyhow::Result<()
+     let tool_name = "create_event".to_string();
+ 
+     let call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: tool_name.clone(),
+         namespace: Some("mcp__codex_apps__calendar".to_string()),
+@@ -457,6 +459,7 @@ async fn build_custom_tool_call_uses_namespace_for_registry_name() -> anyhow::Re
+ fn build_tool_call_normalizes_default_function_and_custom_namespaces() -> anyhow::Result<()> {
+     for namespace in [None, Some(""), Some(DEFAULT_FUNCTION_NAMESPACE)] {
+         let function_call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "lookup".to_string(),
+             namespace: namespace.map(str::to_string),
+@@ -770,6 +773,7 @@ async fn extension_tool_executors_are_model_visible_and_dispatchable() -> anyhow
+     );
+ 
+     let call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "echo".to_string(),
+         namespace: Some("extension/".to_string()),
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+index 8d9521a8..8af5d105 100644
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -335,6 +335,7 @@ impl<'call> ToolExecutor<ExtensionToolCall<'call>> for TestNamespaceExtensionToo
+             name: self.namespace.to_string(),
+             description: "Test namespace.".to_string(),
+             tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: self.tool_name.to_string(),
+                 description: "Test namespace tool.".to_string(),
+                 strict: false,
+@@ -364,6 +365,7 @@ impl<'call> ToolExecutor<ExtensionToolCall<'call>> for DeferredExtensionTool {
+ 
+     fn spec(&self) -> ToolSpec {
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "extension_echo".to_string(),
+             description: "Echoes arguments through an extension tool.".to_string(),
+             strict: true,
+diff --git a/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs b/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs
+index d44ad986..a2de08c0 100644
+--- a/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs
++++ b/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs
+@@ -39,6 +39,7 @@ impl ToolExecutor<ToolInvocation> for TestHandler {
+ 
+     fn spec(&self) -> codex_tools::ToolSpec {
+         codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++            allowed_callers: None,
+             name: self.tool_name.name.clone(),
+             description: "Test tool.".to_string(),
+             strict: false,
+diff --git a/codex-rs/core/src/turn_timing_tests.rs b/codex-rs/core/src/turn_timing_tests.rs
+index c4a44b12..66e5defc 100644
+--- a/codex-rs/core/src/turn_timing_tests.rs
++++ b/codex-rs/core/src/turn_timing_tests.rs
+@@ -151,6 +151,7 @@ async fn turn_timing_state_preserves_in_flight_items_after_turn_completion() {
+ fn response_item_records_turn_ttft_for_first_output_signals() {
+     assert!(response_item_records_turn_ttft(
+         &ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "shell".to_string(),
+             namespace: None,
+diff --git a/codex-rs/core/tests/suite/client.rs b/codex-rs/core/tests/suite/client.rs
+index 9baade38..997484d2 100644
+--- a/codex-rs/core/tests/suite/client.rs
++++ b/codex-rs/core/tests/suite/client.rs
+@@ -635,6 +635,7 @@ async fn synthetic_call_output_id_is_stable_across_resumes() -> anyhow::Result<(
+             timestamp: "2024-01-01T00:00:01.000Z".to_string(),
+             ordinal: None,
+             item: rollout_response_item(ResponseItem::FunctionCall {
++                caller: None,
+                 id: Some(ResponseItemId::with_suffix("fc", "existing")),
+                 name: "do_it".to_string(),
+                 namespace: None,
+@@ -1282,6 +1283,7 @@ async fn resume_replays_image_tool_outputs_with_detail() {
+             timestamp: "2024-01-01T00:00:01.000Z".to_string(),
+             ordinal: None,
+             item: rollout_response_item(ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "view_image".to_string(),
+                 namespace: None,
+@@ -3242,6 +3244,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
+         internal_chat_message_metadata_passthrough: None,
+     });
+     prompt.input.push(ResponseItem::FunctionCall {
++        caller: None,
+         id: Some(ResponseItemId::with_suffix("fc", "function-id")),
+         name: "do_thing".into(),
+         namespace: None,
+diff --git a/codex-rs/core/tests/suite/step_settings.rs b/codex-rs/core/tests/suite/step_settings.rs
+index 56cf9f9f..be6e4d66 100644
+--- a/codex-rs/core/tests/suite/step_settings.rs
++++ b/codex-rs/core/tests/suite/step_settings.rs
+@@ -2996,6 +2996,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for SettingsEcho {
+ 
+     fn spec(&self) -> ToolSpec {
+         ToolSpec::Function(codex_tools::ResponsesApiTool {
++            allowed_callers: None,
+             name: "extension_settings".to_string(),
+             description: "Report the settings received by this extension.".to_string(),
+             strict: false,
+diff --git a/codex-rs/ext/agent-message-board/src/tools/spec.rs b/codex-rs/ext/agent-message-board/src/tools/spec.rs
+index 956494a7..dc307460 100644
+--- a/codex-rs/ext/agent-message-board/src/tools/spec.rs
++++ b/codex-rs/ext/agent-message-board/src/tools/spec.rs
+@@ -127,6 +127,7 @@ pub(super) fn tool(
+     }
+     let parameters = json!({"type":"object","properties":properties,"required":required,"additionalProperties":false});
+     let tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: name.into(),
+         description: description_override.unwrap_or(description).into(),
+         strict: false,
+diff --git a/codex-rs/ext/goal/src/spec.rs b/codex-rs/ext/goal/src/spec.rs
+index 6d1d7a92..bee67fa7 100644
+--- a/codex-rs/ext/goal/src/spec.rs
++++ b/codex-rs/ext/goal/src/spec.rs
+@@ -12,6 +12,7 @@ pub const UPDATE_GOAL_TOOL_NAME: &str = "update_goal";
+ 
+ pub fn create_get_goal_tool() -> ToolSpec {
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: GET_GOAL_TOOL_NAME.to_string(),
+         description: "Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget."
+             .to_string(),
+@@ -41,6 +42,7 @@ pub fn create_create_goal_tool() -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: CREATE_GOAL_TOOL_NAME.to_string(),
+         description: format!(
+             r#"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.
+@@ -70,6 +72,7 @@ pub fn create_update_goal_tool() -> ToolSpec {
+     )]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: UPDATE_GOAL_TOOL_NAME.to_string(),
+         description: r#"Update the existing goal.
+ Set status to `paused` only at the user's explicit request to pause this goal, never on your own initiative. Ask if unclear; a later resume revokes that request. Report the returned status and stop goal work. Budget limits take precedence over pausing.
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
+index 27a36f51..748e5878 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
+@@ -1438,6 +1438,7 @@ max_recent_non_user_entries = 8
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "list_dir".to_owned(),
+             namespace: None,
+@@ -1770,6 +1771,7 @@ async fn contributor_includes_transcript_images_by_default() -> Result<()> {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "screenshot".to_owned(),
+             namespace: None,
+@@ -1881,6 +1883,7 @@ async fn contributor_uses_model_defaults_and_preserves_local_overrides() -> Resu
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "list_dir".to_owned(),
+             namespace: None,
+@@ -2001,6 +2004,7 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "list_dir".to_owned(),
+             namespace: None,
+@@ -2020,6 +2024,7 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "read_file".to_owned(),
+             namespace: None,
+@@ -2906,6 +2911,7 @@ async fn contributor_preserves_final_assistant_messages_after_tool_eviction() ->
+         },
+     ];
+     history.extend((0..6).map(|index| ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_owned(),
+         namespace: None,
+@@ -2968,6 +2974,7 @@ async fn contributor_sends_compacted_conversation_history_to_luna() -> Result<()
+         let call_id = format!("call-{index}");
+         [
+             ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "exec_command".to_owned(),
+                 namespace: None,
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
+index 9331af7c..e0f3ab48 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
+@@ -66,6 +66,7 @@ fn transcript_keeps_conversation_and_configured_sources() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "exec_command".to_string(),
+             namespace: None,
+@@ -340,6 +341,7 @@ fn transcript_preserves_recent_tool_evidence_when_protected_messages_fill_entry_
+         assistant_message(format!("final answer {index}"), MessagePhase::FinalAnswer)
+     }));
+     items.push(ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_string(),
+         namespace: None,
+@@ -397,6 +399,7 @@ fn transcript_reserves_five_recent_tool_entries_from_protected_messages() {
+     for index in 0..3 {
+         let call_id = format!("call-{index}");
+         items.push(ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "exec_command".to_string(),
+             namespace: None,
+@@ -582,6 +585,7 @@ fn transcript_preserves_latest_final_when_reserved_tools_fill_entry_window() {
+         user_message_item("Yes."),
+     ];
+     items.extend((0..3).map(|index| ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_string(),
+         namespace: None,
+@@ -659,6 +663,7 @@ fn transcript_does_not_protect_legacy_inter_agent_instructions() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "exec_command".to_string(),
+             namespace: None,
+@@ -713,6 +718,7 @@ fn transcript_reserves_separate_budget_for_recent_tool_evidence() {
+         })
+         .collect::<Vec<_>>();
+     items.extend((0..12).map(|index| ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_string(),
+         namespace: None,
+@@ -779,6 +785,7 @@ fn transcript_reserves_separate_budget_for_recent_tool_evidence() {
+         .expect("at least one tool entry should be retained")
+         .to_string();
+     items.push(ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_string(),
+         namespace: None,
+@@ -890,6 +897,7 @@ fn rejected_message_does_not_evict_retained_tool_entries() {
+         internal_chat_message_metadata_passthrough: None,
+     }];
+     items.extend((0..40).map(|index| ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_string(),
+         namespace: None,
+@@ -958,6 +966,7 @@ fn transcript_evicts_non_user_entries_in_cacheable_chunks() {
+         }];
+         items.extend(
+             (0..tool_call_count).map(|index| ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "exec_command".to_string(),
+                 namespace: None,
+@@ -1025,6 +1034,7 @@ fn transcript_truncates_tool_results_using_standard_budget() {
+     let output = format!("first {} last", "evidence ".repeat(5_000));
+     let items = vec![
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "node_repl__run".to_owned(),
+             namespace: None,
+@@ -1244,6 +1254,7 @@ fn transcript_preserves_encrypted_agent_messages_and_omits_other_encrypted_field
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "exec_command".to_string(),
+             namespace: None,
+diff --git a/codex-rs/ext/history-notes/src/tools.rs b/codex-rs/ext/history-notes/src/tools.rs
+index 114ee2ec..62c9d4c1 100644
+--- a/codex-rs/ext/history-notes/src/tools.rs
++++ b/codex-rs/ext/history-notes/src/tools.rs
+@@ -296,6 +296,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HistoryNotesTool {
+             name: self.action.namespace().to_string(),
+             description: self.action.namespace_description().to_string(),
+             tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: self.action.name().to_string(),
+                 description: self.action.description().to_string(),
+                 strict: false,
+diff --git a/codex-rs/ext/image-generation/src/tests.rs b/codex-rs/ext/image-generation/src/tests.rs
+index 77305846..9db5ce61 100644
+--- a/codex-rs/ext/image-generation/src/tests.rs
++++ b/codex-rs/ext/image-generation/src/tests.rs
+@@ -98,6 +98,7 @@ async fn recent_image_fallback_selects_newest_images_in_chronological_order() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "mcp_image".to_string(),
+             namespace: None,
+diff --git a/codex-rs/ext/image-generation/src/tool.rs b/codex-rs/ext/image-generation/src/tool.rs
+index 97b1d730..87237b74 100644
+--- a/codex-rs/ext/image-generation/src/tool.rs
++++ b/codex-rs/ext/image-generation/src/tool.rs
+@@ -633,6 +633,7 @@ fn imagegen_tool_spec() -> ToolSpec {
+         name: IMAGE_GEN_NAMESPACE.to_string(),
+         description: default_namespace_description(IMAGE_GEN_NAMESPACE),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: IMAGEGEN_TOOL_NAME.to_string(),
+             description: IMAGEGEN_DESCRIPTION.to_string(),
+             strict: false,
+diff --git a/codex-rs/ext/memories/src/tools/mod.rs b/codex-rs/ext/memories/src/tools/mod.rs
+index 2852e3c6..6800b47a 100644
+--- a/codex-rs/ext/memories/src/tools/mod.rs
++++ b/codex-rs/ext/memories/src/tools/mod.rs
+@@ -61,6 +61,7 @@ pub(super) fn memory_function_tool<I: JsonSchema, O: JsonSchema>(
+     description: &str,
+ ) -> ToolSpec {
+     let tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: name.to_string(),
+         description: description.to_string(),
+         strict: false,
+diff --git a/codex-rs/ext/skills/src/tools/mod.rs b/codex-rs/ext/skills/src/tools/mod.rs
+index 64d2eadd..6e2a93c7 100644
+--- a/codex-rs/ext/skills/src/tools/mod.rs
++++ b/codex-rs/ext/skills/src/tools/mod.rs
+@@ -297,6 +297,7 @@ fn skill_tool_name(name: &str) -> ToolName {
+ 
+ fn skill_function_tool<I: JsonSchema, O: JsonSchema>(name: &str, description: &str) -> ToolSpec {
+     let tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: name.to_string(),
+         description: description.to_string(),
+         strict: false,
+diff --git a/codex-rs/ext/web-search/src/history.rs b/codex-rs/ext/web-search/src/history.rs
+index b2a0af38..4b8f914b 100644
+--- a/codex-rs/ext/web-search/src/history.rs
++++ b/codex-rs/ext/web-search/src/history.rs
+@@ -128,6 +128,7 @@ mod tests {
+             message(ASSISTANT_ROLE, "old assistant"),
+             previous_user,
+             ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "tool".to_string(),
+                 namespace: None,
+diff --git a/codex-rs/ext/web-search/src/tool.rs b/codex-rs/ext/web-search/src/tool.rs
+index 8de7a844..7652f111 100644
+--- a/codex-rs/ext/web-search/src/tool.rs
++++ b/codex-rs/ext/web-search/src/tool.rs
+@@ -67,6 +67,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for WebSearchTool {
+             name: WEB_NAMESPACE.to_string(),
+             description: default_namespace_description(WEB_NAMESPACE),
+             tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: RUN_TOOL_NAME.to_string(),
+                 description: WEB_RUN_DESCRIPTION.to_string(),
+                 strict: false,
+diff --git a/codex-rs/external-agent-migration/src/sessions/append_tests.rs b/codex-rs/external-agent-migration/src/sessions/append_tests.rs
+index 72a42b4b..f3ff5797 100644
+--- a/codex-rs/external-agent-migration/src/sessions/append_tests.rs
++++ b/codex-rs/external-agent-migration/src/sessions/append_tests.rs
+@@ -89,6 +89,7 @@ fn requires_a_strict_nonempty_model_prefix() {
+     let mut with_tool_call = history;
+     with_tool_call.push(RolloutItem::ResponseItem(
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "native_tool".to_string(),
+             namespace: None,
+diff --git a/codex-rs/guardian-context/src/transcript_tests.rs b/codex-rs/guardian-context/src/transcript_tests.rs
+index 28859997..ac230877 100644
+--- a/codex-rs/guardian-context/src/transcript_tests.rs
++++ b/codex-rs/guardian-context/src/transcript_tests.rs
+@@ -142,6 +142,7 @@ fn registered_transcript_filters_roles_and_preserves_node_repl_tool_attribution(
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "read_file".to_string(),
+             namespace: Some("mcp__node_repl__".to_string()),
+@@ -219,6 +220,7 @@ fn registered_transcript_filters_roles_and_preserves_node_repl_tool_attribution(
+ fn excluded_tool_calls_still_attribute_included_results() {
+     let history = vec![
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "read_file".to_string(),
+             namespace: None,
+@@ -444,6 +446,7 @@ fn reused_registry_applies_current_history_sources_and_entry_limits() {
+     }
+ 
+     history.push(ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_string(),
+         namespace: None,
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index 214bb397..a13b0266 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -1232,7 +1232,7 @@ pub enum ResponseItem {
+         #[ts(optional)]
+         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+     },
+-    #[serde(deserialize_with = "deserialize_direct_function_call")]
++    #[serde(deserialize_with = "deserialize_function_call")]
+     FunctionCall {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+@@ -1259,6 +1259,9 @@ pub enum ResponseItem {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        caller: Option<ProviderFunctionCaller>,
+     },
+     ToolSearchCall {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -1504,8 +1507,16 @@ pub enum ResponseItem {
+     Other,
+ }
+ 
+-// Preserve the existing FunctionCall constructor while checking ownership on every wire route.
+-type DirectFunctionCallFields = (
++/// Untrusted provider provenance; native runtime admission supplies execution authority.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
++pub enum ProviderFunctionCaller {
++    Direct,
++    Program { caller_id: String },
++}
++
++// Parsing retains provenance; native per-call admission grants execution authority.
++type FunctionCallFields = (
+     Option<ResponseItemId>,
+     String,
+     Option<String>,
+@@ -1515,11 +1526,10 @@ type DirectFunctionCallFields = (
+     Option<String>,
+     String,
+     Option<InternalChatMessageMetadataPassthrough>,
++    Option<ProviderFunctionCaller>,
+ );
+ 
+-fn deserialize_direct_function_call<'de, D>(
+-    deserializer: D,
+-) -> Result<DirectFunctionCallFields, D::Error>
++fn deserialize_function_call<'de, D>(deserializer: D) -> Result<FunctionCallFields, D::Error>
+ where
+     D: Deserializer<'de>,
+ {
+@@ -1539,13 +1549,27 @@ where
+     }
+ 
+     let call = WireCall::deserialize(deserializer)?;
+-    if call.caller.as_ref().is_some_and(|caller| {
+-        caller.get("type").and_then(serde_json::Value::as_str) != Some("direct")
+-    }) {
+-        return Err(serde::de::Error::custom(
+-            "Only direct function callers are supported by the native runtime",
+-        ));
+-    }
++    let caller = match call.caller {
++        None | Some(serde_json::Value::Null) => None,
++        Some(serde_json::Value::Object(value)) => match value
++            .get("type")
++            .and_then(serde_json::Value::as_str)
++        {
++            Some("direct") => None,
++            Some("program") if value.len() == 2 => {
++                let caller_id = value
++                    .get("caller_id")
++                    .and_then(serde_json::Value::as_str)
++                    .filter(|id| !id.is_empty())
++                    .ok_or_else(|| serde::de::Error::custom("Invalid provider function caller"))?;
++                Some(ProviderFunctionCaller::Program {
++                    caller_id: caller_id.to_owned(),
++                })
++            }
++            _ => return Err(serde::de::Error::custom("Invalid provider function caller")),
++        },
++        _ => return Err(serde::de::Error::custom("Invalid provider function caller")),
++    };
+     Ok((
+         call.id,
+         call.name,
+@@ -1556,6 +1580,7 @@ where
+         call.status,
+         call.call_id,
+         call.internal_chat_message_metadata_passthrough,
++        caller,
+     ))
+ }
+ 
+@@ -3033,7 +3058,7 @@ impl std::fmt::Display for FunctionCallOutputPayload {
+ #[cfg(test)]
+ mod tests {
+     #[test]
+-    fn function_call_caller_cannot_widen_direct_dispatch() {
++    fn function_call_caller_retains_typed_provenance_without_granting_dispatch() {
+         let plain = serde_json::json!({
+             "type": "function_call",
+             "id": "fc_native_call",
+@@ -3050,13 +3075,27 @@ mod tests {
+         direct["caller"] = serde_json::json!({"type": "direct"});
+         let direct: super::ResponseItem = serde_json::from_value(direct).unwrap();
+         assert_eq!(absent, direct);
++        let mut direct_extra = plain.clone();
++        direct_extra["caller"] = serde_json::json!({"type":"direct","provider_field":"discarded"});
++        assert_eq!(
++            absent,
++            serde_json::from_value::<super::ResponseItem>(direct_extra).unwrap()
++        );
+         let mut null = plain.clone();
+         null["caller"] = serde_json::Value::Null;
+-        assert_eq!(absent, serde_json::from_value::<super::ResponseItem>(null).unwrap());
++        assert_eq!(
++            absent,
++            serde_json::from_value::<super::ResponseItem>(null).unwrap()
++        );
+         assert_eq!(serde_json::to_value(absent).unwrap(), plain);
+ 
++        let mut program = plain.clone();
++        program["caller"] = serde_json::json!({"type":"program","caller_id":"pc_provider"});
++        let typed: super::ResponseItem = serde_json::from_value(program.clone()).unwrap();
++        assert_eq!(serde_json::to_value(typed).unwrap(), program);
+         for caller in [
+-            serde_json::json!({"type": "program", "caller_id": "pc_provider"}),
++            serde_json::json!({"type": "program", "caller_id": ""}),
++            serde_json::json!({"type": "program"}),
+             serde_json::json!({"type": "programmatic", "program_call_id": "pc_provider"}),
+             serde_json::json!({"type": "unknown"}),
+             serde_json::json!(false),
+@@ -3064,7 +3103,7 @@ mod tests {
+             let mut owned = plain.clone();
+             owned["caller"] = caller;
+             let error = serde_json::from_value::<super::ResponseItem>(owned).unwrap_err();
+-            assert!(error.to_string().contains("Only direct function callers"));
++            assert!(!error.to_string().is_empty());
+         }
+     }
+ 
+@@ -3902,6 +3941,7 @@ mod tests {
+         assert_eq!(
+             item,
+             ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "mcp__codex_apps__gmail_get_recent_emails".to_string(),
+                 namespace: Some("mcp__codex_apps__gmail".to_string()),
+diff --git a/codex-rs/tools/src/code_mode_tests.rs b/codex-rs/tools/src/code_mode_tests.rs
+index 135694bc..cf3699bd 100644
+--- a/codex-rs/tools/src/code_mode_tests.rs
++++ b/codex-rs/tools/src/code_mode_tests.rs
+@@ -51,6 +51,7 @@ fn code_mode_materializes_mcp_output_schemas() {
+     )
+     .unwrap();
+     let eager = ResponsesApiTool {
++        allowed_callers: None,
+         output_schema: Some(crate::mcp_call_tool_result_output_schema(output).into()),
+         ..parsed.clone()
+     };
+@@ -85,6 +86,7 @@ fn code_mode_tool_names_do_not_prefix_the_default_namespace() {
+ fn augment_tool_spec_for_code_mode_augments_function_tools() {
+     assert_eq!(
+         augment_tool_spec_for_code_mode(ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "lookup_order".to_string(),
+             description: "Look up an order".to_string(),
+             strict: false,
+@@ -109,6 +111,7 @@ fn augment_tool_spec_for_code_mode_augments_function_tools() {
+             ),
+         })),
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "lookup_order".to_string(),
+             description: r#"Look up an order
+ 
+diff --git a/codex-rs/tools/src/lib.rs b/codex-rs/tools/src/lib.rs
+index a2c296fa..a9fc91b6 100644
+--- a/codex-rs/tools/src/lib.rs
++++ b/codex-rs/tools/src/lib.rs
+@@ -73,6 +73,7 @@ pub use response_history::truncate_assistant_output_text_to_token_budget;
+ pub use responses_api::FreeformTool;
+ pub use responses_api::FreeformToolFormat;
+ pub use responses_api::LoadableToolSpec;
++pub use responses_api::ProviderToolCaller;
+ pub use responses_api::ResponsesApiNamespace;
+ pub use responses_api::ResponsesApiNamespaceTool;
+ pub use responses_api::ResponsesApiTool;
+@@ -111,6 +112,7 @@ pub use tool_discovery::ToolSearchSourceInfo;
+ pub use tool_discovery::collect_request_plugin_install_entries;
+ pub use tool_discovery::filter_request_plugin_install_discoverable_tools_for_client;
+ pub use tool_executor::AcceptedToolOutcome;
++pub use tool_executor::ProviderToolCallers;
+ pub use tool_executor::ToolExecutor;
+ pub use tool_executor::ToolExecutorFuture;
+ pub use tool_executor::ToolExposure;
+diff --git a/codex-rs/tools/src/responses_api.rs b/codex-rs/tools/src/responses_api.rs
+index 0e1f7772..d81ed383 100644
+--- a/codex-rs/tools/src/responses_api.rs
++++ b/codex-rs/tools/src/responses_api.rs
+@@ -32,8 +32,17 @@ pub struct FreeformToolFormat {
+     pub definition: String,
+ }
+ 
++#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(rename_all = "snake_case")]
++pub enum ProviderToolCaller {
++    Direct,
++    Programmatic,
++}
++
+ #[derive(Debug, Clone, Serialize, PartialEq)]
+ pub struct ResponsesApiTool {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub allowed_callers: Option<Vec<ProviderToolCaller>>,
+     pub name: String,
+     pub description: String,
+     /// TODO: Validation. When strict is set to true, the JSON schema,
+@@ -186,6 +195,7 @@ pub fn mcp_tool_to_deferred_responses_api_tool(
+ 
+ pub fn tool_definition_to_responses_api_tool(tool_definition: ToolDefinition) -> ResponsesApiTool {
+     ResponsesApiTool {
++        allowed_callers: None,
+         name: tool_definition.name,
+         description: tool_definition.description,
+         strict: false,
+diff --git a/codex-rs/tools/src/responses_api_tests.rs b/codex-rs/tools/src/responses_api_tests.rs
+index 8f97c70e..c70ffa69 100644
+--- a/codex-rs/tools/src/responses_api_tests.rs
++++ b/codex-rs/tools/src/responses_api_tests.rs
+@@ -62,6 +62,7 @@ fn tool_definition_to_responses_api_tool_omits_false_defer_loading() {
+             defer_loading: false,
+         }),
+         ResponsesApiTool {
++            allowed_callers: None,
+             name: "lookup_order".to_string(),
+             description: "Look up an order".to_string(),
+             strict: false,
+@@ -100,6 +101,7 @@ fn dynamic_tool_to_responses_api_tool_preserves_defer_loading() {
+     assert_eq!(
+         dynamic_tool_to_responses_api_tool(&tool).expect("convert dynamic tool"),
+         ResponsesApiTool {
++            allowed_callers: None,
+             name: "lookup_order".to_string(),
+             description: "Look up an order".to_string(),
+             strict: false,
+@@ -169,6 +171,7 @@ fn mcp_tool_to_deferred_responses_api_tool_sets_defer_loading() {
+         )
+         .expect("convert deferred tool"),
+         ResponsesApiTool {
++            allowed_callers: None,
+             name: "lookup_order".to_string(),
+             description: "Look up an order".to_string(),
+             strict: false,
+@@ -254,6 +257,7 @@ fn loadable_tool_spec_namespace_serializes_with_deferred_child_tools() {
+         name: "mcp__codex_apps__calendar".to_string(),
+         description: "Plan events".to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "create_event".to_string(),
+             description: "Create a calendar event.".to_string(),
+             strict: false,
+diff --git a/codex-rs/tools/src/tool_executor.rs b/codex-rs/tools/src/tool_executor.rs
+index 9c445ac7..df30c6f0 100644
+--- a/codex-rs/tools/src/tool_executor.rs
++++ b/codex-rs/tools/src/tool_executor.rs
+@@ -44,6 +44,16 @@ bitflags::bitflags! {
+     }
+ }
+ 
++bitflags::bitflags! {
++    /// Provider caller provenance is independent of local Code Mode exposure.
++    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
++    pub struct ProviderToolCallers: u8 {
++        const NONE = 0;
++        const DIRECT = 0b01;
++        const PROGRAMMATIC = 0b10;
++    }
++}
++
+ impl From<ToolExposureSurface> for ToolExposures {
+     fn from(surface: ToolExposureSurface) -> Self {
+         match surface {
+@@ -143,6 +153,11 @@ pub trait ToolExecutor<Invocation>: Send + Sync {
+     fn spec(&self) -> ToolSpec;
+ 
+     /// An explicit caller ceiling. None preserves the host's legacy behavior.
++    /// Frozen application policy; omitted provider policy retains direct-only.
++    fn allowed_provider_callers(&self) -> Option<ProviderToolCallers> {
++        None
++    }
++
+     fn allowed_callers(&self) -> Option<ToolExposures> {
+         None
+     }
+diff --git a/codex-rs/tools/src/tool_payload.rs b/codex-rs/tools/src/tool_payload.rs
+index 760b7a24..3dcfe635 100644
+--- a/codex-rs/tools/src/tool_payload.rs
++++ b/codex-rs/tools/src/tool_payload.rs
+@@ -190,6 +190,7 @@ mod client_search_tests {
+ 
+     fn entry(name: &str, namespace: Option<&str>, deferred: bool) -> ClientToolSearchEntry {
+         let function = crate::ResponsesApiTool {
++            allowed_callers: None,
+             name: name.into(),
+             description: "captured-schema-sentinel".into(),
+             strict: false,
+diff --git a/codex-rs/tools/src/tool_search_tests.rs b/codex-rs/tools/src/tool_search_tests.rs
+index 106c6178..016175de 100644
+--- a/codex-rs/tools/src/tool_search_tests.rs
++++ b/codex-rs/tools/src/tool_search_tests.rs
+@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
+ #[test]
+ fn shared_search_specs_preserve_results_and_release_the_source() {
+     let function = ResponsesApiTool {
++        allowed_callers: None,
+         name: "lookup".to_string(),
+         description: "Look up an item".to_string(),
+         strict: true,
+@@ -68,6 +69,7 @@ fn shared_search_specs_preserve_results_and_release_the_source() {
+ #[test]
+ fn top_level_function_search_results_use_the_default_namespace() {
+     let function_tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: "lookup_order".to_string(),
+         description: "Look up an order".to_string(),
+         strict: false,
+@@ -173,6 +175,7 @@ fn default_search_text_uses_model_visible_namespace_metadata_once() {
+         name: "codex_app".to_string(),
+         description: "Manage Codex automations.".to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "automation_update".to_string(),
+             description: "Create or update automations.".to_string(),
+             strict: false,
+@@ -194,6 +197,7 @@ fn default_search_text_uses_model_visible_namespace_metadata_once() {
+ #[test]
+ fn mixed_namespaced_function_and_custom_tools_are_searchable() {
+     let function_tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: "lookup_order".to_string(),
+         description: "Look up an order".to_string(),
+         strict: false,
+diff --git a/codex-rs/tools/src/tool_spec_tests.rs b/codex-rs/tools/src/tool_spec_tests.rs
+index 917859e5..fa0c3fe6 100644
+--- a/codex-rs/tools/src/tool_spec_tests.rs
++++ b/codex-rs/tools/src/tool_spec_tests.rs
+@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
+ fn tool_spec_name_covers_all_variants() {
+     assert_eq!(
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "lookup_order".to_string(),
+             description: "Look up an order".to_string(),
+             strict: false,
+@@ -122,6 +123,7 @@ fn web_search_config_converts_to_responses_api_types() {
+ fn create_tools_json_for_responses_api_includes_top_level_name() {
+     assert_eq!(
+         create_tools_json_for_responses_api(&[ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "demo".to_string(),
+             description: "A demo tool".to_string(),
+             strict: false,
+@@ -151,6 +153,7 @@ fn create_tools_json_for_responses_api_includes_top_level_name() {
+ 
+ fn responses_lite_function(name: &str) -> ResponsesApiTool {
+     ResponsesApiTool {
++        allowed_callers: None,
+         name: name.to_string(),
+         description: format!("{name} tool"),
+         strict: false,
+@@ -253,6 +256,7 @@ fn responses_lite_does_not_add_an_empty_functions_namespace() {
+ #[test]
+ fn raw_tool_json_matches_value_encoding() {
+     let specs = vec![ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "demo".to_string(),
+         description: "A demo tool".to_string(),
+         strict: false,
+@@ -281,6 +285,7 @@ fn namespace_tool_spec_serializes_expected_wire_shape() {
+             description: "Demo tools".to_string(),
+             tools: vec![
+                 ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                    allowed_callers: None,
+                     name: "lookup_order".to_string(),
+                     description: "Look up an order".to_string(),
+                     strict: false,
+diff --git a/codex-rs/tools/tests/hosted_tool_choice.rs b/codex-rs/tools/tests/hosted_tool_choice.rs
+index 19220b15..3ef80dc4 100644
+--- a/codex-rs/tools/tests/hosted_tool_choice.rs
++++ b/codex-rs/tools/tests/hosted_tool_choice.rs
+@@ -6,6 +6,7 @@ use serde_json::json;
+ fn hosted_tool_choice_never_promotes_same_name_or_deferred_functions() {
+     for deferred in [false, true] {
+         let function = ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "web_search".into(),
+             description: "application callback".into(),
+             strict: false,

@@ -1075,7 +1075,15 @@
     {
       "path": "sdk-provider-history-output-references.patch",
       "sha256": "176905297a6285c529cbf074c7b9da5412a14d5a710bf3d37975e061664c128a"
+    },
+    {
+      "path": "sdk-provider-programmatic-callers.patch",
+      "sha256": "605f61485b22b0b30a5f18f77762cfc4e144e55c3f4e056aabd38b21ad18d919"
+    },
+    {
+      "path": "sdk-provider-programmatic-progress.patch",
+      "sha256": "5bda827970cc426dab1181869d427019b8e212e7f938f64cfb8277a00ab33adf"
     }
   ],
-  "result_tree": "d064e65d18bbf42da4da3f70d3ac4ef8ec5883ed"
+  "result_tree": "0e9644881fbd4db2966c391a95b3b6a1a799ca02"
 }

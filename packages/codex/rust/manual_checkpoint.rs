@@ -1030,6 +1030,16 @@ fn validate_frame(
 pub(crate) fn manual_request(
     item: &ResponseItem,
 ) -> Result<(codex_tools::ToolName, String, Value)> {
+    ensure!(
+        !matches!(
+            item,
+            ResponseItem::FunctionCall {
+                caller: Some(codex_protocol::models::ProviderFunctionCaller::Program { .. }),
+                ..
+            }
+        ),
+        "Pending provider programmatic calls require their original live native owner"
+    );
     match item {
         ResponseItem::FunctionCall {
             name,

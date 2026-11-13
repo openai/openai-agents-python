@@ -2125,7 +2125,7 @@
           "@dataclass(frozen=True, kw_only=True)\nclass HostedProgrammaticToolCalling:\n    pass",
           "@dataclass(frozen=True)\nclass ToolRef:\n    name: str\n    namespace: str | None = None",
           "@dataclass(frozen=True, kw_only=True)\nclass ToolSearchResult:\n    tool_refs: tuple[ToolRef, ...] = ()",
-          "ToolCaller = Literal['direct', 'code']",
+          "ToolCaller = Literal['direct', 'code', 'programmatic']",
           "ToolNotFoundBehavior = Literal['return_error_to_model', 'raise_error']",
           "@dataclass(frozen=True)\nclass ToolCallInfo:\n    tool: ToolRef\n    session_id: str\n    turn_id: str\n    call_id: str | None\n    child_id: str | None\n    child_incarnation: str | None\n    role: str | None\n    model: str | None\n    route: Literal['direct', 'code']\n    outer_call_id: str | None = None\n    cell_id: str | None = None\n    nested_call_id: str | None = None",
           "@dataclass(frozen=True)\nclass ToolOutputText:\n    text: str",

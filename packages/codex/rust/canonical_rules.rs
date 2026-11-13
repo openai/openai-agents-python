@@ -767,6 +767,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ReadText {
     }
     fn spec(&self) -> ToolSpec {
         ToolSpec::Function(ResponsesApiTool {
+            allowed_callers: None,
             name: "read_text_file".into(),
             description: "Read a regular UTF-8 text file, at most 32768 bytes. Paths are absolute or relative to the environment cwd. Successful reads select applicable canonical project rules.".into(),
             strict: true,

@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections import deque
+from collections import Counter, deque
 from collections.abc import AsyncIterator, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import Any, cast
 from weakref import WeakKeyDictionary
 
@@ -20,6 +21,7 @@ from ._responses_websocket import (
     ResponsesSocketOptions,
     ResponsesWebSocketModel,
     ResponsesWebSocketOptions,
+    _check_socket_json_structure,
     _connect,
     _decode_socket_frame,
     _limited,
@@ -43,6 +45,7 @@ _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 _MAX_RESPONSE_ITEMS = 4096
 _TERMINAL = {"response.completed", "response.failed", "response.incomplete"}
 _COLLABORATION = {"agent_message", "multi_agent_call", "multi_agent_call_output"}
+_PROGRAM_ITEMS = {"program", "program_output"}
 
 
 @dataclass
@@ -61,6 +64,9 @@ class _Active:
     response_id: str | None = None
     pending: set[str] = field(default_factory=set)
     emitted: set[str] = field(default_factory=set)
+    program_parents: set[str] = field(default_factory=set)
+    passive: Counter[bytes] = field(default_factory=Counter)
+    passive_count: int = 0
     queued: list[dict[str, Any]] = field(default_factory=list)
     injecting: set[str] | None = None
     terminal: dict[str, Any] | None = None
@@ -189,6 +195,12 @@ def _stable(item: dict[str, Any]) -> bool:
         and agent.get("agent_name") == "/root"
         and item.get("phase") == "final_answer"
     )
+
+
+def _program_key(item: dict[str, Any]) -> bytes:
+    # Terminal snapshots can repeat completed output-item frames. The same program
+    # may also emit multiple distinct outputs before it finishes.
+    return sha256(json.dumps(item, sort_keys=True, separators=(",", ":")).encode()).digest()
 
 
 def _provider_object(value: Any, diagnostic: str) -> dict[str, Any]:
@@ -443,11 +455,38 @@ class _Socket:
                     raise ValueError("Closed hosted response did not settle")
                 if observe:
                     self._run.recovered.append(_ResponsesWebSocketFrame(event, raw=True))
+                if kind == "response.output_item.done" and isinstance(item, dict):
+                    self._recover_program_output(active, item)
+            for item in active.queued:
+                self._recover_program_output(active, item)
         except BaseException as error:
             _clear_error_frames(error)
             raise
         finally:
             del self, active, event, item, kind
+
+    def _recover_program_output(self, active: _Active, item: dict[str, Any]) -> None:
+        if item.get("type") == "program_output":
+            call_id = item.get("call_id")
+            if isinstance(call_id, str) and call_id in active.program_parents:
+                if len(self._run.recovered) >= _MAX_RESPONSE_ITEMS:
+                    raise ValueError("Hosted reconciliation exceeds its retained frame limit")
+                frame = {"type": "response.output_item.done", "item": item}
+                budget = self._run.recovered_budget
+                budget.remaining -= _check_socket_json_structure(
+                    json.dumps(frame), budget.remaining
+                )
+                self._record_program(active, item)
+                self._run.recovered.append(_ResponsesWebSocketFrame(frame))
+
+    def _record_program(self, active: _Active, item: dict[str, Any]) -> None:
+        if len(active.emitted) + active.passive_count >= _MAX_RESPONSE_ITEMS:
+            raise ValueError("Hosted response exceeds the native output-item limit")
+        call_id = item.get("call_id")
+        if item["type"] == "program" and isinstance(call_id, str):
+            active.program_parents.add(call_id)
+        active.passive_count += 1
+        active.passive[_program_key(item)] += 1
 
     async def _reconcile_terminal(self, active: _Active) -> None:
         try:
@@ -508,10 +547,10 @@ class _Socket:
         acknowledged_call = None
         try:
             if self._run.recovered:
-                event = self._run.recovered.popleft()
+                recovered = self._run.recovered.popleft()
                 if not self._run.recovered:
                     self._run.recovered_budget = _SocketJsonBudget()
-                return event
+                return recovered
             while not self._queue:
                 active = self._run.active
                 if active is None:
@@ -535,17 +574,16 @@ class _Socket:
                     self._enqueue(event)
                 elif kind == "response.output_item.done":
                     item = event.get("item")
-                    if (
-                        isinstance(item, dict)
-                        and item.get("type") == "function_call"
+                    if isinstance(item, dict) and (
+                        item.get("type") in _PROGRAM_ITEMS
+                        or item.get("type") == "function_call"
                         and isinstance(item.get("call_id"), str)
                         and item["call_id"] not in active.emitted
                         and item["call_id"] not in active.pending
                     ):
-                        if len(active.emitted) + len(active.queued) >= _MAX_RESPONSE_ITEMS:
-                            raise ValueError("Hosted response exceeds the native output-item limit")
-                        active.pending.add(item["call_id"])
-                        active.queued.append(deepcopy(item))
+                        if item["type"] == "function_call":
+                            active.pending.add(item["call_id"])
+                        self._queue_item(active, item)
                 elif kind == "response.inject.created":
                     if active.injecting is not None:
                         acknowledged_call = None
@@ -580,14 +618,23 @@ class _Socket:
                 ):
                     if active.continuation is None:
                         raise ValueError("Hosted fallback requires its original continuation")
+                    for item in active.queued:
+                        if item.get("type") in _PROGRAM_ITEMS:
+                            self._record_program(active, item)
+                            self._enqueue({"type": "response.output_item.done", "item": item})
                     await self._fallback(active, active.continuation, active.fallback_input)
                     continue
                 if active.queued and active.injecting is None:
                     if active.template is None or active.response_id is None:
                         raise ValueError("Hosted function call preceded response creation")
                     calls, active.queued = active.queued, []
-                    active.emitted.update(item["call_id"] for item in calls)
+                    has_call = False
                     for index, item in enumerate(calls):
+                        if item.get("type") in _PROGRAM_ITEMS:
+                            self._record_program(active, item)
+                        else:
+                            active.emitted.add(item["call_id"])
+                            has_call = True
                         self._enqueue(
                             {
                                 "type": "response.output_item.done",
@@ -595,25 +642,29 @@ class _Socket:
                                 "item": item,
                             }
                         )
-                    self._enqueue(
-                        {
-                            "type": "response.completed",
-                            "response": {
-                                **active.template,
-                                "id": active.response_id,
-                                "status": "completed",
-                                "output": calls,
-                                "usage": None,
-                            },
-                        }
-                    )
-                elif active.terminal is not None and active.injecting is None:
+                    if has_call:
+                        self._enqueue(
+                            {
+                                "type": "response.completed",
+                                "response": {
+                                    **active.template,
+                                    "id": active.response_id,
+                                    "status": "completed",
+                                    "output": calls,
+                                    "usage": None,
+                                },
+                            }
+                        )
+                        continue
+                if active.terminal is not None and active.injecting is None:
                     saved = active.terminal
                     response = saved["response"]
+                    # Program occurrences have already been queued in wire order.
                     supported = [
                         item
                         for item in response.get("output", [])
                         if _stable(item)
+                        and item.get("type") not in _PROGRAM_ITEMS
                         and not (
                             item.get("type") == "function_call"
                             and item.get("call_id") in active.emitted
@@ -659,8 +710,23 @@ class _Socket:
             )
             active.terminal_reported = True
             active.terminal = deepcopy(event)
+            accounted = active.passive + Counter(
+                _program_key(item) for item in active.queued if item.get("type") in _PROGRAM_ITEMS
+            )
+            for item in output:
+                if item.get("type") in _PROGRAM_ITEMS:
+                    key = _program_key(item)
+                    if accounted[key]:
+                        accounted[key] -= 1
+                    else:
+                        self._queue_item(active, item)
         finally:
             del self, active, event, response, output, usage
+
+    def _queue_item(self, active: _Active, item: dict[str, Any]) -> None:
+        if len(active.emitted) + active.passive_count + len(active.queued) >= _MAX_RESPONSE_ITEMS:
+            raise ValueError("Hosted response exceeds the native output-item limit")
+        active.queued.append(deepcopy(item))
 
     def _enqueue(self, event: dict[str, Any]) -> None:
         self._queue.append(_ResponsesWebSocketFrame(event))

@@ -366,6 +366,7 @@ mod registered_plan_tests {
             internal_chat_message_metadata_passthrough: None,
         };
         let exec_command = ResponseItem::FunctionCall {
+            caller: None,
             id: None,
             name: "exec_command".into(),
             namespace: None,

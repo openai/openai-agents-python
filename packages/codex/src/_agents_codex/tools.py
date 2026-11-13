@@ -479,7 +479,7 @@ class ToolSearchResult:
         object.__setattr__(self, "tool_refs", refs)
 
 
-ToolCaller = Literal["direct", "code"]
+ToolCaller = Literal["direct", "code", "programmatic"]
 ToolNotFoundBehavior = Literal["return_error_to_model", "raise_error"]
 
 

@@ -6363,6 +6363,7 @@ impl ToolContributor for PythonContributor {
                     .specs
                     .caller_limits(slot)
                     .is_some_and(|callers| !callers.contains(codex_tools::ToolExposures::DIRECT))
+                    && (voice || generation.specs.provider_callers(slot).is_none())
                 || defaults.as_ref().is_some_and(|defaults| {
                     !defaults.iter().any(|name| {
                         name.clone().with_default_namespace()
@@ -6966,11 +6967,28 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
     }
 
     fn spec(&self) -> ToolSpec {
-        self.generation.entries[self.slot].spec.clone()
+        let mut spec = self.generation.entries[self.slot].spec.clone();
+        if let Some(callers) = self.generation.specs.provider_callers(self.slot) {
+            if let ToolSpec::Function(function) = &mut spec {
+                let mut values = Vec::new();
+                if callers.contains(codex_tools::ProviderToolCallers::DIRECT) {
+                    values.push(codex_tools::ProviderToolCaller::Direct);
+                }
+                if callers.contains(codex_tools::ProviderToolCallers::PROGRAMMATIC) {
+                    values.push(codex_tools::ProviderToolCaller::Programmatic);
+                }
+                function.allowed_callers = Some(values);
+            }
+        }
+        spec
+    }
+
+    fn allowed_provider_callers(&self) -> Option<codex_tools::ProviderToolCallers> {
+        self.generation.specs.provider_callers(self.slot)
     }
 
     fn allowed_callers(&self) -> Option<codex_tools::ToolExposures> {
-        self.generation.specs.caller_limits(self.slot)
+        self.generation.specs.model_surfaces(self.slot)
     }
 
     fn exposure(&self) -> ToolExposure {
@@ -10042,6 +10060,7 @@ pub(crate) mod managed_tests {
 
     pub(super) fn call(call_id: &str, original_name: &str, original_args: &str) -> ResponseItem {
         ResponseItem::FunctionCall {
+            caller: None,
             id: None,
             namespace: Some("_agents_sdk".into()),
             name: "dispatch".into(),
