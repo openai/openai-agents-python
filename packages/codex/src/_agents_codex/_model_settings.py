@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
@@ -14,17 +15,11 @@ from .retry import ModelRetrySettings
 from .tools import ToolRef
 
 if TYPE_CHECKING:
-    from openai import Omit, omit
+    from openai import Omit
 
     from .agent import ModelSettings
 else:
-    try:
-        from openai import Omit, omit
-    except ModuleNotFoundError as error:
-        if error.name != "openai":
-            raise
-        Omit = type(None)
-        omit = None
+    Omit = getattr(sys.modules.get("openai"), "Omit", type(None))
 
 
 class _StaticProviderCompaction(TypedDict, closed=True):
@@ -224,9 +219,13 @@ def _capture_model_settings(
             if value not in allowed:
                 raise ValueError(f"Unsupported {key}")
         elif key == "extra_headers":
+            # A caller can import the optional client after native declarations load.
+            openai = sys.modules.get("openai")
+            omit_type = getattr(openai, "Omit", type(None))
+            omit = getattr(openai, "omit", None)
             if not isinstance(value, Mapping) or any(
                 not isinstance(name, str)
-                or (item is not None and not isinstance(item, (str, Omit)))
+                or (item is not None and not isinstance(item, (str, omit_type)))
                 for name, item in value.items()
             ):
                 raise TypeError("extra_headers must map strings to strings, None, or Omit")
