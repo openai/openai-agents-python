@@ -4347,10 +4347,9 @@ fn conversation_opening(
 
     let specs: tool_callers::ToolDeclarations =
         serde_json::from_str(specs_json).map_err(py_error)?;
-    let process_private_wss = process_private_runtime
-        && !private_http
+    let process_private_functions = process_private_runtime
         && !private_disposable
-        && options.private_wss_tls
+        && (private_http || options.private_wss_tls)
         && cfg!(target_os = "linux")
         && options.permits_private_functions()
         && !specs.is_empty()
@@ -4370,12 +4369,12 @@ fn conversation_opening(
         && cfg!(target_os = "linux")
         && options.permits_private_disposable()
         && specs.is_empty();
-    let process_runtime = process_private_http || process_private_wss;
+    let process_runtime = process_private_http || process_private_functions;
     if process_runtime {
         provider_owner::check_process_runtime_pid()?;
     }
-    // A WSS scope must never inherit a previous implicit Provider's HTTP owner.
-    let share_model_http = share_model_http && !process_private_wss;
+    // Function scopes have been borrowing the parent pool, never an implicit Provider's.
+    let share_model_http = share_model_http && !process_private_functions;
     let settings_value: serde_json::Value = serde_json::from_str(settings_json)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let has_settings = settings_value
@@ -4394,8 +4393,10 @@ fn conversation_opening(
             )
             .await?;
         if private_http {
-            // Only this scope selects an idle transport owner, never the parent.
-            state.model_http_pool = Some(if process_private_http {
+            // Only the fresh thread has been selecting HTTP; the parent has been owning the pool.
+            state.model_http_pool = Some(if process_private_functions {
+                state.private_function_http_pool()
+            } else if process_private_http {
                 private_http::process_pool()
             } else {
                 lease.private_model_http_pool()?

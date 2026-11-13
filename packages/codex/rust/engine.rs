@@ -80,6 +80,7 @@ pub struct EngineState {
     cloud_config: codex_config::CloudConfigBundleLoader,
     pub(crate) service_config: Config,
     pub(crate) model_http_pool: Option<codex_http_client::SdkModelHttpPool>,
+    pub(crate) private_function_http_pool: OnceLock<codex_http_client::SdkModelHttpPool>,
     initial_config_available: AtomicBool,
     pub(crate) interception: Arc<crate::native_interception::Boundary>,
     pub(crate) recovery: Arc<crate::recovery_guard::RecoveryContributor>,
@@ -697,6 +698,7 @@ impl EngineState {
             // The isolated HTTP pool enables Core's redirect rejection when
             // the provider declares its fixed routing, including on restore.
             model_http_pool: siwc.then(codex_http_client::SdkModelHttpPool::default),
+            private_function_http_pool: OnceLock::new(),
             // Session opening captures one configuration for its owned runtime
             // and immediate first thread. Raw creation retains its prior behavior.
             initial_config_available: AtomicBool::new(
@@ -1734,6 +1736,16 @@ impl EngineState {
         Ok(())
     }
 
+    // A dedicated fallback owns its own pool; a scope borrows its parent's pool.
+    pub(crate) fn private_function_http_pool(&self) -> codex_http_client::SdkModelHttpPool {
+        self.runtime_parent
+            .as_deref()
+            .unwrap_or(self)
+            .private_function_http_pool
+            .get_or_init(crate::private_http::pool)
+            .clone()
+    }
+
     async fn close_locked(&self) -> anyhow::Result<()> {
         self.discard_stored_forks(None).await?;
         if self.runtime_parent.is_some() {
@@ -1779,6 +1791,9 @@ impl EngineState {
             .downcast_ref::<crate::canonical_storage::CanonicalStore>()
         {
             store.close_all().await?;
+        }
+        if let Some(pool) = self.private_function_http_pool.get() {
+            pool.close();
         }
         self.closed.store(true, Ordering::Release);
         if let Some(store) = &self.local_checklist_store {

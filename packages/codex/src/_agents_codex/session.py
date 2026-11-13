@@ -4346,7 +4346,7 @@ class Session(Generic[ContextT, OutputT]):
                     ):
                         private_http = True
                         websockets_enabled = False
-                    private_wss_tls = (
+                    private_function_run = (
                         _private_wss_candidate
                         and observation_retention == "bounded"
                         and provider.model_backend is None
@@ -4357,12 +4357,23 @@ class Session(Generic[ContextT, OutputT]):
                             provider, provider_config, websockets_enabled
                         )
                     )
-                    return use_completed_owner, websockets_enabled, private_http, private_wss_tls
+                    if private_function_run:
+                        # Only the fresh thread has been selecting HTTP;
+                        # parent config has been staying fixed.
+                        private_http = True
+                    return (
+                        use_completed_owner,
+                        websockets_enabled,
+                        private_http,
+                        private_function_run,
+                    )
 
-                use_completed_owner, websockets_enabled, private_http, private_wss_tls = (
+                use_completed_owner, websockets_enabled, private_http, private_function_run = (
                     private_run_policy(provider)
                 )
-                _atomic_first_turn = any((_atomic_first_turn, use_completed_owner, private_wss_tls))
+                _atomic_first_turn = any(
+                    (_atomic_first_turn, use_completed_owner, private_function_run)
+                )
                 config = _native_session_config(
                     executor=executor,
                     provider_config=provider_config,
@@ -4424,7 +4435,6 @@ class Session(Generic[ContextT, OutputT]):
                         if startup_transport is not None
                         else {}
                     ),
-                    **({"_sdk_websocket_tls": True} if private_wss_tls else {}),
                     **guidance_options,
                     **(
                         {"user_instructions_appendix": lease._workspace_instructions}
@@ -4662,9 +4672,13 @@ class Session(Generic[ContextT, OutputT]):
                                 json.dumps(settings),
                                 api_key=opening.api_key or "",
                                 provider_lease=provider_lease,
-                                _share_model_http=not private_wss_tls,
+                                _share_model_http=not private_function_run,
                                 _private_http=private_http,
-                                **({"_process_private_runtime": True} if private_wss_tls else {}),
+                                **(
+                                    {"_process_private_runtime": True}
+                                    if private_function_run
+                                    else {}
+                                ),
                             )
                         ),
                     )
