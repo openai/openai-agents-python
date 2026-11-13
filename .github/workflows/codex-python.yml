@@ -47,13 +47,17 @@ jobs:
     runs-on: >-
       ${{ fromJSON(
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64-xl"}' ||
+        github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04-arm' && inputs.native_source_run == '' && github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness' &&
+          '{"group":"codex-runners","labels":"codex-linux-arm64"}' ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
           (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
            (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness' &&
            inputs.native_source_run == '' && '{"group":"codex-runners","labels":"codex-windows-x64-xl"}' ||
            '{"group":"codex-runners","labels":"codex-windows-x64"}') ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'macos-latest' &&
-          (inputs.native_source_run != '' && '"macos-15"' || '"macos-15-xlarge"') ||
+          (inputs.native_source_run != '' && '"macos-15"' ||
+           (github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness') &&
+           '"macos-26-xlarge"' || '"macos-15-xlarge"') ||
         toJSON(inputs.runner)
       ) }}
     # PyPA manylinux 2026.11.07-1. See https://github.com/pypa/manylinux/actions/runs/42368406253.
@@ -123,8 +127,11 @@ jobs:
           uname -m
           getconf GNU_LIBC_VERSION
           df -h "$RUNNER_TEMP"
-          # Leave one CPU and memory headroom on the standard 4-vCPU, 16-GB runner.
-          echo "CARGO_BUILD_JOBS=3" >> "$GITHUB_ENV"
+          # Leave CPU and memory headroom on the larger or standard ARM64 producer.
+          echo "CARGO_BUILD_JOBS=$ARM_CARGO_BUILD_JOBS" >> "$GITHUB_ENV"
+        env:
+          ARM_CARGO_BUILD_JOBS: >-
+            ${{ github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04-arm' && inputs.native_source_run == '' && github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness' && '14' || '3' }}
       - name: Select shared Cargo directories
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
@@ -307,7 +314,8 @@ jobs:
               )
           environment.setdefault("RUST_MIN_STACK", str(16 * 1024 * 1024))
           subprocess.run(
-              ["cargo", "test", "--release", "--locked", *options, "--lib",
+              ["cargo", "test", "--release", "--locked", *options,
+               "--config", "profile.release.package.codex-agents-python.opt-level=0", "--lib",
                "python_tools::managed_tests::prepared_request_rechecks_admission_after_no_edit_reply",
                "--", "--exact"],
               cwd=root, env=environment, check=True,

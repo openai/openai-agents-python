@@ -132,7 +132,7 @@ Tests searches artifacts by the exact native input hash, so later docs-only runs
 
 If no eligible snapshot exists, Tests checks the latest 20 successful push runs per source for reusable Rust dependencies, then starts a fresh build immediately. Incomplete source-history reads and corrupted downloads fail visibly. A copied snapshot must pass the same source, publication and qualification checks.
 
-In this repository's CI, macOS snapshot reuse, SDK qualification and SDK tests use the ARM64 `macos-15` runner. Cold native builds and dependency-only reuse use `macos-15-xlarge`.
+In this repository's CI, macOS snapshot reuse, SDK qualification and SDK tests have been using the ARM64 `macos-15` runner. Official `feat/codex-harness` pushes have been using `macos-26-xlarge` when rebuilding the native payload. Other macOS native builds have been using `macos-15-xlarge`, including dependency-only reuse outside those pushes.
 
 Artifact-control Python commands isolate startup from unbound checkout imports. Native CI rejects tracked Python bytecode/cache paths and root `.python-version`, `uv.toml` or `.venv` overrides before setting up uv; keep build settings in `pyproject.toml`.
 
