@@ -50,12 +50,29 @@ pub async fn snapshot(
     Ok(json!({"revision": revision, "total": total, "items": items}))
 }
 
+enum HistoryEdit {
+    Replace { keep: usize, items: Vec<String> },
+    Pop { allow_rebuild: bool },
+}
+
 pub async fn replace(
     state: &ThreadState,
     expected: String,
     keep: usize,
     items: Vec<String>,
 ) -> anyhow::Result<Value> {
+    edit(state, expected, HistoryEdit::Replace { keep, items }).await
+}
+
+pub async fn pop(
+    state: &ThreadState,
+    expected: String,
+    allow_rebuild: bool,
+) -> anyhow::Result<Value> {
+    edit(state, expected, HistoryEdit::Pop { allow_rebuild }).await
+}
+
+async fn edit(state: &ThreadState, expected: String, edit: HistoryEdit) -> anyhow::Result<Value> {
     let _operation = state
         .engine
         .context_gate
@@ -94,37 +111,53 @@ pub async fn replace(
         state.engine.goals.is_none(),
         "history transactions do not rewrite goal-backed sessions"
     );
-    // The Core revision is rechecked under its state lock when replacing below.
-    // Validate before durability: neither retained nor appended history may split
-    // a client tool call/result pair. Provider-hosted records keep their existing
-    // context-validator treatment, including server-side tool-search output.
-    let (current_revision, total, _) = state.thread.sdk_history_snapshot(Some(0)).await?;
-    ensure!(
-        current_revision == expected,
-        "canonical history revision conflict"
-    );
-    ensure!(keep <= total, "history keep exceeds snapshot length");
-    // Eligibility is fixed at admission. Never reinterpret old audit-only JSON.
-    let projected = state.thread.sdk_history_projection(None).await?;
-    let retained = state.thread.sdk_history_projection(Some(keep)).await?;
-    crate::context::check_pairs(&projected, &(0..retained.len()).collect::<Vec<_>>())
-        .context("canonical history requires complete tool call/result pairs")?;
-    let appended: Vec<ResponseItem> = items
-        .iter()
-        .map(|item| codex_history::sdk_originals::input_projection(item))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| anyhow::anyhow!("Invalid canonical history item"))?
-        .into_iter()
-        .flatten()
-        .collect();
-    crate::context::check_pairs(&appended, &(0..appended.len()).collect::<Vec<_>>())
-        .context("canonical history requires complete tool call/result pairs")?;
-    match state
-        .thread
-        .sdk_replace_history(&expected, keep, items)
-        .await
-    {
-        Ok(revision) => Ok(json!({"revision": revision})),
+    let result = match edit {
+        HistoryEdit::Replace { keep, items } => {
+            // The Core revision is rechecked under its state lock when replacing below.
+            // Validate before durability: neither retained nor appended history may split
+            // a client tool call/result pair. Provider-hosted records keep their existing
+            // context-validator treatment, including server-side tool-search output.
+            let (current_revision, total, _) = state.thread.sdk_history_snapshot(Some(0)).await?;
+            ensure!(
+                current_revision == expected,
+                "canonical history revision conflict"
+            );
+            ensure!(keep <= total, "history keep exceeds snapshot length");
+            // Eligibility is fixed at admission. Never reinterpret old audit-only JSON.
+            let projected = state.thread.sdk_history_projection(None).await?;
+            let retained = state.thread.sdk_history_projection(Some(keep)).await?;
+            crate::context::check_pairs(&projected, &(0..retained.len()).collect::<Vec<_>>())
+                .context("canonical history requires complete tool call/result pairs")?;
+            let appended: Vec<ResponseItem> = items
+                .iter()
+                .map(|item| codex_history::sdk_originals::input_projection(item))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| anyhow::anyhow!("Invalid canonical history item"))?
+                .into_iter()
+                .flatten()
+                .collect();
+            crate::context::check_pairs(&appended, &(0..appended.len()).collect::<Vec<_>>())
+                .context("canonical history requires complete tool call/result pairs")?;
+            state
+                .thread
+                .sdk_replace_history(&expected, keep, items)
+                .await
+                .map(|revision| json!({"revision": revision}))
+        }
+        HistoryEdit::Pop { allow_rebuild } => state
+            .thread
+            .sdk_pop_history(&expected, allow_rebuild)
+            .await
+            .map(|(revision, item, rebuilt_context)| {
+                json!({
+                    "revision": revision,
+                    "item": item,
+                    "rebuilt_context": rebuilt_context,
+                })
+            }),
+    };
+    match result {
+        Ok(value) => Ok(value),
         Err(error)
             if matches!(
                 error.details(),

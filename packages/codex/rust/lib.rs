@@ -1156,6 +1156,21 @@ impl NativeThread {
         })
     }
 
+    fn _pop_history<'py>(
+        &self,
+        py: Python<'py>,
+        expected_revision: String,
+        allow_rebuild: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let value = canonical_history::pop(&inner, expected_revision, allow_rebuild)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&value).map_err(py_error)
+        })
+    }
+
     fn _read_model_context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
@@ -2939,7 +2954,9 @@ impl NativeThread {
             .manual
             .lock()
             .map_err(|_| py_error("Manual continuation poisoned"))?;
-        Ok(frame.as_ref().is_some_and(|frame| frame.raise_on_unknown_tool))
+        Ok(frame
+            .as_ref()
+            .is_some_and(|frame| frame.raise_on_unknown_tool))
     }
 
     #[pyo3(signature = (observation_submission_id=None, tracing_context=None, trace_json=None, operation_declaration_source_json=None))]
@@ -3259,7 +3276,10 @@ impl NativeThread {
                 let id = codex_protocol::ThreadId::from_string(&grant.key.reply.thread)
                     .map_err(py_error)?;
                 let reentry = tools.is_reentry(&grant.key);
-                let Some(item) = tools.response_receipt(&grant.key, response.clone()).map_err(py_error)? else {
+                let Some(item) = tools
+                    .response_receipt(&grant.key, response.clone())
+                    .map_err(py_error)?
+                else {
                     return Ok(false);
                 };
                 return async_bridge::retain_writer_operation(async move {
@@ -3526,7 +3546,9 @@ impl NativeThread {
                         })
                         .is_ok();
                     if accepted {
-                        tools.record_approved_result(&request, &receipt).map_err(py_error)?;
+                        tools
+                            .record_approved_result(&request, &receipt)
+                            .map_err(py_error)?;
                     }
                     Ok(accepted)
                 }
@@ -4675,9 +4697,8 @@ fn config_schema() -> &'static str {
 
 #[pyfunction]
 fn _validate_python_tool_declarations(specs_json: &str) -> PyResult<()> {
-    let specs: tool_callers::ToolDeclarations =
-        serde_json::from_str(specs_json)
-            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let specs: tool_callers::ToolDeclarations = serde_json::from_str(specs_json)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
     python_tools::validate_declarations(&specs)
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }

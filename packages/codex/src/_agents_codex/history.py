@@ -15,8 +15,9 @@ preview before retention. A call interrupted before Core records a completion
 may have no item.
 """
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass as dataclass
-from typing import Any as Any, Literal as Literal
+from typing import Any as Any, Literal as Literal, TypeAlias
 
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
 
@@ -33,6 +34,7 @@ from ._stored_history import (
     StoredTurn as StoredTurn,
     StoredTurnPage as StoredTurnPage,
 )
+from .input import UserInput
 from .response_facts import (
     CaptureTruncatedFact as CaptureTruncatedFact,
     MalformedProbabilitiesFact as MalformedProbabilitiesFact,
@@ -63,6 +65,20 @@ class CanonicalHistorySnapshot:
     revision: str
     total: int
     items: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class CanonicalHistoryPop:
+    """The removed original, the resulting revision and any model context rebuild."""
+
+    revision: str
+    item: dict[str, Any] | None
+    rebuilt_model_context: bool
+
+
+_InputStoragePolicy: TypeAlias = Callable[
+    [UserInput, CanonicalHistorySnapshot], UserInput | None | Awaitable[UserInput | None]
+]
 
 
 class ReceivedInputTokensDetails(TypedDict, total=False):

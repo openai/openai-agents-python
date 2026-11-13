@@ -17,6 +17,7 @@ may have no item.
 
 from _agents_codex.history import (
     Any as Any,
+    CanonicalHistoryPop as CanonicalHistoryPop,
     CanonicalHistorySnapshot as CanonicalHistorySnapshot,
     CaptureTruncatedFact as CaptureTruncatedFact,
     Failure as Failure,
