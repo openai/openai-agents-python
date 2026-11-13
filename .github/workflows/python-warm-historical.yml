@@ -1,3 +1,4 @@
+# Same-coverage replay of the verified historical warm CI graph.
 name: Historical warm Python replay
 'on':
   push:
