@@ -482,6 +482,7 @@ class _ObservationBuffer:
         self.sequence = 0
         self.closed = False
         self.changed = asyncio.Event()
+        self._text_demand: weakref.WeakMethod[Callable[[], None]] | None = None
         self._callback_check: weakref.WeakMethod[Callable[[str], None]] | None = None
         self.repair_parent: tuple[_ObservationBuffer, str] | None = None
         self.on_record: weakref.WeakMethod[Callable[[Observation], None]] | None = None
@@ -626,6 +627,8 @@ class EventStream(AsyncIterator[Observation]):
     ) -> None:
         if after < 0 or after > buffer.sequence:
             raise ValueError("after must be between zero and the current event sequence")
+        if buffer._text_demand is not None and (demand := buffer._text_demand()) is not None:
+            demand()
         self._buffer = buffer
         self._after = after
         self._closed = False

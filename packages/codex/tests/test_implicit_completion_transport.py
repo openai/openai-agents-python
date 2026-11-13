@@ -648,9 +648,10 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
         route, config, kwargs, runtime = openings.pop()
         assert route == "_open_conversation"
         assert config["model_providers.native_agent"]["supports_websockets"] is True
-        assert kwargs["_private_http"] is False
+        assert kwargs["_private_http"] is True
         assert kwargs["_share_model_http"] is False
         assert kwargs["_process_private_runtime"] is True
+        assert not kwargs.get("_process_private_http", False)
         assert "codex_home" not in runtime and "cwd" not in runtime
         assert starts == []
     else:

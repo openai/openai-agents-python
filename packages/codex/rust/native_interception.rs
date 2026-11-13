@@ -682,6 +682,7 @@ pub struct Control {
     strict_executor_writes: OnceLock<()>,
     collaboration_namespace: std::sync::OnceLock<Option<String>>,
     channel: Arc<Channel>,
+    pub(crate) text_demand: Arc<codex_api::TextDeltaDemand>,
 }
 
 // One bounded callback owner per explicit root. Native ThreadSpawn ancestry
@@ -788,6 +789,7 @@ impl Control {
     fn with_budget(id: String, root: bool, bytes: usize) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         Self {
+            text_demand: Arc::default(),
             mcp_results: OnceLock::new(),
             profile_policies: AtomicU8::new(0),
             id,
@@ -855,6 +857,7 @@ impl Control {
         let incarnation = codex_protocol::ThreadId::new().to_string();
         let stopped = CancellationToken::new();
         Self {
+            text_demand: parent.text_demand.clone(),
             mcp_results: OnceLock::new(),
             profile_policies: AtomicU8::new(parent.profile_policies.load(Ordering::Acquire)),
             id,
@@ -2729,6 +2732,21 @@ impl Boundary {
             .upgrade()
     }
 
+    pub(crate) fn text_delta_demand(
+        &self,
+        thread: &str,
+    ) -> Option<Arc<codex_api::TextDeltaDemand>> {
+        Some(
+            self.threads
+                .lock()
+                .expect("interception index poisoned")
+                .get(thread)?
+                .upgrade()?
+                .text_demand
+                .clone(),
+        )
+    }
+
     pub(crate) fn response_admission(
         &self,
         thread: &str,
@@ -2754,7 +2772,11 @@ impl Boundary {
     ) -> Option<Box<dyn ModelResponseInterceptor>> {
         if input.kind != ModelRequestKind::Generation {
             return owner.map(|owner| {
-                Box::new(AdmissionOnly { control, owner }) as Box<dyn ModelResponseInterceptor>
+                Box::new(AdmissionOnly {
+                    control,
+                    owner,
+                    generation: false,
+                }) as Box<dyn ModelResponseInterceptor>
             });
         }
         let owner = {
@@ -2772,6 +2794,7 @@ impl Boundary {
                     Box::new(AdmissionOnly {
                         control: control.clone(),
                         owner,
+                        generation: true,
                     }) as Box<dyn ModelResponseInterceptor>
                 });
             }
@@ -2797,10 +2820,15 @@ impl Boundary {
 
 // Unconfigured managed requests need only retain exact expiry admission.
 struct AdmissionOnly {
+    generation: bool,
     control: Arc<Control>,
     owner: Arc<DirectTurn>,
 }
 impl ModelResponseInterceptor for AdmissionOnly {
+    fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {
+        self.generation.then(|| self.control.text_demand.clone())
+    }
+
     fn preserves_provider_message_window(&self) -> bool {
         // Native admission preserves messages, reasoning and response IDs.
         // Core excludes all other newly emitted item kinds from lineage.
@@ -3226,6 +3254,10 @@ impl DirectRequest {
 }
 
 impl ModelResponseInterceptor for DirectRequest {
+    fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {
+        Some(self.control.text_demand.clone())
+    }
+
     fn preserves_provider_message_window(&self) -> bool {
         // Native admission preserves messages, reasoning and response IDs.
         // Core excludes all other newly emitted item kinds from lineage.
