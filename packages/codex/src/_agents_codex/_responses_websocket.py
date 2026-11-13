@@ -259,14 +259,33 @@ def _check_socket_json_structure(payload: str) -> None:
                 return  # The normal decoder rejects an unterminated string.
 
 
+def _socket_frame_size(payload: Any, limit: int | None) -> int:
+    size = 0
+    try:
+        if not isinstance(payload, (str, bytes, bytearray)):
+            raise TypeError("Unsupported WebSocket frame")
+        if limit is not None and len(payload) > limit:
+            raise ValueError("WebSocket frame exceeds its receive limit")
+        if isinstance(payload, str):
+            # Count UTF-8 without allocating a second whole peer-controlled frame.
+            for start in range(0, len(payload), 4096):
+                size += len(payload[start : start + 4096].encode("utf-8"))
+                if limit is not None and size > limit:
+                    raise ValueError("WebSocket frame exceeds its receive limit")
+        else:
+            size = len(payload)
+        return size
+    except (TypeError, ValueError):
+        pass
+    finally:
+        del payload
+    raise ValueError("Responses WebSocket received an invalid frame size") from None
+
+
 def _decode_socket_frame(payload: Any, limit: int | None) -> dict[str, Any]:
     decoded: Any = None
     try:
-        if limit is not None and isinstance(payload, (str, bytes, bytearray)):
-            if len(payload) > limit or (
-                isinstance(payload, str) and len(payload.encode("utf-8")) > limit
-            ):
-                raise ValueError("Responses WebSocket frame exceeds its receive limit")
+        _socket_frame_size(payload, limit)
         if isinstance(payload, (bytes, bytearray)):
             # Preserve the standard decoder's supported byte encodings.
             payload = payload.decode(json.detect_encoding(payload), "surrogatepass")

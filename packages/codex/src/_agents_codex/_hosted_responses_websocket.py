@@ -22,6 +22,7 @@ from ._responses_websocket import (
     ResponsesWebSocketOptions,
     _connect,
     _decode_socket_frame,
+    _socket_frame_size,
 )
 from .models import (
     ModelRequest,
@@ -379,12 +380,11 @@ class _Socket:
                 active = self._run.active
                 if active is None:
                     raise RuntimeError("Hosted response has no active owner")
-                active.size += len(
-                    payload if isinstance(payload, bytes) else payload.encode("utf-8")
-                )
-                if active.size > _MAX_RESPONSE_BYTES:
-                    raise ValueError("Hosted response exceeds the native retained-byte limit")
+                remaining = _MAX_RESPONSE_BYTES - active.size
+                limit = remaining if self._max_size is None else min(remaining, self._max_size)
+                frame_size = _socket_frame_size(payload, limit)
                 event = _decode_socket_frame(payload, self._max_size)
+                active.size += frame_size
                 if "response" in event:
                     _provider_object(
                         event["response"], "Hosted Responses response must be an object"
