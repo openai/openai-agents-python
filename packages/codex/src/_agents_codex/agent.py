@@ -175,6 +175,9 @@ class ModelSettings(TypedDict, total=False, closed=True):
     takes precedence, including ``None``. ``store=True``
     requires API-key authentication.
     ``extra_headers`` and ``extra_query`` have been selecting per-request metadata.
+    ``request_transport`` has been selecting auto, HTTP, or required WebSocket
+    transport. Required WebSocket mode has been preventing HTTP fallback and
+    uncertain automatic replay.
     Header ``None`` and OpenAI ``omit`` values have been removing inherited
     header names. Query ``None`` values have been omitting pairs. Top-level
     ``None`` has been clearing the corresponding SDK override.
@@ -206,6 +209,7 @@ class ModelSettings(TypedDict, total=False, closed=True):
     top_logprobs: int | None
     extra_headers: Mapping[str, str | Omit | None] | None
     extra_query: Mapping[str, Any] | None
+    request_transport: Literal["auto", "http", "websocket"] | None
     parallel_tool_calls: bool | None
     verbosity: Literal["low", "medium", "high"] | None
     metadata: Mapping[str, str] | None
@@ -378,8 +382,11 @@ class SignInWithChatGPT:
         raise failure
 
 
-class _ProviderStrings(dict[str, str]):
-    """Frozen captured strings that preserve dataclass asdict/copy/pickle support."""
+_ProviderValue = TypeVar("_ProviderValue", str, int | None)
+
+
+class _ProviderOptions(dict[str, _ProviderValue]):
+    """Frozen captured settings that support asdict, copying, and pickle."""
 
     def _immutable(self: object, *args: Any, **kwargs: Any) -> NoReturn:
         raise TypeError("Captured provider routing is immutable")
@@ -486,6 +493,9 @@ class NativeProvider:
     stream_idle_timeout_ms: int | None = field(default=None, repr=False)
     websocket_connect_timeout_ms: int | None = field(default=None, repr=False)
     websocket_base_url: str | None = field(default=None, repr=False)
+    # Deadlines have been inheriting provider defaults when omitted and disabling
+    # their phase when explicitly None. Ping durations have been using positive ms.
+    websocket_options: Mapping[str, int | None] | None = field(default=None, repr=False, hash=False)
     agent_harness_id: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -507,6 +517,27 @@ class NativeProvider:
                 isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**63 - 1
             ):
                 raise ValueError(f"{name} must be a non-negative signed 64-bit integer or None")
+        if self.websocket_options is not None:
+            if not isinstance(self.websocket_options, Mapping):
+                raise TypeError("websocket_options must be a mapping")
+            options = dict(self.websocket_options)
+            allowed = {
+                "ping_interval_ms",
+                "ping_timeout_ms",
+                "max_message_bytes",
+                "connect_timeout_ms",
+                "send_timeout_ms",
+                "receive_timeout_ms",
+            }
+            if options.keys() - allowed:
+                raise ValueError("Unsupported websocket_options field")
+            for name, value in options.items():
+                minimum = 1 if name in {"ping_interval_ms", "ping_timeout_ms"} else 0
+                if value is not None and (
+                    type(value) is not int or not minimum <= value <= 2**63 - 1
+                ):
+                    raise ValueError(f"{name} must be an integer >= {minimum} or None")
+            object.__setattr__(self, "websocket_options", _ProviderOptions(options))
         for name in ("base_url", "api_key", "websocket_base_url"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
@@ -603,7 +634,7 @@ class NativeProvider:
             ):
                 raise TypeError(f"{name} must be a string map with nonempty keys")
             captured[name] = dict(value) if value is not None else None
-            object.__setattr__(self, name, _ProviderStrings(value) if value is not None else None)
+            object.__setattr__(self, name, _ProviderOptions(value) if value is not None else None)
         protected = {
             "authorization",
             "proxy-authorization",
@@ -717,7 +748,7 @@ class NativeProvider:
             return reduction
         # Copy settings and the closed fence, never another descriptor's resource.
         dictionary = dictionary.copy()
-        for name in ("query_params", "headers", "env_headers"):
+        for name in ("query_params", "headers", "env_headers", "websocket_options"):
             if dictionary.get(name) is not None:
                 dictionary[name] = dict(dictionary[name])
         dictionary.pop("_transport", None)
@@ -732,8 +763,11 @@ class NativeProvider:
             if attributes is None:
                 continue
             for name, value in attributes.items():
-                if name in ("query_params", "headers", "env_headers") and value is not None:
-                    value = _ProviderStrings(value)
+                if (
+                    name in ("query_params", "headers", "env_headers", "websocket_options")
+                    and value is not None
+                ):
+                    value = _ProviderOptions(value)
                 object.__setattr__(self, name, value)
 
     def _acquire_lease(self) -> tuple[Any, Any, Any]:

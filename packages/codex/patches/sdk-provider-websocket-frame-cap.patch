@@ -1,0 +1,77 @@
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 527a3237..6ba608c2 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -761,7 +761,14 @@ fn websocket_config_with_options(options: &WebsocketOptions) -> WebSocketConfig
+     config.extensions = extensions;
+     if let Some(limit) = options.max_message_bytes {
+         config.max_message_size = limit;
+-        config.max_frame_size = None;
++        if let Some(message_limit) = limit {
++            config.max_frame_size = Some(
++                config
++                    .max_frame_size
++                    .unwrap_or(message_limit)
++                    .min(message_limit),
++            );
++        }
+     }
+     config
+ }
+@@ -1207,6 +1214,56 @@ mod tests {
+     use std::collections::HashMap;
+     use std::sync::Arc;
+
++    #[test]
++    fn message_overrides_preserve_or_lower_the_default_frame_bound() {
++        let default = WebSocketConfig::default().max_frame_size.unwrap();
++        for (limit, expected) in [(None, default), (Some(default * 2), default), (Some(8), 8)] {
++            let config = websocket_config_with_options(&WebsocketOptions {
++                max_message_bytes: Some(limit),
++                ..Default::default()
++            });
++            assert_eq!(config.max_message_size, limit);
++            assert_eq!(config.max_frame_size, Some(expected));
++        }
++        assert_eq!(
++            websocket_config_with_options(&WebsocketOptions::default()).max_frame_size,
++            Some(default)
++        );
++    }
++
++    #[tokio::test]
++    async fn oversized_frame_headers_fail_before_waiting_for_a_body() {
++        use tokio::io::AsyncWriteExt;
++        let default = WebSocketConfig::default().max_frame_size.unwrap();
++        for (limit, bound) in [(None, default), (Some(default * 2), default), (Some(8), 8)] {
++            let config = websocket_config_with_options(&WebsocketOptions {
++                max_message_bytes: Some(limit),
++                ..Default::default()
++            });
++            let (mut peer, reader) = tokio::io::duplex(64);
++            let mut socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
++                reader,
++                tungstenite::protocol::Role::Client,
++                Some(config),
++            )
++            .await;
++            let size = bound + 1;
++            let mut header = vec![0x81];
++            if size < 126 {
++                header.push(size as u8);
++            } else {
++                header.push(127);
++                header.extend_from_slice(&(size as u64).to_be_bytes());
++            }
++            peer.write_all(&header).await.unwrap();
++            let result = tokio::time::timeout(Duration::from_secs(2), socket.next())
++                .await
++                .expect("must reject the header without receiving its body")
++                .expect("capacity error before EOF");
++            assert!(matches!(result, Err(WsError::Capacity(_))));
++        }
++    }
++
+     #[tokio::test]
+     async fn independent_rejected_handshake_omits_reflected_response_fields() {
+         use tokio::io::{AsyncReadExt, AsyncWriteExt};

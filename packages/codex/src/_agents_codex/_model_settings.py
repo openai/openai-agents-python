@@ -225,6 +225,9 @@ def _capture_model_settings(
             }[key]
             if value not in allowed:
                 raise ValueError(f"Unsupported {key}")
+        elif key == "request_transport":
+            if value not in ("auto", "http", "websocket"):
+                raise ValueError("request_transport must select auto, http, or websocket")
         elif key == "extra_headers":
             # A caller can import the optional client after native declarations load.
             openai = sys.modules.get("openai")

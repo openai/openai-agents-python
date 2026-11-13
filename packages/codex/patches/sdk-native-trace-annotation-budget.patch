@@ -1,0 +1,274 @@
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+index 34708a63632d34e900dace615f35281d83802a7e..e674de8e8e6dc22d893859b5ea32b9eab9b54468 100644
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -18,7 +18,12 @@ use serde::{Deserialize, Serialize};
+ use serde_json::{Value, json};
+ use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+-pub(crate) const MAX_COMPLETION_DATA_BYTES: usize = 32 * 1024;
++// Per-owner wire budgets. Processor queues still charge the complete encoded
++// projection, including receipts and retained root descriptors.
++pub(crate) const MAX_TRACING_OPTIONS_BYTES: usize = 128 * 1024;
++pub(crate) const MAX_COMPLETION_DATA_BYTES: usize = 64 * 1024;
++// Allow host JSON escaping and outcome framing, then validate compact data below.
++const MAX_TRACING_OUTCOME_BYTES: usize = 4 * MAX_COMPLETION_DATA_BYTES;
+ const MAX_TRACING_DATA_DEPTH: usize = 64;
+
+ pub(crate) struct SpanAnnotations(Box<str>);
+@@ -485,7 +490,7 @@ fn bounded_value(value: &Value, depth: usize) -> Result<(), String> {
+     }
+     match value {
+         Value::String(s) if s.len() > MAX_COMPLETION_DATA_BYTES => {
+-            Err("Tracing outcome string exceeds 32 KiB".into())
++            Err("Tracing outcome string exceeds 64 KiB".into())
+         }
+         Value::Array(values) => {
+             for value in values {
+@@ -505,6 +510,14 @@ fn bounded_value(value: &Value, depth: usize) -> Result<(), String> {
+         _ => Ok(()),
+     }
+ }
++pub(crate) fn validate_completion_data(data: &Value) -> Result<(), String> {
++    bounded_value(data, 0)?;
++    if data.to_string().len() > MAX_COMPLETION_DATA_BYTES {
++        return Err("Encoded tracing outcome data exceeds 64 KiB".into());
++    }
++    Ok(())
++}
++
+ // Validate opaque metadata with typed serde containers, without Value's private-map visitor.
+ fn bounded_metadata_json(
+     encoded: &str,
+@@ -557,8 +570,8 @@ fn metadata_attribute_value(value: &serde_json::value::RawValue) -> Result<Strin
+ // A single SDK-owned carrier avoids the generic OpenTelemetry attribute-count cap.
+ // Both export routes restore the existing per-key shape after native span collection.
+ pub(crate) fn metadata_attributes(encoded: &str) -> Result<Vec<KeyValue>, String> {
+-    if encoded.len() > 65536 {
+-        return Err("Tracing metadata exceeds 64 KiB".into());
++    if encoded.len() > MAX_TRACING_OPTIONS_BYTES {
++        return Err("Tracing metadata exceeds 128 KiB".into());
+     }
+     let bounded = bounded_metadata_json(encoded, 0)?;
+     let metadata: std::collections::BTreeMap<String, &serde_json::value::RawValue> =
+@@ -575,8 +588,8 @@ pub(crate) fn metadata_attributes(encoded: &str) -> Result<Vec<KeyValue>, String
+ }
+
+ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
+-    if encoded.len() > 65536 {
+-        return Err("Tracing options exceed 64 KiB".into());
++    if encoded.len() > MAX_TRACING_OPTIONS_BYTES {
++        return Err("Tracing options exceed 128 KiB".into());
+     }
+     let options: Options =
+         serde_json::from_str(encoded).map_err(|_| "Invalid native tracing span options")?;
+@@ -897,8 +910,8 @@ pub fn end_trace_span(key: &str, encoded: &str) -> Result<(), String> {
+         category: Option<String>,
+         data: Option<Value>,
+     }
+-    if encoded.len() > 65536 {
+-        return Err("Tracing outcome exceeds 64 KiB".into());
++    if encoded.len() > MAX_TRACING_OUTCOME_BYTES {
++        return Err("Tracing outcome exceeds 256 KiB".into());
+     }
+     let outcome: Outcome =
+         serde_json::from_str(encoded).map_err(|_| "Invalid tracing span outcome")?;
+@@ -911,10 +924,7 @@ pub fn end_trace_span(key: &str, encoded: &str) -> Result<(), String> {
+         return Err("Tracing outcome category must be a bounded nonsecret label".into());
+     }
+     if let Some(data) = &outcome.data {
+-        bounded_value(data, 0)?;
+-        if data.to_string().len() > MAX_COMPLETION_DATA_BYTES {
+-            return Err("Encoded tracing outcome data exceeds 32 KiB".into());
+-        }
++        validate_completion_data(data)?;
+     }
+     let handle = resolve(key)?;
+     let mut ended = handle.ended.lock().unwrap_or_else(|e| e.into_inner());
+@@ -1027,6 +1037,27 @@ mod tests {
+         assert!(parse_trace_id("00000000000000000000000000000000").is_err());
+         assert!(parse_trace_id("workflow").is_err());
+     }
++    #[test]
++    fn validates_expanded_annotation_budgets_without_relaxing_shape_bounds() {
++        let metadata = json!({"x": "x".repeat(100_000)}).to_string();
++        assert!(metadata_attributes(&metadata).is_ok());
++        assert!(
++            metadata_attributes(&json!({"x": "x".repeat(MAX_TRACING_OPTIONS_BYTES)}).to_string())
++                .is_err()
++        );
++        let data = json!({"x": "x".repeat(MAX_COMPLETION_DATA_BYTES - 8)});
++        assert_eq!(data.to_string().len(), MAX_COMPLETION_DATA_BYTES);
++        assert!(validate_completion_data(&data).is_ok());
++        let escaped = json!({"x": "\\".repeat((MAX_COMPLETION_DATA_BYTES - 8) / 2)});
++        assert_eq!(escaped.to_string().len(), MAX_COMPLETION_DATA_BYTES);
++        assert!(validate_completion_data(&escaped).is_ok());
++        assert!(
++            validate_completion_data(&json!({"x": "x".repeat(MAX_COMPLETION_DATA_BYTES)})).is_err()
++        );
++        let key = "x".repeat(257);
++        assert!(validate_completion_data(&json!({(key): 0})).is_err());
++    }
++
+     #[test]
+     fn bounds_nested_fields() {
+         let at_limit = json!({"x": "a".repeat(MAX_COMPLETION_DATA_BYTES)});
+diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
+index b9b9d2b4b51bcd94bbe924e97b03771d6bc314ba..13c32131a366a06d90154e49893027ba938bbe14 100644
+--- a/codex-rs/otel/src/sdk_trace_routes.rs
++++ b/codex-rs/otel/src/sdk_trace_routes.rs
+@@ -435,18 +435,11 @@ fn event(
+     let credential = credential.filter(|_| !s.credentials_closed);
+     // Native fields are copied into an immutable, bounded JSON snapshot. Never copy policy.
+     let (attrs, metadata_projection_bytes, annotations) = attributes(span, policy);
+-    // Completion data is compact JSON carried as a string. Exclude only the
+-    // second layer of escaping from the record limit. The queue still charges
+-    // the actual encoded bytes below.
+-    let completion_escape_bytes = match attrs.get("sdk.outcome.data") {
+-        Some(value @ Value::String(data)) => value.to_string().len() - data.len() - 2,
+-        _ => 0,
+-    };
+     // SDK metadata has an independent validated start budget. Keep its projection
+     // separate from the existing record/completion budget.
+     // Queue admission below still charges every encoded byte.
+     let max_event_bytes = 65_536
+-        + completion_escape_bytes.min(crate::sdk_trace::MAX_COMPLETION_DATA_BYTES)
++        + completion_projection_bytes(attrs.get("sdk.outcome.data"))
+         + metadata_projection_bytes;
+     let mut value = json!({"sequence":sequence,"processor_ids":s.processors,"lifecycle":lifecycle,"trace_id":span.span_context.trace_id().to_string(),"span_id":span.span_context.span_id().to_string(),"parent_span_id":if span.parent_span_id==opentelemetry::trace::SpanId::INVALID {None}else{Some(span.parent_span_id.to_string())},"name":truncate(&span.name,4096),"kind":format!("{:?}",span.span_kind).to_ascii_lowercase(),"start_time_unix_nanos":span.start_time.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string(),"end_time_unix_nanos":if lifecycle=="end" {Some(span.end_time.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string())}else{None},"attributes":attrs,"dropped_attributes_count":span.dropped_attributes_count,"outcome":match span.status { opentelemetry::trace::Status::Error{..}=>"error",opentelemetry::trace::Status::Ok=>"ok",_=>"unset" }});
+     if credential_required {
+@@ -463,6 +456,27 @@ fn event(
+     );
+ }
+
++// Preserve the ordinary record allowance. Only validated compact SDK completion
++// data grants room above the original 32-KiB data budget, plus JSON escaping.
++// Replay uses the same check; arbitrary observation fields grant no extra room.
++fn completion_projection_bytes(value: Option<&Value>) -> usize {
++    let Some(value @ Value::String(data)) = value else {
++        return 0;
++    };
++    if data.len() > crate::sdk_trace::MAX_COMPLETION_DATA_BYTES {
++        return 0;
++    }
++    let Ok(decoded) = serde_json::from_str::<Value>(data) else {
++        return 0;
++    };
++    if crate::sdk_trace::validate_completion_data(&decoded).is_err()
++        || decoded.to_string() != data.as_str()
++    {
++        return 0;
++    }
++    data.len().saturating_sub(32 * 1024) + value.to_string().len() - data.len() - 2
++}
++
+ fn enqueue_event(
+     s: &mut Routes,
+     sequence: u64,
+@@ -568,7 +582,10 @@ fn legacy_metadata_bytes(attributes: &serde_json::Map<String, Value>) -> usize {
+         let Value::String(text) = value else {
+             return 0;
+         };
+-        if key.is_empty() || key.len() > 256 || text.len() > 65_536 {
++        if key.is_empty()
++            || key.len() > 256
++            || text.len() > crate::sdk_trace::MAX_TRACING_OPTIONS_BYTES
++        {
+             return 0;
+         }
+         let decoded = serde_json::from_str::<Value>(text)
+@@ -593,7 +610,7 @@ fn legacy_metadata_bytes(attributes: &serde_json::Map<String, Value>) -> usize {
+         };
+         input_bytes +=
+             encoded_key.len() + 1 + encoded_value.len() + usize::from(!metadata.is_empty());
+-        if input_bytes > 65_536 {
++        if input_bytes > crate::sdk_trace::MAX_TRACING_OPTIONS_BYTES {
+             return 0;
+         }
+         metadata.insert(key.to_owned(), decoded);
+@@ -635,6 +652,8 @@ pub async fn dispatch_trace_event(encoded: &str) -> Result<(), String> {
+         };
+         Ok::<_, String>((value, bytes))
+     }).transpose()?;
++    let completion_bytes =
++        completion_projection_bytes(observation.attributes.get("sdk.outcome.data"));
+     let mut value =
+         serde_json::to_value(observation).map_err(|_| "Invalid trace event snapshot")?;
+     let acknowledged = {
+@@ -656,7 +675,7 @@ pub async fn dispatch_trace_event(encoded: &str) -> Result<(), String> {
+             value,
+             descriptor,
+             None,
+-            65_536 + metadata_projection_bytes,
++            65_536 + metadata_projection_bytes + completion_bytes,
+         ) {
+             return Err("Trace event exceeds processor queue capacity".into());
+         }
+@@ -2506,4 +2525,67 @@ mod tests {
+         assert!(retained.upgrade().is_none());
+         assert_eq!(lock().dropped, 1);
+     }
++    #[test]
++    fn expanded_completion_preserves_record_and_actual_queue_budgets() {
++        let completion =
++            json!({"x": "\\".repeat((crate::sdk_trace::MAX_COMPLETION_DATA_BYTES - 8) / 2)})
++                .to_string();
++        let mut data = sample_span();
++        data.attributes = vec![opentelemetry::KeyValue::new(
++            "sdk.outcome.data",
++            completion.clone(),
++        )];
++        // This ordinary data fits its original share of the record allowance.
++        for index in 0..7 {
++            data.attributes.push(opentelemetry::KeyValue::new(
++                format!("ordinary.{index}"),
++                "g".repeat(4000),
++            ));
++        }
++        let mut routes = Routes {
++            processors: vec!["recording".into()],
++            ..Default::default()
++        };
++        event(&mut routes, &data, "end", None, None, None);
++        assert_eq!(routes.queue.len(), 1);
++        let snapshot = &routes.queue.front().unwrap().1;
++        assert_eq!(snapshot["attributes"]["sdk.outcome.data"], completion);
++        let encoded_bytes = serde_json::to_vec(snapshot).unwrap().len();
++        assert_eq!(routes.bytes, encoded_bytes);
++        let attrs = snapshot["attributes"].as_object().unwrap();
++        assert!(completion_projection_bytes(attrs.get("sdk.outcome.data")) > 32_768);
++        let mut invalid = attrs.clone();
++        invalid.insert("sdk.outcome.data".into(), json!("x".repeat(65_537)));
++        assert_eq!(
++            completion_projection_bytes(invalid.get("sdk.outcome.data")),
++            0
++        );
++        invalid.insert("sdk.outcome.data".into(), json!("not JSON"));
++        assert_eq!(
++            completion_projection_bytes(invalid.get("sdk.outcome.data")),
++            0
++        );
++        // The larger record still fails a queue with one fewer actual byte.
++        let mut constrained = Routes {
++            processors: vec!["recording".into()],
++            ..Default::default()
++        };
++        constrained.delivery.max_queue_bytes = (encoded_bytes - 1) as u32;
++        event(&mut constrained, &data, "end", None, None, None);
++        assert!(constrained.queue.is_empty());
++        assert_eq!(constrained.bytes, 0);
++        // Completion data grants no allowance to an unrelated large field.
++        for index in 0..20 {
++            data.attributes.push(opentelemetry::KeyValue::new(
++                format!("other.{index}"),
++                "g".repeat(4000),
++            ));
++        }
++        let mut unrelated = Routes {
++            processors: vec!["recording".into()],
++            ..Default::default()
++        };
++        event(&mut unrelated, &data, "end", None, None, None);
++        assert!(unrelated.queue.is_empty());
++    }
+ }

@@ -36,6 +36,7 @@ def test_provider_dataclass_declaration_does_not_load_native(response_mode):
         "stream_idle_timeout_ms": None,
         "websocket_connect_timeout_ms": None,
         "websocket_base_url": None,
+        "websocket_options": None,
         "agent_harness_id": "synthetic-harness",
     }
     assert [field.name for field in fields(provider)] == list(expected)
@@ -102,3 +103,28 @@ def test_provider_controls_accept_supported_integer_bounds(name, value):
     from agents import NativeProvider
 
     assert getattr(NativeProvider(**{name: value}), name) == value
+
+
+@pytest.mark.parametrize("options", [{}, {"connect_timeout_ms": None, "ping_interval_ms": 50}])
+def test_websocket_provider_options_survive_copy_and_serialization(options):
+    import pickle
+    from copy import copy, deepcopy
+    from dataclasses import asdict, replace
+
+    from agents import NativeProvider
+
+    expected = dict(options)
+    supplied = dict(options)
+    provider = NativeProvider(websocket_options=supplied)
+    supplied["ping_interval_ms"] = 100
+    assert asdict(provider)["websocket_options"] == expected
+    for cloned in (
+        copy(provider),
+        deepcopy(provider),
+        pickle.loads(pickle.dumps(provider)),
+        replace(provider),
+    ):
+        assert cloned is not provider and cloned == provider
+        assert cloned.websocket_options == expected
+        with pytest.raises(TypeError, match="immutable"):
+            cloned.websocket_options["ping_interval_ms"] = 90

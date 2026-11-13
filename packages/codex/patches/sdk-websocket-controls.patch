@@ -1,0 +1,928 @@
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+index 5cf75a4c..13978f22 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+@@ -596,6 +596,7 @@ mod thread_processor_behavior_tests {
+     async fn derive_config_from_params_uses_session_thread_config_model_provider() -> Result<()> {
+         let temp_dir = TempDir::new()?;
+         let session_provider = ModelProviderInfo {
++            websocket_options: None,
+             name: "session".to_string(),
+             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
+             websocket_base_url: None,
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 9afa4d55..527a3237 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -52,6 +52,8 @@ use tungstenite::extensions::compression::deflate::DeflateConfig;
+ use tungstenite::protocol::WebSocketConfig;
+ use url::Url;
+
++use codex_protocol::model_request_transport::WebsocketOptions;
++
+ struct WsStream {
+     tx_command: mpsc::Sender<WsCommand>,
+     rx_message: mpsc::UnboundedReceiver<Result<Message, WsError>>,
+@@ -67,14 +69,48 @@ enum WsCommand {
+ }
+
+ impl WsStream {
+-    fn new(inner: WebSocketConnection, upgrade_rate_limits: Option<ApiRateLimits>) -> Self {
++    fn new(inner: WebSocketConnection, upgrade_rate_limits: Option<ApiRateLimits>, options: WebsocketOptions) -> Self {
+         let (tx_command, mut rx_command) = mpsc::channel::<WsCommand>(32);
+         let (tx_message, rx_message) = mpsc::unbounded_channel::<Result<Message, WsError>>();
+
+         let pump_task = tokio::spawn(async move {
+             let mut inner = inner;
++            let mut ping_timer = options.ping_interval_ms.and_then(|value| {
++                let interval = Duration::from_millis(value.get());
++                tokio::time::Instant::now().checked_add(interval).map(|deadline| {
++                    let mut timer = tokio::time::interval_at(deadline, interval);
++                    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
++                    timer
++                })
++            });
++            let mut ping_nonce = 0u64;
++            let mut awaiting_pong: Option<Vec<u8>> = None;
++            let mut pong_deadline = None;
+             loop {
+                 tokio::select! {
++                    _ = async { match ping_timer.as_mut() {
++                        Some(timer) => { timer.tick().await; },
++                        None => std::future::pending::<()>().await,
++                    } }, if ping_timer.is_some() && awaiting_pong.is_none() => {
++                        ping_nonce = ping_nonce.wrapping_add(1);
++                        let payload = ping_nonce.to_be_bytes().to_vec();
++                        if let Err(error) = inner.send(Message::Ping(payload.clone().into())).await {
++                            let _ = tx_message.send(Err(error));
++                            break;
++                        }
++                        if let Some(timeout) = options.ping_timeout_ms {
++                            awaiting_pong = Some(payload);
++                            pong_deadline = tokio::time::Instant::now().checked_add(Duration::from_millis(timeout.get()));
++                        }
++                    }
++                    _ = async { match pong_deadline {
++                        Some(deadline) => tokio::time::sleep_until(deadline).await,
++                        None => std::future::pending::<()>().await,
++                    } } => {
++                        let error = std::io::Error::new(std::io::ErrorKind::TimedOut, "Responses websocket pong timeout");
++                        let _ = tx_message.send(Err(WsError::Io(error)));
++                        break;
++                    }
+                     command = rx_command.recv() => {
+                         let Some(command) = command else {
+                             break;
+@@ -101,7 +137,12 @@ impl WsStream {
+                                     break;
+                                 }
+                             }
+-                            Ok(Message::Pong(_)) => {}
++                            Ok(Message::Pong(payload)) => {
++                                if awaiting_pong.as_deref() == Some(payload.as_ref()) {
++                                    awaiting_pong = None;
++                                    pong_deadline = None;
++                                }
++                            }
+                             Ok(message @ (Message::Text(_)
+                             | Message::Binary(_)
+                             | Message::Close(_)
+@@ -196,6 +237,8 @@ pub struct ResponsesWebsocketConnection {
+     stream: Arc<Mutex<Option<WsStream>>>,
+     // TODO (pakrym): is this the right place for timeout?
+     idle_timeout: Duration,
++    send_timeout: Option<Duration>,
++    receive_timeout: Option<Duration>,
+     server_reasoning_included: bool,
+     server_model: Option<String>,
+     telemetry: Option<Arc<dyn WebsocketTelemetry>>,
+@@ -224,6 +267,8 @@ impl ResponsesWebsocketConnection {
+         Self {
+             stream: Arc::new(Mutex::new(Some(stream))),
+             idle_timeout,
++            send_timeout: Some(idle_timeout),
++            receive_timeout: Some(idle_timeout),
+             server_reasoning_included,
+             server_model,
+             telemetry,
+@@ -274,7 +319,8 @@ impl ResponsesWebsocketConnection {
+             mpsc::channel::<std::result::Result<ResponseEvent, ApiError>>(1600);
+         let (tx_interrupt, rx_interrupt) = oneshot::channel();
+         let stream = Arc::clone(&self.stream);
+-        let idle_timeout = self.idle_timeout;
++        let send_timeout = self.send_timeout;
++        let receive_timeout = self.receive_timeout;
+         let server_reasoning_included = self.server_reasoning_included;
+         let server_model = self.server_model.clone();
+         let telemetry = self.telemetry.clone();
+@@ -354,7 +400,8 @@ impl ResponsesWebsocketConnection {
+                             ws_stream,
+                             tx_event.clone(),
+                             request_text,
+-                            idle_timeout,
++                            send_timeout,
++                            receive_timeout,
+                             telemetry,
+                             turn_state.as_deref(),
+                             &timing_log_context,
+@@ -395,6 +442,7 @@ impl ResponsesWebsocketConnection {
+ pub struct ResponsesWebsocketClient {
+     provider: Provider,
+     request_transport: Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
++    websocket_options: WebsocketOptions,
+     auth: SharedAuthProvider,
+     tls_selector: Option<Arc<crate::SdkWebsocketTlsSelector>>,
+ }
+@@ -431,9 +479,15 @@ impl ResponsesWebsocketClient {
+             auth,
+             tls_selector: None,
+             request_transport: None,
++            websocket_options: WebsocketOptions::default(),
+         }
+     }
+
++    pub fn with_websocket_options(mut self, options: WebsocketOptions) -> Self {
++        self.websocket_options = options;
++        self
++    }
++
+     pub fn with_request_transport(
+         mut self,
+         overrides: Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
+@@ -480,24 +534,32 @@ impl ResponsesWebsocketClient {
+         })?;
+         self.auth.add_auth_headers(&mut headers);
+
+-        let (stream, _status, server_reasoning_included, server_model) = connect_websocket(
++        let (stream, _status, server_reasoning_included, server_model) = connect_websocket_with_options(
+             ws_url.clone(),
+             headers,
+             http_client_factory,
+             turn_state.clone(),
+             self.tls_selector.clone(),
++            &self.websocket_options,
+         )
+         .await
+         .map_err(|error| {
+             sanitize_handshake_rejection(error, &ws_url, self.provider.websocket_base_url.is_some())
+         })?;
+-        Ok(ResponsesWebsocketConnection::new(
++        let mut connection = ResponsesWebsocketConnection::new(
+             stream,
+             self.provider.stream_idle_timeout,
+             server_reasoning_included,
+             server_model,
+             telemetry,
+-        ))
++        );
++        if let Some(timeout) = self.websocket_options.send_timeout_ms {
++            connection.send_timeout = timeout.map(Duration::from_millis);
++        }
++        if let Some(timeout) = self.websocket_options.receive_timeout_ms {
++            connection.receive_timeout = timeout.map(Duration::from_millis);
++        }
++        Ok(connection)
+     }
+
+     /// Opens a WebSocket connection long enough to validate the upgrade response.
+@@ -523,12 +585,13 @@ impl ResponsesWebsocketClient {
+             merge_request_headers(&self.provider.headers, extra_headers, default_headers);
+         self.auth.add_auth_headers(&mut headers);
+
+-        let (mut stream, status, reasoning_included, server_model) = connect_websocket(
++        let (mut stream, status, reasoning_included, server_model) = connect_websocket_with_options(
+             ws_url.clone(),
+             headers,
+             http_client_factory,
+             /*turn_state*/ None,
+             self.tls_selector.clone(),
++            &self.websocket_options,
+         )
+         .await
+         .map_err(|error| {
+@@ -617,12 +680,24 @@ fn websocket_tls_mode(url: &Url) -> WebSocketTlsMode {
+     }
+ }
+
++#[cfg(test)]
+ async fn connect_websocket(
+     url: Url,
+     headers: HeaderMap,
+     http_client_factory: &HttpClientFactory,
+     turn_state: Option<Arc<OnceLock<String>>>,
+     tls_selector: Option<Arc<crate::SdkWebsocketTlsSelector>>,
++) -> Result<(WsStream, StatusCode, bool, Option<String>), ApiError> {
++    connect_websocket_with_options(url, headers, http_client_factory, turn_state, tls_selector, &WebsocketOptions::default()).await
++}
++
++async fn connect_websocket_with_options(
++    url: Url,
++    headers: HeaderMap,
++    http_client_factory: &HttpClientFactory,
++    turn_state: Option<Arc<OnceLock<String>>>,
++    tls_selector: Option<Arc<crate::SdkWebsocketTlsSelector>>,
++    options: &WebsocketOptions,
+ ) -> Result<(WsStream, StatusCode, bool, Option<String>), ApiError> {
+     info!("connecting to websocket");
+
+@@ -638,7 +713,7 @@ async fn connect_websocket(
+         .unwrap_or_else(|| websocket_tls_mode(&url));
+     let connector = WebSocketConnector::new_with_tls_mode(http_client_factory, tls_mode)
+         .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
+-    let response = connector.connect(request, websocket_config()).await;
++    let response = connector.connect(request, websocket_config_with_options(options)).await;
+
+     let (stream, response) = match response {
+         Ok((stream, response)) => {
+@@ -666,19 +741,28 @@ async fn connect_websocket(
+         let _ = turn_state.set(header_value.to_string());
+     }
+     Ok((
+-        WsStream::new(stream, parse_api_rate_limits(response.headers())),
++        WsStream::new(stream, parse_api_rate_limits(response.headers()), options.clone()),
+         response.status(),
+         reasoning_included,
+         server_model,
+     ))
+ }
+
++#[cfg(test)]
+ fn websocket_config() -> WebSocketConfig {
++    websocket_config_with_options(&WebsocketOptions::default())
++}
++
++fn websocket_config_with_options(options: &WebsocketOptions) -> WebSocketConfig {
+     let mut extensions = ExtensionsConfig::default();
+     extensions.permessage_deflate = Some(DeflateConfig::default());
+
+     let mut config = WebSocketConfig::default();
+     config.extensions = extensions;
++    if let Some(limit) = options.max_message_bytes {
++        config.max_message_size = limit;
++        config.max_frame_size = None;
++    }
+     config
+ }
+
+@@ -793,7 +877,8 @@ async fn run_websocket_response_stream(
+     ws_stream: &mut WsStream,
+     tx_event: mpsc::Sender<std::result::Result<ResponseEvent, ApiError>>,
+     request_text: String,
+-    idle_timeout: Duration,
++    send_timeout: Option<Duration>,
++    receive_timeout: Option<Duration>,
+     telemetry: Option<Arc<dyn WebsocketTelemetry>>,
+     turn_state: Option<&OnceLock<String>>,
+     timing_log_context: &ResponsesWebsocketTimingLogContext,
+@@ -809,7 +894,7 @@ async fn run_websocket_response_stream(
+     send_websocket_request(
+         ws_stream,
+         request_text,
+-        idle_timeout,
++        send_timeout,
+         telemetry.as_ref(),
+         timing_log_context.connection_reused,
+     )
+@@ -821,7 +906,7 @@ async fn run_websocket_response_stream(
+     loop {
+         let poll_start = Instant::now();
+         let response = tokio::select! {
+-            response = tokio::time::timeout(idle_timeout, ws_stream.next()) => {
++            response = websocket_phase_timeout(receive_timeout, ws_stream.next()) => {
+                 response.map_err(|_| ApiError::Stream("idle timeout waiting for websocket".into()))
+             }
+             Ok(()) = &mut interrupt, if response_id.is_some() => {
+@@ -832,7 +917,7 @@ async fn run_websocket_response_stream(
+                         "response_id": response_id,
+                         "mode": "discard_partial_items",
+                     }).to_string(),
+-                    idle_timeout,
++                    send_timeout,
+                     /*telemetry*/ None,
+                     timing_log_context.connection_reused,
+                 )
+@@ -1065,16 +1150,23 @@ fn safety_buffering_for_event(
+     event.safety_buffering(treatment)
+ }
+
++async fn websocket_phase_timeout<T>(timeout: Option<Duration>, future: impl std::future::Future<Output = T>) -> Result<T, tokio::time::error::Elapsed> {
++    match timeout {
++        Some(timeout) => tokio::time::timeout(timeout, future).await,
++        None => Ok(future.await),
++    }
++}
++
+ async fn send_websocket_request(
+     ws_stream: &mut WsStream,
+     request_text: String,
+-    idle_timeout: Duration,
++    send_timeout: Option<Duration>,
+     telemetry: Option<&Arc<dyn WebsocketTelemetry>>,
+     connection_reused: bool,
+ ) -> Result<(), ApiError> {
+     let request_start = Instant::now();
+-    let result = tokio::time::timeout(
+-        idle_timeout,
++    let result = websocket_phase_timeout(
++        send_timeout,
+         ws_stream.send(Message::Text(request_text.into())),
+     )
+     .await
+diff --git a/codex-rs/config/src/thread_config.rs b/codex-rs/config/src/thread_config.rs
+index 8fd7e796..f797c056 100644
+--- a/codex-rs/config/src/thread_config.rs
++++ b/codex-rs/config/src/thread_config.rs
+@@ -296,6 +296,7 @@ mod tests {
+
+     fn test_provider(name: &str) -> ModelProviderInfo {
+         ModelProviderInfo {
++            websocket_options: None,
+             name: name.to_string(),
+             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
+             websocket_base_url: None,
+diff --git a/codex-rs/config/src/thread_config/remote.rs b/codex-rs/config/src/thread_config/remote.rs
+index fec0c4a2..70c689a1 100644
+--- a/codex-rs/config/src/thread_config/remote.rs
++++ b/codex-rs/config/src/thread_config/remote.rs
+@@ -171,6 +171,7 @@ fn model_provider_from_proto(
+         }
+     };
+     let info = ModelProviderInfo {
++        websocket_options: None,
+         name: provider.name,
+         base_url: provider.base_url,
+         websocket_base_url: provider.websocket_base_url.map(Into::into),
+@@ -225,6 +226,7 @@ fn model_provider_to_proto(
+         stream_max_retries,
+         stream_idle_timeout_ms,
+         websocket_connect_timeout_ms,
++        websocket_options: _,
+         requires_openai_auth,
+         supports_websockets,
+         supports_standalone_web_search,
+@@ -571,6 +573,7 @@ mod tests {
+
+     fn expected_provider() -> ModelProviderInfo {
+         ModelProviderInfo {
++            websocket_options: None,
+             name: "Local".to_string(),
+             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
+             websocket_base_url: None,
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index 7e5458ef..e7f9dfe6 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -2859,6 +2859,14 @@
+           "minimum": 0.0,
+           "type": "integer"
+         },
++        "websocket_options": {
++          "allOf": [
++            {
++              "$ref": "#/definitions/WebsocketOptions"
++            }
++          ],
++          "description": "Optional Responses WebSocket keepalive, message limit, and phase controls."
++        },
+         "wire_api": {
+           "allOf": [
+             {
+@@ -6700,6 +6708,43 @@
+       },
+       "type": "object"
+     },
++    "WebsocketOptions": {
++      "additionalProperties": false,
++      "description": "Per-connection controls; omitted deadlines retain the existing provider phase defaults.",
++      "properties": {
++        "connect_timeout_ms": {
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
++        },
++        "max_message_bytes": {
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
++        },
++        "ping_interval_ms": {
++          "format": "uint64",
++          "minimum": 1.0,
++          "type": "integer"
++        },
++        "ping_timeout_ms": {
++          "format": "uint64",
++          "minimum": 1.0,
++          "type": "integer"
++        },
++        "receive_timeout_ms": {
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
++        },
++        "send_timeout_ms": {
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
++        }
++      },
++      "type": "object"
++    },
+     "WindowsSandboxModeToml": {
+       "enum": [
+         "elevated",
+@@ -7652,7 +7697,7 @@
+       "description": "Optional path to a file containing model instructions that will override the built-in instructions for the selected model. Users are STRONGLY DISCOURAGED from using this field, as deviating from the instructions sanctioned by Codex will likely degrade model performance."
+     },
+     "model_post_turn_compact_threshold_percent": {
+-      "description": "Percentage of the usable context window that triggers compaction after a final response. Existing auto-compaction limits still apply. Omitted or zero disables turn-end compaction; valid values are 0–100.",
++      "description": "Percentage of the usable context window that triggers compaction after a final response. Existing auto-compaction limits still apply. Omitted or zero disables turn-end compaction; valid values are 0\u2013100.",
+       "format": "uint8",
+       "maximum": 100.0,
+       "minimum": 0.0,
+@@ -7929,4 +7974,4 @@
+   },
+   "title": "ConfigToml",
+   "type": "object"
+-}
+\ No newline at end of file
++}
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index a85ac5e2..bcb00d42 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -305,6 +305,7 @@ pub struct ModelClientSession {
+     client: ModelClient,
+     websocket_session: WebsocketSession,
+     pending_http_response: Option<(Option<String>, Option<u64>, oneshot::Receiver<LastResponse>)>,
++    allow_http_fallback: bool,
+     /// Turn state for sticky routing.
+     ///
+     /// This is an `OnceLock` that stores the turn state value received from the server
+@@ -841,6 +842,7 @@ impl ModelClient {
+             client: self.clone(),
+             websocket_session,
+             pending_http_response: None,
++            allow_http_fallback: true,
+             turn_state: Arc::new(OnceLock::new()),
+             provider_history_rx: None,
+         }
+@@ -1815,12 +1817,15 @@ impl ModelClient {
+             request_route_telemetry,
+             self.state.auth_env_telemetry.clone(),
+         );
+-        let websocket_connect_timeout = self.state.provider.info().websocket_connect_timeout();
++        let websocket_connect_timeout = self.state.provider.info().websocket_options.as_ref()
++            .and_then(|options| options.connect_timeout_ms)
++            .map(|timeout| timeout.map(Duration::from_millis))
++            .unwrap_or_else(|| Some(self.state.provider.info().websocket_connect_timeout()));
+         let start = Instant::now();
+-        let result = match tokio::time::timeout(
+-            websocket_connect_timeout,
++        let connect = async {
+             ApiWebSocketResponsesClient::new(api_provider, api_auth)
+                 .with_request_transport(request_transport.cloned())
++                .with_websocket_options(self.state.provider.info().websocket_options.clone().unwrap_or_default())
+                 .with_tls_selector(self.sdk_websocket_tls_selector.clone())
+                 .connect(
+                     &self.http_client_factory,
+@@ -1828,12 +1833,14 @@ impl ModelClient {
+                     codex_login::default_client::default_headers(),
+                     /*turn_state*/ None,
+                     Some(websocket_telemetry),
+-                ),
+-        )
+-        .await
+-        {
+-            Ok(result) => result,
+-            Err(_) => Err(ApiError::Transport(TransportError::Timeout)),
++                ).await
++        };
++        let result = match websocket_connect_timeout {
++            Some(timeout) => match tokio::time::timeout(timeout, connect).await {
++                Ok(result) => result,
++                Err(_) => Err(ApiError::Transport(TransportError::Timeout)),
++            },
++            None => connect.await,
+         };
+         let error_message = result.as_ref().err().map(telemetry_api_error_message);
+         let response_debug = result
+@@ -1933,6 +1940,25 @@ impl Drop for ModelClientSession {
+ }
+
+ impl ModelClientSession {
++    fn request_transport_mode(prompt: &Prompt) -> codex_protocol::model_request_transport::RequestTransportMode {
++        prompt.request_controls.request_transport.as_ref().and_then(Option::as_ref)
++            .and_then(|transport| transport.mode.flatten()).unwrap_or_default()
++    }
++
++    fn websocket_for_prompt(&self, prompt: &Prompt) -> Result<bool> {
++        use codex_protocol::model_request_transport::RequestTransportMode;
++        match Self::request_transport_mode(prompt) {
++            RequestTransportMode::Auto => Ok(self.client.responses_websocket_enabled()),
++            RequestTransportMode::Http => Ok(false),
++            RequestTransportMode::Websocket => {
++                if !self.client.state.provider.info().supports_websockets || prompt.prefer_buffered_response {
++                    return Err(CodexErr::InvalidRequest("Explicit WebSocket transport requires a streaming WebSocket provider".into()));
++                }
++                Ok(true)
++            }
++        }
++    }
++
+     pub(crate) fn uses_chatgpt_plan(&self) -> bool {
+         self.client
+             .auth_manager()
+@@ -2486,6 +2512,10 @@ impl ModelClientSession {
+                     "Video input requires a compatible application model".into(),
+                 ));
+             }
++            if Self::request_transport_mode(prompt) != codex_protocol::model_request_transport::RequestTransportMode::Auto
++                && interceptors.iter().any(|interceptor| interceptor.produces_response()) {
++                return Err(CodexErr::InvalidRequest("Explicit request transport requires the native Responses provider".into()));
++            }
+             let mut logical_history_input = None;
+             if let Some(cursor) = &self.client.provider_history {
+                 if interceptors.iter().any(|interceptor| interceptor.produces_response()) {
+@@ -2812,6 +2842,10 @@ impl ModelClientSession {
+                 &mut interceptor_metadata,
+                 prompt.tool_admission.clone(),
+             );
++            if Self::request_transport_mode(prompt) != codex_protocol::model_request_transport::RequestTransportMode::Auto
++                && interceptors.iter().any(|interceptor| interceptor.produces_response()) {
++                return Err(CodexErr::InvalidRequest("Explicit request transport requires the native Responses provider".into()));
++            }
+             let mut logical_history_input = None;
+             let require_existing = if let Some(cursor) = &self.client.provider_history {
+                 if interceptors.iter().any(|interceptor| interceptor.produces_response()) {
+@@ -2878,9 +2912,12 @@ impl ModelClientSession {
+             }
+             match connection_result {
+                 Ok(_) => {}
+-                Err(ApiError::Transport(TransportError::Http { status, .. }))
++                Err(error @ ApiError::Transport(TransportError::Http { status, .. }))
+                     if status == StatusCode::UPGRADE_REQUIRED =>
+                 {
++                    if Self::request_transport_mode(prompt) == codex_protocol::model_request_transport::RequestTransportMode::Websocket {
++                        return Err(provider.map_api_error(error));
++                    }
+                     return Ok(WebsocketStreamOutcome::FallbackToHttp);
+                 }
+                 Err(ApiError::Transport(unauthorized_transport))
+@@ -2904,6 +2941,9 @@ impl ModelClientSession {
+                         // No prompt was sent: negotiate HTTP after auth recovery is exhausted.
+                         Err(error) if matches!(error.details(), CodexErrorDetails::UnexpectedStatus(response) if response.status == StatusCode::UNAUTHORIZED) =>
+                         {
++                            if Self::request_transport_mode(prompt) == codex_protocol::model_request_transport::RequestTransportMode::Websocket {
++                                return Err(error);
++                            }
+                             return Ok(WebsocketStreamOutcome::FallbackToHttp);
+                         }
+                         Err(error) => return Err(error),
+@@ -3079,7 +3119,8 @@ impl ModelClientSession {
+                     return Err(error);
+                 }
+             };
+-            if self.client.provider_history.is_some()
++            if (self.client.provider_history.is_some()
++                || Self::request_transport_mode(prompt) == codex_protocol::model_request_transport::RequestTransportMode::Websocket)
+                 && let Some(attempt) = prompt.tool_admission.as_ref().and_then(|admission| admission.model_attempt())
+             {
+                 attempt.observe_provider_tools(true);
+@@ -3225,6 +3266,10 @@ impl ModelClientSession {
+         service_tier: Option<String>,
+         responses_metadata: &CodexResponsesMetadata,
+     ) -> Result<()> {
++        if Self::request_transport_mode(prompt) != codex_protocol::model_request_transport::RequestTransportMode::Auto {
++            // Explicit selection belongs to the admitted request, including its first handshake.
++            return Ok(());
++        }
+         if self.client.provider_history.is_some() {
+             // Connection-only preconnect without an unowned remote-history write.
+             return Ok(());
+@@ -3237,7 +3282,7 @@ impl ModelClientSession {
+         }) {
+             return Ok(());
+         }
+-        if !self.client.responses_websocket_enabled() {
++        if !self.websocket_for_prompt(prompt)? {
+             return Ok(());
+         }
+         if self.is_websocket_prewarmed().await {
+@@ -3301,10 +3346,12 @@ impl ModelClientSession {
+         responses_metadata: &CodexResponsesMetadata,
+         inference_trace: &InferenceTraceContext,
+     ) -> Result<ResponseStream> {
++        let websocket_enabled = self.websocket_for_prompt(prompt)?;
++        self.allow_http_fallback = Self::request_transport_mode(prompt) != codex_protocol::model_request_transport::RequestTransportMode::Websocket;
+         let projected_model = request_model_info(prompt, model_info);
+         let model_info = projected_model.as_ref();
+         if prompt.prefer_buffered_response
+-            && (model_info.use_responses_lite || self.client.responses_websocket_enabled())
++            && (model_info.use_responses_lite || websocket_enabled)
+         {
+             return Err(CodexErr::InvalidRequest(
+                 "Buffered Responses requires HTTP without Responses Lite or WebSockets".into(),
+@@ -3358,7 +3405,8 @@ impl ModelClientSession {
+             projected.input == prompt.input && projected.request_controls == prompt.request_controls
+         });
+         let prompt = transformed.as_ref().unwrap_or(prompt);
+-        if self.client.responses_websocket_enabled()
++        let websocket_enabled = self.websocket_for_prompt(prompt)?;
++        if websocket_enabled
+             && codex_protocol::input_video::contains_video_input(&prompt.input)
+         {
+             return Err(CodexErr::InvalidRequest(
+@@ -3369,7 +3417,7 @@ impl ModelClientSession {
+         match wire_api {
+             WireApi::Responses => {
+                 let mut auth_recovery = RequestAuthRecovery::new(&self.client.state.provider);
+-                if self.client.responses_websocket_enabled() {
++                if websocket_enabled {
+                     let request_trace = current_span_w3c_trace_context();
+                     match self
+                         .stream_responses_websocket(
+@@ -3476,6 +3524,7 @@ impl ModelClientSession {
+         session_telemetry: &SessionTelemetry,
+         model_info: &ModelInfo,
+     ) -> bool {
++        if !self.allow_http_fallback { return false; }
+         let activated = self
+             .client
+             .force_http_fallback(session_telemetry, model_info);
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index bff341e9..b41fbc84 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -4277,6 +4277,9 @@ fn sdk_request_may_have_provider_effects(
+         .as_ref()
+         .is_some_and(Option::is_some)
+         || prompt.canonical_history_input.is_some()
++        || prompt.request_controls.request_transport.as_ref().and_then(Option::as_ref)
++            .and_then(|transport| transport.mode.flatten())
++            == Some(codex_protocol::model_request_transport::RequestTransportMode::Websocket)
+         || prompt.tools.iter().chain(visible_tools.iter()).any(|tool| {
+             matches!(
+                 tool,
+diff --git a/codex-rs/core/tests/responses_headers.rs b/codex-rs/core/tests/responses_headers.rs
+index ac3fc389..f6258ee1 100644
+--- a/codex-rs/core/tests/responses_headers.rs
++++ b/codex-rs/core/tests/responses_headers.rs
+@@ -72,6 +72,7 @@ async fn responses_stream_includes_subagent_header_on_review() {
+     .await;
+
+     let provider = ModelProviderInfo {
++        websocket_options: None,
+         name: "mock".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
+         websocket_base_url: None,
+@@ -217,6 +218,7 @@ async fn responses_stream_includes_subagent_header_on_other() {
+     .await;
+
+     let provider = ModelProviderInfo {
++        websocket_options: None,
+         name: "mock".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
+         websocket_base_url: None,
+@@ -343,6 +345,7 @@ async fn responses_respects_model_info_overrides_from_config() {
+     let request_recorder = responses::mount_sse_once(&server, response_body).await;
+
+     let provider = ModelProviderInfo {
++        websocket_options: None,
+         name: "mock".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
+         websocket_base_url: None,
+diff --git a/codex-rs/core/tests/suite/client.rs b/codex-rs/core/tests/suite/client.rs
+index 33231525..9baade38 100644
+--- a/codex-rs/core/tests/suite/client.rs
++++ b/codex-rs/core/tests/suite/client.rs
+@@ -1628,6 +1628,7 @@ async fn amazon_bedrock_proxy_uses_command_auth_and_custom_headers() {
+ /// reaches `Completed` without surfacing an auth or transport error to the client.
+ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuthInfo) {
+     let provider = ModelProviderInfo {
++        websocket_options: None,
+         name: "corp".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
+         websocket_base_url: None,
+@@ -3132,6 +3133,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
+     let resp_mock = mount_sse_once(&server, sse_body.to_string()).await;
+
+     let provider = ModelProviderInfo {
++        websocket_options: None,
+         name: "azure".into(),
+         base_url: Some(format!("{}/openai", server.uri())),
+         websocket_base_url: None,
+@@ -3767,6 +3769,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
+         .await;
+
+     let provider = ModelProviderInfo {
++        websocket_options: None,
+         name: "custom".to_string(),
+         base_url: Some(format!("{}/openai", server.uri())),
+         websocket_base_url: None,
+@@ -3856,6 +3859,7 @@ async fn env_var_overrides_loaded_auth() {
+         .await;
+
+     let provider = ModelProviderInfo {
++        websocket_options: None,
+         name: ModelProviderInfo::create_openai_provider(/*base_url*/ None).name,
+         base_url: Some(format!("{}/openai", server.uri())),
+         websocket_base_url: None,
+diff --git a/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs b/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
+index a79f7a35..52cd85d6 100644
+--- a/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
++++ b/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
+@@ -64,6 +64,7 @@ async fn continue_after_stream_error() {
+     // server. Use an existing env var (PATH) to satisfy the auth plumbing
+     // without requiring a real secret.
+     let provider = ModelProviderInfo {
++        websocket_options: None,
+         name: "mock-openai".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
+         websocket_base_url: None,
+diff --git a/codex-rs/core/tests/suite/stream_no_completed.rs b/codex-rs/core/tests/suite/stream_no_completed.rs
+index ba9b3794..484af4a7 100644
+--- a/codex-rs/core/tests/suite/stream_no_completed.rs
++++ b/codex-rs/core/tests/suite/stream_no_completed.rs
+@@ -46,6 +46,7 @@ async fn retries_on_early_close() {
+     // environment variables.
+
+     let model_provider = ModelProviderInfo {
++        websocket_options: None,
+         name: "openai".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
+         websocket_base_url: None,
+diff --git a/codex-rs/login/src/auth_env_telemetry.rs b/codex-rs/login/src/auth_env_telemetry.rs
+index e9f89d9a..6195cd5a 100644
+--- a/codex-rs/login/src/auth_env_telemetry.rs
++++ b/codex-rs/login/src/auth_env_telemetry.rs
+@@ -59,6 +59,7 @@ mod tests {
+     #[test]
+     fn collect_auth_env_telemetry_buckets_provider_env_key_name() {
+         let provider = ModelProviderInfo {
++            websocket_options: None,
+             name: "Custom".to_string(),
+             base_url: None,
+             websocket_base_url: None,
+diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
+index f6686618..c4538281 100644
+--- a/codex-rs/model-provider-info/src/lib.rs
++++ b/codex-rs/model-provider-info/src/lib.rs
+@@ -190,6 +190,9 @@ pub struct ModelProviderInfo {
+     /// Maximum time (in milliseconds) to wait for a websocket connection attempt before treating
+     /// it as failed.
+     pub websocket_connect_timeout_ms: Option<u64>,
++    /// Optional Responses WebSocket keepalive, message limit, and phase controls.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub websocket_options: Option<codex_protocol::model_request_transport::WebsocketOptions>,
+     /// Does this provider require an OpenAI API key or ChatGPT login token? If true,
+     /// the user is presented with a login screen on first run, and credentials are
+     /// stored using the backend selected by `cli_auth_credentials_store`.
+@@ -593,6 +596,7 @@ other non-default provider fields are not supported"
+
+     pub fn create_openai_provider(base_url: Option<String>) -> ModelProviderInfo {
+         ModelProviderInfo {
++            websocket_options: None,
+             name: OPENAI_PROVIDER_NAME.into(),
+             base_url,
+             websocket_base_url: None,
+@@ -638,6 +642,7 @@ other non-default provider fields are not supported"
+         aws: Option<ModelProviderAwsAuthInfo>,
+     ) -> ModelProviderInfo {
+         ModelProviderInfo {
++            websocket_options: None,
+             name: AMAZON_BEDROCK_PROVIDER_NAME.into(),
+             // The runtime provider derives the regional Mantle endpoint when
+             // this is unset. A configured value is therefore unambiguously an
+@@ -824,6 +829,7 @@ pub fn create_oss_provider(default_provider_port: u16, wire_api: WireApi) -> Mod
+
+ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> ModelProviderInfo {
+     ModelProviderInfo {
++        websocket_options: None,
+         name: "gpt-oss".into(),
+         base_url: Some(base_url.into()),
+         websocket_base_url: None,
+diff --git a/codex-rs/model-provider-info/src/model_provider_info_tests.rs b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+index 69ae70b5..037d3776 100644
+--- a/codex-rs/model-provider-info/src/model_provider_info_tests.rs
++++ b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+@@ -76,6 +76,7 @@ name = "Ollama"
+ base_url = "http://localhost:11434/v1"
+         "#;
+     let expected_provider = ModelProviderInfo {
++        websocket_options: None,
+         name: "Ollama".into(),
+         base_url: Some("http://localhost:11434/v1".into()),
+         websocket_base_url: None,
+@@ -114,6 +115,7 @@ env_key = "AZURE_OPENAI_API_KEY"
+ query_params = { api-version = "2025-04-01-preview" }
+         "#;
+     let expected_provider = ModelProviderInfo {
++        websocket_options: None,
+         name: "Azure".into(),
+         base_url: Some("https://xxxxx.openai.azure.com/openai".into()),
+         websocket_base_url: None,
+@@ -156,6 +158,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
+ supports_standalone_web_search = true
+         "#;
+     let expected_provider = ModelProviderInfo {
++        websocket_options: None,
+         name: "Example".into(),
+         base_url: Some("https://example.com".into()),
+         websocket_base_url: None,
+@@ -343,6 +346,7 @@ fn test_create_amazon_bedrock_provider() {
+     assert_eq!(
+         ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
+         ModelProviderInfo {
++            websocket_options: None,
+             name: "Amazon Bedrock".to_string(),
+             base_url: None,
+             websocket_base_url: None,
+diff --git a/codex-rs/model-provider/src/provider.rs b/codex-rs/model-provider/src/provider.rs
+index 8779e9c1..19faabb0 100644
+--- a/codex-rs/model-provider/src/provider.rs
++++ b/codex-rs/model-provider/src/provider.rs
+@@ -634,6 +634,7 @@ mod tests {
+
+     fn provider_for(base_url: String) -> ModelProviderInfo {
+         ModelProviderInfo {
++            websocket_options: None,
+             name: "mock".into(),
+             base_url: Some(base_url),
+             websocket_base_url: None,
+diff --git a/codex-rs/protocol/src/model_request_transport.rs b/codex-rs/protocol/src/model_request_transport.rs
+index 5579c3ea..41fa6f27 100644
+--- a/codex-rs/protocol/src/model_request_transport.rs
++++ b/codex-rs/protocol/src/model_request_transport.rs
+@@ -4,9 +4,22 @@ use serde::{Deserialize, Serialize};
+ use std::collections::{BTreeMap, BTreeSet};
+ use ts_rs::TS;
+
++#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(rename_all = "snake_case")]
++pub enum RequestTransportMode {
++    #[default]
++    Auto,
++    Http,
++    Websocket,
++}
++
+ #[derive(Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ #[serde(deny_unknown_fields)]
+ pub struct RequestTransportOverrides {
++    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_with::rust::double_option")]
++    #[ts(optional = nullable)]
++    #[schemars(with = "Option<RequestTransportMode>")]
++    pub mode: Option<Option<RequestTransportMode>>,
+     #[serde(
+         default,
+         skip_serializing_if = "Option::is_none",
+@@ -32,6 +45,7 @@ pub struct RequestTransportOverrides {
+ impl std::fmt::Debug for RequestTransportOverrides {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         f.debug_struct("RequestTransportOverrides")
++            .field("mode", &self.mode)
+             .field(
+                 "headers",
+                 &self
+@@ -55,6 +69,7 @@ impl std::fmt::Debug for RequestTransportOverrides {
+
+ impl RequestTransportOverrides {
+     pub fn apply_patch(&mut self, patch: &Self) {
++        if patch.mode.is_some() { self.mode = patch.mode; }
+         if patch.headers.is_some() {
+             self.headers = patch.headers.clone();
+         }
+@@ -129,3 +144,32 @@ impl RequestTransportOverrides {
+         Ok(())
+     }
+ }
++
++
++/// Per-connection controls; omitted deadlines retain the existing provider phase defaults.
++#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct WebsocketOptions {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional = nullable, type = "number | null")]
++    pub ping_interval_ms: Option<std::num::NonZeroU64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional = nullable, type = "number | null")]
++    pub ping_timeout_ms: Option<std::num::NonZeroU64>,
++    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_with::rust::double_option")]
++    #[ts(optional = nullable, type = "number | null")]
++    #[schemars(with = "Option<usize>")]
++    pub max_message_bytes: Option<Option<usize>>,
++    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_with::rust::double_option")]
++    #[ts(optional = nullable, type = "number | null")]
++    #[schemars(with = "Option<u64>")]
++    pub send_timeout_ms: Option<Option<u64>>,
++    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_with::rust::double_option")]
++    #[ts(optional = nullable, type = "number | null")]
++    #[schemars(with = "Option<u64>")]
++    pub connect_timeout_ms: Option<Option<u64>>,
++    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_with::rust::double_option")]
++    #[ts(optional = nullable, type = "number | null")]
++    #[schemars(with = "Option<u64>")]
++    pub receive_timeout_ms: Option<Option<u64>>,
++}

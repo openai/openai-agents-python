@@ -344,6 +344,7 @@ from .telemetry import (
     _CapturedTrace as _CapturedTrace,
     _clear_current as _clear_current,
     _create_task as _create_task,
+    _native_provider_response_span_id,
     _owned_span as _owned_span,
 )
 from .tools import (
@@ -466,8 +467,11 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
         "context_management",
         "provider_compaction",
         "extra_body",
+        "request_transport",
     }
     transport: dict[str, Any] = {}
+    if "request_transport" in copied:
+        transport["mode"] = copied["request_transport"]
     if "extra_headers" in copied:
         headers = copied["extra_headers"]
         transport["headers"] = (
@@ -483,7 +487,7 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
     if transport:
         controls["request_transport"] = transport
     for key, value in copied.items():
-        if key in ("extra_headers", "extra_query"):
+        if key in ("extra_headers", "extra_query", "request_transport"):
             continue
         if key == "tool_choice":
             if isinstance(value, ToolRef):
@@ -3363,10 +3367,18 @@ async def _opening_provider_config(
         "stream_max_retries",
         "stream_idle_timeout_ms",
         "websocket_connect_timeout_ms",
+        "websocket_options",
     ):
         value = getattr(provider, name)
         if value is not None:
-            routing[name] = value
+            if name == "websocket_options":
+                routing[name] = {
+                    key: "disabled" if limit is None else limit
+                    for key, limit in value.items()
+                    if limit is not None or key not in {"ping_interval_ms", "ping_timeout_ms"}
+                }
+            else:
+                routing[name] = value
     if isinstance(auth, CodexLogin):
         provider_id = "native_agent_codex_login"
         base_url = _CODEX_RESPONSES_BASE_URL
@@ -4407,6 +4419,8 @@ class Session(Generic[ContextT, OutputT]):
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
 
+                startup_transport = settings.get("request_controls", {}).get("request_transport")
+
                 def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool, bool]:
                     private_run = (
                         (_atomic_first_turn or _private_default_opening)
@@ -4432,6 +4446,7 @@ class Session(Generic[ContextT, OutputT]):
                     if (
                         private_run
                         and (_private_text_run or use_completed_owner)
+                        and (startup_transport or {}).get("mode") != "websocket"
                         and _default_private_tls_profile(
                             provider, provider_config, websockets_enabled
                         )
@@ -4500,7 +4515,6 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 if hosted_verification is not None and chatgpt_apps is not None:
                     raise ValueError("Select one explicit Apps registration per Session")
-                startup_transport = settings.get("request_controls", {}).get("request_transport")
                 options = {
                     "_hosted_tools": hosted_tools,
                     **(
@@ -13522,6 +13536,8 @@ class Session(Generic[ContextT, OutputT]):
         prepare: Callable[[Callable[[], bool]], tuple[Callable[..., Any], object]],
         reply: Callable[[Any], None],
         reject: Callable[[], None],
+        *,
+        synchronous_id_policy: bool = False,
     ) -> None:
         """Own a context or compaction callback through its final native reply."""
 
@@ -13549,7 +13565,10 @@ class Session(Generic[ContextT, OutputT]):
             if not active():
                 return
             callback, request = prepare(active)
-            if isinstance(request, CompletionContext):
+            if synchronous_id_policy:
+                # ID policy is synchronous host-loop work, with no callback span.
+                result = callback(request)
+            elif isinstance(request, CompletionContext):
                 result = await self._call_completion_callback(
                     state, message, callback, active, request
                 )
@@ -13575,6 +13594,34 @@ class Session(Generic[ContextT, OutputT]):
             if not replied:
                 with suppress(RuntimeError):
                     reject()
+
+    async def _admit_provider_response_span(
+        self, state: _CallbackState, message: dict[str, Any]
+    ) -> None:
+        def prepare(_active: Callable[[], bool]) -> tuple[Callable[..., Any], str]:
+            if "profile_id" in message or "profile_epoch" in message:
+                self._agent_for_message(message)
+            context = message["parent_context"]
+            if not isinstance(context, str) or not context:
+                raise NativeError("SDK response span has no live parent owner")
+            return _native_provider_response_span_id, context
+
+        def reply(value: Any) -> None:
+            self._native._reply_provider_response_span(
+                message["step_id"],
+                json.dumps(value, allow_nan=False),
+                message["thread"],
+                message["instance"],
+            )
+
+        def reject() -> None:
+            self._native._reply_provider_response_span(
+                message["step_id"], None, message["thread"], message["instance"], error=True
+            )
+
+        await self._run_owned_context_callback(
+            state, message, prepare, reply, reject, synchronous_id_policy=True
+        )
 
     async def _transform_context(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span("context callback", "callback", message.get("tracing_context")) as tracing:
@@ -14867,6 +14914,7 @@ class Session(Generic[ContextT, OutputT]):
         prefix = ()
         preparation_callbacks = {
             "_sdk_select_step": self._select_step,
+            "_sdk_provider_response_span": self._admit_provider_response_span,
             "_sdk_transform_context": self._transform_context,
             "_sdk_before_compact": self._before_compact,
             "_sdk_before_compact_policy": self._before_compact,
