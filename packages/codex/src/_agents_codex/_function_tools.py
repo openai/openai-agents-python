@@ -939,10 +939,19 @@ def _uses_live_tool_context(callback: Callable[..., Any] | None) -> bool:
 async def _application_error_output(
     name: str, formatter: Callable[..., Any], *arguments: Any
 ) -> ToolOutput:
-    text = await _call_application_callback(formatter, arguments, {})
-    if not isinstance(text, str):
-        raise TypeError(f"Function {name} must return str")
-    return ToolOutput.error(text)
+    text: Any = None
+    invalid: TypeError | None = None
+    try:
+        text = await _call_application_callback(formatter, arguments, {})
+        if not isinstance(text, str):
+            invalid = TypeError(f"Function {name} must return str")
+            raise invalid from None
+        return ToolOutput.error(text)
+    finally:
+        if invalid is not None:
+            # A formatter may be running inside a validation exception handler.
+            invalid.__context__ = None
+        del text, formatter, arguments, invalid
 
 
 async def _invoke_application_tool(

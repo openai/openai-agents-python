@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 from dataclasses import dataclass
 from typing import cast
 
@@ -110,6 +112,62 @@ async def test_standalone_configured_input_and_body_failures():
         "application failure"
     )
     assert calls == [2]
+
+
+async def test_standalone_invalid_input_formatter_clears_private_diagnostics():
+    input_marker = "private-standalone-formatter-input"
+    output_marker = "private-standalone-formatter-result"
+
+    def format_input(_ctx: ToolInvocationInputContext[None], _error: Exception, raw: object) -> str:
+        return cast(str, {"result": output_marker, "raw": raw})
+
+    @function_tool(input_error_function=format_input)
+    def requires_integer(amount: int) -> int:
+        return amount
+
+    with pytest.raises(TypeError, match="input_error_function must return str") as caught:
+        await requires_integer.invoke({"amount": input_marker})
+    _assert_sdk_failure_privacy(caught.value, input_marker, output_marker)
+
+
+@pytest.mark.parametrize(
+    ("exception_type", "stage"),
+    [("SystemExit", "body"), ("KeyboardInterrupt", "policy")],
+)
+def test_standalone_delivers_process_control_to_the_invoking_task(exception_type, stage):
+    program = """
+import asyncio
+import sys
+from agents import Allow, ToolInvocationContext, function_tool
+
+problem = SystemExit(23) if sys.argv[1] == "SystemExit" else KeyboardInterrupt("synthetic")
+
+def before(_context: ToolInvocationContext[None]) -> Allow:
+    raise problem
+
+@function_tool(before=before if sys.argv[2] == "policy" else None)
+async def owned() -> None:
+    raise problem
+
+async def main():
+    sibling = asyncio.create_task(asyncio.sleep(0, result="alive"))
+    try:
+        await owned.invoke("{}")
+    except (SystemExit, KeyboardInterrupt) as caught:
+        assert caught is problem
+    else:
+        raise AssertionError("The invoking task did not receive the original exception")
+    assert await sibling == "alive"
+
+asyncio.run(main())
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", program, exception_type, stage],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 async def test_standalone_deadline_joins_callback_and_skips_late_output():

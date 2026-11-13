@@ -66,15 +66,20 @@ async def _call_application_callback(
     cutoff = None if timeout_seconds is None else loop.time() + timeout_seconds
     active = True
     settled_at: float | None = None
+    control_error: SystemExit | KeyboardInterrupt | None = None
 
     def admit() -> bool:
         return active and (cutoff is None or loop.time() < cutoff)
 
     async def run() -> Any:
-        nonlocal settled_at
+        nonlocal settled_at, control_error
         try:
             if admit():
                 return await _call_callback_entered(callback, admit, args, kwargs)
+            return None
+        except (SystemExit, KeyboardInterrupt) as error:
+            # A child asyncio task must not propagate these to the event loop.
+            control_error = error
             return None
         finally:
             settled_at = loop.time()
@@ -105,10 +110,14 @@ async def _call_application_callback(
             raise
         if cutoff is not None and (not active or settled_at is not None and settled_at >= cutoff):
             failure = None if pending.cancelled() else pending.exception()
+            if failure is None:
+                failure = control_error
             if isinstance(failure, _FunctionBodyFailure):
                 failure = failure.original
             assert timeout_error is not None
             raise timeout_error from failure
+        if control_error is not None:
+            raise control_error
         return pending.result()
     finally:
         if timer is not None:
@@ -116,6 +125,7 @@ async def _call_application_callback(
         args = ()
         kwargs = {}
         callback = pending = cast(Any, None)
+        control_error = None
 
 
 async def _call_callback_body(
