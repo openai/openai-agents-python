@@ -54,6 +54,7 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         "items",
         "history_snapshot",
         "transact_history",
+        "pop_history",
         "turns",
         "rate_limits",
         "plan_usage",
