@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,8 +22,16 @@ from agents import (
 )
 from agents.state import SessionState
 from tests._asyncio import timeout
-from tests.native_fixtures import ResponsesFixture, assistant_output, responses as responses
+from tests.native_executor_fixtures import ExecutorPeer
+from tests.native_fixtures import (
+    ResponsesFixture,
+    assistant_output,
+    function_call,
+    responses as responses,
+    tool_output,
+)
 from tests.test_native_agent import provider
+from tests.test_native_executor_tools import declaration
 from tests.test_native_mcp_tools import Peer, mcp_call
 
 
@@ -52,8 +61,9 @@ def descriptor(url: str) -> HttpMCP[Any]:
 
 
 @pytest.mark.parametrize("decision", ["allow_once", "deny"])
+@pytest.mark.parametrize("reset_tool_choice", [False, True])
 async def test_portable_ordinary_mcp_candidate_fresh_exact_decision(
-    responses: ResponsesFixture, decision: str
+    responses: ResponsesFixture, decision: str, reset_tool_choice: bool
 ) -> None:
     peer = Peer(names=("find-record",), annotations=None)
     sampled = mcp_call("reviewed", "mcp__docs", "portable-native")
@@ -65,7 +75,10 @@ async def test_portable_ordinary_mcp_candidate_fresh_exact_decision(
     try:
         async with timeout(15), peer.serve() as url:
             agent = Agent(
-                instructions="Read the record.", tools=[descriptor(url)], provider=native_provider
+                instructions="Read the record.",
+                tools=[descriptor(url)],
+                provider=native_provider,
+                model_settings={"tool_choice": "required", "reset_tool_choice": reset_tool_choice},
             )
             async with agent.session() as source:
                 old = await approval(await source.submit("Read"))
@@ -126,6 +139,9 @@ async def test_portable_ordinary_mcp_candidate_fresh_exact_decision(
                 [("find-record", {"key": "43"})] if decision == "allow_once" else []
             )
             assert len(responses.requests) == 2
+            assert responses.requests[0]["tool_choice"] == "required"
+            if reset_tool_choice and decision == "allow_once":
+                assert responses.requests[1].get("tool_choice", "auto") == "auto"
             history = responses.requests[1]["input"]
             calls = [
                 item
@@ -143,6 +159,50 @@ async def test_portable_ordinary_mcp_candidate_fresh_exact_decision(
             assert (calls[0]["namespace"], calls[0]["name"]) == ("mcp__docs", "reviewed")
     finally:
         await native_provider.aclose()
+
+
+async def test_portable_ordinary_mcp_refuses_live_root_terminal_before_claim(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer = Peer(names=("find-record",), annotations=None)
+    responses.respond(
+        function_call("exec_command", {"cmd": "sleep 30", "yield_time_ms": 1000}, "background")
+    )
+    responses.respond(assistant_output("process running"))
+    responses.respond(mcp_call("reviewed", "mcp__docs", "portable-live-terminal"))
+    responses.respond(assistant_output("original MCP request settled"))
+    async with (
+        timeout(25),
+        peer.serve() as url,
+        ExecutorPeer(
+            tmp_path / "remote",
+            synthetic_process_output="process running",
+            synthetic_process_stays_running=True,
+        ).serve() as executor,
+        provider(responses) as native_provider,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        agent = Agent(
+            instructions="Use the requested tool.",
+            tools=[descriptor(url)],
+            provider=native_provider,
+        )
+        async with agent.session(environment=declaration(executor)) as source:
+            assert (await (await source.submit("Start a process")).get_result()).final_output == (
+                "process running"
+            )
+            assert "Process running with session ID" in tool_output(
+                responses.requests[1], "background"
+            )
+            turn = await source.submit("Read a record")
+            pending = await approval(turn)
+            with pytest.raises(RuntimeError, match="live background terminals"):
+                await source.suspend()
+            assert peer.calls == []
+            await pending.respond("allow_once")
+            assert (await turn.get_result()).final_output == "original MCP request settled"
+            assert [call["name"] for call in peer.calls] == ["find-record"]
 
 
 async def test_portable_ordinary_mcp_candidate_changed_declaration_before_effect(

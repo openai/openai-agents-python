@@ -1822,7 +1822,8 @@ pub(crate) async fn continue_if_ready(
     };
     let terminal = match frame.tool_outcomes.take() {
         Some(outcomes)
-            if frame.fresh.is_some() || !held_outputs.is_empty() || reset_tool_choice =>
+            if frame.native_mcp.is_none()
+                && (frame.fresh.is_some() || !held_outputs.is_empty() || reset_tool_choice) =>
         {
             Some(crate::python_tools::RecoveredToolCompletionSeed::new(
                 frame.turn.clone(),
@@ -1905,6 +1906,10 @@ async fn native_mcp_context(
     if outcomes.call_ids != [data.call_id.clone()] || !outcomes.outcomes.is_empty() {
         return Ok(None);
     }
+    ensure!(
+        thread.thread.list_background_terminals().await.is_empty(),
+        UnsupportedManualState::LiveTerminal
+    );
     Ok(Some((source.binding().clone(), captured, managed_specs)))
 }
 

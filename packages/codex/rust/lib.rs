@@ -1238,6 +1238,25 @@ impl NativeThread {
             .is_some_and(|control| control.handoff(nonce)))
     }
 
+    fn _take_native_mcp_transport_error(
+        &self,
+        py: Python<'_>,
+        nonce: u64,
+        turn_id: &str,
+        call_id: &str,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let error = self
+            .mcp_result_control()?
+            .and_then(|control| control.owner(nonce))
+            .and_then(|control| control.take_transport_error(nonce, turn_id, call_id));
+        Ok(error.map(|error| {
+            let error = PyRuntimeError::new_err(mcp_result_control::transport_error_message(
+                error.as_ref(),
+            ));
+            error.into_value(py).into_any()
+        }))
+    }
+
     fn _check_native_mcp_result(&self, nonce: u64) -> PyResult<bool> {
         Ok(self
             .mcp_result_control()?

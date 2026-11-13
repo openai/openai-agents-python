@@ -959,7 +959,11 @@ class NativeError(RuntimeError):
         self._response_integrity_reason: ResponseIntegrityReason | None = None
 
     def get_mcp_callback_error(self) -> Exception | None:
-        """Private error from an admitted root MCP callback; explicit access only."""
+        """Private cause from an admitted root MCP policy; explicit access only.
+
+        Native transport causes retain up to 16 KiB of diagnostics here.
+        They never enter the public error text, model output or event payload.
+        """
         return self._mcp_callback_error
 
     @property
@@ -3184,6 +3188,23 @@ def _prepare_open_state(
     return state, managed_source
 
 
+def _without_untrusted_memory_admission(
+    checkpoint: str | None, *, authenticated: bool
+) -> str | None:
+    if checkpoint is None or authenticated:
+        return checkpoint
+    imported = json.loads(checkpoint)
+    for thread in [imported, *imported.get("descendants", [])]:
+        for item in thread.get("history", []):
+            if item.get("type") != "turn_context":
+                continue
+            payload = item.get("payload")
+            receipt = payload.get("sdk_receipt") if isinstance(payload, dict) else None
+            if isinstance(receipt, dict):
+                receipt.pop("sandbox_memory_input_admitted", None)
+    return json.dumps(imported)
+
+
 def _prepare_native_checkpoint(
     saved: SessionState, *, has_output_override: bool
 ) -> tuple[str, bool, tuple[ToolRef, ...] | None, tuple[str, ...]]:
@@ -4350,17 +4371,9 @@ class Session(Generic[ContextT, OutputT]):
             )
             verify_remembered_approvals = None
             remembered_approvals = await verification
-            if checkpoint is not None and not authenticated_memory_history:
-                imported = json.loads(checkpoint)
-                for thread in [imported, *imported.get("descendants", [])]:
-                    for item in thread.get("history", []):
-                        if item.get("type") != "turn_context":
-                            continue
-                        payload = item.get("payload")
-                        receipt = payload.get("sdk_receipt") if isinstance(payload, dict) else None
-                        if isinstance(receipt, dict):
-                            receipt.pop("sandbox_memory_input_admitted", None)
-                checkpoint = json.dumps(imported)
+            checkpoint = _without_untrusted_memory_admission(
+                checkpoint, authenticated=authenticated_memory_history
+            )
             if environment is not None and not isinstance(environment, Environment):
                 if not isinstance(environment, AbstractAsyncContextManager):
                     raise TypeError("environment must be an Environment or async context manager")
@@ -16060,7 +16073,11 @@ class Session(Generic[ContextT, OutputT]):
                 else (server.request_metadata if metadata else server.transform_result)
             )
             extractor = None if server is None or metadata else server.extract_application_data
-            if server is None or (callback is None and extractor is None):
+            if server is None or (
+                callback is None
+                and extractor is None
+                and not (not metadata and server._has_failure_callback)
+            ):
                 raise NativeError("Native MCP callback does not match its captured declaration")
             assert state.handle is not None
 
@@ -16123,8 +16140,28 @@ class Session(Generic[ContextT, OutputT]):
                     notice["tool_name"],
                     arguments=MappingProxyType(deepcopy(notice["arguments"])),
                 )
+                original_result = notice["result"]
+                if server._has_failure_callback:
+                    original_error = self._native._take_native_mcp_transport_error(
+                        nonce, notice["turn_id"], notice["call_id"]
+                    )
+                    if original_error is not None:
+                        if server.failure_error_function is None:
+                            raise _FunctionBodyFailure(original_error)
+                        formatted = await _call_callback(
+                            _RecoverableFunctionCallback(server.failure_error_function),
+                            admitted,
+                            context,
+                            original_error,
+                        )
+                        if not isinstance(formatted, str):
+                            raise TypeError("MCP failure_error_function must return text")
+                        original_result = {
+                            "content": [{"type": "text", "text": formatted}],
+                            "isError": True,
+                        }
                 value, application_data = await _transform_and_extract_result(
-                    callback, extractor, context, notice["result"], admitted
+                    callback, extractor, context, original_result, admitted
                 )
                 if application_data is not None:
                     application_output = ApplicationToolOutput(
