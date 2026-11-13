@@ -37,7 +37,7 @@ async fn private_http_changes_only_owned_provider_and_attaches_its_retained_pool
     let pool = crate::private_http::pool();
     let ordinary_pool = codex_http_client::SdkModelHttpPool::default();
     let mut child = StartThreadOptions::new(parent.clone());
-    prepare_private_transport(&mut child, Some(&pool), true).unwrap();
+    prepare_private_transport(&mut child, Some(&pool), true, true).unwrap();
     let mut expected = original.clone();
     expected.supports_websockets = false;
     assert_eq!(child.config.model_provider, expected);
@@ -58,7 +58,7 @@ async fn private_http_changes_only_owned_provider_and_attaches_its_retained_pool
 
     // A later ordinary child of the same parent keeps both its permission and pool.
     let mut ordinary = StartThreadOptions::new(parent.clone());
-    prepare_private_transport(&mut ordinary, Some(&ordinary_pool), false).unwrap();
+    prepare_private_transport(&mut ordinary, Some(&ordinary_pool), false, false).unwrap();
     assert_eq!(ordinary.config.model_provider, original);
     assert!(
         ordinary
@@ -67,7 +67,7 @@ async fn private_http_changes_only_owned_provider_and_attaches_its_retained_pool
             .is_some()
     );
     let mut independent = StartThreadOptions::new(parent.clone());
-    prepare_private_transport(&mut independent, Some(&pool), true).unwrap();
+    prepare_private_transport(&mut independent, Some(&pool), true, true).unwrap();
     assert!(matches!(&child.initial_history, InitialHistory::New));
     assert!(matches!(&independent.initial_history, InitialHistory::New));
     // Independent scopes share only this uncredentialed socket owner.
@@ -103,7 +103,7 @@ async fn private_http_rejects_explicit_http_without_mutating_provider_or_pool() 
     let original = config.model_provider.clone();
     let mut startup = StartThreadOptions::new(config);
     let pool = codex_http_client::SdkModelHttpPool::default();
-    assert!(prepare_private_transport(&mut startup, Some(&pool), true).is_err());
+    assert!(prepare_private_transport(&mut startup, Some(&pool), true, true).is_err());
     assert_eq!(startup.config.model_provider, original);
     assert!(
         startup
@@ -136,7 +136,7 @@ async fn private_http_rejects_both_sign_in_with_chatgpt_provider_names() {
         let original = config.model_provider.clone();
         let original_catalog = config.model_providers.clone();
         let mut startup = StartThreadOptions::new(config);
-        assert!(prepare_private_transport(&mut startup, Some(&pool), true).is_err());
+        assert!(prepare_private_transport(&mut startup, Some(&pool), true, true).is_err());
         assert_eq!(startup.config.model_provider, original);
         assert_eq!(startup.config.model_providers, original_catalog);
         assert!(

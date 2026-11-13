@@ -717,14 +717,16 @@ async def test_private_completion_honors_fixed_request_transport(
     route, config, kwargs, _ = openings.pop()
     expected_route = "_prepare_run_conversation"
     if eager_tool:
-        expected_route = "create_engine" if transport == "websocket" else "_open_conversation"
+        expected_route = "_open_conversation"
     assert route == expected_route
     assert config["model_providers.native_agent"]["supports_websockets"] is True
     if route == "create_engine":
         assert "_private_http" not in kwargs
         assert initial_private_http == [False]
     else:
-        assert kwargs["_private_http"] is (transport == "http")
+        assert kwargs["_private_http"] is (eager_tool or transport == "http")
+        if eager_tool:
+            assert kwargs["_process_private_runtime"] is True
         assert initial_private_http == []
     assert request_controls == [{"mode": transport}]
     assert not openings

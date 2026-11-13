@@ -746,6 +746,7 @@ impl EngineState {
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
         let private_http = options.private_http;
+        let force_http = private_http && !options.private_function_scope;
         let process_private_http = options.process_private_http
             && cfg!(target_os = "linux")
             && self.owns_runtime_services()
@@ -901,6 +902,7 @@ impl EngineState {
                 instructions,
                 private_http,
                 process_private_http,
+                force_http,
             )
             .await?;
         if let Some(batch) = initial_messages {
@@ -923,7 +925,7 @@ impl EngineState {
         startup: StartThreadOptions,
         instructions: Arc<options::ThreadInstructions>,
     ) -> anyhow::Result<NativeThread> {
-        self.start_prepared_with_transport(startup, instructions, false, false)
+        self.start_prepared_with_transport(startup, instructions, false, false, false)
             .await
     }
 
@@ -933,6 +935,7 @@ impl EngineState {
         instructions: Arc<options::ThreadInstructions>,
         private_http: bool,
         process_private_http: bool,
+        force_http: bool,
     ) -> anyhow::Result<NativeThread> {
         // build_startup has already validated the unchanged provider against the
         // retained Engine. Only this owned thread config receives the restriction.
@@ -941,6 +944,7 @@ impl EngineState {
             &mut startup,
             process_pool.as_ref().or(self.model_http_pool.as_ref()),
             private_http || process_private_http,
+            force_http || process_private_http,
         )?;
         if self.runtime_parent.is_some() {
             ensure!(
@@ -3243,6 +3247,7 @@ fn prepare_private_transport(
     startup: &mut StartThreadOptions,
     pool: Option<&codex_http_client::SdkModelHttpPool>,
     private_http: bool,
+    force_http: bool,
 ) -> anyhow::Result<()> {
     if private_http {
         let config = &mut startup.config;
@@ -3257,9 +3262,11 @@ fn prepare_private_transport(
                 && !provider.has_request_routing_overrides(),
             "private HTTP requires the implicit default SDK Responses provider on a fresh thread"
         );
-        provider.supports_websockets = false;
-        if let Some(selected) = config.model_providers.get_mut(&config.model_provider_id) {
-            selected.supports_websockets = false;
+        if force_http {
+            provider.supports_websockets = false;
+            if let Some(selected) = config.model_providers.get_mut(&config.model_provider_id) {
+                selected.supports_websockets = false;
+            }
         }
     }
     if let Some(pool) = pool {

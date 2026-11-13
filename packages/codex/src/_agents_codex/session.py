@@ -4449,7 +4449,6 @@ class Session(Generic[ContextT, OutputT]):
                     private_function_run = (
                         _private_wss_candidate
                         and observation_retention == "bounded"
-                        and (startup_transport or {}).get("mode") != "websocket"
                         and provider.model_backend is None
                         and provider.auth is None
                         and _tracing_context is None

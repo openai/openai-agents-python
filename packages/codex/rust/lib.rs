@@ -4489,6 +4489,7 @@ fn conversation_opening(
         && cfg!(target_os = "linux")
         && options.permits_private_disposable()
         && specs.is_empty();
+    options.private_function_scope = process_private_functions;
     let process_runtime = process_private_http || process_private_functions;
     if process_runtime {
         provider_owner::check_process_runtime_pid()?;
