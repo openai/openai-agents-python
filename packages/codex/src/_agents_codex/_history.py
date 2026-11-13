@@ -42,6 +42,7 @@ _EXECUTION_TYPES = {"command_execution", "mcp_call", "patch_execution"}
 _CALL_TYPES_BY_OUTPUT = {
     "function_call_output": "function_call",
     "shell_call_output": "shell_call",
+    "program_output": "program",
     "tool_search_output": "tool_search_call",
 }
 
@@ -96,6 +97,7 @@ def _response_item(
         "apply_patch_call",
         "shell_call",
         "local_shell_call",
+        "program",
         "tool_search_call",
     }:
         item_id = item_id or raw.get("call_id")
@@ -105,6 +107,7 @@ def _response_item(
         "computer_call_output",
         "apply_patch_call_output",
         "shell_call_output",
+        "program_output",
         "tool_search_output",
     }:
         item_id = item_id or (f"{raw['call_id']}:output" if raw.get("call_id") else None)

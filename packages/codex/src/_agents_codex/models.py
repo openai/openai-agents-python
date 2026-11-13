@@ -21,6 +21,7 @@ from agents.config import JsonValue
 from ._compat import cancellation_requested
 from ._media import _capture_video
 from ._public import preserve_module_identity as _preserve_module_identity
+from .input import _capture_prompt_cache_breakpoint
 from .retry import RetryAdvice
 
 
@@ -729,6 +730,11 @@ class ChatCompletionsModel:
                         else:
                             raise ValueError(
                                 "ChatCompletionsModel received unsupported message content"
+                            )
+                    for original, converted in zip(item.get("content", []), content, strict=True):
+                        if "prompt_cache_breakpoint" in original:
+                            converted["prompt_cache_breakpoint"] = _capture_prompt_cache_breakpoint(
+                                original["prompt_cache_breakpoint"]
                             )
                     if (
                         item["role"] == "assistant"

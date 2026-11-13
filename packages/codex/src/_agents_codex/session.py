@@ -79,6 +79,8 @@ from ._events import (
     ImageGenerationCallItem,
     McpListToolsItem,
     MessageItem,
+    ProgramCallItem,
+    ProgramOutputItem,
     ReasoningItem,
     SessionItem as SessionItem,
     ShellCallItem,
@@ -597,6 +599,7 @@ def _manual_restore_model_settings(
                 "attempt_timeout_ms",
                 "retry",
                 "hosted_prompt",
+                "prompt_cache_key",
             }
         ):
             raise ValueError("Manual checkpoint has invalid accepted request controls")
@@ -604,6 +607,10 @@ def _manual_restore_model_settings(
             None,
             cast(ModelSettings, {key: value for key, value in controls.items() if key in ordinary}),
         ).get("request_controls", {})
+        if "prompt_cache_key" in controls:
+            from ._cache_affinity import _saved_cache_key
+
+            normalized["prompt_cache_key"] = _saved_cache_key(controls["prompt_cache_key"])
         if "hosted_prompt" in controls:
             prompt = controls["hosted_prompt"]
             if prompt is not None and (
@@ -1605,6 +1612,8 @@ def _project_progress(
                     "web_search_call",
                     "mcp_list_tools",
                     "mcp_call",
+                    "program",
+                    "program_output",
                     "file_search_call",
                     "code_interpreter_call",
                     "shell_call",
@@ -1627,6 +1636,8 @@ def _project_progress(
                             | WebSearchCallItem
                             | McpListToolsItem
                             | HostedMcpCallItem
+                            | ProgramCallItem
+                            | ProgramOutputItem
                             | FileSearchCallItem
                             | CodeInterpreterCallItem
                             | ShellCallItem
@@ -3887,6 +3898,7 @@ class Session(Generic[ContextT, OutputT]):
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
         _private_text_run: bool = False,
+        _prompt_cache_key: str | None = None,
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
         authenticated_memory_history = isinstance(state, ManagedWorkspaceCheckpoint)
@@ -3899,7 +3911,9 @@ class Session(Generic[ContextT, OutputT]):
             resume_budget=resume_budget,
         )
         if state is not None:
+            # Accepted request controls retain the source run's affinity on restore.
             state._check_prompt_references()
+            _prompt_cache_key = None
         hosted_restore_grants = _capture_restored_hosted_mcp(state, restored_hosted_mcp)
         lease = None
         pending_environment: _EnvironmentLease | None = None
@@ -4587,6 +4601,11 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                     },
                     **({"_sdk_resume_thread_id": resume} if resume is not None else {}),
+                    **(
+                        {"_sdk_prompt_cache_key": _prompt_cache_key}
+                        if _prompt_cache_key is not None
+                        else {}
+                    ),
                     "_application_instructions": instructions,
                     "_sdk_instruction_files": instruction_receipts,
                     "_manual_tool_slots": manual_slots,
@@ -5076,6 +5095,7 @@ class Session(Generic[ContextT, OutputT]):
         histories: dict[str, dict[str, Any]] = {}
         followup_calls: set[tuple[str, str]] = set()
         child_root_turns: dict[tuple[str, str], str] = {}
+        provider_sampling_risks: set[tuple[str, str]] = set()
         projected: dict[
             str,
             tuple[list[RecordedTurn], list[SessionItem], list[UncertainCall], set[tuple[str, str]]],
@@ -5104,6 +5124,25 @@ class Session(Generic[ContextT, OutputT]):
                     and payload.get("root_turn_id")
                 ):
                     child_root_turns[(thread_id, payload["turn_id"])] = payload["root_turn_id"]
+                receipt = payload.get("sdk_receipt")
+                if (
+                    row["type"] == "turn_context"
+                    and isinstance(turn_id := payload.get("turn_id"), str)
+                    and receipt is not None
+                    and (
+                        not isinstance(receipt, dict)
+                        or (
+                            "provider_effects_possible" in receipt
+                            and (
+                                type(receipt.get("version")) is not int
+                                or receipt.get("version") != 1
+                                or receipt.get("thread_id") != thread_id
+                                or receipt.get("provider_effects_possible") is not False
+                            )
+                        )
+                    )
+                ):
+                    provider_sampling_risks.add((thread_id, turn_id))
             calls, shell_receipts = _application_shell_recovery(history, thread_id)
             turns, items = project_history(history, self.id, subagent_id, uncertain_calls=calls)
             if subagent_id is not None:
@@ -5156,9 +5195,9 @@ class Session(Generic[ContextT, OutputT]):
         recovery_turns.update(
             (thread, turn["id"])
             for thread, turns in recorded.items()
-            if thread in children
             for turn in turns
             if turn["status"] == "in_progress"
+            and (thread in children or (thread, turn["id"]) in provider_sampling_risks)
         )
         receipt_turns = {
             (thread, turn)
@@ -5245,12 +5284,19 @@ class Session(Generic[ContextT, OutputT]):
                             "root_recovery_turns": [
                                 turn["id"]
                                 for turn in recorded[self.id]
-                                if recovery_lineage and (self.id, turn["id"]) in recovery_turns
+                                if (
+                                    recovery_lineage
+                                    or (self.id, turn["id"]) in provider_sampling_risks
+                                )
+                                and (self.id, turn["id"]) in recovery_turns
                             ],
                             "automatic_root_turns": [
                                 turn["id"]
                                 for turn in recorded[self.id]
-                                if recovery_lineage
+                                if (
+                                    recovery_lineage
+                                    or (self.id, turn["id"]) in provider_sampling_risks
+                                )
                                 and turn["status"] == "in_progress"
                                 and (self.id, turn["id"]) in recovery_turns
                                 and (self.id, turn["id"]) not in receipt_turns
@@ -10093,6 +10139,16 @@ class Session(Generic[ContextT, OutputT]):
             await self._update_instructions(instructions)
         elif settings:
             await self._update_model_settings(json.dumps(settings))
+
+    async def _bind_prompt_cache_key(self, key: str | None) -> None:
+        if key is None:
+            return
+        from ._cache_affinity import _saved_cache_key
+
+        key = _saved_cache_key(key)
+        self._check_idle_update()
+        encoded = json.dumps({"request_controls": {"prompt_cache_key": key}})
+        await self._join_mutation(asyncio.create_task(self._update_model_settings(encoded)))
 
     async def _update_model_settings(self, encoded: str) -> None:
         try:

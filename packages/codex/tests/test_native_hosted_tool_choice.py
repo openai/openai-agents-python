@@ -229,6 +229,46 @@ async def test_provider_programmatic_selector_requires_its_hosted_declaration(re
     } in request["tools"]
 
 
+@pytest.mark.parametrize("companion", ["absent", "direct-only", "search", "programmatic-only"])
+async def test_provider_programmatic_tool_requires_companion(responses, companion):
+    from agents import CodeInterpreter, HostedProgrammaticToolCalling, NativeError, ToolSearch
+
+    responses.respond(assistant_output("provider completed"))
+    declaration = HostedProgrammaticToolCalling()
+    interpreter = CodeInterpreter(
+        container="cntr_fixture",
+        allowed_callers=["direct"] if companion == "direct-only" else ["programmatic"],
+    )
+
+    @function_tool(defer_loading=True)
+    def lookup() -> str:
+        return "ok"
+
+    tools = {
+        "absent": [declaration],
+        "direct-only": [declaration, interpreter],
+        "search": [declaration, ToolSearch(execution="server"), lookup],
+        "programmatic-only": [interpreter],
+    }[companion]
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-provider-companion"
+    ) as provider:
+        agent = Agent(
+            model="gpt-5.5", instructions="Use a provider tool.", tools=tools, provider=provider
+        )
+        if companion == "search":
+            assert (await agent.run("Use the tool.")).final_output == "provider completed"
+        else:
+            expected = (
+                "Programmatic-only tools require a provider programmatic tool declaration"
+                if companion == "programmatic-only"
+                else "requires an offered programmatic caller or tool search"
+            )
+            with pytest.raises(NativeError, match=expected):
+                await agent.run("Use the tool.")
+    assert len(responses.requests) == (1 if companion == "search" else 0)
+
+
 async def test_provider_program_and_result_replay_on_the_next_native_turn(responses):
     from agents import CodeInterpreter, HostedProgrammaticToolCalling
 
@@ -252,6 +292,11 @@ async def test_provider_program_and_result_replay_on_the_next_native_turn(respon
         assistant_output("provider completed"),
     )
     responses.respond(assistant_output("used previous program"))
+    responses.respond(
+        {"type": "response.output_item.done", "item": program},
+        {"type": "response.output_item.done", "item": output},
+        assistant_output("produced program"),
+    )
     async with NativeProvider(
         base_url=responses.url, api_key="synthetic-provider-program-replay"
     ) as provider:
@@ -271,9 +316,68 @@ async def test_provider_program_and_result_replay_on_the_next_native_turn(respon
             assert (await (await session.submit("What happened?")).get_result()).final_output == (
                 "used previous program"
             )
+            history = [
+                item
+                async for item in session.items()
+                if item["type"] in {"program", "program_output"}
+            ]
+        result = await agent.run("Run again.", return_items=True)
+        assert result.items is not None
+        produced = [
+            item.item for item in result.items if item.item["type"] in {"program", "program_output"}
+        ]
+    assert [item["provider_data"] for item in history] == [program, output]
+    assert [item["provider_data"] for item in produced] == [program, output]
+    assert [item["call_id"] for item in history] == ["program-call", "program-call"]
     replay = [
         item
         for item in responses.requests[1]["input"]
         if item["type"] in {"program", "program_output"}
     ]
     assert replay == [program, output]
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_provider_program_is_admitted_only_by_its_actual_hosted_prompt_catalog(
+    responses, explicit
+):
+    from agents import NativeError
+
+    responses.respond(
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "program",
+                "id": "program_prompt",
+                "call_id": "p",
+                "code": "return 1",
+            },
+        },
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "program_output",
+                "id": "program_output_prompt",
+                "call_id": "p",
+                "status": "completed",
+                "result": "1",
+            },
+        },
+        assistant_output("provider completed"),
+    )
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-prompt-program"
+    ) as provider:
+        agent = Agent(
+            provider=provider,
+            hosted_prompt={"id": "pmpt_programmatic"},
+            **({"tools": []} if explicit else {}),
+        )
+        if explicit:
+            with pytest.raises(NativeError, match="without an offered programmatic tool"):
+                await agent.run("Use the saved prompt.")
+            assert responses.requests[0]["tools"] == []
+        else:
+            assert (await agent.run("Use the saved prompt.")).final_output == "provider completed"
+            assert "tools" not in responses.requests[0]
+    assert responses.requests[0]["prompt"] == {"id": "pmpt_programmatic"}

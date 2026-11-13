@@ -36,6 +36,8 @@ from ._events import (
     ImageGenerationCallItem,
     McpListToolsItem,
     MessageItem,
+    ProgramCallItem,
+    ProgramOutputItem,
     ReasoningItem,
     ShellCallItem,
     ShellCallOutputItem,
@@ -208,6 +210,8 @@ class ModelOutputItemCompleted(_SubmissionEvent):
         | WebSearchCallItem
         | McpListToolsItem
         | HostedMcpCallItem
+        | ProgramCallItem
+        | ProgramOutputItem
         | FileSearchCallItem
         | CodeInterpreterCallItem
         | ShellCallItem

@@ -1011,7 +1011,31 @@
     {
       "path": "sdk-hosted-program-replay.patch",
       "sha256": "b23ea6892323db80958f9f52b3088f82561389cb57eab291ab4f2c1b9356043e"
+    },
+    {
+      "path": "sdk-provider-prompt-cache-affinity.patch",
+      "sha256": "25b34fcc52aef02a44a41e35f47dd93c184020c7403f88c73f55cae7a8efe539"
+    },
+    {
+      "path": "sdk-explicit-prompt-cache-breakpoints.patch",
+      "sha256": "2b26699860b4a3783c8b23ff0b13ecb57f8c6f2248ed4da64f01327b042f959b"
+    },
+    {
+      "path": "sdk-provider-program-companion.patch",
+      "sha256": "bfe647751198fd00a329e8ea853111ac996a3ef7d0a147a939921cc6ea3f8283"
+    },
+    {
+      "path": "sdk-provider-program-projection.patch",
+      "sha256": "58f23ce9132577218225f4c365c5d72a8bcafa14aa72107c6a6086ff47267022"
+    },
+    {
+      "path": "sdk-provider-content-qualification.patch",
+      "sha256": "fa8aeb3909f2313ad0c01dbdb8269aaed738edc055f4635e32f5fb4a10d333ee"
+    },
+    {
+      "path": "sdk-cache-owned-input-iteration.patch",
+      "sha256": "e6a2379399a4ab8ddb0b5c9bdc2200927d969f0703c99ffa57f42675269e2c10"
     }
   ],
-  "result_tree": "7761690a64562d0bb22c172c16267899ecc2bce2"
+  "result_tree": "7a1d803955de82d76112892f950e0310d21f43ce"
 }

@@ -1844,8 +1844,11 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("tool_error_formatter must be callable or None")
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
+        from ._cache_affinity import _claim_cache_affinity
         from .session import Completed, Session
         from .telemetry import _capture, get_default_agent_harness_id
+
+        prompt_cache_key = _claim_cache_affinity(self)
 
         try:
             parent_trace = _trace_context(parent_trace)
@@ -1896,6 +1899,7 @@ class Agent(Generic[ContextT, OutputT]):
                 _completed_input=_completed_input,
                 _private_text_run=_private_text_run,
                 _tracing_context_policy_only=captured.policy_only,
+                _prompt_cache_key=prompt_cache_key,
                 **cast(
                     "_TracingOpeningOptions",
                     {"_tracing_context": captured.context} if captured.context is not None else {},
@@ -2409,10 +2413,14 @@ class Agent(Generic[ContextT, OutputT]):
                 produced_items_token = _produced_items_restore.set(
                     (self, state, asyncio.current_task())
                 )
-            async with session_factory(
-                context=cast(SessionContextT, context),
-                **options,
-            ) as session:
+            from ._cache_affinity import _cache_affinity_opening, _cache_key
+            from .telemetry import _options as _trace_options
+
+            group = _trace_options(trace_options).group_id if trace_options is not None else None
+            async with (
+                _cache_affinity_opening(self, _cache_key("group", group)),
+                session_factory(context=cast(SessionContextT, context), **options) as session,
+            ):
                 from .session import Completed
 
                 if raw_usage_token is not None:
