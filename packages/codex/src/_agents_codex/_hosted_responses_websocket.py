@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
+from traceback import clear_frames
 from typing import Any
 from weakref import WeakKeyDictionary
 
@@ -217,97 +218,125 @@ class _Socket:
         self._max_size = max_size
         self._queue: deque[_ResponsesWebSocketFrame] = deque()
 
+    @property
+    def close_code(self) -> Any:
+        return getattr(self._socket, "close_code", None)
+
+    @property
+    def state(self) -> Any:
+        return getattr(self._socket, "state", None)
+
     def _account(self, operation: dict[str, Any]) -> str | None:
         if self._run.account is None:
             raise TypeError("Hosted transport requires an active native request")
         return self._run.account(operation)
 
     async def _send(self, frame: dict[str, Any]) -> None:
-        task = asyncio.current_task()
-        if task is not None and task.cancelling():
-            raise asyncio.CancelledError
-        active = self._run.active
-        if active is None:
-            raise RuntimeError("Hosted send requires a physical response owner")
-        self._account({"operation": "dispatch", "lineage": active.lineage})
-        result = self._socket.send(json.dumps(frame, allow_nan=False))
-        if inspect.isawaitable(result):
-            await result
+        active = result = None
+        try:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise asyncio.CancelledError
+            active = self._run.active
+            if active is None:
+                raise RuntimeError("Hosted send requires a physical response owner")
+            self._account({"operation": "dispatch", "lineage": active.lineage})
+            result = self._socket.send(json.dumps(frame, allow_nan=False))
+            if inspect.isawaitable(result):
+                await result
+        except BaseException as error:
+            clear_frames(error.__traceback__)
+            raise
+        finally:
+            del self, frame, active, result
 
     async def _create(self, frame: dict[str, Any], emitted: set[str] | None = None) -> None:
-        size = len(json.dumps(frame, allow_nan=False).encode("utf-8"))
-        if size > _MAX_RESPONSE_BYTES:
-            raise ValueError("Hosted request exceeds the native retained-byte limit")
-        lineage = self._account({"operation": "create"})
-        if not lineage:
-            raise TypeError("Hosted create requires a native request lineage")
-        self._run.active = _Active(
-            create=frame, lineage=lineage, emitted=emitted or set(), size=size
-        )
-        await self._send({**frame, "type": "response.create", "multi_agent": self._config})
+        lineage = None
+        try:
+            size = len(json.dumps(frame, allow_nan=False).encode("utf-8"))
+            if size > _MAX_RESPONSE_BYTES:
+                raise ValueError("Hosted request exceeds the native retained-byte limit")
+            lineage = self._account({"operation": "create"})
+            if not lineage:
+                raise TypeError("Hosted create requires a native request lineage")
+            self._run.active = _Active(
+                create=frame, lineage=lineage, emitted=emitted or set(), size=size
+            )
+            await self._send({**frame, "type": "response.create", "multi_agent": self._config})
+        finally:
+            del self, frame, emitted, lineage
 
     async def _fallback(
         self, active: _Active, frame: dict[str, Any], outputs: list[dict[str, Any]]
     ) -> None:
-        completed = (active.terminal or {}).get("response")
-        if not isinstance(completed, dict) or not isinstance(completed.get("id"), str):
-            raise ValueError("Hosted continuation requires an exact terminal response")
-        next_frame = {**frame, "input": outputs}
-        stored = completed.get("store")
-        if type(stored) is not bool:
-            stored = active.create.get("store") is not False
-        if next_frame.get("conversation") is not None:
-            next_frame.pop("previous_response_id", None)
-        elif stored:
-            next_frame["previous_response_id"] = completed["id"]
-        else:
-            replay = list(active.create.get("input", []))
-            acknowledged = active.acknowledged_outputs.copy()
-            terminal_output = completed.get("output", [])
-            for item in terminal_output:
-                replay.append(item)
-                if item.get("type") == "function_call":
-                    result = acknowledged.pop(item.get("call_id"), None)
-                    if result is not None:
-                        replay.append(result)
-            next_frame["input"] = [*replay, *acknowledged.values(), *outputs]
-            original_previous = active.create.get("previous_response_id")
-            if isinstance(original_previous, str):
-                next_frame["previous_response_id"] = original_previous
-            else:
+        completed = next_frame = replay = acknowledged = terminal_output = item = result = None
+        try:
+            completed = (active.terminal or {}).get("response")
+            if not isinstance(completed, dict) or not isinstance(completed.get("id"), str):
+                raise ValueError("Hosted continuation requires an exact terminal response")
+            next_frame = {**frame, "input": outputs}
+            stored = completed.get("store")
+            if type(stored) is not bool:
+                stored = active.create.get("store") is not False
+            if next_frame.get("conversation") is not None:
                 next_frame.pop("previous_response_id", None)
-        await self._create(next_frame, active.emitted)
+            elif stored:
+                next_frame["previous_response_id"] = completed["id"]
+            else:
+                replay = list(active.create.get("input", []))
+                acknowledged = active.acknowledged_outputs.copy()
+                terminal_output = completed.get("output", [])
+                for item in terminal_output:
+                    replay.append(item)
+                    if item.get("type") == "function_call":
+                        result = acknowledged.pop(item.get("call_id"), None)
+                        if result is not None:
+                            replay.append(result)
+                next_frame["input"] = [*replay, *acknowledged.values(), *outputs]
+                original_previous = active.create.get("previous_response_id")
+                if isinstance(original_previous, str):
+                    next_frame["previous_response_id"] = original_previous
+                else:
+                    next_frame.pop("previous_response_id", None)
+            await self._create(next_frame, active.emitted)
+        finally:
+            del self, active, frame, outputs, completed, next_frame, replay
+            del acknowledged, terminal_output, item, result
 
     async def send(self, payload: str) -> None:
-        frame = json.loads(payload)
-        frame.pop("stream", None)
-        frame.pop("betas", None)
-        active = self._run.active
-        if active is None:
-            await self._create(frame)
-            return
-        outputs = [
-            item
-            for item in frame.get("input", [])
-            if isinstance(item, dict)
-            and item.get("type") == "function_call_output"
-            and item.get("call_id") in active.pending
-        ]
-        ids = {item["call_id"] for item in outputs}
-        if not active.response_id or not ids or active.pending - ids:
-            raise ValueError("Hosted response requires the matching local function outputs")
-        if active.terminal is not None:
-            await self._fallback(active, frame, outputs)
-            return
-        active.size += len(json.dumps(outputs, allow_nan=False).encode("utf-8"))
-        if active.size > _MAX_RESPONSE_BYTES:
-            raise ValueError("Hosted response exceeds the native retained-byte limit")
-        active.continuation = frame
-        active.injection_input = outputs
-        active.injecting = ids
-        await self._send(
-            {"type": "response.inject", "response_id": active.response_id, "input": outputs}
-        )
+        frame = active = outputs = ids = None
+        try:
+            frame = json.loads(payload)
+            frame.pop("stream", None)
+            frame.pop("betas", None)
+            active = self._run.active
+            if active is None:
+                await self._create(frame)
+                return
+            outputs = [
+                item
+                for item in frame.get("input", [])
+                if isinstance(item, dict)
+                and item.get("type") == "function_call_output"
+                and item.get("call_id") in active.pending
+            ]
+            ids = {item["call_id"] for item in outputs}
+            if not active.response_id or not ids or active.pending - ids:
+                raise ValueError("Hosted response requires the matching local function outputs")
+            if active.terminal is not None:
+                await self._fallback(active, frame, outputs)
+                return
+            active.size += len(json.dumps(outputs, allow_nan=False).encode("utf-8"))
+            if active.size > _MAX_RESPONSE_BYTES:
+                raise ValueError("Hosted response exceeds the native retained-byte limit")
+            active.continuation = frame
+            active.injection_input = outputs
+            active.injecting = ids
+            await self._send(
+                {"type": "response.inject", "response_id": active.response_id, "input": outputs}
+            )
+        finally:
+            del self, payload, frame, active, outputs, ids
 
     async def recv(self) -> _ResponsesWebSocketFrame:
         payload = event = response = output = saved = item = active = calls = supported = None

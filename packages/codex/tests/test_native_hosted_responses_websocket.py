@@ -575,3 +575,157 @@ async def test_hosted_nonstored_fallback_replays_all_injected_outputs(terminal_f
         *frames[2]["input"],
     ]
     assert result.run_usage.requests == 2
+
+
+@pytest.mark.parametrize("operation", ["create", "inject", "fallback"])
+async def test_hosted_send_failure_releases_private_locals_and_keeps_cause(operation) -> None:
+    from tests.test_native_responses_websocket_review import _diagnostics
+
+    private = "synthetic-hosted-private-send"
+    failure = ConnectionError("hosted socket disconnected")
+    pending: asyncio.Queue[str] = asyncio.Queue()
+    sends = []
+    call = {
+        "type": "function_call",
+        "id": "fc_private",
+        "namespace": "functions",
+        "call_id": "call_private",
+        "name": "lookup",
+        "arguments": "{}",
+    }
+
+    class Socket:
+        async def send(self, payload: str) -> None:
+            frame = json.loads(payload)
+            sends.append(frame["type"])
+            if len(sends) == {"create": 1, "inject": 2, "fallback": 3}[operation]:
+                assert private in payload
+                raise failure
+            if len(sends) == 1:
+                pending.put_nowait(
+                    json.dumps({"type": "response.created", "response": {"id": "first"}})
+                )
+                pending.put_nowait(json.dumps({"type": "response.output_item.done", "item": call}))
+            else:
+                pending.put_nowait(
+                    json.dumps(
+                        {
+                            "type": "response.inject.failed",
+                            "error": {"code": "response_already_completed"},
+                        }
+                    )
+                )
+                pending.put_nowait(
+                    json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "first",
+                                "store": False,
+                                "status": "completed",
+                                "output": [call],
+                            },
+                        }
+                    )
+                )
+
+        async def recv(self) -> str:
+            return await pending.get()
+
+        async def close(self) -> None:
+            pass
+
+    async def connect(_request, _options):
+        return Socket()
+
+    @function_tool
+    def lookup() -> str:
+        return private
+
+    async with timeout(20), AsyncOpenAI(api_key="synthetic") as client:
+        backend = HostedResponsesWebSocketModel(client, socket_factory=connect)
+        async with NativeProvider(model_backend=backend) as provider:
+            agent = Agent(
+                model="gpt-5.5",
+                instructions=f"Use lookup. {private}" if operation == "create" else "Use lookup.",
+                provider=provider,
+                tools=[lookup],
+                model_settings={"store": False},
+            )
+            with pytest.raises(Exception, match="Hosted|WebSocket|disconnected") as caught:
+                await agent.run("Public synthetic input.")
+        assert not client.is_closed()
+
+    causes = [caught.value]
+    for cause in causes:
+        for nested in (cause.__cause__, cause.__context__, getattr(cause, "model_error", None)):
+            if isinstance(nested, BaseException) and nested not in causes:
+                causes.append(nested)
+    assert failure in causes
+    assert private not in _diagnostics(caught.value)
+    assert len(sends) == {"create": 1, "inject": 2, "fallback": 3}[operation]
+
+
+async def test_hosted_reconnects_closed_peer_with_the_same_native_run_owner() -> None:
+    from agents import ModelRequest, ModelRunOwner
+
+    sockets = []
+    owner = ModelRunOwner("session", "turn")
+
+    class Socket:
+        close_code: int | None = None
+        sends = 0
+
+        def __init__(self, output: str) -> None:
+            self.output = output
+
+        async def send(self, payload: str) -> None:
+            assert self.close_code is None
+            self.sends += 1
+
+        async def recv(self) -> str:
+            if self.sends == 1 and self.close_code is None:
+                self.close_code = 1000
+                return json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": self.output,
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "id": self.output,
+                                    "role": "assistant",
+                                    "status": "completed",
+                                    "phase": "final_answer",
+                                    "agent": {"agent_name": "/root"},
+                                    "content": [{"type": "output_text", "text": self.output}],
+                                }
+                            ],
+                        },
+                    }
+                )
+            raise AssertionError("unexpected receive")
+
+        async def close(self) -> None:
+            self.close_code = 1000
+
+    async def connect(request, _options):
+        assert request.run_owner is owner
+        socket = Socket(f"answer-{len(sockets) + 1}")
+        sockets.append(socket)
+        return socket
+
+    async with AsyncOpenAI(api_key="synthetic") as client:
+        backend = HostedResponsesWebSocketModel(client, socket_factory=connect)
+        for ordinal in (1, 2):
+            request = ModelRequest(
+                {"model": "gpt-5.5", "input": []}, None, "session", "turn", run_owner=owner
+            )
+            object.__setattr__(request, "_account_provider_request", lambda op: "lineage")
+            result = await backend.complete(request)
+            assert result.output[0]["content"][0]["text"] == f"answer-{ordinal}"
+        await backend.cleanup_on_run_end(owner)
+        assert [socket.sends for socket in sockets] == [1, 1]
+        assert not client.is_closed()
