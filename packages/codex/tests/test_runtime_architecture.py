@@ -1075,3 +1075,24 @@ def test_domain_dependency_accepts_standard_library_imports() -> None:
     assert not _domain_dependency_violations(
         {"_agents_codex._stored_history": "import statistics"}, "_stored_history"
     )
+
+
+def test_sandbox_facade_first_import_has_been_initializing_shared_manifest_ownership() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+assert 'agents.sandbox' not in sys.modules
+import agents.sandbox as sandbox
+from _agents_shared.sandbox_manifest import _borrowed_manifest_lock
+from types import SimpleNamespace
+assert callable(sandbox.sandbox_environment)
+owner = SimpleNamespace()
+assert _borrowed_manifest_lock(owner) is _borrowed_manifest_lock(owner)
+assert 'agents._native' not in sys.modules
+""",
+        ],
+        check=True,
+    )

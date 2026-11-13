@@ -12,7 +12,6 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from _agents_shared.sandbox_manifest import _borrowed_manifest_lock
 from agents.classic.sandbox._mount_security import (
     _mark_mount_error_data_safe,
     rebind_manifest_mount_authority,
@@ -431,6 +430,8 @@ def sandbox_environment(
                         raise ValueError("Managed resume requires a supported snapshot factory")
                     selected.state.snapshot = publication.build(uuid4().hex)
             else:
+                from _agents_shared.sandbox_manifest import _borrowed_manifest_lock
+
                 async with _borrowed_manifest_lock(selected._inner):
                     if skill_lease is not None:
                         skill_lease._validate_borrowed_manifest(selected, captured_manifest)

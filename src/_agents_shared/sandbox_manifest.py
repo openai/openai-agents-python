@@ -182,5 +182,5 @@ def _borrowed_manifest_lock(owner: BaseSandboxSession) -> asyncio.Lock:
     lock: asyncio.Lock | None = getattr(owner, "_borrowed_manifest_lock", None)
     if lock is None:
         lock = asyncio.Lock()
-        owner._borrowed_manifest_lock = lock
+        setattr(owner, "_borrowed_manifest_lock", lock)  # noqa: B010
     return lock
