@@ -267,7 +267,7 @@ jobs:
             packages/codex/tests/test_native_mcp_host_remote.py \
             packages/codex/tests/test_checkpoint_upgrades.py \
             packages/codex/tests/test_native_local_descendant_receipts.py::test_local_descendant_admission_checks_receipts_without_resuming_work \
-            packages/codex/tests/test_native_local_descendant_receipts.py::test_local_reopen_refuses_cold_active_child_without_tool_receipt
+            packages/codex/tests/test_native_local_descendant_receipts.py::test_local_reopen_interrupts_cold_active_child_without_replaying_work
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             env -u OPENAI_API_KEY -u OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX \
               "$python" -I -B -m pytest -q -o "pythonpath=$stage/packages/codex" -o asyncio_mode=auto \
