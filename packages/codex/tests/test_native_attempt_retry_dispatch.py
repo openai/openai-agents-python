@@ -484,7 +484,7 @@ async def test_revoked_producer_retains_expected_abort_only_for_advice(error_kin
 async def test_provider_response_start_evidence_preserves_unknown_and_native_facts(evidence):
     class Backend:
         def get_retry_advice(self, _request):
-            return RetryAdvice(response_started=evidence)
+            return RetryAdvice(response_started=evidence, replay_safety="safe")
 
     seen = []
 
@@ -503,6 +503,7 @@ async def test_provider_response_start_evidence_preserves_unknown_and_native_fac
     reply = await _resolve_retry(native, failed(Backend()), policy, invoke)
     assert seen[-1].response_started is (evidence is True)
     assert seen[-1].provider_advice.response_started is evidence
+    assert seen[-1].replay_safety == "safe"
     assert reply["decision"]["approve_unsafe_replay"] is (evidence is False)
     assert seen[-1].local_effects is True
     assert seen[-1].retry_unsafe_output is True
