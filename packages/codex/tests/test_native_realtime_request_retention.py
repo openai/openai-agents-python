@@ -170,6 +170,8 @@ async def test_terminal_request_byte_pressure_releases_only_terminal_reservation
     # Isolate request-identity pressure from the independent history buffer.
     monkeypatch.setattr(realtime, "_record_function_history", lambda *args, **kwargs: None)
     monkeypatch.setattr(realtime, "_BUFFER_BYTES_LIMIT", 600)
+    # This shared limit also bounds history; isolate request reservations here.
+    monkeypatch.setattr(realtime, "_record_function_history", lambda *args: None)
     request(realtime, "active")
     for index in range(12):
         call_id = f"terminal-{index}" + "x" * 12

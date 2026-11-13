@@ -682,7 +682,7 @@
     },
     {
       "path": "sdk-provider-tool-search.patch",
-      "sha256": "368be837c084d7cb2c2c4caa7ccd8774be44b3ce34ce22e14839ab589256a5a8"
+      "sha256": "8d99209333aab7c8dd48fa39d1f2e9cb3d33282ea640b5eabb6e318fced58f0e"
     },
     {
       "path": "sdk-provider-hosted-shell.patch",
@@ -707,6 +707,10 @@
     {
       "path": "sdk-trace-lifecycle-dispatch.patch",
       "sha256": "7ad94085ca25e835088fa60efc140869944e889aa02fdd3689b9560b2b300c8c"
+    },
+    {
+      "path": "0177-sdk-fresh-websocket-tls.patch",
+      "sha256": "1427787a523977fc0bc6523ce7ef92a046f94fc5978b16c7dd3690dccd1ec23f"
     },
     {
       "path": "sdk-trace-context-binding.patch",
@@ -774,7 +778,7 @@
     },
     {
       "path": "sdk-model-cohort-core-test-fixtures.patch",
-      "sha256": "b4a7f82c4c62a00ae4046d316fa7e9004b1b57acb9488576a25dd0c5ceaf7b9a"
+      "sha256": "30c218b88cfd15417c664024c6a2039e18c6d4ab8cd65bd9cd8440de9d38b4c5"
     },
     {
       "path": "sdk-model-deadline-admission-compile.patch",
@@ -890,7 +894,7 @@
     },
     {
       "path": "sdk-independent-websocket-base.patch",
-      "sha256": "30f9ffea4007bf192e1065b0e66a18f8438df9564850761ebf261f9f66d3362a"
+      "sha256": "b29ef217c5eb88d94fc48bb6d6ef2b06c458e6ab6df5ca5cdbfd9e94bb52385a"
     },
     {
       "path": "sdk-staged-manual-continuation-input.patch",
@@ -902,7 +906,7 @@
     },
     {
       "path": "sdk-request-transport-overrides.patch",
-      "sha256": "6acc1cf8d3c72ce09628400dce808936f0913a15b734f8ede822268f99e7b8ec"
+      "sha256": "75adf85dded181bed0b7d305f84a62fc9833aeadf4458bc2cb1202a09eab3fdc"
     },
     {
       "path": "sdk-run-model-settings-override.patch",
@@ -938,7 +942,7 @@
     },
     {
       "path": "sdk-provider-history-lineage.patch",
-      "sha256": "1934627c0daa12ca5d7dd9f696285dcd707499fc0a35b3577eed6503006f645f"
+      "sha256": "6080a8a7da76718c431a73a53136244af8e87d8108d79314e054d066db30ace6"
     },
     {
       "path": "sdk-agent-profile-durable-transport-comparison.patch",
@@ -966,7 +970,7 @@
     },
     {
       "path": "sdk-websocket-provider-history.patch",
-      "sha256": "55164389d2c111f53155639e39d85786ebe4bfba4eaf5f35ebfae3617a4cc5eb"
+      "sha256": "816fba1cbd547ccfbbf6829ceb33f3a37a105ac86c3522fc86305918ce20dcf4"
     },
     {
       "path": "sdk-conversation-locked-retry.patch",
@@ -974,12 +978,36 @@
     },
     {
       "path": "sdk-video-input.patch",
-      "sha256": "8312f4b4cccdea8af8081cea56818735e6560ebc6ad5405c84cd877bdc0db125"
+      "sha256": "614b311673b21959d58608111dea2d351ec98e4f1acbbb083a710c07c4fa2ebb"
+    },
+    {
+      "path": "sdk-websocket-controls.patch",
+      "sha256": "150258216a12037b82762549b546a9a9f53e5442b81c82efef32af2550620970"
+    },
+    {
+      "path": "sdk-native-response-span-tracing.patch",
+      "sha256": "fa2bf0f130b0586def10f63711e5ff0b7c920c8918e7c06637a970ace2bee169"
+    },
+    {
+      "path": "sdk-native-trace-annotation-budget.patch",
+      "sha256": "602554199c8d892b78c5834695a8e642ae42964a30d8f5f8824aa4f53645e78c"
+    },
+    {
+      "path": "sdk-request-transport-mode-type.patch",
+      "sha256": "c3719b23c1bade46326708f115ce716be10dcc195de8203e2fe686acec9999db"
+    },
+    {
+      "path": "sdk-provider-transport-feedback.patch",
+      "sha256": "05188557a884771c5b33a792f11156d3f4717d4a855f23b3320c4476fcba3403"
+    },
+    {
+      "path": "sdk-provider-websocket-frame-cap.patch",
+      "sha256": "4236dfecf6a01d471582da77fdbb78d1416c0e61249bffed060138a51e07702e"
     },
     {
       "path": "sdk-api-demand-text-coalescing.patch",
-      "sha256": "c70b44f00289e47111d5a7260bfd406dacaf870eb3a50460f91ecc551762db30"
+      "sha256": "9f888368305bdcdba5de75a44ca4b5a447bbf370630846516198d382066cb7e4"
     }
   ],
-  "result_tree": "d7757ab7aef95dd7e4266d8e54271f411f2aebae"
+  "result_tree": "388b64c16c9b8a2aef3f8cb869f5b5182213cf21"
 }

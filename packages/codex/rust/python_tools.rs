@@ -266,6 +266,11 @@ pub(crate) enum ToolCompletionReply {
 }
 
 enum PreparationReply {
+    ProviderResponseSpan(
+        oneshot::Sender<
+            std::result::Result<Option<codex_extension_api::SdkProviderResponseSpanAdmission>, ()>,
+        >,
+    ),
     ModelRetry(
         oneshot::Sender<std::result::Result<codex_protocol::model_retry::ModelRetryResolution, ()>>,
     ),
@@ -297,6 +302,7 @@ enum PreparationReply {
 impl PreparationReply {
     fn is_closed(&self) -> bool {
         match self {
+            Self::ProviderResponseSpan(reply) => reply.is_closed(),
             Self::ModelRetry(reply) => reply.is_closed(),
             Self::PreparedRequest { ticket, reply } => reply.is_closed() || !ticket.admits(),
             Self::ModelProducer { ticket, reply } => reply.is_closed() || !ticket.admits(),
@@ -2632,6 +2638,101 @@ impl PythonTools {
             .requests
             .send(QueuedRequest::Step(event))
             .map_err(|_| anyhow::anyhow!("Model attempt reader closed"))
+    }
+
+    pub(crate) async fn admit_provider_response_span(
+        self: &Arc<Self>,
+        input: codex_extension_api::SdkProviderResponseSpanInput,
+    ) -> Result<Option<codex_extension_api::SdkProviderResponseSpanAdmission>> {
+        let owner = input
+            .admission
+            .turn_store()
+            .get::<Arc<TurnAdmission>>()
+            .context("Missing SDK response span owner")?;
+        let source = self.source_metadata(input.admission.step_store())?;
+        let turn = owner.turn_id.clone();
+        self.exchange_preparation(
+            Arc::clone(owner.as_ref()),
+            None,
+            Some(input.cancellation),
+            [
+                "Expired SDK response span owner",
+                "SDK response span reader closed",
+                "SDK response span admission cancelled",
+            ],
+            PreparationReply::ProviderResponseSpan,
+            |id| {
+                let mut msg = source;
+                msg.insert("type".into(), json!("_sdk_provider_response_span"));
+                msg.insert("step_id".into(), json!(id));
+                msg.insert("thread".into(), json!(input.admission.thread_id()));
+                msg.insert("instance".into(), json!(self.instance));
+                msg.insert("turn_id".into(), json!(turn));
+                msg.insert("parent_context".into(), json!(input.parent_context));
+                let mut event = json!({"id":turn,"msg":msg});
+                if let Some(instance) = &self.instance {
+                    event["subagent_id"] = json!(input.admission.thread_id());
+                    event["subagent_incarnation"] = json!(instance);
+                }
+                event
+            },
+            |reply| reply.map_err(|_| anyhow::anyhow!("SDK response span ID policy failed")),
+        )
+        .await
+    }
+
+    pub(crate) fn reply_provider_response_span(
+        self: &Arc<Self>,
+        id: u64,
+        data: Option<&str>,
+        error: bool,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> Result<()> {
+        let owner = self.step_owner(thread, instance)?;
+        let mut replies = owner
+            .preparation_replies
+            .lock()
+            .expect("Python preparation replies poisoned");
+        let slot = replies
+            .as_mut()
+            .and_then(|pending| pending.get_mut(&id))
+            .context("Expired SDK response span admission")?;
+        ensure!(
+            !slot.is_closed()
+                && matches!(slot.reply, Some(PreparationReply::ProviderResponseSpan(_))),
+            "Expired SDK response span admission"
+        );
+        ensure!(
+            !error || data.is_none(),
+            "Conflicting SDK response span reply"
+        );
+        let value = if error {
+            Err(())
+        } else {
+            let data = data.context("Missing SDK response span reply")?;
+            ensure!(
+                data.len() <= 256,
+                "SDK response span reply exceeds capacity"
+            );
+            let value: Option<codex_extension_api::SdkProviderResponseSpanAdmission> =
+                serde_json::from_str(data)?;
+            if let Some(span_id) = value.as_ref().and_then(|value| value.span_id.as_ref()) {
+                ensure!(
+                    span_id.len() == 16
+                        && span_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        && span_id.bytes().any(|byte| byte != b'0'),
+                    "Invalid SDK response span ID"
+                );
+            }
+            Ok(value)
+        };
+        let Some(PreparationReply::ProviderResponseSpan(reply)) = slot.reply.take() else {
+            unreachable!()
+        };
+        reply
+            .send(value)
+            .map_err(|_| anyhow::anyhow!("Expired SDK response span admission"))
     }
 
     pub(crate) async fn decide_model_retry(
@@ -6722,7 +6823,8 @@ impl ToolContributor for PythonContributor {
                     request["msg"]["initial_input"] = json!(records);
                 }
             }
-            if step.get::<codex_extension_api::StagedInputPreparation>()
+            if step
+                .get::<codex_extension_api::StagedInputPreparation>()
                 .is_some_and(|preparation| preparation.is_for(turn.level_id()))
             {
                 request["msg"]["staged_input_preparation"] = json!(true);
@@ -6834,8 +6936,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
 
     fn exposure(&self) -> ToolExposure {
         let exposure = self.generation.entries[self.slot].exposure;
-        let model_only_custom = matches!(self.generation.specs[self.slot], DynamicToolSpec::Custom(_))
-            && !self.explicitly_allows_code();
+        let model_only_custom =
+            matches!(self.generation.specs[self.slot], DynamicToolSpec::Custom(_))
+                && !self.explicitly_allows_code();
         if model_only_custom && exposure == ToolExposure::Direct {
             return ToolExposure::DirectModelOnly;
         }
@@ -9742,6 +9845,159 @@ pub(crate) mod managed_tests {
                 tools: vec![DynamicToolNamespaceTool::Function(function("dispatch"))],
             }),
         )
+    }
+
+    fn response_span_preparation(
+        tools: &Arc<PythonTools>,
+    ) -> (
+        u64,
+        Arc<CallbackRelease>,
+        oneshot::Receiver<
+            std::result::Result<Option<codex_extension_api::SdkProviderResponseSpanAdmission>, ()>,
+        >,
+    ) {
+        tools
+            .family
+            .members
+            .write()
+            .unwrap()
+            .insert("thread".into(), Arc::downgrade(tools));
+        let id = tools.family.next_invocation.fetch_add(1, Ordering::Relaxed);
+        let mut request = json!({"id":"turn", "msg":{"thread":"thread"}});
+        let callback = tools.preparation_callback(id, &mut request);
+        let (reply, receive) = oneshot::channel();
+        tools
+            .preparation_replies
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .insert(
+                id,
+                PreparationSlot {
+                    turn: "turn".into(),
+                    reply: Some(PreparationReply::ProviderResponseSpan(reply)),
+                    callback: callback.clone(),
+                },
+            );
+        (id, callback, receive)
+    }
+
+    #[tokio::test]
+    async fn response_span_reply_is_typed_owned_and_single_use() {
+        let tools = sdk();
+        let (id, callback, receive) = response_span_preparation(&tools);
+        for invalid in [
+            r#"{"span_id":"0000000000000000"}"#,
+            r#"{"span_id":"zzzzzzzzzzzzzzzz"}"#,
+            r#"{"span_id":"111111111111111"}"#,
+            r#"{"span_id":"1111111111111111","parent":"spoof"}"#,
+        ] {
+            assert!(
+                tools
+                    .reply_provider_response_span(id, Some(invalid), false, Some("thread"), None)
+                    .is_err()
+            );
+        }
+        let valid = r#"{"span_id":"b000000000000001"}"#;
+        assert!(
+            tools
+                .reply_provider_response_span(id, Some(valid), false, Some("missing"), None)
+                .is_err()
+        );
+        assert!(
+            tools
+                .reply_provider_response_span(
+                    id,
+                    Some(valid),
+                    false,
+                    Some("thread"),
+                    Some("retired")
+                )
+                .is_err()
+        );
+        assert!(
+            tools
+                .reply_provider_response_span(id, Some(valid), true, Some("thread"), None)
+                .is_err()
+        );
+        tools
+            .reply_provider_response_span(id, Some(valid), false, Some("thread"), None)
+            .unwrap();
+        assert_eq!(
+            receive.await.unwrap().unwrap().unwrap().span_id.as_deref(),
+            Some("b000000000000001")
+        );
+        assert!(
+            tools
+                .reply_provider_response_span(id, Some(valid), false, Some("thread"), None)
+                .is_err()
+        );
+        callback.release();
+    }
+
+    #[tokio::test]
+    async fn response_span_defaults_and_suppression_remain_distinct() {
+        let tools = sdk();
+        for (raw, suppressed) in [("null", true), (r#"{"span_id":null}"#, false)] {
+            let (id, callback, receive) = response_span_preparation(&tools);
+            tools
+                .reply_provider_response_span(id, Some(raw), false, Some("thread"), None)
+                .unwrap();
+            let value = receive.await.unwrap().unwrap();
+            assert_eq!(value.is_none(), suppressed);
+            assert!(value.is_none_or(|value| value.span_id.is_none()));
+            callback.release();
+        }
+    }
+
+    #[tokio::test]
+    async fn response_span_cancellation_joins_entered_callback_before_returning() {
+        let tools = sdk();
+        let (id, callback, receive) = response_span_preparation(&tools);
+        let receipt = callback.receipt.clone();
+        assert!(tools.callback_operation("thread", &receipt, "enter"));
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let mut joined = tokio::spawn({
+            let tools = tools.clone();
+            let callback = callback.clone();
+            let cancellation = cancellation.clone();
+            async move {
+                tools
+                    .await_preparation(id, &callback, receive, Some(cancellation))
+                    .await
+            }
+        });
+        cancellation.cancel();
+        let notice = tokio::time::timeout(std::time::Duration::from_secs(1), tools.next_request())
+            .await
+            .unwrap();
+        assert_eq!(notice["msg"]["type"], "_sdk_callback_cancel");
+        assert_eq!(notice["msg"]["receipt"], receipt);
+        assert!(
+            tools
+                .reply_provider_response_span(
+                    id,
+                    Some(r#"{"span_id":"b000000000000001"}"#),
+                    false,
+                    Some("thread"),
+                    None
+                )
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut joined)
+                .await
+                .is_err()
+        );
+        assert!(tools.callback_operation("thread", &receipt, "release"));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), joined)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
     }
 
     pub(super) fn call(call_id: &str, original_name: &str, original_args: &str) -> ResponseItem {

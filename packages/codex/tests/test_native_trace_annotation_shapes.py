@@ -127,14 +127,14 @@ async def native_boundaries():
 
     await telemetry.configure(processors=[Recorder()])
     try:
-        with pytest.raises(RuntimeError, match="64 KiB"):
-            with telemetry.trace("bounds.too-large", options={"metadata": {"x": "x" * 65536}}):
+        with pytest.raises(RuntimeError, match="128 KiB"):
+            with telemetry.trace("bounds.too-large", options={"metadata": {"x": "x" * 131072}}):
                 pass
         with pytest.raises(RuntimeError, match="span end failed"):
             with telemetry.span(
                 "bounds.completion", options={"include_sensitive_data": True}
             ) as child:
-                child.set_outcome(status="ok", data={"x": "x" * 32768})
+                child.set_outcome(status="ok", data={"x": "x" * 65536})
         value = "leaf"
         for _ in range(64):
             value = {"x": value}
@@ -214,7 +214,7 @@ async def native_delivery(route):
             else None,
         )
         try:
-            metadata = {f"f{i}": 0 for i in range(3000)}
+            metadata = {f"f{i}": 0 for i in range(9000)}
             literal = "literal"
             for _ in range(65):
                 literal = {"x": literal}
@@ -222,7 +222,7 @@ async def native_delivery(route):
             with telemetry.trace(
                 "bounds.replay.root",
                 options={
-                    "metadata": {"x": "x" * 64000}
+                    "metadata": {"x": "x" * 100000}
                     if route == "redispatch-configured"
                     else {"x": 0}
                     if route
@@ -374,8 +374,8 @@ async def native_delivery(route):
 
         await telemetry.configure(processors=[Recorder()])
         try:
-            metadata = {"x": "x" * 40000}
-            data = {"x": "y" * 30000 if route == "combined" else "\\" * 16375}
+            metadata = {"x": "x" * 100000}
+            data = {"x": "y" * (65536 - 8) if route == "combined" else "\\" * ((65536 - 8) // 2)}
             with telemetry.trace(
                 "bounds.combined",
                 options={"metadata": metadata, "include_sensitive_data": True},
@@ -386,6 +386,15 @@ async def native_delivery(route):
             assert len(ended) == 1
             assert ended[0]["attributes"]["sdk.metadata.x"] == metadata["x"]
             assert json.loads(ended[0]["attributes"]["sdk.outcome.data"]) == data
+            replay = dict(ended[0], attributes=dict(ended[0]["attributes"]))
+            await telemetry.dispatch_trace_event(replay)
+            assert events[-1]["attributes"] == ended[0]["attributes"]
+            oversized = dict(replay, attributes=dict(replay["attributes"]))
+            oversized["attributes"]["sdk.outcome.data"] = json.dumps(
+                {"x": "x" * 65536}, separators=(",", ":")
+            )
+            with pytest.raises(Exception, match="queue capacity"):
+                await telemetry.dispatch_trace_event(oversized)
         finally:
             await telemetry.shutdown()
         return
@@ -402,7 +411,7 @@ async def native_delivery(route):
             trace_delivery={"max_queue_bytes": 60000} if route == "wide-queue" else None,
         )
         try:
-            metadata = {f"f{i}": 0 for i in range(3000)}
+            metadata = {f"f{i}": 0 for i in range(9000)}
             with telemetry.trace("bounds.wide.root", options={"metadata": metadata}) as root:
                 parent = root.context
             with telemetry.use_context(parent):
@@ -443,7 +452,7 @@ async def native_delivery(route):
             else None,
         )
         try:
-            metadata = {"a-long": "x" * 8192, "b-encoded": ["x" * 3000, "y" * 3000]}
+            metadata = {"a-long": "x" * 70000, "b-encoded": ["x" * 3000, "y" * 3000]}
             metadata.update(payload("top-level"))
             child_metadata = (
                 dict(metadata, child="owned") if route.startswith("carrier-") else metadata

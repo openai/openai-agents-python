@@ -506,3 +506,64 @@ async def test_provider_response_start_evidence_preserves_unknown_and_native_fac
     native["response_started"] = True
     await _resolve_retry(native, failed(Backend()), policy, invoke)
     assert seen[-1].response_started is True
+
+
+async def test_provider_normalized_advice_is_a_detached_policy_view():
+    source = {
+        "status_code": None,
+        "retry_after_ms": None,
+        "is_abort": False,
+        "is_network_error": False,
+        "is_timeout": False,
+    }
+
+    class Backend:
+        def get_retry_advice(self, _request):
+            advice = RetryAdvice(retry_after_ms=7, normalized=source)
+            source["status_code"] = 429
+            return advice
+
+    admitted = context(original=None)
+    admitted["normalized"].update(
+        is_abort=True, is_network_error=True, status_code=503, request_id="native-id"
+    )
+    seen = []
+    reply = await _resolve_retry(
+        admitted, failed(Backend()), lambda value: seen.append(value) or True, invoke
+    )
+    normalized = seen[0].normalized
+    assert normalized.status_code is None and normalized.retry_after_ms is None
+    assert normalized.is_abort is True
+    assert normalized.is_network_error is False and normalized.is_timeout is False
+    assert normalized.request_id == "native-id"
+    assert admitted["normalized"]["is_timeout"] is True
+    assert admitted["normalized"]["status_code"] == 503
+    assert "normalized" not in reply["provider_advice"]
+    with pytest.raises(TypeError):
+        seen[0].provider_advice.normalized["is_abort"] = False
+
+
+@pytest.mark.parametrize(
+    "normalized", [{"is_timeout": 1}, {"surprise": True}, {"retry_after_ms": float("nan")}]
+)
+def test_provider_normalized_advice_rejects_invalid_fields(normalized):
+    with pytest.raises((TypeError, ValueError)):
+        RetryAdvice(normalized=normalized)
+
+
+def test_provider_normalized_advice_preserves_dataclass_copy_and_pickle():
+    import json
+    import pickle
+    from copy import copy, deepcopy
+    from dataclasses import asdict
+
+    original = RetryAdvice(normalized={"status_code": 429, "is_timeout": False})
+    for captured in (copy(original), deepcopy(original), pickle.loads(pickle.dumps(original))):
+        assert captured == original
+        assert captured.normalized == {"status_code": 429, "is_timeout": False}
+        with pytest.raises(TypeError):
+            captured.normalized["is_timeout"] = True
+    assert json.loads(json.dumps(asdict(original)))["normalized"] == {
+        "status_code": 429,
+        "is_timeout": False,
+    }

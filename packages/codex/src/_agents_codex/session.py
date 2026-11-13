@@ -344,6 +344,7 @@ from .telemetry import (
     _CapturedTrace as _CapturedTrace,
     _clear_current as _clear_current,
     _create_task as _create_task,
+    _native_provider_response_span_id,
     _owned_span as _owned_span,
 )
 from .tools import (
@@ -401,7 +402,7 @@ if TYPE_CHECKING:
     from ._sandbox_events import _OperationObserver
     from .hosted_mcp import HostedMCP
     from .realtime import RealtimeConfig, RealtimeSession, _RealtimePolicySource
-    from .realtime_usage import RealtimeUsage
+    from .realtime_usage import RealtimeUsage, RealtimeUsageAccounting
     from .turn import ChildTurn
 
 _MutationResultT = TypeVar("_MutationResultT")
@@ -465,8 +466,11 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
         "context_management",
         "provider_compaction",
         "extra_body",
+        "request_transport",
     }
     transport: dict[str, Any] = {}
+    if "request_transport" in copied:
+        transport["mode"] = copied["request_transport"]
     if "extra_headers" in copied:
         headers = copied["extra_headers"]
         transport["headers"] = (
@@ -482,7 +486,7 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
     if transport:
         controls["request_transport"] = transport
     for key, value in copied.items():
-        if key in ("extra_headers", "extra_query"):
+        if key in ("extra_headers", "extra_query", "request_transport"):
             continue
         if key == "tool_choice":
             if isinstance(value, ToolRef):
@@ -3361,10 +3365,18 @@ async def _opening_provider_config(
         "stream_max_retries",
         "stream_idle_timeout_ms",
         "websocket_connect_timeout_ms",
+        "websocket_options",
     ):
         value = getattr(provider, name)
         if value is not None:
-            routing[name] = value
+            if name == "websocket_options":
+                routing[name] = {
+                    key: "disabled" if limit is None else limit
+                    for key, limit in value.items()
+                    if limit is not None or key not in {"ping_interval_ms", "ping_timeout_ms"}
+                }
+            else:
+                routing[name] = value
     if isinstance(auth, CodexLogin):
         provider_id = "native_agent_codex_login"
         base_url = _CODEX_RESPONSES_BASE_URL
@@ -3778,6 +3790,34 @@ def _opening_tool_policy(
     }
 
 
+def _capture_opening_guardrails(
+    input_guardrails: Sequence[InputGuardrail[Any]],
+    output_guardrails: Sequence[OutputGuardrail[Any]],
+) -> tuple[tuple[InputGuardrail[Any], ...], tuple[OutputGuardrail[Any], ...]]:
+    inputs = tuple(input_guardrails)
+    outputs = tuple(output_guardrails)
+    if any(not isinstance(check, InputGuardrail) for check in inputs):
+        raise TypeError("input_guardrails contains an invalid guardrail")
+    if any(not isinstance(check, OutputGuardrail) for check in outputs):
+        raise TypeError("output_guardrails contains an invalid guardrail")
+    return inputs, outputs
+
+
+def _selected_opening_declaration(
+    agent: Agent[Any, Any], state: SessionState | None
+) -> _RestoreDeclaration | None:
+    selected = _restore_declaration.get()
+    if (
+        selected is not None
+        and selected.owner is not None
+        and selected.owner is asyncio.current_task()
+        and selected.agent is agent
+        and (selected.state is state or selected.state == state)
+    ):
+        return selected
+    return None
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -3850,12 +3890,9 @@ class Session(Generic[ContextT, OutputT]):
         native_environment: dict[str, Any] | None = None
         session = None
         with opening:
-            input_guardrails = tuple(input_guardrails)
-            output_guardrails = tuple(output_guardrails)
-            if any(not isinstance(check, InputGuardrail) for check in input_guardrails):
-                raise TypeError("input_guardrails contains an invalid guardrail")
-            if any(not isinstance(check, OutputGuardrail) for check in output_guardrails):
-                raise TypeError("output_guardrails contains an invalid guardrail")
+            input_guardrails, output_guardrails = _capture_opening_guardrails(
+                input_guardrails, output_guardrails
+            )
             retention_omitted = observation_retention is _OBSERVATION_RETENTION_UNSET
             if retention_omitted:
                 observation_retention = "bounded"
@@ -3880,14 +3917,8 @@ class Session(Generic[ContextT, OutputT]):
             reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
             model, authorized_restore_model = _capture_opening_model(state, model, model_settings)
             policy_agent = agent
-            selected = _restore_declaration.get()
-            if (
-                selected is not None
-                and selected.owner is not None
-                and selected.owner is asyncio.current_task()
-                and selected.agent is agent
-                and (selected.state is state or selected.state == state)
-            ):
+            selected = _selected_opening_declaration(agent, state)
+            if selected is not None:
                 agent = selected.declaration
                 if resume_budget is None:
                     resume_budget = selected.resume_budget
@@ -4381,6 +4412,8 @@ class Session(Generic[ContextT, OutputT]):
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
 
+                startup_transport = settings.get("request_controls", {}).get("request_transport")
+
                 def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool, bool]:
                     private_run = (
                         (_atomic_first_turn or _private_default_opening)
@@ -4406,6 +4439,7 @@ class Session(Generic[ContextT, OutputT]):
                     if (
                         private_run
                         and (_private_text_run or use_completed_owner)
+                        and (startup_transport or {}).get("mode") != "websocket"
                         and _default_private_tls_profile(
                             provider, provider_config, websockets_enabled
                         )
@@ -4415,6 +4449,7 @@ class Session(Generic[ContextT, OutputT]):
                     private_function_run = (
                         _private_wss_candidate
                         and observation_retention == "bounded"
+                        and (startup_transport or {}).get("mode") != "websocket"
                         and provider.model_backend is None
                         and provider.auth is None
                         and _tracing_context is None
@@ -4485,7 +4520,6 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 if hosted_verification is not None and chatgpt_apps is not None:
                     raise ValueError("Select one explicit Apps registration per Session")
-                startup_transport = settings.get("request_controls", {}).get("request_transport")
                 options = {
                     "_hosted_tools": hosted_tools,
                     **(
@@ -5479,6 +5513,11 @@ class Session(Generic[ContextT, OutputT]):
         starts its own totals. Retain a RealtimeSession to read its totals after close.
         """
         return None if self._realtime is None else self._realtime.usage
+
+    @property
+    def realtime_usage_accounting(self) -> RealtimeUsageAccounting | None:
+        """Completed response and usage report counts for the current voice owner."""
+        return None if self._realtime is None else self._realtime.usage_accounting
 
     def _check_realtime_provider(self) -> None:
         if any(profile.profile.decision_handoffs for profile in self._profiles.values()):
@@ -7687,6 +7726,7 @@ class Session(Generic[ContextT, OutputT]):
             call=call,
             trace_context=_native_trace_context(message.get("_sdk_trace")),
             realtime_usage=self.realtime_usage,
+            realtime_usage_accounting=self.realtime_usage_accounting,
         )
         text = await _call_callback(callback, admit, context, error, deepcopy(original))
         if not admit():
@@ -7804,6 +7844,7 @@ class Session(Generic[ContextT, OutputT]):
                 _snapshot_function_arguments(kwargs, function._ref),
                 call=request.call,
                 realtime_usage=self.realtime_usage,
+                realtime_usage_accounting=self.realtime_usage_accounting,
             )
 
             object.__setattr__(context, "_environment", self._executor)
@@ -11194,7 +11235,7 @@ class Session(Generic[ContextT, OutputT]):
         native_admission: dict[str, Any] | BaseException | None = None,
     ) -> None:
         outcome = None
-        error = None
+        error: BaseException | None = None
         confirmed_rejection = False
         delegate_close = False
         usage_request: asyncio.Future[Any] | None = None
@@ -13519,6 +13560,8 @@ class Session(Generic[ContextT, OutputT]):
         prepare: Callable[[Callable[[], bool]], tuple[Callable[..., Any], object]],
         reply: Callable[[Any], None],
         reject: Callable[[], None],
+        *,
+        synchronous_id_policy: bool = False,
     ) -> None:
         """Own a context or compaction callback through its final native reply."""
 
@@ -13546,7 +13589,10 @@ class Session(Generic[ContextT, OutputT]):
             if not active():
                 return
             callback, request = prepare(active)
-            if isinstance(request, CompletionContext):
+            if synchronous_id_policy:
+                # ID policy is synchronous host-loop work, with no callback span.
+                result = callback(request)
+            elif isinstance(request, CompletionContext):
                 result = await self._call_completion_callback(
                     state, message, callback, active, request
                 )
@@ -13572,6 +13618,34 @@ class Session(Generic[ContextT, OutputT]):
             if not replied:
                 with suppress(RuntimeError):
                     reject()
+
+    async def _admit_provider_response_span(
+        self, state: _CallbackState, message: dict[str, Any]
+    ) -> None:
+        def prepare(_active: Callable[[], bool]) -> tuple[Callable[..., Any], str]:
+            if "profile_id" in message or "profile_epoch" in message:
+                self._agent_for_message(message)
+            context = message["parent_context"]
+            if not isinstance(context, str) or not context:
+                raise NativeError("SDK response span has no live parent owner")
+            return _native_provider_response_span_id, context
+
+        def reply(value: Any) -> None:
+            self._native._reply_provider_response_span(
+                message["step_id"],
+                json.dumps(value, allow_nan=False),
+                message["thread"],
+                message["instance"],
+            )
+
+        def reject() -> None:
+            self._native._reply_provider_response_span(
+                message["step_id"], None, message["thread"], message["instance"], error=True
+            )
+
+        await self._run_owned_context_callback(
+            state, message, prepare, reply, reject, synchronous_id_policy=True
+        )
 
     async def _transform_context(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span("context callback", "callback", message.get("tracing_context")) as tracing:
@@ -14864,6 +14938,7 @@ class Session(Generic[ContextT, OutputT]):
         prefix = ()
         preparation_callbacks = {
             "_sdk_select_step": self._select_step,
+            "_sdk_provider_response_span": self._admit_provider_response_span,
             "_sdk_transform_context": self._transform_context,
             "_sdk_before_compact": self._before_compact,
             "_sdk_before_compact_policy": self._before_compact,
@@ -16487,6 +16562,7 @@ class Session(Generic[ContextT, OutputT]):
                     effective_arguments,
                     trace_context=_native_trace_context(message.get("_sdk_trace")),
                     realtime_usage=self.realtime_usage,
+                    realtime_usage_accounting=self.realtime_usage_accounting,
                     call=call,
                 )
                 object.__setattr__(tool_context, "_environment", self._executor)
@@ -16631,7 +16707,10 @@ class Session(Generic[ContextT, OutputT]):
                 else entry.callback
             )
 
+            entered_media_owner: RealtimeSession | None = None
+
             def enter_body() -> None:
+                nonlocal entered_media_owner
                 if self._realtime is None:
                     return
                 source = message.get("_sdk_realtime_tool_call")
@@ -16648,15 +16727,19 @@ class Session(Generic[ContextT, OutputT]):
                     ),
                     None,
                 )
-                if original is not None:
-                    self._realtime._tool_body_started(
-                        source, message["_sdk_realtime_tool_name"], original
-                    )
+                if original is not None and self._realtime._tool_body_started(
+                    source, message["_sdk_realtime_tool_name"], original
+                ):
+                    entered_media_owner = self._realtime
 
             async def invoke_body_callback(active: Callable[[], bool]) -> Any:
-                return await self._call_decision_callback_entered(
-                    state, message, callback, active, enter_body, args, kwargs
-                )
+                try:
+                    return await self._call_decision_callback_entered(
+                        state, message, callback, active, enter_body, args, kwargs
+                    )
+                finally:
+                    if entered_media_owner is not None:
+                        entered_media_owner._tool_body_ended()
 
             try:
                 from ._hosted_mcp_binding import _CapturedHostedMCPApproval

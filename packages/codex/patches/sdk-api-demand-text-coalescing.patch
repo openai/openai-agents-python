@@ -87,10 +87,10 @@ index 5ec63a3e19ab2cbd8e020e6cf1daaa837121bb15..7b68b0415144b408c213e24bc16c56d4
      let events: Events = events.collect().await;
      assert!(default_header_reset(events.first()));
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index 55c98f3ed0f3271be03d5112d80ad36bb589ebbd..bd9eabe4d86d93ea1eb591cd051a02e3af9bc6c7 100644
+index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18fb0267f68 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-@@ -251,6 +251,7 @@ impl ResponsesWebsocketConnection {
+@@ -296,6 +296,7 @@ impl ResponsesWebsocketConnection {
              turn_state,
              observe_raw_provider_events,
              None,
@@ -98,7 +98,7 @@ index 55c98f3ed0f3271be03d5112d80ad36bb589ebbd..bd9eabe4d86d93ea1eb591cd051a02e3
          )
          .await
      }
-@@ -269,6 +270,7 @@ impl ResponsesWebsocketConnection {
+@@ -314,6 +315,7 @@ impl ResponsesWebsocketConnection {
          turn_state: Option<Arc<OnceLock<String>>>,
          observe_raw_provider_events: bool,
          send_observer: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -106,7 +106,7 @@ index 55c98f3ed0f3271be03d5112d80ad36bb589ebbd..bd9eabe4d86d93ea1eb591cd051a02e3
      ) -> Result<ResponseStream, ApiError> {
          let (tx_event, rx_event) =
              mpsc::channel::<std::result::Result<ResponseEvent, ApiError>>(1600);
-@@ -361,6 +363,7 @@ impl ResponsesWebsocketConnection {
+@@ -408,6 +410,7 @@ impl ResponsesWebsocketConnection {
                              rx_interrupt,
                              observe_raw_provider_events && !timing_log_context.warmup,
                              send_observer.as_deref(),
@@ -114,7 +114,7 @@ index 55c98f3ed0f3271be03d5112d80ad36bb589ebbd..bd9eabe4d86d93ea1eb591cd051a02e3
                          ) => result,
                          _ = &mut stopped => Err(ApiError::Stream("local response invocation stopped".into())),
                          _ = tx_event.closed() => Err(ApiError::Stream(
-@@ -783,6 +786,7 @@ async fn run_websocket_response_stream(
+@@ -892,6 +895,7 @@ async fn run_websocket_response_stream(
      interrupt: oneshot::Receiver<()>,
      observe_raw_provider_events: bool,
      send_observer: Option<&(dyn Fn() + Send + Sync)>,
@@ -122,7 +122,7 @@ index 55c98f3ed0f3271be03d5112d80ad36bb589ebbd..bd9eabe4d86d93ea1eb591cd051a02e3
  ) -> Result<(), ApiError> {
      let mut last_server_model: Option<String> = None;
      let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
-@@ -801,10 +805,18 @@ async fn run_websocket_response_stream(
+@@ -910,10 +914,23 @@ async fn run_websocket_response_stream(
      // A response owns its interrupt, and create must be sent before interrupt.
      let mut interrupt = interrupt.fuse();
      let mut response_id = None;
@@ -132,23 +132,28 @@ index 55c98f3ed0f3271be03d5112d80ad36bb589ebbd..bd9eabe4d86d93ea1eb591cd051a02e3
      loop {
 -        let poll_start = Instant::now();
 -        let response = tokio::select! {
--            response = tokio::time::timeout(idle_timeout, ws_stream.next()) => {
+-            response = websocket_phase_timeout(receive_timeout, ws_stream.next()) => {
 +        let mut poll_start = Instant::now();
-+        let mut expires = tokio::time::Instant::now() + idle_timeout;
++        let mut expires = receive_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
 +        let response = loop { break tokio::select! {
 +            _ = async { if let Some(demand) = &demand { demand.cancelled().await; } }, if pending_text.enabled() => {
 +                pending_text.activate(&tx_event).await.map_err(|_| ApiError::Stream("response event consumer dropped".into()))?;
 +                continue;
 +            }
-+            response = tokio::time::timeout_at(expires, ws_stream.next()) => {
++            response = async {
++                match expires {
++                    Some(deadline) => tokio::time::timeout_at(deadline, ws_stream.next()).await,
++                    None => Ok(ws_stream.next().await),
++                }
++            } => {
                  response.map_err(|_| ApiError::Stream("idle timeout waiting for websocket".into()))
              }
              Ok(()) = &mut interrupt, if response_id.is_some() => {
-@@ -820,9 +832,11 @@ async fn run_websocket_response_stream(
+@@ -929,9 +946,11 @@ async fn run_websocket_response_stream(
                      timing_log_context.connection_reused,
                  )
                  .await?;
-+                expires = tokio::time::Instant::now() + idle_timeout;
++                expires = receive_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
 +                poll_start = Instant::now();
                  continue;
              }
@@ -157,7 +162,7 @@ index 55c98f3ed0f3271be03d5112d80ad36bb589ebbd..bd9eabe4d86d93ea1eb591cd051a02e3
          if let Some(t) = telemetry.as_ref() {
              t.on_ws_event(&response, poll_start.elapsed());
          }
-@@ -873,9 +887,11 @@ async fn run_websocket_response_stream(
+@@ -982,9 +1001,11 @@ async fn run_websocket_response_stream(
                              payload_bytes = text.len(),
                              "Failed to parse WebSocket event"
                          );
@@ -169,7 +174,7 @@ index 55c98f3ed0f3271be03d5112d80ad36bb589ebbd..bd9eabe4d86d93ea1eb591cd051a02e3
                  emit_responses_websocket_timing_event(
                      event.kind(),
                      text.as_str(),
-@@ -1004,6 +1020,12 @@ async fn run_websocket_response_stream(
+@@ -1113,6 +1134,12 @@ async fn run_websocket_response_stream(
      }
  
      Ok(())
@@ -182,7 +187,7 @@ index 55c98f3ed0f3271be03d5112d80ad36bb589ebbd..bd9eabe4d86d93ea1eb591cd051a02e3
  }
  
  fn emit_responses_websocket_timing_event(
-@@ -1519,6 +1541,7 @@ mod tests {
+@@ -1685,6 +1712,7 @@ mod tests {
              rx_interrupt,
              /*observe_raw_provider_events*/ false,
              /*send_observer*/ None,
@@ -190,7 +195,7 @@ index 55c98f3ed0f3271be03d5112d80ad36bb589ebbd..bd9eabe4d86d93ea1eb591cd051a02e3
          )
          .await
          .unwrap_err();
-@@ -1934,6 +1957,7 @@ mod tests {
+@@ -2100,6 +2128,7 @@ mod tests {
                  rx_interrupt,
                  /*observe_raw_provider_events*/ false,
                  /*send_observer*/ None,
@@ -198,7 +203,7 @@ index 55c98f3ed0f3271be03d5112d80ad36bb589ebbd..bd9eabe4d86d93ea1eb591cd051a02e3
              )
              .await
              .unwrap_err();
-@@ -1963,3 +1987,172 @@ mod tests {
+@@ -2129,3 +2158,172 @@ mod tests {
          }
      }
  }
@@ -372,11 +377,11 @@ index 55c98f3ed0f3271be03d5112d80ad36bb589ebbd..bd9eabe4d86d93ea1eb591cd051a02e3
 +    }
 +}
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
-index 050c9ead1df95e5c9029ebfa8ea79f8887447015..8003ab1f2a0ba3d275a53507ffbd8ccd8eb63caa 100644
+index 793d30a9d75d090699711e5837a93d1e244dfb78..02e3b376de83667f077ddc6df3eedf213fe3320c 100644
 --- a/codex-rs/codex-api/src/lib.rs
 +++ b/codex-rs/codex-api/src/lib.rs
-@@ -179,3 +179,6 @@ pub use crate::endpoint::RealtimeHostedMcpToolFilter;
- 
+@@ -184,3 +184,6 @@ pub struct SdkWebsocketTlsSelector(
+ );
  
  pub use common::ProviderHistoryInputProjection;
 +
@@ -910,11 +915,45 @@ index 0000000000000000000000000000000000000000..a4a70f18059b743bf8e4e30bae9bb8fa
 +        );
 +    }
 +}
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index b6bfd1710a925092c7fc119ad3c346b121c445f8..a0cd4a6b4e33308904c8cfbac4ff0bd5910b106b 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -348,7 +348,8 @@ fn has_subagent_notification<'a>(
+             }
+             ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => false,
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => false,
+         })
+     })
+ }
+@@ -368,7 +369,8 @@ fn history_contains_text<'a>(
+             }
+             ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => false,
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => false,
+         })
+     })
+ }
+@@ -417,7 +419,8 @@ fn history_contains_assistant_inter_agent_communication<'a>(
+             ContentItem::InputText { .. }
+             | ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => false,
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => false,
+         })
+     })
+ }
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index f9906a62f5a6f6be0ce99699c9877232f225c5c8..069c540c998f6bd8442aeafc8d4b31e5362d9726 100644
+index bcb00d42509775680b81af0b6f38337f44409626..e2868b7b12ba99b4c6b937f49c84452cc11cb6e2 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -2022,6 +2022,7 @@ impl ModelClientSession {
+@@ -2059,6 +2059,7 @@ impl ModelClientSession {
              turn_state: Some(Arc::clone(&self.turn_state)),
              terminal_limit_errors: self.terminal_limit_errors(responses_metadata.request_kind),
              observe_raw_provider_events,
@@ -922,7 +961,7 @@ index f9906a62f5a6f6be0ce99699c9877232f225c5c8..069c540c998f6bd8442aeafc8d4b31e5
          }
      }
  
-@@ -2582,6 +2583,11 @@ impl ModelClientSession {
+@@ -2623,6 +2624,11 @@ impl ModelClientSession {
              )
              .await
              .map_err(CodexErr::Fatal)?;
@@ -934,7 +973,7 @@ index f9906a62f5a6f6be0ce99699c9877232f225c5c8..069c540c998f6bd8442aeafc8d4b31e5
              let stream_result = if let Some(events) = produced {
                  Ok((None, None, events, None, None))
              } else if prompt.prefer_buffered_response {
-@@ -3100,6 +3106,16 @@ impl ModelClientSession {
+@@ -3152,6 +3158,16 @@ impl ModelClientSession {
                      );
                  }) as Arc<dyn Fn() + Send + Sync>
              });
@@ -951,7 +990,7 @@ index f9906a62f5a6f6be0ce99699c9877232f225c5c8..069c540c998f6bd8442aeafc8d4b31e5
              let stream_result = websocket_connection
                  .stream_request_with_send_observer(
                      ws_request,
-@@ -3107,6 +3123,7 @@ impl ModelClientSession {
+@@ -3159,6 +3175,7 @@ impl ModelClientSession {
                      Some(Arc::clone(&self.turn_state)),
                      prompt.observe_raw_provider_events,
                      send_observer,
@@ -959,7 +998,7 @@ index f9906a62f5a6f6be0ce99699c9877232f225c5c8..069c540c998f6bd8442aeafc8d4b31e5
                  )
                  .await;
              if stream_result.is_err()
-@@ -3549,6 +3566,24 @@ fn add_responses_lite_header(headers: &mut ApiHeaderMap, use_responses_lite: boo
+@@ -3609,6 +3626,24 @@ fn add_responses_lite_header(headers: &mut ApiHeaderMap, use_responses_lite: boo
  }
  
  const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 1600;
@@ -984,7 +1023,7 @@ index f9906a62f5a6f6be0ce99699c9877232f225c5c8..069c540c998f6bd8442aeafc8d4b31e5
  const STREAM_DROPPED_REASON: &str = "response stream dropped before provider terminal event";
  
  fn map_response_stream(
-@@ -4307,3 +4342,40 @@ fn provider_window_rejects_schema_bearing_history() {
+@@ -4367,3 +4402,40 @@ fn provider_window_rejects_schema_bearing_history() {
  #[cfg(test)]
  #[path = "client_tests.rs"]
  mod tests;
@@ -1025,6 +1064,32 @@ index f9906a62f5a6f6be0ce99699c9877232f225c5c8..069c540c998f6bd8442aeafc8d4b31e5
 +    interceptors.push(Box::new(Unknown));
 +    assert!(text_delta_demand(None, false, &interceptors).is_none());
 +}
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 5b3c6147a0bdad1ceb44f88fa39122361cbe41ee..6051a0bb905ba255be402783764f103f07964a35 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -2381,6 +2381,7 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
+         attempt,
+         test_model_provider(),
+         vec![Box::new(ReplaceOutput)],
++        None,
+         false,
+     );
+     let mut delivered = Vec::new();
+diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
+index a0f475f3cc2a8f03f7e812e6dd24c48cceeb3310..20608ff2aa6bd7e2ead2ca29418de14ae5bc39a0 100644
+--- a/codex-rs/core/src/guardian/tests.rs
++++ b/codex-rs/core/src/guardian/tests.rs
+@@ -309,7 +309,8 @@ fn response_item_contains_message_text(item: &ResponseItem, needle: &str) -> boo
+         }
+         ContentItem::InputFile { .. }
+         | ContentItem::InputImage { .. }
+-        | ContentItem::InputAudio { .. } => false,
++        | ContentItem::InputAudio { .. }
++        | ContentItem::InputVideo { .. } => false,
+     })
+ }
+ 
 diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
 index ac4cd0f5a81ded0c35f7104bf3085eb38d706b1c..71e63fbc1acadf521a6d2f2985aa4fda60bc6151 100644
 --- a/codex-rs/core/src/model_request.rs
@@ -1040,11 +1105,112 @@ index ac4cd0f5a81ded0c35f7104bf3085eb38d706b1c..71e63fbc1acadf521a6d2f2985aa4fda
      fn preserves_provider_message_window(&self) -> bool {
          self.inner.preserves_provider_message_window()
      }
+diff --git a/codex-rs/core/src/session/startup_prewarm.rs b/codex-rs/core/src/session/startup_prewarm.rs
+index e0dae20e81e6aa678c447345ef3edeb2fa9c34d2..364e36811d2de4a6b973709d75f9458afb5d29f0 100644
+--- a/codex-rs/core/src/session/startup_prewarm.rs
++++ b/codex-rs/core/src/session/startup_prewarm.rs
+@@ -505,6 +505,7 @@ mod transport_boundary_tests {
+             let provider = codex_api::Provider {
+                 name: "startup-boundary".into(),
+                 base_url: format!("{}/v1", server.uri()),
++                websocket_base_url: None,
+                 query_params: None,
+                 headers: http::HeaderMap::new(),
+                 retry: codex_api::RetryConfig {
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 4a8b6f8c1add751fb32db50ed7c24eea3b6bced7..518cdfcacafb2431ebd50c57378a61a48786ddaf 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -12077,6 +12077,7 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
+         Arc::new(session.build_world_state_for_step(&fallback).await.unwrap()),
+         CompactionReason::ModelDownshift,
+         CompactionPhase::PreTurn,
++        &CancellationToken::new(),
+     )
+     .await;
+     match first_attempt {
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+index 143a279741de9c7216e6e43438705dcdd39f3d0b..f7573452bceac283113bb2e0e05076804e27ad21 100644
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -184,6 +184,7 @@ fn settled_test_calls() -> SettledDirectTools {
+                 .unwrap()
+             })
+             .collect(),
++        outcomes: vec![Some(true); 3],
+         all_succeeded: true,
+     }
+ }
+@@ -205,6 +206,7 @@ async fn terminal_policy_selects_the_first_eligible_call_in_model_order() {
+         &session,
+         &step,
+         &settled_test_calls(),
++        false,
+         &CancellationToken::new(),
+     )
+     .await
+@@ -230,8 +232,9 @@ async fn terminal_policy_never_runs_for_failed_siblings() {
+     let step = StepContext::for_test(Arc::new(turn));
+     let mut tools = settled_test_calls();
+     tools.all_succeeded = false;
++    tools.outcomes[0] = Some(false);
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, false, &CancellationToken::new())
+             .await
+             .unwrap()
+             .is_none()
+@@ -252,6 +255,7 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+             &session,
+             &step,
+             &settled_test_calls(),
++            false,
+             &CancellationToken::new(),
+         )
+         .await
+@@ -270,6 +274,7 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+         &session,
+         &step,
+         &settled_test_calls(),
++        false,
+         &CancellationToken::new(),
+     )
+     .await
+@@ -284,7 +289,7 @@ async fn terminal_policy_rejects_a_mismatched_accepted_receipt() {
+     let mut tools = settled_test_calls();
+     tools.outputs.swap(0, 1);
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, false, &CancellationToken::new())
+             .await
+             .is_err()
+     );
+@@ -523,7 +528,7 @@ async fn tool_terminal_recovery_saved_success_alone_has_no_completion_authority(
+     let (session, turn) = crate::session::tests::make_session_and_context().await;
+     let step = StepContext::for_test(Arc::new(turn));
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, false, &CancellationToken::new())
+             .await
+             .unwrap()
+             .is_none()
+diff --git a/codex-rs/core/src/tools/context_tests.rs b/codex-rs/core/src/tools/context_tests.rs
+index bd0cb0c5b57bda6b0d4c40b015d1228de40b1c82..fa6f183ac6a88ed5ea98866d0e2556a3490e508d 100644
+--- a/codex-rs/core/src/tools/context_tests.rs
++++ b/codex-rs/core/src/tools/context_tests.rs
+@@ -2,6 +2,7 @@ use super::*;
+ use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
+ use codex_protocol::models::ImageReference;
+ use codex_protocol::models::SearchToolCallParams;
++use codex_tools::LoadableToolSpec;
+ use core_test_support::assert_regex_match;
+ use pretty_assertions::assert_eq;
+ use serde_json::json;
 diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
-index 31528e7bf5de1b8cfbe591b1d287aa3467b88170..2b6496c5f0fa71805c9b5925d6660e046e72b7f4 100644
+index 87cd419ed11dee6bfec3fbda6ec6f1b212c61f54..70618c291cf80f0a331f002cb7a605c4dacaf049 100644
 --- a/codex-rs/ext/extension-api/src/model_request.rs
 +++ b/codex-rs/ext/extension-api/src/model_request.rs
-@@ -494,6 +494,12 @@ pub struct ModelAttemptInput {
+@@ -521,6 +521,12 @@ pub struct ModelAttemptInput {
  /// Interceptors compose in registration order; dropping their stream must release unfinished work.
  /// Trusted host implementations must bound any model-visible content they synthesize.
  pub trait ModelResponseInterceptor: Send + Sync {

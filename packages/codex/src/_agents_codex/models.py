@@ -1673,16 +1673,17 @@ class ResponsesModel:
 
     @staticmethod
     def _check_video_input(request: ModelRequest) -> None:
-        items = request.body.get("input")
+        items: Any = None
         try:
-            if not isinstance(items, list):
+            items = request.body.get("input")
+            if not isinstance(items, (list, tuple)):
                 return
             if any(
                 part.get("type") == "input_video"
                 for item in items
                 if isinstance(item, Mapping)
                 and item.get("type", "message") == "message"
-                and isinstance(item.get("content"), list)
+                and isinstance(item.get("content"), (list, tuple))
                 for part in item["content"]
                 if isinstance(part, Mapping)
             ):

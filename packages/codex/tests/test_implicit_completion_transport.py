@@ -660,3 +660,71 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
     assert len(providers) == 1 and providers[0].api_key is None and providers[0]._closed
     assert agent.provider is None
     assert not openings
+
+
+@pytest.mark.parametrize("eager_tool", [False, True], ids=["plain", "eager-tool"])
+@pytest.mark.parametrize("transport", ["http", "websocket"])
+async def test_private_completion_honors_fixed_request_transport(
+    openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]],
+    transport: str,
+    eager_tool: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native = importlib.import_module("agents._native")
+    request_controls = []
+
+    def record(name: str) -> Any:
+        capture = getattr(native, name)
+
+        def forward(*args: Any, **kwargs: Any) -> Any:
+            request_controls.append(json.loads(args[2])["_sdk_request_transport"])
+            return capture(*args, **kwargs)
+
+        return forward
+
+    for name in ("_prepare_run_conversation", "_open_conversation"):
+        monkeypatch.setattr(native, name, record(name))
+
+    capture_engine = native.create_engine
+    initial_private_http = []
+
+    async def create_engine(*args: Any, **kwargs: Any) -> Any:
+        class CapturedEngine:
+            async def _start_initial_replaceable_thread(
+                self, options_json: str, *_thread_args: Any, **thread_kwargs: Any
+            ) -> Any:
+                request_controls.append(json.loads(options_json)["_sdk_request_transport"])
+                initial_private_http.append(thread_kwargs.get("_process_private_http", False))
+                return capture_engine(*args, **kwargs)
+
+        return CapturedEngine()
+
+    monkeypatch.setattr(native, "create_engine", create_engine)
+
+    @function_tool
+    async def lookup() -> str:
+        """Return synthetic eager tool output."""
+        return "unused"
+
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-default-key")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    with pytest.raises(_OpeningCaptured):
+        await Agent(
+            instructions="Answer.",
+            model_settings={"request_transport": transport},
+            tools=[lookup] if eager_tool else [],
+        ).run("hello")
+    route, config, kwargs, _ = openings.pop()
+    expected_route = "_prepare_run_conversation"
+    if eager_tool:
+        expected_route = "create_engine" if transport == "websocket" else "_open_conversation"
+    assert route == expected_route
+    assert config["model_providers.native_agent"]["supports_websockets"] is True
+    if route == "create_engine":
+        assert "_private_http" not in kwargs
+        assert initial_private_http == [False]
+    else:
+        assert kwargs["_private_http"] is (transport == "http")
+        assert initial_private_http == []
+    assert request_controls == [{"mode": transport}]
+    assert not openings

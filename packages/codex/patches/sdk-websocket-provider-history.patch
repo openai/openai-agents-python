@@ -643,15 +643,3 @@ index 934feaa8..2851adb8 100644
  #[tokio::test]
  async fn cold_resume_requires_current_anchor_and_only_sends_new_input() -> Result<()> {
      let server = responses::start_mock_server().await;
-diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index 5b3c6147a0bdad1ceb44f88fa39122361cbe41ee..6051a0bb905ba255be402783764f103f07964a35 100644
---- a/codex-rs/core/src/client_tests.rs
-+++ b/codex-rs/core/src/client_tests.rs
-@@ -2381,6 +2381,7 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
-         attempt,
-         test_model_provider(),
-         vec![Box::new(ReplaceOutput)],
-+        None,
-         false,
-     );
-     let mut delivered = Vec::new();

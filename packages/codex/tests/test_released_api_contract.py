@@ -109,9 +109,8 @@ def implementation(candidate: Path, name: str) -> Path:
         ("observation.py", "    | UsageUpdated\n", ""),
         (
             "input.py",
-            "Sequence[InputText | InputImage | InputImageFile | InputFile | InputAudio"
-            " | InputVideo]",
-            "Sequence[InputText | InputImageFile | InputFile | InputAudio | InputVideo]",
+            "InputText | InputImage | InputImageFile",
+            "InputText | InputImageFile",
         ),
         ("agent.py", "    reasoning_effort: str\n", ""),
         (

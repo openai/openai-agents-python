@@ -2525,6 +2525,29 @@ impl TurnLifecycleContributor for Boundary {
 }
 
 impl ModelRequestContributor for Boundary {
+    fn admit_provider_response_span(
+        &self,
+        input: codex_extension_api::SdkProviderResponseSpanInput,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        std::result::Result<Option<codex_extension_api::SdkProviderResponseSpanAdmission>, String>,
+    > {
+        let tools = input
+            .admission
+            .turn_store()
+            .get::<Arc<crate::python_tools::TurnAdmission>>()
+            .and_then(|receipt| receipt.callback_tools());
+        Box::pin(async move {
+            let Some(tools) = tools else {
+                return Ok(None);
+            };
+            tools
+                .admit_provider_response_span(input)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
     fn model_attempt(
         &self,
         input: codex_extension_api::ModelAttemptInput,
