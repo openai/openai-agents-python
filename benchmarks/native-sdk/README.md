@@ -271,3 +271,45 @@ exec env OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX=1 PYTHONHASHSEED=0 \
 ```
 
 The existing estimator has been retaining matched block order, raw metric vectors and paired bootstrap intervals. This command has not been carrying a source-specific optimization gate or a speedup claim. All-client CPU has been covering the existing warm interval; full-owner CPU has been covering Adapter construction through exit. Process-owned cache retirement and process-exit CPU have been remaining outside those owner clocks.
+
+
+## Optional HTTP/2 peer
+
+The default peer has been remaining aiohttp HTTP/1.1, including its WebSocket upgrade path. The explicit `--peer-http-mode dual` option has been selecting a TLS peer advertising both `h2` and `http/1.1`, using the same response, tool and history validation. This option has been requiring the existing default-host container setup. Native HTTP arms have been requiring actual H2 receipts; v0 HTTP and native WebSocket arms have been requiring HTTP/1.1. Unsupported native wheels have been failing validation rather than silently qualifying an HTTP/1.1 fallback.
+
+The optional peer dependency has been remaining outside both SDK environments. Before measurement, install it only in the peer environment:
+
+```sh
+uv pip install --compile-bytecode --python "$PEER_PY" \
+  --requirement "$BENCH/requirements-http2-peer.txt"
+```
+
+For the [default-host container guide](container-default-host/README.md), add the following line to its generated Dockerfile after the existing environment provisioning. Rebuild the image before the offline run:
+
+```dockerfile
+RUN uv pip install --no-build --compile-bytecode --python /opt/peer/bin/python -r /bench/requirements-http2-peer.txt \
+    && uv pip freeze --python /opt/peer/bin/python > /input/peer-packages.txt
+```
+
+Inside that guide's existing owned container command, the following comparison has been selecting H2 for both native HTTP arms, retaining fresh Sessions and the real async tool. Use the installed versions and paths from the guide's second-wheel setup:
+
+```sh
+"$PEER_PY" "$BENCH/compare.py" \
+  --peer-http-mode dual --default-host-setup /run/sdk-benchmark/setup.json \
+  --reference-engine v1 --native-provider-mode omitted \
+  --reference-transport http --native-transport http \
+  --v0-python "$REFERENCE_NATIVE_PY" --v1-python "$NATIVE_PY" \
+  --v0-version "$REFERENCE_NATIVE_VERSION" --v1-version "$NATIVE_VERSION" \
+  --server-python "$PEER_PY" --output-dir "$LAB/fresh-tools-h2" \
+  --samples 5 --iterations 100 --timeout 60 --cases oneshot_tool_output_16k_128
+```
+
+Each request receipt has been recording its HTTP version, negotiated ALPN and TLS connection ID. `server.tls_transports` has been recording the matching connection and request count. Repeated IDs across different operation IDs have been showing actual connection reuse; Provider lifetime alone has not been proving reuse. HTTP responses have been completing their final body send before their receipt ends. The peer has not been adding a delayed EOF after `response.completed`.
+
+The two server modes have been using different HTTP implementations. Comparing their wall or CPU measurements has not been isolating SDK work or establishing a performance improvement. Keep the selected mode identical across a matched SDK comparison. All original measured, prefill and full-owner clocks have been remaining unchanged. Hypercorn has been staying pinned because the benchmark's TLS connection/shutdown adapter has been using its private `TCPServer` interface.
+
+The focused transport check has been launching a local TLS peer, verifying H2 reuse, HTTP/1.1 JSON and WebSocket delivery, complete bodies and joined shutdown, without importing either SDK:
+
+```sh
+"$PEER_PY" -B -m unittest discover -s "$BENCH/tests" -p 'test_http2_peer.py'
+```
