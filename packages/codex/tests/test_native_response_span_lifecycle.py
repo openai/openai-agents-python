@@ -28,7 +28,6 @@ from agents import (
     function_tool,
     telemetry,
 )
-from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call
 from tests.telemetry_transport_fixtures import decoded_collector
 from tests.test_tracing_native import Recorder, _attrs, _descends, _spans
@@ -148,13 +147,15 @@ async def run(case):
         ]
 
     async def wait_ends(count):
+        async def wait():
+            while len(responses("end")) < count:
+                processor_changed.clear()
+                if len(responses("end")) < count:
+                    await processor_changed.wait()
+
         try:
-            async with timeout(5):
-                while len(responses("end")) < count:
-                    processor_changed.clear()
-                    if len(responses("end")) < count:
-                        await processor_changed.wait()
-        except TimeoutError:
+            await asyncio.wait_for(wait(), timeout=5)
+        except asyncio.TimeoutError:
             raise AssertionError(
                 "logical response did not end while approval remained pending"
             ) from None

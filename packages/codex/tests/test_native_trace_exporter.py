@@ -1019,7 +1019,7 @@ async def native_outcome_privacy_case():
     scope = telemetry.span("bounded-outcome")
     with pytest.raises(RuntimeError, match="Native trace span end failed") as failure:
         with scope:
-            scope.set_outcome(status="ok", data={"private": secret + "x" * (64 * 1024)})
+            scope.set_outcome(status="ok", data={"private": secret * 4000})
     assert_sanitized_failure(failure.value, secret)
     assert scope._outcome is None
     await telemetry.force_flush()

@@ -1,0 +1,2 @@
+# The peer has been using a pinned private Hypercorn TCPServer interface.
+hypercorn==0.18.0
