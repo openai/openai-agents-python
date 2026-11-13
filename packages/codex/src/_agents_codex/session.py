@@ -4530,6 +4530,7 @@ class Session(Generic[ContextT, OutputT]):
                         for slot, tool in enumerate(restored_catalog.tools)
                         if isinstance(tool, _CapturedFunction)
                         and tool.configured_agent is not None
+                        and (operation_slots is None or slot in operation_slots)
                         and state is not None
                         and saved.native_continuation is not None
                         and any(
@@ -5255,6 +5256,7 @@ class Session(Generic[ContextT, OutputT]):
         self._mutation: asyncio.Task[Any] | None = None
         self._mutation_cancellable = False
         self._checkpoint_task: asyncio.Future[None] | None = None
+        self._configured_capture: asyncio.Task[SessionState] | None = None
         self._stored_fork: Any = None
         self._stored_fork_receipt: asyncio.Future[None] | None = None
         self._sealed_checkpoint: str | None = None
@@ -6565,6 +6567,13 @@ class Session(Generic[ContextT, OutputT]):
 
     def _check_open(self) -> None:
         self._check_loop()
+        capture = self._configured_capture
+        if (
+            capture is not None
+            and not capture.done()
+            and asyncio.current_task() not in {capture, self._checkpoint_task, self._close_task}
+        ):
+            raise SessionBusyError("Session is capturing a configured child checkpoint")
         managed = self._managed_workspace
         if (
             managed is not None
@@ -15857,13 +15866,14 @@ class Session(Generic[ContextT, OutputT]):
             else ()
         )
         previous_opening = invocation.configured_opening
-        invocation.configured_opening = _ConfiguredOpening(
+        configured_opening = _ConfiguredOpening(
             declaration.agent,
             context._environment,
             self._writable_roots,
             admitted,
             executor_tools,
         )
+        invocation.configured_opening = configured_opening
         handler = self._interaction_handler
 
         async def answer(event: Interaction) -> ActionReply[Any]:
@@ -15950,6 +15960,9 @@ class Session(Generic[ContextT, OutputT]):
                     async def recover_child() -> Any:
                         nonlocal child_session
                         assert child.checkpoint is not None and child.recovery_ready is not None
+                        recovery_token = _invocation.set(invocation)
+                        recovery_opening = invocation.configured_opening
+                        invocation.configured_opening = configured_opening
                         try:
                             async with declaration.agent.session(
                                 context=context.context,
@@ -15984,6 +15997,9 @@ class Session(Generic[ContextT, OutputT]):
                             if not child.recovery_ready.done():
                                 child.recovery_ready.set_exception(error)
                             raise
+                        finally:
+                            invocation.configured_opening = recovery_opening
+                            _invocation.reset(recovery_token)
 
                     child.recover = recover_child
                     try:
@@ -17298,7 +17314,9 @@ class Session(Generic[ContextT, OutputT]):
 
         Wait for the pending request's sample and callbacks to settle, then
         retire the original session. A repeated suspend returns the same state.
-        No active automatic work or unfinished child work is checkpointed.
+        A single configured child at a portable manual boundary can be saved
+        once other automatic callbacks settle. Managed profile graphs still
+        require a live reply to a configured child.
         Settled native stored values and terminal cell observations are retained.
         Active code cells and root before_step callbacks cannot be captured.
         """
@@ -17309,6 +17327,8 @@ class Session(Generic[ContextT, OutputT]):
         return await self._suspend()
 
     async def _suspend(self, *, before_seal: Callable[[], None] | None = None) -> SessionState:
+        if self._configured_capture is not None:
+            return await _join(self._configured_capture)
         self._check_portable_capture()
         active = self._active
         self._check_manual_capture(active)
@@ -17322,47 +17342,61 @@ class Session(Generic[ContextT, OutputT]):
                 not task.done() and task is not child.callback_task for task in active.callbacks
             ):
                 raise RuntimeError("Other automatic callbacks have not settled")
-            if child.checkpoint is None:
-                child.sealing = True
-                try:
-                    child.checkpoint = await child.session.suspend()
-                except BaseException:
-                    child.sealing = False
-                    raise
-                child_usage = self._configured_checkpoint_usage(child.checkpoint)
-                _merge_configured_child_restore_usage(
-                    active.run_usage.snapshot(), child_usage, child_usage
+            if self._profiles or child.session._profiles:
+                raise CapabilityError(
+                    "Configured checkpoints cannot capture managed handoff profiles; "
+                    "reply in the live Session"
                 )
-                payload = {
-                    "request": json.loads(child.parent_request),
-                    "callback": child.parent_callback,
-                    "continuation": {
-                        "kind": "configured-child-v1",
-                        "state": json.loads(child.checkpoint.to_json()),
-                        "usage_in_parent": asdict(child_usage),
-                    },
-                }
-                if not await self._native._respond_python_tool(json.dumps(payload)):
-                    raise RuntimeError("Configured parent continuation expired")
-            try:
-                return await self._checkpoint(active, before_seal=before_seal)
-            except Exception:
-                # A known refusal leaves the same parent sender live. Rebind
-                # only that held invocation to its saved child, never submit anew.
-                if child.recover is not None and self._sealed_checkpoint is None:
-                    rollback = {
+
+            async def capture_configured() -> SessionState:
+                if child.checkpoint is None:
+                    child.sealing = True
+                    try:
+                        child.checkpoint = await child.session.suspend()
+                    except BaseException:
+                        child.sealing = False
+                        raise
+                    child_usage = self._configured_checkpoint_usage(child.checkpoint)
+                    _merge_configured_child_restore_usage(
+                        active.run_usage.snapshot(), child_usage, child_usage
+                    )
+                    payload = {
                         "request": json.loads(child.parent_request),
                         "callback": child.parent_callback,
-                        "continuation": None,
-                        "rollback": True,
+                        "continuation": {
+                            "kind": "configured-child-v1",
+                            "state": json.loads(child.checkpoint.to_json()),
+                            "usage_in_parent": asdict(child_usage),
+                        },
                     }
-                    await self._native._respond_python_tool(json.dumps(rollback))
-                    child.recovery_ready = asyncio.get_running_loop().create_future()
-                    child.recovery = _create_task(child.recover())
-                    active.add_callback(child.recovery)
-                    child.seal_hold.set()
-                    await asyncio.shield(child.recovery_ready)
-                raise
+                    if not await self._native._respond_python_tool(json.dumps(payload)):
+                        raise RuntimeError("Configured parent continuation expired")
+                try:
+                    return await self._checkpoint(active, before_seal=before_seal)
+                except Exception:
+                    # A known refusal leaves the same parent sender live. Rebind
+                    # only that held invocation to its saved child, never submit anew.
+                    if child.recover is not None and self._sealed_checkpoint is None:
+                        rollback = {
+                            "request": json.loads(child.parent_request),
+                            "callback": child.parent_callback,
+                            "continuation": None,
+                            "rollback": True,
+                        }
+                        await self._native._respond_python_tool(json.dumps(rollback))
+                        child.recovery_ready = asyncio.get_running_loop().create_future()
+                        child.recovery = _create_task(child.recover())
+                        active.add_callback(child.recovery)
+                        child.seal_hold.set()
+                        await asyncio.shield(child.recovery_ready)
+                    raise
+
+            capture = _create_task(capture_configured())
+            self._configured_capture = capture
+            try:
+                return await _join(capture)
+            finally:
+                self._configured_capture = None
         # Waiting precedes checkpoint ownership: cancellation or close can
         # still stop a callback that has not reached a safe sealing boundary.
         if self._child_admissions:
@@ -17902,6 +17936,13 @@ class Session(Generic[ContextT, OutputT]):
         """
         self._check_loop()
         self._check_callback_operation("close its own Session")
+        capture = self._configured_capture
+        if capture is not None and asyncio.current_task() not in {
+            capture,
+            self._checkpoint_task,
+            self._close_task,
+        }:
+            await asyncio.gather(asyncio.shield(capture), return_exceptions=True)
         if self._close_task is None or (
             not self._closed
             and self._close_task.done()

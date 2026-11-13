@@ -1818,18 +1818,44 @@ pub(crate) async fn capture(
             ready(thread, owner).await?,
             "Manual continuation changed during export"
         );
+        let tools = thread
+            .thread
+            .thread_extension_data()
+            .get::<crate::python_tools::PythonTools>()
+            .context("Manual continuation requires current tools")?;
+        let pending = tools.pending_manual_keys(&thread.id.to_string())?;
+        let configured = tools.continuations(&pending)?;
         let mut current = owner
             .lock()
             .map_err(|_| anyhow::anyhow!("Manual continuation poisoned"))?;
         let frame = current
             .as_mut()
             .context("Manual continuation is no longer pending")?;
+        ensure!(
+            pending.iter().all(|key| key.turn == frame.turn),
+            "Configured continuations belong to another restored turn"
+        );
         snapshot["format_version"] = serde_json::json!(if snapshot["format_version"] == 4 {
             5
         } else {
             3
         });
-        snapshot["native_continuation"] = frame.continuation_snapshot(false)?;
+        let mut continuation = frame.continuation_snapshot(false)?;
+        for call in continuation["pending_manual"]
+            .as_array_mut()
+            .context("Missing pending manual calls")?
+        {
+            let id = call["call_id"].as_str().context("Missing manual call ID")?;
+            if let Some(value) = configured.get(id) {
+                call["continuation"] = value.clone();
+            } else {
+                ensure!(
+                    call.get("continuation").is_none(),
+                    "Configured continuation is no longer parked"
+                );
+            }
+        }
+        snapshot["native_continuation"] = continuation;
         frame.sealed = true;
         frame.receivers.clear();
         return Ok(Some(snapshot));

@@ -93,6 +93,13 @@ async def test_public_parent_checkpoint_resumes_configured_child_and_held_siblin
             await sibling.wait()
             saved = await source.suspend()
             assert (turn.run_usage.requests, turn.run_usage.total_tokens) == (2, 28)
+        if not legacy_usage:
+            value = json.loads(saved.to_json())
+            value["operation_tools"] = []
+            excluded = SessionState.from_json(json.dumps(value))
+            with pytest.raises(ValueError, match="Saved operation does not admit"):
+                async with parent.session(context=context, state=excluded):
+                    raise AssertionError("excluded configured child was admitted")
         if legacy_usage:
             value = json.loads(saved.to_json())
             [continuation] = [
