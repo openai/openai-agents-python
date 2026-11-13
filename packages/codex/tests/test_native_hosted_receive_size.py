@@ -81,7 +81,10 @@ async def test_hosted_receive_checks_bounded_bytes_before_encoding_or_json_mater
             )
         ) as provider:
             async with Agent(
-                model="gpt-4.1", instructions="Answer.", provider=provider
+                model="gpt-4.1",
+                model_settings={"reasoning_summary": "none"},
+                instructions="Answer.",
+                provider=provider,
             ).session() as session:
                 turn = await session.submit("Public synthetic input.")
                 with pytest.raises(Exception) as caught:
