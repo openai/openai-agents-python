@@ -17,6 +17,13 @@ def configured_client(tmp_path, monkeypatch):
     from agents.classic.sandbox.sandboxes.docker import DockerSandboxClient
 
     monkeypatch.setattr("_agents_codex.sandbox.shutil.which", lambda name: "/fixture/docker")
+    config = tmp_path / "docker-config"
+    config.mkdir()
+    (config / "config.json").write_text("{}")
+    monkeypatch.setenv("DOCKER_CONFIG", str(config))
+    netrc = tmp_path / "empty.netrc"
+    netrc.write_text("")
+    monkeypatch.setenv("NETRC", str(netrc))
     connection = docker.DockerClient(
         base_url="unix://" + str(tmp_path / "selected.sock"), version="1.45"
     )
@@ -98,3 +105,93 @@ def test_docker_gateway_rejects_relative_cli_selection(configured_client, monkey
     monkeypatch.setattr("_agents_codex.sandbox.shutil.which", lambda name: "workspace/docker")
     with pytest.raises(ValueError, match="Docker CLI"):
         DockerGateway(configured_client)
+
+
+@pytest.mark.parametrize("mode", ["auth", "cookie", "netrc"])
+async def test_docker_gateway_rejects_effective_http_auth_before_daemon_calls(
+    configured_client, monkeypatch, tmp_path, mode
+):
+    import requests
+
+    api = configured_client.docker_client.api
+    if mode == "auth":
+        api.auth = ("scoped-user", "synthetic-password")
+    elif mode == "cookie":
+        api.cookies.set("role", "synthetic-scope")
+    else:
+        netrc = tmp_path / "scoped.netrc"
+        netrc.write_text("machine localhost login scoped-user password synthetic-password\n")
+        netrc.chmod(0o600)
+        monkeypatch.setenv("NETRC", str(netrc))
+    prepared = api.prepare_request(requests.Request("GET", "http+docker://localhost/_ping"))
+    assert "Authorization" in prepared.headers or "Cookie" in prepared.headers
+    calls = []
+
+    def info():
+        calls.append("info")
+        return {"ID": "selected", "OSType": "linux", "Plugins": {"Authorization": []}}
+
+    monkeypatch.setattr(api, "info", info)
+    with pytest.raises(ValueError, match="authentication scope"):
+        await DockerGateway(configured_client)._preflight()
+    assert calls == []
+
+
+@pytest.mark.parametrize("trust_env", [False, True])
+async def test_docker_gateway_preserves_unauthed_default_and_explicit_environment_policy(
+    configured_client, monkeypatch, trust_env
+):
+    api = configured_client.docker_client.api
+    api.trust_env = trust_env
+    monkeypatch.setattr(
+        api, "info", lambda: {"ID": "selected", "OSType": "linux", "Plugins": {"Authorization": []}}
+    )
+    current, _, daemon = await DockerGateway(configured_client)._preflight()
+    assert current is api and len(daemon) == 64
+    assert api.trust_env is trust_env
+
+
+async def test_docker_gateway_rejects_auth_learned_from_daemon_info(configured_client, monkeypatch):
+    api = configured_client.docker_client.api
+
+    def info():
+        api.cookies.set("role", "synthetic-scope")
+        return {"ID": "selected", "OSType": "linux", "Plugins": {"Authorization": []}}
+
+    monkeypatch.setattr(api, "info", info)
+    with pytest.raises(ValueError, match="authentication scope"):
+        await DockerGateway(configured_client)._preflight()
+
+
+async def test_docker_gateway_respects_explicit_netrc_opt_out(
+    configured_client, monkeypatch, tmp_path
+):
+    api = configured_client.docker_client.api
+    netrc = tmp_path / "scoped.netrc"
+    netrc.write_text("machine localhost login scoped-user password synthetic-password\n")
+    netrc.chmod(0o600)
+    monkeypatch.setenv("NETRC", str(netrc))
+    api.trust_env = False
+    monkeypatch.setattr(
+        api, "info", lambda: {"ID": "selected", "OSType": "linux", "Plugins": {"Authorization": []}}
+    )
+    current, _, _ = await DockerGateway(configured_client)._preflight()
+    assert current is api and api.trust_env is False
+
+
+@pytest.mark.parametrize("mode", ["query", "hook", "cert", "authority"])
+async def test_docker_gateway_rejects_custom_request_scope(configured_client, monkeypatch, mode):
+    api = configured_client.docker_client.api
+    if mode == "query":
+        api.params = {"role": "synthetic-scope"}
+    elif mode == "hook":
+        api.hooks["response"].append(lambda response: response)
+    elif mode == "cert":
+        api.cert = "synthetic-client-certificate"
+    else:
+        api.base_url = "http+docker://other-authority"
+    calls = []
+    monkeypatch.setattr(api, "info", lambda: calls.append("info"))
+    with pytest.raises(ValueError, match="authentication scope"):
+        await DockerGateway(configured_client)._preflight()
+    assert calls == []

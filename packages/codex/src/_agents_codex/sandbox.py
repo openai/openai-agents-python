@@ -346,6 +346,33 @@ def _docker_unix_adapter_type() -> type[Any]:
     return cast(type[Any], UnixHTTPAdapter)
 
 
+def _docker_daemon_info(api: Any) -> Any:
+    from requests import Request
+
+    def check_scope() -> None:
+        if (
+            api.base_url != "http+docker://localhost"
+            or api.auth is not None
+            or api.cookies
+            or api.params
+            or api.cert is not None
+            or api.hooks != {"response": []}
+        ):
+            raise ValueError("DockerGateway cannot match the current HTTP authentication scope")
+        # Preparing the same fixed authority applies requests' current netrc policy.
+        # Inspect names only; never copy credentials into CLI arguments or state.
+        prepared = api.prepare_request(Request("GET", "http+docker://localhost/_ping"))
+        if any(
+            name in prepared.headers for name in ("Authorization", "Proxy-Authorization", "Cookie")
+        ):
+            raise ValueError("DockerGateway cannot match the current HTTP authentication scope")
+
+    check_scope()
+    info = api.info()
+    check_scope()
+    return info
+
+
 def _current_docker_executable() -> str:
     cli = shutil.which("docker")
     if cli is None or not Path(cli).is_absolute():
@@ -380,7 +407,11 @@ class DockerGateway:
     """Attach a fresh SDK-owned Linux Docker resource to the native executor.
 
     Pass this object as sandbox_environment's connect argument. The current
-    standard Unix-socket Docker client supplies daemon authority. This helper
+    standard Unix-socket Docker client supplies daemon authority. Explicit
+    session auth, cookies, custom request settings, and effective netrc auth
+    require an application gateway. The normal trust_env=True client remains
+    supported when requests prepares no authentication for its Unix authority.
+    This helper
     ignores ambient Docker configuration and opens no listener or host mount.
     The selected image must supply a compatible exec-server at exec_server_path.
     Its image-configured process user applies; capability_user is metadata only.
@@ -435,7 +466,7 @@ class DockerGateway:
             "Connection",
         }:
             raise ValueError("DockerGateway cannot prove the current daemon authorization scope")
-        info = await run_blocking_workspace_io(api.info)
+        info = await run_blocking_workspace_io(lambda: _docker_daemon_info(api))
         plugins = info.get("Plugins")
         if (
             info.get("OSType") != "linux"

@@ -136,7 +136,14 @@ class ObservedGateway(DockerGateway):
 
 
 @pytest.mark.parametrize("mode", ["read", "cancel", "missing-server", "headers"])
-async def test_selected_native_docker_gateway(responses, monkeypatch, mode):
+async def test_selected_native_docker_gateway(responses, monkeypatch, tmp_path, mode):
+    config = tmp_path / "docker-config"
+    config.mkdir()
+    (config / "config.json").write_text("{}")
+    monkeypatch.setenv("DOCKER_CONFIG", str(config))
+    netrc = tmp_path / "empty.netrc"
+    netrc.write_text("")
+    monkeypatch.setenv("NETRC", str(netrc))
     assert IMAGE is not None and SOCKET is not None and Path(SOCKET).is_absolute()
     connection = docker.DockerClient(base_url="unix://" + SOCKET)
     selected_image = connection.images.get(IMAGE).id
