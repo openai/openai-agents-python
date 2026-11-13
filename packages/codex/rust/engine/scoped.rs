@@ -55,6 +55,7 @@ impl EngineState {
             cloud_config: parent.cloud_config.clone(),
             service_config,
             model_http_pool: parent.model_http_pool.clone(),
+            private_function_http_pool: OnceLock::new(),
             initial_config_available: AtomicBool::new(true),
             interception: parent.interception.clone(),
             recovery: parent.recovery.clone(),

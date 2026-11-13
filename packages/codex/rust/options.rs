@@ -62,9 +62,8 @@ pub struct ThreadOptions {
     pub(crate) process_private_http: bool,
     #[serde(skip)]
     pub(crate) private_disposable: bool,
-    // Private per-thread TLS capability; absent from captured declarations.
-    #[serde(rename = "_sdk_websocket_tls")]
-    pub(crate) private_wss_tls: bool,
+    #[serde(skip)]
+    pub(crate) private_function_scope: bool,
     // Private Agents SDK entry path; never used for portable checkpoint import.
     #[serde(rename = "_sdk_resume_thread_id")]
     pub sdk_resume_thread_id: Option<ThreadId>,
