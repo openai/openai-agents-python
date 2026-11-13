@@ -1,0 +1,154 @@
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index 0080c08e..ca447916 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -51,6 +51,10 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
+         self.0.allowed_callers()
+     }
+
++    fn is_native_environment_tool(&self) -> bool {
++        self.0.is_native_environment_tool()
++    }
++
+     fn exposure(&self) -> crate::tools::registry::ToolExposure {
+         self.0.exposure()
+     }
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+index 3347ff30..2635b104 100644
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -10,6 +10,7 @@ use crate::tools::context::ToolInvocation;
+ use crate::tools::context::ToolPayload;
+ #[cfg(test)]
+ use crate::tools::handlers::ToolSearchHandlerCache;
++use crate::tools::handlers::extension_tools::ExtensionToolAdapter;
+ use crate::tools::registry::AnyToolResult;
+ use crate::tools::registry::CoreToolRuntime;
+ use crate::tools::registry::ToolArgumentDiffConsumer;
+@@ -28,6 +29,7 @@ use codex_tools::ToolName;
+ use codex_tools::ToolSpec;
+ use std::borrow::Cow;
+ use std::collections::BTreeMap;
++use std::collections::HashSet;
+ use std::sync::Arc;
+ use tokio_util::sync::CancellationToken;
+ use tracing::instrument;
+@@ -184,6 +186,20 @@ impl ToolRouter {
+         self.can_manage_children
+     }
+
++    pub(crate) fn exposed_builtin_tool_names(&self) -> HashSet<ToolName> {
++        self.registry
++            .entries()
++            .filter(|tool| {
++                // Extension callbacks can use the same name as a native executor.
++                !tool.runtime.is_third_party_tool()
++                    && (!(tool.runtime.as_ref() as &dyn std::any::Any).is::<ExtensionToolAdapter>()
++                        || tool.runtime.is_native_environment_tool())
++            })
++            .map(|tool| tool.runtime.tool_name())
++            .filter(|name| self.exposes_tool(name))
++            .collect()
++    }
++
+     // Answers if the tool plan lets the model invoke the tool directly, through code mode, or deferred tool search.
+     pub(crate) fn exposes_tool(&self, name: &ToolName) -> bool {
+         let name = name.clone().with_default_namespace();
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index a5bc6c1c..a48f89bd 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -62,6 +62,7 @@ use crate::tools::router::ToolRouter;
+ use crate::tools::tool_namespaces_info::collect_tool_namespaces_info;
+ use codex_connectors::apps_config_from_layer_stack;
+ use codex_extension_api::ExtensionData;
++use codex_extension_api::FinalStepBuiltinTools;
+ use codex_features::Feature;
+ use codex_features::SleepToolMode;
+ use codex_login::AuthManager;
+@@ -348,14 +349,23 @@ pub(crate) async fn build_tool_router(
+             selected.contains(&hosted_tool_policy_name(spec).with_default_namespace())
+         });
+     }
+-    finalize_selected_tool_router(
++    let router = finalize_selected_tool_router(
+         turn_context,
+         model_info,
+         registry,
+         hosted_specs,
+         &session.services.tool_search_handler_cache,
+         selection.0.as_ref(),
+-    )
++    )?;
++    if let Some(receipt) = step_store.get::<FinalStepBuiltinTools>()
++        && !receipt.capture(router.exposed_builtin_tool_names())
++    {
++        return Err(CodexErrorDetails::InvalidRequest(
++            "Built-in tool selection changed after this step captured its catalog".into(),
++        )
++        .into());
++    }
++    Ok(router)
+ }
+
+ struct SelectedStepTools(Option<HashSet<ToolName>>, Option<ToolName>);
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 00eb3fb9..11ccffd2 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -13,6 +13,7 @@ pub use provider_image_reference_policy::ProviderImageReferencePolicy;
+ pub use session_isolation::IsolatedSessionExtensions;
+ pub use session_isolation::SessionIsolation;
+ pub use tool_not_found::ToolNotFoundBehavior;
++pub use tool_policy::FinalStepBuiltinTools;
+ pub use tool_policy::ToolPolicy;
+
+ pub use capabilities::ConversationHistorySnapshot;
+diff --git a/codex-rs/ext/extension-api/src/tool_policy.rs b/codex-rs/ext/extension-api/src/tool_policy.rs
+index 85fde765..89f20494 100644
+--- a/codex-rs/ext/extension-api/src/tool_policy.rs
++++ b/codex-rs/ext/extension-api/src/tool_policy.rs
+@@ -2,6 +2,27 @@
+ //! This policy only restricts tools; permission and approval checks still apply.
+
+ use crate::ToolName;
++use std::collections::HashSet;
++use std::sync::OnceLock;
++
++/// The built-in tools exposed by the finalized router for one issuing step.
++/// An executor can retain this receipt before the router finishes selection.
++#[derive(Debug, Default)]
++pub struct FinalStepBuiltinTools(OnceLock<HashSet<ToolName>>);
++
++impl FinalStepBuiltinTools {
++    pub fn names(&self) -> Option<&HashSet<ToolName>> {
++        self.0.get()
++    }
++
++    /// Freeze the first finalized set and require repeated builds to agree.
++    pub fn capture(&self, names: HashSet<ToolName>) -> bool {
++        match self.0.set(names) {
++            Ok(()) => true,
++            Err(names) => self.0.get() == Some(&names),
++        }
++    }
++}
+
+ /// Supply through `ExtensionDataInit` before starting a thread. The host captures
+ /// the policy once; later extension-state changes cannot relax it. Callers must
+diff --git a/codex-rs/tools/src/tool_executor.rs b/codex-rs/tools/src/tool_executor.rs
+index 8d120e8b..9c445ac7 100644
+--- a/codex-rs/tools/src/tool_executor.rs
++++ b/codex-rs/tools/src/tool_executor.rs
+@@ -147,6 +147,11 @@ pub trait ToolExecutor<Invocation>: Send + Sync {
+         None
+     }
+
++    /// Runtime-authored identity for an SDK-owned Environment helper.
++    fn is_native_environment_tool(&self) -> bool {
++        false
++    }
++
+     /// The preferred exposure before the host applies step-specific policy.
+     fn exposure(&self) -> ToolExposure {
+         ToolExposure::Direct

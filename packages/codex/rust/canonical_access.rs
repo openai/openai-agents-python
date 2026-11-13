@@ -64,6 +64,9 @@ struct AccessExecutor {
 }
 
 impl<'call> ToolExecutor<ToolCall<'call>> for AccessExecutor {
+    fn is_native_environment_tool(&self) -> bool {
+        self.inner.is_native_environment_tool()
+    }
     fn tool_name(&self) -> ToolName {
         self.inner.tool_name()
     }
