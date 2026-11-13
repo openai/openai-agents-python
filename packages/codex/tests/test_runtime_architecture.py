@@ -770,3 +770,308 @@ resource.assert_complete()
         ],
         check=True,
     )
+
+
+# These established leaves have no authority to acquire a Session or native handle.
+# _events is an existing shared event-contract port, not a native-free closure.
+_DOMAIN_DEPENDENCIES = {
+    "_stored_history": (set(), set()),
+    "_mcp_names": ({"_agents_codex._public"}, set()),
+    "_public": (set(), set()),
+    "_web_projection": (
+        {"_agents_codex._events", "_agents_codex._public"},
+        {"_agents_codex._events"},
+    ),
+}
+
+
+def _runtime_dependency_edges(
+    source: str, module: str, *, package_module: bool = False
+) -> list[tuple[str | None, int]]:
+    package = module if package_module else module.rpartition(".")[0]
+    edges: list[tuple[str | None, int]] = []
+    importlibs, import_modules, typing_modules, type_guards = (
+        {"importlib"},
+        {"__import__"},
+        {"typing"},
+        set(),
+    )
+
+    builtin_imports = {"__import__"}
+
+    def resolve(name: str, owner: str = package) -> str:
+        return importlib.util.resolve_name(name, owner) if name.startswith(".") else name
+
+    def guard(node: ast.expr) -> bool:
+        return (
+            isinstance(node, ast.Name)
+            and node.id in type_guards
+            or (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in typing_modules
+                and node.attr == "TYPE_CHECKING"
+            )
+        )
+
+    def visit(node: ast.AST) -> None:
+        if isinstance(node, ast.If) and guard(node.test):
+            for child in node.orelse:
+                visit(child)
+            return
+        if (
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.UnaryOp)
+            and (isinstance(node.test.op, ast.Not) and guard(node.test.operand))
+        ):
+            for child in node.body:
+                visit(child)
+            return
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                edges.append((alias.name, node.lineno))
+                if alias.name == "importlib":
+                    importlibs.add(alias.asname or "importlib")
+                if alias.name == "typing":
+                    typing_modules.add(alias.asname or "typing")
+        elif isinstance(node, ast.ImportFrom):
+            target = resolve("." * node.level + (node.module or ""))
+            if target == "importlib":
+                import_modules.update(
+                    a.asname or a.name for a in node.names if a.name == "import_module"
+                )
+            if target == "typing":
+                type_guards.update(
+                    a.asname or a.name for a in node.names if a.name == "TYPE_CHECKING"
+                )
+            if node.module is None or target in {"agents", "_agents_codex"}:
+                edges.extend((target + "." + a.name, node.lineno) for a in node.names)
+            else:
+                edges.append((target, node.lineno))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            names = {
+                target.id
+                for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                if isinstance(target, ast.Name)
+            }
+            value = node.value
+            if isinstance(value, ast.Name) and value.id in importlibs:
+                importlibs.update(names)
+            if isinstance(value, ast.Name) and value.id in typing_modules:
+                typing_modules.update(names)
+            if isinstance(value, ast.Name) and value.id in builtin_imports:
+                builtin_imports.update(names)
+            if (isinstance(value, ast.Name) and value.id in import_modules) or (
+                isinstance(value, ast.Attribute)
+                and isinstance(value.value, ast.Name)
+                and value.value.id in importlibs
+                and value.attr == "import_module"
+            ):
+                import_modules.update(names)
+        elif isinstance(node, ast.Call):
+            dynamic = (
+                isinstance(node.func, ast.Name) and node.func.id in import_modules | {"__import__"}
+            ) or (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in importlibs
+                and node.func.attr == "import_module"
+            )
+            if dynamic:
+                literal = node.args[0] if node.args else None
+                if isinstance(node.func, ast.Name) and node.func.id in builtin_imports:
+                    level = (
+                        node.args[4]
+                        if len(node.args) > 4
+                        else next((kw.value for kw in node.keywords if kw.arg == "level"), None)
+                    )
+                    # Builtin globals/locals/fromlist are not import_module's package.
+                    # Relative builtin imports need globals-based resolution, outside this guard.
+                    absolute = level is None or (
+                        isinstance(level, ast.Constant) and level.value == 0
+                    )
+                    edges.append(
+                        (
+                            literal.value
+                            if absolute
+                            and isinstance(literal, ast.Constant)
+                            and isinstance(literal.value, str)
+                            and not literal.value.startswith(".")
+                            else None,
+                            node.lineno,
+                        )
+                    )
+                    for child in ast.iter_child_nodes(node):
+                        visit(child)
+                    return
+                owner = package
+                supplied_owner = (
+                    node.args[1]
+                    if len(node.args) > 1
+                    else next((kw.value for kw in node.keywords if kw.arg == "package"), None)
+                )
+                if isinstance(supplied_owner, ast.Constant) and isinstance(
+                    supplied_owner.value, str
+                ):
+                    owner = supplied_owner.value
+                elif supplied_owner is not None and not (
+                    isinstance(supplied_owner, ast.Name) and supplied_owner.id == "__package__"
+                ):
+                    edges.append((None, node.lineno))
+                    return
+                edges.append(
+                    (
+                        resolve(literal.value, owner)
+                        if isinstance(literal, ast.Constant) and isinstance(literal.value, str)
+                        else None,
+                        node.lineno,
+                    )
+                )
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    tree = ast.parse(source)
+    # Function bodies can use module import aliases declared later. Discover
+    # those aliases before emitting edges; retain the same erased guards.
+    while True:
+        previous = (
+            len(importlibs),
+            len(import_modules),
+            len(typing_modules),
+            len(type_guards),
+            len(builtin_imports),
+        )
+        edges.clear()
+        visit(tree)
+        if previous == (
+            len(importlibs),
+            len(import_modules),
+            len(typing_modules),
+            len(type_guards),
+            len(builtin_imports),
+        ):
+            return edges
+
+
+def _domain_dependency_violations(sources: dict[str, str], root: str) -> list[str]:
+    local, boundaries = _DOMAIN_DEPENDENCIES[root]
+    # annotationlib is stdlib on supported Python 3.14, but absent from older hosts.
+    external = sys.stdlib_module_names | {"annotationlib", "typing_extensions"}
+    violations = []
+    visited = set()
+
+    def walk(module: str, chain: list[str]) -> None:
+        if module in visited:
+            return
+        visited.add(module)
+        if module not in sources:
+            violations.append(" -> ".join(chain) + ": missing private source")
+            return
+        for target, line in _runtime_dependency_edges(sources[module], module):
+            route = " -> ".join([*chain, target or "<computed import>"])
+            if target is None:
+                violations.append(f"{route} at {module}:{line}: unresolved import")
+            elif target == "agents" or target.startswith(("agents.", "_agents_")):
+                if target not in local:
+                    violations.append(f"{route} at {module}:{line}: unreviewed private/facade edge")
+                elif target not in boundaries:
+                    walk(target, [*chain, target])
+            elif target.split(".")[0] not in external:
+                violations.append(f"{route} at {module}:{line}: unreviewed external dependency")
+
+    module = "_agents_codex." + root
+    walk(module, [module])
+    return violations
+
+
+@pytest.mark.parametrize("root", _DOMAIN_DEPENDENCIES)
+def test_domain_runtime_dependency_direction(root: str) -> None:
+    sources = {"_agents_codex." + path.stem: path.read_text() for path in _RUNTIME.glob("*.py")}
+    violations = _domain_dependency_violations(sources, root)
+    assert not violations, "Domain runtime dependencies:\n" + "\n".join(violations)
+
+
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ("import _agents_codex.session", {"_agents_codex.session"}),
+        ("from .session import Session", {"_agents_codex.session"}),
+        ("from . import session", {"_agents_codex.session"}),
+        ("from agents import Agent", {"agents.Agent"}),
+        (
+            "from typing import TYPE_CHECKING as checking\n"
+            "if checking:\n    from .session import Session\n"
+            "else:\n    import json",
+            {"typing", "json"},
+        ),
+        (
+            "import typing as t\nif not t.TYPE_CHECKING:\n    import json\n"
+            "else:\n    from .session import Session",
+            {"typing", "json"},
+        ),
+        (
+            "def later():\n    return load('.session', __package__)\n"
+            "from importlib import import_module as load",
+            {"importlib", "_agents_codex.session"},
+        ),
+        (
+            "import importlib as loader\nload = loader.import_module\n"
+            "load('.session', '_agents_codex')",
+            {"importlib", "_agents_codex.session"},
+        ),
+        ("__import__('_agents_codex.session')", {"_agents_codex.session"}),
+        (
+            "__import__('_agents_codex.session', globals(), locals(), ['Session'], 0)",
+            {"_agents_codex.session"},
+        ),
+        ("__import__('session', globals(), locals(), ['Session'], 1)", {None}),
+        ("load = __import__\nload('session', level=1)", {None}),
+        ("__import__('json', __import__('numpy').__dict__)", {"json", "numpy"}),
+        ("__import__(selected_module)", {None}),
+    ],
+)
+def test_domain_dependency_parser_controls(source: str, expected: set[str | None]) -> None:
+    assert {
+        target for target, _ in _runtime_dependency_edges(source, "_agents_codex.leaf")
+    } == expected
+
+
+@pytest.mark.parametrize(
+    "source,rejected",
+    [
+        ("from .session import Session", "_agents_codex.session"),
+        ("from ._opening import _capture_opening_agent", "_agents_codex._opening"),
+        ("from agents import Agent", "agents.Agent"),
+        ("__import__('_agents_codex.session')", "_agents_codex.session"),
+        ("__import__(selected_module)", "<computed import>"),
+        ("import numpy", "numpy"),
+    ],
+)
+def test_domain_dependency_negative_controls(source: str, rejected: str) -> None:
+    violations = _domain_dependency_violations(
+        {"_agents_codex._stored_history": source}, "_stored_history"
+    )
+    assert any(rejected in violation for violation in violations), violations
+
+
+def test_domain_dependency_rejects_backedge_through_allowed_helper() -> None:
+    sources = {
+        "_agents_codex._mcp_names": "from ._public import preserve_module_identity",
+        "_agents_codex._public": "from .session import Session",
+    }
+    violations = _domain_dependency_violations(sources, "_mcp_names")
+    assert any(
+        "_agents_codex._mcp_names -> _agents_codex._public -> _agents_codex.session" in item
+        for item in violations
+    )
+
+
+def test_domain_dependency_requires_named_source() -> None:
+    violations = _domain_dependency_violations({}, "_stored_history")
+    assert violations == ["_agents_codex._stored_history: missing private source"]
+
+
+def test_domain_dependency_accepts_standard_library_imports() -> None:
+    assert not _domain_dependency_violations(
+        {"_agents_codex._stored_history": "import statistics"}, "_stored_history"
+    )
