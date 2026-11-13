@@ -124,12 +124,16 @@ class HTTP2PeerTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 if process is not None:
                     primary = sys.exception()
-                    terminate_group(process, term_timeout=5)
-                    stderr = process.stderr.read(65536)
-                    if primary is not None and stderr:
-                        primary.add_note("Joined peer stderr: " + stderr)
-                    if primary is None:
-                        self.assertEqual(process.returncode, 0, stderr)
+                    try:
+                        terminate_group(process, term_timeout=5)
+                        stderr = process.stderr.read(65536)
+                        if primary is not None and stderr:
+                            primary.add_note("Joined peer stderr: " + stderr)
+                        if primary is None:
+                            self.assertEqual(process.returncode, 0, stderr)
+                    finally:
+                        process.stdout.close()
+                        process.stderr.close()
 
 
 if __name__ == "__main__":
