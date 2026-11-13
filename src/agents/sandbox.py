@@ -8,6 +8,7 @@ from _agents_codex.sandbox import (
     CallbackSink as CallbackSink,
     ChainedSink as ChainedSink,
     Dir as Dir,
+    DockerGateway as DockerGateway,
     DockerVolumeMountStrategy as DockerVolumeMountStrategy,
     EventPayloadPolicy as EventPayloadPolicy,
     EventSink as EventSink,
@@ -68,6 +69,7 @@ from _agents_codex.sandbox import (
 )
 
 __all__ = [
+    "DockerGateway",
     "Skill",
     "Skills",
     "SkillMetadata",

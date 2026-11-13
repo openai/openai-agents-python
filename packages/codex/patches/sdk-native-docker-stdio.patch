@@ -1,0 +1,156 @@
+diff --git a/codex-rs/exec-server/src/client_api.rs b/codex-rs/exec-server/src/client_api.rs
+index e870f124..654d568b 100644
+--- a/codex-rs/exec-server/src/client_api.rs
++++ b/codex-rs/exec-server/src/client_api.rs
+@@ -85,14 +85,25 @@ pub(crate) struct StdioExecServerConnectArgs {
+ }
+ 
+ /// Structured process command used to start an exec-server over stdio.
+-#[derive(Debug, Clone, PartialEq, Eq)]
+-pub(crate) struct StdioExecServerCommand {
++#[derive(Clone, PartialEq, Eq)]
++pub struct StdioExecServerCommand {
+     pub program: String,
+     pub args: Vec<String>,
+     pub env: HashMap<String, String>,
+     pub cwd: Option<PathBuf>,
+ }
+ 
++impl std::fmt::Debug for StdioExecServerCommand {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("StdioExecServerCommand")
++            .field("program", &"<host-owned>")
++            .field("args", &"<redacted>")
++            .field("env", &"<redacted>")
++            .field("cwd", &"<redacted>")
++            .finish()
++    }
++}
++
+ pub(crate) type DeferredEnvironmentReadiness = watch::Receiver<Option<Result<(), String>>>;
+ 
+ #[derive(Clone)]
+@@ -115,7 +126,6 @@ pub(crate) enum ExecServerTransportParams {
+         provider: Arc<dyn NoiseRendezvousConnectProvider>,
+         identity: NoiseChannelIdentity,
+     },
+-    #[allow(dead_code)]
+     StdioCommand {
+         command: StdioExecServerCommand,
+         initialize_timeout: Duration,
+@@ -185,3 +195,22 @@ pub trait HttpClient: Send + Sync {
+         params: HttpRequestParams,
+     ) -> BoxFuture<'_, Result<(HttpRequestResponse, HttpResponseBodyStream), ExecServerError>>;
+ }
++
++#[cfg(test)]
++mod stdio_command_redaction_tests {
++    use super::StdioExecServerCommand;
++    use std::collections::HashMap;
++    use std::path::PathBuf;
++
++    #[test]
++    fn host_owned_command_debug_keeps_arguments_and_environment_private() {
++        let private = "synthetic-private-stdio-material";
++        let command = StdioExecServerCommand {
++            program: private.to_owned(),
++            args: vec![private.to_owned()],
++            env: HashMap::from([("TOKEN".to_owned(), private.to_owned())]),
++            cwd: Some(PathBuf::from(private)),
++        };
++        assert!(!format!("{command:?}").contains(private));
++    }
++}
+diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
+index ddbe65d6..41f692fb 100644
+--- a/codex-rs/exec-server/src/environment.rs
++++ b/codex-rs/exec-server/src/environment.rs
+@@ -28,6 +28,7 @@ use crate::client::LazyRemoteExecServerClient;
+ use crate::client::http_client::RouteAwareHttpClient;
+ use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT;
+ use crate::client_api::ExecServerTransportParams;
++use crate::client_api::StdioExecServerCommand;
+ use crate::environment_bootstrap::PreparedEnvironmentManager;
+ use crate::environment_bootstrap::PreparedEnvironmentSource;
+ use crate::environment_config::read_environment_config;
+@@ -529,6 +530,31 @@ impl EnvironmentManager {
+         self.insert_environment(environment_id, Arc::new(environment))
+     }
+ 
++    /// Registers a trusted host-owned command through the existing stdio transport.
++    ///
++    /// The host must select this command from current trusted configuration,
++    /// never model input or serialized checkpoints. Remote policies and the
++    /// existing connection owner apply.
++    pub fn upsert_stdio_environment(
++        &self,
++        environment_id: String,
++        command: StdioExecServerCommand,
++        initialize_timeout: Option<std::time::Duration>,
++    ) -> Result<(), ExecServerError> {
++        validate_environment_id(&environment_id)?;
++        let environment = Environment::remote_with_transport(
++            ExecServerTransportParams::StdioCommand {
++                command,
++                initialize_timeout: initialize_timeout
++                    .unwrap_or(crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT),
++            },
++            self.local_runtime_paths.clone(),
++            self.http_client_factory.clone(),
++            ScopedSkillsConfig::default(),
++        );
++        self.insert_environment(environment_id, Arc::new(environment))
++    }
++
+     /// Returns the stable environment for an ID, creating it as pending when absent.
+     pub fn materialize_pending_noise_environment(
+         &self,
+@@ -1761,6 +1787,36 @@ mod tests {
+             .expect("accept connection");
+     }
+ 
++    #[tokio::test]
++    async fn host_stdio_registration_preserves_selection_and_lazy_ownership() {
++        let manager = EnvironmentManager::without_environments(legacy_http_client_factory());
++        let command = StdioExecServerCommand {
++            program: "codex-missing-exec-server-for-test".to_string(),
++            args: Vec::new(),
++            env: HashMap::new(),
++            cwd: None,
++        };
++        assert!(
++            manager
++                .upsert_stdio_environment(String::new(), command.clone(), None)
++                .is_err()
++        );
++        assert!(manager.get_environment("").is_none());
++        manager
++            .upsert_stdio_environment("selected".to_owned(), command, None)
++            .expect("register host-owned command");
++        let environment = manager
++            .get_environment("selected")
++            .expect("registered environment");
++        assert!(environment.is_remote());
++        assert!(manager.default_environment().is_none());
++        assert_eq!(
++            environment.status().await,
++            EnvironmentObservedStatus::Pending
++        );
++        assert!(!environment.startup_finished());
++    }
++
+     #[tokio::test]
+     async fn environment_status_keeps_stdio_environment_pending() {
+         let environment = Environment::remote_with_transport(
+diff --git a/codex-rs/exec-server/src/lib.rs b/codex-rs/exec-server/src/lib.rs
+index 3adf5278..c87d8ee3 100644
+--- a/codex-rs/exec-server/src/lib.rs
++++ b/codex-rs/exec-server/src/lib.rs
+@@ -83,6 +83,7 @@ pub use client_api::NoiseRendezvousConnectArgs;
+ pub use client_api::NoiseRendezvousConnectBundle;
+ pub use client_api::NoiseRendezvousConnectProvider;
+ pub use client_api::RemoteExecServerConnectArgs;
++pub use client_api::StdioExecServerCommand;
+ pub use codex_exec_server_protocol::ExecutorCapabilityDiscoverySnapshot;
+ pub use codex_exec_server_protocol::ProcessId;
+ pub use codex_file_system::CopyOptions;

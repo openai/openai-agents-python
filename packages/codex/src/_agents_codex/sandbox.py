@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
+import shutil
+import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Any, TypeVar, cast
 from urllib.parse import unquote, urlsplit
@@ -104,10 +109,11 @@ from ._managed_workspace import (
     ManagedWorkspaceCheckpoint as ManagedWorkspaceCheckpoint,
     _ManagedWorkspaceSource,
 )
+from ._options import RuntimeEnvironment
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._sandbox_events import Instrumentation as Instrumentation, _OperationObserver
 from .agent import ModelSettings, _copy_model_settings
-from .executor import Environment, _path_uri
+from .executor import Environment, ExecutorToolName, _path_uri
 from .model_context import ModelRequestContext, _ContextTransform
 from .sandbox_memory import (
     _MEMORY_OWNER_ATTRIBUTE,
@@ -334,6 +340,178 @@ def _capability_workspace(
         ) from None
 
 
+def _docker_unix_adapter_type() -> type[Any]:
+    from docker.transport.unixconn import UnixHTTPAdapter  # type: ignore[import-untyped]
+
+    return cast(type[Any], UnixHTTPAdapter)
+
+
+def _current_docker_executable() -> str:
+    cli = shutil.which("docker")
+    if cli is None or not Path(cli).is_absolute():
+        raise ValueError("DockerGateway requires a current absolute Docker executable")
+    executable = Path(cli).resolve(strict=True)
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ValueError("DockerGateway requires a current executable Docker CLI")
+    return str(executable)
+
+
+@dataclass(frozen=True, kw_only=True)
+class _DockerStdioEnvironment(Environment[object]):
+    _argv: tuple[str, ...] = field(repr=False)
+
+    def _validate_remote_url(self) -> None:
+        if not self.url.startswith("docker://") or self.headers:
+            raise ValueError("Docker execution requires its current SDK resource source")
+
+    def _to_native(self) -> RuntimeEnvironment:
+        result = super()._to_native()
+        result["stdio_command"] = {
+            "program": "/usr/bin/env",
+            "args": list(self._argv),
+            "env": {},
+            "cwd": None,
+        }
+        return result
+
+
+@dataclass(frozen=True)
+class DockerGateway:
+    """Attach a fresh SDK-owned Linux Docker resource to the native executor.
+
+    Pass this object as sandbox_environment's connect argument. The current
+    standard Unix-socket Docker client supplies daemon authority. This helper
+    ignores ambient Docker configuration and opens no listener or host mount.
+    The selected image must supply a compatible exec-server at exec_server_path.
+    Its image-configured process user applies; capability_user is metadata only.
+    Borrowed, resumed, snapshot-created, and custom-authenticated clients require
+    an explicit application gateway instead.
+    """
+
+    client: BaseSandboxClient[Any] = field(repr=False)
+    exec_server_path: str = "/usr/local/bin/exec-server"
+    tools: tuple[ExecutorToolName, ...] = ()
+
+    def __post_init__(self) -> None:
+
+        from agents.classic.sandbox.sandboxes.docker import DockerSandboxClient
+
+        if not isinstance(self.client, DockerSandboxClient):
+            raise TypeError("DockerGateway requires the current DockerSandboxClient")
+        api = self.client.docker_client.api
+        adapter = cast(Any, api.get_adapter(api.base_url))
+        if type(adapter) is not _docker_unix_adapter_type():
+            raise ValueError("DockerGateway requires the standard current Unix socket client")
+        if not Path(adapter.socket_path).is_absolute():
+            raise ValueError("DockerGateway requires an absolute current Unix socket")
+        if (
+            not isinstance(self.exec_server_path, str)
+            or not self.exec_server_path.startswith("/")
+            or any(part == ".." for part in self.exec_server_path.split("/"))
+            or any(ord(c) < 32 for c in self.exec_server_path)
+        ):
+            raise ValueError("exec_server_path must be an absolute container executable path")
+        cli = shutil.which("docker")
+        if cli is None or not Path(cli).is_absolute() or not Path("/usr/bin/env").is_file():
+            raise ValueError("DockerGateway requires Docker CLI and /usr/bin/env")
+
+    def _validate_acquisition(self, client: BaseSandboxClient[Any], *, fresh: bool) -> None:
+        if client is not self.client or not fresh:
+            raise ValueError("DockerGateway requires fresh creation by its current SDK client")
+
+    async def _preflight(self) -> tuple[Any, str, str]:
+
+        from agents.classic.sandbox.sandboxes.docker import DockerSandboxClient
+        from agents.classic.sandbox.util.blocking_io import run_blocking_workspace_io
+
+        if not isinstance(self.client, DockerSandboxClient):
+            raise TypeError("DockerGateway requires its current Docker client")
+        api = self.client.docker_client.api
+        adapter = cast(Any, api.get_adapter(api.base_url))
+        if type(adapter) is not _docker_unix_adapter_type() or set(api.headers) - {
+            "User-Agent",
+            "Accept-Encoding",
+            "Accept",
+            "Connection",
+        }:
+            raise ValueError("DockerGateway cannot prove the current daemon authorization scope")
+        info = await run_blocking_workspace_io(api.info)
+        plugins = info.get("Plugins")
+        if (
+            info.get("OSType") != "linux"
+            or not isinstance(plugins, dict)
+            or "Authorization" not in plugins
+            or plugins["Authorization"] not in (None, [])
+        ):
+            raise ValueError("DockerGateway requires a Linux daemon without custom authorization")
+        identity = info.get("ID")
+        if not isinstance(identity, str) or not identity:
+            raise ValueError("DockerGateway requires a current daemon identity")
+        socket = str(adapter.socket_path)
+        stamp = hashlib.sha256((socket + "\0" + identity).encode()).hexdigest()
+        return api, socket, stamp
+
+    @asynccontextmanager
+    async def __call__(self, resource: SandboxSession) -> AsyncIterator[Environment[object]]:
+        from _agents_shared.sandbox_manifest import _borrowed_manifest_owner
+        from agents.classic.sandbox.sandboxes.docker import (
+            DockerSandboxSession,
+            DockerSandboxSessionState,
+        )
+        from agents.classic.sandbox.util.blocking_io import run_blocking_workspace_io
+
+        api, socket, daemon = await self._preflight()
+        inner = _borrowed_manifest_owner(resource)
+        if not isinstance(inner, DockerSandboxSession):
+            raise ValueError("DockerGateway resource does not belong to the current client")
+        container_client = inner._container.client
+        if container_client is None or container_client.api is not api:
+            raise ValueError("DockerGateway resource does not belong to the current client")
+        cid = inner._container.id
+        if not isinstance(cid, str) or re.fullmatch(r"[0-9a-f]{64}", cid) is None:
+            raise ValueError("DockerGateway requires the full current container identity")
+        inspected = await run_blocking_workspace_io(lambda: api.inspect_container(cid))
+        state = resource.state
+        if (
+            not isinstance(state, DockerSandboxSessionState)
+            or inspected.get("Id") != cid
+            or state.container_id != cid
+        ):
+            raise ValueError("DockerGateway current resource identity changed")
+        root = str(resource.state.manifest.root)
+        writes = (
+            root,
+            *(g.path for g in resource.state.manifest.extra_path_grants if not g.read_only),
+        )
+        with tempfile.TemporaryDirectory(prefix="codex-docker-gateway-") as config:
+            await run_blocking_workspace_io(lambda: Path(config, "config.json").write_text("{}"))
+            executable = await run_blocking_workspace_io(_current_docker_executable)
+            argv = (
+                "-i",
+                "PATH=/usr/bin:/bin",
+                "HOME=" + config,
+                "DOCKER_CONFIG=" + config,
+                executable,
+                "--config",
+                config,
+                "--host",
+                "unix://" + socket,
+                "exec",
+                "--interactive",
+                "--workdir=" + root,
+                cid,
+                self.exec_server_path,
+                "stdio",
+            )
+            yield _DockerStdioEnvironment(
+                url="docker://" + daemon + "/" + cid,
+                cwd=root,
+                writable_roots=writes,
+                tools=self.tools,
+                _argv=argv,
+            )
+
+
 @redact_mount_error_data_sync
 def sandbox_environment(
     client: BaseSandboxClient[_OptionsT],
@@ -389,6 +567,15 @@ def sandbox_environment(
     this boundary. SDK-retired in-memory pairs have been retaining provenance;
     deserialization has been requiring this explicit trusted whole-pair grant.
     """
+    if isinstance(connect, DockerGateway):
+        connect._validate_acquisition(
+            client,
+            fresh=session is None
+            and authorized_resume_state is None
+            and snapshot is None
+            and not managed_workspace
+            and authorized_resume_checkpoint is None,
+        )
     try:
         captured_options = deepcopy(
             cast(_OptionsT, BaseSandboxClientOptions.parse(dict(options)))
@@ -486,6 +673,8 @@ def sandbox_environment(
     @asynccontextmanager
     async def source() -> AsyncIterator[Environment[_ContextT]]:
         async with AsyncExitStack() as owners:
+            if isinstance(connect, DockerGateway):
+                await connect._preflight()
             selected = session
             if selected is None:
                 selected = (
@@ -814,6 +1003,7 @@ def _render_workspace_instructions(manifest: Manifest, environment: Environment[
 
 
 __all__ = [
+    "DockerGateway",
     "Instrumentation",
     "EventPayloadPolicy",
     "SandboxSessionEvent",

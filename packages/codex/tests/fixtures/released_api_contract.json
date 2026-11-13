@@ -1459,6 +1459,7 @@
           "_OptionsT = TypeVar('_OptionsT')",
           "_ContextT = TypeVar('_ContextT')",
           "class SandboxCapability:\n    name: str\n    requires: tuple[str, ...] = ()\n\n    def clone(self) -> SandboxCapability:\n        pass\n\n    def prepare_manifest(self, manifest: Manifest) -> Manifest:\n        pass\n\n    async def bind(self, session: SandboxSession, *, user: User | None, workspace: SandboxWorkspaceScope) -> None:\n        pass\n\n    async def instructions(self, manifest: Manifest) -> str | None:\n        pass\n\n    def tools(self) -> Sequence[FunctionTool[Any, Any, Any]]:\n        pass\n\n    def sampling_settings(self, settings: ModelSettings) -> ModelSettings:\n        pass\n\n    async def transform_context(self, request: ModelRequestContext[Any]) -> Sequence[dict[str, Any]] | None:\n        pass",
+          "@dataclass(frozen=True)\nclass DockerGateway:\n    client: BaseSandboxClient[Any] = field(repr=False)\n    exec_server_path: str = '/usr/local/bin/exec-server'\n    tools: tuple[ExecutorToolName, ...] = ()\n\n    @asynccontextmanager\n    async def __call__(self, resource: SandboxSession) -> AsyncIterator[Environment[object]]:\n        pass",
           "@redact_mount_error_data_sync\ndef sandbox_environment(client: BaseSandboxClient[_OptionsT], *, manifest: Manifest, options: _OptionsT | Mapping[str, Any], connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]], skills: Skills | None=None, snapshot: SnapshotSpec | SnapshotBase | None=None, session: SandboxSession | None=None, authorized_resume_state: SandboxSessionState | None=None, concurrency_limits: SandboxConcurrencyLimits | None=None, archive_limits: SandboxArchiveLimits | None=None, managed_workspace: bool=False, authorized_resume_checkpoint: ManagedWorkspaceCheckpoint | None=None, memory: SandboxMemoryOptions | None=None, capabilities: Sequence[SandboxCapability]=(), capability_user: User | None=None) -> SandboxEnvironmentSource[_ContextT]:\n    pass",
           "@redact_mount_error_data_sync\ndef render_storage_layout(manifest: Manifest) -> str:\n    pass"
         ],
@@ -1470,6 +1471,7 @@
           "CallbackSink": "agents.classic.sandbox.session.sinks.CallbackSink",
           "ChainedSink": "agents.classic.sandbox.session.sinks.ChainedSink",
           "Dir": "agents.classic.sandbox.entries.artifacts.Dir",
+          "DockerGateway": "agents.sandbox.DockerGateway",
           "DockerVolumeMountStrategy": "agents.classic.sandbox.entries.mounts.base.DockerVolumeMountStrategy",
           "EventPayloadPolicy": "agents.classic.sandbox.session.events.EventPayloadPolicy",
           "EventSink": "agents.classic.sandbox.session.sinks.EventSink",
@@ -1529,8 +1531,9 @@
           "truncate_with_token_budget": "agents.classic.sandbox.util.token_truncation.truncate_with_token_budget"
         },
         "imports": [
-          "from collections.abc import Callable, Mapping, Sequence",
-          "from contextlib import AbstractAsyncContextManager",
+          "from collections.abc import AsyncIterator, Callable, Mapping, Sequence",
+          "from contextlib import AbstractAsyncContextManager, asynccontextmanager",
+          "from dataclasses import dataclass, field",
           "from typing import Any, TypeVar",
           "from ._function_tools import FunctionTool",
           "from ._managed_workspace import ManagedWorkspaceCheckpoint as ManagedWorkspaceCheckpoint",
@@ -1553,7 +1556,7 @@
           "from .classic.sandbox.session.sinks import CallbackSink as CallbackSink, ChainedSink as ChainedSink, EventSink as EventSink, HttpProxySink as HttpProxySink, JsonlOutboxSink as JsonlOutboxSink, WorkspaceJsonlSink as WorkspaceJsonlSink",
           "from .classic.sandbox.types import User",
           "from .classic.sandbox.workspace_paths import SandboxWorkspaceScope",
-          "from .executor import Environment",
+          "from .executor import Environment, ExecutorToolName",
           "from .model_context import ModelRequestContext",
           "from .sandbox_memory import MemoryLayoutConfig as MemoryLayoutConfig, SandboxMemoryOptions as SandboxMemoryOptions",
           "from .sandbox_skills import LazySkillSource as LazySkillSource, LocalDirLazySkillSource as LocalDirLazySkillSource, SandboxEnvironmentSource as SandboxEnvironmentSource, Skill as Skill, SkillMetadata as SkillMetadata, Skills as Skills"
@@ -1570,6 +1573,7 @@
           "Environment": "agents.executor.Environment",
           "EventPayloadPolicy": "agents.classic.sandbox.session.events.EventPayloadPolicy",
           "EventSink": "agents.classic.sandbox.session.sinks.EventSink",
+          "ExecutorToolName": "agents.executor.ExecutorToolName",
           "FunctionTool": "agents._function_tools.FunctionTool",
           "FuseMountPattern": "agents.classic.sandbox.entries.mounts.FuseMountPattern",
           "GCSMount": "agents.classic.sandbox.entries.mounts.GCSMount",

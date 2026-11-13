@@ -1035,7 +1035,11 @@
     {
       "path": "sdk-native-mcp-failure-policy.patch",
       "sha256": "2b12d391be1d784668b6c8d4b56a6ae3fecbaa073fba2ea3a6add4b35dfd1f3c"
+    },
+    {
+      "path": "sdk-native-docker-stdio.patch",
+      "sha256": "d868ad817e556a671dc3751c0efa0c955801ba7e7d04e1beb512451a33b72106"
     }
   ],
-  "result_tree": "fe52246fd14df07693858e19e2595ab88f183e26"
+  "result_tree": "016b761288dcb69d1ef8b2220c741887d5dfa1bf"
 }
