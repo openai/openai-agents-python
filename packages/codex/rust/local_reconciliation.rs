@@ -1075,6 +1075,7 @@ fn validate_interrupted_effects(
     let mut calls = HashMap::new();
     let mut outputs = HashMap::new();
     let mut terminal_commands = HashSet::new();
+    let mut terminal_processes = Vec::new();
     for row in history {
         match row {
             RolloutItem::TurnContext(turn) => context = turn.turn_id.as_deref().or(context),
@@ -1084,6 +1085,13 @@ fn validate_interrupted_effects(
                     && command.status != codex_protocol::items::CommandExecutionStatus::InProgress
                 {
                     terminal_commands.insert((event.turn_id.as_str(), command.id.as_str()));
+                    if command.source
+                        == codex_protocol::protocol::ExecCommandSource::UnifiedExecStartup
+                        && let Some(process) = command.process_id.as_deref()
+                    {
+                        terminal_processes
+                            .push((process, (event.turn_id.as_str(), command.id.as_str())));
+                    }
                 }
             }
             RolloutItem::ResponseItem(envelope) => {
@@ -1181,10 +1189,25 @@ fn validate_interrupted_effects(
             }), "Native local history has an approved hosted MCP call without a terminal receipt");
         }
         if is_native_command(call) {
+            let terminal_poll = match call {
+                ResponseItem::FunctionCall { name, arguments, .. } if name == "write_stdin" => {
+                    serde_json::from_str::<Value>(arguments).ok()
+                        .and_then(|arguments| arguments.get("session_id").and_then(Value::as_i64))
+                        .and_then(|id| i32::try_from(id).ok())
+                        .is_some_and(|id| terminal_processes.iter().any(|(process, original)| {
+                            *process == id.to_string() && calls.get(original).is_some_and(|original| {
+                                is_native_command(original)
+                                    && matches!(original, ResponseItem::FunctionCall { name, .. } if name == "exec_command")
+                            })
+                        }))
+                }
+                _ => false,
+            };
             // A tool result can acknowledge a still-running command process.
             // Cold recovery cannot establish that process's terminal state.
             ensure!(
                 terminal_commands.contains(key)
+                    || terminal_poll
                     || outputs.get(key).is_some_and(|output| {
                         output.turn_id() == Some(key.0) && tag(output).is_some()
                     })
@@ -1469,6 +1492,61 @@ mod tests {
         assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
         history.push(terminal("effect", "original"));
         assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn cold_interruption_links_stdin_to_its_original_terminal_process() {
+        let row = |value| {
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                serde_json::from_value(value).unwrap(),
+            ))
+        };
+        let terminal = |process, source| {
+            RolloutItem::EventMsg(
+                serde_json::from_value(serde_json::json!({
+                    "type":"item_completed", "thread_id":ThreadId::new(), "turn_id":"turn",
+                    "item":{"type":"CommandExecution", "id":"exec", "process_id":process,
+                        "command":["synthetic"], "cwd":"file:///synthetic", "parsed_cmd":[],
+                        "source":source, "status":"completed", "exit_code":0}
+                }))
+                .unwrap(),
+            )
+        };
+        let mut history = vec![
+            RolloutItem::EventMsg(serde_json::from_value(serde_json::json!({"type":"task_started", "turn_id":"turn", "root_turn_id":"turn"})).unwrap()),
+            row(serde_json::json!({"type":"function_call", "name":"exec_command", "call_id":"exec", "arguments":"{}"})),
+            row(serde_json::json!({"type":"function_call_output", "call_id":"exec", "output":"retained startup result"})),
+            row(serde_json::json!({"type":"function_call", "name":"write_stdin", "call_id":"poll", "arguments":"{\"session_id\":41}"})),
+            row(serde_json::json!({"type":"function_call_output", "call_id":"poll", "output":"retained poll result"})),
+        ];
+        let turns = vec!["turn".to_owned()];
+        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        history.push(terminal("42", "unified_exec_startup"));
+        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        history.pop();
+        history.push(terminal("41", "unified_exec_startup"));
+        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_ok());
+        history.pop();
+        history.push(terminal("41", "unified_exec_interaction"));
+        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        history.pop();
+        history.push(terminal("41", "unified_exec_startup"));
+        history[1] = row(
+            serde_json::json!({"type":"function_call", "namespace":"application", "name":"exec_command", "call_id":"exec", "arguments":"{}"}),
+        );
+        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        history[1] = row(
+            serde_json::json!({"type":"function_call", "name":"exec_command", "call_id":"exec", "arguments":"{}"}),
+        );
+        history[3] = row(
+            serde_json::json!({"type":"function_call", "name":"write_stdin", "call_id":"poll", "arguments":"{\"session_id\":\"41\"}"}),
+        );
+        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        history[3] = row(
+            serde_json::json!({"type":"function_call", "name":"write_stdin", "call_id":"poll", "arguments":"{\"session_id\":41}"}),
+        );
+        history.remove(4);
+        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
     }
 
     #[test]
