@@ -99,6 +99,7 @@ class _Submission:
     model_override: str | None = None
     model_settings_override: dict[str, Any] | None = None
     retry_policy_override: RetryPolicy | None = field(default=None, repr=False)
+    raise_on_unknown_tool: bool = False
     operation_slots: tuple[int, ...] | None = None
     operation_mcp: tuple[_MCP[Any], ...] | None = None
     operation_refs: tuple[ToolRef, ...] | None = None

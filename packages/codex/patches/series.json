@@ -923,7 +923,11 @@
     {
       "path": "sdk-agent-profile-request-transport.patch",
       "sha256": "8ebc06c4e9b3dadbabf9dc68595d141a83602f0a425e1095e909f2ad4869f193"
+    },
+    {
+      "path": "sdk-unknown-direct-tool-policy.patch",
+      "sha256": "708d7a5b452a6c2dcc799c5c64057888b64a302812272b522a2ecf4fad45fa06"
     }
   ],
-  "result_tree": "b34a9d0c51b14cf905feaacc6cb1fb27a6051cd8"
+  "result_tree": "501bb732aba6600d533358aca6002a9b0d2166b8"
 }
