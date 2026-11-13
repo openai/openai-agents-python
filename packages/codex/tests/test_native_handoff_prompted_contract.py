@@ -1,6 +1,7 @@
 """Native handoffs scope prompted output guidance to the active profile."""
 
 import json
+from dataclasses import replace
 
 import pytest
 from pydantic import BaseModel
@@ -23,6 +24,55 @@ class PromptedDestination(BaseModel):
 
 class PromptedSource(BaseModel):
     prompted_source: int
+
+
+async def test_uniform_prompted_guidance_survives_replaced_handoff_input(responses):
+    responses.respond(function_call("transfer_to_target", {}, "prompted-route"))
+    responses.respond(assistant_output('{"prompted_destination":7}'))
+    output = PromptedOutput(PromptedDestination)
+
+    def prepare(value):
+        return replace(
+            value,
+            input=(
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "destination summary"}],
+                },
+            ),
+            previous=(),
+            generated=(),
+        )
+
+    async with (
+        timeout(20),
+        NativeProvider(base_url=responses.url, api_key="synthetic-prompted") as provider,
+    ):
+        target = Agent(name="target", instructions="Target.", output_type=output)
+        source = Agent(
+            instructions="Source.",
+            output_type=output,
+            provider=provider,
+            handoffs=[target],
+            prepare_handoff_input=prepare,
+        )
+        async with source.session() as session:
+            result = await (await session.submit("Source input.")).get_result()
+            assert result.final_output == PromptedDestination(prompted_destination=7)
+
+    request = responses.requests[1]
+    assert "destination summary" in json.dumps(request["input"])
+    assert "Source input." not in json.dumps(request["input"])
+    guidance = [
+        part["text"]
+        for item in request["input"]
+        if item.get("role") == "developer"
+        for part in item.get("content", [])
+        if part.get("text", "").startswith("Return only JSON")
+    ]
+    assert len(guidance) == 1
+    assert "prompted_destination" in guidance[0]
 
 
 @pytest.mark.parametrize("native_source", [False, True])

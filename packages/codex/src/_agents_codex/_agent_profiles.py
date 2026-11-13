@@ -30,6 +30,7 @@ class _AgentProfile:
     handoff_callbacks: Mapping[str, int] = field(default_factory=dict)
     handoff_options: Mapping[str, RealtimeHandoff] = field(default_factory=dict)
     decision_handoffs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    native_provider_id: str | None = None
 
 
 def _handoff_name(agent: Agent[Any, Any]) -> str:
@@ -71,6 +72,7 @@ def _capture_agent_graph(
     )
     indices = {id(root): 0}
     resolved: dict[int, tuple[Callable[[], Agent[Any, Any]], Agent[Any, Any]]] = {}
+    provider_ids: dict[int, str] = {}
     profiles: list[_AgentProfile] = []
     for agent in agents:
         source = opening if agent is root else agent
@@ -107,20 +109,34 @@ def _capture_agent_graph(
             output_guardrails=source.output_guardrails,
         )
         target_provider = declaration.provider
-        if (
-            target_provider is not None
-            and target_provider is not opening.provider
-            and (
-                opening.realtime is not None
-                or opening.provider is None
-                or opening.provider.model_backend is None
-                or target_provider.model_backend is None
+        native_provider_id = None
+        if target_provider is not None and target_provider is not opening.provider:
+            root_provider = opening.provider
+            borrowed = (
+                root_provider is not None
+                and root_provider.model_backend is not None
+                and target_provider.model_backend is not None
             )
-        ):
-            raise ValueError(
-                "Handoff profiles must share the Session provider or use "
-                "captured text model backends"
+            native = (
+                target_provider.auth is None
+                and target_provider.model_backend is None
+                and (
+                    root_provider is None
+                    and target_provider.response_mode == "streaming"
+                    or root_provider is not None
+                    and root_provider.auth is None
+                    and root_provider.model_backend is None
+                    and root_provider.response_mode == target_provider.response_mode
+                )
             )
+            if opening.realtime is not None or not (borrowed or native):
+                raise ValueError(
+                    "Distinct handoff providers require compatible text inference providers"
+                )
+            if native:
+                native_provider_id = provider_ids.setdefault(
+                    id(target_provider), f"sdk_profile_{indices[id(agent)]}"
+                )
         if declaration.programmatic_tool_calling != opening.programmatic_tool_calling:
             raise ValueError("Handoff profiles must share programmatic tool calling mode")
         output = _prepare_spec(declaration.output_type)
@@ -250,6 +266,7 @@ def _capture_agent_graph(
                 MappingProxyType(callbacks),
                 MappingProxyType(options),
                 MappingProxyType(decision_handoffs),
+                native_provider_id,
             )
         )
     return tuple(profiles)

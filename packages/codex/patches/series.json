@@ -1095,7 +1095,11 @@
     {
       "path": "sdk-natural-output-guardrail-admission.patch",
       "sha256": "d233c816b0f0023a1a269f99844b241c0a33b55552295370173b40d6b63832b6"
+    },
+    {
+      "path": "sdk-native-handoff-provider-routing.patch",
+      "sha256": "ec9e78eaa2b222f609257068d3eca280e295903d5c211d04e65a3de3c65e93c2"
     }
   ],
-  "result_tree": "11bf10e2696c7f9af37f51985fda1f045c0c7a15"
+  "result_tree": "7c6f2c75ca76ef6b43655098e7fae22381050159"
 }

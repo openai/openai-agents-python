@@ -1823,6 +1823,7 @@ class _OpeningOwner:
     def __init__(self, environment: EnvironmentSource[Any] | None = None) -> None:
         self.lease: Any = None
         self.profile_leases: dict[int, Any] = {}
+        self.profile_keys: dict[int, str] = {}
         self._environment_reservation: Any = None
         self.api_key: str | None = None
         self.environment = environment
@@ -1933,6 +1934,7 @@ class _OpeningOwner:
         for lease in self.profile_leases.values():
             lease.adopt()
         session._profile_provider_leases, self.profile_leases = self.profile_leases, {}
+        session._profile_provider_keys, self.profile_keys = self.profile_keys, {}
         session._model_api_key = self.api_key
         self.api_key = None
 
@@ -2625,6 +2627,14 @@ def _profile_prompted_output(outputs: Sequence[_PreparedOutput]) -> bool:
     )
 
 
+def _uniform_profile_output_guidance(profiles: Sequence[_AgentProfile]) -> bool:
+    return (
+        bool(profiles)
+        and profiles[0].declaration.realtime is None
+        and any(profile.declaration.prepare_handoff_input is not None for profile in profiles)
+    )
+
+
 def _prompted_output_guidance(output: _PreparedOutput) -> str:
     return (
         "Return only JSON that matches this output schema: "
@@ -2648,6 +2658,9 @@ def _capture_profile_runtimes(
     outputs = tuple(_prepare_spec(profile.declaration.output_type) for profile in profiles)
     distinct_wire_outputs = _distinct_profile_wire_outputs(outputs)
     profile_prompted_output = _profile_prompted_output(outputs)
+    uniform_output_guidance = not profile_prompted_output and _uniform_profile_output_guidance(
+        profiles
+    )
     captured: dict[str, _ProfileRuntime] = {}
     roster: list[dict[str, Any]] = []
     for index, profile in enumerate(profiles):
@@ -2701,6 +2714,11 @@ def _capture_profile_runtimes(
         roster.append(
             {
                 "id": profile.id,
+                **(
+                    {"native_provider_id": profile.native_provider_id}
+                    if profile.native_provider_id is not None
+                    else {}
+                ),
                 "model": {
                     "model": declaration.model or "",
                     "reasoning_effort": settings.get("effort"),
@@ -2767,6 +2785,8 @@ def _capture_profile_runtimes(
                 **(
                     {"wire_output_guidance": _prompted_output_guidance(output)}
                     if profile_prompted_output and output.mode == "prompted"
+                    else {"runtime_output_guidance": _prompted_output_guidance(output)}
+                    if uniform_output_guidance and output.mode == "prompted"
                     else {}
                 ),
                 # Fingerprinting uses admitted MCP identities, not credentials.
@@ -4099,6 +4119,10 @@ class Session(Generic[ContextT, OutputT]):
             profiles = (
                 _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
             )
+            if provider_history is not None and any(
+                profile.native_provider_id is not None for profile in profiles
+            ):
+                raise CapabilityError("Distinct handoff providers require SDK-managed history")
             hold_assistant_completion = bool(
                 output_guardrails
                 or agent.output_guardrails
@@ -4549,6 +4573,7 @@ class Session(Generic[ContextT, OutputT]):
             try:
                 native, transport, provider_lease = provider._acquire_lease()
                 opening.lease = provider_lease
+                profile_provider_keys: dict[str, str] = {}
                 for profile in profiles:
                     target = profile.declaration.provider
                     if (
@@ -4558,6 +4583,16 @@ class Session(Generic[ContextT, OutputT]):
                     ):
                         _, _, target_lease = target._acquire_lease()
                         opening.profile_leases[id(target)] = target_lease
+                    route = profile.native_provider_id
+                    if route is not None and route not in profile_provider_keys:
+                        assert target is not None
+                        key = target.api_key
+                        if key is None:
+                            key = native._read_openai_api_key_from_env()
+                        if not key or not key.strip():
+                            raise ValueError("A distinct handoff provider requires an API key")
+                        profile_provider_keys[route] = key.strip()
+                        opening.profile_keys[id(target)] = profile_provider_keys[route]
                 engine = None
                 thread = None
                 provider_config = await _opening_provider_config(
@@ -4570,6 +4605,24 @@ class Session(Generic[ContextT, OutputT]):
                     and web_search.route == "standalone",
                     provider_history=provider_history,
                 )
+                for profile in profiles:
+                    route = profile.native_provider_id
+                    if route is None or f"model_providers.{route}" in provider_config:
+                        continue
+                    target = profile.declaration.provider
+                    assert target is not None
+                    target_config = await _opening_provider_config(
+                        target,
+                        opening,
+                        captured_api_key=None,
+                        captured_siwc_provider=None,
+                        saved_plan_provider=None,
+                        standalone_web_search=web_search is not None
+                        and web_search.route == "standalone",
+                    )
+                    provider_config[f"model_providers.{route}"] = target_config[
+                        "model_providers.native_agent"
+                    ]
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
 
@@ -4671,6 +4724,11 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
                     "_hosted_tools": hosted_tools,
+                    **(
+                        {"_sdk_profile_provider_keys": profile_provider_keys}
+                        if profile_provider_keys
+                        else {}
+                    ),
                     **(
                         {"_provider_history": provider_history}
                         if provider_history is not None
@@ -5452,6 +5510,7 @@ class Session(Generic[ContextT, OutputT]):
         self._trace_context: str | None = None
         self._provider_lease: Any = None
         self._profile_provider_leases: dict[int, Any] = {}
+        self._profile_provider_keys: dict[int, str] = {}
         self._storage: LocalStorage | CustomStorage | None = None
         self._history_ttl_seconds: int | None = None
         self._environment_lease: _EnvironmentLease | None = None
@@ -6389,8 +6448,10 @@ class Session(Generic[ContextT, OutputT]):
         }
 
     def _uses_profile_output_guidance(self) -> bool:
-        return _profile_prompted_output(
-            tuple(profile.output for profile in self._profiles.values())
+        profiles = tuple(self._profiles.values())
+        return _profile_prompted_output(tuple(profile.output for profile in profiles)) or (
+            any(profile.output.mode == "prompted" for profile in profiles)
+            and _uniform_profile_output_guidance(tuple(profile.profile for profile in profiles))
         )
 
     def _effective_handoffs(self) -> Mapping[str, str] | None:
@@ -12483,7 +12544,7 @@ class Session(Generic[ContextT, OutputT]):
         repair = await Session[ContextT, str]._open(
             declaration,
             context=self._context,
-            _captured_api_key=self._model_api_key,
+            _captured_api_key=self._profile_provider_keys.get(id(provider), self._model_api_key),
             _captured_siwc_provider=captured_siwc_provider,
             _expected_codex_login_binding=self._codex_login_binding,
             parent_trace=state.parent_trace,
@@ -14293,6 +14354,12 @@ class Session(Generic[ContextT, OutputT]):
                     if factory is None:
                         return None
                     matches_provider = factory._matches_provider
+                    config = json.loads(self._native_options or "{}").get("config", {})
+                    api_key = self._model_api_key
+                    runtime = self._profiles.get(message.get("profile_id", ""))
+                    if runtime is not None and runtime.profile.native_provider_id is not None:
+                        api_key = self._profile_provider_keys[id(declaration.provider)]
+                        config["model_provider"] = runtime.profile.native_provider_id
                     return await _run_responses_compaction(
                         factory,
                         request,
@@ -14306,10 +14373,7 @@ class Session(Generic[ContextT, OutputT]):
                         invoke=lambda callback, value: self._call_decision_callback(
                             state, message, callback, active, value
                         ),
-                        matches_provider=lambda: matches_provider(
-                            self._model_api_key,
-                            json.loads(self._native_options or "{}").get("config", {}),
-                        ),
+                        matches_provider=lambda: matches_provider(api_key, config),
                         observe=observe,
                     )
                 except Exception:
@@ -18777,6 +18841,7 @@ class Session(Generic[ContextT, OutputT]):
         for provider_id, lease in tuple(self._profile_provider_leases.items()):
             lease.release()
             del self._profile_provider_leases[provider_id]
+        self._profile_provider_keys.clear()
         if self._provider_lease is not None:
             self._provider_lease.release()
             self._provider_lease = None

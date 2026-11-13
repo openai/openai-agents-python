@@ -74,6 +74,8 @@ pub struct ThreadOptions {
     pub(crate) application_instructions: Option<String>,
     #[serde(rename = "_agent_profiles")]
     pub(crate) agent_profiles: Option<crate::agent_profiles::OpeningProfiles>,
+    #[serde(rename = "_sdk_profile_provider_keys")]
+    profile_provider_keys: std::collections::BTreeMap<String, String>,
     #[serde(rename = "_sdk_request_transport")]
     sdk_request_transport:
         Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
@@ -303,6 +305,11 @@ impl ThreadOptions {
         }
         configuration.sdk_provider_history = self.provider_history;
         let mut options = StartThreadOptions::new(configuration);
+        if !self.profile_provider_keys.is_empty() {
+            options.thread_extension_init.insert(
+                crate::agent_profiles::PendingProviderKeys(self.profile_provider_keys),
+            );
+        }
         if self.hold_assistant_completion {
             anyhow::ensure!(
                 options.config.sdk_provider_history.is_none(),

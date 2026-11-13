@@ -41,6 +41,8 @@ pub(crate) struct OpeningProfiles {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProfileSpec {
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_provider_id: Option<String>,
     model: AgentProfileModelSettings,
     instructions: String,
     tools: ToolDeclarations,
@@ -79,6 +81,10 @@ pub(crate) struct ProfileSpec {
     wire_output_plain: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     wire_output_guidance: Option<String>,
+    // The current SDK derives uniform guidance from the fingerprinted output schema.
+    // This field carries it at runtime without changing existing checkpoint identity.
+    #[serde(default, skip_serializing)]
+    runtime_output_guidance: Option<String>,
     #[serde(default)]
     mcp_servers: BTreeMap<String, Value>,
     #[serde(default)]
@@ -96,6 +102,12 @@ pub(crate) struct ProfileSpec {
 struct DecisionHandoffSpec {
     slot: usize,
     targets: Vec<String>,
+}
+
+impl ProfileSpec {
+    fn output_guidance(&self) -> Option<&String> {
+        self.wire_output_guidance.as_ref().or(self.runtime_output_guidance.as_ref())
+    }
 }
 
 /// Selection authority exists only for one admitted callback executor.
@@ -344,8 +356,7 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
         );
         ensure!(
             profile
-                .wire_output_guidance
-                .as_ref()
+                .output_guidance()
                 .is_none_or(|guidance| {
                     !guidance.is_empty() && profile.wire_output_schema.is_none()
                 }),
@@ -773,6 +784,63 @@ struct VoiceGraphAdmission {
     previous: Option<Arc<AgentProfiles>>,
 }
 
+pub(crate) struct PendingProviderKeys(pub BTreeMap<String, String>);
+
+pub(crate) struct ProfileProviders(BTreeMap<String, codex_core::SdkAgentProfileProvider>);
+
+pub(crate) async fn bind_profile_providers(startup: &mut StartThreadOptions) -> Result<()> {
+    let Some(keys) = startup.thread_extension_init.remove::<PendingProviderKeys>() else {
+        return Ok(());
+    };
+    let mut providers = BTreeMap::new();
+    for (id, key) in &keys.0 {
+        ensure!(
+            id.strip_prefix("sdk_profile_")
+                .is_some_and(|index| {
+                    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+                }),
+            "Invalid captured Agent provider route"
+        );
+        let info = startup
+            .config
+            .model_providers
+            .get(id)
+            .context("Captured Agent provider route is unavailable")?;
+        let auth_manager = crate::auth::manager(&startup.config, Some(key.clone()), false).await?;
+        providers.insert(
+            id.clone(),
+            codex_core::SdkAgentProfileProvider {
+                id: Arc::from(id.as_str()),
+                info: info.clone(),
+                auth_manager,
+            },
+        );
+    }
+    startup
+        .thread_extension_init
+        .insert(Arc::new(ProfileProviders(providers)));
+    Ok(())
+}
+
+fn insert_profile_provider(
+    thread: &CodexThread,
+    descriptor: &ProfileSpec,
+    data: &mut ExtensionDataInit,
+) -> Result<()> {
+    if let Some(id) = &descriptor.native_provider_id {
+        let providers = thread
+            .thread_extension_data()
+            .get::<Arc<ProfileProviders>>()
+            .context("Captured Agent providers are unavailable")?;
+        let provider = providers
+            .0
+            .get(id)
+            .context("Captured Agent provider route is unavailable")?;
+        data.insert(provider.clone());
+    }
+    Ok(())
+}
+
 fn set_profiles(thread: &CodexThread, profiles: Option<Arc<AgentProfiles>>) {
     match profiles {
         Some(profiles) => {
@@ -1079,10 +1147,11 @@ impl AgentProfiles {
             .get_or_insert_with(Default::default)
             .sdk_agent_graph = Some(self.opening.fingerprint.clone());
         let mut data = ExtensionDataInit::new();
+        insert_profile_provider(thread, &prepared.declaration, &mut data)?;
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
         });
-        if let Some(guidance) = &prepared.declaration.wire_output_guidance {
+        if let Some(guidance) = prepared.declaration.output_guidance() {
             data.insert(codex_extension_api::AgentProfileOutputGuidance(
                 guidance.clone(),
             ));
@@ -1341,10 +1410,11 @@ pub(crate) async fn configure(
         catalog.handoff_defaults = handoff_defaults(&prepared.declaration, default_handoffs)?;
         let generation = catalog.generation.id;
         let mut data = ExtensionDataInit::new();
+        insert_profile_provider(thread, &prepared.declaration, &mut data)?;
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
         });
-        if let Some(guidance) = &prepared.declaration.wire_output_guidance {
+        if let Some(guidance) = prepared.declaration.output_guidance() {
             data.insert(codex_extension_api::AgentProfileOutputGuidance(
                 guidance.clone(),
             ));
