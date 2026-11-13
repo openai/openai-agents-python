@@ -18,6 +18,7 @@ pub(super) enum Response {
     Stream {
         events: mpsc::Receiver<ResponseEvent>,
         finish: oneshot::Receiver<StreamResult>,
+        upstream_request_id: Option<String>,
     },
 }
 pub(super) enum Delivery {
@@ -107,13 +108,14 @@ struct StreamCursor {
     callback: Arc<CallbackRelease>,
     cancellation: Option<tokio_util::sync::CancellationToken>,
     _pending: PendingPreparation,
+    upstream_request_id: Option<String>,
 }
 impl StreamCursor {
     async fn next(&mut self) -> std::result::Result<Option<ResponseEvent>, ApiError> {
         let failure = || ApiError::InvalidRequest {
             message: FAILURE.into(),
         };
-        let event = if let Some(event) = self.accepted.next() {
+        let mut event = if let Some(event) = self.accepted.next() {
             event
         } else if self.finish.is_some() {
             let cancelled = async {
@@ -161,6 +163,11 @@ impl StreamCursor {
                 .retire_preparation(self._pending.id, false);
             self.callback.wait().await;
             return Err(failure());
+        }
+        if let (Some(request_id), ResponseEvent::ResponseObserved(observation)) =
+            (&self.upstream_request_id, &mut event)
+        {
+            observation.upstream_request_id = Some(request_id.clone());
         }
         Ok(Some(event))
     }
@@ -219,6 +226,7 @@ impl PythonTools {
         id: u64,
         observe_raw: bool,
         chat_stream: bool,
+        upstream_request_id: Option<String>,
     ) -> bool {
         let mut replies = self
             .preparation_replies
@@ -257,6 +265,7 @@ impl PythonTools {
             .send(Ok(Response::Stream {
                 events: receive_events,
                 finish: receive_finish,
+                upstream_request_id,
             }))
             .is_ok()
     }
@@ -676,7 +685,11 @@ impl ModelResponseInterceptor for Producer {
                     }
                     Ok(futures_util::stream::iter(events).boxed())
                 }
-                Response::Stream { events, finish } => {
+                Response::Stream {
+                    events,
+                    finish,
+                    upstream_request_id,
+                } => {
                     let cursor = StreamCursor {
                         events,
                         finish: Some(finish),
@@ -686,6 +699,7 @@ impl ModelResponseInterceptor for Producer {
                         callback,
                         cancellation,
                         _pending: pending,
+                        upstream_request_id,
                     };
                     Ok(
                         futures_util::stream::try_unfold(cursor, |mut cursor| async move {

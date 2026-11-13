@@ -18,6 +18,7 @@ class _ModelFailure:
     request: ModelRequest = field(repr=False)
     backend: Any = field(repr=False)
     error: BaseException = field(repr=False)
+    stream: bool | None = None
 
     def selected_error(self, attempt_id: str | None) -> BaseException | None:
         if attempt_id is None:
@@ -138,6 +139,10 @@ async def _resolve_retry(
         values["error"] = failure.selected_error(original_id) if failure is not None else None
         values["normalized"] = NormalizedError(**values["normalized"])
         values["provider_advice"] = RetryAdvice(**values["provider_advice"])
+        if values["transport"] == "model_producer":
+            values["stream"] = failure.stream if failure is not None else None
+        elif values["transport"] in {"responses_json", "responses_sse", "responses_ws"}:
+            values["stream"] = values["transport"] != "responses_json"
         raw_usage = values["usage"]
         if raw_usage is not None:
             values["usage"] = TokenUsage(
@@ -159,6 +164,7 @@ async def _resolve_retry(
                         context.attempt_id,
                         context.attempt,
                         context.request_attempt,
+                        stream=context.stream,
                     ),
                 )
                 if advice is not None and not isinstance(advice, RetryAdvice):

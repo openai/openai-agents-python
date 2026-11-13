@@ -4016,6 +4016,18 @@ impl PythonTools {
                     && (matches!(entry.spec, ToolSpec::ApplicationShell { .. }) == shell)
             })
             .context("Pending manual declaration is absent")?;
+        if matches!(
+            item,
+            ResponseItem::FunctionCall { .. } | ResponseItem::CustomToolCall { .. }
+        ) {
+            ensure!(
+                generation
+                    .specs
+                    .caller_limits(slot)
+                    .is_none_or(|limits| { limits.contains(codex_tools::ToolExposures::DIRECT) }),
+                "Pending manual tool no longer allows direct model calls"
+            );
+        }
         self.enqueue_profile(
             owner,
             &generation,
@@ -4783,17 +4795,16 @@ impl FreshTerminalReceipts {
         Ok(())
     }
     fn adopt(&self, tools: &PythonTools, step: &StepCatalog) -> Result<()> {
+        let mut pending = self.calls.lock().expect("fresh terminal receipts poisoned");
+        if pending.is_none() {
+            return Ok(());
+        }
         self.check(tools)?;
         ensure!(
             Arc::ptr_eq(&self.generation, &step.generation),
             "Recovered terminal step generation changed"
         );
-        if let Some(calls) = self
-            .calls
-            .lock()
-            .expect("fresh terminal receipts poisoned")
-            .take()
-        {
+        if let Some(calls) = pending.take() {
             step.accepted
                 .lock()
                 .expect("terminal receipts poisoned")
@@ -5197,6 +5208,43 @@ impl TurnLifecycleContributor for PythonContributor {
             let Some(tools) = input.thread_store.get::<PythonTools>() else {
                 return Ok(None);
             };
+            if input.recovered {
+                let Some(step) = input.step_store.get::<StepCatalog>() else {
+                    return Ok(None);
+                };
+                let Some(fresh) = input.turn_store.get::<FreshTerminalReceipts>() else {
+                    return Ok(None);
+                };
+                fresh
+                    .adopt(&tools, &step)
+                    .map_err(|error| error.to_string())?;
+                if !tools.admits_generation(&step.generation) {
+                    return Ok(None);
+                }
+                let accepted = step.accepted.lock().expect("Terminal receipts poisoned");
+                let all_fresh =
+                    input.results.iter().all(|result| {
+                        let Some((call_id, name, namespace)) = terminal_tool_call(result.call)
+                        else {
+                            return false;
+                        };
+                        let name = ToolName::new(namespace.map(str::to_owned), name.to_owned())
+                            .with_default_namespace();
+                        accepted.keys().any(|key| {
+                            key.call == call_id
+                                && key.turn == input.turn_id
+                                && key.reply.thread == input.thread_store.level_id()
+                                && key.reply.instance == tools.instance
+                                && key.reply.generation == step.generation.id
+                                && step.generation.entries.get(key.reply.slot).is_some_and(
+                                    |entry| entry.name.clone().with_default_namespace() == name,
+                                )
+                        })
+                    });
+                if !all_fresh {
+                    return Ok(None);
+                }
+            }
             let source = tools
                 .source_metadata(Some(input.step_store))
                 .map_err(|error| error.to_string())?;

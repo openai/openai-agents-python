@@ -949,9 +949,17 @@
       "sha256": "331ceb875035ae10cdd6c23ab34c43642b4978da51137ad1c0998cb28b024ab0"
     },
     {
+      "path": "sdk-recovered-batch-origin.patch",
+      "sha256": "911df52c6cc95e43771daa4cf958786dfacb918ad72cc5c91594f01806d935c9"
+    },
+    {
+      "path": "sdk-recovered-batch-origin-tests.patch",
+      "sha256": "51798c6b4c28ece8c868be4994f2401a99f0aae2e9c9f83fc96cdd4a42741bbe"
+    },
+    {
       "path": "sdk-mcp-tool-name-overrides.patch",
       "sha256": "45bf8a7b350479d551b41fc06a4ee38bd81c9faee0497d004fe99e2a1bdcebe3"
     }
   ],
-  "result_tree": "2e663cd5a94e2eab55160ae9d4dc313eb6f3b775"
+  "result_tree": "d37ac561aaa17b55fd0cdd7967e96a12916f1996"
 }
