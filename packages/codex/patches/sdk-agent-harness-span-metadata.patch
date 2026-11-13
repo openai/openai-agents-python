@@ -1,0 +1,103 @@
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -99,10 +99,18 @@
+     }
+ }
+ 
++pub(crate) const AGENT_HARNESS_METADATA_KEY: &str = "agent_harness_id";
++
++pub(crate) struct AgentHarnessMetadata {
++    pub(crate) raw_value: Box<serde_json::value::RawValue>,
++    pub(crate) attribute: KeyValue,
++}
++
+ #[derive(Default)]
+ pub(crate) struct RootDescriptor {
+     pub snapshot: OnceLock<(Value, usize)>,
+     pub metadata: OnceLock<String>,
++    pub agent_harness_metadata: OnceLock<AgentHarnessMetadata>,
+     pub ended: AtomicBool,
+ }
+ impl std::fmt::Debug for RootDescriptor {
+@@ -643,6 +651,18 @@
+             .root_descriptor
+             .metadata
+             .set(metadata_json.to_owned());
++        if let Some(value) = metadata.get(AGENT_HARNESS_METADATA_KEY) {
++            let _ = policy
++                .root_descriptor
++                .agent_harness_metadata
++                .set(AgentHarnessMetadata {
++                    raw_value: (*value).to_owned(),
++                    attribute: KeyValue::new(
++                        format!("sdk.metadata.{AGENT_HARNESS_METADATA_KEY}"),
++                        metadata_attribute_value(value)?,
++                    ),
++                });
++        }
+     }
+     let mut attributes = Vec::new();
+     attributes.push(KeyValue::new("sdk.span.kind", options.kind));
+diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
+--- a/codex-rs/otel/src/sdk_trace_routes.rs
++++ b/codex-rs/otel/src/sdk_trace_routes.rs
+@@ -298,9 +298,19 @@
+     span: &SpanData,
+     policy: Option<&crate::sdk_trace::ScopePolicy>,
+ ) -> Option<Vec<opentelemetry::KeyValue>> {
+-    if span.instrumentation_scope.name() != "codex_agents_sdk" { return None; }
+-    let metadata = policy?.annotations.as_deref()?;
+-    crate::sdk_trace::metadata_attributes(metadata.encoded()).ok()
++    let policy = policy?;
++    let annotations = (span.instrumentation_scope.name() == "codex_agents_sdk")
++        .then_some(policy.annotations.as_deref())
++        .flatten();
++    let mut metadata = annotations
++        .and_then(|value| crate::sdk_trace::metadata_attributes(value.encoded()).ok())
++        .unwrap_or_default();
++    if let Some(harness) = policy.root_descriptor.agent_harness_metadata.get()
++        && !metadata.iter().any(|value| value.key == harness.attribute.key)
++    {
++        metadata.push(harness.attribute.clone());
++    }
++    (!metadata.is_empty()).then_some(metadata)
+ }
+ 
+ fn export_sdk_metadata(mut span: SpanData, policy: Option<&crate::sdk_trace::ScopePolicy>) -> SpanData {
+@@ -348,12 +358,29 @@
+     // A data-only receipt preserves which fields came from SDK annotations,
+     // independently of configured attributes sharing that prefix. It carries
+     // no scope IDs, credential leases, or callback capability.
+-    let annotations = policy.and_then(|policy| policy.annotations.as_deref())
+-        .and_then(|annotations| serde_json::from_str::<BTreeMap<String, &serde_json::value::RawValue>>(annotations.encoded()).ok())
+-        .and_then(|mut values| {
+-            values.retain(|key, _| projected.contains_key(&format!("sdk.metadata.{key}")));
+-            (!values.is_empty()).then(|| serde_json::to_string(&values).ok().map(Value::String)).flatten()
+-        });
++    let annotations = policy.and_then(|policy| {
++        let annotations = (span.instrumentation_scope.name() == "codex_agents_sdk")
++            .then_some(policy.annotations.as_deref())
++            .flatten();
++        let mut values = annotations
++            .and_then(|value| {
++                serde_json::from_str::<BTreeMap<String, &serde_json::value::RawValue>>(
++                    value.encoded(),
++                )
++                .ok()
++            })
++            .unwrap_or_default();
++        if let Some(harness) = policy.root_descriptor.agent_harness_metadata.get() {
++            values
++                .entry(crate::sdk_trace::AGENT_HARNESS_METADATA_KEY.to_owned())
++                .or_insert(harness.raw_value.as_ref());
++        }
++        values.retain(|key, _| projected.contains_key(&format!("sdk.metadata.{key}")));
++        if values.is_empty() {
++            return None;
++        }
++        serde_json::to_string(&values).ok().map(Value::String)
++    });
+     let projection_bytes = if projected.is_empty() {
+         0
+     } else {

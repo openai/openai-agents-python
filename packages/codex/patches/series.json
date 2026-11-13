@@ -927,7 +927,11 @@
     {
       "path": "sdk-unknown-direct-tool-policy.patch",
       "sha256": "708d7a5b452a6c2dcc799c5c64057888b64a302812272b522a2ecf4fad45fa06"
+    },
+    {
+      "path": "sdk-agent-harness-span-metadata.patch",
+      "sha256": "edac1f3bc0818c8454af005f8393dc583a5e579c625dab7f93489067ffaec9d7"
     }
   ],
-  "result_tree": "501bb732aba6600d533358aca6002a9b0d2166b8"
+  "result_tree": "ccf4295bbfa1a1f4c65426a53b8c45a886a48d82"
 }

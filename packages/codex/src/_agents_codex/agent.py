@@ -387,6 +387,8 @@ class NativeProvider:
     For API-key authentication, an omitted key uses ``OPENAI_API_KEY`` when
     the Session opens. Credentials and connection URLs are excluded from the
     descriptor's representation.
+    Set ``agent_harness_id`` to route new agent traces to a specific harness.
+    The provider captures the process or environment default at construction.
     With ``supports_websockets=None``, the SDK permits WebSockets only when
     ``base_url=None``; an explicit ``base_url`` defaults to HTTP. Set ``True``
     to permit WebSockets for a compatible custom provider, or ``False`` to use
@@ -474,8 +476,16 @@ class NativeProvider:
     stream_idle_timeout_ms: int | None = field(default=None, repr=False)
     websocket_connect_timeout_ms: int | None = field(default=None, repr=False)
     websocket_base_url: str | None = field(default=None, repr=False)
+    agent_harness_id: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        from .telemetry import _normalize_agent_harness_id, get_default_agent_harness_id
+
+        object.__setattr__(
+            self,
+            "agent_harness_id",
+            _normalize_agent_harness_id(self.agent_harness_id) or get_default_agent_harness_id(),
+        )
         for name in (
             "request_max_retries",
             "stream_max_retries",
@@ -1741,11 +1751,18 @@ class Agent(Generic[ContextT, OutputT]):
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
         from .session import Completed, Session
-        from .telemetry import _capture
+        from .telemetry import _capture, get_default_agent_harness_id
 
         try:
             parent_trace = _trace_context(parent_trace)
-            captured = _capture(trace_options)
+            harness_id = None
+            if parent_trace is None:
+                selected_provider = provider if provider is not None else self.provider
+                provider_harness_id = (
+                    selected_provider.agent_harness_id if selected_provider is not None else None
+                )
+                harness_id = provider_harness_id or get_default_agent_harness_id()
+            captured = _capture(trace_options, agent_harness_id=harness_id)
         finally:
             del trace_options
         trace_error: BaseException | None = None
