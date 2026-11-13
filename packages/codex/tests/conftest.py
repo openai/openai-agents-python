@@ -1,6 +1,7 @@
 """Shared native fixtures with explicit execution-environment ownership."""
 
 import asyncio
+import hashlib
 import os
 import sys
 from collections.abc import Mapping, MutableMapping
@@ -147,7 +148,37 @@ def _running_in_nested_codex_macos_sandbox(
     return platform == "darwin" and environment.get(_CODEX_SANDBOX_ENVIRONMENT_VARIABLE) == "1"
 
 
-def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+def _shard_collection(config: pytest.Config, items: list[pytest.Item]) -> None:
+    index = os.environ.get("SDK_TEST_SHARD_INDEX")
+    count = os.environ.get("SDK_TEST_SHARD_COUNT")
+    if index is None and count is None:
+        return
+    try:
+        if index is None or count is None or not index.isascii() or not count.isascii():
+            raise ValueError
+        if not index.isdecimal() or not count.isdecimal():
+            raise ValueError
+        shard, total = int(index), int(count)
+        if not 0 <= shard < total:
+            raise ValueError
+    except ValueError:
+        raise pytest.UsageError("Set valid SDK_TEST_SHARD_INDEX and SDK_TEST_SHARD_COUNT") from None
+    # Nested pytest invocations belong to their enclosing test, not another CI shard.
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return
+    selected, deselected = [], []
+    for item in items:
+        # The existing serial runner still executes the complete serial phase.
+        keep = item.get_closest_marker("serial") is not None or (
+            int(hashlib.sha256(item.nodeid.encode()).hexdigest(), 16) % total == shard
+        )
+        (selected if keep else deselected).append(item)
+    items[:] = selected
+    config.hook.pytest_deselected(items=deselected)
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    _shard_collection(config, items)
     if _running_in_nested_codex_macos_sandbox(platform=sys.platform, environment=os.environ):
         skip_native_macos_sandbox = pytest.mark.skip(
             reason="requires a native macOS sandbox and cannot run inside the Codex outer sandbox"

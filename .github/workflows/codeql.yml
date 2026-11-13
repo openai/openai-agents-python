@@ -2,7 +2,7 @@ name: CodeQL
 
 on:
   push:
-    branches: [main, feat/codex-harness]
+    branches: [main, feat/codex-harness, ci/hillclimb/python-warm-historical-11]
   pull_request:
     branches: [main, feat/codex-harness]
   merge_group:
