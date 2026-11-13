@@ -124,7 +124,7 @@ async def native_body_primary():
         try:
             with scope:
                 scope.set_outcome(
-                    status="ok", data={"private": "synthetic-private-outcome" + "x" * (32 * 1024)}
+                    status="ok", data={"private": "synthetic-private-outcome" + "x" * (64 * 1024)}
                 )
                 raise primary
         except BaseException as error:
