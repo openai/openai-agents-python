@@ -81,6 +81,54 @@ def _condition(expression: str, values: dict[str, str]) -> bool:
     )
 
 
+@pytest.mark.parametrize(
+    ("event", "ref", "base", "stack", "head_repo", "snapshot", "dependencies", "runner"),
+    [
+        ("push", "feat/codex-harness", "", "", "", "", "", "macos-26-xlarge"),
+        ("push", "feat/codex-harness", "", "", "", "", "123", "macos-26-xlarge"),
+        ("push", "main", "", "", "", "", "", "macos-15-xlarge"),
+        ("pull_request", "", "feat/codex-harness", "", "same", "", "", "macos-26-xlarge"),
+        ("pull_request", "", "feat/stack", "feat/codex-harness", "same", "", "", "macos-26-xlarge"),
+        ("pull_request", "", "feat/codex-harness", "", "fork", "", "", "macos-15-xlarge"),
+        ("pull_request", "", "main", "", "same", "", "", "macos-15-xlarge"),
+        ("pull_request", "", "feat/codex-harness", "", "same", "123", "", "macos-15"),
+        ("pull_request", "", "feat/codex-harness", "", "same", "", "123", "macos-15-xlarge"),
+        ("merge_group", "", "feat/codex-harness", "", "", "", "", "macos-15-xlarge"),
+        ("workflow_dispatch", "feat/codex-harness", "", "", "", "", "", "macos-15-xlarge"),
+    ],
+)
+def test_macos_producer_uses_the_new_runner_only_for_harness_builds(
+    event: str,
+    ref: str,
+    base: str,
+    stack: str,
+    head_repo: str,
+    snapshot: str,
+    dependencies: str,
+    runner: str,
+) -> None:
+    repository = "openai/openai-agents-python"
+    values = {
+        "github.repository": repository,
+        "github.event_name": event,
+        "github.ref": f"refs/heads/{ref}",
+        "github.base_ref": base,
+        "github.event.pull_request.stack.base.ref": stack,
+        "github.event.pull_request.head.repo.full_name": repository
+        if head_repo == "same"
+        else head_repo,
+        "inputs.runner": "macos-latest",
+        "inputs.native_source_run": snapshot,
+        "inputs.native_dependency_run": dependencies,
+    }
+    native = yaml.load(
+        (ROOT / ".github/workflows/codex-python.yml").read_text(), Loader=yaml.BaseLoader
+    )["jobs"]["build"]
+    expression = native["runs-on"].removeprefix("${{ fromJSON(").removesuffix(") }}").strip()
+    expression = expression.replace("toJSON(inputs.runner)", repr(json.dumps("macos-latest")))
+    assert _condition("(" + expression + ") == " + repr(json.dumps(runner)), values)
+
+
 def test_native_provenance_command_ignores_checkout_imports(tmp_path: Path) -> None:
     step = next(step for step in _steps() if step.get("id") == "producer-identity")
     (tmp_path / "dist").mkdir()
@@ -531,6 +579,7 @@ def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
         "github.event.pull_request.stack.base.ref": "",
         "inputs.runner": "ubuntu-24.04-arm",
         "inputs.native_source_run": snapshot,
+        "inputs.native_dependency_run": "",
         "inputs.native_only": False,
         "needs.changes.outputs.code": code,
         "github.event_name": event,

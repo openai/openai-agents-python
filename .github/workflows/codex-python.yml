@@ -56,7 +56,11 @@ jobs:
            '{"group":"codex-runners","labels":"codex-windows-x64"}') ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'macos-latest' &&
           (inputs.native_source_run != '' && '"macos-15"' ||
-           (github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness') &&
+           ((github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness') ||
+            (github.event_name == 'pull_request' &&
+             github.event.pull_request.head.repo.full_name == github.repository &&
+             (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness' &&
+             inputs.native_dependency_run == '')) &&
            '"macos-26-xlarge"' || '"macos-15-xlarge"') ||
         toJSON(inputs.runner)
       ) }}
