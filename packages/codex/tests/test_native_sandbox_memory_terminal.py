@@ -5,16 +5,18 @@ import os
 import pytest
 
 from agents import Agent, TurnStoppedError, function_tool
-from agents.classic.sandbox.sandboxes.unix_local import (
-    UnixLocalSandboxClient,
-    UnixLocalSandboxClientOptions,
-)
 from agents.sandbox import Manifest, SandboxMemoryOptions, sandbox_environment
 from agents.testing import ScriptedResponses, text, tool_call
 from tests._asyncio import timeout
 from tests.test_native_sandbox_memory import _workspace_gateway
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="UnixLocal memory fixture")
+
+if os.name != "nt":
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
 
 
 @pytest.mark.parametrize("capture", [False, True], ids=["flush", "suspend"])
