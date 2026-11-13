@@ -527,6 +527,14 @@ class _RawChatChunk(_ChatStreamEvent):
     """A process-local source tag; never part of provider JSON."""
 
 
+class _ResponsesWebSocketFrame(dict[str, Any]):
+    """Process-local distinction between wire observations and projected events."""
+
+    def __init__(self, event: Mapping[str, Any], *, raw: bool = False) -> None:
+        super().__init__(event)
+        self.raw = raw
+
+
 class _BorrowedResponsesEvent(dict[str, Any]):
     """Carry the borrowed response header outside provider event data."""
 

@@ -16,6 +16,7 @@ from agents import (
     function_tool,
 )
 from agents.models import ModelRetryAdviceRequest, ResponsesWebSocketOptions
+from agents.observation import RawProviderEvent
 from tests._asyncio import timeout
 
 
@@ -156,7 +157,10 @@ async def test_post_send_failure_has_unsafe_native_retry_advice() -> None:
     assert socket.closed == 1
 
 
-async def test_native_turn_owns_socket_through_tool_continuation_and_closes_before_result() -> None:
+@pytest.mark.parametrize("capture_wire", [False, True])
+async def test_native_turn_owns_socket_through_tool_continuation_and_closes_before_result(
+    capture_wire: bool,
+) -> None:
     sockets: list[Socket] = []
     owners = []
     effects = []
@@ -178,8 +182,23 @@ async def test_native_turn_owns_socket_through_tool_continuation_and_closes_befo
             agent = Agent(
                 model="gpt-5.5", instructions="Use lookup.", tools=[lookup], provider=provider
             )
-            async with agent.session() as session:
+            async with agent.session(
+                include_raw_provider_events=capture_wire, observation_retention="all"
+            ) as session:
                 first = await session.submit("First")
+                raw = [
+                    event
+                    async for event in first.events(include_execution_details=True)
+                    if isinstance(event, RawProviderEvent)
+                ]
+                assert [(event.source, event.transport, event.payload) for event in raw] == (
+                    [
+                        ("responses", "websocket", frame)
+                        for frame in [*events(1, call=True), *events(2)]
+                    ]
+                    if capture_wire
+                    else []
+                )
                 assert (await first.get_result()).final_output == "accepted"
                 assert sockets[0].closed == 1
                 second = await session.submit("Second")

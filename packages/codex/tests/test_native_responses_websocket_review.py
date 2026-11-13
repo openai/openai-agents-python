@@ -39,6 +39,7 @@ def _diagnostics(error: BaseException) -> str:
                     repr(frame.f_locals[key])
                     for key in (
                         "doc",
+                        "o",
                         "s",
                         "payload",
                         "body",

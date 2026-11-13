@@ -1138,15 +1138,42 @@ impl PythonTools {
         receipt: &Value,
         usage: codex_protocol::protocol::TokenUsage,
     ) -> Result<bool> {
+        Ok(self
+            .with_model_attempt_receipt(root, attempt_id, receipt, |attempt| {
+                attempt.report_usage(usage)
+            })?
+            .is_some())
+    }
+
+    pub(crate) fn account_provider_request(
+        self: &Arc<Self>,
+        root: &str,
+        attempt_id: &str,
+        receipt: &Value,
+        operation: codex_extension_api::ProviderRequestAccounting,
+    ) -> Result<Option<String>> {
+        self.with_model_attempt_receipt(root, attempt_id, receipt, |attempt| {
+            attempt.account_provider_request(operation)
+        })?
+        .ok_or_else(|| anyhow::anyhow!("Native provider request accounting receipt expired"))
+    }
+
+    fn with_model_attempt_receipt<T>(
+        self: &Arc<Self>,
+        root: &str,
+        attempt_id: &str,
+        receipt: &Value,
+        apply: impl FnOnce(&dyn codex_extension_api::ModelAttemptAdmission) -> Result<T, String>,
+    ) -> Result<Option<T>> {
         let Some((owner, id)) = self.preparation_callback_owner(root, receipt) else {
-            return Ok(false);
+            return Ok(None);
         };
         let replies = owner
             .preparation_replies
             .lock()
             .expect("Python preparation replies poisoned");
         let Some(slot) = replies.as_ref().and_then(|pending| pending.get(&id)) else {
-            return Ok(false);
+            return Ok(None);
         };
         let callback = &slot.callback;
         // Cancellation revokes execution, but an entered worker can still measure its own
@@ -1155,16 +1182,17 @@ impl PythonTools {
             || !callback.entered.load(Ordering::Acquire)
             || callback.released.load(Ordering::Acquire)
         {
-            return Ok(false);
+            return Ok(None);
         }
         let Some(attempt) = &callback.model_attempt else {
-            return Ok(false);
+            return Ok(None);
         };
         if attempt.id() != attempt_id {
-            return Ok(false);
+            return Ok(None);
         }
-        attempt.report_usage(usage).map_err(anyhow::Error::msg)?;
-        Ok(true)
+        apply(attempt.as_ref())
+            .map(Some)
+            .map_err(anyhow::Error::msg)
     }
 
     fn preparation_callback_operation(

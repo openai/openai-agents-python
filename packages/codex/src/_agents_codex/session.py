@@ -11673,6 +11673,13 @@ class Session(Generic[ContextT, OutputT]):
             error = caught
         finally:
             state.stopping = True
+            # Retire run-owned transports independently of a tool that is
+            # still joining after cancellation.
+            model_cleanup = (
+                _create_task(self._close_model_run(state))
+                if error is not None and state.model_run is not None
+                else None
+            )
             # A pending selector blocks Core before it can settle an interrupt.
             # Notify callbacks now; retain this owner until their exit below.
             for callback in state.callbacks:
@@ -11786,6 +11793,13 @@ class Session(Generic[ContextT, OutputT]):
                 if error is None:
                     error = cleanup_error
             finally:
+                if model_cleanup is not None:
+                    try:
+                        model_cleanup_error = await _join(model_cleanup)
+                    except BaseException as cleanup_failure:
+                        model_cleanup_error = cleanup_failure
+                    if model_cleanup_error is not None:
+                        state.retain_cleanup_error(model_cleanup_error)
                 if (
                     self._environment_lease is not None
                     and self._environment_lease._sandbox_memory is not None
@@ -13294,10 +13308,14 @@ class Session(Generic[ContextT, OutputT]):
         request_id: int,
         active: Callable[[], bool],
     ) -> bool:
-        from .models import _BorrowedResponsesEvent, _ChatStreamEvent, _RawChatChunk
+        from .models import (
+            _BorrowedResponsesEvent,
+            _ChatStreamEvent,
+            _RawChatChunk,
+            _ResponsesWebSocketFrame,
+        )
 
         started = False
-        observing_chat = False
         produced: Any = None
         iterator: Any = None
         event: Any = None
@@ -13324,26 +13342,25 @@ class Session(Generic[ContextT, OutputT]):
                     raise TypeError("NativeModel.stream must yield Responses event mappings")
                 if not started:
                     chat_stream = isinstance(event, _ChatStreamEvent)
-                    observing_chat = chat_stream and getattr(
-                        request, "_observe_raw_provider_events", False
-                    )
-                    started = (
-                        native._start_model_producer_stream(request_id, chat_stream=True)
-                        if chat_stream
-                        else native._start_model_producer_stream(
-                            request_id, upstream_request_id=event.request_id
-                        )
-                        if isinstance(event, _BorrowedResponsesEvent)
-                        else native._start_model_producer_stream(request_id)
+                    started = native._start_model_producer_stream(
+                        request_id,
+                        chat_stream=chat_stream,
+                        responses_websocket_stream=isinstance(event, _ResponsesWebSocketFrame),
+                        upstream_request_id=(
+                            event.request_id if isinstance(event, _BorrowedResponsesEvent) else None
+                        ),
                     )
                     if not started:
                         return False
                 data = json.dumps(dict(event), allow_nan=False)
 
-                accepted = (
-                    await native._push_model_producer_event(request_id, data, raw_chat_chunk=True)
-                    if observing_chat and isinstance(event, _RawChatChunk)
-                    else await native._push_model_producer_event(request_id, data)
+                accepted = await native._push_model_producer_event(
+                    request_id,
+                    data,
+                    raw_chat_chunk=isinstance(event, _RawChatChunk),
+                    raw_responses_websocket_frame=(
+                        isinstance(event, _ResponsesWebSocketFrame) and event.raw
+                    ),
                 )
                 if not accepted:
                     return False
@@ -13430,6 +13447,20 @@ class Session(Generic[ContextT, OutputT]):
                 disable_provider_retries=message.get("disable_provider_retries") is True,
                 _report_usage=report_usage,
             )
+            if measurement_owner is not None:
+
+                def account_provider_request(operation: dict[str, Any]) -> str | None:
+                    result = cast(
+                        str | None,
+                        native._account_provider_request(
+                            measurement_owner, json.dumps(operation, allow_nan=False)
+                        ),
+                    )
+                    if operation.get("operation") == "manage":
+                        state.model_run_usage.manage_provider_attempts()
+                    return result
+
+                object.__setattr__(request, "_account_provider_request", account_provider_request)
             if "request_transport" in message:
                 object.__setattr__(
                     request, "_request_transport", deepcopy(message["request_transport"])
@@ -17076,7 +17107,10 @@ class Session(Generic[ContextT, OutputT]):
                 failure_output = ToolOutput.error(text)
             if not self._admit_tool(state, request):
                 return
-            from .decision_handoff import _CapturedDecisionHandoff, _DecisionHandoffSelection
+            from .decision_handoff import (
+                _CapturedDecisionHandoff,
+                _DecisionHandoffSelection,
+            )
 
             handoff_target_profile_id = None
             if failure_output is None and isinstance(entry, _CapturedDecisionHandoff):

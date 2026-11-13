@@ -1,5 +1,8 @@
 """Application model producers for the native Core turn and tool loop."""
 
+from _agents_codex._hosted_responses_websocket import (
+    HostedResponsesWebSocketModel as HostedResponsesWebSocketModel,
+)
 from _agents_codex._responses_websocket import (
     ResponsesSocketFactory as ResponsesSocketFactory,
     ResponsesSocketOptions as ResponsesSocketOptions,

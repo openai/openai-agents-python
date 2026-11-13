@@ -165,6 +165,7 @@ if TYPE_CHECKING:
     from .models import (
         AnyLLMModel as AnyLLMModel,
         ChatCompletionsModel as ChatCompletionsModel,
+        HostedResponsesWebSocketModel as HostedResponsesWebSocketModel,
         LitellmModel as LitellmModel,
         ModelProvider as ModelProvider,
         ModelRequest as ModelRequest,
@@ -319,6 +320,7 @@ if TYPE_CHECKING:
     )
 
 _MODULES = {
+    "HostedResponsesWebSocketModel": ".models",
     "run_demo_loop": ".repl",
     "ChatCompletionsModel": ".models",
     "ResponsesModel": ".models",

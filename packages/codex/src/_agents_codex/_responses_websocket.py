@@ -11,7 +11,7 @@ import math
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, NoReturn, TypeAlias, cast
 from weakref import WeakKeyDictionary
 
 from typing_extensions import TypedDict
@@ -19,6 +19,7 @@ from typing_extensions import TypedDict
 from ._lifecycle import _error_contexts, _join, _retain_cleanup_error
 from ._public import preserve_module_identity as _preserve_module_identity
 from .models import (
+    _MAX_CHAT_STREAM_BYTES,
     ModelRequest,
     ModelRequestOptions,
     ModelRequestOptionsFactory,
@@ -26,6 +27,7 @@ from .models import (
     ModelRunOwner,
     ResponsesModel,
     _request_options_for,
+    _ResponsesWebSocketFrame,
 )
 from .retry import RetryAdvice
 
@@ -58,7 +60,10 @@ class _QuietSocketLogger(_SocketLoggerBase):
 
 
 async def _connect(request: ModelRequest, options: ResponsesSocketOptions) -> Any:
-    socket_options: ResponsesWebSocketOptions = {"max_size": None, **options["websocket_options"]}
+    socket_options: ResponsesWebSocketOptions = {
+        "max_size": _MAX_CHAT_STREAM_BYTES,
+        **options["websocket_options"],
+    }
     try:
         from websockets.asyncio.client import connect
 
@@ -79,7 +84,7 @@ def _capture_websocket_options(
 ) -> ResponsesWebSocketOptions:
     if value is not None and not isinstance(value, Mapping):
         raise TypeError("Responses WebSocket options must be a mapping")
-    data = dict(value) if value is not None else {}
+    data = {"max_size": _MAX_CHAT_STREAM_BYTES, **(dict(value) if value is not None else {})}
     if data.keys() - {"ping_interval", "ping_timeout", "max_size"}:
         raise ValueError("Unsupported Responses WebSocket option")
     for key, item in data.items():
@@ -179,9 +184,27 @@ class _Connection:
         return self.closing
 
 
-def _decode_socket_frame(payload: Any) -> Any:
+def _reject_json_constant(_value: str) -> NoReturn:
+    raise ValueError("Non-finite JSON number")
+
+
+def _finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        _reject_json_constant(value)
+    return parsed
+
+
+def _decode_socket_frame(payload: Any, limit: int | None) -> Any:
     try:
-        return json.loads(payload)
+        if limit is not None and isinstance(payload, (str, bytes, bytearray)):
+            if len(payload) > limit or (
+                isinstance(payload, str) and len(payload.encode("utf-8")) > limit
+            ):
+                raise ValueError("Responses WebSocket frame exceeds its receive limit")
+        return json.loads(
+            payload, parse_constant=_reject_json_constant, parse_float=_finite_json_float
+        )
     except (ValueError, TypeError, RecursionError):
         # Decoder exceptions and their tracebacks can retain the input value.
         pass
@@ -215,6 +238,9 @@ class ResponsesWebSocketModel(ResponsesModel):
     Each owned continuation can reuse its run's socket. Headers and query values
     select the connection; changed values open a replacement. The SDK closes
     sockets before releasing a run and leaves the borrowed client open.
+
+    Default receive ceiling: 8 MiB. Explicit unlimited override:
+    ``websocket_options={"max_size": None}``.
     """
 
     _socket_factory: ResponsesSocketFactory
@@ -264,6 +290,8 @@ class ResponsesWebSocketModel(ResponsesModel):
         events = self._stream_websocket(request)
         try:
             async for event in events:
+                if isinstance(event, _ResponsesWebSocketFrame) and event.raw:
+                    continue
                 if event.get("type") in (
                     "response.completed",
                     "response.failed",
@@ -393,11 +421,24 @@ class ResponsesWebSocketModel(ResponsesModel):
                 payload = await _limited(
                     connection.socket.recv(), _timeout(self.client, selected, "read")
                 )
-                event = _decode_socket_frame(payload)
-                if not isinstance(event, dict):
-                    raise ValueError("Responses WebSocket requires object events")
+                if isinstance(payload, _ResponsesWebSocketFrame):
+                    event = payload
+                    if event.raw:
+                        if getattr(request, "_observe_raw_provider_events", False):
+                            yield event
+                        continue
+                else:
+                    decoded = _decode_socket_frame(payload, self._websocket_options.get("max_size"))
+                    if not isinstance(decoded, dict):
+                        raise ValueError("Responses WebSocket requires object events")
+                    event = _ResponsesWebSocketFrame(decoded)
+                    del decoded
                 if "response" in event and not isinstance(event["response"], dict):
                     raise ValueError("Responses WebSocket response must be an object")
+                if not isinstance(payload, _ResponsesWebSocketFrame) and getattr(
+                    request, "_observe_raw_provider_events", False
+                ):
+                    yield _ResponsesWebSocketFrame(event, raw=True)
                 candidate = event.get("response", {}).get("id")
                 if candidate is not None:
                     if response_id is not None and response_id != candidate:
