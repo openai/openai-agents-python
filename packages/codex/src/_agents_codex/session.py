@@ -12764,7 +12764,7 @@ class Session(Generic[ContextT, OutputT]):
         request_id: int,
         active: Callable[[], bool],
     ) -> bool:
-        from .models import _ChatStreamEvent, _RawChatChunk
+        from .models import _BorrowedResponsesEvent, _ChatStreamEvent, _RawChatChunk
 
         started = False
         observing_chat = False
@@ -12800,6 +12800,10 @@ class Session(Generic[ContextT, OutputT]):
                     started = (
                         native._start_model_producer_stream(request_id, chat_stream=True)
                         if chat_stream
+                        else native._start_model_producer_stream(
+                            request_id, upstream_request_id=event.request_id
+                        )
+                        if isinstance(event, _BorrowedResponsesEvent)
                         else native._start_model_producer_stream(request_id)
                     )
                     if not started:
@@ -12830,6 +12834,7 @@ class Session(Generic[ContextT, OutputT]):
         backend: Any = None
         complete: Any = None
         stream: Any = None
+        request_stream: bool | None = None
         attempt_id = message.get("attempt_id")
         request_id = message["request_id"]
         issuing = _invocation.get()
@@ -12912,6 +12917,7 @@ class Session(Generic[ContextT, OutputT]):
                 complete = getattr(backend, "complete", None)
             stream = getattr(backend, "stream", None)
             if callable(stream):
+                request_stream = True
                 failed = not await self._produce_model_stream(
                     native,
                     stream,
@@ -12922,6 +12928,7 @@ class Session(Generic[ContextT, OutputT]):
                 return
             if not callable(complete):
                 raise TypeError("Native model provider must resolve a complete or stream method")
+            request_stream = False
 
             def invoke(request: ModelRequest) -> Any:
                 value: Any = None
@@ -12966,9 +12973,13 @@ class Session(Generic[ContextT, OutputT]):
                 elif isinstance(attempt_id, str) and request is not None:
                     # Advice retains the failed request; native timeout disposition
                     # independently keeps the cancellation artifact out of policy.error.
-                    state.model_failure = _ModelFailure(attempt_id, request, backend, error)
+                    state.model_failure = _ModelFailure(
+                        attempt_id, request, backend, error, stream=request_stream
+                    )
             elif isinstance(attempt_id, str) and request is not None:
-                state.model_failure = _ModelFailure(attempt_id, request, backend, error)
+                state.model_failure = _ModelFailure(
+                    attempt_id, request, backend, error, stream=request_stream
+                )
                 reply = json.dumps(
                     {
                         "failed": True,
