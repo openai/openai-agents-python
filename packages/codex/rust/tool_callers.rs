@@ -21,9 +21,20 @@ struct CallerLimits {
 pub(crate) struct ToolDeclarations {
     specs: Vec<DynamicToolSpec>,
     limits: BTreeMap<usize, CallerLimits>,
+    configured_agent_roles: BTreeMap<usize, String>,
 }
 
 impl ToolDeclarations {
+    pub(crate) fn configured_agent_role(&self, slot: usize) -> Option<&str> {
+        self.configured_agent_roles.get(&slot).map(String::as_str)
+    }
+
+    pub(crate) fn without_configured_agent_roles(&self) -> Self {
+        let mut declarations = self.clone();
+        declarations.configured_agent_roles.clear();
+        declarations
+    }
+
     pub(crate) fn provider_callers(&self, slot: usize) -> Option<codex_tools::ProviderToolCallers> {
         let limits = self.limits.get(&slot)?;
         if !limits.programmatic {
@@ -61,6 +72,9 @@ impl ToolDeclarations {
     }
 
     pub(crate) fn append_captured(&mut self, source: &Self, slot: usize) {
+        if let Some(role) = source.configured_agent_roles.get(&slot) {
+            self.configured_agent_roles.insert(self.specs.len(), role.clone());
+        }
         self.push_with_callers(
             source.specs[slot].clone(),
             source.limits.get(&slot).copied(),
@@ -83,6 +97,7 @@ impl From<Vec<DynamicToolSpec>> for ToolDeclarations {
         Self {
             specs,
             limits: BTreeMap::new(),
+            configured_agent_roles: BTreeMap::new(),
         }
     }
 }
@@ -111,7 +126,17 @@ impl<'de> Deserialize<'de> for ToolDeclarations {
             let callers = value
                 .as_object_mut()
                 .and_then(|object| object.remove("allowedCallers"));
+            let configured_role = value
+                .as_object_mut()
+                .and_then(|object| object.remove("configuredAgentRole"));
             let spec: DynamicToolSpec = serde_json::from_value(value).map_err(D::Error::custom)?;
+            if let Some(role) = configured_role {
+                let role = String::deserialize(role).map_err(D::Error::custom)?;
+                if role.trim().is_empty() || !matches!(spec, DynamicToolSpec::Function(_)) {
+                    return Err(D::Error::custom("Configured Agent origin requires a named function"));
+                }
+                result.configured_agent_roles.insert(result.specs.len(), role);
+            }
             let limits = if let Some(callers) = callers {
                 if !matches!(
                     spec,
@@ -173,7 +198,7 @@ impl<'de> Deserialize<'de> for ToolDeclarations {
 
 impl Serialize for ToolDeclarations {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if self.limits.is_empty() {
+        if self.limits.is_empty() && self.configured_agent_roles.is_empty() {
             return self.specs.serialize(serializer);
         }
         let mut values: Vec<Value> = self
@@ -194,6 +219,9 @@ impl Serialize for ToolDeclarations {
                 callers.push("programmatic");
             }
             values[*slot]["allowedCallers"] = serde_json::json!(callers);
+        }
+        for (slot, role) in &self.configured_agent_roles {
+            values[*slot]["configuredAgentRole"] = serde_json::json!(role);
         }
         values.serialize(serializer)
     }

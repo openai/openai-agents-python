@@ -1,0 +1,34 @@
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index c1e22cd89ddcc0e414915d2beb57a20b306bec42..d736523bf622773b5e10202a7873e9f1f8824720 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -68,2 +68,6 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
+     }
++
++    fn configured_agent_tool_role(&self) -> Option<&str> {
++        self.0.configured_agent_tool_role()
++    }
+     fn managed_agent_result_options(&self) -> (bool, bool) {
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index a63e2915926e585395a898ac982102ca140938e0..072f0d4c96ba2dee28f8c3917a26330e48726b17 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -64,3 +64,5 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> + std::any::Any {
+     fn managed_agent_tool_origin(&self) -> Option<ManagedAgentToolOrigin> {
+-        let role = self.managed_agent_role()?;
++        let role = self
++            .managed_agent_role()
++            .or_else(|| self.configured_agent_tool_role())?;
+         Some(ManagedAgentToolOrigin {
+diff --git a/codex-rs/tools/src/tool_executor.rs b/codex-rs/tools/src/tool_executor.rs
+index df30c6f0adedaddd7366b3946739159216b418d3..ba03bc2fe18da70bc13f0767a5ade1dfa959f882 100644
+--- a/codex-rs/tools/src/tool_executor.rs
++++ b/codex-rs/tools/src/tool_executor.rs
+@@ -193,2 +193,7 @@ pub trait ToolExecutor<Invocation>: Send + Sync {
+
++    /// Observational identity for a callback-backed Agent; it grants no role routing.
++    fn configured_agent_tool_role(&self) -> Option<&str> {
++        None
++    }
++
+     /// Observes the final native result after all output policies accept it.

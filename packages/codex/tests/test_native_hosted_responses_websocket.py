@@ -145,8 +145,21 @@ async def test_hosted_pause_inject_and_native_tool_owner(terminal_before_ack: bo
                     history = [recorded async for recorded in session.turns()]
                     assert len(history) == 1
                     assert history[0]["run_usage"]["requests"] == 1
-                    assert history[0]["request_usage_entries"] == []
-                    assert not history[0]["request_usage_entries_complete"]
+                    assert history[0]["request_usage_entries_complete"]
+                    (entry,) = history[0]["request_usage_entries"]
+                    assert entry["scope"] == "provider_request"
+                    assert entry["request_ordinal"] == 1
+                    assert entry["token_usage_known"]
+                    assert entry["input_tokens_details"] == {
+                        "cached_tokens": 2,
+                        "cache_write_tokens": 1,
+                    }
+                    assert entry["total_tokens"] == 5
+                    state = await session.save_state()
+                    async with agent.session(state=state) as restored:
+                        restored_history = [recorded async for recorded in restored.turns()]
+                        assert restored_history[0]["request_usage_entries_complete"]
+                        assert restored_history[0]["request_usage_entries"] == [entry]
                     assert [item async for item in session.items()]
                 assert [(event.source, event.transport, event.payload) for event in raw] == [
                     ("responses", "websocket", frame) for frame in incoming
@@ -331,6 +344,14 @@ async def test_hosted_terminal_fallback(store: bool, terminal_first: bool, steer
                         finally:
                             release_tool.set()
                     result = await turn.get_result()
+                    (history,) = [recorded async for recorded in session.turns()]
+                    assert history["request_usage_entries_complete"]
+                    entries = history["request_usage_entries"]
+                    assert [
+                        (entry["scope"], entry["request_ordinal"], entry["total_tokens"])
+                        for entry in entries
+                    ] == [("provider_request", 1, 5), ("provider_request", 2, 11)]
+                    assert entries[0]["attempt_id"] != entries[1]["attempt_id"]
             assert result.final_output == "done"
             assert effects == ["lookup"]
             assert [frame["type"] for frame in frames] == [
@@ -497,7 +518,7 @@ async def test_hosted_initial_connect_failure_reaches_result_and_event_reader() 
                 assert len(history) == 1
                 assert history[0]["run_usage"]["requests"] == 0
                 assert history[0]["request_usage_entries"] == []
-                assert not history[0]["request_usage_entries_complete"]
+                assert history[0]["request_usage_entries_complete"]
                 assert [item async for item in session.items()]
         assert attempts == 1
         assert not client.is_closed()

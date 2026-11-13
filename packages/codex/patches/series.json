@@ -1231,7 +1231,15 @@
     {
       "path": "sdk-bind-declaration-output-strictness.patch",
       "sha256": "723046d8ae5c31b90e4f23f83ea0be45311fb60fd674f031764807fb58b2d85d"
+    },
+    {
+      "path": "sdk-configured-agent-tool-origin.patch",
+      "sha256": "352ccf61873c818f61893f4430e5980d4d71d53ae752db0159332221df3679e9"
+    },
+    {
+      "path": "sdk-hosted-provider-request-detail.patch",
+      "sha256": "1b315c5f6f0d7273fa9e181f3a8861418e4aec298c6d63c7d375b0da68fe8cca"
     }
   ],
-  "result_tree": "6713fdc83f9c82eb7a69544c425f746ff2fab610"
+  "result_tree": "30abc45c5742ba14094578ab34948fea376c01bd"
 }

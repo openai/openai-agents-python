@@ -858,7 +858,16 @@ class _ToolCatalog:
         return slots
 
     def native_specs(self) -> str:
-        return json.dumps([json.loads(tool.spec_json) for tool in self.tools])
+        from ._function_tools import _CapturedApproval
+
+        specs = []
+        for tool in self.tools:
+            spec = json.loads(tool.spec_json)
+            function = tool.function if isinstance(tool, _CapturedApproval) else tool
+            if isinstance(function, _CapturedFunction) and function.configured_agent is not None:
+                spec["configuredAgentRole"] = function.configured_agent.agent.name or function.name
+            specs.append(spec)
+        return json.dumps(specs)
 
 
 @dataclass(frozen=True)

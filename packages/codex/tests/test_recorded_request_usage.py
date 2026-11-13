@@ -99,3 +99,23 @@ def test_decreasing_cumulative_tokens_do_not_create_negative_request_usage():
     turn = project(attempt("owner", 1, 7), attempt("owner", 2, 3))
     assert turn["request_usage_entries"] == []
     assert turn["request_usage_entries_complete"] is False
+
+
+def test_native_hosted_replay_updates_original_request_with_later_terminal_usage():
+    first = attempt("hosted", 1, 0, 1)
+    second = attempt("hosted", 2, 7, 1)
+    started, settled = first["payload"]["data"], second["payload"]["data"]
+    for detail in started, settled:
+        detail["provider_managed"] = True
+    pending = {"request_id": "physical-first", "request_ordinal": 1, "token_usage": None}
+    started["provider_requests"] = [pending]
+    settled["provider_requests"] = [
+        {**pending, "token_usage": settled["usage"]["token_usage"]},
+        {"request_id": "physical-second", "request_ordinal": 2, "token_usage": None},
+    ]
+    result = project(first, second, first, second, event("task_complete", model_attempt=settled))
+    assert result["request_usage_entries_complete"] is True
+    assert [
+        (entry["attempt_id"], entry["token_usage_known"], entry["total_tokens"])
+        for entry in result["request_usage_entries"]
+    ] == [("physical-first", True, 7), ("physical-second", False, 0)]

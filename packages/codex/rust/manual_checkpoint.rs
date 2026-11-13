@@ -1359,6 +1359,7 @@ impl Frame {
             if let Some(outcomes) = &mut self.tool_outcomes {
                 outcomes.record(&key.call, value.success);
             }
+            let origin = generation.configured_agent_origin(key.reply.slot);
             if value.success || self.batch_completion {
                 crate::python_tools::FreshTerminalReceipts::record(
                     &mut self.fresh,
@@ -1368,7 +1369,12 @@ impl Frame {
                     self.batch_completion,
                 );
             }
-            self.accepted.insert(key.call.clone(), receipt.into());
+            let mut output: ResponseItemEnvelope = receipt.into();
+            if let Some(origin) = origin {
+                output.metadata.get_or_insert_with(Default::default).sdk_managed_agent_tool =
+                    Some(origin);
+            }
+            self.accepted.insert(key.call.clone(), output);
         }
     }
 

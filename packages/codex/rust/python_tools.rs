@@ -98,6 +98,17 @@ pub(crate) struct FinishToolSlots(pub(crate) Vec<usize>);
 pub(crate) struct InputErrorToolSlots(pub(crate) Vec<usize>);
 
 impl Generation {
+    pub(crate) fn configured_agent_origin(
+        &self,
+        slot: usize,
+    ) -> Option<codex_history::ManagedAgentToolOrigin> {
+        let role = self.specs.configured_agent_role(slot)?;
+        Some(codex_history::ManagedAgentToolOrigin {
+            name: self.entries.get(slot)?.name.name.clone(),
+            role: role.to_owned(),
+        })
+    }
+
     fn default_names(&self, defaults: Option<&[usize]>) -> Result<Option<Vec<ToolName>>> {
         defaults
             .map(|slots| {
@@ -7100,6 +7111,10 @@ impl PythonExecutor {
 }
 
 impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
+    fn configured_agent_tool_role(&self) -> Option<&str> {
+        self.generation.specs.configured_agent_role(self.slot)
+    }
+
     fn on_result_accepted(
         &self,
         _: &str,
