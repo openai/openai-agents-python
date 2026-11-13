@@ -80,10 +80,21 @@ fn matching_scopes_outlive_idle_interval_and_failed_retirement_stays_owned() {
         let first = opening("pool-key-a", true).await;
         let first_state = first.2.current().unwrap();
         let manager = first_state.manager.clone();
-        let parent = first_state.runtime_parent.as_ref().unwrap();
+        let parent = process_slot()
+            .unwrap()
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .engine
+            .as_ref()
+            .unwrap()
+            .current()
+            .unwrap();
         assert!(parent.private_function_http_pool.get().is_none());
         let function_http = first_state.private_function_http_pool();
         assert!(parent.private_function_http_pool.get().is_some());
+        drop(parent);
         assert!(first_state.private_function_http_pool.get().is_none());
         let factory = codex_http_client::HttpClientFactory::new(
             codex_http_client::OutboundProxyPolicy::ReqwestDefault,

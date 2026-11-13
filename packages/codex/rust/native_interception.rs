@@ -8987,6 +8987,7 @@ pub(crate) mod tests {
         let unconfigured = AdmissionOnly {
             control: root.clone(),
             owner: original.owner.clone(),
+            generation: true,
         };
         assert!(original.admit_request().is_ok());
         assert!(unconfigured.admit_request().is_ok());
