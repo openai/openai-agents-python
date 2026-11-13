@@ -936,6 +936,8 @@ class NativeError(RuntimeError):
 
     _effects: Literal["not_started", "unknown", "recorded"] = "unknown"
     _interrupted: bool = False
+    _request_limit_reached: bool = False
+    _cleanup_uncertain: bool = False
 
     def __init__(
         self,
@@ -1061,9 +1063,11 @@ class _RunBudget:
             (limits.max_estimated_cost_micros, self.cost_micros, "estimated cost"),
         ):
             if limit is not None and observed >= limit:
-                raise NativeError(
+                error = NativeError(
                     f"Run budget reached its {metric} limit", code="run_budget_exceeded"
                 )
+                error._request_limit_reached = metric == "request"
+                raise error
         stop_on_missing = limits.missing_usage == "stop"
         cost_limit = limits.max_estimated_cost_micros
         estimator = limits.estimate_cost_micros
@@ -1191,6 +1195,30 @@ class RunErrorDetails:
     raw_responses: tuple[dict[str, Any], ...] = field(repr=False)
     guardrail_results: tuple[GuardrailRecord, ...] = field(repr=False)
     incomplete: bool = False
+    history: tuple[dict[str, Any], ...] = field(default=(), repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class RunFailure:
+    """A settled one-shot failure and its bounded native run evidence."""
+
+    kind: Literal["max_requests", "model_refusal", "invalid_output"]
+    error: NativeError | OutputValidationError = field(repr=False)
+    details: RunErrorDetails = field(repr=False)
+    context: object = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class RecoverRun(Generic[OutputT]):
+    """Supply the run's final output, with optional assistant history insertion."""
+
+    output: OutputT
+    include_in_history: bool = True
+
+
+_RunErrorHandler: TypeAlias = Callable[
+    [RunFailure], RecoverRun[Any] | None | Awaitable[RecoverRun[Any] | None]
+]
 
 
 class RunDiagnosticError(Exception):
@@ -3580,6 +3608,25 @@ def _current_attempt_controls(
     }
 
 
+def _check_history_retention_opening(
+    storage: LocalStorage | CustomStorage | None,
+    provider_history: ProviderHistory | None,
+    profiles: tuple[_AgentProfile, ...],
+) -> None:
+    from .canonical_storage_encrypt import EncryptedSessionStore
+
+    if not (
+        isinstance(storage, CustomStorage)
+        and isinstance(storage.backend, EncryptedSessionStore)
+        and storage.backend._native_history_ttl_seconds is not None
+    ):
+        return
+    if provider_history is not None:
+        raise ValueError("Encrypted history TTL cannot combine with provider-owned history")
+    if any(profile.declaration.prepare_handoff_input is not None for profile in profiles):
+        raise ValueError("Handoff input preparation cannot combine with encrypted history TTL")
+
+
 def _prepare_opening_model_settings(
     agent: Agent[Any, Any],
     model: str | None,
@@ -3971,6 +4018,7 @@ class Session(Generic[ContextT, OutputT]):
             profiles = (
                 _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
             )
+            _check_history_retention_opening(storage, provider_history, profiles)
             auth = agent.provider.auth if agent.provider is not None else None
             codex_login = auth if isinstance(auth, CodexLogin) else None
             uses_siwc = isinstance(auth, SignInWithChatGPT)
@@ -9382,6 +9430,12 @@ class Session(Generic[ContextT, OutputT]):
                         items = self._take_produced_items(turn)
                     except Exception:
                         incomplete = True
+            history: tuple[dict[str, Any], ...] = ()
+            if settled and turn.turn_id is not None:
+                try:
+                    history = (await self.history_snapshot()).items
+                except Exception:
+                    incomplete = True
             last_agent = None
             try:
                 last_agent = await self.get_active_agent()
@@ -9394,8 +9448,134 @@ class Session(Generic[ContextT, OutputT]):
                 raw_responses=tuple(responses),
                 guardrail_results=guardrail_results,
                 incomplete=incomplete,
+                history=history,
             )
         return None
+
+    async def _one_shot_result(
+        self,
+        submission: Turn[OutputT],
+        handler: _RunErrorHandler | None,
+        diagnostics: bool,
+        original_input: UserInput | None,
+    ) -> Completed[OutputT]:
+        try:
+            return await submission.get_result()
+        except Exception as error:
+            result = await self._resolve_one_shot_failure(
+                submission, error, handler, diagnostics, original_input
+            )
+            if result is None:
+                raise
+            return result
+
+    async def _resolve_one_shot_failure(
+        self,
+        submission: Turn[OutputT],
+        error: Exception,
+        handler: _RunErrorHandler | None,
+        diagnostics: bool,
+        original_input: UserInput | None,
+    ) -> Completed[OutputT] | None:
+        kind: Literal["max_requests", "model_refusal", "invalid_output"] | None = None
+        if isinstance(error, NativeError) and not error._cleanup_uncertain:
+            if error._request_limit_reached:
+                kind = "max_requests"
+            elif error.response_integrity_reason == "provider_refusal":
+                kind = "model_refusal"
+        elif isinstance(error, OutputValidationError) and error._run_recoverable:
+            kind = "invalid_output"
+        if not diagnostics and (handler is None or kind is None):
+            return None
+        details = await self._capture_run_error_details(submission, original_input)
+        if details is None:
+            return None
+        if (
+            handler is not None
+            and kind is not None
+            and isinstance(error, (NativeError, OutputValidationError))
+            and not self._broken
+            and submission.turn_id is not None
+            and details.last_agent is not None
+            and not (self._output_guardrails or details.last_agent.output_guardrails)
+        ):
+            result = await self._recover_one_shot(
+                submission, handler, RunFailure(kind, error, details, self._context)
+            )
+            if result is not None:
+                return result
+        if diagnostics:
+            raise RunDiagnosticError(details) from error
+        return None
+
+    async def _recover_one_shot(
+        self,
+        submission: Turn[OutputT],
+        handler: _RunErrorHandler,
+        failure: RunFailure,
+    ) -> Completed[OutputT] | None:
+        self._check_idle_update()
+        scope = _Invocation(self)
+        token = _invocation.set(scope)
+        try:
+            recovery = await _call_callback(handler, lambda: scope.active, failure)
+        finally:
+            scope.active = False
+            _invocation.reset(token)
+        if recovery is None:
+            return None
+        if not isinstance(recovery, RecoverRun):
+            raise TypeError("error_handler must return RecoverRun or None")
+        self._check_idle_update()
+        await self._refresh_profile_bindings()
+        self._check_idle_update()
+        output, wire = self._default_output.terminal_application_value(recovery.output)
+        usage = _token_usage_info(json.loads(await self._native.call("token_usage_info")))
+        items = failure.details.items
+        if recovery.include_in_history:
+            text = wire
+            if self._default_output.mode != "plain":
+                text = json.dumps(
+                    {"response": wire} if self._default_output.wrapped else wire,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+            turn_id = submission.turn_id
+            assert turn_id is not None
+            agent = failure.details.last_agent
+            assert agent is not None
+            item_id = f"msg_{uuid4().hex}"
+            content = [{"type": "output_text", "text": text}]
+            revision = await self.history_snapshot(limit=0)
+            await self.transact_history(
+                expected_revision=revision.revision,
+                keep=revision.total,
+                items=[{"type": "message", "id": item_id, "role": "assistant", "content": content}],
+            )
+            items = (
+                *items,
+                ProducedItem(
+                    {
+                        "type": "message",
+                        "id": item_id,
+                        "turn_id": turn_id,
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": text}],
+                        "phase": None,
+                    },
+                    agent,
+                ),
+            )
+        result = Completed(
+            submission,
+            cast(OutputT, output),
+            usage,
+            guardrail_results=failure.details.guardrail_results,
+            items=items,
+        )
+        object.__setattr__(submission, "_recovered_result", result)
+        return result
 
     async def _run_with_interactions(
         self,
@@ -9407,6 +9587,7 @@ class Session(Generic[ContextT, OutputT]):
         return_raw_usage: bool = False,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         error_input: UserInput | None = None,
         pause_manual: Sequence[FunctionTool[Any, Any, Any]] = (),
     ) -> Completed[OutputT]:
@@ -9509,6 +9690,7 @@ class Session(Generic[ContextT, OutputT]):
 
         reader = asyncio.create_task(consume())
         waiter = asyncio.create_task(submission.get_result())
+        settled_error_checked = False
 
         async def close() -> None:
             nonlocal stopping
@@ -9532,18 +9714,30 @@ class Session(Generic[ContextT, OutputT]):
                 raise failure.result()
             if reader.done():
                 await reader
-            result = await waiter
+            try:
+                result = await waiter
+            except Exception as error:
+                settled_error_checked = True
+                recovered = await self._resolve_one_shot_failure(
+                    submission, error, error_handler, capture_error_details, error_input
+                )
+                if recovered is None:
+                    raise
+                result = recovered
+                settled_error_checked = False
             if return_state:
                 result = replace(result, state=await self.save_state())
             if return_history:
                 result = replace(result, history=await self._run_history())
             if return_raw_usage:
                 result = replace(result, raw_usage=self._take_raw_usage(result.turn))
-            if return_items:
+            if return_items and result.items is None:
                 result = replace(result, items=self._take_produced_items(result.turn))
+            if not return_items and result.items is not None:
+                result = replace(result, items=None)
         except BaseException as error:
             run_error = error
-            if capture_error_details and isinstance(error, Exception):
+            if capture_error_details and isinstance(error, Exception) and not settled_error_checked:
                 details = await self._capture_run_error_details(
                     submission, error_input, settled=waiter.done() and not waiter.cancelled()
                 )
@@ -10420,6 +10614,8 @@ class Session(Generic[ContextT, OutputT]):
     async def _wait(self, submission: Turn[_TurnT]) -> Completed[_TurnT]:
         """Join this captured root future or exact native child result."""
         self._check_owner(submission)
+        if submission._recovered_result is not None:
+            return submission._recovered_result
         if submission.child_id is not None:
             self._check_callback_operation("wait on a child of its own Session")
             native_error = None
@@ -11797,6 +11993,10 @@ class Session(Generic[ContextT, OutputT]):
                     state.submission_request_attempts.add(snapshot)
         continuation: _Submission | None = None
         if state.cleanup_error is not None:
+            if isinstance(error, NativeError):
+                error._cleanup_uncertain = True
+            if isinstance(error, OutputValidationError):
+                error._run_recoverable = False
             if error is None:
                 error = state.cleanup_error
             else:
@@ -11937,7 +12137,11 @@ class Session(Generic[ContextT, OutputT]):
         self, state: _Submission, text: str, *, output: _PreparedOutput | None = None
     ) -> Any:
         context = state.tracing.context if state.tracing is not None else None
-        return _validate_output(state.output if output is None else output, text, context)
+        try:
+            return _validate_output(state.output if output is None else output, text, context)
+        except OutputValidationError as error:
+            error._run_recoverable = True
+            raise
 
     async def _repair_output(self, state: _Submission, text: str) -> Any:
         """Correct invalid final text when no application completion gate is active."""
@@ -11953,7 +12157,9 @@ class Session(Generic[ContextT, OutputT]):
             except OutputValidationError as error:
                 issues = error.issues
         # Never expose validator inputs through an attached exception context.
-        raise OutputValidationError(text, issues)
+        error = OutputValidationError(text, issues)
+        error._run_recoverable = True
+        raise error
 
     async def _repair_output_once(
         self,
@@ -14146,7 +14352,9 @@ class Session(Generic[ContextT, OutputT]):
             if state.graceful_requested:
                 return StopTurn("Graceful stop requested")
             if state.repair_attempt_count >= output_contract.max_retries:
-                raise OutputValidationError(text, issues)
+                failure = OutputValidationError(text, issues)
+                failure._run_recoverable = True
+                raise failure
             state.repairing = True
             try:
                 corrected = await self._repair_output_once(

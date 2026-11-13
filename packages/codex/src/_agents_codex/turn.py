@@ -214,6 +214,7 @@ class Turn(Generic[OutputT]):
         repr=False, compare=False
     )
     _original_input: UserInput | None = field(default=None, repr=False, compare=False)
+    _recovered_result: Completed[OutputT] | None = field(default=None, repr=False, compare=False)
 
     @property
     def request_attempts(self) -> RequestAttempts | None:
@@ -635,6 +636,7 @@ def _root_turn(
         "_completion": completion,
         "_continuation": None,
         "_result": None,
+        "_recovered_result": None,
         "_observe_output_acceptance": False,
         "_native": None,
         "_observation_after": observation_after,
@@ -666,6 +668,7 @@ def _child_turn(session: Session[Any, Any], native: Any) -> Turn[str]:
         "_completion": None,
         "_continuation": None,
         "_result": None,
+        "_recovered_result": None,
         "_observe_output_acceptance": False,
         "_native": native,
         "_guardrail_results": observed.guardrail_results if observed is not None else [],

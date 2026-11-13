@@ -197,6 +197,58 @@ async def test_encrypted_ttl_excludes_old_items_from_native_model_context(
 
 
 @pytest.mark.parametrize(
+    "selection", [{"type": "previous_response"}, {"type": "conversation", "id": "conv_fixture"}]
+)
+async def test_encrypted_ttl_rejects_provider_history_before_opening(
+    tmp_path: Path, responses, selection
+) -> None:
+    path = tmp_path / "canonical-incompatible.sqlite"
+
+    class UnopenedStore(SQLiteSessionStore):
+        def acquire(self, session_id: str) -> str:
+            pytest.fail("The incompatible Session acquired persistent storage")
+
+    storage = CustomStorage(
+        EncryptedSessionStore(UnopenedStore(path), encryption_key="synthetic-key", ttl=0)
+    )
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-history-retention", supports_websockets=False
+    ) as provider:
+        agent = Agent(
+            instructions="Do not submit.", provider=provider, model_settings={"store": True}
+        )
+        with pytest.raises(ValueError, match="TTL cannot combine with provider-owned history"):
+            async with agent.session(storage=storage, provider_history=selection):
+                pytest.fail("An incompatible Session opened")
+    assert responses.requests == []
+
+
+async def test_encrypted_ttl_rejects_prepared_handoff_before_opening(tmp_path: Path, responses):
+    path = tmp_path / "canonical-handoff-incompatible.sqlite"
+
+    class UnopenedStore(SQLiteSessionStore):
+        def acquire(self, session_id: str) -> str:
+            pytest.fail("The incompatible Session acquired persistent storage")
+
+    storage = CustomStorage(
+        EncryptedSessionStore(UnopenedStore(path), encryption_key="synthetic-key", ttl=0)
+    )
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-history-retention", supports_websockets=False
+    ) as provider:
+        agent = Agent(
+            instructions="Do not submit.",
+            provider=provider,
+            handoffs=[Agent(name="destination", instructions="Do not enter.")],
+            prepare_handoff_input=lambda view: view,
+        )
+        with pytest.raises(ValueError, match="Handoff input preparation cannot combine"):
+            async with agent.session(storage=storage):
+                pytest.fail("An incompatible Session opened")
+    assert responses.requests == []
+
+
+@pytest.mark.parametrize(
     "operation,tamper", [("read", "revision"), ("read", "json"), ("commit", "revision")]
 )
 def test_encrypted_authentication_errors_discard_snapshot_frames_and_context(

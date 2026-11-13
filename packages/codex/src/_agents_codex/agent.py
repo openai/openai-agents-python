@@ -113,6 +113,7 @@ if TYPE_CHECKING:
         _EnvironmentLease,
         _InteractionHandler,
         _OpeningOwner,
+        _RunErrorHandler,
     )
     from .state import LocalStorage, SessionState
     from .telemetry import TraceOptions
@@ -1968,6 +1969,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2006,6 +2008,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2044,6 +2047,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2086,6 +2090,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2167,6 +2172,13 @@ class Agent(Generic[ContextT, OutputT]):
         Portable manual checkpoints have been retaining captured caller input.
         Restores without that origin have been reporting input=None and incomplete=True.
         Read the snapshot from RunDiagnosticError.details. The original error is its cause.
+
+        error_handler receives a settled run failure and its captured diagnostics.
+        Return RecoverRun to supply schema-validated output, or None to propagate
+        the failure. The replacement can be added as an assistant history item.
+        Provider refusal, final output validation and the request budget are
+        eligible. Recovery is unavailable when output guards or uncertain cleanup
+        prevent safe completion.
         """
         provider_history = _capture_provider_history(provider_history)
         if input_storage_policy is not None:
@@ -2175,10 +2187,11 @@ class Agent(Generic[ContextT, OutputT]):
             if input is None:
                 raise TypeError("Cannot add input_storage_policy when resuming a run")
             input = deepcopy(input)
+        if error_handler is not None and not callable(error_handler):
+            raise TypeError("error_handler must be callable or None")
         capture_error_details = capture_error_details is True
-        error_input = (
-            deepcopy(input) if capture_error_details and input_storage_policy is None else None
-        )
+        observe_failure = capture_error_details or error_handler is not None
+        error_input = deepcopy(input) if observe_failure and input_storage_policy is None else None
         if error_input is not None:
             input = error_input
         audio_budget = [_MAX_AUDIO_INPUT_BYTES]
@@ -2196,7 +2209,7 @@ class Agent(Generic[ContextT, OutputT]):
             if not isinstance(input, str) and input_storage_policy is None:
                 input = cast("UserInput", {"role": "user", "content": _response_content(parts)})
         options: dict[str, Any] = {}
-        if capture_error_details:
+        if observe_failure:
             options["include_raw_provider_events"] = True
         raw_usage_token = None
         produced_items_token = None
@@ -2208,7 +2221,6 @@ class Agent(Generic[ContextT, OutputT]):
                 CapabilityError,
                 InteractionRequired,
                 NativeError,
-                RunDiagnosticError,
                 _handoff_default_names,
                 _produced_items_restore,
                 _raw_usage_restore,
@@ -2384,6 +2396,7 @@ class Agent(Generic[ContextT, OutputT]):
                 and budget is None
                 and not input_guardrails
                 and not output_guardrails
+                and error_handler is None
             ):
                 # Only the built-in one-shot opening may defer its initial
                 # instruction receipt to the first ordinary submission.
@@ -2414,7 +2427,7 @@ class Agent(Generic[ContextT, OutputT]):
             if return_raw_usage and resume_manual:
                 assert state is not None
                 raw_usage_token = _raw_usage_restore.set((self, state, asyncio.current_task()))
-            if (return_items or capture_error_details) and resume_manual:
+            if (return_items or observe_failure) and resume_manual:
                 assert state is not None
                 produced_items_token = _produced_items_restore.set(
                     (self, state, asyncio.current_task())
@@ -2565,7 +2578,7 @@ class Agent(Generic[ContextT, OutputT]):
                 session._fail_unhandled_configured_children = session._interaction_handler is None
                 if return_raw_usage:
                     session._start_raw_usage()
-                if return_items or capture_error_details:
+                if return_items or observe_failure:
                     session._start_produced_items()
                 if resume_manual:
                     restored = session.restored_turn
@@ -2591,7 +2604,7 @@ class Agent(Generic[ContextT, OutputT]):
                         submission = await session.submit(
                             input, tools=tools, before_step=before_step, **submit_options
                         )
-                if capture_error_details and input is not None and input_storage_policy is None:
+                if observe_failure and input is not None and input_storage_policy is None:
                     session._remember_run_error_input(submission, error_input)
                 if session._interaction_handler is None and pause_manual:
                     return await session._run_with_interactions(
@@ -2602,25 +2615,23 @@ class Agent(Generic[ContextT, OutputT]):
                         return_raw_usage=return_raw_usage,
                         return_items=return_items,
                         capture_error_details=capture_error_details,
+                        error_handler=error_handler,
                         error_input=error_input,
                         pause_manual=pause_manual,
                     )
-                try:
-                    result = await submission.get_result()
-                except Exception as error:
-                    if capture_error_details:
-                        details = await session._capture_run_error_details(submission, error_input)
-                        if details is not None:
-                            raise RunDiagnosticError(details) from error
-                    raise
+                result = await session._one_shot_result(
+                    submission, error_handler, capture_error_details, error_input
+                )
                 if return_state:
                     result = replace(result, state=await session.save_state())
                 if return_history:
                     result = replace(result, history=await session._run_history())
                 if return_raw_usage:
                     result = replace(result, raw_usage=session._take_raw_usage(result.turn))
-                if return_items:
+                if return_items and result.items is None:
                     result = replace(result, items=session._take_produced_items(result.turn))
+                if not return_items and result.items is not None:
+                    result = replace(result, items=None)
                 return result
         finally:
             if raw_usage_token is not None:
@@ -2655,6 +2666,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2693,6 +2705,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2731,6 +2744,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2773,6 +2787,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2825,6 +2840,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["return_items"] = return_items
                 if capture_error_details is True:
                     options["capture_error_details"] = True
+                if error_handler is not None:
+                    options["error_handler"] = error_handler
                 if return_state is not False:
                     options["return_state"] = return_state
                 if return_history is not False:

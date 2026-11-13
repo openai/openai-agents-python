@@ -1051,7 +1051,15 @@
     {
       "path": "sdk-handoff-restored-model-identity.patch",
       "sha256": "4db2a02356b7d53209e8f0aba1ca91abb2a51f9ad2da91fd7648bd5a05b52cd3"
+    },
+    {
+      "path": "sdk-handoff-compaction-anchor-privacy.patch",
+      "sha256": "270b47efa763bd0c7eb74c1b53ddb6ff8daef65a6426bca9fccef91fa9d30c7a"
+    },
+    {
+      "path": "sdk-original-item-eligibility.patch",
+      "sha256": "7c9fbb9c6c03a4dd1029b53ea2ab2c82bc799aedebcdbb23384b02f0844df691"
     }
   ],
-  "result_tree": "6248b56aff1ec7163f5a5b4af3e3b678858bfe47"
+  "result_tree": "61328c1878abd8f21b4e0fab323e2ffcefbf2b1c"
 }
