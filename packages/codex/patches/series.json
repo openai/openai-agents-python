@@ -1031,7 +1031,11 @@
     {
       "path": "sdk-portable-mcp-peer-elicitation.patch",
       "sha256": "9186a141613fbcc7376c85a093b4dd86a099bb641d689054c4b859ca5a9a22e1"
+    },
+    {
+      "path": "sdk-native-mcp-failure-policy.patch",
+      "sha256": "2b12d391be1d784668b6c8d4b56a6ae3fecbaa073fba2ea3a6add4b35dfd1f3c"
     }
   ],
-  "result_tree": "674823ff71303aa0374e01bc42094c5c9a29c0ae"
+  "result_tree": "fe52246fd14df07693858e19e2595ab88f183e26"
 }
