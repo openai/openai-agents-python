@@ -118,6 +118,7 @@ async def test_configured_rollback_keeps_issuing_executor_tool_ceiling(
                 await sibling.wait()
                 [child] = source._configured_children
                 opening = child.session._native_options
+                assert opening is not None
 
                 def refuse():
                     raise RuntimeError("injected parent refusal")
@@ -127,9 +128,9 @@ async def test_configured_rollback_keeps_issuing_executor_tool_ceiling(
                 [recovered] = source._configured_children
                 # Inspect the replacement's current native selection before sampling resumes.
                 before = json.loads(opening)["tool_policy"]["allowed_tools"]
-                after = json.loads(recovered.session._native_options)["tool_policy"][
-                    "allowed_tools"
-                ]
+                recovered_options = recovered.session._native_options
+                assert recovered_options is not None
+                after = json.loads(recovered_options)["tool_policy"]["allowed_tools"]
                 assert before == after
                 assert "exec_command" not in {tool["name"] for tool in after}
                 pending = await turn.wait_for_request_or_result()

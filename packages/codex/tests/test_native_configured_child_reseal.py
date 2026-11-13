@@ -80,10 +80,14 @@ async def test_restored_parent_reseal_retains_second_child_approval_without_repe
                 assert turn is not None
                 first = await turn.wait_for_request_or_result()
                 assert isinstance(first, PendingRequests)
-                await resumed.respond(first.requests[0].reply(True))
+                [reentered] = first.requests
+                assert isinstance(reentered, ApprovalRequested)
+                await resumed.respond(reentered.reply(True))
                 second = await turn.wait_for_request_or_result()
                 assert isinstance(second, PendingRequests)
-                assert second.requests[0].call_id == "child-second"
+                [next_approval] = second.requests
+                assert isinstance(next_approval, ApprovalRequested)
+                assert next_approval.call_id == "child-second"
                 assert effects == ["sibling", "child-first"]
                 saved_second = await resumed.suspend()
                 prefix_usage = turn.run_usage
@@ -96,6 +100,7 @@ async def test_restored_parent_reseal_retains_second_child_approval_without_repe
                 pending = await turn.wait_for_request_or_result()
                 assert isinstance(pending, PendingRequests)
                 [current] = pending.requests
+                assert isinstance(current, ApprovalRequested)
                 assert current.call_id == "child-second"
                 with pytest.raises(InteractionExpiredError):
                     await final.respond(original.reply(True))
