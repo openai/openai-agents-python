@@ -315,7 +315,6 @@ class BaseSandboxSession(abc.ABC):
     _pre_stop_hooks_failed: bool = False
     _pre_stop_hooks_lock: asyncio.Lock | None = None
     _aclose_lock: asyncio.Lock | None = None
-    _borrowed_manifest_lock: asyncio.Lock | None = None
     _runtime_helpers_installed: set[PurePath] | None = None
     _runtime_helper_cache_key: object = _RUNTIME_HELPER_CACHE_KEY_UNSET
     _workspace_path_policy_cache: (
