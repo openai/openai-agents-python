@@ -31,18 +31,26 @@ impl ModelRequestContributor for Contributor {
                 thread: input.thread_id.to_owned(),
                 admission: self.boundary.response_admission(input.thread_id),
                 registered_plan: self.registered_plan,
+                text_demand: self.boundary.text_delta_demand(input.thread_id),
             }) as Box<dyn ModelResponseInterceptor>
         })
     }
 }
 
 struct Interceptor {
+    text_demand: Option<Arc<codex_api::TextDeltaDemand>>,
     thread: String,
     admission: Option<Arc<crate::python_tools::TurnAdmission>>,
     registered_plan: bool,
 }
 
 impl ModelResponseInterceptor for Interceptor {
+    fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {
+        (!self.registered_plan)
+            .then(|| self.text_demand.clone())
+            .flatten()
+    }
+
     fn preserves_provider_message_window(&self) -> bool {
         // Accepted events are unchanged; unsupported output rejects the stream.
         true
@@ -414,6 +422,7 @@ mod registered_plan_tests {
                 .flatten(),
             );
             let interceptor = Box::new(Interceptor {
+                text_demand: None,
                 thread: "synthetic-thread".into(),
                 admission: None,
                 registered_plan,
@@ -504,6 +513,7 @@ mod computer_guard_tests {
                         }),
                     ])),
                     owner: Interceptor {
+                        text_demand: None,
                         thread: "computer-guard".into(),
                         admission: None,
                         registered_plan: false,

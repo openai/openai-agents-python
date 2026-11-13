@@ -2301,6 +2301,8 @@ class Agent(Generic[ContextT, OutputT]):
                     produced_items_token = None
                 if isinstance(session, Completed):
                     return session
+                if capture_error_details:
+                    session._request_text_observation()
                 if (
                     pause_manual
                     or (prepare_request is not None and on_interaction is None)

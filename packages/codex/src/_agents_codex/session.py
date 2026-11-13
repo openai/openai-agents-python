@@ -5171,6 +5171,7 @@ class Session(Generic[ContextT, OutputT]):
             thread._enable_raw_provider_events()
         self._engine = engine
         self._native = thread
+        self._text_observation_requested = False
         # Issued snapshots belong to this Session's current native thread.
         self._model_context_snapshots: weakref.WeakKeyDictionary[ModelContextSnapshot, str] = (
             weakref.WeakKeyDictionary()
@@ -5279,6 +5280,9 @@ class Session(Generic[ContextT, OutputT]):
         self._request_observation_routes: weakref.WeakValueDictionary[str, _Submission] = (
             weakref.WeakValueDictionary()
         )
+        self._observations._text_demand = weakref.WeakMethod(self._request_text_observation)
+        if observation_retention == "all" or include_raw_provider_events:
+            self._request_text_observation()
         self._observations._callback_check = weakref.WeakMethod(self._check_callback_operation)
         self._realtime: RealtimeSession | None = None
         # The sole native reader owns questions during opening publication.
@@ -6456,6 +6460,11 @@ class Session(Generic[ContextT, OutputT]):
         with _private_task(enqueue()) as (task, outcome):
             state.add_callback(task)
             await _join(task, outcome=outcome)
+
+    def _request_text_observation(self) -> None:
+        self._text_observation_requested = True
+        if not self._closed:
+            self._native._request_text_observation()
 
     def _check_open(self) -> None:
         self._check_loop()
@@ -8655,6 +8664,8 @@ class Session(Generic[ContextT, OutputT]):
             )
             if self._model_backend is not None:
                 thread._enable_model_producer(True)
+            if self._text_observation_requested:
+                thread._request_text_observation()
             await change.validate_candidate(thread)
             if self._profiles:
                 graph = options["_agent_profiles"]
@@ -8702,6 +8713,8 @@ class Session(Generic[ContextT, OutputT]):
             change.release()
             await self._engine.close()
             self._engine = engine
+            if self._text_observation_requested:
+                thread._request_text_observation()
             self._native = thread
             if publish_profile_catalogs is not None:
                 publish_profile_catalogs()
@@ -16579,6 +16592,7 @@ class Session(Generic[ContextT, OutputT]):
     async def items(self, *, subagent_id: str | None = None) -> AsyncIterator[SessionItem]:
         """Iterate a snapshot of recorded items, including inherited child history."""
         self._check_open()
+        self._request_text_observation()
         history = json.loads(await self._native.read_thread_history(subagent_id))
         turns, items = project_history(history, self.id, subagent_id)
         if subagent_id is None:
@@ -16633,6 +16647,7 @@ class Session(Generic[ContextT, OutputT]):
     async def turns(self, *, subagent_id: str | None = None) -> AsyncIterator[RecordedTurn]:
         """Iterate a snapshot of recorded turns, including restored terminal outcomes."""
         self._check_open()
+        self._request_text_observation()
         history = json.loads(await self._native.read_thread_history(subagent_id))
         turns, _ = project_history(history, self.id, subagent_id)
         if subagent_id is None:
