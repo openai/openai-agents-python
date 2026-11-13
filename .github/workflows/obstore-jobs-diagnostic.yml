@@ -1,0 +1,171 @@
+# Temporary dependency-only diagnostic; no SDK build or cache publication.
+name: Obstore Cargo jobs diagnostic
+on:
+  push:
+    branches: [ci/hillclimb/python-obstore-jobs-21]
+permissions:
+  contents: read
+env:
+  CARGO_BUILD_JOBS: '3'
+  CARGO_INCREMENTAL: '0'
+  RUSTUP_TOOLCHAIN: '1.99.1-x86_64-pc-windows-msvc'
+jobs:
+  build:
+    if: >-
+      github.repository == 'openai/openai-agents-python' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/ci/hillclimb/python-obstore-jobs-21'
+    name: Obstore source build (jobs=${{ matrix.jobs }})
+    runs-on:
+      group: codex-runners
+      labels: codex-windows-x64
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        jobs: [3, 8]
+    env:
+      UV_CACHE_DIR: ${{ github.workspace }}/obstore-uv-${{ matrix.jobs }}
+      CARGO_HOME: ${{ github.workspace }}/obstore-cargo-${{ matrix.jobs }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/obstore-target-${{ matrix.jobs }}
+    steps:
+      - name: Set up the matched Python and uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          version: '0.11.14'
+          python-version: '3.14.10'
+          enable-cache: false
+      - name: Authenticate the locked source and record the host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $resultDirectory = Join-Path $env:RUNNER_TEMP 'obstore-jobs-results'
+          New-Item -ItemType Directory -Path $resultDirectory -Force | Out-Null
+          $sourcePath = Join-Path $env:RUNNER_TEMP 'obstore-0.8.2.tar.gz'
+          $sourceUrl = 'https://files.pythonhosted.org/packages/a3/8c/9ec984edd0f3b72226adfaa19b1c61b15823b35b52f311ca4af36d009d15/obstore-0.8.2.tar.gz'
+          $sourceHash = 'a467bc4e97169e2ba749981b4fd0936015428d9b8f3fb83a5528536b1b6f377f'
+          Invoke-WebRequest -Uri $sourceUrl -OutFile $sourcePath
+          if ((Get-FileHash $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sourceHash) {
+            throw 'The sdist differs from the exact uv.lock source'
+          }
+          $compiler = (& rustc -vV | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $compiler -notmatch '^rustc 1\.99\.1\s') {
+            throw 'The exact toolchain shipped by the recorded runner image is unavailable'
+          }
+          foreach ($cachePath in @((Join-Path $env:CARGO_HOME 'registry'), (Join-Path $env:CARGO_HOME 'git'), $env:CARGO_TARGET_DIR)) {
+            if ((Test-Path $cachePath) -and @(Get-ChildItem -Force -Recurse -File $cachePath).Count -gt 0) {
+              throw 'Diagnostic Cargo source or target cache is not cold'
+            }
+          }
+          $system = Get-CimInstance Win32_ComputerSystem
+          $operatingSystem = Get-CimInstance Win32_OperatingSystem
+          $hardware = @{
+            cpus = $system.NumberOfLogicalProcessors
+            memory_bytes = $system.TotalPhysicalMemory
+            cpu_models = @(Get-CimInstance Win32_Processor | ForEach-Object { $_.Name })
+            os = $operatingSystem.Caption
+            os_version = $operatingSystem.Version
+            image_version = $env:ImageVersion
+            uv = (& uv --version | Out-String).Trim()
+            rustc = $compiler
+            rustup_toolchain = $env:RUSTUP_TOOLCHAIN
+            source_sha256 = $sourceHash
+            uv_cache = $env:UV_CACHE_DIR
+            cargo_cache = $env:CARGO_HOME
+            cargo_target = $env:CARGO_TARGET_DIR
+          }
+          if ($hardware.cpus -ne 16) { throw 'Comparison requires the observed 16-CPU standard runner' }
+          $hardware | ConvertTo-Json -Depth 5 | Tee-Object -FilePath (Join-Path $resultDirectory 'host.json')
+          uv venv --python 3.14.10 (Join-Path $env:RUNNER_TEMP 'obstore-venv')
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to prepare the isolated interpreter' }
+          $sourceUri = ([System.Uri]::new($sourcePath)).AbsoluteUri
+          "obstore @ $sourceUri --hash=sha256:$sourceHash" |
+            Set-Content -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'obstore-requirements.txt')
+          'maturin==1.16.0' |
+            Set-Content -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'obstore-build-constraints.txt')
+      - name: Time only the isolated source installation
+        shell: pwsh
+        env:
+          CARGO_BUILD_JOBS: ${{ matrix.jobs }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pythonPath = Join-Path $env:RUNNER_TEMP 'obstore-venv/Scripts/python.exe'
+          $requirementPath = Join-Path $env:RUNNER_TEMP 'obstore-requirements.txt'
+          $constraintPath = Join-Path $env:RUNNER_TEMP 'obstore-build-constraints.txt'
+          $resultDirectory = Join-Path $env:RUNNER_TEMP 'obstore-jobs-results'
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & uv pip install --python $pythonPath --no-deps --require-hashes --build-constraints $constraintPath --config-setting 'maturin.build-args=--locked' --requirement $requirementPath 2>&1 | Tee-Object -FilePath (Join-Path $resultDirectory 'source-build.log')
+          $buildExit = $LASTEXITCODE
+          $watch.Stop()
+          @{
+            jobs = [int]$env:CARGO_BUILD_JOBS
+            elapsed_seconds = $watch.Elapsed.TotalSeconds
+            exit_code = $buildExit
+          } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $resultDirectory 'timing.json')
+          if ($buildExit -ne 0) { throw "Source build failed: $buildExit" }
+      - name: Verify wheel contents and a compiled in-memory operation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $verifyPath = Join-Path $env:RUNNER_TEMP 'verify-obstore.py'
+          @'
+          import base64
+          import csv
+          import hashlib
+          import importlib.metadata
+          import json
+          import os
+          from pathlib import Path
+          import tarfile
+          import tomllib
+          import obstore
+          import obstore._obstore
+          from obstore.store import MemoryStore
+          root = Path(os.environ["RUNNER_TEMP"])
+          distribution = importlib.metadata.distribution("obstore")
+          assert distribution.version == "0.8.2"
+          wheel = distribution.read_text("WHEEL")
+          assert "Tag: cp314-cp314-win_amd64" in wheel
+          assert "Generator: maturin (1.16.0)" in wheel.splitlines()
+          for row in csv.reader(distribution.read_text("RECORD").splitlines()):
+              name, encoded, size = row
+              if not encoded:
+                  continue
+              algorithm, expected = encoded.split("=", 1)
+              assert algorithm == "sha256"
+              data = Path(distribution.locate_file(name)).read_bytes()
+              actual = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+              assert actual == expected and len(data) == int(size), name
+          with tarfile.open(root / "obstore-0.8.2.tar.gz") as archive:
+              lock = archive.extractfile("obstore-0.8.2/Cargo.lock").read()
+              profile = tomllib.loads(archive.extractfile("obstore-0.8.2/Cargo.toml").read().decode())["profile"]["release"]
+              backend = tomllib.loads(archive.extractfile("obstore-0.8.2/pyproject.toml").read().decode())["build-system"]
+          assert hashlib.sha256(lock).hexdigest() == "8b6fee29e67698578d9df7f7d25525e9e84504f12010be130bfbe787323c3d09"
+          assert profile == {"lto": True, "codegen-units": 1}
+          assert backend == {"requires": ["maturin>=1.4.0,<2.0"], "build-backend": "maturin"}
+          store = MemoryStore()
+          obstore.put(store, "jobs-probe", b"obstore-0.8.2")
+          assert bytes(obstore.get(store, "jobs-probe").bytes()) == b"obstore-0.8.2"
+          native = Path(obstore._obstore.__file__)
+          report = {
+              "version": distribution.version,
+              "wheel_metadata": wheel,
+              "native_sha256": hashlib.sha256(native.read_bytes()).hexdigest(),
+              "native_bytes": native.stat().st_size,
+              "source_cargo_lock_sha256": hashlib.sha256(lock).hexdigest(),
+              "source_release_profile": profile,
+              "record_verified": True,
+              "memory_store_roundtrip": True,
+          }
+          (root / "obstore-jobs-results" / "verification.json").write_text(json.dumps(report, indent=2) + "\n")
+          print(json.dumps(report, indent=2))
+          '@ | Set-Content -Encoding utf8 $verifyPath
+          & (Join-Path $env:RUNNER_TEMP 'obstore-venv/Scripts/python.exe') $verifyPath
+          if ($LASTEXITCODE -ne 0) { throw 'Installed wheel verification failed' }
+      - name: Save diagnostic evidence only
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: obstore-jobs-${{ matrix.jobs }}
+          path: ${{ runner.temp }}/obstore-jobs-results/
+          if-no-files-found: warn
