@@ -351,6 +351,9 @@ from .tools import (
     _capture_web_search_config as _capture_web_search_config,
     _CapturedFunction as _CapturedFunction,
     _hosted_tool_name,
+    _MCPResourceRef as _MCPResourceRef,
+    _ordinary_default_slots as _ordinary_default_slots,
+    _plan_tool_update,
     _restore_operation_slots as _restore_operation_slots,
     _restore_python_catalog as _restore_python_catalog,
     _saved_python_ref as _saved_python_ref,
@@ -2011,21 +2014,6 @@ def _fixed_tool_refs(
             ToolRef(name, "collaboration") for name in native_agents._collaboration_tool_names
         )
     return fixed
-
-
-@dataclass(frozen=True)
-class _MCPResourceRef:
-    """Select a current ordinary server without granting any model tools."""
-
-    name: str
-
-
-def _ordinary_default_slots(
-    catalog: _ToolCatalog, selection: Sequence[ToolRef | _MCPResourceRef] | None
-) -> list[int] | None:
-    if selection is None:
-        return None
-    return [slot for slot, tool in enumerate(catalog.tools) if tool._ref in selection]
 
 
 def _handoff_default_names(
@@ -9772,49 +9760,13 @@ class Session(Generic[ContextT, OutputT]):
             opening_mcp_modes = {server.name: server.defer_loading for server in allowed_mcp}
             if any(server.defer_loading != opening_mcp_modes[server.name] for server in mcp):
                 raise CapabilityError("MCP schema discovery mode must match Session opening")
-            # MCP defaults select current bindings by name, never by captured
-            # endpoints or credentials. Empty declarations select only a server.
-            defaults = tuple(
-                ref
-                for tool in selection
-                for ref in (
-                    tuple(tool.tool(raw) for raw in tool.tools)
-                    if isinstance(tool, (HttpMCP, StdioMCP)) and tool.tools
-                    else (_MCPResourceRef(tool.name),)
-                    if isinstance(tool, (HttpMCP, StdioMCP)) and type(tool) in (HttpMCP, StdioMCP)
-                    else (tool,)
-                )
+            plan = _plan_tool_update(
+                selection,
+                self._bindings,
+                self._bound_tools,
+                self._context,
             )
-            # Explicit idle declarations replace bindings; refs only select.
-            # Preserve every omitted opening slot and alias for later operations.
-            from .hosted_mcp import HostedMCP
-
-            supplied_python = {
-                tool.ref: tool._binding if isinstance(tool, HostedMCP) else tool
-                for tool in selection
-                if isinstance(tool, (FunctionTool, HostedMCP))
-            }
-            supplied_mcp = tuple(
-                tool for tool in selection if isinstance(tool, (HttpMCP, StdioMCP))
-            )
-            bindings: list[Tool[ContextT]] = []
-            for bound in self._bindings:
-                if isinstance(bound, (FunctionTool, HostedMCP)):
-                    bindings.append(supplied_python.get(bound.ref, bound))
-                elif isinstance(bound, (HttpMCP, StdioMCP)):
-                    if not any(server.name == bound.name for server in supplied_mcp):
-                        bindings.append(bound)
-                else:
-                    bindings.append(bound)
-            # A validated alias can contain several disjoint descriptor identities.
-            # Replace its old identities once; keep all current ones selectable.
-            bindings.extend(supplied_mcp)
-            selected = tuple(
-                supplied_python[bound._ref]._capture(self._context)
-                if bound._ref in supplied_python
-                else bound
-                for bound in self._bound_tools
-            )
+            selected = plan.bound_tools
             from ._hosted_mcp_binding import (
                 _CapturedHostedMCPApproval,
                 _CapturedHostedMCPManual,
@@ -9829,14 +9781,11 @@ class Session(Generic[ContextT, OutputT]):
                     raise CapabilityError(
                         "Hosted MCP provider configuration is fixed when the Session opens"
                     )
-            bound_tools = selected
             if self._native_agents is not None:
-                refs = {tool.ref for tool in python}
-                selected = tuple(tool for tool in selected if tool._ref in refs)
-            candidate = _ToolCatalog(
+                selected = plan.select(python)
+            candidate = plan.catalog(
                 max(self._catalog.generation, self._profile_generation_high_water) + 1, selected
             )
-
             default_slots = (
                 _ordinary_default_slots(candidate, tuple(tool.ref for tool in python))
                 if self._profiles
@@ -9850,11 +9799,13 @@ class Session(Generic[ContextT, OutputT]):
                     allowed_mcp,
                     candidate.native_specs(),
                     default_slots=default_slots,
-                    default_handoffs=_handoff_default_names(defaults, self._effective_handoffs()),
+                    default_handoffs=_handoff_default_names(
+                        plan.defaults, self._effective_handoffs()
+                    ),
                 )
-                self._bound_tools = bound_tools
-                self._bindings = tuple(bindings)
-                self._default_tools = defaults
+                self._bound_tools = plan.bound_tools
+                self._bindings = plan.bindings
+                self._default_tools = plan.defaults
 
             await publish()
             return
