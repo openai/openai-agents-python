@@ -4427,6 +4427,42 @@ impl PythonTools {
             .unwrap_or_default()
     }
 
+    pub(crate) fn unpublished_tool_outputs(
+        &self,
+        turn: &str,
+    ) -> Vec<(codex_history::ResponseItemEnvelope, bool)> {
+        self.admission
+            .lock()
+            .expect("Python admission receipt poisoned")
+            .as_ref()
+            .filter(|receipt| receipt.turn_id == turn)
+            .map(|receipt| {
+                let completed = receipt
+                    .completed_calls
+                    .lock()
+                    .expect("Completed calls poisoned")
+                    .clone();
+                receipt
+                    .held_tool_outputs
+                    .unpublished_outputs
+                    .lock()
+                    .expect("unpublished tool outputs poisoned")
+                    .iter()
+                    .filter(|(output, _)| match &output.item {
+                        ResponseItem::FunctionCallOutput {
+                            call_id: Some(id), ..
+                        }
+                        | ResponseItem::CustomToolCallOutput { call_id: id, .. } => {
+                            completed.contains(id)
+                        }
+                        _ => false,
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn pending_manual_keys(&self, owner: &str) -> Result<Vec<PendingKey>> {
         let pending = self.pending.lock().expect("Python replies poisoned");
         ensure!(!pending.is_empty(), "No pending manual calls");
@@ -5187,6 +5223,17 @@ impl ToolLifecycleContributor for PythonContributor {
                 // including later native post-hook changes. A successful
                 // oneshot send alone cannot prove that settlement.
                 tools.record_completed_call(input.turn_id, input.call_id);
+                #[cfg(test)]
+                {
+                    let hold = tools.before_result.lock().unwrap().clone();
+                    if let Some(hold) = hold
+                        && hold.after_terminal
+                        && hold.call_id == input.call_id
+                    {
+                        hold.entered.add_permits(1);
+                        hold.release.acquire().await.unwrap().forget();
+                    }
+                }
             }
         })
     }
@@ -5703,6 +5750,15 @@ impl TurnLifecycleContributor for PythonContributor {
                 let Some(publication) = startup.lock_current() else {
                     return;
                 };
+                let manual_progress = tools.manual_progress.clone();
+                *receipt
+                    .held_tool_outputs
+                    .unpublished_progress
+                    .lock()
+                    .expect("unpublished tool progress poisoned") =
+                    Some(Arc::new(move || {
+                        manual_progress.send_modify(|version| *version = version.wrapping_add(1));
+                    }));
                 crate::native_interception::attach_sdk_admission(input.turn_store, &receipt);
                 input.turn_store.insert(receipt.clone());
                 if let Some(previous) = admission.replace(receipt) {
@@ -7122,6 +7178,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 let hold = self.tools.before_result.lock().unwrap().clone();
                 if let Some(hold) = hold
                     && hold.call_id == key.call
+                    && !hold.after_terminal
                 {
                     hold.entered.add_permits(1);
                     hold.release.acquire().await.unwrap().forget();
@@ -7325,30 +7382,6 @@ impl ToolOutput for PythonOutput {
 #[cfg(test)]
 pub(crate) mod admission_order_tests {
     use super::*;
-
-    #[tokio::test]
-    async fn handoff_reply_wrong_kind_preserves_the_original_preparation() {
-        let tools = sdk();
-        tools.family.members.write().unwrap()
-            .insert("thread".into(), Arc::downgrade(&tools));
-        let id = tools.family.next_invocation.fetch_add(1, Ordering::Relaxed);
-        let mut request = json!({"id":"turn", "msg":{"thread":"thread"}});
-        let callback = tools.preparation_callback(id, &mut request);
-        let receipt = callback.receipt.clone();
-        let (reply, mut receive) = oneshot::channel::<Option<ModelContextUpdate>>();
-        tools.preparation_replies.lock().unwrap().as_mut().unwrap().insert(id,
-            PreparationSlot {turn:"turn".into(), reply:Some(PreparationReply::Context(reply)), callback});
-        assert!(tools.callback_operation("thread", &receipt, "enter"));
-        assert!(tools.reply_handoff_input(id, Some(r#"{"input":[],"previous":[],"generated":[]}"#),
-            Some("thread"), None).is_err());
-        assert!(matches!(receive.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
-        let PreparationReply::Context(original) = tools.take_preparation(id).unwrap() else {
-            panic!("The original callback kind changed");
-        };
-        assert!(original.send(None).is_ok());
-        assert!(receive.await.unwrap().is_none());
-        assert!(tools.callback_operation("thread", &receipt, "release"));
-    }
 
     // Thread-scoped only. Core has detached the real task before this SDK hook
     // runs, but it has not sent TurnComplete or cleared the active slot yet.
@@ -9858,6 +9891,30 @@ pub(crate) mod managed_tests {
                     .contains("invalid Python tool slot projection")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn handoff_reply_wrong_kind_preserves_the_original_preparation() {
+        let tools = sdk();
+        tools.family.members.write().unwrap()
+            .insert("thread".into(), Arc::downgrade(&tools));
+        let id = tools.family.next_invocation.fetch_add(1, Ordering::Relaxed);
+        let mut request = json!({"id":"turn", "msg":{"thread":"thread"}});
+        let callback = tools.preparation_callback(id, &mut request);
+        let receipt = callback.receipt.clone();
+        let (reply, mut receive) = oneshot::channel::<Option<ModelContextUpdate>>();
+        tools.preparation_replies.lock().unwrap().as_mut().unwrap().insert(id,
+            PreparationSlot {turn:"turn".into(), reply:Some(PreparationReply::Context(reply)), callback});
+        assert!(tools.callback_operation("thread", &receipt, "enter"));
+        assert!(tools.reply_handoff_input(id, Some(r#"{"input":[],"previous":[],"generated":[]}"#),
+            Some("thread"), None).is_err());
+        assert!(matches!(receive.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        let PreparationReply::Context(original) = tools.take_preparation(id).unwrap() else {
+            panic!("The original callback kind changed");
+        };
+        assert!(original.send(None).is_ok());
+        assert!(receive.await.unwrap().is_none());
+        assert!(tools.callback_operation("thread", &receipt, "release"));
     }
 
     fn sdk() -> Arc<PythonTools> {

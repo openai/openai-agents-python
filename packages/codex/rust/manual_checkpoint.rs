@@ -1684,6 +1684,31 @@ pub(crate) async fn continue_if_ready(
     Ok(result)
 }
 
+// Only final Core envelopes can stand in for unpublished results. Ordinary
+// envelopes remain distinct from candidates held by terminal completion policy.
+fn completed_ready_outputs(
+    tools: &crate::python_tools::PythonTools,
+    turn: &str,
+) -> HashSet<String> {
+    let completed = tools.completed_calls(turn);
+    tools
+        .held_tool_outputs(turn)
+        .into_iter()
+        .chain(tools.unpublished_tool_outputs(turn))
+        .filter_map(|(output, _)| match output.item {
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(id), ..
+            }
+            | ResponseItem::CustomToolCallOutput { call_id: id, .. }
+                if completed.contains(&id) =>
+            {
+                Some(id)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 pub(crate) async fn ready(thread: &crate::engine::ThreadState, owner: &Owner) -> Result<bool> {
     let restored = owner
         .lock()
@@ -1725,8 +1750,9 @@ pub(crate) async fn ready(thread: &crate::engine::ThreadState, owner: &Owner) ->
             .as_any()
             .downcast_ref::<crate::storage::MemoryThreadStore>()
             .context("Manual continuation requires the in-memory store")?;
+        let held = completed_ready_outputs(&tools, &pending[0].turn);
         if !store
-            .manual_suspension_ready(thread.id, &pending, &completed)
+            .manual_suspension_ready(thread.id, &pending, &held)
             .await?
         {
             return Ok(false);
@@ -1903,7 +1929,11 @@ pub(crate) async fn capture(
         Err(error) => return Err(error),
     };
     match store
-        .begin_manual_suspension(thread.id, pending.clone(), &tools.completed_calls(&turn))
+        .begin_manual_suspension(
+            thread.id,
+            pending.clone(),
+            &completed_ready_outputs(&tools, &turn),
+        )
         .await
     {
         Ok(true) => {}
@@ -2059,9 +2089,41 @@ pub(crate) async fn capture(
         }
         outputs.insert(id.clone(), output);
     }
+    let mut unpublished_ids = HashSet::new();
+    for (output, succeeded) in tools.unpublished_tool_outputs(&turn) {
+        let id = match &output.item {
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(id), ..
+            }
+            | ResponseItem::CustomToolCallOutput { call_id: id, .. } => id,
+            _ => anyhow::bail!("Invalid unpublished Core output"),
+        };
+        // A completed write or a terminal candidate takes precedence over its
+        // transient copy if cancellation lands before Core retires that copy.
+        if outputs.contains_key(id) {
+            continue;
+        }
+        ensure!(
+            calls.iter().any(|(call, _)| call == id) && !pending.iter().any(|key| key.call == *id),
+            "Unpublished Core output has no settled call owner"
+        );
+        if let Some(outcomes) = tool_outcomes.as_mut() {
+            ensure!(
+                outcomes.call_ids.contains(id),
+                "Unpublished Core output has no sampled call"
+            );
+            outcomes.record(id, succeeded);
+        } else {
+            anyhow::bail!("Unpublished Core output has no sampled batch");
+        }
+        unpublished_ids.insert(id.clone());
+        outputs.insert(id.clone(), output);
+    }
     let prefix = calls
         .iter()
-        .take_while(|(id, _)| outputs.contains_key(id) && !held_ids.contains(id))
+        .take_while(|(id, _)| {
+            outputs.contains_key(id) && !held_ids.contains(id) && !unpublished_ids.contains(id)
+        })
         .count();
     let order: Vec<String> = calls
         .iter()
@@ -2103,6 +2165,11 @@ pub(crate) async fn capture(
         .into_iter()
         .filter(|(id, _)| order.contains(id))
         .collect();
+    ensure!(
+        pending_ids.len() + accepted.len() == order.len()
+            && accepted.keys().all(|id| !pending_ids.contains(id.as_str())),
+        "Core did not settle every sibling receipt; no checkpoint was authorized"
+    );
     let history: Vec<_> = history
         .into_iter()
         .enumerate()

@@ -490,14 +490,14 @@ struct PersistedProfile {
 
 impl PersistedProfile {
     fn validate_presentation(&self) -> Result<()> {
-        let destination = AgentProfileReceipt {
-            profile_id: self.profile_id.clone(),
-            epoch: self.epoch,
-        };
+        // An idle update may retain an earlier admitted presentation. Core
+        // validates the complete publication chain before it can use that view.
         ensure!(
-            self.presentation
-                .as_ref()
-                .is_none_or(|value| value.belongs_to(&destination)),
+            self.presentation.as_ref().is_none_or(|value| {
+                value.destination.profile_id == self.profile_id
+                    && value.destination.epoch <= self.epoch
+                    && value.belongs_to(&value.destination)
+            }),
             "Restored presentation belongs to another Agent destination"
         );
         Ok(())
@@ -1325,10 +1325,18 @@ pub(crate) async fn configure(
                 .collect(),
         });
         let mut model = receipt.model;
+        // Startup has already rebound these runtime controls against the current declaration.
+        // The restored profile must retain them when an idle update copies its model.
+        model
+            .request_controls
+            .retry
+            .clone_from(&settings.request_controls.retry);
+        model.request_controls.attempt_timeout_ms = settings.request_controls.attempt_timeout_ms;
         model
             .request_controls
             .request_transport
             .clone_from(&settings.request_controls.request_transport);
+        model.invocation_timeout_ms = settings.invocation_timeout_ms;
         let mut target = AgentProfile {
             profile_id: receipt.profile_id,
             model,

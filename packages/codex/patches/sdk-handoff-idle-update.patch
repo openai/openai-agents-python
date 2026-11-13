@@ -1,0 +1,270 @@
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index 1dcc1061..f6a86036 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -30,6 +30,20 @@ struct PersistedProfile {
+     presentation: Option<codex_protocol::agent_profile::AgentProfileHandoffPresentation>,
+ }
+
++/// The original native publication remains the projection boundary after idle updates.
++#[derive(Clone)]
++struct HandoffPresentationAnchor(ResponseItem);
++
++pub(super) fn handoff_presentation_anchor(profile: &AgentProfile) -> ResponseItem {
++    profile
++        .data
++        .get::<HandoffPresentationAnchor>()
++        .map_or_else(
++            || profile.application_instructions.item.clone(),
++            |anchor| anchor.0.clone(),
++        )
++}
++
+ struct TaskFence {
+     context: Arc<TurnContext>,
+     done: Arc<Notify>,
+@@ -108,22 +122,27 @@ pub(super) fn profile_after_history_replacement(
+         .data
+         .get::<AgentProfileHandoffPresentation>()
+         .is_none()
+-        || retains_publication(replacement, &captured.profile.application_instructions.item)
++        || retains_publication(replacement, &handoff_presentation_anchor(&captured.profile))
+     {
+         return Arc::clone(captured);
+     }
+     let mut profile = captured.profile.as_ref().clone();
+     profile.data.remove::<AgentProfileHandoffPresentation>();
++    profile.data.remove::<HandoffPresentationAnchor>();
+     Arc::new(CapturedAgentProfile {
+         receipt: captured.receipt.clone(),
+         profile: Arc::new(profile),
+     })
+ }
+
+-fn persisted_profile(
+-    items: &[RolloutItem],
+-) -> CodexResult<Option<(&ResponseItemEnvelope, PersistedProfile)>> {
+-    let mut latest: Option<(&ResponseItemEnvelope, PersistedProfile)> = None;
++struct RestoredProfile<'a> {
++    envelope: &'a ResponseItemEnvelope,
++    record: PersistedProfile,
++    presentation_anchor: Option<&'a ResponseItem>,
++}
++
++fn persisted_profile(items: &[RolloutItem]) -> CodexResult<Option<RestoredProfile<'_>>> {
++    let mut latest: Option<RestoredProfile<'_>> = None;
+     let mut accepted_handoffs = Vec::new();
+     for item in items {
+         if let RolloutItem::Compacted(checkpoint) = item {
+@@ -133,10 +152,12 @@ fn persisted_profile(
+                 checkpoint.sdk_originals.as_ref(),
+                 Some(codex_history::sdk_originals::SdkOriginalHistoryCheckpoint::Replace(_))
+             ) && let Some(replacement) = checkpoint.replacement_history.as_ref()
+-                && let Some((envelope, record)) = latest.as_mut()
+-                && !retains_publication(replacement, &envelope.item)
++                && let Some(profile) = latest.as_mut()
++                && let Some(anchor) = profile.presentation_anchor
++                && !retains_publication(replacement, anchor)
+             {
+-                record.presentation = None;
++                profile.record.presentation = None;
++                profile.presentation_anchor = None;
+             }
+             continue;
+         }
+@@ -169,6 +190,7 @@ fn persisted_profile(
+         if record.profile_id.is_empty() || record.model.model.is_empty() {
+             return Err(invalid("Invalid persisted Agent profile identity"));
+         }
++        let mut presentation_anchor = None;
+         if let Some(presentation) = &record.presentation {
+             crate::prepared_request::validate_handoff_presentation(presentation)
+                 .map_err(invalid)?;
+@@ -176,21 +198,27 @@ fn persisted_profile(
+                 profile_id: record.profile_id.clone(),
+                 epoch: record.epoch,
+             };
+-            if !presentation.belongs_to(&destination)
+-                || !accepted_handoffs.contains(&&presentation.handoff)
+-                || latest.as_ref().is_none_or(|(_, previous)| {
+-                    let previous: &PersistedProfile = previous;
+-                    presentation.handoff.source.profile_id != previous.profile_id
+-                        || presentation.handoff.source.epoch != previous.epoch
++            if presentation.belongs_to(&destination)
++                && accepted_handoffs.contains(&&presentation.handoff)
++                && latest.as_ref().is_some_and(|previous| {
++                    presentation.handoff.source.profile_id == previous.record.profile_id
++                        && presentation.handoff.source.epoch == previous.record.epoch
+                 })
+             {
++                presentation_anchor = Some(&envelope.item);
++            } else if let Some(previous) = &latest
++                && record.profile_id == previous.record.profile_id
++                && previous.record.presentation.as_ref() == Some(presentation)
++                && let Some(anchor) = previous.presentation_anchor
++            {
++                presentation_anchor = Some(anchor);
++            } else {
+                 return Err(invalid("Persisted handoff presentation has another owner"));
+             }
+         }
+-        if let Some((_, previous)) = &latest {
+-            let previous: &PersistedProfile = previous;
++        if let Some(previous) = &latest {
+             if record.epoch
+-                != previous
++                != previous.record
+                     .epoch
+                     .checked_add(1)
+                     .ok_or_else(|| invalid("Agent profile epoch exhausted"))?
+@@ -200,7 +228,7 @@ fn persisted_profile(
+         } else if record.epoch != 0 {
+             return Err(invalid("Persisted Agent profile has no initial receipt"));
+         }
+-        latest = Some((envelope, record));
++        latest = Some(RestoredProfile { envelope, record, presentation_anchor });
+     }
+     Ok(latest)
+ }
+@@ -539,7 +567,7 @@ impl Session {
+             .map_err(|_| persistence_failure())?;
+         let previous = persisted_profile(&saved.items)?;
+         if restored {
+-            if let Some((envelope, record)) = previous {
++            if let Some(RestoredProfile { envelope, record, presentation_anchor }) = previous {
+                 if record.profile_id != target.profile_id
+                     || record.model.for_persistence() != target.model.for_persistence()
+                     || envelope.item != target.application_instructions.item
+@@ -573,6 +601,9 @@ impl Session {
+                     }
+                     let mut restored_target = (*target).clone();
+                     restored_target.data.insert(presentation);
++                    if let Some(anchor) = presentation_anchor {
++                        restored_target.data.insert(HandoffPresentationAnchor(anchor.clone()));
++                    }
+                     Arc::new(restored_target)
+                 } else {
+                     if target
+@@ -624,7 +655,7 @@ impl Session {
+             }
+         } else if previous
+             .as_ref()
+-            .map(|(_, record)| (&record.profile_id, record.epoch))
++            .map(|profile| (&profile.record.profile_id, profile.record.epoch))
+             != expected
+                 .as_ref()
+                 .map(|receipt| (&receipt.profile_id, receipt.epoch))
+@@ -644,14 +675,25 @@ impl Session {
+         let presentation = target
+             .data
+             .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>();
+-        if presentation.as_ref().is_some_and(|presentation| {
+-            task_fence.is_none()
+-                || !presentation.belongs_to(&receipt)
+-                || expected.as_ref() != Some(&presentation.handoff.source)
+-        }) {
+-            return Err(invalid(
+-                "Handoff presentation differs from committed destination",
+-            ));
++        let mut target = target;
++        if let Some(presentation) = &presentation {
++            let expected_transfer = task_fence.is_some()
++                && presentation.belongs_to(&receipt)
++                && expected.as_ref() == Some(&presentation.handoff.source);
++            let inherited = previous.as_ref().and_then(|previous| {
++                (task_fence.is_none()
++                    && previous.record.profile_id == receipt.profile_id
++                    && previous.record.presentation.as_ref() == Some(presentation.as_ref()))
++                .then_some(previous.presentation_anchor)
++                .flatten()
++            });
++            if let Some(anchor) = inherited {
++                Arc::make_mut(&mut target)
++                    .data
++                    .insert(HandoffPresentationAnchor(anchor.clone()));
++            } else if !expected_transfer {
++                return Err(invalid("Handoff presentation differs from committed destination"));
++            }
+         }
+         self.validate_handoff_input_retention(
+             presentation.is_some()
+@@ -895,8 +937,8 @@ impl Session {
+         let mut previous = values(&items[frontier.root_count..frontier.sample_count])?;
+         if let Some(source) = source {
+             if let Some(presentation) = source.profile.data.get::<AgentProfileHandoffPresentation>() {
+-                if !presentation.belongs_to(&source.receipt) { return Err(invalid("Source handoff presentation is stale")); }
+-                let publication = &source.profile.application_instructions.item;
++                let publication = handoff_presentation_anchor(&source.profile);
++                let publication = &publication;
+                 let anchors: Vec<_> = items.iter().enumerate().filter_map(|(index,item)|
+                     (item.id() == publication.id()).then_some(index)).collect();
+                 if anchors.len() != 1 || *items[anchors[0]] != *publication || anchors[0] >= frontier.sample_count {
+@@ -1071,9 +1113,25 @@ mod tests {
+             RolloutItem::ResponseItem(accepted_result.clone()),
+             envelope(&destination, 1, Some(presentation.clone())),
+         ];
+-        let (_, restored) = persisted_profile(&history).unwrap().unwrap();
++        let restored = persisted_profile(&history).unwrap().unwrap().record;
+         assert_eq!(restored.presentation, Some(presentation.clone()));
+         assert_eq!(history.len(), 3); // No effect item has been replaced.
++        let mut updated = history.clone();
++        updated.push(envelope(&destination, 2, Some(presentation.clone())));
++        let updated_profile = persisted_profile(&updated).unwrap().unwrap();
++        assert_eq!(updated_profile.record.epoch, 2);
++        assert_eq!(updated_profile.record.presentation, Some(presentation.clone()));
++        let RolloutItem::ResponseItem(first_publication) = &history[2] else {
++            panic!("expected the original destination publication");
++        };
++        assert_eq!(updated_profile.presentation_anchor, Some(&first_publication.item));
++
++        let mut injected = presentation.clone();
++        injected.input.clear();
++        updated.pop();
++        updated.push(envelope(&destination, 2, Some(injected)));
++        assert!(persisted_profile(&updated).is_err());
++
+         // Mutation of any persisted group cannot mint fresh HostedMCP authority.
+         for group in 0..3 {
+             let mut rejected = presentation.clone();
+@@ -1132,7 +1190,7 @@ mod tests {
+                 .unwrap();
+             let mut edited = history.clone();
+             edited.push(RolloutItem::Compacted(checkpoint));
+-            let (_, restored) = persisted_profile(&edited).unwrap().unwrap();
++            let restored = persisted_profile(&edited).unwrap().unwrap().record;
+             assert_eq!(restored.presentation.is_some(), retained);
+             // The original admitted transfer and presentation remain audit facts.
+             assert_eq!(edited[..history.len()], history);
+@@ -1570,7 +1628,7 @@ for line in sys.stdin:
+             .load_history(true)
+             .await
+             .unwrap();
+-        let (_, persisted) = persisted_profile(&history.items).unwrap().unwrap();
++        let persisted = persisted_profile(&history.items).unwrap().unwrap().record;
+         assert_eq!((persisted.profile_id.as_str(), persisted.epoch), ("a", 2));
+         assert!(
+             session
+@@ -2153,7 +2211,7 @@ for line in sys.stdin:
+             .load_history(true)
+             .await
+             .unwrap();
+-        let (_, persisted) = persisted_profile(&saved.items).unwrap().unwrap();
++        let persisted = persisted_profile(&saved.items).unwrap().unwrap().record;
+         assert_eq!(persisted.profile_id, receipt.profile_id);
+         assert_eq!(persisted.epoch, receipt.epoch);
+         session
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 7818379b..cc36a511 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2346,8 +2346,8 @@ async fn run_sampling_request(
+                     crate::prepared_request::apply_handoff_presentation(
+                         &prompt,
+                         &presentation,
+-                        &profile.receipt,
+-                        &profile.profile.application_instructions.item,
++                        &presentation.destination,
++                        &super::agent_profile::handoff_presentation_anchor(&profile.profile),
+                     )
+                 })
+                 .transpose()

@@ -83,11 +83,7 @@ async def test_idle_replacement_preserves_active_destination_across_restore(
 
 @pytest.mark.parametrize("projected", [False, True])
 @pytest.mark.parametrize("change", ["model", "instructions"])
-async def test_material_profile_update_publishes_or_rejects_stale_view(
-    responses, projected, change
-):
-    from agents import NativeError
-
+async def test_material_profile_update_preserves_admitted_view(responses, projected, change):
     def prepare(value):
         return replace(
             value,
@@ -135,37 +131,29 @@ async def test_material_profile_update_publishes_or_rejects_stale_view(
                 if change == "model"
                 else {"instructions": "CHANGED destination authority."}
             )
-            if projected:
-                with pytest.raises(
-                    (NativeError, RuntimeError, ValueError),
-                    match="Handoff presentation differs from committed destination",
-                ):
-                    await session.update(**kwargs)
+            await session.update(**kwargs)
+            after = json.loads((await session.save_state()).to_json())
+            latest = publications(after)[-1]
+            assert len(publications(after)) == len(publications(before)) + 1
+            assert (
+                latest["metadata"]["sdk_agent_profile"]["epoch"]
+                == previous["metadata"]["sdk_agent_profile"]["epoch"] + 1
+            )
+            assert latest["payload"]["id"] != previous["payload"]["id"]
+            assert latest["metadata"]["sdk_agent_profile"].get("presentation") == previous[
+                "metadata"
+            ]["sdk_agent_profile"].get("presentation")
+            if change == "model":
+                assert latest["metadata"]["sdk_agent_profile"]["model"]["model"] == "gpt-5.5"
                 assert len(responses.requests) == 2
-                with pytest.raises(
-                    RuntimeError,
-                    match="Session cannot continue after an unconfirmed native operation",
-                ):
-                    await session.save_state()
             else:
-                await session.update(**kwargs)
-                after = json.loads((await session.save_state()).to_json())
-                latest = publications(after)[-1]
-                assert len(publications(after)) == len(publications(before)) + 1
+                responses.respond(assistant_output("updated destination complete"))
                 assert (
-                    latest["metadata"]["sdk_agent_profile"]["epoch"]
-                    == previous["metadata"]["sdk_agent_profile"]["epoch"] + 1
+                    await (await session.submit("continue")).get_result()
+                ).final_output == "updated destination complete"
+                assert "CHANGED destination authority." in json.dumps(
+                    responses.requests[2]["input"]
                 )
-                assert latest["payload"]["id"] != previous["payload"]["id"]
-                if change == "model":
-                    assert latest["metadata"]["sdk_agent_profile"]["model"]["model"] == "gpt-5.5"
-                    assert len(responses.requests) == 2
-                else:
-                    responses.respond(assistant_output("updated destination complete"))
-                    assert (
-                        await (await session.submit("continue")).get_result()
-                    ).final_output == "updated destination complete"
-                    assert "CHANGED destination authority." in json.dumps(
-                        responses.requests[2]["input"]
-                    )
-                    assert "sampling summary" not in json.dumps(responses.requests[2]["input"])
+                assert (
+                    "sampling summary" in json.dumps(responses.requests[2]["input"])
+                ) is projected

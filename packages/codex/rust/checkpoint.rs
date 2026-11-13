@@ -620,6 +620,14 @@ async fn export_inner(
     if let Some(key) = pending {
         check_capture(state, key)?;
     }
+    let mut history = history;
+    // Only the admitted idle LocalStorage export detaches these live decisions.
+    if reader.is_some() && pending.is_none() && !suspended {
+        archive_exported_mcp_approvals(&mut history)?;
+        for child in &mut descendants {
+            archive_exported_mcp_approvals(&mut child.history)?;
+        }
+    }
     Ok(serde_json::to_value(Checkpoint {
         format_version: if code_states.is_empty() { 2 } else { 4 },
         codex_revision: include_str!("../CODEX_REVISION").trim().to_owned(),
@@ -834,6 +842,58 @@ pub(crate) fn validate_external_response_item(item: &ResponseItem) -> anyhow::Re
         ),
         "Imported hosted MCP approvals require live SDK approval authority"
     );
+    Ok(())
+}
+
+// Portable copies retain approval JSON as history, never as a live decision.
+fn archive_exported_mcp_approvals(history: &mut [RolloutItem]) -> anyhow::Result<()> {
+    use codex_history::sdk_originals::{SdkOriginalHistoryCheckpoint, input_projections};
+
+    let mut envelopes = Vec::new();
+    for record in history {
+        match record {
+            RolloutItem::ResponseItem(envelope) => envelopes.push(envelope),
+            RolloutItem::Compacted(compacted) => {
+                if let Some(items) = &mut compacted.replacement_history {
+                    envelopes.extend(items.iter_mut());
+                }
+                if let Some(SdkOriginalHistoryCheckpoint::Replace(originals)) =
+                    &mut compacted.sdk_originals
+                {
+                    envelopes.extend(
+                        originals
+                            .items
+                            .iter_mut()
+                            .filter_map(|item| item.projection.as_mut()),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    envelopes.retain(|envelope| {
+        matches!(
+            &envelope.item,
+            ResponseItem::McpApprovalRequest { .. } | ResponseItem::McpApprovalResponse { .. }
+        )
+    });
+    if !envelopes.iter().any(|envelope| {
+        matches!(
+            &envelope.item,
+            ResponseItem::McpApprovalResponse { approve: true, .. }
+        )
+    }) {
+        return Ok(());
+    }
+    let originals = envelopes
+        .iter()
+        .map(|envelope| serde_json::to_string(&envelope.item))
+        .collect::<Result<Vec<_>, _>>()?;
+    let projections = input_projections(&originals)
+        .map_err(|_| anyhow::anyhow!("Invalid historical MCP approval presentation"))?;
+    for (envelope, projection) in envelopes.into_iter().zip(projections) {
+        envelope.item = projection.context("Missing historical MCP approval presentation")?;
+    }
     Ok(())
 }
 

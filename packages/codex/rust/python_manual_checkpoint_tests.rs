@@ -18,12 +18,27 @@ use crate::{NativeThread, engine::EngineState, manual_checkpoint};
 
 pub(crate) struct BeforeResult {
     pub(crate) call_id: String,
+    pub(crate) after_terminal: bool,
     pub(crate) entered: Semaphore,
     pub(crate) release: Semaphore,
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automatic_reply_waits_for_core_terminal_before_sealing() {
+    automatic_reply_waits_for_actual_core_result(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_sibling_without_core_receipt_declines_export_and_keeps_writer() {
+    automatic_reply_waits_for_actual_core_result(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn core_suspension_timeout_does_not_authorize_a_checkpoint() {
+    automatic_reply_waits_for_actual_core_result(true, true).await;
+}
+
+async fn automatic_reply_waits_for_actual_core_result(after_terminal: bool, force_timeout: bool) {
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -97,7 +112,7 @@ async fn automatic_reply_waits_for_core_terminal_before_sealing() {
         let state = native.current().unwrap();
         let tools = state.thread.thread_extension_data().get::<PythonTools>().unwrap();
         let hold = Arc::new(BeforeResult {
-            call_id: "call-B".into(), entered: Semaphore::new(0), release: Semaphore::new(0),
+            call_id: "call-B".into(), after_terminal, entered: Semaphore::new(0), release: Semaphore::new(0),
         });
         *tools.before_result.lock().unwrap() = Some(hold.clone());
         state.thread.start_turn_if_idle(TurnInputRequest::new(TurnInput::UserInput {
@@ -120,14 +135,31 @@ async fn automatic_reply_waits_for_core_terminal_before_sealing() {
             }
         }
         hold.entered.acquire().await.unwrap().forget();
+        if force_timeout {
+            let outcome = state.thread.suspend_turn_and_shutdown().await;
+            hold.release.add_permits(1);
+            assert!(outcome.is_err(), "A forced turn abort cannot authorize a checkpoint");
+            state.close().await.unwrap();
+            engine.close().await.unwrap();
+            server.abort();
+            let _ = server.await;
+            return;
+        }
         let version = tools.manual_progress();
+        if after_terminal {
+            let admitted = tools.admission.lock().unwrap();
+            assert!(admitted.as_ref().unwrap().completed_calls.lock().unwrap().contains("call-B"));
+        }
         assert!(!manual_checkpoint::ready(&state, &native.manual).await.unwrap());
         assert!(manual_checkpoint::capture(&state, &native.manual, None, false).await.unwrap().is_none());
 
         hold.release.add_permits(1);
         // This must also work if Core finishes before the waiter subscribes.
-        tools.wait_manual_progress(version).await.unwrap();
-        assert!(manual_checkpoint::ready(&state, &native.manual).await.unwrap());
+        let mut observed = version;
+        while !manual_checkpoint::ready(&state, &native.manual).await.unwrap() {
+            tools.wait_manual_progress(observed).await.unwrap();
+            observed = tools.manual_progress();
+        }
         let checkpoint = manual_checkpoint::capture(&state, &native.manual, None, false).await.unwrap().unwrap();
         assert_eq!(checkpoint["format_version"], 3);
         assert_eq!(checkpoint["native_continuation"]["pending_manual"][0]["call_id"], "call-A");
