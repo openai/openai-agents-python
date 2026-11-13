@@ -2990,6 +2990,12 @@ def _restore_profile_sources(
     )
     if not isinstance(source, dict) or source.get("profile_id") not in profiles:
         raise ValueError("Checkpoint has no admitted native Agent profile")
+    if source["profile_id"] != roster[0]["id"] and any(
+        runtime.profile.declaration.prepare_handoff_input is not None
+        and (runtime.profile.handoffs or runtime.profile.decision_handoffs)
+        for runtime in profiles.values()
+    ):
+        saved._require_authenticated_handoff_restore()
     origin, receipt = _restore_operation_origin(native, profiles, roster, saved, context)
     return profiles[source["profile_id"]], origin, receipt
 

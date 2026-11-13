@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import replace
+from hashlib import sha256
 
 import pytest
 
@@ -74,7 +75,12 @@ async def test_handoff_compaction_retires_removed_anchor_hot_and_cold(responses,
         if cold:
             async with (
                 timeout(30),
-                source.session(state=SessionState.from_json(saved.to_json())) as restored,
+                source.session(
+                    state=SessionState.from_json(
+                        saved.to_json(),
+                        expected_sha256=sha256(saved.to_json().encode()).hexdigest(),
+                    )
+                ) as restored,
             ):
                 assert (
                     await (await restored.submit("continue")).get_result()

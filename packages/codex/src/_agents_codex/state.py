@@ -381,6 +381,7 @@ class SessionState(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
 
     _handoff_presentation_digest: str | None = _PrivateAttr(default=None)
+    _authenticated_state_digest: str | None = _PrivateAttr(default=None)
 
     format_version: Literal[2, 3, 4, 5, 6, 7, 8, 9]
     codex_revision: str
@@ -565,7 +566,7 @@ class SessionState(BaseModel):
 
     def _with_pending_continuation(self, continuation: _ManualContinuation) -> "SessionState":
         state = self.model_copy(update={"native_continuation": continuation})
-        authority = self._handoff_presentation_digest
+        authority = self._authenticated_state_digest
         if authority is not None and authority == sha256(self.to_json().encode()).hexdigest():
             state._record_handoff_presentation_authority()
         return state
@@ -611,18 +612,25 @@ class SessionState(BaseModel):
         return False
 
     def _record_handoff_presentation_authority(self) -> None:
+        self._authenticated_state_digest = sha256(self.to_json().encode()).hexdigest()
         if self._has_handoff_presentation():
-            self._handoff_presentation_digest = sha256(self.to_json().encode()).hexdigest()
+            self._handoff_presentation_digest = self._authenticated_state_digest
 
     def _capture_for_restore(self) -> "SessionState":
         encoded = self.to_json()
         captured = SessionState.from_json(encoded)
+        digest = sha256(encoded.encode()).hexdigest()
         if (
-            captured._has_handoff_presentation()
-            and self._handoff_presentation_digest != sha256(encoded.encode()).hexdigest()
-        ):
+            self._handoff_presentation_digest is not None or captured._has_handoff_presentation()
+        ) and self._handoff_presentation_digest != digest:
             raise ValueError("Restoring a handoff presentation requires authenticated state")
+        if self._authenticated_state_digest == digest:
+            captured._record_handoff_presentation_authority()
         return captured
+
+    def _require_authenticated_handoff_restore(self) -> None:
+        if self._authenticated_state_digest != sha256(self.to_json().encode()).hexdigest():
+            raise ValueError("Restoring a handoff presentation requires authenticated state")
 
     @classmethod
     def from_json(cls, value: str, *, expected_sha256: str | None = None) -> "SessionState":
