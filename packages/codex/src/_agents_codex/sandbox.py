@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath
 from typing import Any, TypeVar, cast
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
@@ -43,7 +43,11 @@ from agents.classic.sandbox.session.sandbox_client import (
 )
 from agents.classic.sandbox.session.sandbox_session import SandboxSession
 from agents.classic.sandbox.types import User
-from agents.classic.sandbox.workspace_paths import SandboxWorkspaceScope
+from agents.classic.sandbox.workspace_paths import (
+    SandboxWorkspaceScope,
+    coerce_posix_path,
+    windows_absolute_path,
+)
 
 # Optional provider owners initialize before their shared resource types.
 # isort: split
@@ -103,7 +107,7 @@ from ._managed_workspace import (
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._sandbox_events import Instrumentation as Instrumentation, _OperationObserver
 from .agent import ModelSettings, _copy_model_settings
-from .executor import Environment
+from .executor import Environment, _path_uri
 from .model_context import ModelRequestContext, _ContextTransform
 from .sandbox_memory import (
     _MEMORY_OWNER_ATTRIBUTE,
@@ -305,16 +309,29 @@ def _capture_capabilities(
 def _capability_workspace(
     session: SandboxSession, environment: Environment[Any]
 ) -> SandboxWorkspaceScope:
-    cwd = urlsplit(environment.cwd)
-    path = PurePosixPath(unquote(cwd.path) if cwd.scheme == "file" else environment.cwd)
-    root = PurePosixPath(session.state.manifest.root)
+    cwd = urlsplit(_path_uri(environment.cwd))
+    root_uri = urlsplit(_path_uri(str(session.state.manifest.root)))
+    cwd_authority = "" if cwd.netloc.lower() == "localhost" else cwd.netloc.lower()
+    root_authority = "" if root_uri.netloc.lower() == "localhost" else root_uri.netloc.lower()
     try:
-        relative = path.relative_to(root)
+        if cwd.scheme != "file" or root_uri.scheme != "file" or cwd_authority != root_authority:
+            raise ValueError("Different workspace authority")
+        relative: PurePath
+        windows_root = windows_absolute_path(session.state.manifest.root)
+        if windows_root is not None:
+            windows_path = windows_absolute_path(unquote(cwd.path).removeprefix("/"))
+            if windows_path is None:
+                raise ValueError("Different workspace path flavor")
+            relative = windows_path.relative_to(windows_root)
+        else:
+            relative = coerce_posix_path(unquote(cwd.path)).relative_to(
+                coerce_posix_path(unquote(root_uri.path))
+            )
+        return SandboxWorkspaceScope.from_cwd(None if not relative.parts else relative.as_posix())
     except ValueError:
         raise ValueError(
             "Sandbox capability requires the gateway cwd within the workspace"
         ) from None
-    return SandboxWorkspaceScope.from_cwd(None if not relative.parts else relative)
 
 
 @redact_mount_error_data_sync

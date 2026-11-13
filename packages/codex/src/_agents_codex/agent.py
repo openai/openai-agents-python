@@ -986,7 +986,6 @@ class Agent(Generic[ContextT, OutputT]):
     instructions: str
     name: str | None
     tools: tuple[Tool[ContextT], ...]
-    tool_name_collision_policy: Literal["error", "warn"]
     handoffs: tuple[
         Agent[ContextT, OutputT]
         | Handoff[ContextT, OutputT]
@@ -1010,6 +1009,7 @@ class Agent(Generic[ContextT, OutputT]):
     tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
     hosted_prompt: HostedPromptSource | None
     compaction: ResponsesCompaction[ContextT] | None
+    tool_name_collision_policy: Literal["error", "warn"]
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -1101,7 +1101,6 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         output_type: None = None,
         programmatic_tool_calling: bool = False,
-        tool_name_collision_policy: Literal["error", "warn"] = "error",
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1111,6 +1110,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     @overload
@@ -1137,7 +1137,6 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         output_type: None = None,
         programmatic_tool_calling: bool = False,
-        tool_name_collision_policy: Literal["error", "warn"] = "error",
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1146,6 +1145,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         realtime: RealtimeAgentConfig | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     @overload
@@ -1169,7 +1169,6 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
-        tool_name_collision_policy: Literal["error", "warn"] = "error",
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1179,6 +1178,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     @overload
@@ -1203,7 +1203,6 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
-        tool_name_collision_policy: Literal["error", "warn"] = "error",
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1212,6 +1211,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         realtime: RealtimeAgentConfig | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     def __init__(
@@ -1234,7 +1234,6 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         output_type: OutputSpec[OutputT] | None = None,
         programmatic_tool_calling: bool = False,
-        tool_name_collision_policy: Literal["error", "warn"] = "error",
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1244,6 +1243,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None:
         if isinstance(instructions, _OmittedInstructions):
             instructions = None

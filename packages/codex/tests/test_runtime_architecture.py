@@ -269,6 +269,8 @@ def test_runtime_dependencies_do_not_use_public_facades() -> None:
                     "agents.classic.sandbox.session.sandbox_session",
                     "agents.classic.sandbox.session.events",
                     "agents.classic.sandbox.session.sinks",
+                    "agents.classic.sandbox.types",
+                    "agents.classic.sandbox.workspace_paths",
                 }:
                     continue
                 # Keep event envelopes, sinks and dispatcher identity shared with

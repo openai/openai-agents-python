@@ -7,9 +7,7 @@ import pytest
 from agents import Agent, Environment
 from agents.classic.sandbox.entries import File
 from agents.sandbox import Manifest, sandbox_environment
-from tests.native_executor_fixtures import ExecutorPeer
-from tests.native_fixtures import assistant_output, responses as responses
-from tests.test_environment_leases_checklist import trust
+from tests.native_fixtures import responses as responses
 from tests.test_native_agent import provider
 
 if sys.platform in ("linux", "darwin"):
@@ -23,9 +21,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-async def test_native_has_been_materializing_safe_borrowed_addition(
-    tmp_path, monkeypatch, responses
-):
+async def test_native_has_been_rejecting_nonatomic_borrowed_addition_before_gateway(responses):
     from agents.classic.tracing import set_tracing_disabled
 
     set_tracing_disabled(True)
@@ -33,40 +29,36 @@ async def test_native_has_been_materializing_safe_borrowed_addition(
     selected = await client.create(manifest=Manifest(entries={"old.txt": File(content=b"old")}))
     await selected.start()
     root = Path(selected.state.manifest.root)
-    assert (root / "old.txt").read_bytes() == b"old"
-    peer = ExecutorPeer(tmp_path / "peer")
-    target = selected.state.manifest.model_copy(
-        update={
-            "entries": {**selected.state.manifest.entries, "added.txt": File(content=b"addition")}
-        },
-        deep=True,
+    original = selected.state.manifest
+    target = original.model_copy(
+        update={"entries": {**original.entries, "added.txt": File(content=b"addition")}}, deep=True
     )
+    connected = False
 
     @asynccontextmanager
     async def connect(sandbox):
-        assert sandbox is selected
-        yield Environment(
-            url=peer.url, cwd=str(root), headers={"Authorization": "Bearer " + peer.token}, tools=[]
-        )
-        await peer.wait_disconnected()
+        nonlocal connected
+        connected = True
+        yield Environment(url="wss://executor.invalid", cwd=str(root))
 
-    responses.respond(assistant_output("done"))
     try:
-        async with peer.serve():
-            trust(peer, tmp_path, monkeypatch)
-            source = sandbox_environment(
-                client,
-                options=UnixLocalSandboxClientOptions(),
-                manifest=target,
-                session=selected,
-                connect=connect,
-            )
+        source = sandbox_environment(
+            client,
+            options=UnixLocalSandboxClientOptions(),
+            manifest=target,
+            session=selected,
+            connect=connect,
+        )
+        with pytest.raises(ValueError, match="atomic provider transaction"):
             async with Agent(
                 instructions="Use the workspace.", provider=provider(responses)
-            ).session(environment=source) as session:
-                assert (await (await session.submit("start")).get_result()).final_output == "done"
-        assert (root / "added.txt").read_bytes() == b"addition"
+            ).session(environment=source):
+                raise AssertionError("Unexpected session")
+        assert not connected
+        assert selected.state.manifest is original
+        assert not (root / "added.txt").exists()
         assert (root / "old.txt").read_bytes() == b"old"
+        assert not responses.requests
     finally:
         await selected.aclose()
 
@@ -107,7 +99,7 @@ async def test_native_has_been_rejecting_entry_removal_before_gateway(responses)
         await selected.aclose()
 
 
-async def test_native_has_been_preserving_manifest_after_materialization_failure(
+async def test_native_has_been_preserving_borrowed_manifest_before_rejected_batch(
     monkeypatch, responses
 ):
     from agents.classic.tracing import set_tracing_disabled
@@ -123,7 +115,11 @@ async def test_native_has_been_preserving_manifest_after_materialization_failure
     )
     connected = False
 
+    applied = False
+
     async def fail(*args, **kwargs):
+        nonlocal applied
+        applied = True
         raise RuntimeError("Provider materialization failed")
 
     monkeypatch.setattr(selected, "_apply_entry_batch", fail)
@@ -142,13 +138,16 @@ async def test_native_has_been_preserving_manifest_after_materialization_failure
             session=selected,
             connect=connect,
         )
-        with pytest.raises(RuntimeError, match="Provider materialization failed"):
+        with pytest.raises(ValueError, match="atomic provider transaction"):
             async with Agent(
                 instructions="Use the workspace.", provider=provider(responses)
             ).session(environment=source):
                 raise AssertionError("Unexpected session")
         assert not connected
+        assert not applied
         assert selected.state.manifest is original
+        assert not (root / "added.txt").exists()
         assert (root / "old.txt").read_bytes() == b"old"
+        assert not responses.requests
     finally:
         await selected.aclose()

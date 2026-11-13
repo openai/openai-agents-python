@@ -614,15 +614,15 @@ class SandboxRuntimeSessionManager(_BorrowedManifestPolicy, Generic[TContext]):
             )
             return _LiveSessionManifestUpdate(processed_manifest=None, entries_to_apply=[])
 
-        cls._validate_live_session_host_path_grants(
-            current_manifest=current_manifest,
-            processed_manifest=processed_manifest,
-        )
         validate_manifest_mount_credential_boundaries(
             processed_manifest,
             provider_backend_id=session.state.type,
         )
         processed_manifest._validate_git_repo_entries(supports_git_repo=session._supports_git_repo)
+        cls._validate_live_session_host_path_grants(
+            current_manifest=current_manifest,
+            processed_manifest=processed_manifest,
+        )
         running = await session.running()
         await session._validate_manifest_application(
             manifest=processed_manifest,

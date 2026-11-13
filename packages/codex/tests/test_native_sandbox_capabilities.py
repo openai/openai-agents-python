@@ -3,6 +3,7 @@
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -222,3 +223,45 @@ async def test_sandbox_capability_tools_use_normal_catalog_collision_rules(
         assert client.events == ["create", "start", "disconnect", "close", "delete"]
     finally:
         await native.aclose()
+
+
+@pytest.mark.parametrize(
+    ("root", "cwd", "relative"),
+    [
+        (r"D:\workspace", "file:///D:/workspace/child", "child"),
+        (r"D:\workspace", r"D:\workspace\child", "child"),
+        (r"D:\workspace", "D:/workspace/child", "child"),
+        ("/workspace", "/workspace/child", "child"),
+        (r"D:\work space", "file:///D:/work%20space/child", "child"),
+        (r"D:\WORKSPACE", "file:///d:/workspace/child", "child"),
+        (r"D:\workspace", "file://localhost/D:/workspace", None),
+        ("/workspace", "file:///workspace/child", "child"),
+    ],
+)
+def test_sandbox_capability_workspace_has_been_retaining_executor_path_flavor(root, cwd, relative):
+    from _agents_codex.sandbox import _capability_workspace
+
+    session = SimpleNamespace(state=SimpleNamespace(manifest=SimpleNamespace(root=root)))
+    environment = Environment(url="wss://executor.invalid", cwd=cwd)
+    scope = _capability_workspace(session, environment)
+    assert (scope.cwd.as_posix() if scope.cwd is not None else None) == relative
+
+
+@pytest.mark.parametrize(
+    ("root", "cwd"),
+    [
+        (r"D:\workspace", "file:///E:/workspace/child"),
+        (r"D:\workspace", "file:///D:/workspace-other/child"),
+        (r"D:\workspace", "file://other/D:/workspace/child"),
+        (r"D:\workspace", "file:///D:/workspace/child/../../escape"),
+        ("/workspace", "file://other/workspace/child"),
+        ("/workspace", "file:///workspace/child/../../escape"),
+    ],
+)
+def test_sandbox_capability_workspace_has_been_rejecting_other_roots_and_authorities(root, cwd):
+    from _agents_codex.sandbox import _capability_workspace
+
+    session = SimpleNamespace(state=SimpleNamespace(manifest=SimpleNamespace(root=root)))
+    environment = Environment(url="wss://executor.invalid", cwd=cwd)
+    with pytest.raises(ValueError, match="gateway cwd within the workspace"):
+        _capability_workspace(session, environment)

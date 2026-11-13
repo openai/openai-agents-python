@@ -1861,18 +1861,16 @@ async fn native_mcp_context(
         Value,
     )>,
 > {
-    if thread.engine.local_checklist_store.is_some()
+    let Some((source, captured)) = thread.pending_root_mcp_approval().await.ok().flatten() else {
+        return Ok(None);
+    };
+    if !crate::native_interception::native_mcp_checkpoint_source(source.data())
+        || thread.engine.local_checklist_store.is_some()
         || !crate::subagents::list(thread).await?.is_empty()
         || !crate::checkpoint::capture_code_states(thread)
             .await?
             .is_empty()
     {
-        return Ok(None);
-    }
-    let Some((source, captured)) = thread.pending_root_mcp_approval().await.ok().flatten() else {
-        return Ok(None);
-    };
-    if !crate::native_interception::native_mcp_checkpoint_source(source.data()) {
         return Ok(None);
     }
     let tools = thread
@@ -1920,15 +1918,19 @@ async fn capture_native_mcp(
 ) -> Result<Option<Value>> {
     // The existing reply owner waits through rollback or joined retirement.
     let _reply_gate = thread.child_question_gate.lock().await;
-    let Some((binding, captured, managed_specs)) = native_mcp_context(thread).await? else {
-        return Ok(None);
+    let (binding, captured, managed_specs) = match native_mcp_context(thread).await {
+        Ok(Some(context)) => context,
+        Ok(None) => return Ok(None),
+        Err(error) if error.is::<UnsupportedManualState>() => return Ok(None),
+        Err(error) => return Err(error),
     };
     let data = captured.checkpoint_data();
-    let code_states = crate::checkpoint::capture_code_states(thread).await?;
-    ensure!(
-        code_states.is_empty(),
-        "Native MCP continuation cannot retain code cells"
-    );
+    let code_states = match crate::checkpoint::capture_code_states(thread).await {
+        Ok(states) if states.is_empty() => states,
+        Ok(_) => return Ok(None),
+        Err(error) if error.is::<UnsupportedManualState>() => return Ok(None),
+        Err(error) => return Err(error),
+    };
     let claim = match captured.claim_for_suspension(&binding).await {
         Ok(claim) => claim,
         Err(_) => return Ok(None),
@@ -2212,8 +2214,11 @@ pub(crate) async fn capture(
         frame.receivers.clear();
         return Ok(Some(snapshot));
     }
-    if native_mcp_context(thread).await?.is_some() {
-        return capture_native_mcp(thread, output_schema, drain_events).await;
+    match native_mcp_context(thread).await {
+        Ok(Some(_)) => return capture_native_mcp(thread, output_schema, drain_events).await,
+        Ok(None) => {}
+        Err(error) if error.is::<UnsupportedManualState>() => return Ok(None),
+        Err(error) => return Err(error),
     }
     match ready(thread, owner).await {
         Ok(true) => {}
