@@ -681,10 +681,37 @@ def _native_provider_response_span_id(context: str) -> dict[str, str | None] | N
             parent = current_context()
             if _tracing_disabled or _in_processor.get() or parent is None or parent.disabled:
                 return None
+            if not _create_provider_response_span():
+                return None
             ids = _generated_scope_ids(options, parent, parent, (), _native_tracing())
             return {"span_id": ids.get("span_id")}
     finally:
         del context, parent, options
+
+
+def _create_provider_response_span() -> bool:
+    # Match the current processor routes selected by native event emission.
+    # Snapshot objects under the lock; run application policy without it.
+    with _processor_lock:
+        processors = tuple(_processors[key].processor for key in sorted(_active_processor_ids))
+    token = _in_processor.set(True)
+    processor = callback = value = None
+    try:
+        for processor in processors:
+            callback = getattr(processor, "should_create_span", None)
+            if callback is None:
+                continue
+            value = callback("response", "model")
+            if not isinstance(value, bool):
+                if _inspect.iscoroutine(value):
+                    value.close()
+                raise TypeError("Trace creation policies must return bool")
+            if not value:
+                return False
+        return True
+    finally:
+        _in_processor.reset(token)
+        del processors, processor, callback, value
 
 
 def _normalize_agent_harness_id(value: str | None) -> str | None:
@@ -1222,6 +1249,13 @@ class TraceLifecycleEvent(TypedDict):
 class TraceProcessor(Protocol):
     """Receive immutable native lifecycle snapshots; callbacks may be async.
 
+    A processor may define should_create_span(name, kind) -> bool as a
+    synchronous creation policy on the host loop. The SDK calls it only for
+    logical response/model spans, before ID allocation and provider I/O.
+    Any False result suppresses that logical span; native transport tracing
+    and operation parentage remain intact. Exceptions or non-boolean results
+    fail admission. Policy-created scopes inherit recursion suppression.
+
     A processor may define on_trace_events(events) to consume a native-drain
     batch instead of individual callbacks. The SDK awaits that callback before
     acknowledging any event in the batch; failures count against every event.
@@ -1266,6 +1300,12 @@ def _validate_processors(processors: Sequence[TraceProcessor]) -> None:
         raise RuntimeError("At most 16 active Python trace processors are supported")
     if any(not callable(getattr(processor, "on_trace_event", None)) for processor in processors):
         raise TypeError("Processors must define on_trace_event")
+    for processor in processors:
+        callback = getattr(processor, "should_create_span", None)
+        if callback is not None and (
+            not callable(callback) or _inspect.iscoroutinefunction(callback)
+        ):
+            raise TypeError("Trace creation policies must be synchronous callables")
 
 
 def _check_processor_capacity(count: int, *, replace: bool) -> None:

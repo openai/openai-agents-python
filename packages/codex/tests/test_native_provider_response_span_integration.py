@@ -12,12 +12,12 @@ from tempfile import TemporaryDirectory
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+
+from agents import Agent, NativeProvider, TurnStoppedError, function_tool, telemetry
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call
 from tests.telemetry_transport_fixtures import decoded_collector
 from tests.test_native_trace_exporter import native_trace_child_env
 from tests.test_tracing_native import Recorder, _descends, _spans
-
-from agents import Agent, NativeProvider, TurnStoppedError, function_tool, telemetry
 
 
 @pytest.mark.parametrize("case", ["rounds", "invalid", "cancel", "retry", "cancel-io"])

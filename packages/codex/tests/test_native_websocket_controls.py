@@ -1,11 +1,14 @@
 from __future__ import annotations
+
 import asyncio
 import json
 from contextlib import asynccontextmanager
+
 import pytest
 from aiohttp import WSMsgType, web
 from aiohttp.test_utils import TestServer
-from agents import Agent, NativeProvider
+
+from agents import Agent, NativeError, NativeProvider
 from tests._asyncio import timeout
 
 
@@ -16,7 +19,12 @@ def events():
         "role": "assistant",
         "status": "completed",
         "content": [
-            {"type": "output_text", "text": "wire answer", "annotations": [], "logprobs": []}
+            {
+                "type": "output_text",
+                "text": "wire answer",
+                "annotations": [],
+                "logprobs": [],
+            }
         ],
     }
     response = {
@@ -60,7 +68,7 @@ def events():
 
 
 @asynccontextmanager
-async def peer(mode: str):
+async def peer(mode: str, *, advertised_frame: int | None = None):
     wire = {"upgrades": 0, "http": 0, "frames": 0, "pings": 0}
     tasks = []
 
@@ -100,7 +108,16 @@ async def peer(mode: str):
                     )
                 else:
                     wire["frames"] += 1
-                    tasks.append(asyncio.create_task(answer(socket)))
+                    if advertised_frame is not None:
+                        size = advertised_frame
+                        header = (
+                            bytes((0x81, size))
+                            if size < 126
+                            else b"\x81\x7f" + size.to_bytes(8, "big")
+                        )
+                        request.transport.write(header)
+                    else:
+                        tasks.append(asyncio.create_task(answer(socket)))
         return socket
 
     async def http(request):
@@ -139,7 +156,7 @@ async def test_native_explicit_websocket_never_crosses_to_http(transport):
             assert (await agent.run("hello")).final_output == "wire answer"
             assert wire["upgrades"] == 0 and wire["http"] == 1
         else:
-            with pytest.raises(Exception):
+            with pytest.raises(NativeError):
                 await agent.run("hello")
             assert wire["upgrades"] == 1 and wire["http"] == 0
 
@@ -159,11 +176,16 @@ async def test_native_websocket_ping_pong_options(mode, pong_timeout, succeeds):
             stream_idle_timeout_ms=1000,
             websocket_options={"ping_interval_ms": 20, "ping_timeout_ms": pong_timeout},
         )
-        agent = Agent(instructions="Answer.", model="gpt-5.5", provider=provider, model_settings={"request_transport": "websocket"})
+        agent = Agent(
+            instructions="Answer.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings={"request_transport": "websocket"},
+        )
         if succeeds:
             assert (await agent.run("hello")).final_output == "wire answer"
         else:
-            with pytest.raises(Exception):
+            with pytest.raises(NativeError):
                 await agent.run("hello")
         assert wire["frames"] == 1 and wire["pings"] >= 1 and wire["http"] == 0
 
@@ -183,7 +205,7 @@ async def test_native_fixed_websocket_never_replays_an_uncertain_send():
             provider=provider,
             model_settings={"request_transport": "websocket"},
         )
-        with pytest.raises(Exception):
+        with pytest.raises(NativeError):
             await agent.run("hello")
         assert wire["frames"] == wire["upgrades"] == 1 and wire["http"] == 0
 
@@ -198,8 +220,13 @@ async def test_native_websocket_max_message_size_is_independent_from_idle_timeou
             stream_max_retries=0,
             websocket_options={"max_message_bytes": 256},
         )
-        with pytest.raises(Exception):
-            await Agent(instructions="Answer.", model="gpt-5.5", provider=provider, model_settings={"request_transport": "websocket"}).run("hello")
+        with pytest.raises(NativeError):
+            await Agent(
+                instructions="Answer.",
+                model="gpt-5.5",
+                provider=provider,
+                model_settings={"request_transport": "websocket"},
+            ).run("hello")
         assert wire["frames"] == 1 and wire["http"] == 0
 
 
@@ -215,7 +242,12 @@ async def test_native_websocket_send_deadline_does_not_expire_a_longer_receive()
             websocket_options={"send_timeout_ms": 30, "receive_timeout_ms": 500},
         )
         assert (
-            await Agent(instructions="Answer.", model="gpt-5.5", provider=provider, model_settings={"request_transport": "websocket"}).run("hello")
+            await Agent(
+                instructions="Answer.",
+                model="gpt-5.5",
+                provider=provider,
+                model_settings={"request_transport": "websocket"},
+            ).run("hello")
         ).final_output == "wire answer"
         assert wire["frames"] == 1 and wire["http"] == 0
 
@@ -233,7 +265,12 @@ async def test_native_websocket_connect_deadline_can_be_disabled_for_a_slow_hand
         )
         async with timeout(3):
             assert (
-                await Agent(instructions="Answer.", model="gpt-5.5", provider=provider, model_settings={"request_transport": "websocket"}).run("hello")
+                await Agent(
+                    instructions="Answer.",
+                    model="gpt-5.5",
+                    provider=provider,
+                    model_settings={"request_transport": "websocket"},
+                ).run("hello")
             ).final_output == "wire answer"
         assert wire["frames"] == 1 and wire["http"] == 0
 
@@ -249,6 +286,43 @@ async def test_native_websocket_receive_deadline_is_independent_from_send():
             stream_idle_timeout_ms=500,
             websocket_options={"send_timeout_ms": 500, "receive_timeout_ms": 20},
         )
-        with pytest.raises(Exception):
-            await Agent(instructions="Answer.", model="gpt-5.5", provider=provider, model_settings={"request_transport": "websocket"}).run("hello")
+        with pytest.raises(NativeError):
+            await Agent(
+                instructions="Answer.",
+                model="gpt-5.5",
+                provider=provider,
+                model_settings={"request_transport": "websocket"},
+            ).run("hello")
         assert wire["frames"] == 1 and wire["http"] == 0
+
+
+@pytest.mark.parametrize("limit,bound", [(None, 16 << 20), (32 << 20, 16 << 20), (8, 8)])
+async def test_native_frame_limit_rejects_a_header_before_its_missing_body(limit, bound):
+    async with peer("frame-header", advertised_frame=bound + 1) as (url, wire):
+        async with NativeProvider(
+            base_url=url,
+            api_key="synthetic-frame-bound",
+            supports_websockets=True,
+            request_max_retries=0,
+            stream_max_retries=0,
+            stream_idle_timeout_ms=10000,
+            websocket_options={"max_message_bytes": limit},
+        ) as provider:
+            agent = Agent(
+                instructions="Answer.",
+                model="gpt-5.5",
+                provider=provider,
+                model_settings={"request_transport": "websocket"},
+            )
+            task = asyncio.create_task(agent.run("hello"))
+            try:
+                done, _ = await asyncio.wait({task}, timeout=2)
+                assert done, (
+                    "Native socket must reject the oversized header before waiting for its body"
+                )
+                with pytest.raises(NativeError):
+                    await task
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            assert wire["frames"] == 1 and wire["http"] == 0
