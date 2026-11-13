@@ -38,7 +38,7 @@ async def outcome_cleanup_case(primary_kind: str):
             with scope:
                 parent = scope.context
                 scope.set_outcome(
-                    status="ok", data={"private": "outcome-private-sentinel" + "x" * (32 * 1024)}
+                    status="ok", data={"private": "outcome-private-sentinel" + "x" * (64 * 1024)}
                 )
                 if original is not None:
                     raise original
