@@ -1415,10 +1415,11 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         custom_output_extractor: Callable[[Completed[OutputT]], str | Awaitable[str]] | None = None,
     ) -> _PythonTool[ContextT, object]:
-        """The issuing parent has been owning live child interactions and cleanup.
+        """Run this agent as a tool owned by the parent Session.
 
-        Pending children have been requiring live replies. Portable suspension
-        through a configured child has been remaining unsupported.
+        The parent relays pending interactions and joins child cleanup.
+        The parent can suspend a single configured child at a supported
+        manual boundary after its other automatic callbacks have settled.
         """
         from ._agent_tool import _create_agent_tool
 

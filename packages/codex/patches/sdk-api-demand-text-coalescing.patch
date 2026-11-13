@@ -911,10 +911,10 @@ index 0000000000000000000000000000000000000000..a4a70f18059b743bf8e4e30bae9bb8fa
 +    }
 +}
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index e6153cb90be1863bd93890709f393aa2b8eacba2..5afcb20b1cc68c4451ed6327a96b43eda69588ba 100644
+index f9906a62f5a6f6be0ce99699c9877232f225c5c8..069c540c998f6bd8442aeafc8d4b31e5362d9726 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -2021,6 +2021,7 @@ impl ModelClientSession {
+@@ -2022,6 +2022,7 @@ impl ModelClientSession {
              turn_state: Some(Arc::clone(&self.turn_state)),
              terminal_limit_errors: self.terminal_limit_errors(responses_metadata.request_kind),
              observe_raw_provider_events,
@@ -922,7 +922,7 @@ index e6153cb90be1863bd93890709f393aa2b8eacba2..5afcb20b1cc68c4451ed6327a96b43ed
          }
      }
  
-@@ -2564,6 +2565,11 @@ impl ModelClientSession {
+@@ -2582,6 +2583,11 @@ impl ModelClientSession {
              )
              .await
              .map_err(CodexErr::Fatal)?;
@@ -934,7 +934,7 @@ index e6153cb90be1863bd93890709f393aa2b8eacba2..5afcb20b1cc68c4451ed6327a96b43ed
              let stream_result = if let Some(events) = produced {
                  Ok((None, None, events, None, None))
              } else if prompt.prefer_buffered_response {
-@@ -3016,6 +3022,16 @@ impl ModelClientSession {
+@@ -3100,6 +3106,16 @@ impl ModelClientSession {
                      );
                  }) as Arc<dyn Fn() + Send + Sync>
              });
@@ -951,15 +951,15 @@ index e6153cb90be1863bd93890709f393aa2b8eacba2..5afcb20b1cc68c4451ed6327a96b43ed
              let stream_result = websocket_connection
                  .stream_request_with_send_observer(
                      ws_request,
-@@ -3023,6 +3039,7 @@ impl ModelClientSession {
+@@ -3107,6 +3123,7 @@ impl ModelClientSession {
                      Some(Arc::clone(&self.turn_state)),
                      prompt.observe_raw_provider_events,
                      send_observer,
 +                    text_demand,
                  )
                  .await;
-             if let Some(original_item_ids) = original_item_ids {
-@@ -3446,6 +3463,24 @@ fn add_responses_lite_header(headers: &mut ApiHeaderMap, use_responses_lite: boo
+             if stream_result.is_err()
+@@ -3549,6 +3566,24 @@ fn add_responses_lite_header(headers: &mut ApiHeaderMap, use_responses_lite: boo
  }
  
  const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 1600;
@@ -984,7 +984,7 @@ index e6153cb90be1863bd93890709f393aa2b8eacba2..5afcb20b1cc68c4451ed6327a96b43ed
  const STREAM_DROPPED_REASON: &str = "response stream dropped before provider terminal event";
  
  fn map_response_stream(
-@@ -4189,3 +4224,40 @@ fn provider_window_rejects_schema_bearing_history() {
+@@ -4307,3 +4342,40 @@ fn provider_window_rejects_schema_bearing_history() {
  #[cfg(test)]
  #[path = "client_tests.rs"]
  mod tests;

@@ -56,11 +56,32 @@ class RunUsage(TokenUsage):
             raise ValueError("Missing-usage requests exceed measured requests")
 
 
+def _subtract_configured_usage(current: RunUsage, baseline: RunUsage) -> RunUsage:
+    return RunUsage(
+        *(
+            getattr(current, name) - getattr(baseline, name)
+            for name in RunUsage.__dataclass_fields__
+        )
+    )
+
+
+def _merge_configured_child_restore_usage(
+    parent: RunUsage, child: RunUsage, accounted: RunUsage | None = None
+) -> RunUsage:
+    accounted = accounted or RunUsage(0, 0, 0, 0, 0, 0, 0, 0)
+    _subtract_configured_usage(parent, accounted)
+    delta = _subtract_configured_usage(child, accounted)
+    return RunUsage(
+        *(getattr(parent, name) + getattr(delta, name) for name in RunUsage.__dataclass_fields__)
+    )
+
+
 class _UsageCollector:
     def __init__(self, initial: RunUsage | None = None) -> None:
         self.lock = RLock()
         self.value = initial or RunUsage(0, 0, 0, 0, 0, 0, 0, 0)
         self.children: set[_UsageCollector] = set()
+        self.configured_children: dict[_UsageCollector, RunUsage] = {}
         # Native generation totals replace this mirror; value retains only explicit,
         # historical-offset and untagged internal-request contributions.
         self.model_usage: RunUsage | None = None
@@ -156,6 +177,18 @@ class _UsageCollector:
         with self.lock:
             self.children.add(child)
 
+    def attach_configured_child(
+        self, child: _UsageCollector, accounted: RunUsage | None = None
+    ) -> None:
+        if child is self:
+            raise ValueError("Configured child cannot own its parent usage")
+        with self.lock:
+            if child not in self.configured_children:
+                if child in self.children:
+                    raise ValueError("Configured child already has a plain usage link")
+                _merge_configured_child_restore_usage(self.snapshot(), child.snapshot(), accounted)
+                self.configured_children[child] = accounted or RunUsage(0, 0, 0, 0, 0, 0, 0, 0)
+
     def snapshot(self) -> RunUsage:
         with self.lock:
             value = self.value
@@ -167,11 +200,22 @@ class _UsageCollector:
                     )
                 )
             children = tuple(self.children)
+            configured_children = tuple(self.configured_children.items())
         for child in children:
             nested = child.snapshot()
             value = RunUsage(
                 *(
                     getattr(value, name) + getattr(nested, name)
+                    for name in RunUsage.__dataclass_fields__
+                )
+            )
+        for child, baseline in configured_children:
+            if child in children:
+                raise ValueError("Configured child already has a plain usage link")
+            delta = _subtract_configured_usage(child.snapshot(), baseline)
+            value = RunUsage(
+                *(
+                    getattr(value, name) + getattr(delta, name)
                     for name in RunUsage.__dataclass_fields__
                 )
             )

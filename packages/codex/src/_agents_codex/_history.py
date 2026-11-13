@@ -128,7 +128,7 @@ def _response_item(
         accepted = (
             {"output_text"}
             if role == "assistant"
-            else {"input_text", "input_image", "input_file", "input_audio"}
+            else {"input_text", "input_image", "input_file", "input_audio", "input_video"}
         )
         content = [part for part in raw["content"] if part["type"] in accepted]
         return {

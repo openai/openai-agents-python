@@ -149,6 +149,37 @@ def _capture_image(value: object) -> dict[str, Any]:
     return result
 
 
+def _capture_video(value: object) -> dict[str, Any]:
+    data = _record(value)
+    if set(data) != {"video_url"}:
+        raise ValueError("Video requires exactly one video_url")
+    source = _source(data["video_url"])
+    if (
+        len(source) > 8192
+        or any(
+            character.isspace()
+            or ord(character) < 32
+            or ord(character) == 127
+            or 0xD800 <= ord(character) <= 0xDFFF
+            for character in source
+        )
+        or len(source.encode()) > 8192
+    ):
+        raise ValueError("Video URL exceeds the supported size or contains invalid characters")
+    try:
+        parsed = urlsplit(source)
+        if (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname
+            and parsed.username is None
+            and parsed.password is None
+        ):
+            return {"video_url": source}
+    except ValueError:
+        pass
+    raise ValueError("Video URL must be an absolute HTTP(S) URL without credentials")
+
+
 def _capture_file(value: object) -> dict[str, Any]:
     data = _record(value)
     if set(data) - {"file_id", "file_data", "file_url", "filename"}:

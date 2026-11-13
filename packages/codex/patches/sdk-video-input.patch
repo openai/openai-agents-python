@@ -1,0 +1,657 @@
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/turn.rs b/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
+index 002411b8..400fac8a 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
+@@ -449,6 +449,9 @@ pub enum UserInput {
+     Audio {
+         url: String,
+     },
++    Video {
++        url: codex_protocol::input_video::VideoUrl,
++    },
+     LocalAudio {
+         path: PathBuf,
+     },
+@@ -482,6 +485,7 @@ impl UserInput {
+             },
+             UserInput::LocalImage { path, detail } => CoreUserInput::LocalImage { path, detail },
+             UserInput::Audio { url } => CoreUserInput::Audio { audio_url: url },
++            UserInput::Video { url } => CoreUserInput::Video { video_url: url },
+             UserInput::LocalAudio { path } => CoreUserInput::LocalAudio { path },
+             UserInput::Skill { name, path } => CoreUserInput::Skill { name, path },
+             UserInput::Mention { name, path } => CoreUserInput::Mention { name, path },
+@@ -511,6 +515,7 @@ impl From<CoreUserInput> for UserInput {
+             },
+             CoreUserInput::LocalImage { path, detail } => UserInput::LocalImage { path, detail },
+             CoreUserInput::Audio { audio_url } => UserInput::Audio { url: audio_url },
++            CoreUserInput::Video { video_url } => UserInput::Video { url: video_url },
+             CoreUserInput::LocalAudio { path } => UserInput::LocalAudio { path },
+             CoreUserInput::Skill { name, path } => UserInput::Skill { name, path },
+             CoreUserInput::Mention { name, path } => UserInput::Mention { name, path },
+@@ -527,6 +532,7 @@ impl UserInput {
+             | UserInput::Image { .. }
+             | UserInput::LocalImage { .. }
+             | UserInput::Audio { .. }
++            | UserInput::Video { .. }
+             | UserInput::LocalAudio { .. }
+             | UserInput::Skill { .. }
+             | UserInput::Mention { .. } => 0,
+diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
+index b395c266..658f821d 100644
+--- a/codex-rs/app-server/src/notification_media.rs
++++ b/codex-rs/app-server/src/notification_media.rs
+@@ -23,7 +23,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
+                     content.retain(|item| match item {
+                         ContentItem::InputFile { .. }
+                         | ContentItem::InputImage { .. }
+-                        | ContentItem::InputAudio { .. } => false,
++                        | ContentItem::InputAudio { .. }
++                        | ContentItem::InputVideo { .. } => false,
+                         ContentItem::InputText { .. } | ContentItem::OutputText { .. } => true,
+                     });
+                 }
+@@ -160,7 +161,10 @@ fn without_thread_item_media(mut item: ThreadItem) -> ThreadItem {
+     match &mut item {
+         ThreadItem::UserMessage { content, .. } => {
+             content.retain(|item| match item {
+-                UserInput::File { .. } | UserInput::Image { .. } | UserInput::Audio { .. } => false,
++                UserInput::File { .. }
++                | UserInput::Image { .. }
++                | UserInput::Audio { .. }
++                | UserInput::Video { .. } => false,
+                 UserInput::Text { .. }
+                 | UserInput::LocalImage { .. }
+                 | UserInput::LocalAudio { .. }
+diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
+index b4a04709..1a6ca23b 100644
+--- a/codex-rs/core/src/agent/control.rs
++++ b/codex-rs/core/src/agent/control.rs
+@@ -811,6 +811,7 @@ pub(crate) fn render_input_preview(input: &[UserInput]) -> String {
+                 format!("[local_image:{}]", path.display())
+             }
+             UserInput::Audio { .. } => "[audio]".to_string(),
++            UserInput::Video { .. } => "[video]".to_string(),
+             UserInput::LocalAudio { path } => {
+                 format!("[local_audio:{}]", path.display())
+             }
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 236b02ee..81465b98 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -2469,6 +2469,15 @@ impl ModelClientSession {
+                 &mut request.client_metadata,
+                 prompt.tool_admission.clone(),
+             );
++            if codex_protocol::input_video::contains_video_input(&request.input)
++                && !interceptors
++                    .iter()
++                    .any(|interceptor| interceptor.produces_response())
++            {
++                return Err(CodexErr::InvalidRequest(
++                    "Video input requires a compatible application model".into(),
++                ));
++            }
+             let mut logical_history_input = None;
+             if let Some(cursor) = &self.client.provider_history {
+                 if interceptors.iter().any(|interceptor| interceptor.produces_response()) {
+@@ -3262,6 +3271,13 @@ impl ModelClientSession {
+             projected.input == prompt.input && projected.request_controls == prompt.request_controls
+         });
+         let prompt = transformed.as_ref().unwrap_or(prompt);
++        if self.client.responses_websocket_enabled()
++            && codex_protocol::input_video::contains_video_input(&prompt.input)
++        {
++            return Err(CodexErr::InvalidRequest(
++                "Video input requires a compatible application model".into(),
++            ));
++        }
+         let wire_api = self.client.state.provider.info().wire_api;
+         match wire_api {
+             WireApi::Responses => {
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index fc33c1b7..51f373d2 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -1090,7 +1090,8 @@ pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
+             }
+             ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => {}
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => {}
+         }
+     }
+     if pieces.is_empty() {
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index f7780557..43f35d46 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -732,7 +732,7 @@ fn truncate_retained_messages(
+             continue;
+         }
+
+-        if crate::file_admission::contains_file(&group.source.item) {
++        if crate::file_admission::contains_opaque_media(&group.source.item) {
+             // This candidate was selected while optional retention budget remained.
+             // Preserve its atomic source, then reserve the rest; this does not claim it fits.
+             if let Some(notice) = group.attached_notice {
+@@ -860,7 +860,9 @@ fn message_text_token_count(item: &ResponseItem) -> usize {
+             ContentItem::InputFile { .. } => {
+                 unreachable!("atomic files are handled before optional text budgeting")
+             }
+-            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => 0,
++            ContentItem::InputImage { .. }
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => 0,
+         })
+         .sum()
+ }
+@@ -905,7 +907,8 @@ fn truncate_message_text_to_token_budget(
+             }
+             ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => {
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => {
+                 truncated_content.push(content_item);
+             }
+         }
+diff --git a/codex-rs/core/src/compact_remote_v2_images.rs b/codex-rs/core/src/compact_remote_v2_images.rs
+index eeb2c3db..7fafac80 100644
+--- a/codex-rs/core/src/compact_remote_v2_images.rs
++++ b/codex-rs/core/src/compact_remote_v2_images.rs
+@@ -21,7 +21,7 @@ pub(super) fn content_item_token_count(item: &ContentItem) -> usize {
+         )
+         .unwrap_or(usize::MAX),
+         ContentItem::InputFile { .. } => unreachable!("atomic files use unknown-cost retention"),
+-        ContentItem::InputAudio { .. } => 0,
++        ContentItem::InputAudio { .. } | ContentItem::InputVideo { .. } => 0,
+     }
+ }
+
+@@ -77,7 +77,9 @@ pub(super) fn truncate_message_to_token_budget(
+                     retained.push(item);
+                 }
+             }
+-            ContentItem::InputFile { .. } | ContentItem::InputAudio { .. } => retained.push(item),
++            ContentItem::InputFile { .. }
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => retained.push(item),
+             ContentItem::InputImage { .. } => unreachable!("images are handled atomically above"),
+         }
+     }
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 2e1bc9ca..8ce64c45 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -939,7 +939,7 @@ impl ContextManager {
+     pub(crate) fn has_file_content(&self) -> bool {
+         self.model_items()
+             .iter()
+-            .any(|item| crate::file_admission::contains_file(&item.item))
++            .any(|item| crate::file_admission::contains_opaque_media(&item.item))
+     }
+
+     /// When true, the server already accounted for past reasoning tokens and
+@@ -1168,7 +1168,7 @@ fn estimate_encrypted_function_output_length(encoded_len: usize) -> usize {
+ /// Counts content directly, excluding transport IDs, metadata, and outer JSON escaping.
+ /// Original-detail file images use the maximum patch count.
+ pub(crate) fn estimate_item_token_count(item: &ResponseItem) -> Option<i64> {
+-    if crate::file_admission::contains_file(item) {
++    if crate::file_admission::contains_opaque_media(item) {
+         return None;
+     }
+     let model_visible_bytes = estimate_response_item_model_visible_bytes(item);
+@@ -1209,8 +1209,8 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
+                 ContentItem::InputImage { image, detail } => {
+                     estimate_image_reference_bytes(image, *detail)
+                 }
+-                ContentItem::InputFile { .. } => {
+-                    unreachable!("file cost is unknown and must use the optional estimate")
++                ContentItem::InputFile { .. } | ContentItem::InputVideo { .. } => {
++                    unreachable!("opaque media cost is unknown and must use the optional estimate")
+                 }
+                 ContentItem::InputAudio { audio_url } => estimate_audio_bytes(audio_url),
+             })
+diff --git a/codex-rs/core/src/event_mapping.rs b/codex-rs/core/src/event_mapping.rs
+index 807ed11a..54674972 100644
+--- a/codex-rs/core/src/event_mapping.rs
++++ b/codex-rs/core/src/event_mapping.rs
+@@ -138,6 +138,11 @@ fn parse_user_message(message: &[ContentItem]) -> Option<UserMessageItem> {
+                     audio_url: audio_url.clone(),
+                 });
+             }
++            ContentItem::InputVideo { video_url } => {
++                content.push(UserInput::Video {
++                    video_url: video_url.clone(),
++                });
++            }
+             ContentItem::OutputText { text, .. } => {
+                 warn!("Output text in user message: {}", text);
+             }
+diff --git a/codex-rs/core/src/file_admission.rs b/codex-rs/core/src/file_admission.rs
+index 2b9392db..518c8388 100644
+--- a/codex-rs/core/src/file_admission.rs
++++ b/codex-rs/core/src/file_admission.rs
+@@ -19,10 +19,14 @@ pub(crate) fn validate_response_items<'a>(
+ ) -> Result<(), String> {
+     for item in items {
+         match item {
+-            ResponseItem::Message { content, .. } => {
++            ResponseItem::Message { role, content, .. } => {
+                 for part in content {
+-                    if let ContentItem::InputFile { file } = part {
+-                        validate_file(file, profile, model)?;
++                    match part {
++                        ContentItem::InputFile { file } => validate_file(file, profile, model)?,
++                        ContentItem::InputVideo { .. } if role != "user" => {
++                            return Err("Video input requires a user message".into());
++                        }
++                        _ => {}
+                     }
+                 }
+             }
+@@ -59,6 +63,11 @@ pub(crate) fn contains_file(item: &ResponseItem) -> bool {
+     }
+ }
+
++pub(crate) fn contains_opaque_media(item: &ResponseItem) -> bool {
++    contains_file(item)
++        || codex_protocol::input_video::contains_video_input(std::slice::from_ref(item))
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/codex-rs/core/src/guardian/input_budget.rs b/codex-rs/core/src/guardian/input_budget.rs
+index 5944d3d2..38cebcd4 100644
+--- a/codex-rs/core/src/guardian/input_budget.rs
++++ b/codex-rs/core/src/guardian/input_budget.rs
+@@ -305,7 +305,8 @@ pub(crate) async fn finalize(
+                                 }),
+                                 ContentItem::InputFile { .. }
+                                 | ContentItem::OutputText { .. }
+-                                | ContentItem::InputAudio { .. } => Err(CodexErr::InvalidRequest(
++                                | ContentItem::InputAudio { .. }
++                                | ContentItem::InputVideo { .. } => Err(CodexErr::InvalidRequest(
+                                     "Unsupported Guardian input content".to_owned(),
+                                 )),
+                             })
+diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
+index c69a9264..6fa40a09 100644
+--- a/codex-rs/core/src/hook_runtime.rs
++++ b/codex-rs/core/src/hook_runtime.rs
+@@ -1128,6 +1128,7 @@ mod tests {
+                                 ContentItem::InputFile { .. }
+                                 | ContentItem::InputImage { .. }
+                                 | ContentItem::InputAudio { .. }
++                                | ContentItem::InputVideo { .. }
+                                 | ContentItem::OutputText { .. } => {
+                                     panic!("expected input text content, got {item:?}")
+                                 }
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 38d9ff34..a7033ae0 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -3860,6 +3860,7 @@ impl Session {
+                             ContentItem::InputFile { .. } => "user.file",
+                             ContentItem::InputImage { .. } => "user.image",
+                             ContentItem::InputAudio { .. } => "user.audio",
++                            ContentItem::InputVideo { .. } => "user.video",
+                         }
+                         .to_string(),
+                     )
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/decisions.rs b/codex-rs/ext/guardian-v2/src/async_scorer/decisions.rs
+index 02295d33..766a5b2d 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/decisions.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/decisions.rs
+@@ -271,6 +271,7 @@ fn request_body(
+                 ContentItem::InputFile { .. }
+                 | ContentItem::InputImage { .. }
+                 | ContentItem::InputAudio { .. }
++                | ContentItem::InputVideo { .. }
+                 | ContentItem::OutputText { .. } => {
+                     return Err(DecisionsError::UnsupportedEvidence);
+                 }
+diff --git a/codex-rs/ext/image-generation/src/tool.rs b/codex-rs/ext/image-generation/src/tool.rs
+index cfcefb32..a8d6d582 100644
+--- a/codex-rs/ext/image-generation/src/tool.rs
++++ b/codex-rs/ext/image-generation/src/tool.rs
+@@ -497,6 +497,7 @@ fn recent_images(
+                     ContentItem::InputFile { .. }
+                     | ContentItem::InputText { .. }
+                     | ContentItem::InputAudio { .. }
++                    | ContentItem::InputVideo { .. }
+                     | ContentItem::OutputText { .. } => None,
+                 }));
+             }
+diff --git a/codex-rs/guardian-context/src/budget.rs b/codex-rs/guardian-context/src/budget.rs
+index f04380c2..8d91bab2 100644
+--- a/codex-rs/guardian-context/src/budget.rs
++++ b/codex-rs/guardian-context/src/budget.rs
+@@ -121,6 +121,9 @@ impl SectionCost {
+                 // payload conservatively until its consumer supplies modality costs.
+                 self.text_bytes = self.text_bytes.saturating_add(audio_url.len());
+             }
++            ContentItem::InputVideo { video_url } => {
++                self.text_bytes = self.text_bytes.saturating_add(video_url.as_str().len());
++            }
+         }
+         self
+     }
+diff --git a/codex-rs/guardian-context/src/composition.rs b/codex-rs/guardian-context/src/composition.rs
+index 5e1956af..e281cfd9 100644
+--- a/codex-rs/guardian-context/src/composition.rs
++++ b/codex-rs/guardian-context/src/composition.rs
+@@ -379,6 +379,7 @@ impl ComposedContext {
+                     ContentItem::InputImage { image, detail } => UserInput::Image { image, detail },
+                     ContentItem::InputFile { .. }
+                     | ContentItem::InputAudio { .. }
++                    | ContentItem::InputVideo { .. }
+                     | ContentItem::OutputText { .. } => {
+                         return Err(SectionError::UnsupportedDelivery {
+                             section: section.id,
+diff --git a/codex-rs/guardian-context/src/enforcement.rs b/codex-rs/guardian-context/src/enforcement.rs
+index 6cf969b1..5956aebf 100644
+--- a/codex-rs/guardian-context/src/enforcement.rs
++++ b/codex-rs/guardian-context/src/enforcement.rs
+@@ -318,6 +318,7 @@ fn retain_content(
+                 } => 0,
+                 ContentItem::InputFile { file } => crate::budget::file_reference_bytes(file),
+                 ContentItem::InputAudio { audio_url } => audio_url.len(),
++                ContentItem::InputVideo { video_url } => video_url.as_str().len(),
+             };
+             truncations.push(TruncationObservation {
+                 component: section.id,
+diff --git a/codex-rs/guardian-context/src/images.rs b/codex-rs/guardian-context/src/images.rs
+index ded6e0df..288a6245 100644
+--- a/codex-rs/guardian-context/src/images.rs
++++ b/codex-rs/guardian-context/src/images.rs
+@@ -102,6 +102,7 @@ impl TranscriptImages {
+                             ContentItem::InputFile { .. }
+                             | ContentItem::InputText { .. }
+                             | ContentItem::InputAudio { .. }
++                            | ContentItem::InputVideo { .. }
+                             | ContentItem::OutputText { .. } => {}
+                         }
+                     }
+@@ -153,6 +154,7 @@ impl TranscriptImages {
+                     | ContentItem::InputFile { .. }
+                     | ContentItem::InputText { .. }
+                     | ContentItem::InputAudio { .. }
++                    | ContentItem::InputVideo { .. }
+                     | ContentItem::OutputText { .. } => {}
+                 }
+             }
+diff --git a/codex-rs/guardian-context/src/transcript.rs b/codex-rs/guardian-context/src/transcript.rs
+index 8f97de2d..127bfe1b 100644
+--- a/codex-rs/guardian-context/src/transcript.rs
++++ b/codex-rs/guardian-context/src/transcript.rs
+@@ -146,7 +146,8 @@ pub fn collect_transcript(
+                         | ContentItem::OutputText { .. }
+                         | ContentItem::InputFile { .. }
+                         | ContentItem::InputImage { .. }
+-                        | ContentItem::InputAudio { .. } => None,
++                        | ContentItem::InputAudio { .. }
++                        | ContentItem::InputVideo { .. } => None,
+                     })
+                     .collect::<Vec<_>>()
+                     .join("\n");
+diff --git a/codex-rs/memories/write/src/rollout_input.rs b/codex-rs/memories/write/src/rollout_input.rs
+index 81292bed..f2cd85d4 100644
+--- a/codex-rs/memories/write/src/rollout_input.rs
++++ b/codex-rs/memories/write/src/rollout_input.rs
+@@ -77,6 +77,11 @@ pub(crate) fn serialize_tiered_input(
+                             text: "[audio omitted]".into(),
+                         };
+                     }
++                    ContentItem::InputVideo { .. } => {
++                        *part = ContentItem::InputText {
++                            text: "[video omitted]".into(),
++                        };
++                    }
+                     ContentItem::InputText { .. } | ContentItem::OutputText { .. } => {}
+                 }
+             }
+diff --git a/codex-rs/otel/src/agent_response.rs b/codex-rs/otel/src/agent_response.rs
+index 7b06edc9..0647427d 100644
+--- a/codex-rs/otel/src/agent_response.rs
++++ b/codex-rs/otel/src/agent_response.rs
+@@ -82,7 +82,8 @@ impl AgentResponseLogger {
+                 ContentItem::InputText { .. }
+                 | ContentItem::InputFile { .. }
+                 | ContentItem::InputImage { .. }
+-                | ContentItem::InputAudio { .. } => None,
++                | ContentItem::InputAudio { .. }
++                | ContentItem::InputVideo { .. } => None,
+             })
+             .collect::<String>();
+         // Keep plan content, stripping memory citations only from the exported copy.
+diff --git a/codex-rs/protocol/src/input_video.rs b/codex-rs/protocol/src/input_video.rs
+new file mode 100644
+index 00000000..31707113
+--- /dev/null
++++ b/codex-rs/protocol/src/input_video.rs
+@@ -0,0 +1,66 @@
++//! An opaque remote reference for a model producer. The runtime never fetches it.
++
++use crate::models::{ContentItem, ResponseItem};
++use schemars::JsonSchema;
++use serde::Deserialize;
++use serde::Serialize;
++use ts_rs::TS;
++
++#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(try_from = "String", into = "String")]
++#[schemars(with = "String")]
++#[ts(type = "string")]
++pub struct VideoUrl(String);
++
++impl VideoUrl {
++    pub fn as_str(&self) -> &str {
++        &self.0
++    }
++}
++
++impl std::fmt::Debug for VideoUrl {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter.write_str("VideoUrl(..)")
++    }
++}
++
++impl TryFrom<String> for VideoUrl {
++    type Error = &'static str;
++
++    fn try_from(value: String) -> Result<Self, Self::Error> {
++        const INVALID: &str = "video_url must be an absolute HTTP(S) URL without credentials";
++        if value.len() > 8192
++            || value
++                .chars()
++                .any(|character| character.is_whitespace() || character.is_control())
++        {
++            return Err("video_url exceeds the supported size or contains whitespace");
++        }
++        let parsed = gix_url::Url::try_from(value.as_str()).map_err(|_| INVALID)?;
++        if !matches!(
++            parsed.scheme,
++            gix_url::Scheme::Http | gix_url::Scheme::Https
++        ) || parsed.host.as_deref().is_none_or(str::is_empty)
++            || parsed.user().is_some()
++            || parsed.password().is_some()
++        {
++            return Err(INVALID);
++        }
++        Ok(Self(value))
++    }
++}
++
++impl From<VideoUrl> for String {
++    fn from(value: VideoUrl) -> Self {
++        value.0
++    }
++}
++
++pub fn contains_video_input(items: &[ResponseItem]) -> bool {
++    items.iter().any(|item| match item {
++        ResponseItem::Message { content, .. } => content
++            .iter()
++            .any(|part| matches!(part, ContentItem::InputVideo { .. })),
++        _ => false,
++    })
++}
+diff --git a/codex-rs/protocol/src/lib.rs b/codex-rs/protocol/src/lib.rs
+index d2dcea72..e238ca26 100644
+--- a/codex-rs/protocol/src/lib.rs
++++ b/codex-rs/protocol/src/lib.rs
+@@ -63,4 +63,5 @@ pub mod turn_input;
+ pub mod user_input;
+
+ pub mod input_file;
++pub mod input_video;
+ pub mod provider_reference_profile;
+diff --git a/codex-rs/protocol/src/local_media.rs b/codex-rs/protocol/src/local_media.rs
+index c7db92eb..05837110 100644
+--- a/codex-rs/protocol/src/local_media.rs
++++ b/codex-rs/protocol/src/local_media.rs
+@@ -49,6 +49,7 @@ pub fn snapshot_local_user_input(input: &mut UserInput) -> io::Result<()> {
+         | UserInput::File { .. }
+         | UserInput::Image { .. }
+         | UserInput::Audio { .. }
++        | UserInput::Video { .. }
+         | UserInput::Skill { .. }
+         | UserInput::Mention { .. } => {}
+     }
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index 61894026..71488c50 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -949,6 +949,9 @@ pub enum ContentItem {
+     InputAudio {
+         audio_url: String,
+     },
++    InputVideo {
++        video_url: crate::input_video::VideoUrl,
++    },
+     OutputText {
+         text: String,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -2498,6 +2501,7 @@ impl ResponseInputItem {
+                     audio_index += 1;
+                     vec![ContentItem::InputAudio { audio_url }]
+                 }
++                UserInput::Video { video_url } => vec![ContentItem::InputVideo { video_url }],
+                 UserInput::LocalAudio { path } => {
+                     audio_index += 1;
+                     match std::fs::read(&path) {
+diff --git a/codex-rs/protocol/src/user_input.rs b/codex-rs/protocol/src/user_input.rs
+index a1190353..86b05125 100644
+--- a/codex-rs/protocol/src/user_input.rs
++++ b/codex-rs/protocol/src/user_input.rs
+@@ -47,6 +47,10 @@ pub enum UserInput {
+     },
+     /// Pre-encoded audio data URI forwarded to the Responses API.
+     Audio { audio_url: String },
++    /// Remote reference retained for an application-owned model producer.
++    Video {
++        video_url: crate::input_video::VideoUrl,
++    },
+     /// Local audio path converted to an `Audio` data URI during request serialization.
+     LocalAudio { path: std::path::PathBuf },
+
+diff --git a/codex-rs/rollout/src/search.rs b/codex-rs/rollout/src/search.rs
+index 9ea1f258..c9a7c61a 100644
+--- a/codex-rs/rollout/src/search.rs
++++ b/codex-rs/rollout/src/search.rs
+@@ -327,7 +327,8 @@ fn content_item_text(item: &ContentItem) -> Option<&str> {
+         }
+         ContentItem::InputFile { .. }
+         | ContentItem::InputImage { .. }
+-        | ContentItem::InputAudio { .. } => None,
++        | ContentItem::InputAudio { .. }
++        | ContentItem::InputVideo { .. } => None,
+     }
+ }
+
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/rollback_plan.rs b/codex-rs/thread-store/src/local/rollout_migration/rollback_plan.rs
+index 6d0656a8..38da1bb6 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/rollback_plan.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/rollback_plan.rs
+@@ -584,8 +584,8 @@ fn user_response_matches_event(content: &[ContentItem], event: &UserMessageEvent
+                     file_ids.push(file_id.as_str());
+                 }
+             },
+-            // Legacy user-message events have no file identity; never infer an exact match.
+-            ContentItem::InputFile { .. } => return false,
++            // Legacy user-message events have no file or video identity.
++            ContentItem::InputFile { .. } | ContentItem::InputVideo { .. } => return false,
+             ContentItem::InputAudio { audio_url } => audio.push(audio_url.as_str()),
+             ContentItem::OutputText { .. } => return false,
+         }
+diff --git a/codex-rs/thread-store/src/local/thread_history/search.rs b/codex-rs/thread-store/src/local/thread_history/search.rs
+index 3f179250..06bdda14 100644
+--- a/codex-rs/thread-store/src/local/thread_history/search.rs
++++ b/codex-rs/thread-store/src/local/thread_history/search.rs
+@@ -314,6 +314,7 @@ fn searchable_text(item: &ThreadItem) -> Option<Cow<'_, str>> {
+                     | UserInput::Image { .. }
+                     | UserInput::LocalImage { .. }
+                     | UserInput::Audio { .. }
++                    | UserInput::Video { .. }
+                     | UserInput::LocalAudio { .. }
+                     | UserInput::Skill { .. }
+                     | UserInput::Mention { .. } => None,
+diff --git a/codex-rs/tools/src/tool_output.rs b/codex-rs/tools/src/tool_output.rs
+index 497fe686..c442032e 100644
+--- a/codex-rs/tools/src/tool_output.rs
++++ b/codex-rs/tools/src/tool_output.rs
+@@ -289,6 +289,11 @@ fn response_input_to_code_mode_result(response: ResponseInputItem) -> JsonValue
+                     codex_protocol::models::ContentItem::InputAudio { audio_url } => {
+                         FunctionCallOutputContentItem::InputAudio { audio_url }
+                     }
++                    codex_protocol::models::ContentItem::InputVideo { .. } => {
++                        FunctionCallOutputContentItem::InputText {
++                            text: "[video tool output is unsupported]".to_owned(),
++                        }
++                    }
+                 })
+                 .collect::<Vec<_>>(),
+         ),
+diff --git a/codex-rs/tui/src/chatwidget/user_messages.rs b/codex-rs/tui/src/chatwidget/user_messages.rs
+index fb5124f8..439469dd 100644
+--- a/codex-rs/tui/src/chatwidget/user_messages.rs
++++ b/codex-rs/tui/src/chatwidget/user_messages.rs
+@@ -634,6 +634,7 @@ pub(crate) fn mention_bindings_from_user_inputs(
+             | UserInput::Image { .. }
+             | UserInput::LocalImage { .. }
+             | UserInput::Audio { .. }
++            | UserInput::Video { .. }
+             | UserInput::LocalAudio { .. } => None,
+         })
+         .collect();
+@@ -769,6 +770,7 @@ impl ChatWidget {
+                 UserInput::Text { text, .. } => message.push_str(text),
+                 UserInput::Image { .. } | UserInput::LocalImage { .. } => image_count += 1,
+                 UserInput::Audio { .. } // TODO: Include audio inputs in pending steer comparison.
++                | UserInput::Video { .. }
+                 | UserInput::LocalAudio { .. } // TODO: Include audio inputs in pending steer comparison.
+                 | UserInput::Skill { .. }
+                 | UserInput::Mention { .. } => {}
+@@ -840,6 +842,7 @@ impl ChatWidget {
+                 } => {}
+                 UserInput::LocalImage { path, .. } => local_images.push(path.clone()),
+                 UserInput::Audio { .. } // TODO: Include audio inputs in the user message display.
++                | UserInput::Video { .. }
+                 | UserInput::LocalAudio { .. } // TODO: Include audio inputs in the user message display.
+                 | UserInput::Skill { .. }
+                 | UserInput::Mention { .. } => {}
+diff --git a/codex-rs/tui/src/dynamic_tools.rs b/codex-rs/tui/src/dynamic_tools.rs
+index 7b6a5619..61a895fb 100644
+--- a/codex-rs/tui/src/dynamic_tools.rs
++++ b/codex-rs/tui/src/dynamic_tools.rs
+@@ -1343,6 +1343,7 @@ fn turn_summary(turn: &Turn, include_outputs: bool, output_chars: usize) -> Valu
+                     } => json!({"type": "image", "fileId": file_id}),
+                     UserInput::LocalImage { path, .. } => json!({"type": "localImage", "path": path}),
+                     UserInput::Audio { url } => json!({"type": "audio", "url": url}),
++                    UserInput::Video { .. } => json!({"type": "video"}),
+                     UserInput::LocalAudio { path } => json!({"type": "localAudio", "path": path}),
+                     UserInput::Skill { name, path } => json!({"type": "skill", "name": name, "path": path}),
+                     UserInput::Mention { name, path } => json!({"type": "mention", "name": name, "path": path}),

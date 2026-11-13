@@ -70,8 +70,11 @@ class RetryAdvice:
     retry_after_ms: float | None = None
     replay_safety: Literal["safe", "unsafe", "unknown"] = "unknown"
     reason: str | None = None
+    response_started: bool | None = None
 
     def __post_init__(self) -> None:
+        if self.response_started is not None and type(self.response_started) is not bool:
+            raise TypeError("response_started must be a bool or None")
         if self.suggested is not None and type(self.suggested) is not bool:
             raise TypeError("suggested must be a bool or None")
         _delay(self.retry_after_ms, "retry_after_ms")
