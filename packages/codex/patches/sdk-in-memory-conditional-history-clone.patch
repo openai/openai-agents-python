@@ -54,3 +54,75 @@ index 7845ccbbbb73e0dce9760fd9ced9eea427205667..5a0ca2ef639460425510d765fe7307ac
      });
      let name = state.names.get(&thread_id).cloned().flatten();
      let metadata = state.metadata_updates.get(&thread_id);
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 26340254c2280ff3faf379184d1e6279145bf71e..7856c12baff13bd7404b21a35a856844709a04bc 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -1395,6 +1395,7 @@ mod tests {
+                     },
+                 )),
+                 RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
++                    model_attempt: None,
+                     tool_completion: None,
+                     turn_id: "turn-1".to_string(),
+                     started_at: None,
+diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
+index a2ca172e766b2ba5f0470d97f059e93d9ab46933..c0ea8bf24260ae3a6c37ba665400a18f1e512f47 100644
+--- a/codex-rs/thread-store/src/local/model_context_tests.rs
++++ b/codex-rs/thread-store/src/local/model_context_tests.rs
+@@ -627,6 +627,7 @@ fn turn_started(turn_id: &str) -> RolloutItem {
+ 
+ fn turn_complete(turn_id: &str) -> RolloutItem {
+     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
++        model_attempt: None,
+         tool_completion: None,
+         turn_id: turn_id.to_string(),
+         last_agent_message: None,
+diff --git a/codex-rs/thread-store/src/local/revert_thread_tests.rs b/codex-rs/thread-store/src/local/revert_thread_tests.rs
+index 72ff0a4bd8207ac586bba6e8bd1d91c75da85c21..71498295fda41b7e26069231729af5ce528e75ef 100644
+--- a/codex-rs/thread-store/src/local/revert_thread_tests.rs
++++ b/codex-rs/thread-store/src/local/revert_thread_tests.rs
+@@ -334,6 +334,7 @@ fn turn_started(turn_id: &str) -> RolloutItem {
+ 
+ fn turn_completed(turn_id: &str) -> RolloutItem {
+     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
++        model_attempt: None,
+         tool_completion: None,
+         turn_id: turn_id.to_string(),
+         last_agent_message: None,
+diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+index 860d1ccf11428aaa1a892ef9d02477cb5cbdb8b1..b55b44c4997b724be1959012511700fd56d5056e 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+@@ -256,6 +256,7 @@ fn compacted(replacement_history: Vec<ResponseItem>) -> RolloutItem {
+ 
+ fn completed(turn_id: &str) -> RolloutItem {
+     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
++        model_attempt: None,
+         tool_completion: None,
+         turn_id: turn_id.to_string(),
+         last_agent_message: None,
+diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
+index ed6c49fea5069aeff1810cda319e1f5504833f38..27db870d2cc56153ea00dc7ecf465129514832af 100644
+--- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
+@@ -2842,6 +2842,7 @@ fn turn_started(turn_id: &str) -> RolloutItem {
+ 
+ fn turn_completed(turn_id: &str) -> RolloutItem {
+     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
++        model_attempt: None,
+         tool_completion: None,
+         turn_id: turn_id.to_string(),
+         last_agent_message: None,
+diff --git a/codex-rs/thread-store/src/thread_metadata_sync.rs b/codex-rs/thread-store/src/thread_metadata_sync.rs
+index 2928986b9ff22f300337135c9525dbcada6f351f..2f45e0ecec0c3c8e97c956f7df281d77f41b2ca9 100644
+--- a/codex-rs/thread-store/src/thread_metadata_sync.rs
++++ b/codex-rs/thread-store/src/thread_metadata_sync.rs
+@@ -743,6 +743,7 @@ mod tests {
+             ThreadSettingsAppliedEvent {
+                 thread_id: None,
+                 thread_settings: ThreadSettingsSnapshot {
++                    invocation_timeout_ms: None,
+                     provider_history: None,
+                     request_controls: Default::default(),
+                     tool_choice: None,
