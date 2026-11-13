@@ -885,12 +885,15 @@ async def test_provider_only_dispatch_fences_cold_recovery_before_any_output(
         )
         code, rows, errors = await _collect(destination)
         if provider_only or receipt_override is not None:
-            message = (
+            expected = (
                 "Local resume requires the recorded executor write and network policy"
-                if receipt_override == {"thread_id": "other"}
+                if receipt_override is not None and "thread_id" in receipt_override
                 else "unknown tool effects"
             )
-            assert code != 0 and message in rows[0].get("message", ""), (rows, errors)
+            assert code != 0 and expected in rows[0].get("message", ""), (
+                rows,
+                errors,
+            )
         else:
             assert code == 0 and rows[0].get("opened"), (rows, errors)
         assert len(peer.requests) == sends

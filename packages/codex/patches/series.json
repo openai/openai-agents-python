@@ -1035,7 +1035,11 @@
     {
       "path": "sdk-cache-owned-input-iteration.patch",
       "sha256": "e6a2379399a4ab8ddb0b5c9bdc2200927d969f0703c99ffa57f42675269e2c10"
+    },
+    {
+      "path": "sdk-seed-cache-and-program-observations.patch",
+      "sha256": "85b1dc336337389719334fc425ecdc6b8b758d45bc568a802984b6ede3d55089"
     }
   ],
-  "result_tree": "7a1d803955de82d76112892f950e0310d21f43ce"
+  "result_tree": "f06f3bbeb20bf3bc0d054efc6c07d9e26b7b3473"
 }

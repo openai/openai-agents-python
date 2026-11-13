@@ -146,6 +146,45 @@ async def test_native_cache_breakpoint_survives_portable_manual_checkpoint(
     assert user_parts(responses.requests[1])[-1]["prompt_cache_breakpoint"] == MARKER
 
 
+async def test_native_initial_history_cache_breakpoint_remains_bound(
+    responses: ResponsesFixture,
+) -> None:
+    responses.respond(assistant_output("accepted"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-cache", supports_websockets=False
+    ) as provider:
+        result = await Agent(
+            model="gpt-5.5", instructions="Answer.", provider=provider, model_settings=SETTINGS
+        ).run(
+            "continue",
+            initial_messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "history prefix",
+                            "prompt_cache_breakpoint": {"mode": "explicit"},
+                        }
+                    ],
+                }
+            ],
+        )
+    assert result.final_output == "accepted"
+    messages = [item for item in responses.requests[0]["input"] if item.get("role") == "user"]
+    prefix = next(
+        part
+        for item in messages
+        for part in item["content"]
+        if part.get("text") == "history prefix"
+    )
+    current = next(
+        part for item in messages for part in item["content"] if part.get("text") == "continue"
+    )
+    assert prefix["prompt_cache_breakpoint"] == MARKER
+    assert "prompt_cache_breakpoint" not in current
+
+
 async def test_native_borrowed_chat_preserves_cache_prefix() -> None:
     from types import SimpleNamespace
 
