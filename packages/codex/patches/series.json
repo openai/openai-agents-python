@@ -1003,7 +1003,11 @@
     {
       "path": "sdk-provider-websocket-frame-cap.patch",
       "sha256": "4236dfecf6a01d471582da77fdbb78d1416c0e61249bffed060138a51e07702e"
+    },
+    {
+      "path": "sdk-join-portable-suspension.patch",
+      "sha256": "e7523d3ed9acb00381cadc13939258dd52a69639fc9ed1e6e9c384e2bb8f4ae1"
     }
   ],
-  "result_tree": "691233eb5a1e1133061eaa84be7c70c948279bc9"
+  "result_tree": "4c1c055cec48de59754020ef3d99ee3256293b45"
 }

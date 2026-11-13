@@ -639,12 +639,16 @@ def test_single_sdk_producer_checks_installed_wheel_before_upload() -> None:
     assert not any(name.startswith("packaged-contract-") for name in jobs)
     for platform in ("linux", "macos"):
         assert jobs[f"produce-{platform}"]["needs"] == "changes"
-        assert jobs[f"produce-{platform}"]["if"] == "needs.changes.outputs.code == 'true'"
+        assert (
+            jobs[f"produce-{platform}"]["if"]
+            == "needs.changes.outputs.code == 'true' && needs.changes.outputs.warm != 'true'"
+        )
         assert set(jobs[f"native-{platform}"]["needs"]) == {
             "changes",
             "produce-linux",
             "produce-windows",
             "produce-macos",
+            "produce-linux-arm64-push",
         }
     workflow = yaml.safe_load((ROOT / ".github/workflows/codex-python-qualify.yml").read_text())
     steps = workflow["jobs"]["build"]["steps"]
@@ -696,7 +700,9 @@ def test_committed_version_controls_windows_scheduling(
     gate = next(step for step in changes["steps"] if step.get("id") == "release-windows")
     assert gate["env"] == {
         "V1_QUALIFICATION": (
-            "${{ inputs.native_only || github.ref_name == 'feat/codex-harness' || "
+            "${{ inputs.native_only || (github.ref_name == 'feat/codex-harness' || "
+            "github.ref_name == 'ci/hillclimb/python-current-seed-29' || "
+            "github.ref_name == 'ci/hillclimb/python-current-warm-29') || "
             "github.base_ref == 'feat/codex-harness' || "
             "github.event.pull_request.stack.base.ref == 'feat/codex-harness' || "
             "github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness' }}"
@@ -816,15 +822,19 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
     for platform in ("linux", "macos"):
         producer = jobs[f"produce-{platform}"]
         assert producer["needs"] == "changes"
-        assert producer["if"] == "needs.changes.outputs.code == 'true'"
+        assert (
+            producer["if"]
+            == "needs.changes.outputs.code == 'true' && needs.changes.outputs.warm != 'true'"
+        )
     producer = jobs["produce-windows"]
     assert producer["needs"] == "changes"
     assert producer["if"] == (
-        "needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true'"
+        "needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true' "
+        "&& needs.changes.outputs.warm != 'true'"
     )
-    suites = jobs["tests-windows"]
-    assert suites["needs"] == "native-windows"
-    assert suites["if"] == "${{ !inputs.native_only }}"
+    suites = jobs["tests-windows-shards"]
+    assert suites["needs"] == jobs["native-windows"]["needs"]
+    assert suites["if"] == "!inputs.native_only && " + jobs["native-windows"]["if"]
     assert suites["strategy"]["matrix"]["python-version"] == ["3.10", "3.14"]
     assert suites["runs-on"] == (
         "${{ fromJSON(github.repository == 'openai/openai-agents-python' && "
@@ -839,7 +849,10 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
         '\'{"group":"codex-runners","labels":"codex-linux-x64"}\' || '
         "'\"ubuntu-latest\"') }}"
     )
-    assert win_typecheck["if"] == "${{ !inputs.native_only }}"
+    assert (
+        win_typecheck["if"]
+        == "${{ !inputs.native_only && !cancelled() && needs.native-linux.result == 'success' }}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -958,6 +971,7 @@ def test_native_selection_routes_stack_sources_and_pr_provenance(
         step for step in workflow["jobs"]["changes"]["steps"] if step.get("id") == "native-source"
     )
     values = {
+        "github.event_name": "push",
         "github.event.pull_request.stack.base.ref": stack_base,
         "github.base_ref": base,
         "steps.producer-identity.outputs.base_ref": recorded_base,
@@ -982,6 +996,22 @@ def test_native_selection_routes_stack_sources_and_pr_provenance(
     "scenario",
     [
         "reuse",
+        "four_platform_reuse",
+        "cold_seed",
+        "warm_replay_reuse",
+        "warm_replay_wrong_branch",
+        "warm_replay_python_fixture_changed",
+        "four_platform_missing_producer",
+        "four_platform_failed_qualifier",
+        "four_platform_missing_qualifier",
+        "four_platform_late_publication",
+        "harness_push_snapshot_clock_rounding",
+        "harness_push_snapshot_clock_beyond_rounding",
+        "harness_push_snapshot_clock_at_sdk_start",
+        "harness_push_snapshot_before_upload",
+        "harness_push_snapshot_clock_duplicate",
+        "harness_push_provenance_clock_rounding",
+        "harness_pr_snapshot_clock_rounding",
         "host_autocrlf",
         "python_dependencies_changed",
         "sdk_license_changed",
@@ -1141,6 +1171,7 @@ def test_native_selection_routes_stack_sources_and_pr_provenance(
         "unknown_two_platforms",
         "unknown_complete",
         "dependencies_reuse",
+        "dependencies_snapshot_clock_rounding",
         "dependencies_prefer_wheel",
         "dependencies_missing_cleanup",
         "dependencies_build_payload_changed_modified",
@@ -1174,6 +1205,17 @@ def test_native_build_selection(
     import urllib.parse
     import urllib.request
 
+    cold_seed = scenario == "cold_seed"
+    warm_replay = scenario.startswith("warm_replay_")
+    if cold_seed:
+        scenario = "harness_push_reuse"
+    elif warm_replay:
+        scenario = "harness_push_" + scenario.removeprefix("warm_replay_")
+    arm_case = (
+        scenario.removeprefix("four_platform_") if scenario.startswith("four_platform_") else ""
+    )
+    if arm_case:
+        scenario = "harness_push_reuse"
     dependency_cache = scenario.startswith("dependencies_")
     prefer_wheel = scenario == "dependencies_prefer_wheel"
     missing_cleanup = scenario == "dependencies_missing_cleanup"
@@ -1182,6 +1224,7 @@ def test_native_build_selection(
         scenario = "reuse"
     harness_pr = scenario.startswith("harness_pr_")
     harness_push = scenario.startswith("harness_push_")
+    four_platform = harness_push and not dependency_cache
     scenario = scenario.removeprefix("harness_pr_").removeprefix("harness_push_")
     pending_python = (
         scenario == "in_progress"
@@ -1613,6 +1656,9 @@ def test_native_build_selection(
         _git(repo, "checkout", "main")
     else:
         donor = base
+    if warm_replay and scenario == "reuse":
+        head = donor
+        _git(repo, "checkout", "--detach", donor)
     repository = "openai/openai-agents-python"
     pr_donor = scenario.startswith("pr_") or scenario == "push_pr_source"
     current_pr = pr_donor and scenario not in {"pr_default_merged", "push_pr_source"}
@@ -1668,6 +1714,8 @@ def test_native_build_selection(
         if scenario in {"failed_run", "retried_during_selection"}
         else "success",
     }
+    if cold_seed or warm_replay and scenario != "wrong_branch":
+        source["head_branch"] = "ci/hillclimb/python-current-seed-29"
     source["referenced_workflows"] = [
         {
             "path": f"{repository}/{path}@{donor}",
@@ -1852,6 +1900,7 @@ def test_native_build_selection(
             ("linux", "ubuntu-24.04"),
             ("windows", "windows-latest"),
             ("macos", "macos-latest"),
+            *((("linux-arm64", "ubuntu-24.04-arm"),) if four_platform else ()),
         )
     ]
     if dependency_cache:
@@ -1890,6 +1939,7 @@ def test_native_build_selection(
                 "native-snapshot-Linux-X64",
                 "native-snapshot-Windows-X64",
                 "native-snapshot-macOS-ARM64",
+                *(("native-snapshot-Linux-ARM64",) if four_platform else ()),
             )
         )
     ]
@@ -1904,6 +1954,17 @@ def test_native_build_selection(
                 .removesuffix("-" + native_identity)
                 .replace("native-snapshot-", "native-dependencies-")
             )
+    if scenario.startswith("snapshot_clock_") or scenario == "snapshot_before_upload":
+        mac_snapshot = artifacts[2]
+        mac_snapshot["created_at"] = {
+            "snapshot_clock_rounding": "2026-11-04T01:00:11Z",
+            "snapshot_clock_beyond_rounding": "2026-11-04T01:00:11.000001Z",
+            "snapshot_clock_at_sdk_start": "2026-11-04T01:00:11Z",
+            "snapshot_before_upload": "2026-11-04T00:59:59.999999Z",
+            "snapshot_clock_duplicate": "2026-11-04T01:00:11Z",
+        }[scenario]
+        if scenario == "snapshot_clock_duplicate":
+            artifacts.append(dict(mac_snapshot, id=9000))
     if scenario == "missing_artifact":
         artifacts.pop()
     if scenario in {
@@ -1959,12 +2020,27 @@ def test_native_build_selection(
             ("linux", "ubuntu-24.04"),
             ("windows", "windows-latest"),
             ("macos", "macos-latest"),
+            *((("linux-arm64", "ubuntu-24.04-arm"),) if four_platform else ()),
         )
     )
+    if arm_case == "missing_producer":
+        jobs[:] = [job for job in jobs if not job["name"].startswith("produce-linux-arm64 /")]
+    elif arm_case == "missing_qualifier":
+        jobs[:] = [job for job in jobs if not job["name"].startswith("native-linux-arm64 /")]
+    elif arm_case == "failed_qualifier":
+        next(job for job in jobs if job["name"].startswith("native-linux-arm64 /"))[
+            "conclusion"
+        ] = "failure"
+    elif arm_case == "late_publication":
+        arm = next(job for job in jobs if job["name"].startswith("produce-linux-arm64 /"))
+        arm["steps"][-1]["completed_at"] = "2026-11-04T01:00:30Z"
+        artifacts[-1]["created_at"] = "2026-11-04T01:00:25Z"
     if scenario == "cross_platform_interleaving":
         jobs.append({"name": "tests (3.11)", "started_at": "2026-11-04T01:00:04Z"})
     if scenario == "replacement_artifact":
         artifacts[0].update(id=9999, created_at="2026-11-04T01:00:30Z")
+    if scenario == "snapshot_clock_at_sdk_start":
+        jobs[-1]["started_at"] = "2026-11-04T01:00:11Z"
     if scenario == "equal_publication_sdk":
         jobs[-1]["started_at"] = "2026-11-04T01:00:10Z"
     if scenario == "equal_fractional_publication_sdk":
@@ -2048,7 +2124,9 @@ def test_native_build_selection(
                     "name": "Publish native producer identity",
                     "conclusion": "success",
                     "started_at": "2026-11-04T00:59:00Z",
-                    "completed_at": "2026-11-04T00:59:10Z",
+                    "completed_at": "2026-11-04T00:59:04Z"
+                    if scenario == "provenance_clock_rounding"
+                    else "2026-11-04T00:59:10Z",
                 }
             ],
         }
@@ -2274,6 +2352,7 @@ def test_native_build_selection(
             else "push"
         ),
         "GH_TOKEN": "placeholder",
+        "REQUIRE_ARM64": "true" if harness_push else "false",
         "REQUIRE_WINDOWS": (
             ""
             if scenario.startswith("unknown_")
@@ -2289,6 +2368,25 @@ def test_native_build_selection(
     if scenario == "pr_missing_number":
         monkeypatch.setenv("CURRENT_PR", "")
     script = selection["run"].split("\n", 1)[1].removesuffix("PYTHON\n")
+    if cold_seed or warm_replay:
+        monkeypatch.setenv("SOURCE_BRANCH", "ci/hillclimb/python-current-seed-29")
+        monkeypatch.setenv(
+            "GITHUB_REF_NAME",
+            "ci/hillclimb/python-current-warm-29"
+            if warm_replay
+            else "ci/hillclimb/python-current-seed-29",
+        )
+        monkeypatch.setenv("WARM_SNAPSHOT_REPLAY", str(warm_replay).lower())
+        monkeypatch.setenv("BENCHMARK_COLD_SEED", str(cold_seed).lower())
+        if cold_seed:
+            exec(compile(script, workflow_path, "exec"), {})
+            assert not output.exists()
+            return
+        if scenario != "reuse":
+            with pytest.raises(SystemExit, match="Approved warm replay requires"):
+                exec(compile(script, workflow_path, "exec"), {})
+            assert not output.exists()
+            return
     if scenario.startswith("incomplete_"):
         with pytest.raises(SystemExit, match="Incomplete source metadata"):
             exec(compile(script, workflow_path, "exec"), {})
@@ -2328,7 +2426,7 @@ def test_native_build_selection(
         (
             "dependency_run=123\ndependencies="
             if dependency_cache and not prefer_wheel
-            else "run_id=123\nartifacts="
+            else "run_id=123\n" + ("warm=true\n" if four_platform else "") + "artifacts="
         )
         + json.dumps(
             {
@@ -2342,13 +2440,22 @@ def test_native_build_selection(
                         else {"name": "native-snapshot-" + identity + "-" + native_identity}
                     ),
                 }
-                for index, identity in enumerate(("Linux-X64", "Windows-X64", "macOS-ARM64"))
+                for index, identity in enumerate(
+                    (
+                        "Linux-X64",
+                        "Windows-X64",
+                        "macOS-ARM64",
+                        *(("Linux-ARM64",) if four_platform else ()),
+                    )
+                )
                 if identity != "Windows-X64" or os.environ["REQUIRE_WINDOWS"] != "false"
             },
             sort_keys=True,
         )
         + "\n"
-        if not missing_cleanup
+        if not (arm_case and arm_case != "reuse")
+        and not (dependency_cache and scenario == "snapshot_clock_rounding")
+        and not missing_cleanup
         and not (dependency_cache and scenario == "branch_copied")
         and (
             harness_pr
@@ -2356,6 +2463,7 @@ def test_native_build_selection(
             or scenario
             in {
                 "reuse",
+                "snapshot_clock_rounding",
                 "python_dependencies_changed",
                 "build_bytecode_noise",
                 "python_fixture_changed",

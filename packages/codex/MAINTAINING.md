@@ -115,16 +115,18 @@ The **Tests** workflow checks each pull request's merge commit and runs on pushe
 
 Each selected platform publishes a `native-snapshot-<OS>-<ARCH>-<input-hash>` artifact. Qualification repacks the current Python SDK around the verified native payload, then publishes `native-<OS>-<ARCH>`. Installed-package, IPC, executable-symbol and receipt checks apply by platform.
 
-Preview code changes build Linux ARM64 on `ubuntu-24.04-arm`. Pull request and merge queue qualification start after the ARM64 producer succeeds. Preview push qualification also waits for the Linux x86_64, macOS, and Windows producers so the push can supply reusable artifacts. Linux ARM64 builds from source and qualifies the installed wheel with a local Session on CPython 3.10 and 3.14. Its `native-Linux-ARM64` artifact includes both Session test reports.
+Preview code changes build Linux ARM64 on `ubuntu-24.04-arm`. Pull request and merge queue qualification start after the ARM64 producer succeeds. Cold preview push qualification also waits for the Linux x86_64, macOS, and Windows producers so the push can supply reusable artifacts. Cold Linux ARM64 builds have been compiling source. ARM64 qualification has been testing the installed wheel with a local Session on CPython 3.10 and 3.14. Its `native-Linux-ARM64` artifact includes both Session test reports.
 
 #### Check donor eligibility
 
-A donor is a push run that supplies a reusable native artifact for Linux x86_64, macOS, or Windows. For each donor, CI:
+Donor pushes have been supplying reusable native artifacts for Linux x86_64, macOS and Windows, plus Linux ARM64 for canonical preview pushes. For each donor, CI:
 
 - Checks the complete caller and native workflows at the push commit.
 - Compares committed native and build inputs against the current checkout.
 - Requires successful later platform qualification.
 - Selects original publications by artifact ID and SHA-256 digest, from before the earliest SDK execution across all attempts.
+
+Complete four-platform hits on canonical `feat/codex-harness` pushes with full SDK coverage have been bypassing relay producers and reusing the original donor directly. Qualification has been repacking and testing the current SDK. PR and merge-queue ARM64 builds have been retaining their independent path.
 
 A branch producer also records its unique open PR, repository IDs and branch refs before publication. Consumers compare that captured identity with their current PR. Pre-PR or ambiguous associations do not qualify, and PR-scoped products never supply canonical pushes or another PR.
 

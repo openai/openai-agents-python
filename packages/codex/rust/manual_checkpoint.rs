@@ -1902,6 +1902,7 @@ pub(crate) async fn capture(
         Err(error) if error.is::<UnsupportedManualState>() => return Ok(None),
         Err(error) => return Err(error),
     };
+    let admission = tools.admission_ready(&turn)?;
     match store
         .begin_manual_suspension(thread.id, pending.clone(), &tools.completed_calls(&turn))
         .await
@@ -1914,11 +1915,15 @@ pub(crate) async fn capture(
     // Finalize the begun store transaction even if retiring an idle child
     // fails. The Python owner treats this as terminal and closes the session;
     // it must not inherit a store still intercepting cancellation receipts.
+    let pending_join = &admission.held_tool_outputs.pending_suspension_join;
     let outcome: Result<_> = async {
         crate::checkpoint::retire_manual_descendants(thread).await?;
+        // Only this admitted portable checkpoint needs the ordered sibling drain.
+        pending_join.store(true, std::sync::atomic::Ordering::Release);
         Ok(thread.thread.suspend_turn_and_shutdown().await?)
     }
     .await;
+    let join_failed = pending_join.swap(false, std::sync::atomic::Ordering::AcqRel);
     let suspended_turn = match &outcome {
         Ok(codex_protocol::turn_input::SuspendTurnOutcome::Suspended { turn_id }) => {
             // Manual suspension joins the turn without publishing its terminal event.
@@ -1970,6 +1975,7 @@ pub(crate) async fn capture(
         thread.retire_suspended(drain_events).await;
     }
     outcome?;
+    ensure!(!join_failed, "Could not join portable checkpoint drain");
     let mut snapshot = snapshot?;
     snapshot["format_version"] = serde_json::json!(if snapshot["format_version"] == 4 {
         5
@@ -2103,6 +2109,11 @@ pub(crate) async fn capture(
         .into_iter()
         .filter(|(id, _)| order.contains(id))
         .collect();
+    ensure!(
+        pending_manual.len() + accepted.len() == order.len()
+            && accepted.keys().all(|call| !pending_ids.contains(call.as_str())),
+        "Continuation receipt partition is incomplete"
+    );
     let history: Vec<_> = history
         .into_iter()
         .enumerate()
