@@ -88,6 +88,7 @@ async def test_configured_child_provider_usage():
     entries = [
         entry for entry in result.items or () if entry.item.get("call_id") == "delegate-call"
     ]
+    assert child_result is not None
     observation = {
         "root_requests": root_requests,
         "child_requests": child_requests,
@@ -101,7 +102,6 @@ async def test_configured_child_provider_usage():
         ],
         "owners": [entry.agent.name for entry in entries],
     }
-    assert child_result is not None
     assert (child_result.run_usage.requests, child_result.run_usage.total_tokens) == (1, 9)
     assert root_requests == 2 and child_requests == 1
     assert result.final_output == "parent done"

@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from agents import InteractionExpiredError, SessionState
+from agents import ApprovalRequested, InteractionExpiredError, PendingRequests, SessionState
 from tests._asyncio import timeout
 from tests.test_native_configured_agent_tool import fixture
 
@@ -16,11 +16,14 @@ async def test_entered_configured_call_parks_once_after_owned_child_seal():
         async with parent.session(context=context) as session:
             turn = await session.submit("begin joint witness")
             boundary = await turn.wait_for_request_or_result()
+            assert isinstance(boundary, PendingRequests)
             approval = boundary.requests[0]
+            assert isinstance(approval, ApprovalRequested)
             await sibling.wait()
             [child] = session._configured_children
             child.sealing = True
             saved_child = await child.session.suspend()
+            assert saved_child.native_continuation is not None
             assert saved_child.native_continuation.pending_manual[0].call_id == approval.call_id
             payload = {
                 "request": json.loads(child.parent_request),
@@ -57,7 +60,9 @@ async def test_entered_configured_call_parks_once_after_owned_child_seal():
             async with child_agent.session(context=context, state=portable) as restored:
                 assert restored.restored_turn is not None
                 resumed = await restored.restored_turn.wait_for_request_or_result()
+                assert isinstance(resumed, PendingRequests)
                 [current] = resumed.requests
+                assert isinstance(current, ApprovalRequested)
                 assert current.call_id == approval.call_id
                 assert current.session_id == approval.session_id
                 assert current.submission_id != approval.submission_id
@@ -82,7 +87,9 @@ async def test_public_parent_checkpoint_resumes_configured_child_and_held_siblin
         async with parent.session(context=context) as source:
             turn = await source.submit("begin portable parent")
             boundary = await turn.wait_for_request_or_result()
+            assert isinstance(boundary, PendingRequests)
             [original] = boundary.requests
+            assert isinstance(original, ApprovalRequested)
             await sibling.wait()
             saved = await source.suspend()
             assert (turn.run_usage.requests, turn.run_usage.total_tokens) == (2, 28)
@@ -113,7 +120,9 @@ async def test_public_parent_checkpoint_resumes_configured_child_and_held_siblin
                 restored.restored_turn.run_usage.total_tokens,
             ) == (2, 28)
             pending = await restored.restored_turn.wait_for_request_or_result()
+            assert isinstance(pending, PendingRequests)
             [current] = pending.requests
+            assert isinstance(current, ApprovalRequested)
             assert current.call_id == original.call_id
             assert effects == ["accepted-sibling"]
             with pytest.raises(InteractionExpiredError):
@@ -141,6 +150,9 @@ async def test_parent_preseal_refusal_rolls_back_owned_child_without_repeating_s
         async with parent.session(context=context) as source:
             turn = await source.submit("begin rollback parent")
             original = await turn.wait_for_request_or_result()
+            assert isinstance(original, PendingRequests)
+            original_request = original.requests[0]
+            assert isinstance(original_request, ApprovalRequested)
             await sibling.wait()
 
             def refuse():
@@ -152,11 +164,13 @@ async def test_parent_preseal_refusal_rolls_back_owned_child_without_repeating_s
             assert child.session._sealed_checkpoint is None
             assert (turn.run_usage.requests, turn.run_usage.total_tokens) == (2, 28)
             current = await turn.wait_for_request_or_result()
+            assert isinstance(current, PendingRequests)
             [request] = current.requests
-            assert request.call_id == original.requests[0].call_id
+            assert isinstance(request, ApprovalRequested)
+            assert request.call_id == original_request.call_id
             assert effects == ["accepted-sibling"]
             with pytest.raises(InteractionExpiredError):
-                await source.respond(original.requests[0].reply(True))
+                await source.respond(original_request.reply(True))
             await source.respond(request.reply(True))
             with pytest.raises(InteractionExpiredError):
                 await source.respond(request.reply(True))
@@ -180,7 +194,9 @@ async def test_configured_child_denial_keeps_admitted_usage():
             turn = await source.submit("deny configured leaf")
             pending = await turn.wait_for_request_or_result()
             await sibling.wait()
+            assert isinstance(pending, PendingRequests)
             [request] = pending.requests
+            assert isinstance(request, ApprovalRequested)
             await source.respond(request.reply(False))
             completed = await turn.get_result()
             assert completed.final_output == "parent complete"
