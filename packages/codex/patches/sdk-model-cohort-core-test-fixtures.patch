@@ -375,7 +375,7 @@ index 896e6552..835072b5 100644
  use tokio::sync::{mpsc, oneshot};
  
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 4bd8fb0a..4488c505 100644
+index c655bae43364c654972480e30507f52c9eb7a623..6cf266ebeb811be5c61f5f8515f467f1cd2746a1 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -824,6 +824,7 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
@@ -394,58 +394,82 @@ index 4bd8fb0a..4488c505 100644
                  tool_completion: None,
                  turn_id,
                  last_agent_message: None,
+@@ -12068,6 +12070,7 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
+         Arc::new(session.build_world_state_for_step(&fallback).await.unwrap()),
+         CompactionReason::ModelDownshift,
+         CompactionPhase::PreTurn,
++        &CancellationToken::new(),
+     )
+     .await;
+     match first_attempt {
 diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
-index f664c703..a2a20e15 100644
+index f664c7038250a2759a7137261b23cfe7409a9cd9..f84eaa130edb712c34ce50e17019ad88d3f23ed3 100644
 --- a/codex-rs/core/src/session/turn_tests.rs
 +++ b/codex-rs/core/src/session/turn_tests.rs
-@@ -205,7 +205,6 @@ async fn terminal_policy_selects_the_first_eligible_call_in_model_order() {
+@@ -183,6 +183,7 @@ fn settled_test_calls() -> SettledDirectTools {
+                 .unwrap()
+             })
+             .collect(),
++        outcomes: vec![Some(true); 3],
+         all_succeeded: true,
+     }
+ }
+@@ -204,8 +205,8 @@ async fn terminal_policy_selects_the_first_eligible_call_in_model_order() {
+         &session,
          &step,
          &settled_test_calls(),
++        false,
          &CancellationToken::new(),
 -        &mut 0,
      )
      .await
      .unwrap()
-@@ -231,7 +230,7 @@ async fn terminal_policy_never_runs_for_failed_siblings() {
+@@ -230,8 +231,9 @@ async fn terminal_policy_never_runs_for_failed_siblings() {
+     let step = StepContext::for_test(Arc::new(turn));
      let mut tools = settled_test_calls();
      tools.all_succeeded = false;
++    tools.outcomes[0] = Some(false);
      assert!(
 -        propose_tool_completion(&session, &step, &tools, &CancellationToken::new(), &mut 0)
-+        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, false, &CancellationToken::new())
              .await
              .unwrap()
              .is_none()
-@@ -253,7 +252,6 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+@@ -252,8 +254,8 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+             &session,
              &step,
              &settled_test_calls(),
++            false,
              &CancellationToken::new(),
 -            &mut 0,
          )
          .await
          .unwrap()
-@@ -272,7 +270,6 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+@@ -271,8 +273,8 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+         &session,
          &step,
          &settled_test_calls(),
++        false,
          &CancellationToken::new(),
 -        &mut 0,
      )
      .await
      .unwrap_err();
-@@ -286,7 +283,7 @@ async fn terminal_policy_rejects_a_mismatched_accepted_receipt() {
+@@ -286,7 +288,7 @@ async fn terminal_policy_rejects_a_mismatched_accepted_receipt() {
      let mut tools = settled_test_calls();
      tools.outputs.swap(0, 1);
      assert!(
 -        propose_tool_completion(&session, &step, &tools, &CancellationToken::new(), &mut 0)
-+        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, false, &CancellationToken::new())
              .await
              .is_err()
      );
-@@ -476,7 +473,7 @@ async fn tool_terminal_recovery_saved_success_alone_has_no_completion_authority(
+@@ -476,7 +478,7 @@ async fn tool_terminal_recovery_saved_success_alone_has_no_completion_authority(
      let (session, turn) = crate::session::tests::make_session_and_context().await;
      let step = StepContext::for_test(Arc::new(turn));
      assert!(
 -        propose_tool_completion(&session, &step, &tools, &CancellationToken::new(), &mut 0)
-+        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, false, &CancellationToken::new())
              .await
              .unwrap()
              .is_none()

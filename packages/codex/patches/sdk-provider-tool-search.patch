@@ -1075,3 +1075,15 @@ index dc2f3e8c76347b200264ec074d2c5b749c54ec38..ae738817db224b1b42568b35853a738c
                  DynamicToolSpec::Function(function) => vec![function],
                  DynamicToolSpec::Namespace(namespace) => namespace
                      .tools
+diff --git a/codex-rs/core/src/tools/context_tests.rs b/codex-rs/core/src/tools/context_tests.rs
+index bd0cb0c5b57bda6b0d4c40b015d1228de40b1c82..fa6f183ac6a88ed5ea98866d0e2556a3490e508d 100644
+--- a/codex-rs/core/src/tools/context_tests.rs
++++ b/codex-rs/core/src/tools/context_tests.rs
+@@ -2,6 +2,7 @@ use super::*;
+ use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
+ use codex_protocol::models::ImageReference;
+ use codex_protocol::models::SearchToolCallParams;
++use codex_tools::LoadableToolSpec;
+ use core_test_support::assert_regex_match;
+ use pretty_assertions::assert_eq;
+ use serde_json::json;

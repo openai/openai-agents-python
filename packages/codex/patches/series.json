@@ -682,7 +682,7 @@
     },
     {
       "path": "sdk-provider-tool-search.patch",
-      "sha256": "8d99209333aab7c8dd48fa39d1f2e9cb3d33282ea640b5eabb6e318fced58f0e"
+      "sha256": "368be837c084d7cb2c2c4caa7ccd8774be44b3ce34ce22e14839ab589256a5a8"
     },
     {
       "path": "sdk-provider-hosted-shell.patch",
@@ -774,7 +774,7 @@
     },
     {
       "path": "sdk-model-cohort-core-test-fixtures.patch",
-      "sha256": "30c218b88cfd15417c664024c6a2039e18c6d4ab8cd65bd9cd8440de9d38b4c5"
+      "sha256": "b4a7f82c4c62a00ae4046d316fa7e9004b1b57acb9488576a25dd0c5ceaf7b9a"
     },
     {
       "path": "sdk-model-deadline-admission-compile.patch",
@@ -902,7 +902,7 @@
     },
     {
       "path": "sdk-request-transport-overrides.patch",
-      "sha256": "523ef3b68479a8e78901bda79021f8f9487003e77afb88d3625c9494e2fd1c16"
+      "sha256": "6acc1cf8d3c72ce09628400dce808936f0913a15b734f8ede822268f99e7b8ec"
     },
     {
       "path": "sdk-run-model-settings-override.patch",
@@ -969,5 +969,5 @@
       "sha256": "a3861d66e1091c6ab3677d9b6224dbac652e3639d9a607a6a1a2104695189787"
     }
   ],
-  "result_tree": "906b6f232fbf8f639e5962400d15d2eed6e3dfa5"
+  "result_tree": "a345e374a9c4d7611b09e371b134b5b71ffb0b22"
 }

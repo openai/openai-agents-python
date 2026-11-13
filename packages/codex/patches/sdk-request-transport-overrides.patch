@@ -687,7 +687,7 @@ index aa55d51ebbbb6b5f502bbfb226e4037d5bf2d5ec..60968dc973d6c8dbcf4f801284c1989f
          self.attempt.clone()
      }
 diff --git a/codex-rs/core/src/session/startup_prewarm.rs b/codex-rs/core/src/session/startup_prewarm.rs
-index b59308436d9845f0aec7c605137c06ea84326133..29fc6e4e37b46cc9843bac6a6608f58c652b2ccb 100644
+index b59308436d9845f0aec7c605137c06ea84326133..d7bf11aea7f002ac8e9c82be08f87356adcb7661 100644
 --- a/codex-rs/core/src/session/startup_prewarm.rs
 +++ b/codex-rs/core/src/session/startup_prewarm.rs
 @@ -387,11 +387,19 @@ async fn schedule_startup_prewarm_inner(
@@ -715,7 +715,7 @@ index b59308436d9845f0aec7c605137c06ea84326133..29fc6e4e37b46cc9843bac6a6608f58c
          ),
      )?;
      let build_prompt_started_at = Instant::now();
-@@ -450,3 +458,88 @@ async fn schedule_startup_prewarm_inner(
+@@ -450,3 +458,89 @@ async fn schedule_startup_prewarm_inner(
      );
      Ok(client_session)
  }
@@ -764,6 +764,7 @@ index b59308436d9845f0aec7c605137c06ea84326133..29fc6e4e37b46cc9843bac6a6608f58c
 +            let provider = codex_api::Provider {
 +                name: "startup-boundary".into(),
 +                base_url: format!("{}/v1", server.uri()),
++                websocket_base_url: None,
 +                query_params: None,
 +                headers: http::HeaderMap::new(),
 +                retry: codex_api::RetryConfig {
