@@ -120,10 +120,11 @@ def test_invalid_handoff_declaration_is_rejected_at_construction():
 
 
 @pytest.mark.parametrize("output", [NativeOutput(str), PromptedOutput(str)])
-def test_graph_rejects_incompatible_output_encoding_before_native_open(output):
+def test_text_graph_captures_distinct_output_encodings(output):
     target = Agent(instructions="Target", name="Target", output_type=output)
-    with pytest.raises(ValueError, match="output mode, schema and wrapping"):
-        _capture_agent_graph(Agent(instructions="Route", handoffs=[target]))
+    root, destination = _capture_agent_graph(Agent(instructions="Route", handoffs=[target]))
+    assert root.declaration.output_type is None
+    assert destination.declaration.output_type == output
 
 
 def test_graph_preserves_agent_specific_retry_policy_with_shared_output_encoding():
