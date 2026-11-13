@@ -3797,6 +3797,19 @@ def _opening_tool_policy(
     }
 
 
+def _without_sandbox_memory_admission(checkpoint: str) -> str:
+    imported = json.loads(checkpoint)
+    for thread in [imported, *imported.get("descendants", [])]:
+        for item in thread.get("history", []):
+            if item.get("type") != "turn_context":
+                continue
+            payload = item.get("payload")
+            receipt = payload.get("sdk_receipt") if isinstance(payload, dict) else None
+            if isinstance(receipt, dict):
+                receipt.pop("sandbox_memory_input_admitted", None)
+    return json.dumps(imported)
+
+
 def _capture_opening_guardrails(
     input_guardrails: Sequence[InputGuardrail[Any]],
     output_guardrails: Sequence[OutputGuardrail[Any]],
@@ -4241,16 +4254,7 @@ class Session(Generic[ContextT, OutputT]):
             verify_remembered_approvals = None
             remembered_approvals = await verification
             if checkpoint is not None and not authenticated_memory_history:
-                imported = json.loads(checkpoint)
-                for thread in [imported, *imported.get("descendants", [])]:
-                    for item in thread.get("history", []):
-                        if item.get("type") != "turn_context":
-                            continue
-                        payload = item.get("payload")
-                        receipt = payload.get("sdk_receipt") if isinstance(payload, dict) else None
-                        if isinstance(receipt, dict):
-                            receipt.pop("sandbox_memory_input_admitted", None)
-                checkpoint = json.dumps(imported)
+                checkpoint = _without_sandbox_memory_admission(checkpoint)
             if environment is not None and not isinstance(environment, Environment):
                 if not isinstance(environment, AbstractAsyncContextManager):
                     raise TypeError("environment must be an Environment or async context manager")

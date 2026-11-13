@@ -17,7 +17,13 @@ class _CapturedValues(dict[str, object]):
     def _immutable(self, *args: Any, **kwargs: Any) -> NoReturn:
         raise TypeError("Captured values are immutable")
 
-    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = __ior__ = _immutable
+    __setitem__ = __delitem__ = clear = pop = popitem = __ior__ = _immutable
+
+    def setdefault(self, key: str, default: object = None, /) -> NoReturn:
+        self._immutable()
+
+    def update(self, *args: Any, **kwargs: Any) -> NoReturn:
+        self._immutable()
 
     def __copy__(self) -> _CapturedValues:
         return self
