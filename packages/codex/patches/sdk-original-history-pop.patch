@@ -1,0 +1,846 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index f52f78bb..3281e628 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1225,6 +1225,18 @@ impl CodexThread {
+             .await
+     }
+
++    /// Pop an exact original under the SDK's exclusive idle permit.
++    #[doc(hidden)]
++    pub async fn sdk_pop_history(
++        &self,
++        expected_revision: &str,
++        allow_rebuild: bool,
++    ) -> CodexResult<(String, Option<String>, bool)> {
++        self.session
++            .sdk_pop_history(expected_revision, allow_rebuild)
++            .await
++    }
++
+     /// Read fixed admission eligibility without exposing private projection metadata.
+     #[doc(hidden)]
+     pub async fn sdk_history_projection(
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index dc17c2f1..1a9e2ce5 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -269,6 +269,11 @@ impl Session {
+ #[path = "inject_tests.rs"]
+ mod tests;
+
++enum SdkHistoryEdit {
++    Replace { keep: usize, appended: Vec<String> },
++    Pop { allow_rebuild: bool },
++}
++
+ impl Session {
+     pub(crate) async fn sdk_history_snapshot(
+         &self,
+@@ -460,6 +465,29 @@ impl Session {
+         keep: usize,
+         appended: Vec<String>,
+     ) -> codex_protocol::error::Result<String> {
++        let (revision, _, _) = self
++            .sdk_edit_history(
++                expected_revision,
++                SdkHistoryEdit::Replace { keep, appended },
++            )
++            .await?;
++        Ok(revision)
++    }
++
++    pub(crate) async fn sdk_pop_history(
++        &self,
++        expected_revision: &str,
++        allow_rebuild: bool,
++    ) -> codex_protocol::error::Result<(String, Option<String>, bool)> {
++        self.sdk_edit_history(expected_revision, SdkHistoryEdit::Pop { allow_rebuild })
++            .await
++    }
++
++    async fn sdk_edit_history(
++        &self,
++        expected_revision: &str,
++        edit: SdkHistoryEdit,
++    ) -> codex_protocol::error::Result<(String, Option<String>, bool)> {
+         use crate::context_manager::HistoryReplacement;
+         use codex_history::sdk_originals::{SdkOriginalItem, input_projection};
+         use codex_protocol::error::CodexErr;
+@@ -477,7 +505,9 @@ impl Session {
+             {
+                 return Err(invalid("canonical history revision conflict"));
+             }
+-            if state.sdk_originals.len().is_some_and(|total| keep > total) {
++            if let SdkHistoryEdit::Replace { keep, .. } = &edit
++                && state.sdk_originals.len().is_some_and(|total| *keep > total)
++            {
+                 return Err(invalid("history keep exceeds snapshot length"));
+             }
+         }
+@@ -486,30 +516,53 @@ impl Session {
+         if state.sdk_originals.revision() != Some(expected_revision) {
+             return Err(invalid("canonical history revision conflict"));
+         }
+-        if keep > current.items.len() {
+-            return Err(invalid("history keep exceeds snapshot length"));
+-        }
+-        let mut originals = current.prefix(keep);
+-        for original in appended {
+-            let projection = input_projection(&original)
+-                .map_err(|_| invalid("Invalid canonical history item"))?
+-                .map(|mut item| {
+-                    Self::assign_missing_response_item_id(&mut item);
+-                    self.annotate_client_response_item(item)
+-                });
+-            originals.append(SdkOriginalItem {
+-                original,
+-                projection,
+-            });
+-        }
+-        let mut envelopes = current
+-            .retained_projection(state.history.annotated_items(), keep)
+-            .map_err(invalid)?;
+-        envelopes.extend(
+-            originals.items[keep..]
+-                .iter()
+-                .filter_map(|item| item.projection.clone()),
+-        );
++        let (originals, envelopes, popped, rebuilt_context) = match edit {
++            SdkHistoryEdit::Replace { keep, appended } => {
++                if keep > current.items.len() {
++                    return Err(invalid("history keep exceeds snapshot length"));
++                }
++                let mut originals = current.prefix(keep);
++                for original in appended {
++                    let projection = input_projection(&original)
++                        .map_err(|_| invalid("Invalid canonical history item"))?
++                        .map(|mut item| {
++                            Self::assign_missing_response_item_id(&mut item);
++                            self.annotate_client_response_item(item)
++                        });
++                    originals.append(SdkOriginalItem {
++                        original,
++                        projection,
++                    });
++                }
++                let mut envelopes = current
++                    .retained_projection(state.history.annotated_items(), keep)
++                    .map_err(invalid)?;
++                envelopes.extend(
++                    originals.items[keep..]
++                        .iter()
++                        .filter_map(|item| item.projection.clone()),
++                );
++                (originals, envelopes, None, false)
++            }
++            SdkHistoryEdit::Pop { allow_rebuild } => {
++                let Some(pop) = current
++                    .prepare_pop(state.history.annotated_items(), allow_rebuild)
++                    .map_err(|error| {
++                        invalid(&format!(
++                            "{error}; raw pop can explicitly rebuild model context"
++                        ))
++                    })?
++                else {
++                    return Ok((current.revision().to_owned(), None, false));
++                };
++                (
++                    pop.originals,
++                    pop.projection,
++                    Some(pop.item),
++                    pop.rebuilt_context,
++                )
++            }
++        };
+         let mut projection_ids = std::collections::HashSet::new();
+         if envelopes
+             .iter()
+@@ -566,6 +619,6 @@ impl Session {
+         state.replace_annotated_history(envelopes, None, HistoryReplacement::Reset);
+         state.sdk_originals =
+             codex_history::sdk_originals::SdkOriginalHistoryCache::from(&originals);
+-        Ok(revision)
++        Ok((revision, popped, rebuilt_context))
+     }
+ }
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index ddea7ed6..0087076f 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -106,6 +106,9 @@ pub struct SdkOriginalHistory {
+     pub items: Vec<SdkOriginalItem>,
+     #[serde(skip)]
+     index: OriginalIndex,
++    // Cold journal proof only. Checkpoint payloads never supply this authority.
++    #[serde(skip)]
++    post_checkpoint_start: Option<usize>,
+ }
+
+ /// Bounded hot originals plus constant-size revision metadata; the journal owns the full catalog.
+@@ -406,6 +409,7 @@ impl Default for SdkOriginalHistory {
+             format_version: 1,
+             items: Vec::new(),
+             index: OriginalIndex::default(),
++            post_checkpoint_start: None,
+         }
+     }
+ }
+@@ -440,6 +444,123 @@ impl<'de> Deserialize<'de> for SdkOriginalHistory {
+     }
+ }
+
++/// Match the same client-owned pairs used by SDK context validation.
++#[doc(hidden)]
++pub fn client_tool_pair_part(item: &ResponseItem) -> Option<(&'static str, Option<&str>, bool)> {
++    let part = match item {
++        ResponseItem::FunctionCall { call_id, .. } => ("function", Some(call_id.as_str()), true),
++        ResponseItem::ApplyPatchCall { call_id, .. } => {
++            ("apply_patch", Some(call_id.as_str()), true)
++        }
++        ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
++            ("apply_patch", Some(call_id.as_str()), false)
++        }
++        ResponseItem::ShellCall {
++            provider_fields, ..
++        }
++        | ResponseItem::ShellCallOutput {
++            provider_fields, ..
++        } => (
++            "shell",
++            provider_fields
++                .get("call_id")
++                .and_then(serde_json::Value::as_str),
++            matches!(item, ResponseItem::ShellCall { .. }),
++        ),
++        ResponseItem::LocalShellCall { call_id, .. } => ("function", call_id.as_deref(), true),
++        ResponseItem::FunctionCallOutput { call_id, .. } => ("function", call_id.as_deref(), false),
++        ResponseItem::ComputerCall { call_id, .. } => ("computer", Some(call_id.as_str()), true),
++        ResponseItem::ComputerCallOutput { call_id, .. } => {
++            ("computer", Some(call_id.as_str()), false)
++        }
++        ResponseItem::CustomToolCall { call_id, .. } => ("custom", Some(call_id.as_str()), true),
++        ResponseItem::CustomToolCallOutput { call_id, .. } => {
++            ("custom", Some(call_id.as_str()), false)
++        }
++        ResponseItem::McpApprovalRequest { id, .. } => {
++            ("mcp-approval", id.as_ref().map(|id| id.as_str()), true)
++        }
++        ResponseItem::McpApprovalResponse {
++            approval_request_id,
++            ..
++        } => ("mcp-approval", Some(approval_request_id.as_str()), false),
++        ResponseItem::ToolSearchCall {
++            call_id, execution, ..
++        } if execution != "server" => ("search", call_id.as_deref(), true),
++        ResponseItem::ToolSearchOutput {
++            call_id, execution, ..
++        } if execution != "server" => ("search", call_id.as_deref(), false),
++        _ => return None,
++    };
++    Some(part)
++}
++
++fn tail_tool_partner(items: &[SdkOriginalItem]) -> Option<usize> {
++    let (tail, retained) = items.split_last()?;
++    let (family, Some(id), false) = client_tool_pair_part(&tail.projection.as_ref()?.item)? else {
++        return None;
++    };
++    // Calls with the same key can occur again after their previous output.
++    // The nearest occurrence must be the call for this exact tail output.
++    for (index, row) in retained.iter().enumerate().rev() {
++        let Some((other_family, Some(other_id), is_call)) = row
++            .projection
++            .as_ref()
++            .and_then(|row| client_tool_pair_part(&row.item))
++        else {
++            continue;
++        };
++        if other_family == family && other_id == id {
++            return is_call.then_some(index);
++        }
++    }
++    None
++}
++
++pub struct SdkOriginalHistoryPop {
++    pub item: String,
++    pub originals: SdkOriginalHistory,
++    pub projection: Vec<ResponseItemEnvelope>,
++    pub rebuilt_context: bool,
++}
++
++// Legacy checkpoint decoding represents absent metadata as an empty metadata object.
++// All populated provenance, including retained-source revisions, must still match.
++fn same_admission_envelope(left: &ResponseItemEnvelope, right: &ResponseItemEnvelope) -> bool {
++    left.item == right.item
++        && left.metadata.clone().unwrap_or_default() == right.metadata.clone().unwrap_or_default()
++}
++
++fn resolved_projection(items: Vec<ResponseItemEnvelope>) -> Vec<ResponseItemEnvelope> {
++    let mut keep = vec![false; items.len()];
++    let mut pending = BTreeMap::new();
++    for (index, row) in items.iter().enumerate() {
++        match client_tool_pair_part(&row.item) {
++            None => keep[index] = true,
++            Some((family, Some(id), true)) => {
++                // A repeated call before its output leaves the pairing ambiguous.
++                pending
++                    .entry((family, id))
++                    .and_modify(|slot| *slot = None)
++                    .or_insert(Some(index));
++            }
++            Some((family, Some(id), false)) => {
++                if let Some(Some(call)) = pending.remove(&(family, id)) {
++                    keep[call] = true;
++                    keep[index] = true;
++                }
++            }
++            Some((_, None, _)) => {}
++        }
++    }
++    drop(pending);
++    items
++        .into_iter()
++        .zip(keep)
++        .filter_map(|(row, keep)| keep.then_some(row))
++        .collect()
++}
++
+ impl SdkOriginalHistory {
+     pub fn revision(&self) -> &str {
+         &self.index.revision
+@@ -479,11 +600,181 @@ impl SdkOriginalHistory {
+             .collect()
+     }
+
++    /// Select an exact raw tail and keep an executable model projection.
++    /// The incomplete partner, if any, remains visible in originals for repair.
++    pub fn prepare_pop(
++        &self,
++        current: &[ResponseItemEnvelope],
++        allow_rebuild: bool,
++    ) -> Result<Option<SdkOriginalHistoryPop>, &'static str> {
++        let Some(last) = self.items.last() else {
++            return Ok(None);
++        };
++        let keep = self.items.len() - 1;
++        let partner = tail_tool_partner(&self.items);
++        let mut originals = self.prefix(keep);
++        if let Some(partner) = partner {
++            // Keep the original string. Future admission must use a complete pair.
++            originals.items[partner].projection = None;
++        }
++        let (projection, rebuilt_context) = if last.projection.is_none() {
++            (current.to_vec(), false)
++        } else {
++            match self.retained_projection_excluding(current, keep, partner) {
++                Ok(projection) => (projection, false),
++                Err(error) => {
++                    if let Some(projection) =
++                        self.projection_after_proven_native_pop(current, partner)
++                    {
++                        (projection, false)
++                    } else if allow_rebuild {
++                        (resolved_projection(originals.projection()), true)
++                    } else {
++                        return Err(error);
++                    }
++                }
++            }
++        };
++        Ok(Some(SdkOriginalHistoryPop {
++            item: last.original.clone(),
++            originals,
++            projection,
++            rebuilt_context,
++        }))
++    }
++
++    /// Subtract native admissions after the latest journal checkpoint without touching its summary.
++    /// Repeated equal envelopes and admissions inside Replace payloads stay conservative.
++    fn projection_after_proven_native_pop(
++        &self,
++        current: &[ResponseItemEnvelope],
++        partner: Option<usize>,
++    ) -> Option<Vec<ResponseItemEnvelope>> {
++        let start = self.post_checkpoint_start?;
++        let tail = self.items.len().checked_sub(1)?;
++        let mut removed = Vec::new();
++        for index in std::iter::once(tail).chain(partner) {
++            if index < start {
++                return None;
++            }
++            let stored = self.items[index].projection.as_ref()?;
++            if self
++                .items
++                .iter()
++                .filter(|item| {
++                    item.projection
++                        .as_ref()
++                        .is_some_and(|row| same_admission_envelope(row, stored))
++                })
++                .count()
++                != 1
++                || current
++                    .iter()
++                    .filter(|row| same_admission_envelope(row, stored))
++                    .count()
++                    != 1
++            {
++                return None;
++            }
++            let position = current
++                .iter()
++                .position(|row| same_admission_envelope(row, stored))?;
++            removed.push(position);
++        }
++        Some(
++            current
++                .iter()
++                .enumerate()
++                .filter(|(index, _)| !removed.contains(index))
++                .map(|(_, row)| row.clone())
++                .collect(),
++        )
++    }
++
++    /// Carry journal proof through a one-item raw pop that only subtracts exact native admissions.
++    fn boundary_after_pop_checkpoint(
++        &self,
++        next: &Self,
++        previous_window: &[ResponseItemEnvelope],
++        replacement: &[ResponseItemEnvelope],
++    ) -> Option<usize> {
++        let start = self.post_checkpoint_start?;
++        if next.items.len().checked_add(1)? != self.items.len() {
++            return None;
++        }
++        let mut removed = Vec::new();
++        for (index, item) in self.items.iter().enumerate() {
++            if let Some(next) = next.items.get(index) {
++                if next.original != item.original {
++                    return None;
++                }
++                if match (&next.projection, &item.projection) {
++                    (None, None) => true,
++                    (Some(next), Some(previous)) => same_admission_envelope(next, previous),
++                    _ => false,
++                } {
++                    continue;
++                }
++                if next.projection.is_some() {
++                    return None;
++                }
++            }
++            let Some(stored) = item.projection.as_ref() else {
++                continue;
++            };
++            if index < start
++                || self
++                    .items
++                    .iter()
++                    .filter(|item| {
++                        item.projection
++                            .as_ref()
++                            .is_some_and(|row| same_admission_envelope(row, stored))
++                    })
++                    .count()
++                    != 1
++                || previous_window
++                    .iter()
++                    .filter(|row| same_admission_envelope(row, stored))
++                    .count()
++                    != 1
++            {
++                return None;
++            }
++            removed.push(
++                previous_window
++                    .iter()
++                    .position(|row| same_admission_envelope(row, stored))?,
++            );
++        }
++        let expected: Vec<_> = previous_window
++            .iter()
++            .enumerate()
++            .filter(|(index, _)| !removed.contains(index))
++            .map(|(_, row)| row.clone())
++            .collect();
++        (expected.len() == replacement.len()
++            && expected
++                .iter()
++                .zip(replacement)
++                .all(|(left, right)| same_admission_envelope(left, right)))
++        .then_some(start)
++    }
++
+     /// Preserve current model admission when retaining originals, without replaying old values.
+     pub fn retained_projection(
+         &self,
+         current: &[ResponseItemEnvelope],
+         keep: usize,
++    ) -> Result<Vec<ResponseItemEnvelope>, &'static str> {
++        self.retained_projection_excluding(current, keep, None)
++    }
++
++    fn retained_projection_excluding(
++        &self,
++        current: &[ResponseItemEnvelope],
++        keep: usize,
++        exclude: Option<usize>,
+     ) -> Result<Vec<ResponseItemEnvelope>, &'static str> {
+         if keep > self.items.len() {
+             return Err("history keep exceeds snapshot length");
+@@ -534,12 +825,15 @@ impl SdkOriginalHistory {
+         latest.reverse();
+         let mut retained = Vec::new();
+         for ((row, first), last) in current.iter().zip(earliest).zip(latest) {
+-            if first < keep && last >= keep {
++            let ambiguous_exclusion = exclude.is_some_and(|index| {
++                first != last && (first..=last).contains(&index) && matches(&self.items[index], row)
++            });
++            if (first < keep && last >= keep) || ambiguous_exclusion {
+                 return Err(
+                     "cannot shorten original history across ambiguous repeated items; use keep=0 to replace it explicitly",
+                 );
+             }
+-            if first < keep {
++            if first < keep && exclude != Some(first) {
+                 retained.push(row.clone());
+             }
+         }
+@@ -553,18 +847,41 @@ impl SdkOriginalHistory {
+         rewind: impl Fn(&[ResponseItemEnvelope], u32) -> Vec<ResponseItemEnvelope>,
+     ) -> Self {
+         let mut history = Self::default();
++        let mut previous_window: Option<Vec<ResponseItemEnvelope>> = None;
+         for record in records {
+             match record {
+                 crate::RolloutItem::ResponseItem(envelope) => {
+                     if let Some(projection) = project(envelope) {
++                        if let Some(window) = &mut previous_window {
++                            window.push(projection.clone());
++                        }
+                         history.append(SdkOriginalItem {
+                             original: serde_json::to_string(&envelope.item)
+                                 .expect("response items serialize"),
+                             projection: Some(projection),
+                         });
+                     }
++                    if envelope
++                        .metadata
++                        .as_ref()
++                        .is_some_and(|metadata| metadata.provider_compaction)
++                    {
++                        history.post_checkpoint_start = Some(history.items.len());
++                    }
+                 }
+                 crate::RolloutItem::Compacted(checkpoint) => {
++                    let preserved_start = match (
++                        &checkpoint.sdk_originals,
++                        previous_window.as_deref(),
++                        checkpoint.replacement_history.as_deref(),
++                    ) {
++                        (
++                            Some(SdkOriginalHistoryCheckpoint::Replace(next)),
++                            Some(previous),
++                            Some(replacement),
++                        ) => history.boundary_after_pop_checkpoint(next, previous, replacement),
++                        _ => None,
++                    };
+                     if let Some(originals) = &checkpoint.sdk_originals {
+                         match originals {
+                             SdkOriginalHistoryCheckpoint::Replace(originals) => {
+@@ -585,6 +902,8 @@ impl SdkOriginalHistory {
+                             }
+                         }
+                     }
++                    history.post_checkpoint_start = preserved_start.or(Some(history.items.len()));
++                    previous_window = checkpoint.replacement_history.clone();
+                 }
+                 crate::RolloutItem::EventMsg(
+                     codex_protocol::protocol::EventMsg::ThreadRolledBack(event),
+@@ -592,6 +911,8 @@ impl SdkOriginalHistory {
+                     let projection = history.projection();
+                     let retained = rewind(&projection, event.num_turns);
+                     history = history.after_rollback(retained);
++                    history.post_checkpoint_start = None;
++                    previous_window = None;
+                 }
+                 _ => {}
+             }
+@@ -1151,6 +1472,273 @@ mod tests {
+         );
+     }
+
++    #[test]
++    fn audit_only_pop_preserves_compacted_projection_after_cold_restore() {
++        let original = json!({"type":"message","id":"covered","role":"user","content":[{"type":"input_text","text":"covered original"}]}).to_string();
++        let summary = json!({"type":"message","id":"summary","role":"user","content":[{"type":"input_text","text":"compacted context"}]}).to_string();
++        let mut history = SdkOriginalHistory::default();
++        history.append(SdkOriginalItem {
++            projection: input_projection(&original)
++                .unwrap()
++                .map(ResponseItemEnvelope::new),
++            original,
++        });
++        let second = json!({"type":"message","id":"covered-2","role":"user","content":[{"type":"input_text","text":"second covered original"}]}).to_string();
++        history.append(SdkOriginalItem {
++            projection: input_projection(&second)
++                .unwrap()
++                .map(ResponseItemEnvelope::new),
++            original: second,
++        });
++        // The exact audit value has never been admitted to the model.
++        let audit =
++            r#"{ "type":"future_record", "large":123456789012345678901234567890 }"#.to_string();
++        history.append(SdkOriginalItem {
++            original: audit.clone(),
++            projection: None,
++        });
++        let mut summary = input_projection(&summary)
++            .unwrap()
++            .map(ResponseItemEnvelope::new)
++            .unwrap();
++        summary
++            .metadata
++            .get_or_insert_with(Default::default)
++            .compaction_output = true;
++        let checkpoint = crate::RolloutItem::Compacted(crate::CompactedItem {
++            sdk_originals: Some(history.into()),
++            message: String::new(),
++            replacement_history: Some(vec![summary]),
++            guardian_history: None,
++            retained_context: Some(Default::default()),
++            mcp_resource_origins: None,
++            window_number: None,
++            first_window_id: None,
++            previous_window_id: None,
++            window_id: None,
++            compaction_response_id: None,
++            latest_token_usage_record: None,
++            resume_metadata: None,
++        });
++        let restored: crate::RolloutItem =
++            serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
++        let crate::RolloutItem::Compacted(mut checkpoint) = restored else {
++            panic!("compacted record")
++        };
++        let Some(SdkOriginalHistoryCheckpoint::Replace(history)) = checkpoint.sdk_originals.take()
++        else {
++            panic!("original catalog")
++        };
++        let current = checkpoint.replacement_history.take().unwrap();
++        let before = history.snapshot(None);
++        let removed = history.prepare_pop(&current, false).unwrap().unwrap();
++        assert_eq!(removed.item, audit);
++        assert_eq!(removed.projection, current);
++        assert!(!removed.rebuilt_context);
++        assert_eq!(history.snapshot(None), before);
++        // Ordinary transactions still cannot silently retain an ambiguous summary.
++        assert!(history.retained_projection(&current, 2).is_err());
++        let retained = removed.originals;
++        assert!(retained.prepare_pop(&current, false).is_err());
++        assert_eq!(retained.snapshot(None).2, before.2[..2]);
++        let rebuilt = retained.prepare_pop(&current, true).unwrap().unwrap();
++        assert!(rebuilt.rebuilt_context);
++        assert_eq!(rebuilt.item, before.2[1]);
++        assert_eq!(rebuilt.projection, retained.projection()[..1]);
++        assert_eq!(rebuilt.originals.snapshot(None).2, before.2[..1]);
++        checkpoint.replacement_history = Some(removed.projection);
++        checkpoint.sdk_originals = Some(retained.into());
++        let committed = crate::RolloutItem::Compacted(checkpoint);
++        let cold: crate::RolloutItem =
++            serde_json::from_slice(&serde_json::to_vec(&committed).unwrap()).unwrap();
++        let crate::RolloutItem::Compacted(cold) = cold else {
++            panic!("committed checkpoint")
++        };
++        assert_eq!(cold.replacement_history.unwrap(), current);
++        let Some(SdkOriginalHistoryCheckpoint::Replace(cold_originals)) = cold.sdk_originals else {
++            panic!("committed original catalog")
++        };
++        assert_eq!(cold_originals.snapshot(None).2, before.2[..2]);
++    }
++
++    #[test]
++    fn cold_native_tool_result_pop_preserves_the_prior_summary() {
++        let envelope = |value: serde_json::Value| {
++            ResponseItemEnvelope::new(serde_json::from_value(value).unwrap())
++        };
++        let first_call = envelope(
++            json!({"type":"function_call","id":"before-call","call_id":"repeat","name":"lookup","arguments":"{}"}),
++        );
++        let first_output =
++            envelope(json!({"type":"function_call_output","call_id":"repeat","output":"covered"}));
++        let mut summary = envelope(
++            json!({"type":"message","id":"surviving-summary","role":"user","content":[{"type":"input_text","text":"covered context"}]}),
++        );
++        summary
++            .metadata
++            .get_or_insert_with(Default::default)
++            .compaction_output = true;
++        let post_summary_user = envelope(
++            json!({"type":"message","id":"post-summary-user","role":"user","content":[{"type":"input_text","text":"later request"}]}),
++        );
++        let call = envelope(
++            json!({"type":"function_call","id":"after-call","call_id":"repeat","name":"lookup","arguments":"{}"}),
++        );
++        let output = envelope(
++            json!({"type":"function_call_output","call_id":"repeat","output":"later native result"}),
++        );
++        let mut checkpoint: crate::RolloutItem =
++            serde_json::from_value(json!({"type":"compacted","payload":{
++                "message":"", "sdk_originals":{"preserve":true}
++            }}))
++            .unwrap();
++        let crate::RolloutItem::Compacted(payload) = &mut checkpoint else {
++            panic!("checkpoint")
++        };
++        payload.replacement_history = Some(vec![summary.clone()]);
++        let records = vec![
++            crate::RolloutItem::ResponseItem(first_call),
++            crate::RolloutItem::ResponseItem(first_output),
++            checkpoint.clone(),
++            crate::RolloutItem::ResponseItem(post_summary_user.clone()),
++            crate::RolloutItem::ResponseItem(call.clone()),
++            crate::RolloutItem::ResponseItem(output.clone()),
++        ];
++        let cold: Vec<crate::RolloutItem> =
++            serde_json::from_slice(&serde_json::to_vec(&records).unwrap()).unwrap();
++        let replay = |records: &[crate::RolloutItem]| {
++            SdkOriginalHistory::replay(records, |row| Some(row.clone()), |items, _| items.to_vec())
++        };
++        let history = replay(&cold);
++        let current = vec![
++            summary.clone(),
++            post_summary_user.clone(),
++            call.clone(),
++            output.clone(),
++        ];
++        let pop = history.prepare_pop(&current, false).unwrap().unwrap();
++        assert_eq!(pop.item, serde_json::to_string(&output.item).unwrap());
++        assert_eq!(pop.projection, vec![summary.clone(), post_summary_user]);
++        assert!(!pop.rebuilt_context);
++        assert_eq!(pop.originals.items.len(), 4);
++        assert!(pop.originals.items[0].projection.is_some());
++        assert!(pop.originals.items[1].projection.is_some());
++        assert!(pop.originals.items[2].projection.is_some());
++        assert!(pop.originals.items[3].projection.is_none());
++        let mut committed = cold.clone();
++        let mut append_pop = |pop: SdkOriginalHistoryPop| {
++            let crate::RolloutItem::Compacted(mut payload) = checkpoint.clone() else {
++                panic!("checkpoint")
++            };
++            payload.sdk_originals = Some(pop.originals.into());
++            payload.replacement_history = Some(pop.projection);
++            committed.push(crate::RolloutItem::Compacted(payload));
++            serde_json::from_slice::<Vec<crate::RolloutItem>>(
++                &serde_json::to_vec(&committed).unwrap(),
++            )
++            .unwrap()
++        };
++        let after_result = append_pop(pop);
++        let first_restored = replay(&after_result);
++        assert_eq!(first_restored.post_checkpoint_start, Some(2));
++        let mut changed_summary = after_result.clone();
++        let Some(crate::RolloutItem::Compacted(last)) = changed_summary.last_mut() else {
++            panic!("pop checkpoint")
++        };
++        last.replacement_history.as_mut().unwrap().remove(0);
++        let invalidated = replay(&changed_summary);
++        assert_eq!(
++            invalidated.post_checkpoint_start,
++            Some(invalidated.items.len())
++        );
++        let Some(crate::RolloutItem::Compacted(last)) = after_result.last() else {
++            panic!("pop checkpoint")
++        };
++        let shortened = last.replacement_history.clone().unwrap();
++        let call_pop = first_restored
++            .prepare_pop(&shortened, false)
++            .unwrap()
++            .unwrap();
++        assert!(!call_pop.rebuilt_context);
++        assert_eq!(call_pop.projection, shortened);
++        let after_call = append_pop(call_pop);
++        let user_pop = replay(&after_call)
++            .prepare_pop(&shortened, false)
++            .unwrap()
++            .unwrap();
++        assert!(!user_pop.rebuilt_context);
++        assert_eq!(user_pop.projection, vec![summary]);
++        // Serializing the catalog cannot mint journal-derived subtraction authority.
++        let payload_only: SdkOriginalHistory =
++            serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
++        assert!(payload_only.prepare_pop(&current, false).is_err());
++        // A result after the boundary cannot retire a call covered by that boundary.
++        let split = vec![
++            crate::RolloutItem::ResponseItem(call),
++            checkpoint,
++            crate::RolloutItem::ResponseItem(output),
++        ];
++        assert!(replay(&split).prepare_pop(&current, false).is_err());
++    }
++
++    #[test]
++    fn pop_tool_output_retires_only_the_matching_call_in_model_context() {
++        let first_call = r#"{"type":"function_call","id":"call-1","call_id":"same","name":"lookup","arguments":"{}"}"#;
++        let first_output =
++            r#"{"type":"function_call_output","id":"output-1","call_id":"same","output":"first"}"#;
++        let last_call = r#"{"type":"function_call","id":"call-2","call_id":"same","name":"lookup","arguments":"{}"}"#;
++        let last_output = r#"{ "type":"function_call_output", "id":"output-2", "call_id":"same", "output":"last" }"#;
++        let mut history = SdkOriginalHistory::default();
++        for original in [first_call, first_output, last_call, last_output] {
++            history.append(SdkOriginalItem {
++                original: original.to_owned(),
++                projection: input_projection(original)
++                    .unwrap()
++                    .map(ResponseItemEnvelope::new),
++            });
++        }
++        let admitted = history.projection();
++        assert_eq!(admitted.len(), 4);
++        let removed = history.prepare_pop(&admitted, false).unwrap().unwrap();
++        assert_eq!(removed.item, last_output);
++        assert_eq!(removed.projection, admitted[..2]);
++        assert!(!removed.rebuilt_context);
++        assert_eq!(
++            removed.originals.snapshot(None).2,
++            [first_call, first_output, last_call]
++        );
++        let cold: SdkOriginalHistory =
++            serde_json::from_str(&serde_json::to_string(&removed.originals).unwrap()).unwrap();
++        assert_eq!(cold.projection(), admitted[..2]);
++        assert_eq!(cold.items.last().unwrap().original, last_call);
++        assert_eq!(history.projection(), admitted);
++    }
++
++    #[test]
++    fn rebuild_after_pop_omits_preexisting_unresolved_client_work() {
++        let user = r#"{"type":"message","id":"user-1","role":"user","content":[{"type":"input_text","text":"keep"}]}"#;
++        let orphan = r#"{"type":"function_call","id":"interrupted","call_id":"interrupted","name":"lookup","arguments":"{}"}"#;
++        let tail = r#"{"type":"message","id":"user-2","role":"user","content":[{"type":"input_text","text":"remove"}]}"#;
++        let summary = r#"{"type":"message","id":"summary","role":"user","content":[{"type":"input_text","text":"covered context"}]}"#;
++        let mut history = SdkOriginalHistory::default();
++        for original in [user, orphan, tail] {
++            history.append(SdkOriginalItem {
++                original: original.to_owned(),
++                projection: input_projection(original)
++                    .unwrap()
++                    .map(ResponseItemEnvelope::new),
++            });
++        }
++        let compacted = vec![ResponseItemEnvelope::new(
++            input_projection(summary).unwrap().unwrap(),
++        )];
++        let removed = history.prepare_pop(&compacted, true).unwrap().unwrap();
++        assert!(removed.rebuilt_context);
++        assert_eq!(removed.item, tail);
++        assert_eq!(removed.originals.snapshot(None).2, [user, orphan]);
++        assert_eq!(removed.projection, history.projection()[..1]);
++    }
++
+     #[test]
+     fn original_numbers_survive_tagged_rollout_value_roundtrip() {
+         let original = format!(

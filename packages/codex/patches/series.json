@@ -959,7 +959,11 @@
     {
       "path": "sdk-mcp-tool-name-overrides.patch",
       "sha256": "45bf8a7b350479d551b41fc06a4ee38bd81c9faee0497d004fe99e2a1bdcebe3"
+    },
+    {
+      "path": "sdk-original-history-pop.patch",
+      "sha256": "b4ce1552baddbd0eb7cf2864733a53a61cc3bddb6f2810cf0acd253f60f1716a"
     }
   ],
-  "result_tree": "d37ac561aaa17b55fd0cdd7967e96a12916f1996"
+  "result_tree": "27b1c22429ee9a14edfd9e512a712a327831e42f"
 }

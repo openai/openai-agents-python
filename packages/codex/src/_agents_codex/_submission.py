@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ._trace_context import TraceContext
     from .agent import Agent
     from .guardrails import GuardrailRecord
+    from .history import _InputStoragePolicy
     from .input import UserInput
     from .manual import _NativeQuestion
     from .mcp import _MCP
@@ -68,6 +69,9 @@ class _Submission:
     guardrail_input: UserInput | None = field(default=None, repr=False)
     original_input: UserInput | None = field(default=None, repr=False)
     input_guardrails_passed: bool | None = None
+    input_storage_policy: tuple[_InputStoragePolicy, UserInput] | None = field(
+        default=None, repr=False
+    )
     input_guardrails_started: bool = False
     input_guardrails_task: asyncio.Task[None] | None = field(default=None, repr=False)
     calls: set[str] = field(default_factory=set)

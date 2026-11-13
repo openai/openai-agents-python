@@ -248,5 +248,5 @@ def test_raw_usage_appends_to_existing_run_parameters() -> None:
             assert declaration.args.kwarg is None
             signatures.append([argument.arg for argument in declaration.args.kwonlyargs])
         for parameters in signatures:
-            assert parameters[-1] == "return_raw_usage"
+            assert parameters[-2:] == ["return_raw_usage", "input_storage_policy"]
             assert parameters.index("parent_trace") < parameters.index("return_raw_usage")
