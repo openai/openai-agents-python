@@ -6641,6 +6641,8 @@ class Session(Generic[ContextT, OutputT]):
         self._text_observation_requested = True
         if not self._closed:
             self._native._request_text_observation()
+        if self._repair_session is not None:
+            self._repair_session._request_text_observation()
 
     def _check_open(self) -> None:
         self._check_loop()
@@ -11970,6 +11972,8 @@ class Session(Generic[ContextT, OutputT]):
         )
         assert isinstance(repair, Session)
         self._repair_session = repair
+        if self._text_observation_requested:
+            repair._request_text_observation()
         repair._trace_context = state.tracing.context if state.tracing is not None else None
         repair._context_transform_purpose = "output_repair"
         repair._observations.repair_parent = (self._observations, handle.submission_id)
