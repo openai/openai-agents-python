@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 
 import pytest
 from pydantic import BaseModel
@@ -258,4 +259,97 @@ async def test_error_recovery_cancellation_keeps_canonical_history(
         if not run.done():
             run.cancel()
         await asyncio.gather(run, return_exceptions=True)
+        await native.aclose()
+
+
+@pytest.mark.parametrize("persist", [True, False])
+@pytest.mark.parametrize("change", ["root", "queued", "history", "profile"])
+async def test_error_recovery_rejects_an_advanced_session(responses, persist, change):
+    responses.respond(assistant_output("bad output"))
+    if change in {"root", "queued"}:
+        responses.respond(assistant_output('{"count":2}'))
+    if change == "queued":
+        responses.respond(assistant_output('{"count":3}'))
+    native = provider(responses)
+    entered = asyncio.Event()
+    changed = asyncio.Event()
+    polling = asyncio.Event()
+    release_poll = asyncio.Event()
+    captured = {}
+
+    async def gate(event):
+        item = event.get("item", {})
+        if change == "queued" and item.get("content") == [
+            {"type": "output_text", "text": '{"count":2}'}
+        ]:
+            polling.set()
+            await release_poll.wait()
+
+    responses.before_event = gate
+
+    class ExposingAgent(Agent):
+        @asynccontextmanager
+        async def session(self, **options):
+            async with super().session(**options) as session:
+                captured["session"] = session
+                try:
+                    yield session
+                finally:
+                    captured["final_history"] = await session.history_snapshot()
+
+    async def other_caller():
+        await entered.wait()
+        session = captured["session"]
+        try:
+            if change in {"root", "queued"}:
+                other = await session.submit("intervening")
+                if change == "queued":
+                    await polling.wait()
+                    queued = await session.submit("queued", if_busy="queue")
+                    assert queued.turn_id is None
+                    release_poll.set()
+                await other.get_result()
+                if change == "queued":
+                    await queued.get_result()
+            elif change == "history":
+                before = await session.history_snapshot()
+                await session.transact_history(
+                    expected_revision=before.revision,
+                    keep=before.total,
+                    items=[{"type": "review_marker", "marker": "other caller"}],
+                )
+            else:
+                await session.update(instructions="New native configuration.")
+            captured["changed_history"] = await session.history_snapshot()
+        finally:
+            changed.set()
+
+    async def recover(failure):
+        entered.set()
+        await changed.wait()
+        await sibling
+        return RecoverRun({"count": 73019}, include_in_history=persist)
+
+    sibling = asyncio.create_task(other_caller())
+    agent = ExposingAgent(
+        instructions="Return a record.",
+        provider=native,
+        output_type=PromptedOutput(Record, max_retries=0),
+    )
+    try:
+        async with timeout(20):
+            with pytest.raises(RuntimeError, match="Session.*changed"):
+                await agent.run("first", error_handler=recover)
+            await sibling
+        before = captured["changed_history"]
+        after = captured["final_history"]
+        assert after.revision == before.revision
+        assert after.items == before.items
+        assert "73019" not in repr(after.items)
+        assert len(responses.requests) == {"root": 2, "queued": 3}.get(change, 1)
+    finally:
+        release_poll.set()
+        if not sibling.done():
+            sibling.cancel()
+        await asyncio.gather(sibling, return_exceptions=True)
         await native.aclose()

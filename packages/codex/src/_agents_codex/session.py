@@ -5463,6 +5463,7 @@ class Session(Generic[ContextT, OutputT]):
         self._root_interrupts: set[asyncio.Task[None]] = set()
         self._mutation: asyncio.Task[Any] | None = None
         self._mutation_cancellable = False
+        self._update_generation = 0
         self._checkpoint_task: asyncio.Future[None] | None = None
         self._configured_capture: asyncio.Task[SessionState] | None = None
         self._stored_fork: Any = None
@@ -9515,6 +9516,26 @@ class Session(Generic[ContextT, OutputT]):
         failure: RunFailure,
     ) -> Completed[OutputT] | None:
         self._check_idle_update()
+        if self._last_turn is not submission:
+            raise RuntimeError("Cannot recover a run after its Session has changed")
+        await self._refresh_profile_bindings()
+        self._check_idle_update()
+        profile = self._profile_current
+        update_generation = self._update_generation
+        output_contract = self._default_output
+        revision = await self.history_snapshot(limit=0)
+
+        def check_owner() -> None:
+            self._check_idle_update()
+            if (
+                self._last_turn is not submission
+                or self._profile_current != profile
+                or self._update_generation != update_generation
+                or self._default_output is not output_contract
+            ):
+                raise RuntimeError("Cannot recover a run after its Session has changed")
+
+        check_owner()
         scope = _Invocation(self)
         token = _invocation.set(scope)
         try:
@@ -9526,17 +9547,22 @@ class Session(Generic[ContextT, OutputT]):
             return None
         if not isinstance(recovery, RecoverRun):
             raise TypeError("error_handler must return RecoverRun or None")
-        self._check_idle_update()
+        check_owner()
         await self._refresh_profile_bindings()
-        self._check_idle_update()
-        output, wire = self._default_output.terminal_application_value(recovery.output)
+        check_owner()
+        output, wire = output_contract.terminal_application_value(recovery.output)
         usage = _token_usage_info(json.loads(await self._native.call("token_usage_info")))
+        check_owner()
+        current = await self.history_snapshot(limit=0)
+        check_owner()
+        if current.revision != revision.revision:
+            raise RuntimeError("Cannot recover a run after its Session history has changed")
         items = failure.details.items
         if recovery.include_in_history:
             text = wire
-            if self._default_output.mode != "plain":
+            if output_contract.mode != "plain":
                 text = json.dumps(
-                    {"response": wire} if self._default_output.wrapped else wire,
+                    {"response": wire} if output_contract.wrapped else wire,
                     ensure_ascii=False,
                     allow_nan=False,
                 )
@@ -9546,7 +9572,6 @@ class Session(Generic[ContextT, OutputT]):
             assert agent is not None
             item_id = f"msg_{uuid4().hex}"
             content = [{"type": "output_text", "text": text}]
-            revision = await self.history_snapshot(limit=0)
             await self.transact_history(
                 expected_revision=revision.revision,
                 keep=revision.total,
@@ -10133,6 +10158,7 @@ class Session(Generic[ContextT, OutputT]):
                 )
 
         async def publish_update() -> None:
+            self._update_generation += 1
             await self._refresh_profile_bindings()
             if requested_retry is not None and requested_retry.policy is not None:
                 captured_retry = self._effective_agent().model_settings.get("retry")
