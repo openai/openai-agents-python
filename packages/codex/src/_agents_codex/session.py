@@ -2425,7 +2425,10 @@ def _apply_sandbox_contributions(
     )
     if capability_transforms:
         object.__setattr__(agent, "transform_context", transform)
-    object.__setattr__(agent, "tools", (*agent.tools, *contributions.tools))
+    tools = (*agent.tools, *contributions.tools)
+    if agent.tool_name_collision_policy == "warn":
+        tools, _ = _resolve_tool_name_collisions(tools, ())
+    object.__setattr__(agent, "tools", tools)
     return True
 
 

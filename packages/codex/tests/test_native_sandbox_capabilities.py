@@ -167,8 +167,9 @@ async def test_failed_sandbox_capability_binding_retires_its_resource():
     assert client.events == ["create", "start", "disconnect", "close", "delete"]
 
 
+@pytest.mark.parametrize("policy", ["error", "warn"])
 async def test_sandbox_capability_tools_use_normal_catalog_collision_rules(
-    tmp_path, monkeypatch, responses
+    tmp_path, monkeypatch, responses, policy
 ):
     @function_tool
     def sandbox_record() -> str:
@@ -199,12 +200,25 @@ async def test_sandbox_capability_tools_use_normal_catalog_collision_rules(
                 capabilities=[WorkspaceGuidance()],
             )
             agent = Agent(
-                instructions="Read the workspace.", provider=native, tools=[sandbox_record]
+                instructions="Read the workspace.",
+                model="fixture-unlisted-sandbox-capability",
+                provider=native,
+                tools=[sandbox_record],
+                tool_name_collision_policy=policy,
             )
-            with pytest.raises(ValueError, match="collid|[Dd]uplicate"):
-                async with agent.session(environment=source):
-                    pytest.fail("Duplicate capability tool was published")
+            if policy == "error":
+                with pytest.raises(ValueError, match="collid|[Dd]uplicate"):
+                    async with agent.session(environment=source):
+                        pytest.fail("Duplicate capability tool was published")
+                assert not responses.requests
+            else:
+                responses.respond(function_call("sandbox_record", {}, "sandbox-collision"))
+                responses.respond(assistant_output("done"))
+                async with agent.session(environment=source) as session:
+                    turn = await session.submit("Read the selected record.")
+                    assert (await turn.get_result()).final_output == "done"
+                assert len(responses.requests) == 2
+                assert "bound-sandbox-value" in json.dumps(responses.requests[1]["input"])
         assert client.events == ["create", "start", "disconnect", "close", "delete"]
-        assert not responses.requests
     finally:
         await native.aclose()
