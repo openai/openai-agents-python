@@ -26,6 +26,8 @@ on:
         required: false
         default: "{}"
     outputs:
+      artifact_name:
+        value: ${{ jobs.build.outputs.artifact_name }}
       artifact_id:
         value: ${{ jobs.build.outputs.artifact_id }}
       artifact_digest:
@@ -65,6 +67,7 @@ jobs:
           'quay.io/pypa/manylinux_2_28_aarch64@sha256:cb37f0d66c8a75abb93cf6085cad1f1427cd7208f0c0fc48359bb1eea9924f21')
         || '' }}
     outputs:
+      artifact_name: native-snapshot-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-inputs.outputs.identity }}
       artifact_id: ${{ steps.snapshot.outputs.artifact-id }}
       artifact_digest: ${{ steps.snapshot.outputs.artifact-digest }}
       native_provenance: ${{ steps.producer-identity.outputs.provenance }}
