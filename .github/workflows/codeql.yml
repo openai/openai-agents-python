@@ -2,7 +2,7 @@ name: CodeQL
 
 on:
   push:
-    branches: [main, feat/codex-harness, ci/hillclimb/python-warm-linux-overlap-15]
+    branches: [main, feat/codex-harness, ci/hillclimb/python-rust-codeql-cache-17]
   pull_request:
     branches: [main, feat/codex-harness]
   merge_group:
@@ -20,6 +20,8 @@ jobs:
     name: CodeQL (${{ matrix.language }})
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && matrix.language == 'rust' && '{"group":"codex-runners","labels":"codex-linux-x64-xl"}' || '"ubuntu-latest"') }}
     timeout-minutes: ${{ matrix.language == 'rust' && 180 || 45 }}
+    env:
+      RUST_CACHE_TRIAL: ${{ github.repository == 'openai/openai-agents-python' && matrix.language == 'rust' && github.event_name == 'push' && !github.event.deleted && github.ref == 'refs/heads/ci/hillclimb/python-rust-codeql-cache-17' }}
     permissions:
       contents: read
       security-events: write
@@ -66,13 +68,99 @@ jobs:
           PY
 
       - name: Initialize CodeQL
+        id: codeql-init
         uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           languages: ${{ matrix.language }}
           build-mode: none
           config-file: ${{ matrix.language == 'rust' && './.codeql-rust.yml' || '' }}
 
+      - name: Configure the exact Rust extractor cache trial
+        if: env.RUST_CACHE_TRIAL == 'true'
+        id: rust-cache
+        env:
+          CODEQL_VERSION: ${{ steps.codeql-init.outputs.codeql-version }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import platform
+          import subprocess
+          from pathlib import Path
+
+          if os.environ["CODEQL_VERSION"] != "2.27.4" or os.environ.get("CODEQL_ACTION_EXTRA_OPTIONS"):
+              raise SystemExit("Unexpected trial CLI version or existing extra options")
+          source_tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip()
+          inputs = {
+              "source_tree": source_tree,
+              "ref": os.environ["GITHUB_REF"],
+              "action": "2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
+              "cli": os.environ["CODEQL_VERSION"],
+              "rustc": subprocess.check_output(["rustc", "-Vv"], text=True),
+              "cargo": subprocess.check_output(["cargo", "-V"], text=True),
+              "platform": platform.platform(),
+              "environment": {name: os.environ.get(name, "") for name in (
+                  "ImageOS", "ImageVersion", "RUSTUP_TOOLCHAIN", "RUSTFLAGS",
+                  "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET", "RUSTC_WRAPPER",
+                  "RUSTC_WORKSPACE_WRAPPER", "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS",
+                  "DOCS_RS", "PYO3_PYTHON", "PYO3_USE_ABI3_FORWARD_COMPATIBILITY",
+              )},
+          }
+          identity = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+          target = str(Path(os.environ["RUNNER_TEMP"]) / "codeql-rust-cargo-target17")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"key=python-codeql-rust-v17-{identity}\npath={target}\n")
+          options = {"database": {"trace-command": [f"--extractor-option=rust.cargo_target_dir={target}"]}}
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write(f"CODEQL_ACTION_EXTRA_OPTIONS={json.dumps(options)}\n")
+          print(f"Rust cache source tree: {source_tree}; exact input identity: {identity}")
+          PY
+
+      - name: Restore the exact Rust extractor Cargo target
+        if: env.RUST_CACHE_TRIAL == 'true'
+        id: rust-cache-restore
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.rust-cache.outputs.path }}
+          key: ${{ steps.rust-cache.outputs.key }}
+
+      - name: Discard any inexact Rust extractor cache
+        if: env.RUST_CACHE_TRIAL == 'true'
+        env:
+          CACHE_HIT: ${{ steps.rust-cache-restore.outputs.cache-hit }}
+          CACHE_PATH: ${{ steps.rust-cache.outputs.path }}
+        run: |
+          if [[ "$CACHE_HIT" != true ]]; then
+            rm -rf -- "$CACHE_PATH"
+          fi
+          mkdir -p "$CACHE_PATH"
+
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           category: /language:${{ matrix.language }}
+
+      - name: Report the Rust extractor Cargo target size
+        if: env.RUST_CACHE_TRIAL == 'true'
+        id: rust-cache-size
+        env:
+          CACHE_PATH: ${{ steps.rust-cache.outputs.path }}
+          CACHE_HIT: ${{ steps.rust-cache-restore.outputs.cache-hit }}
+        run: |
+          echo "Rust extractor cache exact hit: ${CACHE_HIT:-false}" | tee -a "$GITHUB_STEP_SUMMARY"
+          bytes="$(du -sb "$CACHE_PATH" | cut -f1)"
+          echo "Rust extractor target: $bytes bytes; save cap: 1073741824 bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          if (( bytes < 1073741824 )); then
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "Target meets or exceeds the 1 GiB cap; no cache will be saved, so a replay cannot demonstrate a hit." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Save the Rust extractor Cargo target after a successful full scan
+        if: env.RUST_CACHE_TRIAL == 'true' && steps.rust-cache-restore.outputs.cache-hit != 'true' && steps.rust-cache-size.outputs.eligible == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.rust-cache.outputs.path }}
+          key: ${{ steps.rust-cache.outputs.key }}
