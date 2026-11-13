@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from agents import Agent, TurnStoppedError
+from agents import Agent, NativeError, TurnStoppedError
 from tests.native_fixtures import ResponsesFixture, assistant_output, responses as responses
 from tests.test_native_agent import provider
 
@@ -285,3 +285,38 @@ async def test_graceful_root_stop_cancels_policy_and_preserves_queued_successor(
             assert "later queued input" not in value
             assert "stopped raw input" not in value
             assert "late stopped replacement" not in value
+
+
+@pytest.mark.parametrize("bound", ["records", "bytes"])
+async def test_policy_history_limits_reject_before_callback_and_native_admission(
+    responses: ResponsesFixture, bound
+):
+    items = (
+        [{"type": "application_note", "index": index} for index in range(4097)]
+        if bound == "records"
+        else [{"type": "application_note", "text": "x" * (8 * 1024 * 1024 + 1)}]
+    )
+    called = False
+
+    def project(input, history):
+        nonlocal called
+        called = True
+        raise AssertionError("Oversized history must reject before the callback")
+
+    async with Agent(instructions="Answer.", provider=provider(responses)).session() as session:
+        opening = await session.history_snapshot()
+        await session.transact_history(expected_revision=opening.revision, keep=0, items=items)
+        before = await session.history_snapshot(limit=0)
+        with pytest.raises(NativeError, match="Input storage policy history exceeds"):
+            await (
+                await session.submit("private pending input", input_storage_policy=project)
+            ).get_result()
+        assert not called
+        assert responses.requests == []
+        assert await session.history_snapshot(limit=0) == before
+
+        responses.respond(assistant_output("ordinary submission remains supported"))
+        assert (await (await session.submit("ordinary input")).get_result()).final_output == (
+            "ordinary submission remains supported"
+        )
+        assert len(responses.requests) == 1

@@ -6777,7 +6777,8 @@ class Session(Generic[ContextT, OutputT]):
         input_storage_policy receives a detached input and the accepted canonical
         history at admission. Return replacement input or None to sample existing
         history without adding user input. Queued roots use their current history
-        after predecessors settle.
+        after predecessors settle. Admission rejects before the callback when the full
+        history exceeds 4096 records or 8 MiB.
 
         Omission inherits the Agent's output. Bare str selects plain text.
         PromptedOutput adds JSON guidance to this root's user input only.
@@ -11022,7 +11023,18 @@ class Session(Generic[ContextT, OutputT]):
                 try:
                     run_policy = policy if isinstance(policy, _RunInputStoragePolicy) else None
                     project = policy if run_policy is None else run_policy.project
-                    history = await self._read_canonical_history(None, for_replay=False)
+                    try:
+                        history = await self._read_canonical_history(None, for_replay=True)
+                    except RuntimeError as error:
+                        if str(error) != (
+                            "Run completed, but its one-shot conversation history "
+                            "exceeds the result size limit"
+                        ):
+                            raise
+                        raise NativeError(
+                            "Input storage policy history exceeds the admission size limit "
+                            "(4096 records or 8 MiB)"
+                        ) from error
 
                     def active() -> bool:
                         return (
