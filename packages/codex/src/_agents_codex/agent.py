@@ -999,7 +999,6 @@ class Agent(Generic[ContextT, OutputT]):
     output_type: OutputSpec[OutputT] | None
     programmatic_tool_calling: bool
     transform_context: _ContextTransform[ContextT] | None
-    prepare_handoff_input: _PrepareHandoffInput[ContextT] | None
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
     decisions: DecisionProvider | None
@@ -1009,6 +1008,7 @@ class Agent(Generic[ContextT, OutputT]):
     tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
     hosted_prompt: HostedPromptSource | None
     compaction: ResponsesCompaction[ContextT] | None
+    prepare_handoff_input: _PrepareHandoffInput[ContextT] | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.

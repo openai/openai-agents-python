@@ -1,0 +1,43 @@
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 31d3441..f73ecb3 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1109,13 +1109,12 @@ pub(crate) fn is_provider_compaction_boundary(envelope: &ResponseItemEnvelope) -
+         }
+ }
+
+-/// Native instruction receipts are model context, separate from SDK originals.
++/// SDK application receipts are validated at admission before they can be hidden.
++/// Collaboration-mode tags are caller-controlled in serialized history.
+ pub(crate) fn is_sdk_model_only_instruction(
+     item: &ResponseItem,
+     metadata: Option<&CodexHarnessMetadata>,
+ ) -> bool {
+-    use codex_protocol::protocol::{COLLABORATION_MODE_CLOSE_TAG, COLLABORATION_MODE_OPEN_TAG};
+-
+     let ResponseItem::Message {
+         role,
+         content,
+@@ -1130,17 +1129,11 @@ pub(crate) fn is_sdk_model_only_instruction(
+         && message_metadata.content_item_kinds.as_ref().is_some_and(|kinds| {
+             !kinds.is_empty()
+                 && kinds.len() == content.len()
+-                && kinds.iter().zip(content).all(|(kind, part)| match kind.0.as_str() {
+-                    "sdk_application.accepted" | "sdk_application.instructions" => true,
+-                    "collaboration_mode.instructions" => matches!(
+-                        part,
+-                        ContentItem::InputText { text }
+-                            if message_metadata.turn_id.is_some()
+-                                && message_metadata.create_time.is_some()
+-                                && text.trim().starts_with(COLLABORATION_MODE_OPEN_TAG)
+-                                && text.trim().ends_with(COLLABORATION_MODE_CLOSE_TAG)
+-                    ),
+-                    _ => false,
++                && kinds.iter().all(|kind| {
++                    matches!(
++                        kind.0.as_str(),
++                        "sdk_application.accepted" | "sdk_application.instructions"
++                    )
+                 })
+         })
+ }

@@ -189,9 +189,10 @@ async def test_different_update_policy_rejects_before_any_native_publication():
     )
 
     async def refresh_profile():
-        return None
+        assert owner._update_generation == 1
 
     owner = SimpleNamespace(
+        _update_generation=0,
         _check_idle_update=lambda: None,
         _opening_agent=agent,
         _refresh_profile_bindings=refresh_profile,
@@ -202,6 +203,7 @@ async def test_different_update_policy_rejects_before_any_native_publication():
         await Session.update(
             owner, model_settings={"retry": ModelRetrySettings(policy=lambda _context: True)}
         )
+    assert owner._update_generation == 1
 
 
 def test_error_diagnostics_cannot_replace_the_retained_provider_failure():

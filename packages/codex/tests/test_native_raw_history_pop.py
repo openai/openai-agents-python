@@ -6,6 +6,10 @@ import pytest
 
 from agents import Agent, LocalStorage, NativeProvider
 from tests.native_fixtures import assistant_output, responses as responses
+from tests.test_native_original_eligibility import (
+    assert_only_collaboration_rows,
+    assert_original_prefix,
+)
 
 
 async def test_raw_pop_empty_stale_and_exact_original(responses):
@@ -13,7 +17,7 @@ async def test_raw_pop_empty_stale_and_exact_original(responses):
     async with NativeProvider(base_url=responses.url, api_key="synthetic-pop") as provider:
         async with Agent(instructions="Answer.", provider=provider).session() as session:
             opening = await session.history_snapshot()
-            assert opening.items == ()
+            assert_only_collaboration_rows(opening.items)
             await session.transact_history(expected_revision=opening.revision, keep=0)
             empty = await session.history_snapshot()
             assert empty.items == () and empty.total == 0
@@ -75,8 +79,11 @@ async def test_raw_pop_tool_output_cold_restore_repair_and_stored_sibling(respon
             )
         async with agent.session(storage=storage, resume=identity) as restored:
             cold = await restored.history_snapshot()
-            assert cold.items == popped.items
-            assert cold.revision == popped.revision
+            assert_original_prefix(cold, popped.items)
+            if cold.items == popped.items:
+                assert cold.revision == popped.revision
+            else:
+                assert cold.revision != popped.revision
             assert not any(
                 item.get("call_id") == "pop-pair" for item in (await restored.model_context()).items
             )
@@ -101,8 +108,7 @@ async def test_raw_pop_tool_output_cold_restore_repair_and_stored_sibling(respon
             assert [item["type"] for item in repaired] == ["function_call", "function_call_output"]
             assert repaired[-1]["output"] == output["output"]
         async with agent.session(storage=storage, resume=sibling_id) as sibling:
-            sibling_items = (await sibling.history_snapshot()).items
-            assert sibling_items == before.items
+            assert_original_prefix(await sibling.history_snapshot(), before.items)
     assert len(responses.requests) == 2
 
 

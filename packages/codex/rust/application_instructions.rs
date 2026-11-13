@@ -203,6 +203,49 @@ fn accepted_envelope(envelope: &ResponseItemEnvelope) -> Result<Option<Accepted>
 fn validate_detached_instruction_projections(history: &[RolloutItem]) -> Result<()> {
     use codex_history::sdk_originals::SdkOriginalHistoryCheckpoint;
 
+    let reserved = |item: &ResponseItem| {
+        let reserved_id = item.id().is_some_and(|id| {
+            id.strip_prefix(ID_PREFIX)
+                .is_some_and(|suffix| suffix.starts_with('_'))
+        });
+        let reserved_tag = matches!(item,
+            ResponseItem::Message { internal_chat_message_metadata_passthrough: Some(metadata), .. }
+            if metadata.content_item_kinds.as_ref().is_some_and(|kinds|
+                kinds.iter().any(|kind| matches!(kind.0.as_str(), ACCEPTED | PROJECTED)))
+        );
+        reserved_id || reserved_tag
+    };
+    let key = |envelope: &ResponseItemEnvelope| -> serde_json::Result<Value> {
+        let mut normalized = envelope.clone();
+        if let ResponseItem::Message {
+            internal_chat_message_metadata_passthrough: Some(metadata),
+            ..
+        } = &mut normalized.item
+        {
+            metadata.turn_id = None;
+            metadata.create_time = None;
+        }
+        normalized.metadata = Some(normalized.metadata.take().unwrap_or_default());
+        serde_json::to_value(normalized)
+    };
+    let mut canonical = std::collections::HashMap::<Value, Vec<&ResponseItemEnvelope>>::new();
+    for record in history {
+        match record {
+            RolloutItem::ResponseItem(item) => {
+                if reserved(&item.item) {
+                    canonical.entry(key(item)?).or_default().push(item);
+                }
+            }
+            RolloutItem::Compacted(compacted) => {
+                for item in compacted.replacement_history.iter().flatten() {
+                    if reserved(&item.item) {
+                        canonical.entry(key(item)?).or_default().push(item);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     for record in history {
         let RolloutItem::Compacted(compacted) = record else {
             continue;
@@ -215,16 +258,7 @@ fn validate_detached_instruction_projections(history: &[RolloutItem]) -> Result<
             let Some(projection) = &original.projection else {
                 continue;
             };
-            let reserved_id = projection.item.id().is_some_and(|id| {
-                id.strip_prefix(ID_PREFIX)
-                    .is_some_and(|suffix| suffix.starts_with('_'))
-            });
-            let reserved_tag = matches!(&projection.item,
-                ResponseItem::Message { internal_chat_message_metadata_passthrough: Some(metadata), .. }
-                if metadata.content_item_kinds.as_ref().is_some_and(|kinds|
-                    kinds.iter().any(|kind| matches!(kind.0.as_str(), ACCEPTED | PROJECTED)))
-            );
-            if !reserved_id && !reserved_tag {
+            if !reserved(&projection.item) {
                 continue;
             }
             let same = |canonical: &ResponseItemEnvelope| {
@@ -232,14 +266,9 @@ fn validate_detached_instruction_projections(history: &[RolloutItem]) -> Result<
                     && projection.metadata.clone().unwrap_or_default()
                         == canonical.metadata.clone().unwrap_or_default()
             };
-            let admitted = history.iter().any(|record| match record {
-                RolloutItem::ResponseItem(canonical) => same(canonical),
-                RolloutItem::Compacted(compacted) => compacted
-                    .replacement_history
-                    .as_ref()
-                    .is_some_and(|items| items.iter().any(same)),
-                _ => false,
-            });
+            let admitted = canonical
+                .get(&key(projection)?)
+                .is_some_and(|items| items.iter().any(|item| same(item)));
             ensure!(
                 admitted,
                 "SDK original instruction projection has no admitted canonical receipt"

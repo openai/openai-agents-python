@@ -103,12 +103,27 @@ async def _worker() -> None:
             if mode == "hold":
                 await asyncio.to_thread(sys.stdin.readline)
             elif mode == "export":
-                try:
-                    await session.save_state()
-                except Exception as error:
-                    print(json.dumps({"rejected": str(error)}), flush=True)
-                    return
-                raise AssertionError("Native local storage exported as a portable checkpoint")
+                before = await session.history_snapshot()
+                saved = await session.save_state()
+                async with agent.session(context=mode, state=saved) as isolated:
+                    revision = await isolated.history_snapshot(limit=0)
+                    await isolated.transact_history(
+                        expected_revision=revision.revision,
+                        keep=revision.total,
+                        items=[
+                            {
+                                "type": "message",
+                                "id": "isolated-copy",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "isolated copy"}],
+                            }
+                        ],
+                    )
+                    copied = await isolated.history_snapshot()
+                    assert any(item.get("id") == "isolated-copy" for item in copied.items)
+                after = await session.history_snapshot()
+                assert after.items == before.items
+                print(json.dumps({"exported": True, "isolated": True}), flush=True)
             else:
                 turn = await session.submit(mode + "-input")
                 result = await turn.get_result()
@@ -387,13 +402,11 @@ async def test_reconciled_local_call_can_reopen_without_replay_or_id_reuse(
         assert "Confirmed application record" in json.dumps(responses.requests[1]["input"])
 
 
-async def test_local_cannot_export_portable_state(responses, tmp_path):
+async def test_local_exports_idle_state_to_isolated_memory_without_model_io(responses, tmp_path):
     process = await _start(responses, tmp_path, "export")
     code, rows, err = await _collect(process)
     assert code == 0, (rows, err)
-    message = rows[1]["rejected"]
-    assert "cannot export portable SessionState" in message, rows
-    assert "Session.id" in message and "same storage backend" in message, rows
+    assert rows[1] == {"exported": True, "isolated": True}
     assert not responses.requests
 
 

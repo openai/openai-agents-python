@@ -17,6 +17,19 @@ from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, responses as responses
 
 
+def assert_only_collaboration_rows(items):
+    for item in items:
+        assert item["type"] == "message" and item["role"] == "developer"
+        assert item["internal_chat_message_metadata_passthrough"]["content_item_kinds"] == [
+            "collaboration_mode.instructions"
+        ]
+
+
+def assert_original_prefix(snapshot, expected):
+    assert snapshot.items[: len(expected)] == tuple(expected)
+    assert_only_collaboration_rows(snapshot.items[len(expected) :])
+
+
 def originals():
     return [
         {
@@ -95,7 +108,7 @@ async def test_stored_middle_filter_pair_delete_and_clear_keep_identity(response
             assert effects == [] and responses.requests == []
         async with agent.session(storage=storage, resume=identity) as session:
             assert session.id == identity
-            assert (await session.history_snapshot()).items == tuple(retained)
+            assert_original_prefix(await session.history_snapshot(), retained)
             assert (
                 await (await session.submit("Continue filtered.")).get_result()
             ).final_output == "filtered request"
@@ -115,7 +128,7 @@ async def test_stored_middle_filter_pair_delete_and_clear_keep_identity(response
             assert (await session.history_snapshot()).items == ()
         async with agent.session(storage=storage, resume=identity) as session:
             assert session.id == identity
-            assert (await session.history_snapshot()).items == ()
+            assert_only_collaboration_rows((await session.history_snapshot()).items)
             assert (
                 await (await session.submit("Fresh input.")).get_result()
             ).final_output == "cleared request"
@@ -144,17 +157,17 @@ async def test_clearing_stored_branch_keeps_parent_materialized_history(response
             assert branch_id != parent_id
         async with agent.session(storage=storage, resume=branch_id) as branch:
             current = await branch.history_snapshot()
-            assert current.items == tuple(values)
+            assert_original_prefix(current, values)
             await branch.transact_history(expected_revision=current.revision, keep=0)
             assert (await branch.history_snapshot()).items == ()
         async with agent.session(storage=storage, resume=parent_id) as parent:
-            assert (await parent.history_snapshot()).items == tuple(values)
+            assert_original_prefix(await parent.history_snapshot(), values)
             assert (
                 await (await parent.submit("Continue parent.")).get_result()
             ).final_output == "parent retained"
             assert "KEEP_CONTEXT" in json.dumps(responses.requests[0]["input"])
         async with agent.session(storage=storage, resume=branch_id) as branch:
-            assert (await branch.history_snapshot()).items == ()
+            assert_only_collaboration_rows((await branch.history_snapshot()).items)
             assert (
                 await (await branch.submit("New branch input.")).get_result()
             ).final_output == "branch fresh"
@@ -162,7 +175,9 @@ async def test_clearing_stored_branch_keeps_parent_materialized_history(response
 
 
 @pytest.mark.parametrize("kind", ["local", "custom"])
-async def test_bounded_originals_exclude_native_instruction_publications(responses, tmp_path, kind):
+async def test_bounded_originals_exclude_standalone_native_instruction_receipts(
+    responses, tmp_path, kind
+):
     storage = (
         LocalStorage(tmp_path / "store")
         if kind == "local"
@@ -182,7 +197,19 @@ async def test_bounded_originals_exclude_native_instruction_publications(respons
             before = await session.history_snapshot()
             assert before.items == tuple(items)
             await session.update(instructions="Current native configuration.")
-            assert await session.history_snapshot(limit=len(items)) == before
+            current = await session.history_snapshot()
+            assert current.items[: before.total] == before.items
+            for row in current.items[before.total :]:
+                assert row["type"] == "message" and row["role"] == "developer"
+                kinds = row["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                assert "collaboration_mode.instructions" in kinds
+                assert set(kinds) <= {
+                    "collaboration_mode.instructions",
+                    "sdk_application.instructions",
+                }
+            bounded = await session.history_snapshot(limit=len(items))
+            assert bounded.revision == current.revision and bounded.total == current.total
+            assert bounded.items == current.items[-len(items) :]
             context = json.dumps((await session.model_context()).items)
             assert "Current native configuration." in context
             assert "KEEP_CALLER_DEVELOPER" in context
