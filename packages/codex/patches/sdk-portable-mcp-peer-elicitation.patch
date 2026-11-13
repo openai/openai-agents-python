@@ -1,0 +1,37 @@
+--- a/codex-rs/core/src/mcp_approval_recovery.rs
++++ b/codex-rs/core/src/mcp_approval_recovery.rs
+@@ -195,6 +195,13 @@
+             .ok_or_else(|| anyhow::anyhow!("MCP recovery already started"))
+     }
+
++    // Recovery only owns its exact synthetic approval. Peer questions keep
++    // their existing elicitation owner and cannot settle this approval.
++    pub(crate) fn owns_question(&self, server: &str, request: &RequestId) -> bool {
++        let data = &self.prepared.source;
++        server == data.server_name && *request == RequestId::String(data.request_id.clone().into())
++    }
++
+     /// Bind the actual new sender before publishing its request, never a stored token.
+     pub(crate) async fn bind_question(
+         &self,
+--- a/codex-rs/core/src/session/mcp.rs
++++ b/codex-rs/core/src/session/mcp.rs
+@@ -724,7 +724,8 @@
+         }
+         let native_recovery = turn_context
+             .extension_data
+-            .get::<crate::NativeMcpRecovery>();
++            .get::<crate::NativeMcpRecovery>()
++            .filter(|recovery| recovery.owns_question(&server_name, &request_id));
+         if let Some(recovery) = native_recovery.as_deref()
+             && recovery
+                 .bind_question(self, turn_context, &server_name, &request_id)
+@@ -795,7 +796,7 @@
+                             .turn_context
+                             .extension_data
+                             .get::<crate::NativeMcpRecovery>()
+-                            .is_some()),
++                            .is_some_and(|recovery| recovery.owns_question(&server_name, &id))),
+                         "Restored MCP approval requires its fresh native receipt"
+                     );
+                     let mut ts = at.turn_state.lock().await;

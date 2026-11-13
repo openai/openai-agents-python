@@ -24,10 +24,18 @@ class RuntimeStorageMount(TypedDict, closed=True):
     read_only: bool
 
 
+class RuntimeStdioCommand(TypedDict, closed=True):
+    program: str
+    args: list[str]
+    env: dict[str, str]
+    cwd: str | None
+
+
 class RuntimeEnvironment(TypedDict, total=False, closed=True):
-    """Select the local executor or connect to WSS with a timeout in seconds."""
+    """Select the local executor or a current host-owned remote connection."""
 
     url: str
+    stdio_command: RuntimeStdioCommand
     local: bool
     read_only: bool
     trusted_workspace_write: bool

@@ -23,6 +23,7 @@ from _agents_codex.tools import (
     FileSearchHybridRanking as FileSearchHybridRanking,
     FileSearchRanking as FileSearchRanking,
     FunctionCallResponse as FunctionCallResponse,
+    HostedProgrammaticToolCalling as HostedProgrammaticToolCalling,
     HostedShell as HostedShell,
     HostedShellAutoEnvironment as HostedShellAutoEnvironment,
     HostedShellReferenceEnvironment as HostedShellReferenceEnvironment,

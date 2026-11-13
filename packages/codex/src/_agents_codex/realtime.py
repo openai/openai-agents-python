@@ -30,13 +30,17 @@ from weakref import WeakKeyDictionary
 from pydantic import AnyUrl
 from typing_extensions import NotRequired, TypedDict
 
-from ._lifecycle import _close_after_error, _join, _retain_cleanup_error
+from ._lifecycle import (
+    _clear_error_frames as _clear_adapter_error_frames,
+    _close_after_error,
+    _join,
+    _retain_cleanup_error,
+)
 from ._public import preserve_module_identity as _preserve_module_identity
 from .realtime_adapter import (
     NativeRealtimeAdapter as NativeRealtimeAdapter,
     NativeRealtimeConnection as NativeRealtimeConnection,
     RealtimeAdapterContext as RealtimeAdapterContext,
-    _clear_adapter_error_frames,
     _RealtimeAdapterDriver,
 )
 from .realtime_agents import (
@@ -83,6 +87,7 @@ from .realtime_settings import (
 )
 from .realtime_usage import (
     RealtimeUsage as RealtimeUsage,
+    RealtimeUsageAccounting as RealtimeUsageAccounting,
     _add_usage,
     _reported_usage,
     _usage_snapshot,
@@ -135,6 +140,7 @@ class RealtimePolicyContext:
     agent: Agent[Any, Any]
     context: Any
     realtime_usage: RealtimeUsage | None = None
+    realtime_usage_accounting: RealtimeUsageAccounting | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +189,7 @@ async def _resolve_realtime_policy(
     *,
     check: Callable[[], None],
     usage: RealtimeUsage | None = None,
+    usage_accounting: RealtimeUsageAccounting | None = None,
     profile_update: bool = False,
     source_snapshot: Mapping[str, Any] | None = None,
 ) -> tuple[str | None, list[str] | None, str | None]:
@@ -196,7 +203,9 @@ async def _resolve_realtime_policy(
         else session._realtime_policy_source(source_snapshot)
     )
     check()
-    context = replace(source.context, realtime_usage=usage)
+    context = replace(
+        source.context, realtime_usage=usage, realtime_usage_accounting=usage_accounting
+    )
     with _voice_callback_scope(session):
         resolved = instructions(context) if callable(instructions) else instructions
         if inspect.isawaitable(resolved):
@@ -260,6 +269,9 @@ class RealtimeConfig:
     ) = field(default=None, repr=False)
     url: str | None = field(default=None, repr=False)
     headers: Mapping[str, str] | None = field(default=None, repr=False)
+    # Keep provider input and control active while deferring media observation.
+    # For inline v0-style delivery, also set max_function_concurrency=1 on the Session.
+    defer_media_while_tool_runs: bool = False
 
 
 async def _prepare_realtime_params(
@@ -283,6 +295,7 @@ async def _prepare_realtime_params(
             if owner is not None
             else session._check_open,
             usage=owner.usage if owner is not None else None,
+            usage_accounting=owner.usage_accounting if owner is not None else None,
             source_snapshot=source_snapshot,
         )
         (
@@ -536,6 +549,7 @@ class RealtimeResponse:
     cumulative_usage: RealtimeUsage | None = None
     out_of_band: bool = False
     run_context: RealtimePolicyContext | None = None
+    usage_accounting: RealtimeUsageAccounting | None = None
 
 
 @dataclass(frozen=True)
@@ -1082,6 +1096,8 @@ class RealtimeSession:
             raise TypeError("automatically_trigger_response_for_mcp_tool_calls must be a bool")
         if type(config.include_raw_provider_events) is not bool:
             raise TypeError("include_raw_provider_events must be a bool")
+        if type(config.defer_media_while_tool_runs) is not bool:
+            raise TypeError("defer_media_while_tool_runs must be a bool")
         # Keys disappear when the bounded event queue and the application release
         # a request. Native code owns revocation and one-time write admission.
         self._mcp_approvals: WeakKeyDictionary[RealtimeHostedMcpApprovalRequested, str] = (
@@ -1140,6 +1156,10 @@ class RealtimeSession:
             asyncio.get_running_loop().create_future()
         )
         self._queue: asyncio.Queue[tuple[RealtimeEvent, int]] = asyncio.Queue(self._EVENT_LIMIT)
+        self._inline_tool_bodies = 0
+        self._deferred_media: deque[tuple[RealtimeAudio | RealtimeText, int]] = deque()
+        self._deferred_media_bytes = 0
+        self._deferred_media_release: asyncio.Handle | None = None
         self._changed = asyncio.Event()
         self._subscribers: set[_ObservationBuffer] = set()
         self._passive_observation = False
@@ -1161,6 +1181,7 @@ class RealtimeSession:
         self._terminal_requests: dict[str, None] = {}
         self._history: dict[str, RealtimeHistoryItem] = {}
         self._usage_totals: dict[str, Any] | None = None
+        self._usage_accounting = RealtimeUsageAccounting(0, 0)
         self._live = False
         self._entered = False
         self._consuming = False
@@ -1178,7 +1199,10 @@ class RealtimeSession:
         if receipt is None and self._session._agent is None:
             return None
         return RealtimePolicyContext(
-            self._session._original_agent_for_profile(receipt), self._session._context, self.usage
+            self._session._original_agent_for_profile(receipt),
+            self._session._context,
+            self.usage,
+            self.usage_accounting,
         )
 
     def _function_event(
@@ -1246,12 +1270,12 @@ class RealtimeSession:
 
     def _tool_body_started(
         self, source: Any, wire_name: str, tool: FunctionTool[Any, Any, Any]
-    ) -> None:
+    ) -> bool:
         if not isinstance(source, dict) or source.get("generation") != self._generation:
-            return
+            return False
         call_id = source.get("provider_call_id")
         if not isinstance(call_id, str):
-            return
+            return False
         captured = self._function_names.get(call_id)
         owned = self._functions.get(call_id)
         if (
@@ -1263,14 +1287,48 @@ class RealtimeSession:
             or captured.item_id != source.get("provider_item_id")
             or captured.response_id != source.get("provider_response_id")
         ):
-            return
+            return False
         captured.tool = tool
         self._emit(self._function_event(call_id, captured.name, "executing"))
+        if not self._config.defer_media_while_tool_runs:
+            return False
+        self._inline_tool_bodies += 1
+        return True
+
+    def _tool_body_ended(self) -> None:
+        self._inline_tool_bodies -= 1
+        if not self._inline_tool_bodies and self._deferred_media_release is None:
+            self._release_deferred_media()
+
+    def _release_deferred_media(self) -> None:
+        self._deferred_media_release = None
+        if self._inline_tool_bodies or not self._deferred_media or self._terminal.done():
+            return
+        event, size = self._deferred_media.popleft()
+        self._deferred_media_bytes -= size
+        self._publish_observation(event, size)
+        if self._deferred_media:
+            # Wake waiting readers before publishing the next queued delta.
+            self._deferred_media_release = asyncio.get_running_loop().call_soon(
+                self._release_deferred_media
+            )
+
+    def _clear_deferred_media(self) -> None:
+        if self._deferred_media_release is not None:
+            self._deferred_media_release.cancel()
+            self._deferred_media_release = None
+        self._deferred_media.clear()
+        self._deferred_media_bytes = 0
 
     @property
     def usage(self) -> RealtimeUsage | None:
         """Cumulative reported speech-model usage; missing usage remains unknown."""
         return _usage_snapshot(self._usage_totals)
+
+    @property
+    def usage_accounting(self) -> RealtimeUsageAccounting:
+        """Accepted completed response and usage report counts for this connection."""
+        return self._usage_accounting
 
     @property
     def history(self) -> tuple[RealtimeHistoryItem, ...]:
@@ -1415,7 +1473,9 @@ class RealtimeSession:
         self._check_live()
         with self._callback_scope():
             result = predicate(
-                RealtimePolicyContext(agent, self._session._context, self.usage),
+                RealtimePolicyContext(
+                    agent, self._session._context, self.usage, self.usage_accounting
+                ),
                 RealtimeTool(kind, name),
             )
             if inspect.isawaitable(result):
@@ -1442,7 +1502,9 @@ class RealtimeSession:
                         name,
                         call_id,
                         default,
-                        RealtimePolicyContext(agent, self._session._context, self.usage),
+                        RealtimePolicyContext(
+                            agent, self._session._context, self.usage, self.usage_accounting
+                        ),
                     )
                 )
                 result = await value if inspect.isawaitable(value) else value
@@ -2174,6 +2236,23 @@ class RealtimeSession:
         if self._terminal.done():
             return
         size = self._buffer_size(event)
+        if (self._inline_tool_bodies or self._deferred_media) and isinstance(
+            event, (RealtimeAudio, RealtimeText)
+        ):
+            if (
+                len(self._deferred_media) >= self._EVENT_LIMIT
+                or self._deferred_media_bytes + size > self._BUFFER_BYTES_LIMIT
+            ):
+                self._finish(RuntimeError("Realtime deferred media capacity exceeded"))
+                return
+            self._deferred_media.append((event, size))
+            self._deferred_media_bytes += size
+            return
+        self._publish_observation(event, size)
+
+    def _publish_observation(self, event: RealtimeEvent, size: int) -> None:
+        if self._terminal.done():
+            return
         if self._passive_observation and not self._primary_owned:
             while not self._queue.empty() and (
                 self._queue.full() or self._queue_bytes + size > self._BUFFER_BYTES_LIMIT
@@ -2217,6 +2296,7 @@ class RealtimeSession:
             self._schedule_close()
 
     def _finish_subscribers(self, error: BaseException | None) -> None:
+        self._clear_deferred_media()
         for subscriber in tuple(self._subscribers):
             if error is None:
                 event = RealtimeLifecycle("closed")
@@ -2813,6 +2893,13 @@ class RealtimeSession:
         ] = None if owned.retired else self._guardrail_fingerprint(owned.snapshot.text)
 
     def _discard_response_audio(self, response_id: str) -> None:
+        if self._deferred_media:
+            self._deferred_media = deque(
+                (event, size)
+                for event, size in self._deferred_media
+                if event.response_id != response_id
+            )
+            self._deferred_media_bytes = sum(size for _, size in self._deferred_media)
         retained: list[RealtimeEvent] = []
         while not self._queue.empty():
             event = self._dequeue()
@@ -3123,6 +3210,7 @@ class RealtimeSession:
                 policy_config,
                 check=self._check_live,
                 usage=self.usage,
+                usage_accounting=self.usage_accounting,
                 source_snapshot=source_snapshot,
             )
             instructions, update, definitions, selection_id = await _resolve_realtime_configuration(
@@ -3709,6 +3797,12 @@ class RealtimeSession:
                     self._finish(error)
                     return
                 self._usage_totals = totals
+            if name == "ResponseDone":
+                previous = self._usage_accounting
+                self._usage_accounting = RealtimeUsageAccounting(
+                    previous.finished_responses + 1,
+                    previous.usage_reports + int(reported_usage is not None),
+                )
             self._emit(
                 RealtimeResponse(
                     status,
@@ -3717,6 +3811,7 @@ class RealtimeSession:
                     self.usage,
                     out_of_band,
                     run_context=self._event_context(value.get("profile_receipt")),
+                    usage_accounting=self._usage_accounting,
                 )
             )
             if name == "ResponseDone" and not out_of_band:

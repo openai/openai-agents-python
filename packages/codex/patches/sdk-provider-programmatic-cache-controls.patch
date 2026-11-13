@@ -1,0 +1,536 @@
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index 06aca9aa..54897998 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -359,7 +359,10 @@ where
+
+ #[derive(Debug, Serialize, Clone, PartialEq)]
+ pub struct PromptCacheOptions {
+-    pub ttl: codex_protocol::model_request_controls::PromptCacheTtl,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub ttl: Option<codex_protocol::model_request_controls::PromptCacheTtl>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub mode: Option<codex_protocol::model_request_controls::PromptCacheMode>,
+ }
+
+ #[derive(Debug, Serialize, Clone, PartialEq)]
+@@ -674,3 +677,35 @@ impl ModelInvocationDeadlineState {
+         self.notify(current);
+     }
+ }
++
++#[cfg(test)]
++mod explicit_prompt_cache_tests {
++    use super::*;
++    use codex_protocol::model_request_controls::{PromptCacheMode, PromptCacheTtl};
++
++    #[test]
++    fn request_mode_and_ttl_serialize_independently() {
++        for (ttl, mode, expected) in [
++            (
++                Some(PromptCacheTtl::Minutes30),
++                None,
++                serde_json::json!({"ttl": "30m"}),
++            ),
++            (
++                None,
++                Some(PromptCacheMode::Explicit),
++                serde_json::json!({"mode": "explicit"}),
++            ),
++            (
++                Some(PromptCacheTtl::Minutes30),
++                Some(PromptCacheMode::Explicit),
++                serde_json::json!({"ttl": "30m", "mode": "explicit"}),
++            ),
++        ] {
++            assert_eq!(
++                serde_json::to_value(PromptCacheOptions { ttl, mode }).unwrap(),
++                expected
++            );
++        }
++    }
++}
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index a85ac5e2..ff14db34 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1489,10 +1489,12 @@ impl ModelClient {
+                 top_logprobs: controls.top_logprobs.flatten(),
+                 metadata: controls.metadata.clone().flatten(),
+                 prompt_cache_retention: controls.prompt_cache_retention.flatten(),
+-                prompt_cache_options: controls
+-                    .prompt_cache_ttl
+-                    .flatten()
+-                    .map(|ttl| codex_api::PromptCacheOptions { ttl }),
++                prompt_cache_options: {
++                    let ttl = controls.prompt_cache_ttl.flatten();
++                    let mode = controls.prompt_cache_mode.flatten();
++                    (ttl.is_some() || mode.is_some())
++                        .then_some(codex_api::PromptCacheOptions { ttl, mode })
++                },
+             },
+             parallel_tool_calls: (!(hosted_prompt.is_some()
+                 && controls.parallel_tool_calls.is_none()))
+@@ -1538,6 +1540,7 @@ impl ModelClient {
+                         | codex_tools::ToolSpec::ImageGeneration(_)
+                         | codex_tools::ToolSpec::Shell(_)
+                         | codex_tools::ToolSpec::Mcp(_)
++                        | codex_tools::ToolSpec::ProviderOnly(_)
+                 )
+             }) || (request.request_controls.prompt.is_some()
+                 && request.tools.is_none());
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index ca447916..697e40fe 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -154,6 +154,7 @@ impl CoreToolRuntime for ExtensionToolAdapter {
+                     | ToolSpec::ApplicationShell { .. }
+                     | ToolSpec::ApplyPatch {}
+                     | ToolSpec::Mcp(_)
++                    | ToolSpec::ProviderOnly(_)
+             ),
+             ToolPayload::HostedMcpApproval { request } => matches!(
+                 self.0.spec(),
+@@ -177,6 +178,7 @@ impl CoreToolRuntime for ExtensionToolAdapter {
+                 | ToolSpec::ApplicationShell { .. }
+                 | ToolSpec::ImageGeneration(_)
+                 | ToolSpec::ProviderToolSearch(_)
++                | ToolSpec::ProviderOnly(_)
+                 | ToolSpec::ApplyPatch {}
+                 | ToolSpec::Computer { .. }
+                 | ToolSpec::ComputerUsePreview { .. }
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 7dcf06dc..c792f9a1 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -554,6 +554,7 @@ impl ToolRegistry {
+                 | ToolSpec::ApplicationShell { .. }
+                 | ToolSpec::ImageGeneration(_)
+                 | ToolSpec::ProviderToolSearch(_)
++                | ToolSpec::ProviderOnly(_)
+                 | ToolSpec::ApplyPatch {}
+                 | ToolSpec::Computer { .. }
+                 | ToolSpec::ComputerUsePreview { .. }
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+index 2635b104..5e764261 100644
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -231,6 +231,7 @@ impl ToolRouter {
+                 | ToolSpec::CodeInterpreter(_)
+                 | ToolSpec::Shell(_)
+                 | ToolSpec::ImageGeneration(_)
++                | ToolSpec::ProviderOnly(_)
+                 | ToolSpec::WebSearch { .. } => false,
+                 ToolSpec::ProviderToolSearch(config) => !config.searches_on_provider() && name.is_default_namespace() && name.name == "tool_search",
+             })
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index a48f89bd..10b0893f 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -728,6 +728,7 @@ fn finalize_selected_tool_router(
+                     | ToolSpec::ApplicationShell { .. }
+                     | ToolSpec::ImageGeneration(_)
+                     | ToolSpec::ProviderToolSearch(_)
++                    | ToolSpec::ProviderOnly(_)
+                     | ToolSpec::ApplyPatch {}
+             | ToolSpec::Computer { .. }
+                     | ToolSpec::ComputerUsePreview { .. }
+@@ -765,6 +766,23 @@ fn finalize_selected_tool_router(
+         }
+     }
+
++    // Opaque provider declarations cannot share an admitted local callable identity.
++    for spec in &hosted_specs {
++        if let ToolSpec::ProviderOnly(definition) = spec {
++            if registry.entries().any(|entry| {
++                let name = entry.runtime.tool_name();
++                name.is_default_namespace()
++                    && (name.name == definition.tool_type()
++                        || Some(name.name.as_str()) == definition.declared_name())
++            }) {
++                return Err(CodexErrorDetails::InvalidRequest(
++                    "Provider-only declaration conflicts with a native callable".into(),
++                )
++                .into());
++            }
++        }
++    }
++
+     let model_visible_specs = build_model_visible_specs(
+         turn_context,
+         model_info,
+@@ -1195,6 +1213,7 @@ fn register_code_mode_executors(
+             | ToolSpec::ApplicationShell { .. }
+             | ToolSpec::ImageGeneration(_)
+             | ToolSpec::ProviderToolSearch(_)
++            | ToolSpec::ProviderOnly(_)
+             | ToolSpec::ApplyPatch {}
+             | ToolSpec::Computer { .. }
+             | ToolSpec::ComputerUsePreview { .. }
+diff --git a/codex-rs/core/src/tools/tool_namespaces_info.rs b/codex-rs/core/src/tools/tool_namespaces_info.rs
+index b53572bc..ee346bb7 100644
+--- a/codex-rs/core/src/tools/tool_namespaces_info.rs
++++ b/codex-rs/core/src/tools/tool_namespaces_info.rs
+@@ -47,6 +47,7 @@ pub(super) fn collect_tool_namespaces_info(
+             | ToolSpec::ApplicationShell { .. }
+             | ToolSpec::ImageGeneration(_)
+             | ToolSpec::ProviderToolSearch(_)
++            | ToolSpec::ProviderOnly(_)
+             | ToolSpec::ApplyPatch {}
+             | ToolSpec::Computer { .. }
+             | ToolSpec::ComputerUsePreview { .. }
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index f538be7e..b4525da9 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -23,6 +23,12 @@ pub enum PromptCacheTtl {
+     Hours12,
+ }
+
++#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(rename_all = "snake_case")]
++pub enum PromptCacheMode {
++    Explicit,
++}
++
+ /// Explicit provider-tool selection; it never grants a function identity.
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+ #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+@@ -36,6 +42,7 @@ pub enum HostedToolChoice {
+     Shell {},
+     ApplyPatch {},
+     ToolSearch {},
++    ProgrammaticToolCalling {},
+     Mcp {
+         server_label: String,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -332,6 +339,14 @@ pub struct ModelRequestControls {
+         skip_serializing_if = "Option::is_none",
+         with = "serde_with::rust::double_option"
+     )]
++    #[ts(optional = nullable, as = "Option<PromptCacheMode>")]
++    #[schemars(with = "Option<PromptCacheMode>")]
++    pub prompt_cache_mode: Option<Option<PromptCacheMode>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
+     #[ts(optional = nullable, as = "Option<ToolName>")]
+     #[schemars(with = "Option<ToolName>")]
+     pub named_tool_choice: Option<Option<ToolName>>,
+@@ -382,6 +397,7 @@ impl ModelRequestControls {
+             && self.store.is_none()
+             && self.prompt_cache_retention.is_none()
+             && self.prompt_cache_ttl.is_none()
++            && self.prompt_cache_mode.is_none()
+             && self.named_tool_choice.is_none()
+             && self.hosted_tool_choice.is_none()
+             && self.reset_tool_choice.is_none()
+@@ -453,6 +469,9 @@ impl ModelRequestControls {
+         if patch.prompt_cache_ttl.is_some() {
+             self.prompt_cache_ttl = patch.prompt_cache_ttl;
+         }
++        if patch.prompt_cache_mode.is_some() {
++            self.prompt_cache_mode = patch.prompt_cache_mode;
++        }
+         if patch.hosted_tool_choice.is_some() {
+             self.hosted_tool_choice = patch.hosted_tool_choice.clone();
+         }
+@@ -666,6 +685,7 @@ impl ModelRequestControls {
+                 .as_ref()
+                 .is_some_and(Option::is_some)
+             || self.prompt_cache_ttl.as_ref().is_some_and(Option::is_some)
++            || self.prompt_cache_mode.as_ref().is_some_and(Option::is_some)
+             || self.named_tool_choice.as_ref().is_some_and(Option::is_some)
+             || self
+                 .hosted_tool_choice
+@@ -827,3 +847,37 @@ mod request_transport_carrier_tests {
+         assert!(invalid.validate_shape().is_err());
+     }
+ }
++
++#[cfg(test)]
++mod explicit_prompt_cache_tests {
++    use super::*;
++
++    #[test]
++    fn mode_patch_and_clear_keep_ttl_independent() {
++        let mut controls: ModelRequestControls = serde_json::from_value(serde_json::json!({
++            "prompt_cache_ttl": "30m", "prompt_cache_mode": "explicit"
++        }))
++        .unwrap();
++        assert_eq!(
++            controls.prompt_cache_mode,
++            Some(Some(PromptCacheMode::Explicit))
++        );
++        assert!(!controls.is_empty());
++        let clear: ModelRequestControls = serde_json::from_value(serde_json::json!({
++            "prompt_cache_mode": null
++        }))
++        .unwrap();
++        controls.apply_patch(&clear);
++        assert_eq!(controls.prompt_cache_mode, Some(None));
++        assert_eq!(
++            controls.prompt_cache_ttl,
++            Some(Some(PromptCacheTtl::Minutes30))
++        );
++        assert!(
++            serde_json::from_value::<ModelRequestControls>(serde_json::json!({
++                "prompt_cache_mode": "invalid"
++            }))
++            .is_err()
++        );
++    }
++}
+diff --git a/codex-rs/tools/src/code_mode.rs b/codex-rs/tools/src/code_mode.rs
+index 6b65a9ca..8ec484ff 100644
+--- a/codex-rs/tools/src/code_mode.rs
++++ b/codex-rs/tools/src/code_mode.rs
+@@ -231,6 +231,7 @@ fn code_mode_tool_definitions_for_spec(
+         | ToolSpec::ApplicationShell { .. }
+         | ToolSpec::ImageGeneration(_)
+         | ToolSpec::ProviderToolSearch(_)
++        | ToolSpec::ProviderOnly(_)
+         | ToolSpec::ApplyPatch {}
+         | ToolSpec::Computer { .. }
+         | ToolSpec::ComputerUsePreview { .. }
+diff --git a/codex-rs/tools/src/hosted_tools.rs b/codex-rs/tools/src/hosted_tools.rs
+index 3c64fc35..7cfbc5e0 100644
+--- a/codex-rs/tools/src/hosted_tools.rs
++++ b/codex-rs/tools/src/hosted_tools.rs
+@@ -16,6 +16,7 @@ pub enum HostedToolSpec {
+     ImageGeneration(ImageGenerationTool),
+     ToolSearch(ProviderToolSearch),
+     Mcp(HostedMcpTool),
++    ProviderOnly { definition: ProviderToolDefinition },
+ }
+
+ impl From<HostedToolSpec> for crate::ToolSpec {
+@@ -27,10 +28,77 @@ impl From<HostedToolSpec> for crate::ToolSpec {
+             HostedToolSpec::ImageGeneration(config) => Self::ImageGeneration(config),
+             HostedToolSpec::ToolSearch(config) => Self::ProviderToolSearch(config),
+             HostedToolSpec::Mcp(config) => Self::Mcp(config),
++            HostedToolSpec::ProviderOnly { definition } => Self::ProviderOnly(definition),
+         }
+     }
+ }
+
++/// An opaque provider declaration with no local executor or approval authority.
++#[derive(Clone, Serialize, PartialEq)]
++#[serde(transparent)]
++pub struct ProviderToolDefinition {
++    definition: serde_json::Map<String, serde_json::Value>,
++}
++
++impl ProviderToolDefinition {
++    pub fn new(definition: serde_json::Map<String, serde_json::Value>) -> Result<Self, String> {
++        let Some(kind) = definition.get("type").and_then(serde_json::Value::as_str) else {
++            return Err("Provider-only tool requires a nonempty type".into());
++        };
++        if kind.is_empty() || kind.trim() != kind || kind.contains('\0') {
++            return Err("Provider-only tool requires a nonempty type".into());
++        }
++        if matches!(
++            kind,
++            "function"
++                | "namespace"
++                | "custom"
++                | "apply_patch"
++                | "computer"
++                | "computer_use_preview"
++                | "local_shell"
++                | "shell"
++                | "tool_search"
++                | "mcp"
++                | "web_search"
++                | "file_search"
++                | "code_interpreter"
++                | "image_generation"
++                | "provider_only"
++        ) {
++            return Err("Use the typed declaration for this tool category".into());
++        }
++        Ok(Self { definition })
++    }
++
++    pub fn tool_type(&self) -> &str {
++        self.definition["type"]
++            .as_str()
++            .expect("validated provider tool type")
++    }
++
++    pub fn declared_name(&self) -> Option<&str> {
++        self.definition
++            .get("name")
++            .and_then(serde_json::Value::as_str)
++    }
++}
++
++impl<'de> Deserialize<'de> for ProviderToolDefinition {
++    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
++        let definition = serde_json::Map::deserialize(deserializer)?;
++        Self::new(definition).map_err(serde::de::Error::custom)
++    }
++}
++
++impl std::fmt::Debug for ProviderToolDefinition {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("ProviderToolDefinition")
++            .field("provider_field_count", &self.definition.len())
++            .finish_non_exhaustive()
++    }
++}
++
+ /// A remote MCP server whose calls are executed by the Responses provider.
+ #[derive(Clone, Serialize, Deserialize, PartialEq)]
+ pub struct HostedMcpTool {
+@@ -491,3 +559,74 @@ pub fn client_tool_search_spec(
+         _ => Err("Captured client tool search requires client execution".to_string()),
+     }
+ }
++
++#[cfg(test)]
++mod provider_only_tests {
++    use super::*;
++    use serde_json::json;
++
++    #[test]
++    fn opaque_provider_definition_keeps_wire_fields_without_callable_authority() {
++        let definition = json!({
++            "type":"future_hosted", "name":"remote_action",
++            "kind":"opaque-provider-field", "future":{"values":[true,null,{"format":"vendor"}]}
++        });
++        let hosted: HostedToolSpec = serde_json::from_value(json!({
++            "type":"provider_only", "definition":definition
++        }))
++        .unwrap();
++        let spec = crate::ToolSpec::from(hosted);
++        assert_eq!(serde_json::to_value(&spec).unwrap(), definition);
++        assert_eq!(spec.name(), "future_hosted");
++        assert!(!spec.has_eager_callable(&codex_protocol::ToolName::plain("future_hosted")));
++        assert!(!spec.has_eager_callable(&codex_protocol::ToolName::plain("remote_action")));
++        assert!(crate::ToolSearchInfo::from_tool_spec(spec.clone(), None).is_none());
++        assert!(crate::tool_spec_to_code_mode_tool_definition(&spec).is_none());
++        assert!(spec.deferred_for_provider_search().is_none());
++    }
++
++    #[test]
++    fn provider_definition_rejects_native_and_approval_categories_and_redacts_debug() {
++        for kind in [
++            "function",
++            "namespace",
++            "custom",
++            "apply_patch",
++            "computer",
++            "computer_use_preview",
++            "local_shell",
++            "shell",
++            "tool_search",
++            "mcp",
++            "web_search",
++            "file_search",
++            "code_interpreter",
++            "image_generation",
++            "provider_only",
++        ] {
++            assert!(
++                serde_json::from_value::<HostedToolSpec>(json!({
++                    "type":"provider_only", "definition":{"type":kind}
++                }))
++                .is_err()
++            );
++        }
++        for definition in [
++            json!({}),
++            json!({"type":null}),
++            json!({"type":""}),
++            json!({"type":" future "}),
++        ] {
++            assert!(
++                serde_json::from_value::<HostedToolSpec>(json!({
++                    "type":"provider_only", "definition":definition
++                }))
++                .is_err()
++            );
++        }
++        let spec: HostedToolSpec = serde_json::from_value(json!({
++            "type":"provider_only", "definition":{"type":"future_hosted", "private_option":"synthetic-provider-value"}
++        })).unwrap();
++        assert!(!format!("{spec:?}").contains("synthetic-provider-value"));
++    }
++}
+diff --git a/codex-rs/tools/src/tool_search.rs b/codex-rs/tools/src/tool_search.rs
+index 0ab89359..3f504b7e 100644
+--- a/codex-rs/tools/src/tool_search.rs
++++ b/codex-rs/tools/src/tool_search.rs
+@@ -51,6 +51,7 @@ impl ToolSearchInfo {
+             | ToolSpec::ApplicationShell { .. }
+             | ToolSpec::ImageGeneration(_)
+             | ToolSpec::ProviderToolSearch(_)
++            | ToolSpec::ProviderOnly(_)
+             | ToolSpec::ApplyPatch {}
+         | ToolSpec::Computer { .. }
+             | ToolSpec::ComputerUsePreview { .. }
+@@ -105,6 +106,7 @@ fn normalize_search_spec(spec: ToolSpec) -> Option<LoadableToolSpec> {
+         | ToolSpec::ApplicationShell { .. }
+         | ToolSpec::ImageGeneration(_)
+         | ToolSpec::ProviderToolSearch(_)
++        | ToolSpec::ProviderOnly(_)
+         | ToolSpec::ApplyPatch {}
+         | ToolSpec::Computer { .. }
+         | ToolSpec::ComputerUsePreview { .. }
+@@ -166,7 +168,8 @@ fn default_tool_search_text(spec: &ToolSpec) -> String {
+         ToolSpec::ApplyPatch {}
+         | ToolSpec::Computer { .. }
+         | ToolSpec::ComputerUsePreview { .. }
+-        | ToolSpec::ProviderToolSearch(_) => {}
++        | ToolSpec::ProviderToolSearch(_)
++        | ToolSpec::ProviderOnly(_) => {}
+         ToolSpec::WebSearch { .. } => {
+             push_search_part(&mut parts, "web search".to_string());
+         }
+diff --git a/codex-rs/tools/src/tool_spec.rs b/codex-rs/tools/src/tool_spec.rs
+index 3ab3b324..95e9e2ff 100644
+--- a/codex-rs/tools/src/tool_spec.rs
++++ b/codex-rs/tools/src/tool_spec.rs
+@@ -82,6 +82,8 @@ pub enum ToolSpec {
+     ProviderToolSearch(crate::ProviderToolSearch),
+     #[serde(rename = "custom")]
+     Freeform(FreeformTool),
++    #[serde(untagged)]
++    ProviderOnly(crate::ProviderToolDefinition),
+ }
+
+ impl ToolSpec {
+@@ -128,7 +130,11 @@ impl ToolSpec {
+             | Self::ImageGeneration(_) => {
+                 target.is_default_namespace() && self.name() == target.name
+             }
+-            Self::Namespace(_) | Self::ToolSearch { .. } | Self::ProviderToolSearch(_) | Self::Mcp(_) => false,
++            Self::Namespace(_)
++            | Self::ToolSearch { .. }
++            | Self::ProviderToolSearch(_)
++            | Self::Mcp(_)
++            | Self::ProviderOnly(_) => false,
+         }
+     }
+
+@@ -151,6 +157,9 @@ impl ToolSpec {
+             | (Self::ToolSearch { .. } | Self::ProviderToolSearch(_), Choice::ToolSearch {}) => {
+                 true
+             }
++            (Self::ProviderOnly(tool), Choice::ProgrammaticToolCalling {}) => {
++                tool.tool_type() == "programmatic_tool_calling"
++            }
+             (Self::ComputerUsePreview { .. }, Choice::Computer {}) => {
+                 return Some(Choice::ComputerUsePreview {});
+             }
+@@ -214,6 +223,7 @@ impl ToolSpec {
+             ToolSpec::Shell(_) | ToolSpec::ApplicationShell { .. } => "shell",
+             ToolSpec::ImageGeneration(_) => "image_generation",
+             ToolSpec::Freeform(tool) => tool.name.as_str(),
++            ToolSpec::ProviderOnly(tool) => tool.tool_type(),
+         }
+     }
+ }

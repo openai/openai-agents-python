@@ -99,3 +99,30 @@ def test_shared_run_keeps_repair_and_held_predecessor_ledgers_separate():
     run.attach(repair)
     run.observe({name: getattr(tokens(11), name) for name in TokenUsage.__dataclass_fields__})
     assert run.snapshot() == RunUsage(23, 0, 0, 0, 0, 23, 4, 1)
+
+
+def test_receipt_managed_physical_totals_wait_for_exact_native_terminal():
+    usage = _UsageCollector()
+    usage.replace_model_attempt(snapshot("physical-owner", 1, 0, missing=1))
+    usage.manage_provider_attempts()
+    usage.replace_model_attempt(snapshot("physical-owner", 2, 5, missing=1))
+    assert usage.snapshot().requests == 0
+    usage.replace_model_attempt(snapshot("physical-owner", 1, 5), final=True)
+    assert usage.snapshot() == RunUsage(5, 0, 0, 0, 0, 5, 1, 0)
+
+
+def test_receipt_managed_zero_create_keeps_restore_offset_and_rejects_other_owner():
+    usage = _UsageCollector(RunUsage(7, 0, 0, 0, 0, 7, 3, 0))
+    usage.replace_model_attempt(snapshot("physical-owner", 1, 0, missing=1))
+    usage.manage_provider_attempts()
+    with pytest.raises(ValueError, match="owner changed"):
+        usage.replace_model_attempt(snapshot("other-owner", 1, 5), final=True)
+    usage.replace_model_attempt(snapshot(None, 0, 0), final=True)
+    assert usage.snapshot() == RunUsage(7, 0, 0, 0, 0, 7, 3, 0)
+
+
+def test_ordinary_final_counter_regression_remains_rejected():
+    usage = _UsageCollector()
+    usage.replace_model_attempt(snapshot("ordinary-owner", 2, 0, missing=2))
+    with pytest.raises(ValueError, match="regressed"):
+        usage.replace_model_attempt(snapshot("ordinary-owner", 1, 0, missing=1), final=True)

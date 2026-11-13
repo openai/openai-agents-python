@@ -196,6 +196,27 @@ assert "agents._native" not in sys.modules
     )
 
 
+def test_voice_workflow_uses_session_tool_selection_boundary() -> None:
+    path = _RUNTIME / "voice" / "workflow.py"
+    tree = ast.parse(path.read_text())
+    private_session_fields = {
+        "_check_open",
+        "_effective_agent",
+        "_bindings",
+        "_executor",
+        "_native_agents",
+        "_effective_handoffs",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            assert node.attr not in private_session_fields, (path, node.lineno, node.attr)
+        elif isinstance(node, ast.ImportFrom):
+            assert all(alias.name != "_split_tools" for alias in node.names), (
+                path,
+                node.lineno,
+            )
+
+
 def test_runtime_dependencies_do_not_use_public_facades() -> None:
     runtime = _RUNTIME
     assert runtime.is_dir()
@@ -244,10 +265,15 @@ def test_runtime_dependencies_do_not_use_public_facades() -> None:
                     "agents.classic.sandbox.entries.mounts",
                     "agents.classic.sandbox.manifest",
                     "agents.classic.sandbox.remote_mount_policy",
+                    # DockerGateway checks concrete provisioning/lease identities.
+                    # Native Core still owns command dispatch and model execution.
+                    "agents.classic.sandbox.sandboxes.docker",
                     "agents.classic.sandbox.session.sandbox_client",
                     "agents.classic.sandbox.session.sandbox_session",
                     "agents.classic.sandbox.session.events",
                     "agents.classic.sandbox.session.sinks",
+                    "agents.classic.sandbox.types",
+                    "agents.classic.sandbox.workspace_paths",
                 }:
                     continue
                 # Keep event envelopes, sinks and dispatcher identity shared with
@@ -287,9 +313,16 @@ def test_facades_preserve_public_object_identity(module: str) -> None:
     runtime = importlib.import_module(
         ("agents.classic." if module in _CLASSIC_VOICE_MODULES else "_agents_codex.") + module
     )
+    generated_bases = {}
+    if module == "experimental._mcp_tasks_wire":
+        for model_name in ("GetOrCancel", "Update"):
+            base = getattr(runtime, model_name).__bases__[0]
+            generated_bases[base.__name__] = base
     for name, value in vars(public).items():
         if module == "experimental.mcp_tasks" and name == "wire":
             assert value is importlib.import_module("agents.experimental._mcp_tasks_wire")
+        elif name in generated_bases:
+            assert value is generated_bases[name], (module, name)
         elif not name.startswith("_"):
             owner = (
                 importlib.import_module("agents.classic.voice.workflow")
@@ -337,8 +370,19 @@ def test_generated_mcp_generic_bases_keep_their_public_pickle_paths() -> None:
     _require_mcp_tasks()
     from agents.experimental._mcp_tasks_wire import GetOrCancel, Update
 
-    for value in (GetOrCancel.__bases__[0], Update.__bases__[0]):
-        assert value.__module__ == "agents.experimental._mcp_tasks_wire"
+    for value, public_lookup in (
+        (
+            GetOrCancel.__bases__[0],
+            b"cagents.experimental._mcp_tasks_wire\n"
+            b"Request[TaskParams, Literal['tasks/get', 'tasks/cancel']]\n.",
+        ),
+        (
+            Update.__bases__[0],
+            b"cagents.experimental._mcp_tasks_wire\n"
+            b"Request[UpdateParams, Literal['tasks/update']]\n.",
+        ),
+    ):
+        assert pickle.loads(public_lookup) is value
         assert pickle.loads(pickle.dumps(value)) is value
 
 
@@ -1074,4 +1118,25 @@ def test_domain_dependency_requires_named_source() -> None:
 def test_domain_dependency_accepts_standard_library_imports() -> None:
     assert not _domain_dependency_violations(
         {"_agents_codex._stored_history": "import statistics"}, "_stored_history"
+    )
+
+
+def test_sandbox_facade_first_import_has_been_initializing_shared_manifest_ownership() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+assert 'agents.sandbox' not in sys.modules
+import agents.sandbox as sandbox
+from _agents_shared.sandbox_manifest import _borrowed_manifest_lock
+from types import SimpleNamespace
+assert callable(sandbox.sandbox_environment)
+owner = SimpleNamespace()
+assert _borrowed_manifest_lock(owner) is _borrowed_manifest_lock(owner)
+assert 'agents._native' not in sys.modules
+""",
+        ],
+        check=True,
     )

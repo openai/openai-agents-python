@@ -30,6 +30,14 @@ class RealtimeUsage:
     output_token_details: Mapping[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class RealtimeUsageAccounting:
+    """Counts of accepted response completions and reports on one connection."""
+
+    finished_responses: int
+    usage_reports: int
+
+
 def _reported_usage(value: dict[str, Any]) -> dict[str, Any]:
     """Select the finite provider counter schema; unknown vendor fields stay raw-only."""
 

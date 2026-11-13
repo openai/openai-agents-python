@@ -979,7 +979,147 @@
     {
       "path": "sdk-video-input.patch",
       "sha256": "614b311673b21959d58608111dea2d351ec98e4f1acbbb083a710c07c4fa2ebb"
+    },
+    {
+      "path": "sdk-websocket-controls.patch",
+      "sha256": "150258216a12037b82762549b546a9a9f53e5442b81c82efef32af2550620970"
+    },
+    {
+      "path": "sdk-native-response-span-tracing.patch",
+      "sha256": "fa2bf0f130b0586def10f63711e5ff0b7c920c8918e7c06637a970ace2bee169"
+    },
+    {
+      "path": "sdk-native-trace-annotation-budget.patch",
+      "sha256": "602554199c8d892b78c5834695a8e642ae42964a30d8f5f8824aa4f53645e78c"
+    },
+    {
+      "path": "sdk-request-transport-mode-type.patch",
+      "sha256": "c3719b23c1bade46326708f115ce716be10dcc195de8203e2fe686acec9999db"
+    },
+    {
+      "path": "sdk-provider-transport-feedback.patch",
+      "sha256": "05188557a884771c5b33a792f11156d3f4717d4a855f23b3320c4476fcba3403"
+    },
+    {
+      "path": "sdk-provider-websocket-frame-cap.patch",
+      "sha256": "4236dfecf6a01d471582da77fdbb78d1416c0e61249bffed060138a51e07702e"
+    },
+    {
+      "path": "sdk-provider-programmatic-cache-controls.patch",
+      "sha256": "3c8f6ccee574f9f906a62eee9abdfd4680d8830a04fca1bd070638fd4d0b642f"
+    },
+    {
+      "path": "sdk-hosted-program-replay.patch",
+      "sha256": "b23ea6892323db80958f9f52b3088f82561389cb57eab291ab4f2c1b9356043e"
+    },
+    {
+      "path": "sdk-provider-prompt-cache-affinity.patch",
+      "sha256": "25b34fcc52aef02a44a41e35f47dd93c184020c7403f88c73f55cae7a8efe539"
+    },
+    {
+      "path": "sdk-explicit-prompt-cache-breakpoints.patch",
+      "sha256": "2b26699860b4a3783c8b23ff0b13ecb57f8c6f2248ed4da64f01327b042f959b"
+    },
+    {
+      "path": "sdk-provider-program-companion.patch",
+      "sha256": "bfe647751198fd00a329e8ea853111ac996a3ef7d0a147a939921cc6ea3f8283"
+    },
+    {
+      "path": "sdk-provider-program-projection.patch",
+      "sha256": "58f23ce9132577218225f4c365c5d72a8bcafa14aa72107c6a6086ff47267022"
+    },
+    {
+      "path": "sdk-provider-content-qualification.patch",
+      "sha256": "fa8aeb3909f2313ad0c01dbdb8269aaed738edc055f4635e32f5fb4a10d333ee"
+    },
+    {
+      "path": "sdk-cache-owned-input-iteration.patch",
+      "sha256": "e6a2379399a4ab8ddb0b5c9bdc2200927d969f0703c99ffa57f42675269e2c10"
+    },
+    {
+      "path": "sdk-seed-cache-and-program-observations.patch",
+      "sha256": "85b1dc336337389719334fc425ecdc6b8b758d45bc568a802984b6ede3d55089"
+    },
+    {
+      "path": "sdk-provider-output-strictness.patch",
+      "sha256": "40595e7e6296e4f63724ee70b6dbbf5dc5bc51e15be977e5b101fe46149d4ca5"
+    },
+    {
+      "path": "sdk-hosted-provider-request-accounting.patch",
+      "sha256": "17bbf17bdf25ad2e610aa423cd62c1308e43e1a30727995de03278285a1c02e0"
+    },
+    {
+      "path": "sdk-hosted-provider-dispatch-fence.patch",
+      "sha256": "229ffa64282829572c164c9b5244e46b4acebe56c4ca4ee4b2de7f2ba34a15b2"
+    },
+    {
+      "path": "sdk-linear-prompt-cache-breakpoints.patch",
+      "sha256": "e01afc641b34792f1e1619e93651f5cc7fbaa2860530a6dd89df8372f7a7d7fd"
+    },
+    {
+      "path": "sdk-managed-history-attempts.patch",
+      "sha256": "c6630843af2aa01b6a059404d91aa72084c741f2750bc57e321082ffb8008e21"
+    },
+    {
+      "path": "sdk-hosted-provider-tool-attribution.patch",
+      "sha256": "19ba9ac29176cf551edd462f315aadfc5a36286f5021a137db36184748d55a66"
+    },
+    {
+      "path": "sdk-hosted-attribution-completion-call.patch",
+      "sha256": "e794c41e5dc8f0df9ccae6ed47e70fbf79a7d01b4e63b1ec3c0814fa4bb71977"
+    },
+    {
+      "path": "sdk-bounded-hosted-program-replay.patch",
+      "sha256": "46c1b0fe713389d2e3760d38858b6b7bd21e8345bca59787e5ce1e026089931d"
+    },
+    {
+      "path": "sdk-provider-history-output-references.patch",
+      "sha256": "176905297a6285c529cbf074c7b9da5412a14d5a710bf3d37975e061664c128a"
+    },
+    {
+      "path": "sdk-provider-programmatic-callers.patch",
+      "sha256": "605f61485b22b0b30a5f18f77762cfc4e144e55c3f4e056aabd38b21ad18d919"
+    },
+    {
+      "path": "sdk-provider-programmatic-progress.patch",
+      "sha256": "5bda827970cc426dab1181869d427019b8e212e7f938f64cfb8277a00ab33adf"
+    },
+    {
+      "path": "sdk-portable-mcp-approval-owner.patch",
+      "sha256": "a95c9563da5db07abbbbd292d9c32040917e10d1f50223e5eaecf416de069dab"
+    },
+    {
+      "path": "sdk-portable-mcp-claimed-owner-export.patch",
+      "sha256": "41895431ed461c5cb0f552b55cb87f309e792a6214d02a290886af0c285ac496"
+    },
+    {
+      "path": "sdk-portable-mcp-handler-export.patch",
+      "sha256": "524dd0fb5b047c25ced972766020fc438ac66a8768c2ffaa0946fc41aa3a4ef3"
+    },
+    {
+      "path": "sdk-portable-mcp-direct-root-binding.patch",
+      "sha256": "3a04e30490c72c278562f33296ffaf8713a7491cc6c2e40f0a19383f07689198"
+    },
+    {
+      "path": "sdk-portable-mcp-admission-source.patch",
+      "sha256": "d51ae0a0be5970a28f8279c4b9582d900ceca84ad149ce3646d3ee4391837cdb"
+    },
+    {
+      "path": "sdk-portable-mcp-step-source.patch",
+      "sha256": "0b139662936e18f98a3b7460a38a3c6a9b07ab5232cb8a525d648c4e086c2f86"
+    },
+    {
+      "path": "sdk-portable-mcp-peer-elicitation.patch",
+      "sha256": "9186a141613fbcc7376c85a093b4dd86a099bb641d689054c4b859ca5a9a22e1"
+    },
+    {
+      "path": "sdk-native-mcp-failure-policy.patch",
+      "sha256": "2b12d391be1d784668b6c8d4b56a6ae3fecbaa073fba2ea3a6add4b35dfd1f3c"
+    },
+    {
+      "path": "sdk-native-docker-stdio.patch",
+      "sha256": "d868ad817e556a671dc3751c0efa0c955801ba7e7d04e1beb512451a33b72106"
     }
   ],
-  "result_tree": "c52f01c4f053a339bbecb45fabf6830ec522cacc"
+  "result_tree": "1703bacc0c0f5039f431245c3ffeef13acd0a7f1"
 }

@@ -80,6 +80,7 @@ pub struct EngineState {
     cloud_config: codex_config::CloudConfigBundleLoader,
     pub(crate) service_config: Config,
     pub(crate) model_http_pool: Option<codex_http_client::SdkModelHttpPool>,
+    pub(crate) private_function_http_pool: OnceLock<codex_http_client::SdkModelHttpPool>,
     initial_config_available: AtomicBool,
     pub(crate) interception: Arc<crate::native_interception::Boundary>,
     pub(crate) recovery: Arc<crate::recovery_guard::RecoveryContributor>,
@@ -697,6 +698,7 @@ impl EngineState {
             // The isolated HTTP pool enables Core's redirect rejection when
             // the provider declares its fixed routing, including on restore.
             model_http_pool: siwc.then(codex_http_client::SdkModelHttpPool::default),
+            private_function_http_pool: OnceLock::new(),
             // Session opening captures one configuration for its owned runtime
             // and immediate first thread. Raw creation retains its prior behavior.
             initial_config_available: AtomicBool::new(
@@ -744,7 +746,8 @@ impl EngineState {
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
         let private_http = options.private_http;
-        let private_wss_tls = options.private_wss_tls;
+        let private_function_wss_tls = options.private_function_scope;
+        let force_http = private_http && !options.private_function_scope;
         let process_private_http = options.process_private_http
             && cfg!(target_os = "linux")
             && self.owns_runtime_services()
@@ -894,13 +897,14 @@ impl EngineState {
                     .collect(),
             );
         }
-        crate::private_wss::install(&mut startup, private_wss_tls);
+        crate::private_wss::install(&mut startup, private_function_wss_tls);
         let native = self
             .start_prepared_with_transport(
                 startup,
                 instructions,
                 private_http,
                 process_private_http,
+                force_http,
             )
             .await?;
         if let Some(batch) = initial_messages {
@@ -923,7 +927,7 @@ impl EngineState {
         startup: StartThreadOptions,
         instructions: Arc<options::ThreadInstructions>,
     ) -> anyhow::Result<NativeThread> {
-        self.start_prepared_with_transport(startup, instructions, false, false)
+        self.start_prepared_with_transport(startup, instructions, false, false, false)
             .await
     }
 
@@ -933,6 +937,7 @@ impl EngineState {
         instructions: Arc<options::ThreadInstructions>,
         private_http: bool,
         process_private_http: bool,
+        force_http: bool,
     ) -> anyhow::Result<NativeThread> {
         // build_startup has already validated the unchanged provider against the
         // retained Engine. Only this owned thread config receives the restriction.
@@ -941,6 +946,7 @@ impl EngineState {
             &mut startup,
             process_pool.as_ref().or(self.model_http_pool.as_ref()),
             private_http || process_private_http,
+            force_http || process_private_http,
         )?;
         if self.runtime_parent.is_some() {
             ensure!(
@@ -1090,6 +1096,7 @@ impl EngineState {
         }
         // Subscribe before inspecting descendants so a concurrent spawn cannot be missed.
         let created = self.manager.subscribe_thread_created();
+        let child_questions = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let state = Arc::new(ThreadState {
             request_metadata: Arc::new(crate::request_metadata::Queue::default()),
             initial_turn: std::sync::Mutex::new(None),
@@ -1105,7 +1112,11 @@ impl EngineState {
                 extensions: extension_events,
                 created,
                 graph: self.agent_graph.subscribe(new.thread_id).await,
-                native: Some(next_native_event(new.thread)),
+                native: Some(next_owned_root_event(
+                    new.thread,
+                    new.thread_id,
+                    Arc::clone(&child_questions),
+                )),
                 session_terminal: None,
                 root_step_prefix: None,
                 children: VecDeque::new(),
@@ -1113,7 +1124,7 @@ impl EngineState {
                 next_instance: 0,
             }),
             child_instances: RwLock::new(HashMap::new()),
-            child_questions: Mutex::new(HashMap::new()),
+            child_questions,
             child_question_gate: Mutex::new(()),
             closed: AtomicBool::new(false),
             closing: watch::channel(false).0,
@@ -1734,6 +1745,16 @@ impl EngineState {
         Ok(())
     }
 
+    // A dedicated fallback owns its own pool; a scope borrows its parent's pool.
+    pub(crate) fn private_function_http_pool(&self) -> codex_http_client::SdkModelHttpPool {
+        self.runtime_parent
+            .as_deref()
+            .unwrap_or(self)
+            .private_function_http_pool
+            .get_or_init(crate::private_http::pool)
+            .clone()
+    }
+
     async fn close_locked(&self) -> anyhow::Result<()> {
         self.discard_stored_forks(None).await?;
         if self.runtime_parent.is_some() {
@@ -1779,6 +1800,9 @@ impl EngineState {
             .downcast_ref::<crate::canonical_storage::CanonicalStore>()
         {
             store.close_all().await?;
+        }
+        if let Some(pool) = self.private_function_http_pool.get() {
+            pool.close();
         }
         self.closed.store(true, Ordering::Release);
         if let Some(store) = &self.local_checklist_store {
@@ -2349,12 +2373,13 @@ pub struct ThreadState {
     closing: watch::Sender<bool>,
     manual_event_drain: AtomicBool,
     pub(crate) child_instances: RwLock<HashMap<ThreadId, crate::native_agents::Instance>>,
-    child_questions: Mutex<HashMap<String, OwnedChildQuestion>>,
-    child_question_gate: Mutex<()>,
+    child_questions: Arc<std::sync::Mutex<HashMap<String, OwnedChildQuestion>>>,
+    pub(crate) child_question_gate: Mutex<()>,
 }
 
 #[derive(Clone)]
 struct OwnedChildQuestion {
+    root: bool,
     _tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
     child: ThreadId,
     instance: u64,
@@ -2393,6 +2418,44 @@ struct ChildReader {
     next: Option<NextEvent>,
     instance: u64,
     incarnation: Option<String>,
+}
+
+// Keep receipt capture inside the retained FIFO future. Cancelling a reader
+// cannot lose a dequeued question while its original turn lock is pending.
+fn next_owned_root_event(
+    thread: Arc<CodexThread>,
+    id: ThreadId,
+    questions: Arc<std::sync::Mutex<HashMap<String, OwnedChildQuestion>>>,
+) -> NextEvent {
+    Box::pin(async move {
+        let event = thread.next_event().await?;
+        if matches!(
+            &event.msg,
+            EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) | EventMsg::ShutdownComplete
+        ) {
+            questions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|_, question| !question.root);
+        }
+        if let Some(grant) = thread.capture_owned_question(&event).await {
+            let tracing = grant.tracing_context();
+            questions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    event.id.clone(),
+                    OwnedChildQuestion {
+                        root: true,
+                        _tracing: tracing,
+                        child: id,
+                        instance: 0,
+                        grant,
+                    },
+                );
+        }
+        Ok(event)
+    })
 }
 
 fn next_native_event(thread: Arc<CodexThread>) -> NextEvent {
@@ -2644,15 +2707,19 @@ impl ThreadState {
                 event["msg"]["tracing_context"] = serde_json::json!(tracing.token());
             }
             let id = ThreadId::new().to_string();
-            self.child_questions.lock().await.insert(
-                id.clone(),
-                OwnedChildQuestion {
-                    _tracing: tracing,
-                    child: source.0,
-                    instance: source.1,
-                    grant,
-                },
-            );
+            self.child_questions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    id.clone(),
+                    OwnedChildQuestion {
+                        root: false,
+                        _tracing: tracing,
+                        child: source.0,
+                        instance: source.1,
+                        grant,
+                    },
+                );
             event["msg"]["_sdk_question_id"] = serde_json::json!(id);
         }
         if let Some(tools) = thread.and_then(|thread| {
@@ -2725,7 +2792,11 @@ impl ThreadState {
                     self.manual_event_drain.store(false, Ordering::Release);
                     None
                 } else {
-                    Some(next_native_event(self.thread.clone()))
+                    Some(next_owned_root_event(
+                        self.thread.clone(),
+                        self.id,
+                        Arc::clone(&self.child_questions),
+                    ))
                 };
                 return native_event(None, event, admission_ready, false);
             }
@@ -2876,7 +2947,11 @@ impl ThreadState {
                     }
                 }
             };
-            events.native = Some(next_native_event(self.thread.clone()));
+            events.native = Some(next_owned_root_event(
+                self.thread.clone(),
+                self.id,
+                Arc::clone(&self.child_questions),
+            ));
             let event = event?;
             if matches!(event.msg, EventMsg::ShutdownComplete) {
                 events.native = None;
@@ -2911,37 +2986,108 @@ impl ThreadState {
                 .as_ref()
                 .and_then(|tools| tools.observed_admission(&event.id))
                 .is_some();
-            return native_event(None, event, admission_ready, project_reason);
+            return self.root_event(event, admission_ready, project_reason);
         }
     }
 
+    fn root_event(
+        &self,
+        event: Event,
+        admission_ready: bool,
+        project_reason: bool,
+    ) -> anyhow::Result<serde_json::Value> {
+        let receipt = event.id.clone();
+        let question = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&receipt)
+            .cloned();
+        let mut value = native_event(None, event, admission_ready, project_reason)?;
+        if receipt.starts_with("sdk-question:") {
+            // An expired receipt must not fall back to a server/request-ID reply.
+            value["msg"]["_sdk_question_id"] = serde_json::json!(receipt);
+            if let Some(tracing) = question.and_then(|question| question._tracing) {
+                value["msg"]["tracing_context"] = serde_json::json!(tracing.token());
+            }
+        }
+        Ok(value)
+    }
+
+    pub(crate) async fn pending_root_mcp_approval(
+        &self,
+    ) -> anyhow::Result<
+        Option<(
+            codex_core::McpApprovalSource,
+            codex_core::CapturedMcpApproval,
+        )>,
+    > {
+        let questions: Vec<_> = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|question| question.root)
+            .map(|question| question.grant.clone())
+            .collect();
+        let mut result = None;
+        for question in questions {
+            let Some(source) = question.mcp_approval_source().await? else {
+                continue;
+            };
+            if let Some(captured) = question.capture_mcp_approval(source.binding()).await? {
+                anyhow::ensure!(
+                    result.is_none(),
+                    "Native MCP checkpoint requires one pending owner"
+                );
+                result = Some((source, captured));
+            }
+        }
+        Ok(result)
+    }
+
     pub async fn child_question_pending(&self, id: &str) -> bool {
-        let question = self.child_questions.lock().await.get(id).cloned();
+        let question = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned();
         let Some(question) = question else {
             return false;
         };
-        let current = self.child_instances.read().ok().is_some_and(|instances| {
-            instances
-                .get(&question.child)
-                .is_some_and(|instance| instance.id == question.instance)
-        });
+        let current = question.root
+            || self.child_instances.read().ok().is_some_and(|instances| {
+                instances
+                    .get(&question.child)
+                    .is_some_and(|instance| instance.id == question.instance)
+            });
         let pending = !*self.closing.borrow() && current && question.grant.is_pending().await;
         if !pending && question.grant.url_completion_status().await == Some(false) {
-            self.child_questions.lock().await.remove(id);
+            self.child_questions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(id);
         }
         pending
     }
 
     pub async fn child_url_completion_status(&self, id: &str) -> Option<bool> {
-        let question = self.child_questions.lock().await.get(id).cloned();
+        let question = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned();
         let Some(question) = question else {
             return Some(false);
         };
-        let current = self.child_instances.read().ok().is_some_and(|instances| {
-            instances
-                .get(&question.child)
-                .is_some_and(|instance| instance.id == question.instance)
-        });
+        let current = question.root
+            || self.child_instances.read().ok().is_some_and(|instances| {
+                instances
+                    .get(&question.child)
+                    .is_some_and(|instance| instance.id == question.instance)
+            });
         let status = question.grant.url_completion_status().await;
         let status = if status != Some(true) && (*self.closing.borrow() || !current) {
             Some(false)
@@ -2949,28 +3095,41 @@ impl ThreadState {
             status
         };
         if status.is_some() {
-            self.child_questions.lock().await.remove(id);
+            self.child_questions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(id);
         }
         status
     }
 
     pub async fn child_url_pending(&self, id: &str) -> bool {
-        let question = self.child_questions.lock().await.get(id).cloned();
+        let question = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned();
         let Some(question) = question else {
             return false;
         };
-        let current = self.child_instances.read().ok().is_some_and(|instances| {
-            instances
-                .get(&question.child)
-                .is_some_and(|instance| instance.id == question.instance)
-        });
+        let current = question.root
+            || self.child_instances.read().ok().is_some_and(|instances| {
+                instances
+                    .get(&question.child)
+                    .is_some_and(|instance| instance.id == question.instance)
+            });
         // A pending probe must not consume a terminal receipt queued for Python.
         !*self.closing.borrow() && current && question.grant.is_url_pending().await
     }
 
     pub async fn cancel_child_url_completion(&self, id: &str) -> bool {
         let _question_gate = self.child_question_gate.lock().await;
-        let question = self.child_questions.lock().await.remove(id);
+        let question = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
         let Some(question) = question else {
             return false;
         };
@@ -2989,14 +3148,23 @@ impl ThreadState {
         if !self.child_question_pending(id).await {
             return Ok(false);
         }
-        let Some(question) = self.child_questions.lock().await.get(id).cloned() else {
+        let Some(question) = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned()
+        else {
             return Ok(false);
         };
         let url = question.grant.url_completion_status().await != Some(false);
         // The Core grant checks the captured turn-state identity again at consumption.
         let accepted = question.grant.respond(response).await;
         if !url {
-            self.child_questions.lock().await.remove(id);
+            self.child_questions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(id);
         }
         Ok(accepted)
     }
@@ -3194,7 +3362,10 @@ impl ThreadState {
             .lock()
             .await
             .retain(|_, owner| *owner != self.id);
-        self.child_questions.lock().await.clear();
+        self.child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.closed.store(true, Ordering::Release);
         if let Some(error) = process_shutdown_error {
             return Err(error.into());
@@ -3221,7 +3392,10 @@ impl ThreadState {
         self.manual_event_drain
             .store(drain_events, Ordering::Release);
         self.closing.send_replace(true);
-        self.child_questions.lock().await.clear();
+        self.child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.closed.store(true, Ordering::Release);
     }
 }
@@ -3230,6 +3404,7 @@ fn prepare_private_transport(
     startup: &mut StartThreadOptions,
     pool: Option<&codex_http_client::SdkModelHttpPool>,
     private_http: bool,
+    force_http: bool,
 ) -> anyhow::Result<()> {
     if private_http {
         let config = &mut startup.config;
@@ -3244,9 +3419,11 @@ fn prepare_private_transport(
                 && !provider.has_request_routing_overrides(),
             "private HTTP requires the implicit default SDK Responses provider on a fresh thread"
         );
-        provider.supports_websockets = false;
-        if let Some(selected) = config.model_providers.get_mut(&config.model_provider_id) {
-            selected.supports_websockets = false;
+        if force_http {
+            provider.supports_websockets = false;
+            if let Some(selected) = config.model_providers.get_mut(&config.model_provider_id) {
+                selected.supports_websockets = false;
+            }
         }
     }
     if let Some(pool) = pool {
@@ -3449,6 +3626,7 @@ mod rebuild_consumer_tests {
                         internal_chat_message_metadata_passthrough: None,
                     };
                     let earlier_call = ResponseItem::FunctionCall {
+                        caller: None,
                         id: None,
                         name: "reserve".into(),
                         namespace: None,
@@ -3480,6 +3658,7 @@ mod rebuild_consumer_tests {
                         ),
                     };
                     let call = ResponseItem::FunctionCall {
+                        caller: None,
                         id: None,
                         name: "reserve".into(),
                         namespace: None,

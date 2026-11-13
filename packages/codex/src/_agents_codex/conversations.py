@@ -228,12 +228,17 @@ class ConversationsHistory:
         parts = _native_input(input)
         if not isinstance(input, str):
             input = cast("UserInput", {"role": "user", "content": _response_content(parts)})
+        from ._cache_affinity import _cache_key
+
         async with self._operation():
             try:
                 async with agent.session(**session_options) as session:
                     self._active_session = session
                     session._fail_unhandled_questions = session._interaction_handler is None
                     items = await self._get_items(None, for_run=True)
+                    await session._bind_prompt_cache_key(
+                        _cache_key("conversation", self._conversation_id)
+                    )
                     before = await session.history_snapshot()
                     if items:
                         await session.transact_history(

@@ -317,11 +317,25 @@ class OpenAITraceExporter:
                                     "parent_id": _span_id(event["parent_span_id"]),
                                     "started_at": _timestamp(event["start_time_unix_nanos"]),
                                     "ended_at": _timestamp(event["end_time_unix_nanos"]),
-                                    "span_data": {
-                                        "type": "custom",
-                                        "name": event["name"],
-                                        "data": _plain(event["attributes"]),
-                                    },
+                                    "span_data": (
+                                        {
+                                            "type": "response",
+                                            "response_id": event["attributes"].get(
+                                                "sdk.response.id"
+                                            )
+                                            if isinstance(
+                                                event["attributes"].get("sdk.response.id"), str
+                                            )
+                                            else None,
+                                            "usage": None,
+                                        }
+                                        if event["attributes"].get("sdk.span.kind") == "model"
+                                        else {
+                                            "type": "custom",
+                                            "name": event["name"],
+                                            "data": _plain(event["attributes"]),
+                                        }
+                                    ),
                                     "error": {
                                         "message": "Native span failed",
                                         "data": {"outcome": event["outcome"]},

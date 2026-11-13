@@ -11,6 +11,7 @@ from .usage import _UsageCollector
 
 if TYPE_CHECKING:
     from ._model_retry import _ModelFailure
+    from ._model_run import _ModelRun
     from ._trace_context import TraceContext
     from .agent import Agent
     from .guardrails import GuardrailRecord
@@ -54,6 +55,7 @@ class _Submission:
     terminal: asyncio.Future[Any] = field(default_factory=_future)
     failure: asyncio.Future[Any] = field(default_factory=_future)
     model_failure: _ModelFailure | None = field(default=None, repr=False)
+    model_run: _ModelRun | None = field(default=None, repr=False)
     handle: Turn[Any] | None = None
     issued: Turn[Any] | None = None
     task: asyncio.Task[None] | None = None

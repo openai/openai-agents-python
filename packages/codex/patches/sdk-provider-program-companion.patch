@@ -1,0 +1,84 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index a5600b67..13001f79 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1287,6 +1287,7 @@ impl ModelClient {
+                 Ok(selected)
+             })
+             .transpose()?;
++        validate_programmatic_tool_catalog(&prompt.tools, hosted_prompt.is_some())?;
+         let context_management =
+             controls.context_management_for_model((!prompt_owns_model).then_some(model_info));
+         if self.provider_history.is_some()
+@@ -4319,6 +4320,71 @@ impl WebsocketTelemetry for ApiTelemetry {
+
+ // Shared with native request construction: only metadata already omitted from
+ // this provider's actual wire request may be ignored by lineage comparison.
++fn validate_programmatic_tool_catalog(
++    tools: &[codex_tools::ToolSpec],
++    prompt_supplies_tools: bool,
++) -> Result<()> {
++    use codex_tools::ToolSpec;
++
++    let has_caller = |callers: Option<&[String]>, expected: &str| {
++        callers.is_some_and(|values| values.iter().any(|value| value == expected))
++    };
++    let mut declarations = 0;
++    let mut has_companion = false;
++    let mut requires_declaration = false;
++    for tool in tools {
++        let (programmatic, direct) = match tool {
++            ToolSpec::ProviderOnly(tool) if tool.tool_type() == "programmatic_tool_calling" => {
++                declarations += 1;
++                continue;
++            }
++            ToolSpec::ToolSearch { .. } | ToolSpec::ProviderToolSearch(_) => {
++                has_companion = true;
++                continue;
++            }
++            ToolSpec::CodeInterpreter(tool) => (
++                has_caller(tool.allowed_callers.as_deref(), "programmatic"),
++                has_caller(tool.allowed_callers.as_deref(), "direct"),
++            ),
++            ToolSpec::Shell(tool) => (
++                has_caller(tool.allowed_callers.as_deref(), "programmatic"),
++                has_caller(tool.allowed_callers.as_deref(), "direct"),
++            ),
++            ToolSpec::Mcp(tool) => {
++                let has_caller = |caller: &str| {
++                    tool.provider_data
++                        .get("allowed_callers")
++                        .and_then(serde_json::Value::as_array)
++                        .is_some_and(|values| {
++                            values.iter().any(|value| value.as_str() == Some(caller))
++                        })
++                };
++                (has_caller("programmatic"), has_caller("direct"))
++            }
++            _ => continue,
++        };
++        has_companion |= programmatic;
++        requires_declaration |= programmatic && !direct;
++    }
++    if declarations > 1 {
++        return Err(CodexErr::InvalidRequest(
++            "Only one provider programmatic tool declaration is allowed".into(),
++        ));
++    }
++    if declarations == 0 && requires_declaration {
++        return Err(CodexErr::InvalidRequest(
++            "Programmatic-only tools require a provider programmatic tool declaration".into(),
++        ));
++    }
++    if declarations == 1 && !has_companion && !prompt_supplies_tools {
++        return Err(CodexErr::InvalidRequest(
++            "A provider programmatic tool requires an offered programmatic caller or tool search"
++                .into(),
++        ));
++    }
++    Ok(())
++}
++
+ fn filter_provider_response_metadata(input: &mut [ResponseItem], is_openai: bool) {
+     if !is_openai {
+         for item in input {

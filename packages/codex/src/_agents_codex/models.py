@@ -6,11 +6,13 @@ import asyncio
 import inspect
 import json
 import math
+import re
+import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, Protocol, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, cast
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -19,9 +21,25 @@ from typing_extensions import NotRequired, TypedDict
 from agents.config import JsonValue
 
 from ._compat import cancellation_requested
+from ._hosted_agent_metadata import (
+    HostedAgentMetadata as HostedAgentMetadata,
+    get_hosted_agent_metadata as get_hosted_agent_metadata,
+)
 from ._media import _capture_video
 from ._public import preserve_module_identity as _preserve_module_identity
+from .input import _capture_prompt_cache_breakpoint
 from .retry import RetryAdvice
+
+if TYPE_CHECKING:
+    from ._hosted_responses_websocket import (
+        HostedResponsesWebSocketModel as HostedResponsesWebSocketModel,
+    )
+    from ._responses_websocket import (
+        ResponsesSocketFactory as ResponsesSocketFactory,
+        ResponsesSocketOptions as ResponsesSocketOptions,
+        ResponsesWebSocketModel as ResponsesWebSocketModel,
+        ResponsesWebSocketOptions as ResponsesWebSocketOptions,
+    )
 
 
 class ProviderConversation(TypedDict):
@@ -30,8 +48,11 @@ class ProviderConversation(TypedDict):
 
 
 class ProviderResponseChain(TypedDict):
+    """Select a response and optionally import its owned output IDs once."""
+
     type: Literal["previous_response"]
     id: NotRequired[str]
+    item_ids: NotRequired[list[str]]
 
 
 ProviderHistory: TypeAlias = ProviderConversation | ProviderResponseChain
@@ -48,9 +69,25 @@ def _capture_provider_history(value: ProviderHistory | None) -> ProviderHistory 
         raise ValueError("conversation history requires an id")
     if identity is not None and not identity.strip():
         raise ValueError("provider history id must be nonempty")
+    item_ids = value.get("item_ids")
+    if item_ids is not None:
+        if kind != "previous_response" or identity is None:
+            raise ValueError("Provider item IDs require an exact previous-response anchor")
+        if not isinstance(item_ids, list) or not 1 <= len(item_ids) <= 4096:
+            raise ValueError("Provider item IDs require 1..4096 entries")
+        if any(not isinstance(item, str) or not item.strip() for item in item_ids):
+            raise ValueError("Provider item IDs must be nonempty strings")
+        if sum(len(item.encode("utf-8")) for item in item_ids) > 8 * 1024 * 1024:
+            raise ValueError("Provider item IDs exceed the history byte limit")
+        if len(set(item_ids)) != len(item_ids):
+            raise ValueError("Provider item IDs must be unique")
     return cast(
         ProviderHistory,
-        {"type": kind, **({"id": identity} if identity is not None else {})},
+        {
+            "type": kind,
+            **({"id": identity} if identity is not None else {}),
+            **({"item_ids": list(item_ids)} if item_ids is not None else {}),
+        },
     )
 
 
@@ -58,6 +95,14 @@ def _capture_model_override(value: str | None) -> str | None:
     if value is not None and not value.strip():
         raise ValueError("model_override must be a nonempty model name")
     return value
+
+
+@dataclass(frozen=True, eq=False)
+class ModelRunOwner:
+    """Identity of one live native run, shared only with its owned continuations."""
+
+    session_id: str
+    turn_id: str
 
 
 @dataclass(frozen=True)
@@ -72,6 +117,7 @@ class ModelRequest:
     attempt: int | None = field(default=None, kw_only=True)
     retry_configured: bool = field(default=False, kw_only=True)
     disable_provider_retries: bool = field(default=False, kw_only=True)
+    run_owner: ModelRunOwner | None = field(default=None, repr=False, kw_only=True)
     _report_usage: Callable[[dict[str, int]], bool] | None = field(
         default=None, repr=False, compare=False, kw_only=True
     )
@@ -517,6 +563,14 @@ class _RawChatChunk(_ChatStreamEvent):
     """A process-local source tag; never part of provider JSON."""
 
 
+class _ResponsesWebSocketFrame(dict[str, Any]):
+    """Process-local distinction between wire observations and projected events."""
+
+    def __init__(self, event: Mapping[str, Any], *, raw: bool = False) -> None:
+        super().__init__(event)
+        self.raw = raw
+
+
 class _BorrowedResponsesEvent(dict[str, Any]):
     """Carry the borrowed response header outside provider event data."""
 
@@ -654,6 +708,7 @@ class ChatCompletionsModel:
         audio_separator: Any = None
         choice: Any = None
         content: Any = None
+        converted: Any = None
         declaration: Any = None
         extra_controls: Any = None
         item: Any = None
@@ -662,6 +717,7 @@ class ChatCompletionsModel:
         messages: list[dict[str, Any]] | None = None
         native_tools: Any = None
         options: dict[str, Any] | None = None
+        original: Any = None
         output: Any = None
         output_format: Any = None
         part: Any = None
@@ -729,6 +785,11 @@ class ChatCompletionsModel:
                         else:
                             raise ValueError(
                                 "ChatCompletionsModel received unsupported message content"
+                            )
+                    for original, converted in zip(item.get("content", []), content, strict=True):
+                        if "prompt_cache_breakpoint" in original:
+                            converted["prompt_cache_breakpoint"] = _capture_prompt_cache_breakpoint(
+                                original["prompt_cache_breakpoint"]
                             )
                     if (
                         item["role"] == "assistant"
@@ -974,6 +1035,7 @@ class ChatCompletionsModel:
                 audio_separator,
                 choice,
                 content,
+                converted,
                 declaration,
                 extra_controls,
                 item,
@@ -982,6 +1044,7 @@ class ChatCompletionsModel:
                 messages,
                 native_tools,
                 options,
+                original,
                 output,
                 output_format,
                 part,
@@ -1021,6 +1084,8 @@ class ChatCompletionsModel:
                 raise ValueError("ChatCompletionsModel requires exactly one response choice")
             choice = value["choices"][0]
             message = choice["message"]
+            if message.get("audio") is not None:
+                raise ValueError("Chat adapters do not support output audio")
             if isinstance(self, LitellmModel) and message.get("refusal") is None:
                 provider_data = (message.get("provider_specific_fields") or {}).get("refusal")
                 if provider_data is not None:
@@ -1478,6 +1543,22 @@ class LitellmModel(ChatCompletionsModel):
             del request, options, response
 
 
+def _anyllm_responses_streaming_supported(client: Any) -> bool:
+    any_llm = sys.modules.get("any_llm")
+    provider_class = getattr(any_llm, "AnyLLM", None)
+    if not isinstance(provider_class, type) or not isinstance(client, provider_class):
+        return True  # Compatible application providers own their stream cleanup.
+    release = getattr(any_llm, "__version__", None)
+    if not isinstance(release, str):
+        return False
+    # AnyLLM 1.28.0 is the first release to propagate aclose to the underlying stream.
+    match = re.fullmatch(
+        r"([0-9]+)\.([0-9]+)\.[0-9]+(?:\.post[0-9]+)?(?:\+[a-z0-9]+(?:\.[a-z0-9]+)*)?",
+        release,
+    )
+    return match is not None and (int(match[1]), int(match[2])) >= (1, 28)
+
+
 @dataclass(frozen=True, init=False)
 class AnyLLMModel(ChatCompletionsModel):
     """Borrow an AnyLLM provider exposing asynchronous ``acompletion``.
@@ -1488,10 +1569,12 @@ class AnyLLMModel(ChatCompletionsModel):
     Inherited native cache hints are omitted for providers declaring them unsupported.
     Explicit adapter cache overrides, including empty strings, remain provider-validated.
     Generic completion requests omit the native ``store=False`` default.
-    Set ``api="responses"`` for the AnyLLM OpenAI provider with public
-    ``aresponses(extra_body=...)`` support. ``api="auto"`` selects Responses
-    when both conditions hold, otherwise it uses Chat Completions. The default
-    uses Chat Completions. ``include_usage`` applies to Chat Completions only.
+    Set ``api="responses"`` for a supported AnyLLM OpenAI-compatible provider
+    with public ``aresponses(extra_body=...)`` support. Streaming
+    Responses requires a stable ``any-llm-sdk`` release at or above 1.28.0
+    for stream cleanup. ``api="auto"`` selects Responses when these requirements
+    hold and otherwise uses Chat Completions. The default uses Chat Completions.
+    ``include_usage`` applies to Chat Completions only.
     """
 
     _responses: _AnyLLMResponsesModel | None = field(default=None, init=False, repr=False)
@@ -1511,9 +1594,16 @@ class AnyLLMModel(ChatCompletionsModel):
             raise ValueError("AnyLLMModel api must be chat_completions, responses or auto")
         use_responses = False
         if api != "chat_completions":
-            is_openai = getattr(client, "PROVIDER_NAME", None) == "openai"
+            is_qualified = getattr(client, "PROVIDER_NAME", None) in (
+                "openai",
+                "openrouter",
+                "azureopenai",
+                "gmi",
+                "deepseek",
+                "meta",
+            )
             advertises_responses = getattr(client, "SUPPORTS_RESPONSES", False) is True
-            if is_openai and advertises_responses:
+            if is_qualified and advertises_responses:
                 create = getattr(client, "aresponses", None)
                 if callable(create):
                     create = inspect.unwrap(create)
@@ -1525,9 +1615,17 @@ class AnyLLMModel(ChatCompletionsModel):
                         )
             if api == "responses" and not use_responses:
                 raise ValueError(
-                    "AnyLLM Responses requires the OpenAI provider with public "
-                    "aresponses extra_body support"
+                    "AnyLLM Responses requires a supported OpenAI-compatible provider "
+                    "with public aresponses extra_body support"
                 )
+            if (
+                use_responses
+                and stream is True
+                and not _anyllm_responses_streaming_supported(client)
+            ):
+                if api == "responses":
+                    raise ValueError("Streaming AnyLLM Responses requires any-llm-sdk>=1.28.0")
+                use_responses = False
             if use_responses and request_options is not None:
                 raise TypeError("request_options requires an OpenAI-compatible client adapter")
         super().__init__(
@@ -1859,3 +1957,24 @@ class _AnyLLMResponsesModel(ResponsesModel):
 
 
 _preserve_module_identity(globals(), "agents.models")
+
+
+def __getattr__(name: str) -> Any:
+    # The socket adapters depend on the request types defined here.
+    if name == "HostedResponsesWebSocketModel":
+        from . import _hosted_responses_websocket
+
+        value = _hosted_responses_websocket.HostedResponsesWebSocketModel
+    elif name in {
+        "ResponsesSocketFactory",
+        "ResponsesSocketOptions",
+        "ResponsesWebSocketModel",
+        "ResponsesWebSocketOptions",
+    }:
+        from . import _responses_websocket
+
+        value = getattr(_responses_websocket, name)
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value

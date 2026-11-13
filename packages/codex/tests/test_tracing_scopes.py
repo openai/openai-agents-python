@@ -3497,6 +3497,7 @@ async def test_interception_reader_keeps_native_context_private_through_dispatch
 
     issuer = SimpleNamespace(
         realtime_usage=None,
+        realtime_usage_accounting=None,
         id="session",
         _active=root,
         _context=None,

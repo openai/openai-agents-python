@@ -17,6 +17,7 @@ from agents import (
     CodeInterpreter,
     CodexLogin,
     FileSearch,
+    HostedProgrammaticToolCalling,
     ImageGeneration,
     NativeError,
     NativeProvider,
@@ -618,6 +619,11 @@ async def test_code_interpreter_allowed_callers_reach_native_request(
 ):
     responses.respond(assistant_output("Done."))
     borrowed = provider(responses)
+    tools: list[CodeInterpreter | HostedProgrammaticToolCalling] = [
+        CodeInterpreter(container=container, **options)
+    ]
+    if expected_callers == ["programmatic"]:
+        tools.append(HostedProgrammaticToolCalling())
     async with (
         timeout(20),
         borrowed,
@@ -625,12 +631,14 @@ async def test_code_interpreter_allowed_callers_reach_native_request(
             instructions="Use the hosted tool.",
             model="gpt-5.2",
             provider=borrowed,
-            tools=[CodeInterpreter(container=container, **options)],
+            tools=tools,
         ).session() as session,
     ):
         assert (await (await session.submit("Run the task.")).get_result()).final_output == "Done."
 
     assert len(responses.requests) == 1
+    if expected_callers == ["programmatic"]:
+        assert {"type": "programmatic_tool_calling"} in responses.requests[0]["tools"]
     expected = {"type": "code_interpreter", "container": container}
     if expected_callers is not None:
         expected["allowed_callers"] = expected_callers

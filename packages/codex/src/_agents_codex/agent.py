@@ -143,6 +143,7 @@ class HostedToolChoice(TypedDict, total=False, closed=True):
             "shell",
             "apply_patch",
             "tool_search",
+            "programmatic_tool_calling",
             "mcp",
         ]
     ]
@@ -174,6 +175,9 @@ class ModelSettings(TypedDict, total=False, closed=True):
     takes precedence, including ``None``. ``store=True``
     requires API-key authentication.
     ``extra_headers`` and ``extra_query`` have been selecting per-request metadata.
+    ``request_transport`` has been selecting auto, HTTP, or required WebSocket
+    transport. Required WebSocket mode has been preventing HTTP fallback and
+    uncertain automatic replay.
     Header ``None`` and OpenAI ``omit`` values have been removing inherited
     header names. Query ``None`` values have been omitting pairs. Top-level
     ``None`` has been clearing the corresponding SDK override.
@@ -205,12 +209,14 @@ class ModelSettings(TypedDict, total=False, closed=True):
     top_logprobs: int | None
     extra_headers: Mapping[str, str | Omit | None] | None
     extra_query: Mapping[str, Any] | None
+    request_transport: Literal["auto", "http", "websocket"] | None
     parallel_tool_calls: bool | None
     verbosity: Literal["low", "medium", "high"] | None
     metadata: Mapping[str, str] | None
     store: bool | None
     prompt_cache_retention: Literal["in_memory", "24h"] | None
     prompt_cache_ttl: Literal["30m", "12h"] | None
+    prompt_cache_mode: Literal["explicit"] | None
     invocation_timeout_ms: int | None
     attempt_timeout_ms: int | None
     retry: ModelRetrySettings | None
@@ -376,8 +382,11 @@ class SignInWithChatGPT:
         raise failure
 
 
-class _ProviderStrings(dict[str, str]):
-    """Frozen captured strings that preserve dataclass asdict/copy/pickle support."""
+_ProviderValue = TypeVar("_ProviderValue", str, int | None)
+
+
+class _ProviderOptions(dict[str, _ProviderValue]):
+    """Frozen captured settings that support asdict, copying, and pickle."""
 
     def _immutable(self: object, *args: Any, **kwargs: Any) -> NoReturn:
         raise TypeError("Captured provider routing is immutable")
@@ -484,6 +493,9 @@ class NativeProvider:
     stream_idle_timeout_ms: int | None = field(default=None, repr=False)
     websocket_connect_timeout_ms: int | None = field(default=None, repr=False)
     websocket_base_url: str | None = field(default=None, repr=False)
+    # Deadlines have been inheriting provider defaults when omitted and disabling
+    # their phase when explicitly None. Ping durations have been using positive ms.
+    websocket_options: Mapping[str, int | None] | None = field(default=None, repr=False, hash=False)
     agent_harness_id: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -505,6 +517,27 @@ class NativeProvider:
                 isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**63 - 1
             ):
                 raise ValueError(f"{name} must be a non-negative signed 64-bit integer or None")
+        if self.websocket_options is not None:
+            if not isinstance(self.websocket_options, Mapping):
+                raise TypeError("websocket_options must be a mapping")
+            options = dict(self.websocket_options)
+            allowed = {
+                "ping_interval_ms",
+                "ping_timeout_ms",
+                "max_message_bytes",
+                "connect_timeout_ms",
+                "send_timeout_ms",
+                "receive_timeout_ms",
+            }
+            if options.keys() - allowed:
+                raise ValueError("Unsupported websocket_options field")
+            for name, value in options.items():
+                minimum = 1 if name in {"ping_interval_ms", "ping_timeout_ms"} else 0
+                if value is not None and (
+                    type(value) is not int or not minimum <= value <= 2**63 - 1
+                ):
+                    raise ValueError(f"{name} must be an integer >= {minimum} or None")
+            object.__setattr__(self, "websocket_options", _ProviderOptions(options))
         for name in ("base_url", "api_key", "websocket_base_url"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
@@ -601,7 +634,7 @@ class NativeProvider:
             ):
                 raise TypeError(f"{name} must be a string map with nonempty keys")
             captured[name] = dict(value) if value is not None else None
-            object.__setattr__(self, name, _ProviderStrings(value) if value is not None else None)
+            object.__setattr__(self, name, _ProviderOptions(value) if value is not None else None)
         protected = {
             "authorization",
             "proxy-authorization",
@@ -715,7 +748,7 @@ class NativeProvider:
             return reduction
         # Copy settings and the closed fence, never another descriptor's resource.
         dictionary = dictionary.copy()
-        for name in ("query_params", "headers", "env_headers"):
+        for name in ("query_params", "headers", "env_headers", "websocket_options"):
             if dictionary.get(name) is not None:
                 dictionary[name] = dict(dictionary[name])
         dictionary.pop("_transport", None)
@@ -730,8 +763,11 @@ class NativeProvider:
             if attributes is None:
                 continue
             for name, value in attributes.items():
-                if name in ("query_params", "headers", "env_headers") and value is not None:
-                    value = _ProviderStrings(value)
+                if (
+                    name in ("query_params", "headers", "env_headers", "websocket_options")
+                    and value is not None
+                ):
+                    value = _ProviderOptions(value)
                 object.__setattr__(self, name, value)
 
     def _acquire_lease(self) -> tuple[Any, Any, Any]:
@@ -919,6 +955,9 @@ class Agent(Generic[ContextT, OutputT]):
     Targets are resolved once when the Session captures the graph; subsequent
     model handoffs select from those captured declarations.
 
+    ``tool_name_collision_policy="warn"`` keeps the last eager bare function or
+    handoff with a given name. A handoff takes precedence over a function.
+
     ``transform_context`` runs before each model request, including children,
     output repair, and model-based compaction. Return replacement input items
     or None to keep the original input. The callback does not edit saved history.
@@ -972,6 +1011,7 @@ class Agent(Generic[ContextT, OutputT]):
     tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
     hosted_prompt: HostedPromptSource | None
     compaction: ResponsesCompaction[ContextT] | None
+    tool_name_collision_policy: Literal["error", "warn"]
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -1072,6 +1112,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     @overload
@@ -1106,6 +1147,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         realtime: RealtimeAgentConfig | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     @overload
@@ -1138,6 +1180,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     @overload
@@ -1170,6 +1213,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         realtime: RealtimeAgentConfig | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     def __init__(
@@ -1201,6 +1245,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None:
         if isinstance(instructions, _OmittedInstructions):
             instructions = None
@@ -1269,6 +1314,9 @@ class Agent(Generic[ContextT, OutputT]):
         )
         object.__setattr__(self, "output_type", output_type)
         object.__setattr__(self, "programmatic_tool_calling", programmatic_tool_calling)
+        if tool_name_collision_policy not in ("error", "warn"):
+            raise ValueError("tool_name_collision_policy must be error or warn")
+        object.__setattr__(self, "tool_name_collision_policy", tool_name_collision_policy)
         object.__setattr__(self, "transform_context", transform_context)
         object.__setattr__(self, "before_compact", before_compact)
         object.__setattr__(self, "before_complete", before_complete)
@@ -1357,6 +1405,7 @@ class Agent(Generic[ContextT, OutputT]):
         only be checked when a Session opens. This never reads credentials or
         connects to a provider, executor or MCP server.
         """
+        from ._agent_profiles import _capture_agent_graph, _resolve_tool_name_collisions
         from .schema import _prepare_spec
         from .session import _OpeningTools
 
@@ -1384,9 +1433,12 @@ class Agent(Generic[ContextT, OutputT]):
             _prepare_spec(declaration.output_type)
 
         if self.handoffs:
-            from ._agent_profiles import _capture_agent_graph
-
             declarations = tuple(profile.declaration for profile in _capture_agent_graph(self))
+        elif self.tool_name_collision_policy == "warn" and getattr(
+            self, "_hosted_tools_provided", True
+        ):
+            tools, _ = _resolve_tool_name_collisions(self.tools, ())
+            declarations = (replace(self, tools=tools),)
         else:
             declarations = (self,)
         for declaration in declarations:
@@ -1808,8 +1860,11 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("tool_error_formatter must be callable or None")
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
+        from ._cache_affinity import _claim_cache_affinity
         from .session import Completed, Session
         from .telemetry import _capture, get_default_agent_harness_id
+
+        prompt_cache_key = _claim_cache_affinity(self)
 
         try:
             parent_trace = _trace_context(parent_trace)
@@ -1860,6 +1915,7 @@ class Agent(Generic[ContextT, OutputT]):
                 _completed_input=_completed_input,
                 _private_text_run=_private_text_run,
                 _tracing_context_policy_only=captured.policy_only,
+                _prompt_cache_key=prompt_cache_key,
                 **cast(
                     "_TracingOpeningOptions",
                     {"_tracing_context": captured.context} if captured.context is not None else {},
@@ -2373,10 +2429,14 @@ class Agent(Generic[ContextT, OutputT]):
                 produced_items_token = _produced_items_restore.set(
                     (self, state, asyncio.current_task())
                 )
-            async with session_factory(
-                context=cast(SessionContextT, context),
-                **options,
-            ) as session:
+            from ._cache_affinity import _cache_affinity_opening, _cache_key
+            from .telemetry import _options as _trace_options
+
+            group = _trace_options(trace_options).group_id if trace_options is not None else None
+            async with (
+                _cache_affinity_opening(self, _cache_key("group", group)),
+                session_factory(context=cast(SessionContextT, context), **options) as session,
+            ):
                 from .session import Completed
 
                 if raw_usage_token is not None:

@@ -428,6 +428,10 @@ pub(crate) struct ProfileMcpPolicy {
     realtime: bool,
 }
 impl ProfileMcpPolicy {
+    pub(crate) fn has_callbacks(&self) -> bool {
+        !self.rules.is_empty()
+    }
+
     fn identities(binding: &codex_mcp::McpBinding) -> HashMap<ToolName, (String, String)> {
         binding
             .tools()
@@ -494,6 +498,26 @@ pub(crate) struct ProfileMcpSource {
     pub(crate) receipt: Option<codex_extension_api::AgentProfileReceipt>,
     pub(crate) policy: Option<Arc<ProfileMcpPolicy>>,
 }
+/// Use only the immutable policy captured for the admitted sampling step.
+pub(crate) fn native_mcp_checkpoint_source(step: &ExtensionData) -> bool {
+    let Some(source) = step.get::<ProfileMcpSource>() else {
+        return false;
+    };
+    let selection = if source.receipt.is_some() {
+        step.get::<crate::mcp_result_control::Selection>()
+    } else {
+        source.result_selection.clone()
+    };
+    source
+        .policy
+        .as_ref()
+        .is_some_and(|policy| !policy.has_callbacks())
+        && (source.receipt.is_none() || selection.is_some())
+        && selection
+            .as_ref()
+            .is_none_or(|selection| !selection.has_callbacks())
+}
+
 fn capture_mcp_source(
     step: Option<&ExtensionData>,
 ) -> Result<Option<Arc<ProfileMcpSource>>, String> {
@@ -2522,6 +2546,29 @@ impl TurnLifecycleContributor for Boundary {
 }
 
 impl ModelRequestContributor for Boundary {
+    fn admit_provider_response_span(
+        &self,
+        input: codex_extension_api::SdkProviderResponseSpanInput,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        std::result::Result<Option<codex_extension_api::SdkProviderResponseSpanAdmission>, String>,
+    > {
+        let tools = input
+            .admission
+            .turn_store()
+            .get::<Arc<crate::python_tools::TurnAdmission>>()
+            .and_then(|receipt| receipt.callback_tools());
+        Box::pin(async move {
+            let Some(tools) = tools else {
+                return Ok(None);
+            };
+            tools
+                .admit_provider_response_span(input)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
     fn model_attempt(
         &self,
         input: codex_extension_api::ModelAttemptInput,

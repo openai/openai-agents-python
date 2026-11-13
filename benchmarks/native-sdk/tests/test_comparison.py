@@ -659,15 +659,19 @@ class ProviderModeTests(unittest.IsolatedAsyncioTestCase):
                 self.options = options
                 self.provider = options.get("provider")
                 self.run = mock.AsyncMock(
-                    side_effect=lambda prompt: SimpleNamespace(final_output=prompt)
+                    side_effect=lambda prompt, **options: SimpleNamespace(final_output=prompt)
                 )
                 self.session = mock.Mock(
                     side_effect=AssertionError("A retained Session has been opening")
                 )
                 instances.append(self)
 
-        for mode in ("caller-owned", "omitted"):
-            with self.subTest(mode=mode):
+        for mode, request_transport in (
+            ("caller-owned", None),
+            ("omitted", None),
+            ("omitted", "http"),
+        ):
+            with self.subTest(mode=mode, request_transport=request_transport):
                 provider = SimpleNamespace(__aenter__=mock.AsyncMock(), __aexit__=mock.AsyncMock())
                 constructor = mock.Mock(return_value=provider)
                 telemetry = SimpleNamespace(configure=mock.AsyncMock(), shutdown=mock.AsyncMock())
@@ -686,7 +690,11 @@ class ProviderModeTests(unittest.IsolatedAsyncioTestCase):
                         str(Path(worker.__file__).with_name("v1_adapter.py"))
                     )["Adapter"]
                     options = (
-                        {"provider_mode": mode, "transport": "websocket"}
+                        {
+                            "provider_mode": mode,
+                            "transport": "websocket",
+                            "request_transport": request_transport,
+                        }
                         if mode == "omitted"
                         else {}
                     )
@@ -694,8 +702,14 @@ class ProviderModeTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual((await adapter.run("first"))["text"], "first")
                         self.assertEqual((await adapter.run("second"))["text"], "second")
                 agent = instances[-1]
+                run_options = (
+                    {"model_settings": {"request_transport": request_transport}}
+                    if request_transport is not None
+                    else {}
+                )
                 self.assertEqual(
-                    agent.run.await_args_list, [mock.call("first"), mock.call("second")]
+                    agent.run.await_args_list,
+                    [mock.call("first", **run_options), mock.call("second", **run_options)],
                 )
                 agent.session.assert_not_called()
                 if mode == "omitted":
@@ -712,6 +726,93 @@ class ProviderModeTests(unittest.IsolatedAsyncioTestCase):
                     provider.__aexit__.assert_awaited_once()
                 telemetry.configure.assert_awaited_once()
                 telemetry.shutdown.assert_awaited_once()
+
+    def test_common_request_transport_reaches_both_native_workers(self):
+        previous = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+        commands, collected = [], {"oneshot_text": {"v0": [], "v1": []}}
+        with tempfile.TemporaryDirectory() as directory:
+            setup, output = Path(directory) / "setup.json", Path(directory) / "result"
+            setup.write_text("{}")
+            arguments = [
+                "compare.py",
+                "--v0-python",
+                "/opt/reference/python",
+                "--v1-python",
+                "/opt/target/python",
+                "--v0-version",
+                VERSIONS["v1"],
+                "--v1-version",
+                VERSIONS["v1"],
+                "--server-python",
+                "/opt/peer/python",
+                "--output-dir",
+                str(output),
+                "--cases",
+                "oneshot_text",
+                "--samples",
+                "1",
+                "--reference-engine",
+                "v1",
+                "--reference-transport",
+                "http",
+                "--default-host-setup",
+                str(setup),
+                "--native-provider-mode",
+                "omitted",
+                "--native-request-transport",
+                "http",
+            ]
+
+            def launch(command, **kwargs):
+                commands.append(command)
+                path = Path(command[command.index("--output") + 1])
+                side = "v0" if path.stem.endswith("-v0") else "v1"
+
+                def wait(timeout):
+                    value = row("v1", 0)
+                    value.update(
+                        default_host=True,
+                        native_provider_mode="omitted",
+                        native_request_transport="http",
+                    )
+                    collected["oneshot_text"][side].append(value)
+                    path.write_text(json.dumps(value))
+                    return 0
+
+                return SimpleNamespace(pid=12345, wait=wait)
+
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch.object(sys, "argv", arguments),
+                mock.patch.object(compare.platform, "platform", return_value="test-platform"),
+                mock.patch.object(compare.subprocess, "Popen", side_effect=launch),
+                mock.patch.object(compare, "terminate_group"),
+                mock.patch("builtins.print"),
+            ):
+                compare.main()
+            self.assertEqual(len(commands), 2)
+            for command in commands:
+                self.assertEqual(command[command.index("--engine") + 1], "v1")
+                self.assertEqual(command[command.index("--native-request-transport") + 1], "http")
+                self.assertEqual(command[command.index("--native-provider-mode") + 1], "omitted")
+            metadata = json.loads((output / "metadata.json").read_text())
+            summary = json.loads((output / "summary.json").read_text())["oneshot_text"]
+            self.assertEqual(metadata["native_request_transport"], "http")
+            self.assertEqual(summary["native_request_transport"], "http")
+            for side in ("v0", "v1"):
+                collected["oneshot_text"][side][0]["native_request_transport"] = None
+                with self.assertRaisesRegex(ValueError, "request transport"):
+                    compare.summarize(
+                        collected,
+                        expected_versions=dict.fromkeys(VERSIONS, VERSIONS["v1"]),
+                        reference_engine="v1",
+                        reference_transport="http",
+                        default_host=True,
+                        native_provider_mode="omitted",
+                        native_request_transport="http",
+                    )
+                collected["oneshot_text"][side][0]["native_request_transport"] = "http"
 
     def test_native_reference_requires_the_same_declared_provider_mode(self):
         value = records()
@@ -1002,6 +1103,7 @@ class PostflightTests(unittest.TestCase):
         self.signal_writes = 0
         self.launched = False
         self.postflight = False
+        self.dependency_drift = False
         self.publications = []
         previous = signal.getsignal(signal.SIGTERM)
         self.addCleanup(signal.signal, signal.SIGTERM, previous)
@@ -1032,6 +1134,8 @@ class PostflightTests(unittest.TestCase):
                 self.postflight = True
                 if self.read_error is not None:
                     raise self.read_error
+                if self.dependency_drift and path.name == "requirements-http2-peer.txt":
+                    return original_read(path) + b"\n# changed peer dependency\n"
             return original_read(path)
 
         def write(path, text, *args, **kwargs):
@@ -1081,6 +1185,15 @@ class PostflightTests(unittest.TestCase):
 
     def metadata(self):
         return compare.json.loads((self.output / "metadata.json").read_text())
+
+    def test_changed_peer_dependency_retracts_completion(self):
+        self.dependency_drift = True
+        with self.assertRaisesRegex(RuntimeError, "Benchmark harness changed"):
+            compare.main()
+        metadata = self.metadata()
+        self.assertFalse(metadata["completed"])
+        key = "requirements-http2-peer.txt"
+        self.assertNotEqual(metadata["harness_sha256"][key], metadata["harness_sha256_end"][key])
 
     def test_postflight_read_failure_preserves_validation_exception(self):
         self.primary = ValueError("scheduled row invalid")
@@ -1132,6 +1245,96 @@ class PostflightTests(unittest.TestCase):
         self.assertEqual(self.signal_writes, 0)
         self.assertEqual([value["completed"] for value in self.publications], [True, False])
         self.assertFalse(self.metadata()["completed"])
+
+
+class DualHTTPQualificationTests(unittest.TestCase):
+    def test_dual_mode_requires_tls_before_any_child(self):
+        for module, argv in (
+            (worker, ["worker.py", "--engine", "v1", "--output", "/unused/result.json"]),
+            (
+                compare,
+                [
+                    "compare.py",
+                    "--v0-python",
+                    sys.executable,
+                    "--v1-python",
+                    sys.executable,
+                    "--server-python",
+                    sys.executable,
+                    "--v0-version",
+                    "0.24.0",
+                    "--v1-version",
+                    "0.24.0-alpha.6",
+                    "--output-dir",
+                    "/unused/results",
+                ],
+            ),
+        ):
+            with (
+                self.subTest(module=module.__name__),
+                mock.patch.object(sys, "argv", argv + ["--peer-http-mode", "dual"]),
+                mock.patch.object(sys, "stderr", io.StringIO()) as errors,
+                mock.patch.object(module.subprocess, "Popen") as child,
+            ):
+                with self.assertRaises(SystemExit):
+                    module.main()
+                self.assertIn("Dual HTTP peer requires default-host TLS setup", errors.getvalue())
+                child.assert_not_called()
+
+    def dual_records(self):
+        value = records()
+        for side, rows in value["oneshot_text"].items():
+            version, alpn = ("2", "h2") if side == "v1" else ("1.1", "http/1.1")
+            for result in rows:
+                result.update(default_host=True, peer_http_mode="dual")
+                stats = result["server"]
+                stats["tls_transports"] = {
+                    "1": {
+                        "id": 1,
+                        "http_version": version,
+                        "alpn_protocol": alpn,
+                        "requests": len(stats["receipts"]),
+                    }
+                }
+                for receipt in stats["receipts"]:
+                    receipt.update(
+                        tls_connection_id=1,
+                        http_version=version,
+                        tls_alpn_protocol=alpn,
+                        response_body_complete=True,
+                    )
+        return value
+
+    def test_dual_protocol_schedule_survives_summary(self):
+        summary = compare.summarize(
+            self.dual_records(),
+            expected_versions=VERSIONS,
+            default_host=True,
+            peer_http_mode="dual",
+        )
+        self.assertEqual(summary["oneshot_text"]["peer_http_mode"], "dual")
+
+    def test_dual_protocol_and_connection_drift_fail_closed(self):
+        for field, invalid in (
+            ("peer_http_mode", "h1"),
+            ("http_version", "1.1"),
+            ("tls_alpn_protocol", None),
+            ("response_body_complete", False),
+            ("connection_requests", 0),
+        ):
+            with self.subTest(field=field):
+                value = self.dual_records()
+                target = value["oneshot_text"]["v1"][0]
+                if field == "peer_http_mode":
+                    target[field] = invalid
+                elif field == "connection_requests":
+                    target["server"]["tls_transports"]["1"]["requests"] = invalid
+                else:
+                    target["server"]["receipts"][0][field] = invalid
+                with self.assertRaises(ValueError):
+                    compare.summarize(
+                        value, expected_versions=VERSIONS, default_host=True, peer_http_mode="dual"
+                    )
 
 
 if __name__ == "__main__":

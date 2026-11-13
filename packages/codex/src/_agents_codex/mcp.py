@@ -339,6 +339,12 @@ class _MCP(Generic[ContextT_contra]):
     separate MCPResultContext and an MCP result dictionary after the effect.
     extract_application_data receives a copy of the result and returns a JSON
     mapping retained by the SDK when native accepts the result.
+
+    failure_error_function receives MCPResultContext and the private native
+    transport exception. Its text becomes an error result. None rejects the
+    root run and retains the cause for NativeError.get_mcp_callback_error().
+    Omission or "native" keeps the fixed native error result. Peer isError results remain
+    ordinary MCP results; cancellation never synthesizes a transport failure.
     HTTP and WebSocket model providers support direct and generated-code
     replacement. Native continuation uses the corrected input and invalidates
     the changed provider item without changing the configured transport.
@@ -364,6 +370,11 @@ class _MCP(Generic[ContextT_contra]):
         ]
         | None
     ) = field(default=None, repr=False)
+    failure_error_function: (
+        Literal["native"]
+        | Callable[[MCPResultContext[ContextT_contra], Exception], str | Awaitable[str]]
+        | None
+    ) = field(default="native", repr=False)
     transform_result_timeout: float | None = None
     request_metadata: (
         Callable[
@@ -441,10 +452,13 @@ class _MCP(Generic[ContextT_contra]):
             "before",
             "transform_result",
             "extract_application_data",
+            "failure_error_function",
             "approval",
             "request_metadata",
         ):
             callback = getattr(self, name)
+            if name == "failure_error_function" and not self._has_failure_callback:
+                continue
             if callback is not None and not callable(callback):
                 raise TypeError(f"MCP {name} must be callable")
         if self.transform_result_timeout is not None:
@@ -495,7 +509,16 @@ class _MCP(Generic[ContextT_contra]):
 
     @property
     def _has_result_callback(self) -> bool:
-        return self.transform_result is not None or self.extract_application_data is not None
+        return (
+            self.transform_result is not None
+            or self.extract_application_data is not None
+            or self._has_failure_callback
+        )
+
+    @property
+    def _has_failure_callback(self) -> bool:
+        value = self.failure_error_function
+        return not (type(value) is str and value == "native")
 
     def _check_context(self, context: object) -> None:
         if context is not None:
@@ -505,13 +528,18 @@ class _MCP(Generic[ContextT_contra]):
         for name, context_type in (
             ("tool_filter", MCPDiscoveryContext),
             ("transform_result", MCPResultContext),
+            ("failure_error_function", MCPResultContext),
             ("extract_application_data", MCPResultContext),
             ("request_metadata", MCPMetadataContext),
             ("before", MCPCallContext),
             ("approval", MCPCallContext),
         ):
             callback = getattr(self, name)
-            if callback is None:
+            if (
+                callback is None
+                or name == "failure_error_function"
+                and not self._has_failure_callback
+            ):
                 continue
             parameters = list(inspect.signature(callback).parameters.values())
             if parameters:

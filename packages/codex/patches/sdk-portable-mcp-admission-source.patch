@@ -1,0 +1,10 @@
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1412,6 +1412,7 @@
+         if self.session.agent_profile_receipt().await?.is_some() {
+             return Ok(None);
+         }
++        self.session.refresh_mcp_if_dirty().await;
+         let binding = self
+             .session
+             .services

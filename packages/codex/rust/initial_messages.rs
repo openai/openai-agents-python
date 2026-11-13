@@ -1,14 +1,15 @@
 //! Fresh opening data. Only the managed initializer can install this batch.
 use anyhow::{Context, Result, ensure};
 use codex_core_api::CodexThread;
-use codex_history::RolloutItem;
+use codex_history::{CodexHarnessMetadata, ResponseItemEnvelope, RolloutItem};
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::{ContentItem, ResponseItem};
+use codex_protocol::prompt_cache::{PromptCacheAnnotation, PromptCacheBreakpoint};
 use codex_protocol::protocol::EventMsg;
 use serde_json::Value;
 use std::collections::HashSet;
 
-pub(crate) struct Batch(Vec<ResponseItem>);
+pub(crate) struct Batch(Vec<ResponseItem>, Vec<Option<PromptCacheAnnotation>>);
 
 impl Batch {
     pub(crate) fn items(&self) -> &[ResponseItem] {
@@ -19,6 +20,7 @@ impl Batch {
     pub(crate) fn capture(json: &str) -> Result<Self> {
         let values: Vec<Value> = serde_json::from_str(json).context("invalid initial messages")?;
         let mut items = Vec::with_capacity(values.len());
+        let mut annotations = Vec::with_capacity(values.len());
         for value in values {
             let object = value
                 .as_object()
@@ -37,6 +39,7 @@ impl Batch {
                 .get("role")
                 .and_then(Value::as_str)
                 .context("initial message requires a role")?;
+            let mut breakpoints = Vec::new();
             let content: Vec<ContentItem> =
                 match role {
                     "assistant" => {
@@ -55,7 +58,7 @@ impl Batch {
                             .and_then(Value::as_array)
                             .context("user seed requires captured content")?;
                         ensure!(!parts.is_empty(), "user seed content must not be empty");
-                        for part in parts {
+                        for (index, part) in parts.iter().enumerate() {
                             let object = part
                                 .as_object()
                                 .context("initial user content must be an object")?;
@@ -74,9 +77,17 @@ impl Batch {
                                 _ => anyhow::bail!("unsupported initial user content"),
                             };
                             ensure!(
-                                object.keys().all(|key| allowed.contains(&key.as_str())),
+                                object.keys().all(|key| {
+                                    key == "prompt_cache_breakpoint" || allowed.contains(&key.as_str())
+                                }),
                                 "initial user content contains unsupported fields"
                             );
+                            if let Some(marker) = object.get("prompt_cache_breakpoint") {
+                                let breakpoint: PromptCacheBreakpoint =
+                                    serde_json::from_value(marker.clone())
+                                        .context("invalid initial prompt cache breakpoint")?;
+                                breakpoints.push((index, breakpoint));
+                            }
                             if kind == "input_text" {
                                 ensure!(
                                     object.get("text").is_some_and(Value::is_string),
@@ -127,15 +138,21 @@ impl Batch {
                     }
                     _ => anyhow::bail!("initial messages accept only user and assistant roles"),
                 };
+            let id = ResponseItemId::new("msg");
+            annotations.push(PromptCacheAnnotation::bind(
+                id.to_string(),
+                &content,
+                &breakpoints,
+            )?);
             items.push(ResponseItem::Message {
-                id: Some(ResponseItemId::new("msg")),
+                id: Some(id),
                 role: role.to_owned(),
                 content,
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,
             });
         }
-        Ok(Self(items))
+        Ok(Self(items, annotations))
     }
 
     /// The initializer holds the native operation and mutation gates throughout.
@@ -153,8 +170,21 @@ impl Batch {
         if self.0.is_empty() {
             return Ok(());
         }
+        let items = self
+            .0
+            .iter()
+            .cloned()
+            .zip(self.1)
+            .map(|(item, prompt_cache)| ResponseItemEnvelope {
+                item,
+                metadata: prompt_cache.map(|annotation| CodexHarnessMetadata {
+                    prompt_cache: Some(annotation),
+                    ..Default::default()
+                }),
+            })
+            .collect();
         let prepared = thread
-            .inject_response_items_for_initialization(self.0.clone())
+            .inject_response_items_for_initialization(items)
             .await?;
         let requested_ids: Vec<_> = self.0.iter().map(ResponseItem::id).collect();
         let requested_id_set: HashSet<_> = requested_ids.iter().copied().collect();

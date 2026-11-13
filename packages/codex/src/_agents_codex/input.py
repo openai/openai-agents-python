@@ -16,19 +16,33 @@ from ._media import (
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
-class InputText(TypedDict):
+class _PromptCacheBreakpoint(TypedDict, closed=True):
+    mode: Literal["explicit"]
+
+
+class _CacheablePart(TypedDict):
+    prompt_cache_breakpoint: NotRequired[_PromptCacheBreakpoint]
+
+
+def _capture_prompt_cache_breakpoint(value: Any) -> _PromptCacheBreakpoint:
+    if not isinstance(value, Mapping) or set(value) != {"mode"} or value.get("mode") != "explicit":
+        raise ValueError("prompt_cache_breakpoint requires mode explicit")
+    return {"mode": "explicit"}
+
+
+class InputText(_CacheablePart):
     type: Literal["input_text"]
     text: str
 
 
-class InputAudio(TypedDict):
+class InputAudio(_CacheablePart):
     """An audio reference passed to Core without local file or transport access."""
 
     type: Literal["input_audio"]
     audio_url: str
 
 
-class InputImage(TypedDict):
+class InputImage(_CacheablePart):
     """An image URL/data URL. Core prepares it for the actual current model."""
 
     type: Literal["input_image"]
@@ -43,7 +57,7 @@ class InputVideo(TypedDict):
     video_url: str
 
 
-class InputImageFile(TypedDict):
+class InputImageFile(_CacheablePart):
     """An opaque provider image ID; never a host path."""
 
     type: Literal["input_image"]
@@ -51,7 +65,7 @@ class InputImageFile(TypedDict):
     detail: NotRequired[ImageDetail | None]
 
 
-class InputFile(TypedDict):
+class InputFile(_CacheablePart):
     """Exactly one provider ID, inline base64 data or HTTPS URL; validated at capture."""
 
     type: Literal["input_file"]
@@ -111,6 +125,14 @@ def _native_input(
             raise TypeError("User message parts must be content mappings")
         part = dict(value)
         kind = part.pop("type", None)
+        has_breakpoint = "prompt_cache_breakpoint" in part
+        breakpoint = (
+            _capture_prompt_cache_breakpoint(part.pop("prompt_cache_breakpoint"))
+            if has_breakpoint
+            else None
+        )
+        if breakpoint is not None and kind == "input_video":
+            raise ValueError("Video cache breakpoints are unsupported")
         if kind == "input_text":
             if set(part) != {"text"} or not isinstance(part["text"], str):
                 raise ValueError("input_text requires a text string")
@@ -125,6 +147,8 @@ def _native_input(
             parts.append({"type": "file", **_capture_file(part)})
         else:
             raise ValueError("Unsupported user content type")
+        if breakpoint is not None:
+            parts[-1]["prompt_cache_breakpoint"] = breakpoint
     return parts
 
 
@@ -162,6 +186,8 @@ def _response_content(parts: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
             "input_image": {"image_url", "file_id", "detail"},
             "input_file": {"file_id", "file_data", "file_url", "filename"},
         }[tag]
+        if tag != "input_video":
+            fields.add("prompt_cache_breakpoint")
         result.append({"type": tag, **{key: item for key, item in part.items() if key in fields}})
     return result
 

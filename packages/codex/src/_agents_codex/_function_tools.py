@@ -69,11 +69,15 @@ from .native_agents import (
 )
 from .native_interception import Allow as Allow, Deny as Deny, ReplaceArguments as ReplaceArguments
 from .realtime_result import BackgroundResult as BackgroundResult
-from .realtime_usage import RealtimeUsage as RealtimeUsage
+from .realtime_usage import (
+    RealtimeUsage as RealtimeUsage,
+    RealtimeUsageAccounting as RealtimeUsageAccounting,
+)
 from .tools import (
     Checklist as Checklist,
     CodeInterpreter as CodeInterpreter,
     FileSearch as FileSearch,
+    HostedProgrammaticToolCalling as HostedProgrammaticToolCalling,
     HostedShell as HostedShell,
     ImageGeneration as ImageGeneration,
     NativeGoals as NativeGoals,
@@ -164,6 +168,7 @@ class ToolInputErrorContext(Generic[ContextT_co]):
     call: ToolCallInfo = field(kw_only=True)
     trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)
     realtime_usage: RealtimeUsage | None = field(default=None, kw_only=True)
+    realtime_usage_accounting: RealtimeUsageAccounting | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -193,6 +198,7 @@ class ToolContext(Generic[ContextT_co]):
     trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)
     # Detached speech usage at callback creation; application context stays caller-owned.
     realtime_usage: RealtimeUsage | None = field(default=None, kw_only=True)
+    realtime_usage_accounting: RealtimeUsageAccounting | None = field(default=None, kw_only=True)
 
     _usage_reporter: Callable[[TokenUsage | None, int], None] | None = field(
         default=None, init=False, repr=False, compare=False
@@ -568,16 +574,21 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             if (
                 not callers
                 or any(
-                    not isinstance(caller, str) or caller not in ("direct", "code")
+                    not isinstance(caller, str) or caller not in ("direct", "code", "programmatic")
                     for caller in callers
                 )
                 or len(callers) != len(set(callers))
             ):
                 raise ValueError(
-                    "FunctionTool allowed_callers must select distinct direct or code routes"
+                    "FunctionTool allowed_callers must select distinct "
+                    "direct, code, or programmatic callers"
                 )
+            if self._custom_format is not None and "programmatic" in callers:
+                raise ValueError("Custom string tools do not support programmatic callers")
             object.__setattr__(
-                self, "allowed_callers", ("direct", "code") if len(callers) == 2 else callers
+                self,
+                "allowed_callers",
+                tuple(value for value in ("direct", "code", "programmatic") if value in callers),
             )
         if not isinstance(self.input_type, type) or not issubclass(self.input_type, BaseModel):
             raise TypeError("FunctionTool input_type must be a Pydantic BaseModel type")
@@ -868,6 +879,7 @@ Tool: TypeAlias = (
     | FileSearch
     | CodeInterpreter
     | HostedShell
+    | HostedProgrammaticToolCalling
     | ImageGeneration
     | HostedMCP[ToolContextT]
     | ToolSearch
@@ -1101,6 +1113,7 @@ def function_tool(
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
     error_function: _BodyErrorFormatter[PolicyContextT] | None = None,
+    extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _PythonTool[ToolContextT, PolicyContextT]: ...
 
 
@@ -1119,6 +1132,7 @@ def function_tool(
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
     error_function: _BodyErrorFormatter[ToolContextT] | None = None,
+    extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _PythonTool[ToolContextT, ToolContextT]: ...
 
 
@@ -1137,6 +1151,7 @@ def function_tool(
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
     error_function: _BodyErrorFormatter[PolicyContextT] | None = None,
+    extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _PythonTool[PolicyContextT, PolicyContextT]: ...
 
 
@@ -1155,6 +1170,7 @@ def function_tool(
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
     error_function: _BodyErrorFormatter[PolicyContextT],
+    extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _PythonTool[PolicyContextT, PolicyContextT]: ...
 
 
@@ -1173,6 +1189,7 @@ def function_tool(
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
     error_function: _BodyErrorFormatter[object] | None = None,
+    extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _PythonTool[object, object]: ...
 
 
@@ -1200,6 +1217,7 @@ def function_tool(
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
     error_function: _BodyErrorFormatter[object] | None = None,
+    extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _ToolDecorator[object]: ...
 
 
@@ -1229,6 +1247,7 @@ def function_tool(
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
     error_function: _BodyErrorFormatter[object] | _BodyErrorFormatter[PolicyContextT] | None = None,
+    extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -1256,6 +1275,7 @@ def function_tool(
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
     error_function: _BodyErrorFormatter[object] | None = None,
+    extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _ToolDecorator[object]: ...
 
 
@@ -1285,6 +1305,7 @@ def function_tool(
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
     error_function: _BodyErrorFormatter[object] | _BodyErrorFormatter[PolicyContextT] | None = None,
+    extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -1312,6 +1333,7 @@ def function_tool(
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
     error_function: _BodyErrorFormatter[object] | None = None,
+    extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _ToolDecorator[object]: ...
 
 
@@ -1343,6 +1365,7 @@ def function_tool(
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
     error_function: _BodyErrorFormatter[object] | _BodyErrorFormatter[PolicyContextT] | None = None,
+    extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -1382,8 +1405,14 @@ def function_tool(
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
     error_function: _BodyErrorFormatter[Any] | None = _UNSET_ERROR_FUNCTION,
+    extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _PythonTool[Any, Any] | _ToolDecorator[Any]:
     """Declare a Python tool without starting a connection or runtime.
+
+    By default, Python argument validation rejects undeclared top-level keys.
+    With extra_arguments="ignore", validation ignores those keys. The
+    advertised schema remains closed, and declared fields still use their
+    normal validation. ToolContext.original_arguments retains the raw keys.
 
     Optional input_error_function: initial JSON syntax or argument-validation recovery,
     with ToolInputErrorContext, the original error, and detached original input.
@@ -1441,6 +1470,9 @@ def function_tool(
     the callback result.
     """
 
+    if extra_arguments not in ("forbid", "ignore"):
+        raise ValueError("function_tool extra_arguments must be forbid or ignore")
+
     def decorate(callback: Callable[..., Any]) -> _PythonTool[Any, Any]:
         parameters = list(inspect.signature(callback).parameters.values())
         hints = get_type_hints(callback, include_extras=True)
@@ -1478,7 +1510,11 @@ def function_tool(
             description if description is not None else inspect.getdoc(callback) or ""
         )
         model = _function_parameters(
-            callback, name=selected_name, hints=hints, skip_first=context_parameter is not None
+            callback,
+            name=selected_name,
+            hints=hints,
+            skip_first=context_parameter is not None,
+            extra_arguments=extra_arguments,
         )
 
         def bind(

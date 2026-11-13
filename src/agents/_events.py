@@ -77,6 +77,8 @@ from _agents_codex._events import (
     PatchExecutionItem as PatchExecutionItem,
     PermissionsRequiredAction as PermissionsRequiredAction,
     PermissionsResponse as PermissionsResponse,
+    ProgramCallItem as ProgramCallItem,
+    ProgramOutputItem as ProgramOutputItem,
     QuestionOption as QuestionOption,
     ReasoningItem as ReasoningItem,
     ReasoningSummaryPartAddedEvent as ReasoningSummaryPartAddedEvent,

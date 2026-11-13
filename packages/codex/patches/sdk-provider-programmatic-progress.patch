@@ -1,0 +1,70 @@
+diff --git a/codex-rs/core/src/tools/program_callers.rs b/codex-rs/core/src/tools/program_callers.rs
+--- a/codex-rs/core/src/tools/program_callers.rs
++++ b/codex-rs/core/src/tools/program_callers.rs
+@@ -1,5 +1,5 @@
+ use codex_extension_api::ExtensionData;
+-use codex_protocol::models::ResponseItem;
++use codex_protocol::models::{ProgramOutputStatus, ResponseItem};
+ use std::collections::HashMap;
+ use std::sync::{Arc, Mutex, Weak};
+ 
+@@ -30,9 +30,15 @@
+     item: &ResponseItem,
+     declared: bool,
+ ) -> Result<(), String> {
+-    let (id, opening) = match item {
+-        ResponseItem::Program { call_id, .. } => (call_id, true),
+-        ResponseItem::ProgramOutput { call_id, .. } => (call_id, false),
++    let (id, opening, settled) = match item {
++        ResponseItem::Program { call_id, .. } => (call_id, true, false),
++        ResponseItem::ProgramOutput {
++            call_id, status, ..
++        } => (
++            call_id,
++            false,
++            matches!(status, ProgramOutputStatus::Completed),
++        ),
+         _ => return Ok(()),
+     };
+     if id.is_empty() {
+@@ -47,7 +53,9 @@
+         return Ok(());
+     }
+     if let Some(active) = state.entries.get_mut(id) {
+-        *active = false;
++        if opening || settled {
++            *active = false;
++        }
+         return Ok(());
+     }
+     let cost = serde_json::to_vec(id)
+@@ -138,6 +146,29 @@
+         assert!(admit(&owner, "", true).is_err());
+     }
+     #[test]
++    fn incomplete_outputs_preserve_only_an_already_admitted_live_parent() {
++        let owner = Arc::new(ExtensionData::default());
++        let progress = serde_json::from_value(serde_json::json!({"type":"program_output","call_id":"parent","status":"incomplete","result":"progress"})).unwrap();
++        observe(&owner, &program("parent"), true).unwrap();
++        for _ in 0..2 {
++            observe(&owner, &progress, true).unwrap();
++            assert!(admit(&owner, "parent", true).is_ok());
++            assert!(admit(&owner, "parent", false).is_err());
++        }
++        observe(&owner, &output("parent"), true).unwrap();
++        observe(&owner, &progress, true).unwrap();
++        assert!(admit(&owner, "parent", true).is_err());
++        let unknown = Arc::new(ExtensionData::default());
++        observe(&unknown, &progress, true).unwrap();
++        observe(&unknown, &program("parent"), true).unwrap();
++        assert!(admit(&unknown, "parent", true).is_err());
++        let undeclared = Arc::new(ExtensionData::default());
++        observe(&undeclared, &program("parent"), false).unwrap();
++        observe(&undeclared, &progress, true).unwrap();
++        assert!(admit(&undeclared, "parent", true).is_err());
++    }
++
++    #[test]
+     fn retained_parent_limits_fail_closed_without_rejecting_passive_items() {
+         for bytes in [false, true] {
+             let owner = Arc::new(ExtensionData::default());

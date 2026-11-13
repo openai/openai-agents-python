@@ -648,9 +648,10 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
         route, config, kwargs, runtime = openings.pop()
         assert route == "_open_conversation"
         assert config["model_providers.native_agent"]["supports_websockets"] is True
-        assert kwargs["_private_http"] is False
+        assert kwargs["_private_http"] is True
         assert kwargs["_share_model_http"] is False
         assert kwargs["_process_private_runtime"] is True
+        assert not kwargs.get("_process_private_http", False)
         assert "codex_home" not in runtime and "cwd" not in runtime
         assert starts == []
     else:
@@ -658,4 +659,50 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
         assert not thread_options[0].get("_sdk_websocket_tls", False)
     assert len(providers) == 1 and providers[0].api_key is None and providers[0]._closed
     assert agent.provider is None
+    assert not openings
+
+
+@pytest.mark.parametrize("eager_tool", [False, True], ids=["plain", "eager-tool"])
+@pytest.mark.parametrize("transport", ["http", "websocket"])
+async def test_private_completion_honors_fixed_request_transport(
+    openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]],
+    transport: str,
+    eager_tool: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native = importlib.import_module("agents._native")
+    request_controls = []
+
+    def record(name: str) -> Any:
+        capture = getattr(native, name)
+
+        def forward(*args: Any, **kwargs: Any) -> Any:
+            request_controls.append(json.loads(args[2])["_sdk_request_transport"])
+            return capture(*args, **kwargs)
+
+        return forward
+
+    for name in ("_prepare_run_conversation", "_open_conversation"):
+        monkeypatch.setattr(native, name, record(name))
+
+    @function_tool
+    async def lookup() -> str:
+        """Return synthetic eager tool output."""
+        return "unused"
+
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-default-key")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    with pytest.raises(_OpeningCaptured):
+        await Agent(
+            instructions="Answer.",
+            model_settings={"request_transport": transport},
+            tools=[lookup] if eager_tool else [],
+        ).run("hello")
+    route, config, kwargs, _ = openings.pop()
+    assert route == ("_open_conversation" if eager_tool else "_prepare_run_conversation")
+    assert config["model_providers.native_agent"]["supports_websockets"] is True
+    assert kwargs["_private_http"] is (eager_tool or transport == "http")
+    if eager_tool:
+        assert kwargs["_process_private_runtime"] is True
+    assert request_controls == [{"mode": transport}]
     assert not openings

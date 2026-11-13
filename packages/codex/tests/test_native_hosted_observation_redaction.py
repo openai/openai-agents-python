@@ -117,3 +117,89 @@ async def test_hosted_payloads_require_reader_opt_in(
         )
         assert [item async for item in session.items() if item["type"] == raw["type"]] == history
     assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("reader", ["session", "turn"])
+async def test_program_code_results_and_provider_data_require_reader_opt_in(responses, reader):
+    from agents import CodeInterpreter, HostedProgrammaticToolCalling, NativeProvider
+
+    program = {
+        "type": "program",
+        "id": "pc_private",
+        "call_id": "call_private",
+        "code": "print('synthetic-private-code')",
+        "future_private": {"text": "synthetic-private-provider-data"},
+    }
+    output = {
+        "type": "program_output",
+        "id": "po_private",
+        "call_id": "call_private",
+        "status": "completed",
+        "result": "synthetic-private-result",
+        "future_private": {"text": "synthetic-private-output-data"},
+    }
+    responses.respond(completed(program), completed(output), assistant_output("Done."))
+    async with timeout(30), NativeProvider(base_url=responses.url, api_key="synthetic") as borrowed:
+        async with Agent(
+            instructions="Use the hosted program.",
+            model="gpt-5.5",
+            provider=borrowed,
+            tools=[
+                HostedProgrammaticToolCalling(),
+                CodeInterpreter(container="cntr_fixture", allowed_callers=["programmatic"]),
+            ],
+        ).session() as session:
+            turn = await session.submit("Run the synthetic program.")
+            assert (await turn.get_result()).final_output == "Done."
+
+            async def collect(**options):
+                cursor = (
+                    session.events(**options) if reader == "session" else turn.events(**options)
+                )
+                records = []
+                async for event in cursor:
+                    records.append(event)
+                    if isinstance(event, TurnFinished) and event.turn_id == turn.turn_id:
+                        break
+                return records
+
+            default = await collect()
+            explicit_default = await collect(include_execution_details=False)
+            detailed = await collect(include_execution_details=True)
+            assert default == explicit_default
+            full = [event.item for event in detailed if isinstance(event, ModelOutputItemCompleted)]
+            assert [item["provider_data"] for item in full] == [program, output]
+            assert full[0]["code"] == program["code"] and full[1]["result"] == output["result"]
+            assert "synthetic-private" not in str([asdict(event) for event in default])
+            summaries = [
+                event.item for event in default if isinstance(event, ModelOutputItemCompleted)
+            ]
+            assert all(isinstance(item, HostedToolCallSummary) for item in summaries)
+            assert [asdict(item) for item in summaries] == [
+                {
+                    "type": item["type"],
+                    "id": item["id"],
+                    "turn_id": turn.turn_id,
+                    "status": item["status"],
+                }
+                for item in full
+            ]
+            history = [
+                item
+                async for item in session.items()
+                if item["type"] in {"program", "program_output"}
+            ]
+            assert history == full
+            full[0]["provider_data"]["future_private"]["text"] = "reader mutation"
+            full[0]["code"] = "reader mutation"
+            full[1]["result"] = "reader mutation"
+            replay = await collect(include_execution_details=True)
+            assert [
+                event.item for event in replay if isinstance(event, ModelOutputItemCompleted)
+            ] == history
+            assert [
+                item
+                async for item in session.items()
+                if item["type"] in {"program", "program_output"}
+            ] == history
+    assert len(responses.requests) == 1

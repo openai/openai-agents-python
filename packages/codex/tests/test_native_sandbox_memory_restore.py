@@ -9,6 +9,12 @@ from agents.testing import ScriptedResponses, text
 from tests._asyncio import timeout
 from tests.test_native_sandbox_memory import _workspace_gateway
 
+if os.name != "nt":
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
+
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="UnixLocal memory fixture")
 
 if os.name != "nt":

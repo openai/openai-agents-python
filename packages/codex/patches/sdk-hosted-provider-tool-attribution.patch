@@ -1,0 +1,604 @@
+diff --git a/codex-rs/codex-api/src/received_response_facts.rs b/codex-rs/codex-api/src/received_response_facts.rs
+--- a/codex-rs/codex-api/src/received_response_facts.rs
++++ b/codex-rs/codex-api/src/received_response_facts.rs
+@@ -210,8 +210,22 @@
+                 .into_iter()
+                 .map(|fact| ResponseEvent::ResponseFact(fact.into())),
+         );
++        let hosted_agent = event.raw.get("item").and_then(serde_json::Value::as_object)
++            .and_then(|item| {
++                let agent = item.get("agent")?.as_object()?;
++                let name = agent.get("agent_name")?.as_str()?.to_owned();
++                if name.is_empty() { return None; }
++                Some((name, item.get("phase").and_then(serde_json::Value::as_str).map(str::to_owned)))
++            });
+         let event =
+             crate::sse::process_responses_event(event).map_err(|error| error.into_api_error())?;
++        if let (Some((agent_name, phase)), Some(ResponseEvent::OutputItemDone(item))) = (hosted_agent, &event) {
++            let item_fingerprint = codex_protocol::response_facts::item_fingerprint(item)
++                .map_err(|_| invalid_application_stream("Could not identify hosted provider attribution"))?;
++            ready.push(ResponseEvent::ResponseFact(ResponseFact::HostedAgentAttribution {
++                item_fingerprint, agent_name, phase,
++            }.into()));
++        }
+         if let Some(ResponseEvent::Completed { response_id, .. }) = &event {
+             if response_id.trim().is_empty() {
+                 return Err(invalid_application_stream(
+diff --git a/codex-rs/protocol/src/response_facts.rs b/codex-rs/protocol/src/response_facts.rs
+--- a/codex-rs/protocol/src/response_facts.rs
++++ b/codex-rs/protocol/src/response_facts.rs
+@@ -58,6 +58,11 @@
+         tokens: Vec<ProbabilityToken>,
+         capture_complete: bool,
+     },
++    HostedAgentAttribution {
++        item_fingerprint: String,
++        agent_name: String,
++        phase: Option<String>,
++    },
+     MalformedProbabilities,
+     CaptureTruncated,
+ }
+@@ -78,6 +83,7 @@
+         f.write_str(match self {
+             Self::Refusal { .. } => "ResponseFact::Refusal(<private>)",
+             Self::TextProbabilities { .. } => "ResponseFact::TextProbabilities(<private>)",
++            Self::HostedAgentAttribution { .. } => "ResponseFact::HostedAgentAttribution(<private>)",
+             Self::MalformedProbabilities => "ResponseFact::MalformedProbabilities",
+             Self::CaptureTruncated => "ResponseFact::CaptureTruncated",
+         })
+@@ -110,6 +116,12 @@
+     pub response_id: Option<String>,
+     #[serde(flatten)]
+     pub received: ReceivedResponseFact,
++}
++
++/// Stable comparison of the exact canonical item, independent of repeated wire IDs.
++pub fn item_fingerprint(item: &crate::models::ResponseItem) -> Result<String, serde_json::Error> {
++    use sha2::{Digest, Sha256};
++    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(item)?)))
+ }
+
+ /// One budget per actual sampling response, including all streaming frames.
+diff --git a/codex-rs/tools/src/tool_call.rs b/codex-rs/tools/src/tool_call.rs
+--- a/codex-rs/tools/src/tool_call.rs
++++ b/codex-rs/tools/src/tool_call.rs
+@@ -19,6 +19,7 @@
+ pub struct ConversationHistory {
+     items: Arc<LazyLock<Box<[ResponseItem]>, HistoryLoader>>,
+     realtime_tool_call: Option<serde_json::Value>,
++    provider_agent_metadata: Option<serde_json::Value>,
+ }
+
+ type HistoryLoader = Box<dyn FnOnce() -> Box<[ResponseItem]> + Send + Sync>;
+@@ -34,6 +35,7 @@
+         Self {
+             items: Arc::new(LazyLock::new(Box::new(move || load().into_boxed_slice()))),
+             realtime_tool_call: None,
++            provider_agent_metadata: None,
+         }
+     }
+
+@@ -44,6 +46,16 @@
+
+     pub fn with_realtime_tool_call(mut self, value: Option<serde_json::Value>) -> Self {
+         self.realtime_tool_call = value;
++        self
++    }
++
++    /// Read-only attribution captured with this exact invocation, never reconstructed by wire ID.
++    pub fn provider_agent_metadata(&self) -> Option<&serde_json::Value> {
++        self.provider_agent_metadata.as_ref()
++    }
++
++    pub fn with_provider_agent_metadata(mut self, value: Option<serde_json::Value>) -> Self {
++        self.provider_agent_metadata = value;
+         self
+     }
+
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -386,6 +386,7 @@
+     ctx: &mut HandleOutputCtx,
+     item: ResponseItem,
+     previously_active_item: Option<TurnItem>,
++    provider_agent_metadata: Option<serde_json::Value>,
+ ) -> Result<OutputItemResult> {
+     let mut output = OutputItemResult::default();
+     let plan_mode = ctx.step_context.turn.mode() == ModeKind::Plan;
+@@ -466,7 +467,7 @@
+             let tool_future: InFlightFuture<'static> = Box::pin(
+                 ctx.tool_runtime
+                     .clone()
+-                    .handle_tool_call(call, cancellation_token),
++                    .handle_tool_call_with_provider_metadata(call, cancellation_token, provider_agent_metadata),
+             );
+
+             output.needs_follow_up = true;
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -7843,6 +7843,7 @@
+         async move {
+             handler
+                 .handle(ToolInvocation {
++                    provider_agent_metadata: None,
+                     session,
+                     step_context,
+                     turn: turn_context,
+@@ -7927,6 +7928,7 @@
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+     let result = RequestPermissionsHandler
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::new(session),
+             step_context,
+             turn: turn_context,
+@@ -14639,6 +14641,7 @@
+     let handler = ExecCommandHandler::default();
+     let resp = handler
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+             step_context,
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -5626,7 +5626,7 @@
+         received: codex_protocol::response_facts::ReceivedResponseFact,
+         capture_probabilities: bool,
+         budget: &mut codex_protocol::response_facts::ResponseFactBudget,
+-    ) -> CodexResult<()> {
++    ) -> CodexResult<Option<codex_protocol::response_facts::ResponseFactRecord>> {
+         use codex_protocol::response_facts::{ResponseFact, ResponseFactRecord};
+         let codex_protocol::response_facts::ReceivedResponseFact {
+             upstream_request_id,
+@@ -5638,7 +5638,7 @@
+                 ResponseFact::TextProbabilities { .. } | ResponseFact::MalformedProbabilities
+             )
+         {
+-            return Ok(());
++            return Ok(None);
+         }
+         let malformed = matches!(&fact, ResponseFact::MalformedProbabilities);
+         let malformed_error = || {
+@@ -5651,7 +5651,7 @@
+             return if malformed {
+                 Err(malformed_error())
+             } else {
+-                Ok(())
++                Ok(None)
+             };
+         }
+         let mut record = ResponseFactRecord {
+@@ -5709,7 +5709,7 @@
+             return if malformed {
+                 Err(malformed_error())
+             } else {
+-                Ok(())
++                Ok(None)
+             };
+         };
+         if matches!(fact, ResponseFact::CaptureTruncated) {
+@@ -5726,6 +5726,7 @@
+                 "Could not retain received response facts".into(),
+             ));
+         }
++        let retained = record.clone();
+         self.send_event_raw_with_persistence(
+             Event {
+                 id: turn_context.sub_id.clone(),
+@@ -5742,7 +5743,7 @@
+                     ),
+             );
+         }
+-        Ok(())
++        Ok(Some(retained))
+     }
+
+     pub(crate) fn private_disposable(&self) -> bool {
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -4740,6 +4740,7 @@
+         let mut response_fact_budget =
+             codex_protocol::response_facts::ResponseFactBudget::default();
+         let mut response_fact_response_id: Option<String> = None;
++        let mut pending_provider_agent: Option<codex_protocol::response_facts::ResponseFactRecord> = None;
+         // Admission is local to the provider request; nothing here executes its program.
+         let mut program_calls = HashMap::new();
+         loop {
+@@ -4845,7 +4846,12 @@
+                         )
+                         .await
+                     {
+-                        Ok(()) => {}
++                        Ok(Some(record)) => {
++                            if matches!(&record.received.fact, codex_protocol::response_facts::ResponseFact::HostedAgentAttribution { .. }) {
++                                pending_provider_agent = Some(record);
++                            }
++                        }
++                        Ok(None) => {}
+                         Err(error) => {
+                             tool_cancellation.cancel();
+                             drop(stream);
+@@ -4869,6 +4875,17 @@
+                     }
+                 }
+                 ResponseEvent::OutputItemDone(mut item) => {
++                    let provider_agent_metadata = pending_provider_agent.take().and_then(|record| {
++                        match record.received.fact {
++                            codex_protocol::response_facts::ResponseFact::HostedAgentAttribution {item_fingerprint, agent_name, phase}
++                                if codex_protocol::response_facts::item_fingerprint(&item).ok().as_ref() == Some(&item_fingerprint) => {
++                                    let mut value = serde_json::json!({"agent_name": agent_name});
++                                    if let Some(phase) = phase { value["phase"] = serde_json::Value::String(phase); }
++                                    Some(value)
++                                }
++                            _ => None,
++                        }
++                    });
+                     if matches!(item, ResponseItem::Program { .. } | ResponseItem::ProgramOutput { .. }) {
+                         admit_hosted_program_item(prompt, &mut program_calls, &item)?;
+                         if let Some(attempt) = &model_attempt {
+@@ -4996,7 +5013,7 @@
+
+                     let direct_call = item.clone();
+                     let output_result =
+-                        match handle_output_item_done(&mut ctx, item, previously_streamed_item)
++                        match handle_output_item_done(&mut ctx, item, previously_streamed_item, provider_agent_metadata)
+                             .instrument(handle_responses)
+                             .await
+                         {
+diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
+--- a/codex-rs/core/src/tools/context.rs
++++ b/codex-rs/core/src/tools/context.rs
+@@ -47,6 +47,7 @@
+ /// Delivery does not finish the call: post-tool hooks can still be cancelled.
+ #[derive(Default)]
+ pub(crate) struct ToolCallState {
++    pub(crate) provider_agent_metadata: OnceLock<serde_json::Value>,
+     pub(crate) terminal_outcome_reached: AtomicBool,
+     pub(crate) dispatch_started_at: OnceLock<std::time::Instant>,
+     pub(crate) builtin_sandbox_operation: OnceLock<codex_extension_api::BuiltinSandboxOperation>,
+@@ -69,6 +70,8 @@
+
+ #[derive(Clone)]
+ pub struct ToolInvocation {
++    /// Observed provider attribution for this exact direct occurrence; never routing authority.
++    pub(crate) provider_agent_metadata: Option<serde_json::Value>,
+     pub session: Arc<Session>,
+     // TODO(sayan): Remove this compatibility field once handlers use `step_context.turn`.
+     pub turn: Arc<TurnContext>,
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -211,6 +211,15 @@
+         call: ToolCall,
+         cancellation_token: CancellationToken,
+     ) -> impl std::future::Future<Output = Result<DirectToolResult, CodexErr>> {
++        self.handle_tool_call_with_provider_metadata(call, cancellation_token, None)
++    }
++
++    pub(crate) fn handle_tool_call_with_provider_metadata(
++        self,
++        call: ToolCall,
++        cancellation_token: CancellationToken,
++        provider_agent_metadata: Option<serde_json::Value>,
++    ) -> impl std::future::Future<Output = Result<DirectToolResult, CodexErr>> {
+         self.observe_requested_handoff(&call.tool_name, &call.call_id);
+         let ignored = self.ignores_handoff(&call.tool_name, &call.call_id);
+         let handoff_selection = Arc::clone(&self.handoff_selection);
+@@ -220,6 +229,9 @@
+         let recorded_call = recorder.prepare_direct_call(&call, &source, &self.step_context);
+         let step_context = Arc::clone(&self.step_context);
+         let call_state = Arc::new(ToolCallState::default());
++        if let Some(metadata) = provider_agent_metadata {
++            let _ = call_state.provider_agent_metadata.set(metadata);
++        }
+         let retained_step_context = Arc::clone(&step_context);
+         let dispatch_call_state = Arc::clone(&call_state);
+         // Construct dispatch eagerly: manual tool requests can unblock the
+diff --git a/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs b/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs
+--- a/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs
++++ b/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs
+@@ -356,6 +356,7 @@
+ ) -> ToolInvocation {
+     let step_context = StepContext::for_test(Arc::clone(&turn));
+     ToolInvocation {
++        provider_agent_metadata: None,
+         session,
+         step_context,
+         turn,
+diff --git a/codex-rs/core/src/tools/registry_tests.rs b/codex-rs/core/src/tools/registry_tests.rs
+--- a/codex-rs/core/src/tools/registry_tests.rs
++++ b/codex-rs/core/src/tools/registry_tests.rs
+@@ -458,6 +458,7 @@
+         tool_name: tool_name.clone(),
+     };
+     let invocation = ToolInvocation {
++        provider_agent_metadata: None,
+         payload: ToolPayload::Function {
+             arguments: serde_json::json!({ "message": "hello" }).to_string(),
+         },
+@@ -504,6 +505,7 @@
+         tool_name: tool_name.clone(),
+     };
+     let invocation = ToolInvocation {
++        provider_agent_metadata: None,
+         payload: ToolPayload::Function {
+             arguments: "  ".to_string(),
+         },
+@@ -536,6 +538,7 @@
+             tool_name: tool_name.clone(),
+         };
+         let invocation = ToolInvocation {
++            provider_agent_metadata: None,
+             payload: ToolPayload::Function {
+                 arguments: serde_json::json!({ "message": "inspect this repo" }).to_string(),
+             },
+@@ -956,6 +959,7 @@
+ ) -> ToolInvocation {
+     let step_context = StepContext::for_test(Arc::clone(&turn));
+     ToolInvocation {
++        provider_agent_metadata: None,
+         session,
+         step_context,
+         turn,
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -594,6 +594,7 @@
+         // Keep the legacy ToolInvocation.turn field tied to the same request state until handlers migrate.
+         let turn = Arc::clone(&step_context.turn);
+         let invocation = ToolInvocation {
++            provider_agent_metadata: call_state.as_ref().and_then(|state| state.provider_agent_metadata.get()).cloned(),
+             session,
+             turn,
+             step_context,
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_tests.rs b/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
+--- a/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
+@@ -40,6 +40,7 @@
+         available_modes: Vec::new(),
+     }
+     .handle(ToolInvocation {
++        provider_agent_metadata: None,
+         session: Arc::new(session),
+         step_context: StepContext::for_test(Arc::clone(&turn)),
+         turn,
+@@ -118,6 +119,7 @@
+                 available_modes: vec![ModeKind::Default],
+             }
+             .handle(ToolInvocation {
++                provider_agent_metadata: None,
+                 session,
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+@@ -239,6 +241,7 @@
+                 available_modes: vec![ModeKind::Plan],
+             }
+             .handle(ToolInvocation {
++                provider_agent_metadata: None,
+                 session,
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+diff --git a/codex-rs/core/src/tools/handlers/apply_patch_tests.rs b/codex-rs/core/src/tools/handlers/apply_patch_tests.rs
+--- a/codex-rs/core/src/tools/handlers/apply_patch_tests.rs
++++ b/codex-rs/core/src/tools/handlers/apply_patch_tests.rs
+@@ -46,6 +46,7 @@
+     let (session, turn) = make_session_and_context().await;
+     let turn = Arc::new(turn);
+     ToolInvocation {
++        provider_agent_metadata: None,
+         session: session.into(),
+         step_context: StepContext::for_test(Arc::clone(&turn)),
+         turn,
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec_tests.rs b/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
+--- a/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
+@@ -35,6 +35,7 @@
+     let (session, turn) = make_session_and_context().await;
+     let turn = Arc::new(turn);
+     ToolInvocation {
++        provider_agent_metadata: None,
+         session: session.into(),
+         step_context: StepContext::for_test(Arc::clone(&turn)),
+         turn,
+@@ -365,6 +366,7 @@
+
+     let turn = Arc::new(turn);
+     let invocation = ToolInvocation {
++        provider_agent_metadata: None,
+         session: session.into(),
+         step_context: StepContext::for_test(Arc::clone(&turn)),
+         turn,
+@@ -514,6 +516,7 @@
+     );
+     let response = ExecCommandHandler::default()
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             step_context,
+             turn,
+@@ -554,6 +557,7 @@
+
+     assert_eq!(
+         handler.pre_tool_use_payload(&ToolInvocation {
++            provider_agent_metadata: None,
+             session: session.into(),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+             turn,
+@@ -582,6 +586,7 @@
+
+     assert_eq!(
+         handler.pre_tool_use_payload(&ToolInvocation {
++            provider_agent_metadata: None,
+             session: session.into(),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+             turn,
+diff --git a/codex-rs/core/src/tools/handlers/mcp.rs b/codex-rs/core/src/tools/handlers/mcp.rs
+--- a/codex-rs/core/src/tools/handlers/mcp.rs
++++ b/codex-rs/core/src/tools/handlers/mcp.rs
+@@ -666,6 +666,7 @@
+             .expect("MCP tool spec should build");
+         assert_eq!(
+             handler.pre_tool_use_payload(&ToolInvocation {
++                provider_agent_metadata: None,
+                 session: session.into(),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+@@ -700,6 +701,7 @@
+
+         assert_eq!(
+             handler.pre_tool_use_payload(&ToolInvocation {
++                provider_agent_metadata: None,
+                 session: session.into(),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+@@ -730,6 +732,7 @@
+         let invocation = handler
+             .with_updated_hook_input(
+                 ToolInvocation {
++                    provider_agent_metadata: None,
+                     session: session.into(),
+                     step_context: StepContext::for_test(Arc::clone(&turn)),
+                     turn,
+@@ -791,6 +794,7 @@
+         let handler = McpHandler::new(tool_info("filesystem", "filesystem", "read_file"))
+             .expect("MCP tool spec should build");
+         let invocation = ToolInvocation {
++            provider_agent_metadata: None,
+             session: session.into(),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+             turn,
+diff --git a/codex-rs/core/src/tools/handlers/view_image.rs b/codex-rs/core/src/tools/handlers/view_image.rs
+--- a/codex-rs/core/src/tools/handlers/view_image.rs
++++ b/codex-rs/core/src/tools/handlers/view_image.rs
+@@ -403,6 +403,7 @@
+
+         let result = ViewImageHandler::default()
+             .handle(ToolInvocation {
++                provider_agent_metadata: None,
+                 session: Arc::new(session),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+@@ -433,6 +434,7 @@
+
+         let result = ViewImageHandler::default()
+             .handle(ToolInvocation {
++                provider_agent_metadata: None,
+                 session: Arc::new(session),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+@@ -476,6 +478,7 @@
+
+         let result = ViewImageHandler::default()
+             .handle(ToolInvocation {
++                provider_agent_metadata: None,
+                 session: Arc::new(session),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+@@ -514,6 +517,7 @@
+
+         let result = ViewImageHandler::default()
+             .handle(ToolInvocation {
++                provider_agent_metadata: None,
+                 session: Arc::new(session),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+--- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -107,6 +107,7 @@
+ ) -> ToolInvocation {
+     let step_context = StepContext::for_test(Arc::clone(&turn));
+     ToolInvocation {
++        provider_agent_metadata: None,
+         session,
+         step_context,
+         turn,
+diff --git a/codex-rs/core/src/tools/handlers/request_plugin_install_tests.rs b/codex-rs/core/src/tools/handlers/request_plugin_install_tests.rs
+--- a/codex-rs/core/src/tools/handlers/request_plugin_install_tests.rs
++++ b/codex-rs/core/src/tools/handlers/request_plugin_install_tests.rs
+@@ -58,6 +58,7 @@
+
+     let result = RequestPluginInstallHandler::new(Vec::new(), presentation)
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::new(session),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+             turn,
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -269,7 +269,8 @@
+             .map(ResponseItemEnvelope::into_item)
+             .collect()
+     })
+-    .with_realtime_tool_call(realtime_tool_call);
++    .with_realtime_tool_call(realtime_tool_call)
++    .with_provider_agent_metadata(invocation.provider_agent_metadata.clone());
+     let settings = &invocation.step_context.settings;
+     let codex_turn_metadata = invocation
+         .turn
+@@ -518,6 +519,7 @@
+         let (session, turn) = crate::session::tests::make_session_and_context().await;
+         let turn = Arc::new(turn);
+         let invocation = ToolInvocation {
++            provider_agent_metadata: None,
+             session: session.into(),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+             turn,
+@@ -612,6 +614,7 @@
+         model_info.node_repl_disabled = !turn.model_info().node_repl_disabled;
+         let node_repl_disabled = model_info.node_repl_disabled;
+         let invocation = ToolInvocation {
++            provider_agent_metadata: None,
+             session,
+             step_context,
+             turn,
+diff --git a/codex-rs/core/src/session/tests/guardian_tests.rs b/codex-rs/core/src/session/tests/guardian_tests.rs
+--- a/codex-rs/core/src/session/tests/guardian_tests.rs
++++ b/codex-rs/core/src/session/tests/guardian_tests.rs
+@@ -608,6 +608,7 @@
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+     let resp = handler
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+             step_context,
+@@ -732,6 +733,7 @@
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+     let resp = handler
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+             step_context,
+@@ -884,6 +886,7 @@
+     let command = "echo captured-action-authority";
+     let handler = crate::tools::handlers::ExecCommandHandler::default();
+     let invocation = handler.handle(ToolInvocation {
++        provider_agent_metadata: None,
+         session: Arc::clone(&session),
+         turn: Arc::clone(&action_turn),
+         step_context,
+@@ -1061,6 +1064,7 @@
+     let handler = ExecCommandHandler::default();
+     let resp = handler
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+             step_context,
+@@ -1182,6 +1186,7 @@
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+     let resp = handler
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+             step_context,
