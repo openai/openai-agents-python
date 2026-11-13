@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,7 @@ def _diagnostics(error: BaseException) -> str:
             continue
         visited.add(id(current))
         output.append(repr(vars(current)))
+        output.extend(repr(getattr(current, key, None)) for key in ("obj", "object", "doc"))
         trace = current.__traceback__
         while trace is not None:
             frame = trace.tb_frame
@@ -199,3 +202,59 @@ async def test_socket_send_and_cleanup_failures_retain_their_original_diagnostic
         assert caught.value.__cause__ is sending
         assert sending.__context__ is closing
         await model.cleanup_on_run_end(owner)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("shape", ["string", "list", "null", "boolean", "number"])
+async def test_invalid_response_shape_has_fixed_public_native_diagnostic_without_reporter_objects(
+    shape, streaming, caplog
+) -> None:
+    private = "synthetic-private-websocket-response-4565068927"
+    response = {"string": private, "list": [private], "null": None, "boolean": True, "number": 17}[
+        shape
+    ]
+
+    class Socket:
+        closed = 0
+
+        async def send(self, value: str) -> None:
+            pass
+
+        async def recv(self) -> str:
+            return json.dumps({"type": "response.created", "response": response})
+
+        async def close(self) -> None:
+            self.closed += 1
+
+    socket = Socket()
+
+    async def connect(request: ModelRequest, options: Any) -> Socket:
+        return socket
+
+    async with timeout(20), AsyncOpenAI(api_key="synthetic") as client:
+        async with NativeProvider(
+            model_backend=ResponsesWebSocketModel(client, socket_factory=connect)
+        ) as provider:
+            async with Agent(
+                model="gpt-4.1", instructions="Complete once.", provider=provider
+            ).session() as session:
+                turn = await session.submit("Synthetic request.")
+                with pytest.raises(
+                    RuntimeError, match="Responses WebSocket request failed after send"
+                ) as caught:
+                    if streaming:
+                        async for _ in turn.events():
+                            pass
+                    await turn.get_result()
+                reporter = _diagnostics(caught.value)
+                logging.getLogger(__name__).error(
+                    "Native error reporter object: %s",
+                    reporter,
+                    exc_info=(type(caught.value), caught.value, caught.value.__traceback__),
+                )
+                assert private not in reporter and private not in caplog.text
+                assert re.search(
+                    r"Responses WebSocket response must be an object",
+                    "".join(traceback.format_exception(caught.value)),
+                )
+                assert socket.closed == 1 and not client.is_closed()

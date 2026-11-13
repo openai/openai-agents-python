@@ -11,7 +11,7 @@ import math
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import Any, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 from weakref import WeakKeyDictionary
 
 from typing_extensions import TypedDict
@@ -46,12 +46,19 @@ class ResponsesSocketOptions(TypedDict):
 ResponsesSocketFactory: TypeAlias = Callable[[ModelRequest, ResponsesSocketOptions], Awaitable[Any]]
 
 
-class _QuietSocketLogger(logging.LoggerAdapter):
+if TYPE_CHECKING:
+    _SocketLoggerBase = logging.LoggerAdapter[logging.Logger]
+else:
+    _SocketLoggerBase = logging.LoggerAdapter
+
+
+class _QuietSocketLogger(_SocketLoggerBase):
     def isEnabledFor(self, level: int) -> bool:
         return level > logging.DEBUG and super().isEnabledFor(level)
 
 
 async def _connect(request: ModelRequest, options: ResponsesSocketOptions) -> Any:
+    socket_options: ResponsesWebSocketOptions = {"max_size": None, **options["websocket_options"]}
     try:
         from websockets.asyncio.client import connect
 
@@ -61,10 +68,10 @@ async def _connect(request: ModelRequest, options: ResponsesSocketOptions) -> An
             user_agent_header=None,
             logger=_QuietSocketLogger(logging.getLogger("websockets.client"), {}),
             open_timeout=options["open_timeout"],
-            **{"max_size": None, **options["websocket_options"]},
+            **cast(Any, socket_options),
         )
     finally:
-        del request, options
+        del request, options, socket_options
 
 
 def _capture_websocket_options(
@@ -389,6 +396,8 @@ class ResponsesWebSocketModel(ResponsesModel):
                 event = _decode_socket_frame(payload)
                 if not isinstance(event, dict):
                     raise ValueError("Responses WebSocket requires object events")
+                if "response" in event and not isinstance(event["response"], dict):
+                    raise ValueError("Responses WebSocket response must be an object")
                 candidate = event.get("response", {}).get("id")
                 if candidate is not None:
                     if response_id is not None and response_id != candidate:
