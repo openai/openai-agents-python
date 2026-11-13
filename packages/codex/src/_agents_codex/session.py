@@ -17518,7 +17518,7 @@ class Session(Generic[ContextT, OutputT]):
         before_seal: Callable[[], None] | None = None,
     ) -> SessionState:
         if self._configured_capture is not None:
-            return await _join(self._configured_capture)
+            return cast(SessionState, await _join(self._configured_capture))
         if self._sealed_checkpoint is not None:
             return SessionState.from_json(self._sealed_checkpoint)
         self._check_portable_capture()
@@ -17581,7 +17581,7 @@ class Session(Generic[ContextT, OutputT]):
             capture = _create_task(capture_configured())
             self._configured_capture = capture
             try:
-                return await _join(capture)
+                return cast(SessionState, await _join(capture))
             finally:
                 self._configured_capture = None
         return await self._checkpoint(active, before_seal=before_seal)
