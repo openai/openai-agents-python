@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 
@@ -255,6 +256,7 @@ async def test_gap_requires_resync_not_success(
     async with (
         timeout(20),
         Agent(instructions="Answer.", provider=provider(responses)).session() as session,
+        aclosing(session.events()),
     ):
         old = await session.submit("old")
         assert (await old.get_result()).final_output == "old"
@@ -273,6 +275,7 @@ async def test_retained_turn_streams_after_earlier_turn_loss(responses: Response
     async with (
         timeout(20),
         Agent(instructions="Answer.", provider=provider(responses)).session() as session,
+        aclosing(session.events()),
     ):
         old = await session.submit("old")
         assert (await old.get_result()).final_output == "a" * 350
@@ -431,6 +434,7 @@ async def test_evicted_root_with_retained_repair_requires_resync(
     async with (
         timeout(20),
         Agent(instructions="Answer.", provider=provider(responses)).session() as session,
+        aclosing(session.events()),
     ):
         turn = await session.submit(
             "Return a value", output_type=PromptedOutput(Answer, max_retries=1)
@@ -472,6 +476,7 @@ async def test_queued_cancel_without_native_start_is_not_history_loss(
         Agent(
             instructions="Answer.", tools=[hold], provider=provider(responses)
         ).session() as session,
+        aclosing(session.events()),
     ):
         if older_eviction:
             old = await session.submit("old")

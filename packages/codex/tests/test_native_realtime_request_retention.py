@@ -167,6 +167,8 @@ async def test_retirement_rollover_preserves_running_guardrail():
 
 async def test_terminal_request_byte_pressure_releases_only_terminal_reservations(monkeypatch):
     realtime = owner()
+    # Isolate request-identity pressure from the independent history buffer.
+    monkeypatch.setattr(realtime, "_record_function_history", lambda *args, **kwargs: None)
     monkeypatch.setattr(realtime, "_BUFFER_BYTES_LIMIT", 600)
     request(realtime, "active")
     for index in range(12):

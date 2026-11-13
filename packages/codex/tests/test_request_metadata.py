@@ -129,6 +129,7 @@ async def test_host_routes_exact_submission_and_drops_retired_metadata() -> None
     state = _Submission(cast(Any, None))
     state.issued = cast(Any, SimpleNamespace(turn_id="turn", submission_id="original"))
     session._request_observation_routes = weakref.WeakValueDictionary()
+    session._configured_usage_parent = None
     assert state.issued is not None
     session._register_request_observation(state, state.issued)
     event = {

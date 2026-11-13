@@ -8,6 +8,7 @@ import json
 import sys
 import weakref
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 from typing import Any, cast
@@ -579,7 +580,10 @@ async def test_late_root_completion_reports_evicted_owner(
             headers={"Authorization": "Bearer " + peer.token},
         )
         agent = Agent(instructions="Use the tool.", provider=provider(responses))
-        async with agent.session(environment=selected) as session:
+        async with (
+            agent.session(environment=selected) as session,
+            aclosing(session.events()),
+        ):
             native = session._native
 
             class DelayCompletion:

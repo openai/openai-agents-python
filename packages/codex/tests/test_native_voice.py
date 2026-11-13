@@ -385,7 +385,11 @@ async def test_early_speech_ignores_observation_gap_from_prior_turn(responses):
         instructions="Answer the question.",
         provider=NativeProvider(base_url=responses.url, api_key="synthetic-voice-key"),
     )
-    async with timeout(10), agent.session() as session:
+    async with (
+        timeout(10),
+        agent.session() as session,
+        aclosing(session.events()),
+    ):
         prior = await session.submit("prior question")
         assert (await prior.get_result()).final_output == "prior " * 300
         async with aclosing(session.events()) as retained:
