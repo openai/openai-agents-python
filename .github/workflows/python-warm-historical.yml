@@ -2,12 +2,12 @@ name: Historical warm Python replay
 'on':
   push:
     branches:
-    - ci/hillclimb/python-warm-historical-13
+    - ci/hillclimb/python-warm-linux-overlap-15
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: python-warm-historical-13-${{ github.ref }}
+  group: python-warm-linux-overlap-15-${{ github.ref }}
   cancel-in-progress: true
 env:
   UV_FROZEN: '1'
@@ -15,7 +15,7 @@ env:
   CARGO_INCREMENTAL: '0'
 jobs:
   changes:
-    if: github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && github.ref == 'refs/heads/ci/hillclimb/python-warm-historical-13'
+    if: github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && github.ref == 'refs/heads/ci/hillclimb/python-warm-linux-overlap-15'
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.native-source.outputs.code }}
@@ -197,9 +197,10 @@ jobs:
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping Windows mypy for non-code changes."
 
-  tests:
-    needs: [changes, native-linux]
-    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.native-linux.result == 'success' }}
+  linux-source-tests:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' }}
+    name: ${{ matrix.python-version == '3.11' && 'Linux source tests (3.11)' || format('tests ({0})', matrix.python-version) }}
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
     strategy:
@@ -233,7 +234,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Use the shared native build
         if: steps.changes.outputs.run == 'true'
-        uses: ./.github/actions/use-native
+        uses: ./.github/actions/use-native-historical
+        with:
+          source-run: ${{ needs.changes.outputs.native_source_run }}
+          snapshots: ${{ needs.changes.outputs.native_artifacts }}
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
@@ -286,17 +290,6 @@ jobs:
           AGENTS_REQUIRE_TRACING_QUALIFICATION: '1'
         run: |
           uv run --with grpcio==1.85.0 --with opentelemetry-proto==1.45.1 python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_tracing_native.py packages/codex/tests/test_telemetry_transports.py
-      - name: Verify the qualified wheel archive
-        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
-        env:
-          OPENAI_AGENTS_WHEEL: ${{ env.OPENAI_AGENTS_NATIVE_WHEEL }}
-        run: PYTHONPATH=. uv run --no-sync python -m pytest -q packages/codex/tests/test_distribution.py
-      - name: Verify copied documentation code against the qualified wheel
-        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
-        run: |
-          uv pip install --no-deps --target "$RUNNER_TEMP/docs-wheel" "$OPENAI_AGENTS_NATIVE_WHEEL"
-          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python .github/scripts/check_docs.py
-          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -m pytest -q packages/codex/tests/test_docs_code.py
       - name: Set up Node for the optional Vercel client example
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -327,6 +320,51 @@ jobs:
       - name: Skip tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."
+
+  tests:
+    name: tests (3.11)
+    needs: [changes, native-linux, linux-source-tests]
+    if: ${{ always() && needs.changes.result != 'skipped' }}
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
+    timeout-minutes: 100
+    env:
+      OPENAI_API_KEY: fake-for-tests
+      PYTEST_ADDOPTS: "-rA"
+    steps:
+      - name: Require successful source tests and native qualification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          SOURCE_RESULT: ${{ needs.linux-source-tests.result }}
+          QUALIFICATION_RESULT: ${{ needs.native-linux.result }}
+        run: |
+          test "$CHANGES_RESULT" = success
+          test "$SOURCE_RESULT" = success
+          test "$QUALIFICATION_RESULT" = success
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Setup uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
+        with:
+          version: "0.11.14"
+          enable-cache: true
+          prune-cache: true
+          python-version: "3.11"
+      - name: Use the shared native build
+        uses: ./.github/actions/use-native
+      - name: Install dependencies
+        run: make sync
+      - name: Verify the qualified wheel archive
+        env:
+          OPENAI_AGENTS_WHEEL: ${{ env.OPENAI_AGENTS_NATIVE_WHEEL }}
+        run: PYTHONPATH=. uv run --no-sync python -m pytest -q packages/codex/tests/test_distribution.py
+      - name: Verify copied documentation code against the qualified wheel
+        run: |
+          uv pip install --no-deps --target "$RUNNER_TEMP/docs-wheel" "$OPENAI_AGENTS_NATIVE_WHEEL"
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python .github/scripts/check_docs.py
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -m pytest -q packages/codex/tests/test_docs_code.py
 
   native-macos-sandbox-shards:
     if: ${{ !cancelled() && needs.changes.result == 'success' }}

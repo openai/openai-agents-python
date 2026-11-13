@@ -340,6 +340,6 @@ def test_preview_install_checks_do_not_enable_pypi_or_automatic_tags() -> None:
     assert codeql["on"]["push"]["branches"] == [
         "main",
         "feat/codex-harness",
-        "ci/hillclimb/python-warm-historical-13",
+        "ci/hillclimb/python-warm-linux-overlap-15",
     ]
     assert codeql["on"]["pull_request"]["branches"] == ["main", "feat/codex-harness"]
