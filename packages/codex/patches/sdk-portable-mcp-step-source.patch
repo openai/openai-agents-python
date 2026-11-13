@@ -1,0 +1,141 @@
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 6dacde25..9245e6ba 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -26,8 +26,6 @@ pub use responses_headers::CodexResponsesHeaders;
+ mod responses_metadata;
+ mod responses_retry;
+ pub(crate) mod session;
+-#[doc(hidden)]
+-pub use session::PrivateDisposableRun;
+ pub use codex_protocol::turn_input::NotSubmittedReason;
+ pub use codex_protocol::turn_input::RecoverTurnRequest;
+ pub use codex_protocol::turn_input::StartIfIdleSubmission;
+@@ -38,6 +36,8 @@ pub use codex_protocol::turn_input::TurnInputRequest;
+ pub use codex_protocol::turn_input::TurnInputSubmission;
+ pub use codex_protocol::turn_input::TurnStartOptions;
+ pub use responses_metadata::CodexResponsesMetadata;
++#[doc(hidden)]
++pub use session::PrivateDisposableRun;
+ pub use turn_metadata::detached_memory_responses_metadata;
+ mod codex_thread;
+ mod turn_extension_data;
+@@ -66,8 +66,8 @@ pub use codex_thread::GuardianRootMessage;
+ pub use codex_thread::GuardianRootSnapshot;
+ pub use codex_thread::ThreadConfigSnapshot;
+ pub use owned_question::{
+-    CapturedMcpApproval, ClaimedMcpApproval, McpApprovalCheckpointData, OwnedQuestion,
+-    PreparedMcpApproval,
++    CapturedMcpApproval, ClaimedMcpApproval, McpApprovalCheckpointData, McpApprovalSource,
++    OwnedQuestion, PreparedMcpApproval,
+ };
+ pub use session::sdk_raw_usage::SdkRawUsageLink;
+ pub use session::turn_context::TurnContext;
+@@ -82,9 +82,6 @@ pub use agent::api::AgentTurnOutcome;
+ pub use agent::api::DeliveryReceipt;
+ pub use agent::api::ManagedAgentTool;
+ pub use agent::api::ManagedAgentToolResult;
+-pub use tools::handlers::multi_agents_v2::managed_tool::{
+-    ManagedAgentToolCatalog, ManagedAgentToolContributor, ManagedAgentToolSpec,
+-};
+ pub use agent::api::SendRequest;
+ pub use agent::api::SpawnRequest;
+ pub use agent::types::AgentExecutionGuard;
+@@ -97,6 +94,9 @@ pub use agent::types::ResolvedMultiAgentV2UsageHints;
+ pub use agent::types::SpawnAgentForkMode;
+ pub use agent::types::SpawnAgentOptions;
+ pub use rollout_budget::RolloutBudgetReminder;
++pub use tools::handlers::multi_agents_v2::managed_tool::{
++    ManagedAgentToolCatalog, ManagedAgentToolContributor, ManagedAgentToolSpec,
++};
+ mod agent_communication;
+ mod agent_message_board;
+ pub use agent_message_board::install_agent_message_board;
+@@ -133,8 +133,8 @@ pub use mcp::McpManager;
+ mod original_image_detail;
+ pub use codex_mcp::CodexAppsToolsCache;
+ pub use codex_mcp::SandboxState;
+-mod mcp_openai_file;
+ mod mcp_approval_recovery;
++mod mcp_openai_file;
+ pub use mcp_approval_recovery::NativeMcpRecovery;
+ mod mcp_tool_call;
+ pub(crate) mod mention_syntax;
+diff --git a/codex-rs/core/src/mcp_tool_call.rs b/codex-rs/core/src/mcp_tool_call.rs
+index 097e57d5..61d3b522 100644
+--- a/codex-rs/core/src/mcp_tool_call.rs
++++ b/codex-rs/core/src/mcp_tool_call.rs
+@@ -1355,10 +1355,7 @@ pub(crate) struct McpToolApprovalContext {
+     pub(crate) metadata: McpToolApprovalMetadata,
+     pub(crate) review_context: GuardianReviewContext,
+     pub(crate) checkpoint_call: Option<(McpInvocation, PreparedMcpCall)>,
+-    pub(crate) checkpoint_source: Option<(
+-        Arc<codex_mcp::McpBinding>,
+-        codex_extension_api::ExtensionData,
+-    )>,
++    pub(crate) checkpoint_source: Option<crate::owned_question::McpApprovalSource>,
+ }
+
+ impl Session {
+@@ -1368,7 +1365,7 @@ impl Session {
+         invocation: &McpInvocation,
+         metadata: McpToolApprovalMetadata,
+         review_context: GuardianReviewContext,
+-        step_context: &crate::session::StepContext,
++        step_context: &Arc<StepContext>,
+         prepared_call: Option<PreparedMcpCall>,
+     ) -> Arc<McpToolApprovalContext> {
+         let key = (invocation.server.clone(), call_id.to_string());
+@@ -1381,11 +1378,8 @@ impl Session {
+             checkpoint_source: prepared_call
+                 .as_ref()
+                 .filter(|call| !call.is_host_owned_apps() && !call.is_selected_plugin_server())
+-                .map(|_| {
+-                    (
+-                        step_context.mcp.clone(),
+-                        step_context.extension_data.clone(),
+-                    )
++                .map(|_| crate::owned_question::McpApprovalSource {
++                    step: Arc::clone(step_context),
+                 }),
+             checkpoint_call: prepared_call
+                 .filter(|call| !call.is_host_owned_apps() && !call.is_selected_plugin_server())
+diff --git a/codex-rs/core/src/owned_question.rs b/codex-rs/core/src/owned_question.rs
+index 436de1a3..3c1cd6fe 100644
+--- a/codex-rs/core/src/owned_question.rs
++++ b/codex-rs/core/src/owned_question.rs
+@@ -389,17 +389,26 @@ impl CapturedMcpApproval {
+     }
+ }
+
++/// Native-only reference to the actual admitted step; never serialized.
++#[derive(Clone)]
++pub struct McpApprovalSource {
++    pub(crate) step: Arc<crate::session::step_context::StepContext>,
++}
++
++impl McpApprovalSource {
++    pub fn binding(&self) -> &Arc<codex_mcp::McpBinding> {
++        &self.step.mcp
++    }
++
++    pub fn data(&self) -> &codex_extension_api::ExtensionData {
++        &self.step.extension_data
++    }
++}
++
+ impl OwnedQuestion {
+     /// Original in-memory MCP binding and SDK attachments from this native call.
+     /// Peer requests and serialized checkpoint fields cannot create this source.
+-    pub async fn mcp_approval_source(
+-        &self,
+-    ) -> anyhow::Result<
+-        Option<(
+-            Arc<codex_mcp::McpBinding>,
+-            codex_extension_api::ExtensionData,
+-        )>,
+-    > {
++    pub async fn mcp_approval_source(&self) -> anyhow::Result<Option<McpApprovalSource>> {
+         if self.identity.is_none() {
+             return Ok(None);
+         }

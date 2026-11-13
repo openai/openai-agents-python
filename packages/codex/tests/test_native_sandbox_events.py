@@ -631,10 +631,90 @@ async def test_native_provider_operations_deliver_paired_headers(tmp_path: Path)
         )
         for phase in ("start", "finish")
     ]
-    assert all(event.data == {} for event in observed)
+    assert [event.data for event in observed] == [
+        {},
+        {},
+        {},
+        {},
+        {},
+        {"alive": True},
+        {"port": 8132},
+        {},
+        {},
+        {},
+        {},
+        {},
+    ]
     finishes = [event for event in observed if isinstance(event, SandboxSessionFinishEvent)]
     assert [(event.op, event.ok) for event in finishes if not event.ok] == [
         ("resolve_exposed_port", False)
     ]
     assert finishes[3].error_type == "SandboxOperationError"
     assert finishes[3].error_message is None
+
+
+@unix
+async def test_native_provider_applies_operation_and_sink_payload_policy(tmp_path: Path):
+    from io import BytesIO
+
+    operation_events = []
+    sink_events = []
+    public_events = []
+    instrumentation = Instrumentation(
+        sinks=[
+            CallbackSink(lambda event, _: operation_events.append(event)),
+            CallbackSink(
+                lambda event, _: sink_events.append(event),
+                payload_policy=EventPayloadPolicy(
+                    include_write_len=False, max_stdout_chars=3, max_stderr_chars=2
+                ),
+            ),
+            CallbackSink(
+                lambda event, _: public_events.append(event),
+                payload_policy=EventPayloadPolicy(include_exec_output=False),
+            ),
+        ],
+        payload_policy_by_op={
+            "write": EventPayloadPolicy(include_write_len=True),
+            "exec": EventPayloadPolicy(include_exec_output=True),
+        },
+    )
+    client = UnixLocalSandboxClient(
+        instrumentation=instrumentation,
+        inherit_host_environment=False,
+    )
+
+    @asynccontextmanager
+    async def connect(resource):
+        await resource.write(Path("synthetic-private-name"), BytesIO(b"synthetic payload"))
+        await resource.exec(
+            "sh",
+            "-c",
+            "printf stdout; printf stderr >&2",
+            shell=False,
+        )
+        yield Environment(url="wss://executor.invalid", cwd=resource.state.manifest.root)
+
+    async with sandbox_environment(
+        client, manifest=Manifest(root=str(tmp_path)), options=None, connect=connect
+    ):
+        pass
+
+    for events, length, output in (
+        (operation_events, 17, ("stdout", "stderr")),
+        (sink_events, None, ("std…", "st…")),
+        (public_events, 17, (None, None)),
+    ):
+        writes = [event for event in events if event.op == "write" and event.phase == "start"]
+        finished = [
+            event
+            for event in events
+            if isinstance(event, SandboxSessionFinishEvent) and event.op == "exec"
+        ]
+        assert len(writes) == len(finished) == 1
+        assert writes[0].data == ({} if length is None else {"bytes": length})
+        assert finished[0].data == {"exit_code": 0, "process.exit.code": 0}
+        assert (finished[0].stdout, finished[0].stderr) == output
+        assert finished[0].stdout_bytes is finished[0].stderr_bytes is None
+        assert all("synthetic-private-name" not in event.model_dump_json() for event in events)
+        assert all("printf" not in event.model_dump_json() for event in events)

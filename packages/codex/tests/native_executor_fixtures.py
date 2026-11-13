@@ -113,6 +113,7 @@ class ExecutorPeer:
     start_reply_dropped: asyncio.Event = field(default_factory=asyncio.Event)
     synthetic_process_output: str | None = field(default=None, repr=False)
     synthetic_sandbox_denied: bool = False
+    synthetic_process_stays_running: bool = False
     before_synthetic_process_reply: Callable[[str], Awaitable[None]] | None = field(
         default=None, repr=False
     )
@@ -244,7 +245,7 @@ class ExecutorPeer:
                                                     chunk = base64.b64encode(
                                                         self.synthetic_process_output.encode()
                                                     ).decode()
-                                                    for notification, payload in (
+                                                    notifications = (
                                                         (
                                                             "process/output",
                                                             {
@@ -271,7 +272,10 @@ class ExecutorPeer:
                                                             "process/closed",
                                                             {"processId": process_id, "seq": 3},
                                                         ),
-                                                    ):
+                                                    )
+                                                    if self.synthetic_process_stays_running:
+                                                        notifications = notifications[:1]
+                                                    for notification, payload in notifications:
                                                         await downstream.send_json(
                                                             {
                                                                 "method": notification,
@@ -299,12 +303,17 @@ class ExecutorPeer:
                                                             if (params.get("afterSeq") or 0) < 1
                                                             else []
                                                         )
+                                                        running = (
+                                                            self.synthetic_process_stays_running
+                                                        )
                                                         reply = {
                                                             "chunks": chunks,
-                                                            "nextSeq": 3,
-                                                            "exited": True,
-                                                            "exitCode": exit_code,
-                                                            "closed": True,
+                                                            "nextSeq": 1 if running else 3,
+                                                            "exited": not running,
+                                                            "exitCode": None
+                                                            if running
+                                                            else exit_code,
+                                                            "closed": not running,
                                                             "failure": None,
                                                             "sandboxDenied": sandbox_denied,
                                                         }

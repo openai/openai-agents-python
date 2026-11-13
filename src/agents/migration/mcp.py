@@ -17,6 +17,7 @@ from _agents_codex._mcp_names import _project_tool_names
 from _agents_codex.mcp import _capture_tool_name_overrides, _launch_text
 from _agents_codex.native_interception import Allow, Deny
 from _agents_codex.tools import _CapturedFunction
+from _agents_shared.strict_schema import ensure_strict_json_schema
 
 from ..classic.agent import AgentBase
 from ..classic.mcp._compat import (
@@ -101,8 +102,13 @@ class _SelectedMCPTool(FunctionTool[_Arguments, ToolOutput, _Binder[ContextT]]):
                         "type": "function",
                         "name": self.name,
                         "description": self.description,
-                        "inputSchema": json.loads(self._schema_json),
+                        "inputSchema": (
+                            ensure_strict_json_schema(json.loads(self._schema_json))
+                            if self.strict
+                            else json.loads(self._schema_json)
+                        ),
                         "deferLoading": self.defer_loading,
+                        **({"strict": True} if self.strict else {}),
                     }
                 ],
             }

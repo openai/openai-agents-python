@@ -1096,6 +1096,7 @@ impl EngineState {
         }
         // Subscribe before inspecting descendants so a concurrent spawn cannot be missed.
         let created = self.manager.subscribe_thread_created();
+        let child_questions = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let state = Arc::new(ThreadState {
             request_metadata: Arc::new(crate::request_metadata::Queue::default()),
             initial_turn: std::sync::Mutex::new(None),
@@ -1111,7 +1112,11 @@ impl EngineState {
                 extensions: extension_events,
                 created,
                 graph: self.agent_graph.subscribe(new.thread_id).await,
-                native: Some(next_native_event(new.thread)),
+                native: Some(next_owned_root_event(
+                    new.thread,
+                    new.thread_id,
+                    Arc::clone(&child_questions),
+                )),
                 session_terminal: None,
                 root_step_prefix: None,
                 children: VecDeque::new(),
@@ -1119,7 +1124,7 @@ impl EngineState {
                 next_instance: 0,
             }),
             child_instances: RwLock::new(HashMap::new()),
-            child_questions: Mutex::new(HashMap::new()),
+            child_questions,
             child_question_gate: Mutex::new(()),
             closed: AtomicBool::new(false),
             closing: watch::channel(false).0,
@@ -2368,12 +2373,13 @@ pub struct ThreadState {
     closing: watch::Sender<bool>,
     manual_event_drain: AtomicBool,
     pub(crate) child_instances: RwLock<HashMap<ThreadId, crate::native_agents::Instance>>,
-    child_questions: Mutex<HashMap<String, OwnedChildQuestion>>,
-    child_question_gate: Mutex<()>,
+    child_questions: Arc<std::sync::Mutex<HashMap<String, OwnedChildQuestion>>>,
+    pub(crate) child_question_gate: Mutex<()>,
 }
 
 #[derive(Clone)]
 struct OwnedChildQuestion {
+    root: bool,
     _tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
     child: ThreadId,
     instance: u64,
@@ -2412,6 +2418,44 @@ struct ChildReader {
     next: Option<NextEvent>,
     instance: u64,
     incarnation: Option<String>,
+}
+
+// Keep receipt capture inside the retained FIFO future. Cancelling a reader
+// cannot lose a dequeued question while its original turn lock is pending.
+fn next_owned_root_event(
+    thread: Arc<CodexThread>,
+    id: ThreadId,
+    questions: Arc<std::sync::Mutex<HashMap<String, OwnedChildQuestion>>>,
+) -> NextEvent {
+    Box::pin(async move {
+        let event = thread.next_event().await?;
+        if matches!(
+            &event.msg,
+            EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) | EventMsg::ShutdownComplete
+        ) {
+            questions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|_, question| !question.root);
+        }
+        if let Some(grant) = thread.capture_owned_question(&event).await {
+            let tracing = grant.tracing_context();
+            questions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    event.id.clone(),
+                    OwnedChildQuestion {
+                        root: true,
+                        _tracing: tracing,
+                        child: id,
+                        instance: 0,
+                        grant,
+                    },
+                );
+        }
+        Ok(event)
+    })
 }
 
 fn next_native_event(thread: Arc<CodexThread>) -> NextEvent {
@@ -2663,15 +2707,19 @@ impl ThreadState {
                 event["msg"]["tracing_context"] = serde_json::json!(tracing.token());
             }
             let id = ThreadId::new().to_string();
-            self.child_questions.lock().await.insert(
-                id.clone(),
-                OwnedChildQuestion {
-                    _tracing: tracing,
-                    child: source.0,
-                    instance: source.1,
-                    grant,
-                },
-            );
+            self.child_questions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    id.clone(),
+                    OwnedChildQuestion {
+                        root: false,
+                        _tracing: tracing,
+                        child: source.0,
+                        instance: source.1,
+                        grant,
+                    },
+                );
             event["msg"]["_sdk_question_id"] = serde_json::json!(id);
         }
         if let Some(tools) = thread.and_then(|thread| {
@@ -2744,7 +2792,11 @@ impl ThreadState {
                     self.manual_event_drain.store(false, Ordering::Release);
                     None
                 } else {
-                    Some(next_native_event(self.thread.clone()))
+                    Some(next_owned_root_event(
+                        self.thread.clone(),
+                        self.id,
+                        Arc::clone(&self.child_questions),
+                    ))
                 };
                 return native_event(None, event, admission_ready, false);
             }
@@ -2895,7 +2947,11 @@ impl ThreadState {
                     }
                 }
             };
-            events.native = Some(next_native_event(self.thread.clone()));
+            events.native = Some(next_owned_root_event(
+                self.thread.clone(),
+                self.id,
+                Arc::clone(&self.child_questions),
+            ));
             let event = event?;
             if matches!(event.msg, EventMsg::ShutdownComplete) {
                 events.native = None;
@@ -2930,37 +2986,108 @@ impl ThreadState {
                 .as_ref()
                 .and_then(|tools| tools.observed_admission(&event.id))
                 .is_some();
-            return native_event(None, event, admission_ready, project_reason);
+            return self.root_event(event, admission_ready, project_reason);
         }
     }
 
+    fn root_event(
+        &self,
+        event: Event,
+        admission_ready: bool,
+        project_reason: bool,
+    ) -> anyhow::Result<serde_json::Value> {
+        let receipt = event.id.clone();
+        let question = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&receipt)
+            .cloned();
+        let mut value = native_event(None, event, admission_ready, project_reason)?;
+        if receipt.starts_with("sdk-question:") {
+            // An expired receipt must not fall back to a server/request-ID reply.
+            value["msg"]["_sdk_question_id"] = serde_json::json!(receipt);
+            if let Some(tracing) = question.and_then(|question| question._tracing) {
+                value["msg"]["tracing_context"] = serde_json::json!(tracing.token());
+            }
+        }
+        Ok(value)
+    }
+
+    pub(crate) async fn pending_root_mcp_approval(
+        &self,
+    ) -> anyhow::Result<
+        Option<(
+            codex_core::McpApprovalSource,
+            codex_core::CapturedMcpApproval,
+        )>,
+    > {
+        let questions: Vec<_> = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|question| question.root)
+            .map(|question| question.grant.clone())
+            .collect();
+        let mut result = None;
+        for question in questions {
+            let Some(source) = question.mcp_approval_source().await? else {
+                continue;
+            };
+            if let Some(captured) = question.capture_mcp_approval(source.binding()).await? {
+                anyhow::ensure!(
+                    result.is_none(),
+                    "Native MCP checkpoint requires one pending owner"
+                );
+                result = Some((source, captured));
+            }
+        }
+        Ok(result)
+    }
+
     pub async fn child_question_pending(&self, id: &str) -> bool {
-        let question = self.child_questions.lock().await.get(id).cloned();
+        let question = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned();
         let Some(question) = question else {
             return false;
         };
-        let current = self.child_instances.read().ok().is_some_and(|instances| {
-            instances
-                .get(&question.child)
-                .is_some_and(|instance| instance.id == question.instance)
-        });
+        let current = question.root
+            || self.child_instances.read().ok().is_some_and(|instances| {
+                instances
+                    .get(&question.child)
+                    .is_some_and(|instance| instance.id == question.instance)
+            });
         let pending = !*self.closing.borrow() && current && question.grant.is_pending().await;
         if !pending && question.grant.url_completion_status().await == Some(false) {
-            self.child_questions.lock().await.remove(id);
+            self.child_questions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(id);
         }
         pending
     }
 
     pub async fn child_url_completion_status(&self, id: &str) -> Option<bool> {
-        let question = self.child_questions.lock().await.get(id).cloned();
+        let question = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned();
         let Some(question) = question else {
             return Some(false);
         };
-        let current = self.child_instances.read().ok().is_some_and(|instances| {
-            instances
-                .get(&question.child)
-                .is_some_and(|instance| instance.id == question.instance)
-        });
+        let current = question.root
+            || self.child_instances.read().ok().is_some_and(|instances| {
+                instances
+                    .get(&question.child)
+                    .is_some_and(|instance| instance.id == question.instance)
+            });
         let status = question.grant.url_completion_status().await;
         let status = if status != Some(true) && (*self.closing.borrow() || !current) {
             Some(false)
@@ -2968,28 +3095,41 @@ impl ThreadState {
             status
         };
         if status.is_some() {
-            self.child_questions.lock().await.remove(id);
+            self.child_questions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(id);
         }
         status
     }
 
     pub async fn child_url_pending(&self, id: &str) -> bool {
-        let question = self.child_questions.lock().await.get(id).cloned();
+        let question = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned();
         let Some(question) = question else {
             return false;
         };
-        let current = self.child_instances.read().ok().is_some_and(|instances| {
-            instances
-                .get(&question.child)
-                .is_some_and(|instance| instance.id == question.instance)
-        });
+        let current = question.root
+            || self.child_instances.read().ok().is_some_and(|instances| {
+                instances
+                    .get(&question.child)
+                    .is_some_and(|instance| instance.id == question.instance)
+            });
         // A pending probe must not consume a terminal receipt queued for Python.
         !*self.closing.borrow() && current && question.grant.is_url_pending().await
     }
 
     pub async fn cancel_child_url_completion(&self, id: &str) -> bool {
         let _question_gate = self.child_question_gate.lock().await;
-        let question = self.child_questions.lock().await.remove(id);
+        let question = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
         let Some(question) = question else {
             return false;
         };
@@ -3008,14 +3148,23 @@ impl ThreadState {
         if !self.child_question_pending(id).await {
             return Ok(false);
         }
-        let Some(question) = self.child_questions.lock().await.get(id).cloned() else {
+        let Some(question) = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned()
+        else {
             return Ok(false);
         };
         let url = question.grant.url_completion_status().await != Some(false);
         // The Core grant checks the captured turn-state identity again at consumption.
         let accepted = question.grant.respond(response).await;
         if !url {
-            self.child_questions.lock().await.remove(id);
+            self.child_questions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(id);
         }
         Ok(accepted)
     }
@@ -3213,7 +3362,10 @@ impl ThreadState {
             .lock()
             .await
             .retain(|_, owner| *owner != self.id);
-        self.child_questions.lock().await.clear();
+        self.child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.closed.store(true, Ordering::Release);
         if let Some(error) = process_shutdown_error {
             return Err(error.into());
@@ -3240,7 +3392,10 @@ impl ThreadState {
         self.manual_event_drain
             .store(drain_events, Ordering::Release);
         self.closing.send_replace(true);
-        self.child_questions.lock().await.clear();
+        self.child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.closed.store(true, Ordering::Release);
     }
 }

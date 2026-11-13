@@ -265,10 +265,15 @@ def test_runtime_dependencies_do_not_use_public_facades() -> None:
                     "agents.classic.sandbox.entries.mounts",
                     "agents.classic.sandbox.manifest",
                     "agents.classic.sandbox.remote_mount_policy",
+                    # DockerGateway checks concrete provisioning/lease identities.
+                    # Native Core still owns command dispatch and model execution.
+                    "agents.classic.sandbox.sandboxes.docker",
                     "agents.classic.sandbox.session.sandbox_client",
                     "agents.classic.sandbox.session.sandbox_session",
                     "agents.classic.sandbox.session.events",
                     "agents.classic.sandbox.session.sinks",
+                    "agents.classic.sandbox.types",
+                    "agents.classic.sandbox.workspace_paths",
                 }:
                     continue
                 # Keep event envelopes, sinks and dispatcher identity shared with
@@ -1113,4 +1118,25 @@ def test_domain_dependency_requires_named_source() -> None:
 def test_domain_dependency_accepts_standard_library_imports() -> None:
     assert not _domain_dependency_violations(
         {"_agents_codex._stored_history": "import statistics"}, "_stored_history"
+    )
+
+
+def test_sandbox_facade_first_import_has_been_initializing_shared_manifest_ownership() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+assert 'agents.sandbox' not in sys.modules
+import agents.sandbox as sandbox
+from _agents_shared.sandbox_manifest import _borrowed_manifest_lock
+from types import SimpleNamespace
+assert callable(sandbox.sandbox_environment)
+owner = SimpleNamespace()
+assert _borrowed_manifest_lock(owner) is _borrowed_manifest_lock(owner)
+assert 'agents._native' not in sys.modules
+""",
+        ],
+        check=True,
     )

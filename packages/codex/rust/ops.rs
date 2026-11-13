@@ -1,9 +1,7 @@
 //! JSON adapters for native operations that contain Rust-only channels or values.
 use crate::config::{decode, optional};
 use anyhow::{Context, Result, bail, ensure};
-use codex_core::context::{
-    ContextualUserFragment, InternalContextSource, InternalModelContextFragment,
-};
+use codex_core::context::{ContextualUserFragment, InternalContextSource, InternalModelContextFragment};
 use codex_core_api::{AbsolutePathBuf, CodexThread, WithTurnExtensionData};
 use codex_extension_api::{ExtensionDataInit, ToolNotFoundBehavior};
 use codex_protocol::config_types::{
@@ -883,6 +881,7 @@ pub async fn recover_prepared(
     value: Value,
     terminal: Option<crate::python_tools::RecoveredToolCompletionSeed>,
     staged_input: Option<codex_extension_api::StagedInputBatch>,
+    native_mcp: Option<codex_core::NativeMcpRecovery>,
 ) -> Result<Value> {
     let p: RecoveryOptions = decode(value)?;
     if let Some(model) = p.model_override.as_deref() {
@@ -907,6 +906,13 @@ pub async fn recover_prepared(
     }
     let thread = &state.thread;
     let mut init = thread.config_snapshot().await.turn_extension_init;
+    if let Some(native_mcp) = native_mcp {
+        anyhow::ensure!(
+            terminal.is_none(),
+            "Native MCP recovery cannot inherit function completion authority"
+        );
+        init.insert(native_mcp);
+    }
     init.insert(if p.raise_on_unknown_tool {
         ToolNotFoundBehavior::RaiseError
     } else {

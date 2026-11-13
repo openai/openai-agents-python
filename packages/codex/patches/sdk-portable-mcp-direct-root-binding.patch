@@ -1,0 +1,133 @@
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1403,6 +1403,31 @@
+         crate::realtime_conversation::release_voice_agent_sources(&self.session, generation);
+     }
+
++    /// Current accepted root MCP connections and catalog, without changing declarations.
++    /// Agent profiles keep their separate committed source and cannot use this path.
++    pub async fn accepted_root_mcp_binding(
++        &self,
++        server_name: &str,
++    ) -> CodexResult<Option<Arc<codex_mcp::McpBinding>>> {
++        if self.session.agent_profile_receipt().await?.is_some() {
++            return Ok(None);
++        }
++        let binding = self
++            .session
++            .services
++            .mcp_runtime
++            .try_current_binding_with_requirements(
++                &[server_name.to_owned()],
++                &std::collections::HashSet::new(),
++            )
++            .await
++            .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
++        if self.session.agent_profile_receipt().await?.is_some() {
++            return Ok(None);
++        }
++        Ok(binding)
++    }
++
+     /// Prepare exact Agent MCP servers under this Session's existing host configuration.
+     pub async fn prepare_agent_profile_mcp(
+         &self,
+--- a/codex-rs/core/src/mcp_tool_call.rs
++++ b/codex-rs/core/src/mcp_tool_call.rs
+@@ -260,6 +260,7 @@
+         &invocation,
+         metadata.clone(),
+         GuardianReviewContext::from(step_context),
++        step_context,
+         matches!(source, crate::tools::context::ToolCallSource::Direct)
+             .then(|| prepared_call.clone()),
+     );
+@@ -1354,6 +1355,10 @@
+     pub(crate) metadata: McpToolApprovalMetadata,
+     pub(crate) review_context: GuardianReviewContext,
+     pub(crate) checkpoint_call: Option<(McpInvocation, PreparedMcpCall)>,
++    pub(crate) checkpoint_source: Option<(
++        Arc<codex_mcp::McpBinding>,
++        codex_extension_api::ExtensionData,
++    )>,
+ }
+
+ impl Session {
+@@ -1363,6 +1368,7 @@
+         invocation: &McpInvocation,
+         metadata: McpToolApprovalMetadata,
+         review_context: GuardianReviewContext,
++        step_context: &crate::session::StepContext,
+         prepared_call: Option<PreparedMcpCall>,
+     ) -> Arc<McpToolApprovalContext> {
+         let key = (invocation.server.clone(), call_id.to_string());
+@@ -1372,6 +1378,15 @@
+             .then(|| invocation.clone()),
+             metadata,
+             review_context,
++            checkpoint_source: prepared_call
++                .as_ref()
++                .filter(|call| !call.is_host_owned_apps() && !call.is_selected_plugin_server())
++                .map(|_| {
++                    (
++                        step_context.mcp.clone(),
++                        step_context.extension_data.clone(),
++                    )
++                }),
+             checkpoint_call: prepared_call
+                 .filter(|call| !call.is_host_owned_apps() && !call.is_selected_plugin_server())
+                 .map(|call| (invocation.clone(), call)),
+--- a/codex-rs/core/src/owned_question.rs
++++ b/codex-rs/core/src/owned_question.rs
+@@ -193,10 +193,8 @@
+         destination_thread_id: codex_protocol::ThreadId,
+     ) -> anyhow::Result<PreparedMcpApproval> {
+         self.validate_bounds()?;
+-        anyhow::ensure!(
+-            destination_thread_id != self.source_thread_id,
+-            "MCP approval restore requires a new native thread"
+-        );
++        // Portable restore preserves durable thread IDs. bind_fresh requires a
++        // new live sender and rejects the old token and receipt independently.
+         anyhow::ensure!(
+             self.version == 1
+                 && !self.call_id.is_empty()
+@@ -392,6 +390,38 @@
+ }
+
+ impl OwnedQuestion {
++    /// Original in-memory MCP binding and SDK attachments from this native call.
++    /// Peer requests and serialized checkpoint fields cannot create this source.
++    pub async fn mcp_approval_source(
++        &self,
++    ) -> anyhow::Result<
++        Option<(
++            Arc<codex_mcp::McpBinding>,
++            codex_extension_api::ExtensionData,
++        )>,
++    > {
++        if self.identity.is_none() {
++            return Ok(None);
++        }
++        let QuestionKey::Elicitation(server, RequestId::String(request_id)) = &self.key else {
++            return Ok(None);
++        };
++        let prefix = format!(
++            "{}_",
++            crate::mcp_tool_call::MCP_TOOL_APPROVAL_QUESTION_ID_PREFIX
++        );
++        let Some(call_id) = request_id.as_ref().strip_prefix(&prefix) else {
++            return Ok(None);
++        };
++        let Some(context) = self.session.mcp_tool_approval_metadata(server, call_id) else {
++            return Ok(None);
++        };
++        if !self.is_pending().await {
++            return Ok(None);
++        }
++        Ok(context.checkpoint_source.clone())
++    }
++
+     /// Capture a direct ordinary MCP approval through its original native owner.
+     /// Current SDK suspension guards remain until sealing and restoration are wired.
+     pub async fn capture_mcp_approval(

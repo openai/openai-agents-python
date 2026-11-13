@@ -1,0 +1,1650 @@
+diff --git a/codex-rs/codex-mcp/src/binding.rs b/codex-rs/codex-mcp/src/binding.rs
+--- a/codex-rs/codex-mcp/src/binding.rs
++++ b/codex-rs/codex-mcp/src/binding.rs
+@@ -306,6 +306,27 @@
+             unreachable!("prepared MCP calls retain their immutable permission authority");
+         };
+         permission_profile
++    }
++
++    /// Compares the raw declaration and its captured permission authority.
++    /// Transport instances may differ after reconnecting. This check never grants execution.
++    pub fn has_same_approval_declaration(&self, current: &Self) -> bool {
++        self.server_name == current.server_name
++            && self.tool_info == current.tool_info
++            && self.config.mcp_server_catalog.server(&self.server_name)
++                == current
++                    .config
++                    .mcp_server_catalog
++                    .server(&current.server_name)
++            && self.permission_profile() == current.permission_profile()
++            && self.config.approval_policy.value() == current.config.approval_policy.value()
++            && self.config.approvals_reviewer == current.config.approvals_reviewer
++            && self.server_environment_id() == current.server_environment_id()
++            && self.server_origin() == current.server_origin()
++            && self.tool_approval_mode() == current.tool_approval_mode()
++            && self.plugin_id == current.plugin_id
++            && self.selected_plugin_server == current.selected_plugin_server
++            && self.client.tool_timeout == current.client.tool_timeout
+     }
+
+     pub fn transport_instance(&self) -> Option<u64> {
+diff --git a/codex-rs/codex-mcp/src/binding_tests.rs b/codex-rs/codex-mcp/src/binding_tests.rs
+--- a/codex-rs/codex-mcp/src/binding_tests.rs
++++ b/codex-rs/codex-mcp/src/binding_tests.rs
+@@ -409,3 +409,43 @@
+         .await
+         .expect("catalog refresh should finish after preparation");
+ }
++
++#[tokio::test]
++async fn approval_checkpoint_rejects_changed_raw_declaration_and_authority() {
++    let source = test_step("new", AppToolApproval::Prompt, false).await;
++    let original = source.step.prepare_call(SERVER_NAME, TOOL_NAME).unwrap();
++    assert!(original.has_same_approval_declaration(&original.clone()));
++
++    let mut changed = original.clone();
++    changed.tool_info.callable_name = "different_alias".into();
++    assert!(!original.has_same_approval_declaration(&changed));
++
++    let mut changed = original.clone();
++    changed.tool_info.tool.name = "another_raw_tool".into();
++    assert!(!original.has_same_approval_declaration(&changed));
++
++    let mut changed = original.clone();
++    changed.tool_info.tool.input_schema = Arc::new(JsonObject::from_iter([(
++        "type".into(),
++        serde_json::json!("object"),
++    )]));
++    assert!(!original.has_same_approval_declaration(&changed));
++
++    let mut changed = original.clone();
++    changed.server_name = "another_raw_server".into();
++    assert!(!original.has_same_approval_declaration(&changed));
++
++    let mut changed = original.clone();
++    changed.server_metadata.origin = Some(McpServerOrigin::StreamableHttp(
++        "https://different.example".into(),
++    ));
++    assert!(!original.has_same_approval_declaration(&changed));
++
++    let mut changed = original.clone();
++    changed.server_metadata.default_tools_approval_mode = Some(AppToolApproval::Approve);
++    assert!(!original.has_same_approval_declaration(&changed));
++
++    let mut changed = original.clone();
++    changed.server_metadata.environment_id = "different-environment".into();
++    assert!(!original.has_same_approval_declaration(&changed));
++}
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -65,7 +65,9 @@
+ pub use codex_thread::GuardianRootMessage;
+ pub use codex_thread::GuardianRootSnapshot;
+ pub use codex_thread::ThreadConfigSnapshot;
+-pub use owned_question::OwnedQuestion;
++pub use owned_question::{
++    CapturedMcpApproval, McpApprovalCheckpointData, OwnedQuestion, PreparedMcpApproval,
++};
+ pub use session::sdk_raw_usage::SdkRawUsageLink;
+ pub use session::turn_context::TurnContext;
+ pub use thread_startup_metadata::ThreadStartupMetadata;
+@@ -131,6 +133,8 @@
+ pub use codex_mcp::CodexAppsToolsCache;
+ pub use codex_mcp::SandboxState;
+ mod mcp_openai_file;
++mod mcp_approval_recovery;
++pub use mcp_approval_recovery::NativeMcpRecovery;
+ mod mcp_tool_call;
+ pub(crate) mod mention_syntax;
+ pub(crate) mod utils;
+diff --git a/codex-rs/core/src/mcp_approval_recovery.rs b/codex-rs/core/src/mcp_approval_recovery.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/mcp_approval_recovery.rs
+@@ -0,0 +1,335 @@
++//! In-memory reentry for one admitted ordinary MCP call, before another model sample.
++use crate::owned_question::PreparedMcpApproval;
++use crate::session::session::Session;
++use crate::session::turn_context::TurnContext;
++use codex_protocol::models::ResponseItem;
++use rmcp::model::RequestId;
++use std::sync::{Arc, Mutex};
++
++#[derive(Clone)]
++pub struct NativeMcpRecovery {
++    prepared: PreparedMcpApproval,
++    response_observation_id: String,
++    state: Arc<Mutex<RecoveryState>>,
++}
++
++struct RecoveryState {
++    call: Option<ResponseItem>,
++    fresh_identity: Option<Arc<String>>,
++    replied: bool,
++    finished: bool,
++}
++
++pub(crate) fn matches_call(
++    data: &crate::owned_question::McpApprovalCheckpointData,
++    item: &ResponseItem,
++) -> bool {
++    let ResponseItem::FunctionCall {
++        call_id,
++        namespace,
++        name,
++        arguments,
++        encrypted_function_args,
++        asynchronous,
++        ..
++    } = item
++    else {
++        return false;
++    };
++    let arguments = if arguments.is_empty() {
++        Some(None)
++    } else {
++        serde_json::from_str::<serde_json::Value>(arguments)
++            .ok()
++            .map(Some)
++    };
++    call_id == &data.call_id
++        && namespace.as_deref().unwrap_or_default() == data.callable_namespace
++        && name == &data.callable_name
++        && encrypted_function_args.is_none()
++        && *asynchronous != Some(true)
++        && arguments.as_ref() == Some(&data.arguments)
++}
++
++fn matches_native_runtime(
++    runtime: &dyn crate::tools::registry::CoreToolRuntime,
++    server: &str,
++    tool: &str,
++) -> bool {
++    runtime.type_id() == std::any::TypeId::of::<crate::tools::handlers::mcp::McpHandler>()
++        && runtime.mcp_server_name() == Some(server)
++        && runtime.mcp_tool_name() == Some(tool)
++}
++
++impl NativeMcpRecovery {
++    pub(crate) fn validate_runtime(
++        &self,
++        runtime: &dyn crate::tools::registry::CoreToolRuntime,
++    ) -> anyhow::Result<()> {
++        anyhow::ensure!(
++            matches_native_runtime(
++                runtime,
++                &self.prepared.source.server_name,
++                &self.prepared.source.tool_name
++            ),
++            "MCP recovery requires its exact native runtime"
++        );
++        Ok(())
++    }
++
++    /// Accept only the canonical sampled call already validated by the native frame.
++    pub fn new(
++        prepared: PreparedMcpApproval,
++        call: ResponseItem,
++        response_observation_id: String,
++    ) -> anyhow::Result<Self> {
++        anyhow::ensure!(
++            !response_observation_id.is_empty() && response_observation_id.len() <= 1024,
++            "MCP recovery requires its completed sample identity"
++        );
++        anyhow::ensure!(
++            matches_call(&prepared.source, &call),
++            "MCP recovery call changed"
++        );
++        Ok(Self {
++            prepared,
++            response_observation_id,
++            state: Arc::new(Mutex::new(RecoveryState {
++                call: Some(call),
++                fresh_identity: None,
++                replied: false,
++                finished: false,
++            })),
++        })
++    }
++
++    pub(crate) fn take_call(
++        &self,
++        session: &Session,
++        turn: &TurnContext,
++        current: &codex_mcp::McpBinding,
++        history: &[codex_history::RolloutItem],
++    ) -> anyhow::Result<ResponseItem> {
++        anyhow::ensure!(
++            session.thread_id == self.prepared.destination_thread_id
++                && turn.sub_id == self.prepared.source.turn_id
++                && crate::owned_question::sdk_owns_prompts(session, turn),
++            "MCP recovery requires its current native prompt owner"
++        );
++        self.prepared.validate_current(current)?;
++        let mut state = self
++            .state
++            .lock()
++            .map_err(|_| anyhow::anyhow!("MCP recovery poisoned"))?;
++        let call = state
++            .call
++            .as_ref()
++            .ok_or_else(|| anyhow::anyhow!("MCP recovery already started"))?;
++        use codex_history::RolloutItem;
++        use codex_protocol::protocol::{EventMsg, ResponseObservationStatus};
++        let anchors: Vec<_> = history
++            .iter()
++            .enumerate()
++            .filter_map(|(index, row)| match row {
++                RolloutItem::ResponseObservationRecord(record)
++                    if record.id == self.response_observation_id =>
++                {
++                    Some((index, record))
++                }
++                _ => None,
++            })
++            .collect();
++        let [(anchor, record)] = anchors.as_slice() else {
++            anyhow::bail!("MCP recovery lacks its unique completed sample");
++        };
++        anyhow::ensure!(
++            record.thread_id == session.thread_id
++                && record.turn_id == turn.sub_id
++                && record.observation.status == ResponseObservationStatus::Completed,
++            "MCP recovery sample owner changed"
++        );
++        let original_start = history[..*anchor]
++            .iter()
++            .rposition(|row| matches!(row, RolloutItem::EventMsg(EventMsg::TurnStarted(_))))
++            .ok_or_else(|| anyhow::anyhow!("MCP recovery sample has no original turn"))?;
++        anyhow::ensure!(
++            matches!(&history[original_start],
++                RolloutItem::EventMsg(EventMsg::TurnStarted(start)) if start.turn_id == turn.sub_id),
++            "MCP recovery sample has a different original turn"
++        );
++        let start = history[original_start + 1..*anchor]
++            .iter()
++            .rposition(|row| matches!(row, RolloutItem::ResponseObservationRecord(_)))
++            .map_or(original_start, |index| original_start + index + 1);
++        let mut sampled = Vec::new();
++        for row in &history[start + 1..*anchor] {
++            if let RolloutItem::ResponseItem(item) = row {
++                match &item.item {
++                    ResponseItem::FunctionCall { .. } => sampled.push(&item.item),
++                    ResponseItem::CustomToolCall { .. }
++                    | ResponseItem::ComputerCall { .. }
++                    | ResponseItem::ApplyPatchCall { .. }
++                    | ResponseItem::ShellCall { .. }
++                    | ResponseItem::ToolSearchCall { .. } => {
++                        anyhow::bail!("MCP recovery sample contains another native operation")
++                    }
++                    ResponseItem::Message { .. } | ResponseItem::Reasoning { .. } => {}
++                    _ => anyhow::bail!("MCP recovery sample contains another response operation"),
++                }
++            }
++        }
++        anyhow::ensure!(!state.finished && sampled.as_slice() == [call]
++            && !history[start + 1..].iter().any(|row| matches!(row,
++                RolloutItem::ResponseItem(item) if matches!(&item.item,
++                    ResponseItem::FunctionCallOutput { call_id: Some(id), .. }
++                        if id == &self.prepared.source.call_id)))
++            && !history[*anchor + 1..].iter().any(|row| match row {
++                RolloutItem::ResponseObservationRecord(record) => record.thread_id == session.thread_id && record.turn_id == turn.sub_id,
++                RolloutItem::ResponseItem(item) => matches!(&item.item,
++                    ResponseItem::FunctionCallOutput { call_id: Some(id), .. } if id == &self.prepared.source.call_id),
++                _ => false,
++            }), "MCP recovery no longer matches the accepted pending call");
++        state
++            .call
++            .take()
++            .ok_or_else(|| anyhow::anyhow!("MCP recovery already started"))
++    }
++
++    /// Bind the actual new sender before publishing its request, never a stored token.
++    pub(crate) async fn bind_question(
++        &self,
++        session: &Session,
++        turn: &TurnContext,
++        server: &str,
++        request: &RequestId,
++    ) -> anyhow::Result<()> {
++        let data = &self.prepared.source;
++        anyhow::ensure!(
++            session.thread_id == self.prepared.destination_thread_id
++                && turn.sub_id == data.turn_id
++                && server == data.server_name
++                && *request == RequestId::String(data.request_id.clone().into()),
++            "MCP recovery question changed"
++        );
++        let context = session
++            .mcp_tool_approval_metadata(server, &data.call_id)
++            .ok_or_else(|| anyhow::anyhow!("MCP recovery lacks its current call owner"))?;
++        let (invocation, call) = context
++            .checkpoint_call
++            .ok_or_else(|| anyhow::anyhow!("MCP recovery requires a direct ordinary MCP call"))?;
++        anyhow::ensure!(
++            invocation.server == data.server_name
++                && invocation.tool == data.tool_name
++                && invocation.arguments == data.arguments
++                && self.prepared.call.has_same_approval_declaration(&call),
++            "MCP recovery declaration changed before its new question"
++        );
++        let active = session.active_turn.lock().await;
++        let active = active
++            .as_ref()
++            .ok_or_else(|| anyhow::anyhow!("MCP recovery turn expired"))?;
++        anyhow::ensure!(
++            active.task.as_ref().is_some_and(|task| {
++                std::ptr::eq(task.turn_context.as_ref(), turn)
++                    && !task.cancellation_token.is_cancelled()
++            }),
++            "MCP recovery turn expired"
++        );
++        let native_state = active.turn_state.lock().await;
++        let identity = native_state
++            .elicitation_identity(server, request)
++            .ok_or_else(|| anyhow::anyhow!("MCP recovery lacks a live native sender"))?;
++        anyhow::ensure!(
++            identity.as_str() != data.token
++                && format!("sdk-question:{}", identity.as_str()) != data.receipt,
++            "MCP recovery cannot reuse its old receipt"
++        );
++        let mut state = self
++            .state
++            .lock()
++            .map_err(|_| anyhow::anyhow!("MCP recovery poisoned"))?;
++        anyhow::ensure!(
++            state.call.is_none() && state.fresh_identity.is_none() && !state.finished,
++            "MCP recovery question already bound"
++        );
++        state.fresh_identity = Some(identity);
++        Ok(())
++    }
++
++    pub(crate) fn question_replied(&self, received: bool) {
++        if let Ok(mut state) = self.state.lock() {
++            state.replied = received && state.fresh_identity.is_some() && !state.finished;
++        }
++    }
++
++    /// Normal native decision parsing still decides allow/deny; this only fences reentry.
++    pub(crate) fn validate_effect(
++        &self,
++        turn: &TurnContext,
++        call_id: &str,
++        invocation: &codex_protocol::protocol::McpInvocation,
++        call: &codex_mcp::PreparedMcpCall,
++    ) -> anyhow::Result<()> {
++        let data = &self.prepared.source;
++        let state = self
++            .state
++            .lock()
++            .map_err(|_| anyhow::anyhow!("MCP recovery poisoned"))?;
++        anyhow::ensure!(
++            state.replied
++                && state.fresh_identity.is_some()
++                && !state.finished
++                && turn.sub_id == data.turn_id
++                && call_id == data.call_id
++                && invocation.server == data.server_name
++                && invocation.tool == data.tool_name
++                && invocation.arguments == data.arguments
++                && self.prepared.call.has_same_approval_declaration(call),
++            "MCP recovery requires its fresh native decision before an effect"
++        );
++        Ok(())
++    }
++
++    pub(crate) fn finish(&self) -> anyhow::Result<()> {
++        let mut state = self
++            .state
++            .lock()
++            .map_err(|_| anyhow::anyhow!("MCP recovery poisoned"))?;
++        anyhow::ensure!(
++            state.replied && state.fresh_identity.is_some() && !state.finished,
++            "MCP recovery did not settle through its fresh native question"
++        );
++        state.finished = true;
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod runtime_identity_tests {
++    use super::*;
++
++    #[test]
++    fn native_runtime_keeps_raw_identity_separate_from_its_callable_alias() {
++        let info = codex_mcp::ToolInfo {
++            server_name: "docs".into(),
++            supports_parallel_tool_calls: false,
++            server_origin: None,
++            callable_namespace: "mcp__docs".into(),
++            callable_name: "reviewed".into(),
++            namespace_description: None,
++            tool: rmcp::model::Tool::new(
++                "find-record".to_owned(),
++                "fixture".to_owned(),
++                Arc::new(rmcp::model::JsonObject::default()),
++            ),
++            openai_file_input_optional_fields: Default::default(),
++            connector_id: None,
++            connector_name: None,
++            plugin_display_names: Vec::new(),
++        };
++        let runtime = crate::tools::handlers::mcp::McpHandler::new(info).unwrap();
++        assert!(matches_native_runtime(&runtime, "docs", "find-record"));
++        assert!(!matches_native_runtime(&runtime, "docs", "reviewed"));
++        assert!(!matches_native_runtime(&runtime, "other", "find-record"));
++    }
++}
+diff --git a/codex-rs/core/src/mcp_tool_call.rs b/codex-rs/core/src/mcp_tool_call.rs
+--- a/codex-rs/core/src/mcp_tool_call.rs
++++ b/codex-rs/core/src/mcp_tool_call.rs
+@@ -260,6 +260,8 @@
+         &invocation,
+         metadata.clone(),
+         GuardianReviewContext::from(step_context),
++        matches!(source, crate::tools::context::ToolCallSource::Direct)
++            .then(|| prepared_call.clone()),
+     );
+     notify_mcp_tool_call_started(
+         sess.as_ref(),
+@@ -470,6 +472,14 @@
+     let mut elicitation_type = None;
+     let mut request_failed = false;
+     let result = async {
++        if let Some(recovery) = turn_context
++            .extension_data
++            .get::<crate::NativeMcpRecovery>()
++        {
++            recovery
++                .validate_effect(turn_context, call_id, &invocation, &prepared_call)
++                .map_err(|error| error.to_string())?;
++        }
+         let result = codex_rmcp_client::with_elicitation_owner(
+             turn_context.sub_id.clone(),
+             if sess
+@@ -1343,6 +1353,7 @@
+     pub(crate) invocation: Option<McpInvocation>,
+     pub(crate) metadata: McpToolApprovalMetadata,
+     pub(crate) review_context: GuardianReviewContext,
++    pub(crate) checkpoint_call: Option<(McpInvocation, PreparedMcpCall)>,
+ }
+
+ impl Session {
+@@ -1352,6 +1363,7 @@
+         invocation: &McpInvocation,
+         metadata: McpToolApprovalMetadata,
+         review_context: GuardianReviewContext,
++        prepared_call: Option<PreparedMcpCall>,
+     ) -> Arc<McpToolApprovalContext> {
+         let key = (invocation.server.clone(), call_id.to_string());
+         let metadata = Arc::new(McpToolApprovalContext {
+@@ -1360,6 +1372,9 @@
+             .then(|| invocation.clone()),
+             metadata,
+             review_context,
++            checkpoint_call: prepared_call
++                .filter(|call| !call.is_host_owned_apps() && !call.is_selected_plugin_server())
++                .map(|call| (invocation.clone(), call)),
+         });
+         let mut registry = self
+             .mcp_tool_approval_metadata
+diff --git a/codex-rs/core/src/mcp_tool_call_tests.rs b/codex-rs/core/src/mcp_tool_call_tests.rs
+--- a/codex-rs/core/src/mcp_tool_call_tests.rs
++++ b/codex-rs/core/src/mcp_tool_call_tests.rs
+@@ -3581,6 +3581,7 @@
+             &invocation,
+             metadata.clone(),
+             review_context.clone(),
++            None,
+         );
+         std::future::pending::<()>().await;
+     });
+@@ -3590,6 +3591,7 @@
+         &invocation,
+         metadata.clone(),
+         review_context.clone(),
++        None,
+     );
+     assert_eq!(
+         session
+@@ -3613,6 +3615,7 @@
+         &invocation,
+         metadata,
+         review_context,
++        None,
+     );
+     let registry = session.mcp_tool_approval_metadata.lock().unwrap();
+     let mut keys = registry.keys().cloned().collect::<Vec<_>>();
+diff --git a/codex-rs/core/src/owned_question.rs b/codex-rs/core/src/owned_question.rs
+--- a/codex-rs/core/src/owned_question.rs
++++ b/codex-rs/core/src/owned_question.rs
+@@ -21,7 +21,432 @@
+     identity: Option<Arc<String>>,
+     url_receipt: Option<tokio::sync::watch::Receiver<Option<bool>>>,
+ }
++/// Checkpoint data only. Deserializing it cannot recreate a native question grant.
++#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct McpApprovalCheckpointData {
++    pub source_thread_id: codex_protocol::ThreadId,
++    pub turn_id: String,
++    pub call_id: String,
++    pub request_id: String,
++    pub receipt: String,
++    pub token: String,
++    pub version: u32,
++    pub server_name: String,
++    pub tool_name: String,
++    pub callable_namespace: String,
++    pub callable_name: String,
++    pub declaration_sha256: String,
++    pub arguments: Option<serde_json::Value>,
++}
++
++/// The original question and prepared call stay live until sealing is implemented.
++/// Neither this capture nor validation settles, suspends, or restores the call.
++#[derive(Clone)]
++pub struct CapturedMcpApproval {
++    question: OwnedQuestion,
++    call: codex_mcp::PreparedMcpCall,
++    data: McpApprovalCheckpointData,
++}
++
++const MAX_MCP_APPROVAL_CHECKPOINT_BYTES: usize = 65_536;
++
++fn bounded_checkpoint_json<T: serde::Serialize>(value: &T) -> anyhow::Result<Vec<u8>> {
++    struct Buffer(Vec<u8>);
++    impl std::io::Write for Buffer {
++        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
++            if bytes.len() > MAX_MCP_APPROVAL_CHECKPOINT_BYTES.saturating_sub(self.0.len()) {
++                return Err(std::io::Error::other(
++                    "MCP approval checkpoint limit exceeded",
++                ));
++            }
++            self.0.extend_from_slice(bytes);
++            Ok(bytes.len())
++        }
++        fn flush(&mut self) -> std::io::Result<()> {
++            Ok(())
++        }
++    }
++    let mut buffer = Buffer(Vec::new());
++    serde_json::to_writer(&mut buffer, value)
++        .map_err(|_| anyhow::anyhow!("MCP approval checkpoint data exceeds its supported bound"))?;
++    Ok(buffer.0)
++}
++
++fn mcp_approval_declaration_fingerprint(
++    call: &codex_mcp::PreparedMcpCall,
++) -> anyhow::Result<String> {
++    use sha2::{Digest, Sha256};
++    let registration = call
++        .config()
++        .mcp_server_catalog
++        .server(call.server_name())
++        .ok_or_else(|| anyhow::anyhow!("MCP approval requires a current server declaration"))?;
++    let config = registration.config();
++    let codex_config::McpServerTransportConfig::StreamableHttp {
++        url,
++        bearer_token_env_var,
++        http_headers,
++        env_http_headers,
++        http_headers_helper,
++    } = &config.transport
++    else {
++        anyhow::bail!("MCP approval checkpoint requires an ordinary host HTTP declaration");
++    };
++    anyhow::ensure!(
++        config.is_local_environment()
++            && call.server_environment_id() == codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID
++            && !call.is_host_owned_apps()
++            && !call.is_selected_plugin_server()
++            && bearer_token_env_var.is_none()
++            && http_headers.as_ref().is_none_or(|v| v.is_empty())
++            && env_http_headers.as_ref().is_none_or(|v| v.is_empty())
++            && http_headers_helper.is_none()
++            && config.oauth.is_none()
++            && config.oauth_resource.is_none()
++            && config.scopes.is_none(),
++        "MCP approval checkpoint cannot prove this declaration's credential or environment identity"
++    );
++    let endpoint = url::Url::parse(url)
++        .map_err(|_| anyhow::anyhow!("MCP approval checkpoint endpoint is unsupported"))?;
++    anyhow::ensure!(
++        matches!(endpoint.scheme(), "http" | "https")
++            && endpoint.has_host()
++            && endpoint.username().is_empty()
++            && endpoint.password().is_none()
++            && endpoint.query().is_none()
++            && endpoint.fragment().is_none(),
++        "MCP approval checkpoint endpoint is unsupported"
++    );
++    let tool = call.tool_info();
++    let encoded = bounded_checkpoint_json(&(
++        1u32,
++        call.server_name(),
++        endpoint.as_str(),
++        &config.auth,
++        call.server_environment_id(),
++        call.permission_profile(),
++        call.config().approval_policy.value(),
++        call.config().approvals_reviewer,
++        call.tool_approval_mode(),
++        config.tool_timeout_sec,
++        call.output_token_limit(),
++        &tool.callable_namespace,
++        &tool.callable_name,
++        &(
++            &tool.tool,
++            tool.supports_parallel_tool_calls,
++            &tool.namespace_description,
++            &tool.openai_file_input_optional_fields,
++            &tool.connector_id,
++            &tool.connector_name,
++            &tool.plugin_display_names,
++        ),
++    ))?;
++    let mut canonical: serde_json::Value = serde_json::from_slice(&encoded)
++        .map_err(|_| anyhow::anyhow!("MCP approval declaration could not be fingerprinted"))?;
++    canonical.sort_all_objects();
++    let digest = Sha256::digest(bounded_checkpoint_json(&canonical)?);
++    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
++}
++
++/// Current declaration preparation only; no old receipt or token can settle it.
++#[derive(Clone)]
++pub struct PreparedMcpApproval {
++    pub(crate) destination_thread_id: codex_protocol::ThreadId,
++    pub(crate) call: codex_mcp::PreparedMcpCall,
++    pub(crate) source: McpApprovalCheckpointData,
++}
++
++impl McpApprovalCheckpointData {
++    fn validate_bounds(&self) -> anyhow::Result<()> {
++        bounded_checkpoint_json(self)?;
++        fn supported(value: &serde_json::Value, depth: usize) -> bool {
++            depth <= 64
++                && match value {
++                    serde_json::Value::Array(values) => {
++                        values.iter().all(|value| supported(value, depth + 1))
++                    }
++                    serde_json::Value::Object(values) => {
++                        values.values().all(|value| supported(value, depth + 1))
++                    }
++                    _ => true,
++                }
++        }
++        anyhow::ensure!(
++            self.arguments
++                .as_ref()
++                .is_none_or(|value| supported(value, 0)),
++            "MCP approval checkpoint arguments exceed their supported nesting bound"
++        );
++        Ok(())
++    }
++
++    /// Match the retained canonical call without rewriting its argument bytes.
++    pub fn matches_canonical_call(&self, item: &codex_protocol::models::ResponseItem) -> bool {
++        crate::mcp_approval_recovery::matches_call(self, item)
++    }
++
++    pub fn prepare(
++        &self,
++        current: &codex_mcp::McpBinding,
++        destination_thread_id: codex_protocol::ThreadId,
++    ) -> anyhow::Result<PreparedMcpApproval> {
++        self.validate_bounds()?;
++        anyhow::ensure!(
++            destination_thread_id != self.source_thread_id,
++            "MCP approval restore requires a new native thread"
++        );
++        anyhow::ensure!(
++            self.version == 1
++                && !self.call_id.is_empty()
++                && !self.turn_id.is_empty()
++                && self.call_id.len() <= 1024
++                && self.turn_id.len() <= 1024
++                && uuid::Uuid::parse_str(&self.token).is_ok()
++                && self.request_id
++                    == format!(
++                        "{}_{}",
++                        crate::mcp_tool_call::MCP_TOOL_APPROVAL_QUESTION_ID_PREFIX,
++                        self.call_id
++                    )
++                && self.receipt == format!("sdk-question:{}", self.token),
++            "Invalid MCP approval checkpoint identity"
++        );
++        let call = current
++            .prepare_call(&self.server_name, &self.tool_name)
++            .ok_or_else(|| anyhow::anyhow!("MCP approval declaration is no longer selected"))?;
++        let tool = call.tool_info();
++        anyhow::ensure!(
++            tool.callable_namespace == self.callable_namespace
++                && tool.callable_name == self.callable_name
++                && mcp_approval_declaration_fingerprint(&call)? == self.declaration_sha256,
++            "MCP approval declaration changed"
++        );
++        Ok(PreparedMcpApproval {
++            destination_thread_id,
++            call,
++            source: self.clone(),
++        })
++    }
++}
++
++impl PreparedMcpApproval {
++    pub(crate) fn validate_current(&self, current: &codex_mcp::McpBinding) -> anyhow::Result<()> {
++        let call = current
++            .prepare_call(&self.source.server_name, &self.source.tool_name)
++            .ok_or_else(|| anyhow::anyhow!("MCP approval declaration is no longer selected"))?;
++        anyhow::ensure!(
++            self.call.has_same_approval_declaration(&call)
++                && mcp_approval_declaration_fingerprint(&call)? == self.source.declaration_sha256,
++            "MCP approval declaration changed"
++        );
++        Ok(())
++    }
++
++    /// Bind only a newly issued native question for the same admitted call.
++    pub async fn bind_fresh(
++        &self,
++        question: &OwnedQuestion,
++        current: &codex_mcp::McpBinding,
++    ) -> anyhow::Result<CapturedMcpApproval> {
++        anyhow::ensure!(
++            question.session.thread_id == self.destination_thread_id,
++            "MCP approval belongs to a different restore destination"
++        );
++        let captured = question
++            .capture_mcp_approval(current)
++            .await?
++            .ok_or_else(|| anyhow::anyhow!("Restore requires a fresh native MCP approval"))?;
++        let data = &captured.data;
++        anyhow::ensure!(
++            self.call.has_same_approval_declaration(&captured.call)
++                && data.token != self.source.token
++                && data.receipt != self.source.receipt
++                && data.turn_id == self.source.turn_id
++                && data.call_id == self.source.call_id
++                && data.request_id == self.source.request_id
++                && data.server_name == self.source.server_name
++                && data.tool_name == self.source.tool_name
++                && data.callable_namespace == self.source.callable_namespace
++                && data.callable_name == self.source.callable_name
++                && data.declaration_sha256 == self.source.declaration_sha256
++                && data.arguments == self.source.arguments,
++            "Restored MCP approval does not match a fresh native owner"
++        );
++        Ok(captured)
++    }
++}
++
++/// A live sender retained while the original Core turn is being suspended.
++/// Dropping this handle cannot approve a call. Rollback restores only its original owner.
++pub struct ClaimedMcpApproval {
++    captured: CapturedMcpApproval,
++    claim: crate::state::ElicitationClaim,
++}
++
++impl ClaimedMcpApproval {
++    pub fn is_live(&self) -> bool {
++        self.claim.is_live()
++    }
++
++    pub fn checkpoint_data(&self) -> McpApprovalCheckpointData {
++        self.captured.checkpoint_data()
++    }
++
++    pub async fn rollback(self) -> bool {
++        let question = &self.captured.question;
++        let active = question.session.active_turn.lock().await;
++        let Some(active) = active.as_ref() else {
++            return false;
++        };
++        if !Arc::ptr_eq(&active.turn_state, &question.state)
++            || !active.task.as_ref().is_some_and(|task| {
++                Arc::ptr_eq(&task.turn_context, &question.turn)
++                    && !task.cancellation_token.is_cancelled()
++            })
++        {
++            return false;
++        }
++        question
++            .state
++            .lock()
++            .await
++            .restore_elicitation_claim(self.claim)
++    }
++}
++
++impl CapturedMcpApproval {
++    pub async fn is_pending(&self) -> bool {
++        self.question.is_pending().await
++    }
++
++    /// Reserve the exact native sender before a suspension transaction starts.
++    pub async fn claim_for_suspension(
++        self,
++        current: &codex_mcp::McpBinding,
++    ) -> anyhow::Result<ClaimedMcpApproval> {
++        self.validate(&self.data, current).await?;
++        let question = &self.question;
++        let claim = {
++            let active = question.session.active_turn.lock().await;
++            let active = active
++                .as_ref()
++                .ok_or_else(|| anyhow::anyhow!("MCP approval request expired"))?;
++            anyhow::ensure!(
++                Arc::ptr_eq(&active.turn_state, &question.state)
++                    && active.task.as_ref().is_some_and(|task| {
++                        Arc::ptr_eq(&task.turn_context, &question.turn)
++                            && !task.cancellation_token.is_cancelled()
++                    }),
++                "MCP approval request expired"
++            );
++            let QuestionKey::Elicitation(server, id) = &question.key else {
++                anyhow::bail!("MCP approval requires its native elicitation owner");
++            };
++            let identity = question
++                .identity
++                .as_ref()
++                .ok_or_else(|| anyhow::anyhow!("MCP approval lacks a native identity"))?;
++            let mut state = question.state.lock().await;
++            state
++                .claim_only_elicitation(server, id, identity)
++                .ok_or_else(|| anyhow::anyhow!("MCP approval boundary is no longer isolated"))?
++        };
++        Ok(ClaimedMcpApproval {
++            captured: self,
++            claim,
++        })
++    }
++
++    pub fn checkpoint_data(&self) -> McpApprovalCheckpointData {
++        self.data.clone()
++    }
++
++    /// Recheck the original receipt and the current raw catalog before a future seal.
++    /// Success is a point-in-time check, not a reservation or execution grant.
++    pub async fn validate(
++        &self,
++        data: &McpApprovalCheckpointData,
++        current: &codex_mcp::McpBinding,
++    ) -> anyhow::Result<()> {
++        anyhow::ensure!(self.data == *data, "MCP approval checkpoint data changed");
++        anyhow::ensure!(
++            self.question.is_pending().await,
++            "MCP approval request expired"
++        );
++        let call = current
++            .prepare_call(&data.server_name, &data.tool_name)
++            .ok_or_else(|| anyhow::anyhow!("MCP approval declaration is no longer selected"))?;
++        anyhow::ensure!(
++            data.declaration_sha256 == mcp_approval_declaration_fingerprint(&call)?
++                && self.call.has_same_approval_declaration(&call),
++            "MCP approval declaration changed"
++        );
++        anyhow::ensure!(
++            self.question.is_pending().await,
++            "MCP approval request expired"
++        );
++        Ok(())
++    }
++}
++
+ impl OwnedQuestion {
++    /// Capture a direct ordinary MCP approval through its original native owner.
++    /// Current SDK suspension guards remain until sealing and restoration are wired.
++    pub async fn capture_mcp_approval(
++        &self,
++        current: &codex_mcp::McpBinding,
++    ) -> anyhow::Result<Option<CapturedMcpApproval>> {
++        let QuestionKey::Elicitation(server, RequestId::String(request_id)) = &self.key else {
++            return Ok(None);
++        };
++        let prefix = format!(
++            "{}_",
++            crate::mcp_tool_call::MCP_TOOL_APPROVAL_QUESTION_ID_PREFIX
++        );
++        let Some(call_id) = request_id.as_ref().strip_prefix(&prefix) else {
++            return Ok(None);
++        };
++        let Some(token) = self.identity.as_ref() else {
++            return Ok(None);
++        };
++        let Some(context) = self.session.mcp_tool_approval_metadata(server, call_id) else {
++            return Ok(None);
++        };
++        let Some((invocation, call)) = context.checkpoint_call else {
++            return Ok(None);
++        };
++        anyhow::ensure!(
++            invocation.server == *server
++                && call.server_name() == server
++                && invocation.tool == call.tool_info().tool.name.as_ref(),
++            "MCP approval does not match its original raw declaration"
++        );
++        let captured = CapturedMcpApproval {
++            data: McpApprovalCheckpointData {
++                source_thread_id: self.session.thread_id,
++                turn_id: self.turn.sub_id.clone(),
++                call_id: call_id.to_owned(),
++                request_id: request_id.to_string(),
++                receipt: format!("sdk-question:{}", token.as_str()),
++                token: token.as_ref().clone(),
++                version: 1,
++                server_name: invocation.server,
++                tool_name: invocation.tool,
++                callable_namespace: call.tool_info().callable_namespace.clone(),
++                callable_name: call.tool_info().callable_name.clone(),
++                declaration_sha256: mcp_approval_declaration_fingerprint(&call)?,
++                arguments: invocation.arguments,
++            },
++            question: self.clone(),
++            call,
++        };
++        captured.data.validate_bounds()?;
++        captured.validate(&captured.data, current).await?;
++        Ok(Some(captured))
++    }
++
+     /// Private tracing follows this grant's original turn, never its successor.
+     pub fn tracing_context(&self) -> Option<Arc<codex_otel::sdk_trace::ContextLease>> {
+         self.turn
+@@ -283,6 +708,16 @@
+     }
+ }
+
++/// Trusted SDK opt-ins capture authority without changing root approval policy.
++pub(crate) fn sdk_owns_prompts(session: &Session, turn: &TurnContext) -> bool {
++    let extension = if turn.session_source.is_non_root_agent() {
++        "openai/sdk-child-prompts"
++    } else {
++        "openai/sdk-root-prompts"
++    };
++    session.services.client_mcp_extensions.contains(extension)
++}
++
+ /// SDK-only prompt identity. Ordinary clients keep their original event IDs.
+ pub(crate) async fn event_identity(
+     session: &Session,
+@@ -294,11 +729,7 @@
+         EventMsg::ExecApprovalRequest(_)
+             | EventMsg::ApplyPatchApprovalRequest(_)
+             | EventMsg::ElicitationRequest(_)
+-    ) || !turn.session_source.is_non_root_agent()
+-        || !session
+-            .services
+-            .client_mcp_extensions
+-            .contains("openai/sdk-child-prompts")
++    ) || !sdk_owns_prompts(session, turn)
+     {
+         return None;
+     }
+@@ -377,3 +808,86 @@
+         assert!(codex_otel::sdk_trace::context(&token).is_err());
+     }
+ }
++
++#[cfg(test)]
++mod mcp_checkpoint_data_tests {
++    use super::*;
++
++    fn data() -> McpApprovalCheckpointData {
++        let token = uuid::Uuid::now_v7().to_string();
++        McpApprovalCheckpointData {
++            source_thread_id: codex_protocol::ThreadId::new(),
++            turn_id: "turn".into(),
++            call_id: "call".into(),
++            request_id: "mcp_tool_call_approval_call".into(),
++            receipt: format!("sdk-question:{token}"),
++            token,
++            version: 1,
++            server_name: "docs".into(),
++            tool_name: "find-record".into(),
++            callable_namespace: "mcp__docs".into(),
++            callable_name: "reviewed".into(),
++            declaration_sha256: "0".repeat(64),
++            arguments: Some(serde_json::json!({"key": "A"})),
++        }
++    }
++
++    #[test]
++    fn canonical_mcp_match_rejects_raw_name_substitution_and_changed_arguments() {
++        let saved = data();
++        let value = serde_json::json!({"type":"function_call", "call_id":"call",
++            "namespace":"mcp__docs", "name":"reviewed", "arguments":" { \"key\": \"A\" } "});
++        let call: codex_protocol::models::ResponseItem =
++            serde_json::from_value(value.clone()).unwrap();
++        assert!(saved.matches_canonical_call(&call));
++        for (field, changed) in [
++            ("name", serde_json::json!("find-record")),
++            ("namespace", serde_json::json!("mcp__other")),
++            ("arguments", serde_json::json!("{\"key\":\"B\"}")),
++            ("asynchronous", serde_json::json!(true)),
++            ("encrypted_function_args", serde_json::json!([])),
++        ] {
++            let mut changed_call = value.clone();
++            changed_call[field] = changed;
++            let changed_call = serde_json::from_value(changed_call).unwrap();
++            assert!(!saved.matches_canonical_call(&changed_call));
++        }
++        let codex_protocol::models::ResponseItem::FunctionCall { arguments, .. } = call else {
++            panic!("call");
++        };
++        assert_eq!(arguments, " { \"key\": \"A\" } ");
++    }
++
++    #[test]
++    fn checkpoint_data_does_not_accept_descriptor_or_connection_fields() {
++        let mut value = serde_json::to_value(data()).unwrap();
++        value["tool"] =
++            serde_json::json!({"server_origin":"https://user:synthetic-secret@example.invalid"});
++        assert!(serde_json::from_value::<McpApprovalCheckpointData>(value).is_err());
++        let mut value = serde_json::to_value(data()).unwrap();
++        value["config"] = serde_json::json!({"authorization":"synthetic-secret"});
++        assert!(serde_json::from_value::<McpApprovalCheckpointData>(value).is_err());
++    }
++
++    #[test]
++    fn checkpoint_arguments_leave_room_for_the_portable_frame_envelope() {
++        let mut saved = data();
++        let mut nested = serde_json::Value::Null;
++        for _ in 0..70 {
++            nested = serde_json::json!([nested]);
++        }
++        saved.arguments = Some(nested);
++        assert!(saved.validate_bounds().is_err());
++        assert!(data().validate_bounds().is_ok());
++    }
++
++    #[test]
++    fn oversized_checkpoint_data_fails_without_echoing_untrusted_content() {
++        let private = "SYNTHETIC_PRIVATE_DESCRIPTOR".repeat(MAX_MCP_APPROVAL_CHECKPOINT_BYTES);
++        let error = bounded_checkpoint_json(&private)
++            .err()
++            .expect("bounded rejection");
++        assert!(!error.to_string().contains("SYNTHETIC_PRIVATE_DESCRIPTOR"));
++        assert!(bounded_checkpoint_json(&data()).is_ok());
++    }
++}
+diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
+--- a/codex-rs/core/src/session/mcp.rs
++++ b/codex-rs/core/src/session/mcp.rs
+@@ -689,11 +689,7 @@
+             let mut active = self.active_turn.lock().await;
+             match active.as_mut() {
+                 Some(at) => {
+-                    let owned_child = self
+-                        .services
+-                        .client_mcp_extensions
+-                        .contains("openai/sdk-child-prompts")
+-                        && turn_context.session_source.is_non_root_agent();
++                    let owned_child = crate::owned_question::sdk_owns_prompts(self, turn_context);
+                     if owned_child
+                         && !at.task.as_ref().is_some_and(|task| {
+                             std::ptr::eq(task.turn_context.as_ref(), turn_context)
+@@ -726,6 +722,22 @@
+                 "Overwriting existing pending elicitation for server_name: {server_name}, request_id: {request_id}"
+             );
+         }
++        let native_recovery = turn_context
++            .extension_data
++            .get::<crate::NativeMcpRecovery>();
++        if let Some(recovery) = native_recovery.as_deref()
++            && recovery
++                .bind_question(self, turn_context, &server_name, &request_id)
++                .await
++                .is_err()
++        {
++            // Dropping this request's receiver fails closed. Do not remove a
++            // map entry here: a newer turn may already own the same raw key.
++            return McpServerElicitationOutcome {
++                response: None,
++                sent: false,
++            };
++        }
+         let id = match request_id {
+             rmcp::model::NumberOrString::String(value) => {
+                 codex_protocol::mcp::RequestId::String(value.to_string())
+@@ -754,8 +766,12 @@
+                     plugin_install_telemetry.tool_name.as_str(),
+                 );
+         }
++        let response = rx_response.await.ok();
++        if let Some(recovery) = native_recovery {
++            recovery.question_replied(response.is_some());
++        }
+         McpServerElicitationOutcome {
+-            response: rx_response.await.ok(),
++            response,
+             sent: true,
+         }
+     }
+@@ -774,6 +790,14 @@
+             let mut active = self.active_turn.lock().await;
+             match active.as_mut() {
+                 Some(at) => {
++                    anyhow::ensure!(
++                        !at.task.as_ref().is_some_and(|task| task
++                            .turn_context
++                            .extension_data
++                            .get::<crate::NativeMcpRecovery>()
++                            .is_some()),
++                        "Restored MCP approval requires its fresh native receipt"
++                    );
+                     let mut ts = at.turn_state.lock().await;
+                     ts.remove_pending_elicitation(&server_name, &id)
+                 }
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -206,6 +206,14 @@
+     let recovered_tools = turn_context
+         .extension_data
+         .remove::<codex_extension_api::RecoveredToolCompletionCandidates>();
++    let native_mcp_recovery = turn_context
++        .extension_data
++        .get::<crate::NativeMcpRecovery>();
++    if native_mcp_recovery.is_some() && recovered_tools.is_some() {
++        return Err(CodexErr::Fatal(
++            "Native MCP recovery cannot inherit function-tool completion authority".into(),
++        ));
++    }
+     // Resolve opt-in accepted recovery before this step captures its eligible catalog.
+     // Retain the starting profile receipt; a later handoff must keep its own choice.
+     let recovered_reset_tools = if let Some(candidates) = recovered_tools.as_deref() {
+@@ -233,6 +241,7 @@
+         None => None,
+     };
+     if recovered_tools.is_none()
++        && native_mcp_recovery.is_none()
+         && !pre_sampling_compaction_or_report(
+             &sess,
+             &turn_context,
+@@ -484,6 +493,79 @@
+     // 1. At the start of a turn, so the fresh turn input in `input` gets sampled first.
+     // 2. After auto-compact, while a model/tool continuation is pending.
+
++    if let Some(recovery) = native_mcp_recovery {
++        let live = sess.live_thread().ok_or_else(|| {
++            CodexErr::Fatal("Native MCP recovery requires retained history".into())
++        })?;
++        live.flush()
++            .or_cancel(&cancellation_token)
++            .await?
++            .map_err(|_| CodexErr::Fatal("Could not flush native MCP recovery history".into()))?;
++        let history = live
++            .load_history(true)
++            .or_cancel(&cancellation_token)
++            .await?
++            .map_err(|_| CodexErr::Fatal("Could not read native MCP recovery history".into()))?;
++        let item = recovery
++            .take_call(
++                &sess,
++                &turn_context,
++                &first_step_context.mcp,
++                &history.items,
++            )
++            .map_err(|error| CodexErr::Fatal(error.to_string()))?;
++        if !first_step_context.tool_router.admits_response_item(&item) {
++            return Err(CodexErr::Fatal(
++                "Native MCP recovery call is no longer admitted".into(),
++            ));
++        }
++        let sampled_call = item.clone();
++        let call = ToolRouter::build_tool_call(item)
++            .map_err(|error| CodexErr::Fatal(error.to_string()))?
++            .ok_or_else(|| CodexErr::Fatal("Native MCP recovery requires a tool call".into()))?;
++        let runtime = first_step_context
++            .tool_router
++            .tool_runtime(&call.tool_name)
++            .ok_or_else(|| CodexErr::Fatal("Native MCP recovery lost its runtime".into()))?;
++        recovery
++            .validate_runtime(runtime.as_ref())
++            .map_err(|error| CodexErr::Fatal(error.to_string()))?;
++        let result = ToolCallRuntime::new(
++            Arc::clone(&sess),
++            Arc::clone(&first_step_context),
++            Arc::clone(&turn_diff_tracker),
++        )
++        .handle_tool_call(call, cancellation_token.clone())
++        .await?;
++        if cancellation_token.is_cancelled() {
++            return Err(CodexErr::TurnAborted);
++        }
++        recovery
++            .finish()
++            .map_err(|error| CodexErr::Fatal(error.to_string()))?;
++        turn_context
++            .extension_data
++            .remove::<crate::NativeMcpRecovery>();
++        record_tool_choice_use(
++            &first_step_context.settings,
++            &turn_context.extension_data,
++            &SettledDirectTools {
++                calls: vec![sampled_call],
++                outputs: vec![result.envelope.item.clone()],
++                outcomes: vec![Some(result.succeeded)],
++                all_succeeded: result.succeeded,
++                ..Default::default()
++            },
++        );
++        sess.record_annotated_conversation_items(
++            &turn_context,
++            &first_step_context.settings.model_info,
++            vec![result.envelope],
++        )
++        .await;
++        sess.ensure_rollout_durable().await?;
++    }
++
+     if let Some(candidates) = recovered_tools {
+         let tools = match recovered_reset_tools {
+             Some(tools) => tools,
+diff --git a/codex-rs/core/src/state/mod.rs b/codex-rs/core/src/state/mod.rs
+--- a/codex-rs/core/src/state/mod.rs
++++ b/codex-rs/core/src/state/mod.rs
+@@ -14,6 +14,7 @@
+ pub(crate) use session::SessionState;
+ pub(crate) use turn::AcceptedUserInputResponse;
+ pub(crate) use turn::ActiveTurn;
++pub(crate) use turn::ElicitationClaim;
+ pub(crate) use turn::MailboxDeliveryPhase;
+ pub(crate) use turn::PendingRequestPermissions;
+ pub(crate) use turn::RunningTask;
+diff --git a/codex-rs/core/src/state/turn.rs b/codex-rs/core/src/state/turn.rs
+--- a/codex-rs/core/src/state/turn.rs
++++ b/codex-rs/core/src/state/turn.rs
+@@ -104,6 +104,7 @@
+     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
+     pending_user_input: HashMap<String, oneshot::Sender<AcceptedUserInputResponse>>,
+     pending_elicitations: HashMap<(String, RequestId), PendingQuestion<ElicitationResponse>>,
++    claimed_elicitations: HashMap<(String, RequestId), std::sync::Weak<ElicitationClaimIdentity>>,
+     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
+     pub(crate) pending_input: TurnInputQueue,
+     mailbox_delivery_phase: MailboxDeliveryPhase,
+@@ -143,12 +144,33 @@
+         }
+     }
+ }
++/// In-memory sender claim. Dropping it fails closed; checkpoint data never contains it.
++struct ElicitationClaimIdentity {
++    identity: Arc<String>,
++}
++
++pub(crate) struct ElicitationClaim {
++    marker: Arc<ElicitationClaimIdentity>,
++    key: (String, RequestId),
++    entry: PendingQuestion<ElicitationResponse>,
++}
++
++impl ElicitationClaim {
++    pub(crate) fn is_live(&self) -> bool {
++        !self.entry.sender.is_closed()
++    }
++}
++
+ impl TurnState {
+     pub(crate) fn has_pending_waiters(&self) -> bool {
+         !self.pending_approvals.is_empty()
+             || !self.pending_request_permissions.is_empty()
+             || !self.pending_user_input.is_empty()
+             || !self.pending_elicitations.is_empty()
++            || self
++                .claimed_elicitations
++                .values()
++                .any(|marker| marker.strong_count() != 0)
+             || !self.pending_dynamic_tools.is_empty()
+     }
+
+@@ -163,6 +185,12 @@
+             .get(&(server.to_owned(), id.clone()))
+             .filter(|entry| !entry.sender.is_closed())
+             .map(|entry| entry.identity.clone())
++            .or_else(|| {
++                self.claimed_elicitations
++                    .get(&(server.to_owned(), id.clone()))
++                    .and_then(std::sync::Weak::upgrade)
++                    .map(|marker| marker.identity.clone())
++            })
+     }
+     pub(crate) fn insert_pending_approval(
+         &mut self,
+@@ -241,6 +269,56 @@
+             .map(|entry| entry.sender)
+     }
+
++    /// Atomically park exactly one live question, retaining its private identity.
++    pub(crate) fn claim_only_elicitation(
++        &mut self,
++        server: &str,
++        id: &RequestId,
++        identity: &Arc<String>,
++    ) -> Option<ElicitationClaim> {
++        if !self.pending_approvals.is_empty()
++            || !self.pending_request_permissions.is_empty()
++            || !self.pending_user_input.is_empty()
++            || !self.pending_dynamic_tools.is_empty()
++            || self.pending_elicitations.len() != 1
++            || self
++                .claimed_elicitations
++                .values()
++                .any(|marker| marker.strong_count() != 0)
++        {
++            return None;
++        }
++        let key = (server.to_owned(), id.clone());
++        let entry = self.pending_elicitations.get(&key)?;
++        if entry.sender.is_closed() || !Arc::ptr_eq(&entry.identity, identity) {
++            return None;
++        }
++        let marker = Arc::new(ElicitationClaimIdentity {
++            identity: Arc::clone(identity),
++        });
++        let entry = self.pending_elicitations.remove(&key)?;
++        self.claimed_elicitations
++            .insert(key.clone(), Arc::downgrade(&marker));
++        Some(ElicitationClaim { marker, entry, key })
++    }
++
++    /// Rollback never replaces a newer request or revives a finished receiver.
++    pub(crate) fn restore_elicitation_claim(&mut self, claim: ElicitationClaim) -> bool {
++        if claim.entry.sender.is_closed()
++            || self.pending_elicitations.contains_key(&claim.key)
++            || !self
++                .claimed_elicitations
++                .get(&claim.key)
++                .and_then(std::sync::Weak::upgrade)
++                .is_some_and(|marker| Arc::ptr_eq(&marker, &claim.marker))
++        {
++            return false;
++        }
++        self.claimed_elicitations.remove(&claim.key);
++        self.pending_elicitations.insert(claim.key, claim.entry);
++        true
++    }
++
+     pub(crate) fn insert_pending_dynamic_tool(
+         &mut self,
+         key: String,
+@@ -268,3 +346,147 @@
+         self.mailbox_delivery_phase = phase;
+     }
+ }
++
++#[cfg(test)]
++mod mcp_approval_claim_tests {
++    use super::*;
++
++    fn request() -> RequestId {
++        RequestId::String("mcp_tool_call_approval_call".into())
++    }
++
++    #[tokio::test]
++    async fn claim_requires_original_identity_and_preserves_live_sender_until_rollback() {
++        let mut state = TurnState::default();
++        let (sender, mut receiver) = oneshot::channel();
++        state.insert_pending_elicitation("raw-server".into(), request(), sender);
++        let identity = state
++            .elicitation_identity("raw-server", &request())
++            .unwrap();
++        let copied_token = Arc::new(identity.as_ref().clone());
++        assert!(
++            state
++                .claim_only_elicitation("raw-server", &request(), &copied_token)
++                .is_none()
++        );
++        assert!(
++            state
++                .claim_only_elicitation("other-server", &request(), &identity)
++                .is_none()
++        );
++        let claim = state
++            .claim_only_elicitation("raw-server", &request(), &identity)
++            .unwrap();
++        assert!(
++            state
++                .remove_pending_elicitation("raw-server", &request())
++                .is_none()
++        );
++        assert!(state.has_pending_waiters());
++        assert!(Arc::ptr_eq(
++            &identity,
++            &state
++                .elicitation_identity("raw-server", &request())
++                .unwrap()
++        ));
++        assert!(matches!(
++            receiver.try_recv(),
++            Err(oneshot::error::TryRecvError::Empty)
++        ));
++        assert!(state.restore_elicitation_claim(claim));
++        assert!(Arc::ptr_eq(
++            &identity,
++            &state
++                .elicitation_identity("raw-server", &request())
++                .unwrap()
++        ));
++        drop(state.remove_pending_elicitation("raw-server", &request()));
++        assert!(matches!(
++            receiver.try_recv(),
++            Err(oneshot::error::TryRecvError::Closed)
++        ));
++    }
++
++    #[tokio::test]
++    async fn rollback_never_overwrites_a_successor_or_reopens_a_closed_receiver() {
++        let mut state = TurnState::default();
++        let (sender, receiver) = oneshot::channel();
++        state.insert_pending_elicitation("raw-server".into(), request(), sender);
++        let identity = state
++            .elicitation_identity("raw-server", &request())
++            .unwrap();
++        let claim = state
++            .claim_only_elicitation("raw-server", &request(), &identity)
++            .unwrap();
++        let (successor, _successor_receiver) = oneshot::channel();
++        state.insert_pending_elicitation("raw-server".into(), request(), successor);
++        let fresh = state
++            .elicitation_identity("raw-server", &request())
++            .unwrap();
++        assert!(!state.restore_elicitation_claim(claim));
++        assert!(Arc::ptr_eq(
++            &fresh,
++            &state
++                .elicitation_identity("raw-server", &request())
++                .unwrap()
++        ));
++        drop(receiver);
++        let claim = state
++            .claim_only_elicitation("raw-server", &request(), &fresh)
++            .unwrap();
++        drop(_successor_receiver);
++        assert!(!state.restore_elicitation_claim(claim));
++        assert!(!state.has_pending_waiters());
++    }
++
++    #[tokio::test]
++    async fn dropping_a_claim_expires_its_reservation_without_granting_a_reply() {
++        let mut state = TurnState::default();
++        let (sender, mut receiver) = oneshot::channel();
++        state.insert_pending_elicitation("raw-server".into(), request(), sender);
++        let identity = state
++            .elicitation_identity("raw-server", &request())
++            .unwrap();
++        let claim = state
++            .claim_only_elicitation("raw-server", &request(), &identity)
++            .unwrap();
++        assert!(state.has_pending_waiters());
++        drop(claim);
++        assert!(!state.has_pending_waiters());
++        assert!(
++            state
++                .elicitation_identity("raw-server", &request())
++                .is_none()
++        );
++        assert!(matches!(
++            receiver.try_recv(),
++            Err(oneshot::error::TryRecvError::Closed)
++        ));
++    }
++
++    #[tokio::test]
++    async fn claim_refuses_an_unsettled_sibling() {
++        let mut state = TurnState::default();
++        let (sender, _receiver) = oneshot::channel();
++        state.insert_pending_elicitation("raw-server".into(), request(), sender);
++        let identity = state
++            .elicitation_identity("raw-server", &request())
++            .unwrap();
++        let (sibling, _sibling_receiver) = oneshot::channel();
++        state.insert_pending_elicitation(
++            "raw-server".into(),
++            RequestId::String("other".into()),
++            sibling,
++        );
++        assert!(
++            state
++                .claim_only_elicitation("raw-server", &request(), &identity)
++                .is_none()
++        );
++        assert!(
++            state
++                .elicitation_identity("raw-server", &request())
++                .is_some()
++        );
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/mcp.rs b/codex-rs/core/src/tools/handlers/mcp.rs
+--- a/codex-rs/core/src/tools/handlers/mcp.rs
++++ b/codex-rs/core/src/tools/handlers/mcp.rs
+@@ -348,6 +348,10 @@
+
+     fn mcp_server_name(&self) -> Option<&str> {
+         Some(&self.tool_info.server_name)
++    }
++
++    fn mcp_tool_name(&self) -> Option<&str> {
++        Some(self.tool_info.tool.name.as_ref())
+     }
+
+     fn on_tool_result_accepted(
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -103,10 +103,17 @@
+         None
+     }
+
++    /// Raw, unaliased identity from an actual native MCP runtime.
++    fn mcp_tool_name(&self) -> Option<&str> {
++        None
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(
+             payload,
+-            ToolPayload::Function { .. } | ToolPayload::ToolSearch { .. } | ToolPayload::ClientToolSearch(_)
++            ToolPayload::Function { .. }
++                | ToolPayload::ToolSearch { .. }
++                | ToolPayload::ClientToolSearch(_)
+         )
+     }
+
+@@ -476,7 +483,9 @@
+                     && entry.key().is_default_namespace()
+                     && entry.key().name == "apply_patch"
+                     && entry.get().runtime.as_ref().type_id()
+-                        == std::any::TypeId::of::<super::handlers::apply_patch::ApplyPatchHandler>() =>
++                        == std::any::TypeId::of::<
++                            super::handlers::apply_patch::ApplyPatchHandler,
++                        >() =>
+             {
+                 entry.insert(RegisteredTool { runtime, exposure });
+                 true
+@@ -657,16 +666,19 @@
+                     &tool_result_tags,
+                     /*extra_trace_fields*/ &[],
+                 );
+-                let strict_unknown_function = matches!(&invocation.payload, ToolPayload::Function { .. })
+-                    && matches!(
+-                        &invocation.source,
+-                        crate::tools::context::ToolCallSource::Direct
+-                            | crate::tools::context::ToolCallSource::DirectPlaintextMessage
+-                    )
+-                    && invocation.turn.extension_data
+-                        .get::<codex_extension_api::ToolNotFoundBehavior>()
+-                        .as_deref()
+-                        == Some(&codex_extension_api::ToolNotFoundBehavior::RaiseError);
++                let strict_unknown_function =
++                    matches!(&invocation.payload, ToolPayload::Function { .. })
++                        && matches!(
++                            &invocation.source,
++                            crate::tools::context::ToolCallSource::Direct
++                                | crate::tools::context::ToolCallSource::DirectPlaintextMessage
++                        )
++                        && invocation
++                            .turn
++                            .extension_data
++                            .get::<codex_extension_api::ToolNotFoundBehavior>()
++                            .as_deref()
++                            == Some(&codex_extension_api::ToolNotFoundBehavior::RaiseError);
+                 let err = if strict_unknown_function {
+                     FunctionCallError::Fatal(message)
+                 } else {
+@@ -929,15 +941,19 @@
+                         .to_response_item(&result.call_id, &result.payload)
+                         .into();
+                     if matches!(invocation.payload, ToolPayload::ApplyPatch { .. })
+-                    && !matches!(&final_item, codex_protocol::models::ResponseItem::ApplyPatchCallOutput { call_id, .. } if call_id == &invocation.call_id)
+-                {
+-                    return Err(FunctionCallError::Fatal("application patch result must retain its protocol type and call ID".into()));
+-                }
+-                if matches!(invocation.payload, ToolPayload::Computer { .. })
++                        && !matches!(&final_item, codex_protocol::models::ResponseItem::ApplyPatchCallOutput { call_id, .. } if call_id == &invocation.call_id)
++                    {
++                        return Err(FunctionCallError::Fatal(
++                            "application patch result must retain its protocol type and call ID"
++                                .into(),
++                        ));
++                    }
++                    if matches!(invocation.payload, ToolPayload::Computer { .. })
+                         && !matches!(&final_item, codex_protocol::models::ResponseItem::ComputerCallOutput { call_id, .. } if call_id == &invocation.call_id)
+                     {
+                         return Err(FunctionCallError::Fatal(
+-                            "native computer result must retain its protocol type and call ID".into(),
++                            "native computer result must retain its protocol type and call ID"
++                                .into(),
+                         ));
+                     }
+                     if matches!(invocation.payload, ToolPayload::Shell { .. })
+@@ -956,7 +972,8 @@
+                         && !matches!(&final_item, codex_protocol::models::ResponseItem::McpApprovalResponse { approval_request_id, .. } if approval_request_id == &invocation.call_id)
+                     {
+                         return Err(FunctionCallError::Fatal(
+-                            "Hosted MCP approval decision must retain the original request ID".into(),
++                            "Hosted MCP approval decision must retain the original request ID"
++                                .into(),
+                         ));
+                     }
+                     crate::file_admission::validate_response_items(
+diff --git a/codex-rs/protocol/src/mcp.rs b/codex-rs/protocol/src/mcp.rs
+--- a/codex-rs/protocol/src/mcp.rs
++++ b/codex-rs/protocol/src/mcp.rs
+@@ -163,9 +163,10 @@
+ }
+
+ /// Client extensions that must not be advertised to MCP servers.
+-const MCP_CLIENT_ONLY_EXTENSION_IDS: [&str; 2] = [
++const MCP_CLIENT_ONLY_EXTENSION_IDS: [&str; 3] = [
+     OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID,
+     "openai/sdk-child-prompts",
++    "openai/sdk-root-prompts",
+ ];
+
+ /// MCP extensions supplied by the client that created a Codex session.

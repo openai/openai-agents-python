@@ -1083,7 +1083,43 @@
     {
       "path": "sdk-provider-programmatic-progress.patch",
       "sha256": "5bda827970cc426dab1181869d427019b8e212e7f938f64cfb8277a00ab33adf"
+    },
+    {
+      "path": "sdk-portable-mcp-approval-owner.patch",
+      "sha256": "a95c9563da5db07abbbbd292d9c32040917e10d1f50223e5eaecf416de069dab"
+    },
+    {
+      "path": "sdk-portable-mcp-claimed-owner-export.patch",
+      "sha256": "41895431ed461c5cb0f552b55cb87f309e792a6214d02a290886af0c285ac496"
+    },
+    {
+      "path": "sdk-portable-mcp-handler-export.patch",
+      "sha256": "524dd0fb5b047c25ced972766020fc438ac66a8768c2ffaa0946fc41aa3a4ef3"
+    },
+    {
+      "path": "sdk-portable-mcp-direct-root-binding.patch",
+      "sha256": "3a04e30490c72c278562f33296ffaf8713a7491cc6c2e40f0a19383f07689198"
+    },
+    {
+      "path": "sdk-portable-mcp-admission-source.patch",
+      "sha256": "d51ae0a0be5970a28f8279c4b9582d900ceca84ad149ce3646d3ee4391837cdb"
+    },
+    {
+      "path": "sdk-portable-mcp-step-source.patch",
+      "sha256": "0b139662936e18f98a3b7460a38a3c6a9b07ab5232cb8a525d648c4e086c2f86"
+    },
+    {
+      "path": "sdk-portable-mcp-peer-elicitation.patch",
+      "sha256": "9186a141613fbcc7376c85a093b4dd86a099bb641d689054c4b859ca5a9a22e1"
+    },
+    {
+      "path": "sdk-native-mcp-failure-policy.patch",
+      "sha256": "2b12d391be1d784668b6c8d4b56a6ae3fecbaa073fba2ea3a6add4b35dfd1f3c"
+    },
+    {
+      "path": "sdk-native-docker-stdio.patch",
+      "sha256": "d868ad817e556a671dc3751c0efa0c955801ba7e7d04e1beb512451a33b72106"
     }
   ],
-  "result_tree": "0e9644881fbd4db2966c391a95b3b6a1a799ca02"
+  "result_tree": "1703bacc0c0f5039f431245c3ffeef13acd0a7f1"
 }

@@ -8,6 +8,7 @@ from _agents_codex.sandbox import (
     CallbackSink as CallbackSink,
     ChainedSink as ChainedSink,
     Dir as Dir,
+    DockerGateway as DockerGateway,
     DockerVolumeMountStrategy as DockerVolumeMountStrategy,
     EventPayloadPolicy as EventPayloadPolicy,
     EventSink as EventSink,
@@ -38,6 +39,7 @@ from _agents_codex.sandbox import (
     S3FilesMountPattern as S3FilesMountPattern,
     S3Mount as S3Mount,
     SandboxArchiveLimits as SandboxArchiveLimits,
+    SandboxCapability as SandboxCapability,
     SandboxConcurrencyLimits as SandboxConcurrencyLimits,
     SandboxEnvironmentSource as SandboxEnvironmentSource,
     SandboxMemoryOptions as SandboxMemoryOptions,
@@ -67,12 +69,14 @@ from _agents_codex.sandbox import (
 )
 
 __all__ = [
+    "DockerGateway",
     "Skill",
     "Skills",
     "SkillMetadata",
     "LazySkillSource",
     "LocalDirLazySkillSource",
     "SandboxEnvironmentSource",
+    "SandboxCapability",
     "CallbackSink",
     "ChainedSink",
     "EventPayloadPolicy",

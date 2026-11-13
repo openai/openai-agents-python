@@ -58,6 +58,7 @@ from ._agent_profiles import (
     _capture_agent_graph,
     _check_handoff_tool_names,
     _python_tool_slot,
+    _resolve_tool_name_collisions,
 )
 from ._agent_tool import _ConfiguredAgentTool
 from ._callback_execution import (
@@ -107,6 +108,7 @@ from ._lifecycle import (
 )
 from ._managed_tool_stream import _ManagedToolPrefix, _ManagedToolStream
 from ._managed_workspace import (
+    _SANDBOX_CAPABILITIES_ATTRIBUTE,
     ManagedWorkspaceCheckpoint,
     _capture_retired_workspace,
     _ManagedWorkspaceSource,
@@ -212,6 +214,7 @@ from .manual import (
     ActionReply as ActionReply,
     ActionRequested as ActionRequested,
     ApprovalDecision as ApprovalDecision,
+    ApprovalRequest,
     ApprovalRequested as ApprovalRequested,
     ElicitationRequest as ElicitationRequest,
     FormRequest as FormRequest,
@@ -985,7 +988,11 @@ class NativeError(RuntimeError):
         self._response_integrity_reason: ResponseIntegrityReason | None = None
 
     def get_mcp_callback_error(self) -> Exception | None:
-        """Private error from an admitted root MCP callback; explicit access only."""
+        """Private cause from an admitted root MCP policy; explicit access only.
+
+        Native transport causes retain up to 16 KiB of diagnostics here.
+        They never enter the public error text, model output or event payload.
+        """
         return self._mcp_callback_error
 
     @property
@@ -2398,6 +2405,87 @@ class _OpeningTools:
         return _capture_tools(generation, self.python, context)
 
 
+def _bind_sandbox_opening_tools(
+    agent: Agent[Any, Any],
+    context: Any,
+    saved: SessionState | None,
+    *,
+    project_guidance: bool,
+) -> tuple[_ToolCatalog, tuple[FunctionTool[Any, Any, Any], ...], list[dict[str, str]]]:
+    declared = _OpeningTools.capture(agent.tools, agent.programmatic_tool_calling)
+    mcp_names = declared.validate_collisions(project_guidance=project_guidance)
+    catalog = declared.bind(context)
+    if saved is not None and saved.managed_tool_specs is not None:
+        catalog = _restore_python_catalog(catalog, saved.managed_tool_specs)
+    return catalog, declared.python, mcp_names
+
+
+@dataclass(frozen=True)
+class _SandboxContextTransforms:
+    callbacks: tuple[Callable[..., Any], ...]
+
+    async def __call__(self, request: ModelRequestContext[Any]) -> Sequence[dict[str, Any]]:
+        raise NativeError("Composed sandbox callbacks require live native admission")
+
+    def bind(
+        self, active: Callable[[], bool]
+    ) -> Callable[[ModelRequestContext[Any]], Awaitable[Sequence[dict[str, Any]]]]:
+        async def transform(request: ModelRequestContext[Any]) -> Sequence[dict[str, Any]]:
+            items = request.items
+            for callback in self.callbacks:
+                if not active():
+                    return items
+                changed = await _call_callback(callback, active, replace(request, items=items))
+                # The outer context owner discards retired projections. Never enter
+                # another application callback while that native owner is stale.
+                if not active():
+                    return items
+                if changed is not None:
+                    items = tuple(changed)
+            return items
+
+        return transform
+
+
+def _apply_sandbox_contributions(
+    agent: Agent[Any, Any],
+    lease: _EnvironmentLease | None,
+    *,
+    has_graph: bool,
+    manual_restore: bool,
+) -> bool:
+    if lease is None:
+        return False
+    contributions = getattr(lease.source, _SANDBOX_CAPABILITIES_ATTRIBUTE, None)
+    if contributions is None:
+        return False
+    from .sandbox import _SandboxContributions
+
+    if not isinstance(contributions, _SandboxContributions):
+        raise TypeError("Sandbox capabilities require a sandbox_environment source")
+    if has_graph or manual_restore:
+        raise CapabilityError(
+            "Sandbox capability callbacks require a single root and an idle opening"
+        )
+    original_transform = agent.transform_context
+    capability_transforms = contributions.transforms()
+    transforms = (
+        *capability_transforms,
+        *((original_transform,) if original_transform is not None else ()),
+    )
+
+    object.__setattr__(
+        agent, "model_settings", MappingProxyType(contributions.settings(agent.model_settings))
+    )
+    if capability_transforms:
+        object.__setattr__(agent, "transform_context", _SandboxContextTransforms(transforms))
+    tools = (*agent.tools, *contributions.tools)
+    if agent.tool_name_collision_policy == "warn":
+        tools, _ = _resolve_tool_name_collisions(tools, ())
+    object.__setattr__(agent, "tools", tools)
+    return True
+
+
 def _check_native_agents_provider(
     native_agents: NativeAgents[Any] | None, provider: NativeProvider | None
 ) -> None:
@@ -3152,6 +3240,23 @@ def _prepare_open_state(
     return state, managed_source
 
 
+def _without_untrusted_memory_admission(
+    checkpoint: str | None, *, authenticated: bool
+) -> str | None:
+    if checkpoint is None or authenticated:
+        return checkpoint
+    imported = json.loads(checkpoint)
+    for thread in [imported, *imported.get("descendants", [])]:
+        for item in thread.get("history", []):
+            if item.get("type") != "turn_context":
+                continue
+            payload = item.get("payload")
+            receipt = payload.get("sdk_receipt") if isinstance(payload, dict) else None
+            if isinstance(receipt, dict):
+                receipt.pop("sandbox_memory_input_admitted", None)
+    return json.dumps(imported)
+
+
 def _prepare_native_checkpoint(
     saved: SessionState, *, has_output_override: bool
 ) -> tuple[str, bool, tuple[ToolRef, ...] | None, tuple[str, ...]]:
@@ -3831,19 +3936,6 @@ def _opening_tool_policy(
     }
 
 
-def _without_sandbox_memory_admission(checkpoint: str) -> str:
-    imported = json.loads(checkpoint)
-    for thread in [imported, *imported.get("descendants", [])]:
-        for item in thread.get("history", []):
-            if item.get("type") != "turn_context":
-                continue
-            payload = item.get("payload")
-            receipt = payload.get("sdk_receipt") if isinstance(payload, dict) else None
-            if isinstance(receipt, dict):
-                receipt.pop("sandbox_memory_input_admitted", None)
-    return json.dumps(imported)
-
-
 def _capture_opening_guardrails(
     input_guardrails: Sequence[InputGuardrail[Any]],
     output_guardrails: Sequence[OutputGuardrail[Any]],
@@ -3855,6 +3947,68 @@ def _capture_opening_guardrails(
     if any(not isinstance(check, OutputGuardrail) for check in outputs):
         raise TypeError("output_guardrails contains an invalid guardrail")
     return inputs, outputs
+
+
+def _validate_opening_environment(
+    executor: Environment[Any] | None,
+    allowed_tools: Sequence[FunctionTool[Any, Any, Any]],
+    saved: SessionState | None,
+    native_agents: NativeAgents[Any] | None,
+    restored_defaults: Sequence[ToolRef | _MCPResourceRef] | None,
+    restored_available: Sequence[Tool[Any]],
+    restored_handoffs: Mapping[str, str] | None,
+    *,
+    project_guidance: bool,
+    programmatic_tool_calling: bool,
+) -> None:
+    _check_environment_python_tool_collisions(executor, allowed_tools)
+    if saved is not None:
+        _check_restored_environment(saved, executor)
+    _check_native_agents_environment(native_agents, executor)
+    if restored_defaults is not None:
+        # Resolve only against destination declarations, without acquiring
+        # MCP connections or replacing the active manual roster.
+        _split_tools(
+            restored_defaults,
+            programmatic_tool_calling,
+            available=restored_available,
+            handoffs=restored_handoffs,
+            environment=executor,
+            native_agents=native_agents,
+            project_guidance=project_guidance,
+        )
+
+
+def _capture_tool_name_winner(
+    agent: Agent[ContextT, OutputT], profiles: tuple[_AgentProfile, ...]
+) -> Agent[ContextT, OutputT]:
+    if agent.tool_name_collision_policy != "warn":
+        return agent
+    if profiles:
+        admitted_tools = profiles[0].opening_tools
+    else:
+        admitted_tools, _ = _resolve_tool_name_collisions(agent.tools, ())
+    if _same_opening_tools(agent.tools, admitted_tools):
+        return agent
+    return replace(agent, tools=admitted_tools)
+
+
+def _check_seatbelt_proxy_settings() -> None:
+    if os.environ.get("CODEX_SANDBOX") == "seatbelt" and any(
+        os.environ.get(name)
+        for name in (
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        )
+    ):
+        raise ValueError(
+            "The pinned Core cannot honor HTTP proxy settings in seatbelt mode. "
+            "Run outside that sandboxed environment or remove unused proxy settings."
+        )
 
 
 def _selected_opening_declaration(
@@ -4008,6 +4162,7 @@ class Session(Generic[ContextT, OutputT]):
             profiles = (
                 _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
             )
+            agent = _capture_tool_name_winner(agent, profiles)
             auth = agent.provider.auth if agent.provider is not None else None
             codex_login = auth if isinstance(auth, CodexLogin) else None
             uses_siwc = isinstance(auth, SignInWithChatGPT)
@@ -4232,21 +4387,7 @@ class Session(Generic[ContextT, OutputT]):
             manual_slots = catalog.manual_slots()
             if state is not None:
                 _check_restored_output_contract(saved, restored_output)
-            if os.environ.get("CODEX_SANDBOX") == "seatbelt" and any(
-                os.environ.get(name)
-                for name in (
-                    "HTTP_PROXY",
-                    "http_proxy",
-                    "HTTPS_PROXY",
-                    "https_proxy",
-                    "ALL_PROXY",
-                    "all_proxy",
-                )
-            ):
-                raise ValueError(
-                    "The pinned Core cannot honor HTTP proxy settings in seatbelt mode. "
-                    "Run outside that sandboxed environment or remove unused proxy settings."
-                )
+            _check_seatbelt_proxy_settings()
             if manual_restore:
                 _check_restored_hosted_mcp(
                     saved, operation_declaration.tools, hosted_restore_grants, selected
@@ -4290,8 +4431,9 @@ class Session(Generic[ContextT, OutputT]):
             )
             verify_remembered_approvals = None
             remembered_approvals = await verification
-            if checkpoint is not None and not authenticated_memory_history:
-                checkpoint = _without_sandbox_memory_admission(checkpoint)
+            checkpoint = _without_untrusted_memory_admission(
+                checkpoint, authenticated=authenticated_memory_history
+            )
             if environment is not None and not isinstance(environment, Environment):
                 if not isinstance(environment, AbstractAsyncContextManager):
                     raise TypeError("environment must be an Environment or async context manager")
@@ -4306,22 +4448,43 @@ class Session(Generic[ContextT, OutputT]):
                 raise TypeError("environment must be an Environment")
             if project_guidance and executor is None:
                 raise ValueError("project_guidance requires an Environment")
-            _check_environment_python_tool_collisions(executor, allowed_tools)
-            if state is not None:
-                _check_restored_environment(saved, executor)
-            _check_native_agents_environment(native_agents, executor)
-            if restored_defaults is not None:
-                # Resolve only against destination declarations, without acquiring
-                # MCP connections or replacing the active manual roster.
-                _split_tools(
-                    restored_defaults,
-                    programmatic_tool_calling,
-                    available=restored_available,
-                    handoffs=restored_handoffs,
-                    environment=executor,
-                    native_agents=native_agents,
+            if _apply_sandbox_contributions(
+                agent,
+                lease,
+                has_graph=bool(profiles or native_agents),
+                manual_restore=manual_restore,
+            ):
+                catalog, allowed_tools, mcp_names = _bind_sandbox_opening_tools(
+                    agent,
+                    context,
+                    saved if state is not None else None,
                     project_guidance=project_guidance,
                 )
+                available = restored_available = agent.tools
+                bound_tools, restored_catalog = catalog.tools, catalog
+                native_specs, manual_slots = catalog.native_specs(), catalog.manual_slots()
+                native._validate_python_tool_declarations(native_specs)
+                model, settings = _prepare_opening_model_settings(
+                    agent,
+                    model,
+                    instructions,
+                    codex_login,
+                    restored_model_settings,
+                    restored_profile,
+                    profile_roster,
+                    provider_history,
+                )
+            _validate_opening_environment(
+                executor,
+                allowed_tools,
+                saved if state is not None else None,
+                native_agents,
+                restored_defaults,
+                restored_available,
+                restored_handoffs,
+                project_guidance=project_guidance,
+                programmatic_tool_calling=programmatic_tool_calling,
+            )
             if manual_restore and saved.operation_tools is not None:
                 (
                     operation_slots,
@@ -4627,6 +4790,7 @@ class Session(Generic[ContextT, OutputT]):
                                 else {}
                             ),
                         },
+                        "openai/sdk-root-prompts": {},
                         **(
                             {"openai/sdk-child-prompts": {}}
                             if native_agents is not None and native_agents.interactions
@@ -5035,6 +5199,9 @@ class Session(Generic[ContextT, OutputT]):
                             saved.continuation_trace_id if parent_trace is None else None
                         ),
                     )
+                    if continuation.pending_mcp:
+                        # Restore validation needs the current before/approval rules.
+                        session._start_interception()
                     await thread._prepare_manual_restore()
                     session._validate_pending_manual(active)
                     session._observations.append(
@@ -5046,7 +5213,7 @@ class Session(Generic[ContextT, OutputT]):
                     )
                     session._start_output_acceptance(handle)
                     active.task = _create_task(session._execute(active, [], admitted=True))
-                    if continuation.staged_retry:
+                    if continuation.staged_retry or continuation.pending_mcp:
                         driver = _create_task(session._continue_restored_turn(active))
                         active.add_callback(driver)
                 if handoff is not None:
@@ -6768,7 +6935,7 @@ class Session(Generic[ContextT, OutputT]):
         self, question: _NativeQuestion, operation: str, encoded: str
     ) -> None:
         state = self._check_question(question)
-        if question.subagent_id is not None:
+        if question._message.get("_sdk_question_id") is not None:
             if not await self._native._child_question_pending(
                 question._message["_sdk_question_id"]
             ):
@@ -6782,7 +6949,7 @@ class Session(Generic[ContextT, OutputT]):
 
         async def enqueue() -> None:
             try:
-                if question.subagent_id is None:
+                if question._message.get("_sdk_question_id") is None:
                     await self._native.call(operation, encoded)
                 elif not await self._native._respond_child_question(
                     question._message["_sdk_question_id"], operation, encoded
@@ -7624,6 +7791,19 @@ class Session(Generic[ContextT, OutputT]):
             seen.add(request._invocation)
         return bool(seen) and not state.failure.done()
 
+    def _has_pending_portable_mcp(self, state: _Submission) -> bool:
+        if state.handle is None or len(state.questions) != 1:
+            return False
+        (question,) = state.questions.values()
+        return (
+            isinstance(question, ApprovalRequest)
+            and question.subagent_id is None
+            and question.submission_id == state.handle.submission_id
+            and question.turn_id == state.handle.turn_id
+            and question._message.get("type") == "elicitation_request"
+            and isinstance(question._message.get("_sdk_question_id"), str)
+        )
+
     async def _manual_ready(self, state: _Submission, *, probe: bool = False) -> bool:
         if (
             self._active is not state
@@ -7653,9 +7833,13 @@ class Session(Generic[ContextT, OutputT]):
             raise NativeError("Native checkpoint readiness could not be verified") from None
         if not ready:
             return False
-        return self._validate_pending_manual(state) or any(
-            child.owner is state and child.sealing and child.checkpoint is not None
-            for child in self._configured_children
+        return (
+            self._validate_pending_manual(state)
+            or self._has_pending_portable_mcp(state)
+            or any(
+                child.owner is state and child.sealing and child.checkpoint is not None
+                for child in self._configured_children
+            )
         )
 
     async def _wait_manual_boundary(
@@ -7674,13 +7858,17 @@ class Session(Generic[ContextT, OutputT]):
             native_progress = self._native._manual_progress()
             if require_request and (
                 state.handle is None
-                or not self._validate_pending_manual(state)
+                or not (
+                    self._validate_pending_manual(state) or self._has_pending_portable_mcp(state)
+                )
                 or self._child_admissions
                 or any(not child.completion.done() for child in self._child_callbacks.values())
             ):
                 return False
             if await self._manual_ready(state):
                 return True
+            if require_request and self._has_pending_portable_mcp(state):
+                return False
             changed = asyncio.create_task(state.changed.wait())
             finished = asyncio.ensure_future(self._native._wait_manual_progress(native_progress))
             try:
@@ -13833,10 +14021,12 @@ class Session(Generic[ContextT, OutputT]):
 
     async def _transform_context_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
         def prepare(
-            _active: Callable[[], bool],
+            active: Callable[[], bool],
         ) -> tuple[Callable[..., Any], ModelRequestContext[ContextT]]:
             declaration = self._agent_for_message(message)
             callback = declaration.transform_context
+            if isinstance(callback, _SandboxContextTransforms):
+                callback = callback.bind(active)
             source = declaration.hosted_prompt
             enabled = message.get("hosted_prompt") is True
             if source is not None and not enabled and message.get("purpose") == "compaction":
@@ -13987,6 +14177,9 @@ class Session(Generic[ContextT, OutputT]):
             declaration = self._agent_for_message(message)
             factory = declaration.compaction
             callback = declaration.before_compact
+            transform = declaration.transform_context
+            if isinstance(transform, _SandboxContextTransforms):
+                transform = transform.bind(active)
             if factory is None and callback is None:
                 raise NativeError("Compaction callback has no application owner")
             request = _compaction_context(cast(ContextT, self._context), self.id, message)
@@ -14016,7 +14209,7 @@ class Session(Generic[ContextT, OutputT]):
                         factory,
                         request,
                         policy=policy,
-                        transform=declaration.transform_context,
+                        transform=transform,
                         provider_response=message.get("provider_response"),
                         candidate_indexes=message["candidate_indexes"],
                         model_omitted=message["model_omitted"],
@@ -16106,7 +16299,11 @@ class Session(Generic[ContextT, OutputT]):
                 else (server.request_metadata if metadata else server.transform_result)
             )
             extractor = None if server is None or metadata else server.extract_application_data
-            if server is None or (callback is None and extractor is None):
+            if server is None or (
+                callback is None
+                and extractor is None
+                and not (not metadata and server._has_failure_callback)
+            ):
                 raise NativeError("Native MCP callback does not match its captured declaration")
             assert state.handle is not None
 
@@ -16169,8 +16366,31 @@ class Session(Generic[ContextT, OutputT]):
                     notice["tool_name"],
                     arguments=MappingProxyType(deepcopy(notice["arguments"])),
                 )
+                original_result = notice["result"]
+                if server._has_failure_callback:
+                    original_error = self._native._take_native_mcp_transport_error(
+                        nonce, notice["turn_id"], notice["call_id"]
+                    )
+                    if original_error is not None:
+                        failure_function = server.failure_error_function
+                        if failure_function is None:
+                            raise _FunctionBodyFailure(original_error)
+                        if not callable(failure_function):
+                            raise NativeError("Native MCP failure policy is not callable")
+                        formatted = await _call_callback(
+                            _RecoverableFunctionCallback(failure_function),
+                            admitted,
+                            context,
+                            original_error,
+                        )
+                        if not isinstance(formatted, str):
+                            raise TypeError("MCP failure_error_function must return text")
+                        original_result = {
+                            "content": [{"type": "text", "text": formatted}],
+                            "isError": True,
+                        }
                 value, application_data = await _transform_and_extract_result(
-                    callback, extractor, context, notice["result"], admitted
+                    callback, extractor, context, original_result, admitted
                 )
                 if application_data is not None:
                     application_output = ApplicationToolOutput(
@@ -18172,11 +18392,13 @@ class Session(Generic[ContextT, OutputT]):
                     encoded = await self._native._seal_manual(
                         include_model_attempt=True, **seal_options
                     )
-                native_sealed = True
                 sealed = json.loads(encoded)
-                if sealed is None:
+                if sealed is None or sealed["checkpoint"] is None:
                     pre_seal_refused = True
-                    raise RuntimeError("The active submission is not a settled manual boundary")
+                    raise _ManualBoundaryLost(
+                        "The active submission is not a settled manual boundary"
+                    )
+                native_sealed = True
                 payload = sealed["checkpoint"]
                 model_attempt = sealed["model_attempt"]
             if active is not None:
