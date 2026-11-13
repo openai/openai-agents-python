@@ -1945,8 +1945,9 @@ pub(crate) mod tests {
     async fn transport_error_requires_exact_live_handed_policy_and_is_taken_once() {
         let args = json!({});
         let result = withheld();
-        let notice = notice(1, "turn", &args, &result);
         let control = Arc::new(McpResultControl::with_budget("root".into(), true, 4096));
+        let nonce = control.channel.next_nonce.fetch_add(1, Ordering::Relaxed);
+        let notice = notice(nonce, "turn", &args, &result);
         let rx = {
             let mut state = control.state.lock().unwrap();
             let rx = control.enqueue(
@@ -1954,42 +1955,42 @@ pub(crate) mod tests {
                 &notice,
                 Instant::now() + Duration::from_secs(30),
             );
-            state.pending.get_mut(&1).unwrap().transport_error =
+            state.pending.get_mut(&nonce).unwrap().transport_error =
                 Some(Arc::new(io::Error::other("private transport 503")));
             rx.unwrap()
         };
-        assert!(control.take_transport_error(1, "turn", "call").is_none());
+        assert!(control.take_transport_error(nonce, "turn", "call").is_none());
         let wire = control.next(None).await.unwrap();
         assert!(!wire.contains("private transport"));
-        assert!(control.handoff(1));
+        assert!(control.handoff(nonce));
         let foreign = McpResultControl::with_budget("foreign".into(), true, 4096);
-        assert!(foreign.take_transport_error(1, "turn", "call").is_none());
+        assert!(foreign.take_transport_error(nonce, "turn", "call").is_none());
         assert!(
             control
-                .take_transport_error(1, "wrong-turn", "call")
+                .take_transport_error(nonce, "wrong-turn", "call")
                 .is_none()
         );
         assert!(
             control
-                .take_transport_error(1, "turn", "wrong-call")
+                .take_transport_error(nonce, "turn", "wrong-call")
                 .is_none()
         );
-        let error = control.take_transport_error(1, "turn", "call").unwrap();
+        let error = control.take_transport_error(nonce, "turn", "call").unwrap();
         assert_eq!(
             transport_error_message(error.as_ref()),
             "private transport 503"
         );
-        assert!(control.take_transport_error(1, "turn", "call").is_none());
+        assert!(control.take_transport_error(nonce, "turn", "call").is_none());
         control
             .state
             .lock()
             .unwrap()
             .pending
-            .get_mut(&1)
+            .get_mut(&nonce)
             .unwrap()
             .transport_error = Some(error);
         control.revoke();
-        assert!(control.take_transport_error(1, "turn", "call").is_none());
+        assert!(control.take_transport_error(nonce, "turn", "call").is_none());
         assert!(rx.await.is_err());
     }
 
