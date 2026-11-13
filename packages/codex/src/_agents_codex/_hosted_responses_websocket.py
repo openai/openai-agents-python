@@ -538,7 +538,7 @@ class _Socket:
                 return
             items, ids = self._continuation(active, frame)
             if active.terminal is not None:
-                await self._fallback(active, frame, items)
+                await self._fallback(active, frame, [*(active.fallback_input or ()), *items])
                 return
             active.size += len(json.dumps(items, allow_nan=False).encode("utf-8"))
             if active.size > _MAX_RESPONSE_BYTES:
@@ -646,6 +646,7 @@ class _Socket:
                     active.terminal is not None
                     and active.fallback_input
                     and active.injecting is None
+                    and not active.pending
                 ):
                     if active.continuation is None:
                         raise ValueError("Hosted fallback requires its original continuation")
@@ -745,7 +746,15 @@ class _Socket:
                 _program_key(item) for item in active.queued if item.get("type") in _PROGRAM_ITEMS
             )
             for item in output:
-                if item.get("type") in _PROGRAM_ITEMS:
+                if (
+                    item.get("type") == "function_call"
+                    and isinstance(item.get("call_id"), str)
+                    and item["call_id"] not in active.emitted
+                    and item["call_id"] not in active.pending
+                ):
+                    active.pending.add(item["call_id"])
+                    self._queue_item(active, item)
+                elif item.get("type") in _PROGRAM_ITEMS:
                     key = _program_key(item)
                     if accounted[key]:
                         accounted[key] -= 1
