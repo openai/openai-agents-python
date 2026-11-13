@@ -939,7 +939,11 @@
     {
       "path": "sdk-client-version.patch",
       "sha256": "1fae03966cd574d2522aea5e036fc4fdd02bba45716952cf7991cae32ec642b1"
+    },
+    {
+      "path": "sdk-agent-profile-durable-request-controls.patch",
+      "sha256": "331ceb875035ae10cdd6c23ab34c43642b4978da51137ad1c0998cb28b024ab0"
     }
   ],
-  "result_tree": "462a79cba6158169bf5212ad217325afaecfb530"
+  "result_tree": "c7ef4e4a1cce702a60735b7ac40188319682dc25"
 }
