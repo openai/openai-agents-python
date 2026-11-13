@@ -146,6 +146,8 @@ pub struct MemoryThreadStore {
     #[cfg(test)]
     pub(crate) next_flush_hold: std::sync::Mutex<Option<Arc<CompletionHold>>>,
     #[cfg(test)]
+    pub(crate) tool_output_hold: std::sync::Mutex<Option<(String, Arc<CompletionHold>)>>,
+    #[cfg(test)]
     pub(crate) hook_completion_flush_hold: std::sync::Mutex<Option<Arc<HookCompletionFlushHold>>>,
     inner: Arc<dyn ThreadStore>,
     archived: Mutex<HashMap<ThreadId, SystemTime>>,
@@ -200,6 +202,8 @@ impl Default for MemoryThreadStore {
             completion_hold: std::sync::Mutex::new(None),
             #[cfg(test)]
             next_flush_hold: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            tool_output_hold: std::sync::Mutex::new(None),
             #[cfg(test)]
             hook_completion_flush_hold: std::sync::Mutex::new(None),
             inner: Arc::new(InMemoryThreadStore::default()),
@@ -797,6 +801,19 @@ impl ThreadStore for MemoryThreadStore {
                             }
                         }
                     }
+                }
+                let tool_output_hold = self.tool_output_hold.lock().unwrap().clone();
+                if let Some((call, hold)) = tool_output_hold
+                    && hold.parent == params.thread_id
+                    && params.items.iter().any(|item| {
+                        matches!(item, RolloutItem::ResponseItem(envelope)
+                            if matches!(&envelope.item,
+                                ResponseItem::FunctionCallOutput { call_id: Some(id), .. }
+                                if id == &call))
+                    })
+                {
+                    hold.entered.add_permits(1);
+                    hold.release.acquire().await.unwrap().forget();
                 }
                 let hold = self.completion_hold.lock().unwrap().clone();
                 if let Some(hold) = hold

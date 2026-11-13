@@ -24,6 +24,15 @@ pub(crate) struct BeforeResult {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automatic_reply_waits_for_core_terminal_before_sealing() {
+    checkpoint_with_completed_sibling(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn suspension_joins_a_completed_siblings_result_write() {
+    checkpoint_with_completed_sibling(true).await;
+}
+
+async fn checkpoint_with_completed_sibling(hold_append: bool) {
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -79,7 +88,7 @@ async fn automatic_reply_waits_for_core_terminal_before_sealing() {
         let runtime = json!({"codex_home":home.path(), "cwd":home.path()});
         let engine = Arc::new(EngineState::new(config.to_string(), runtime.to_string(), false, None)
             .await.unwrap());
-        let specs = ["lookup", "record"].into_iter().map(|name| {
+        let specs: Vec<codex_core_api::DynamicToolSpec> = ["lookup", "record"].into_iter().map(|name| {
             serde_json::from_value(json!({
                 "type":"function", "name":name, "description":name,
                 "inputSchema":{"type":"object","properties":{},"additionalProperties":false}
@@ -92,9 +101,11 @@ async fn automatic_reply_waits_for_core_terminal_before_sealing() {
                 {"namespace":"functions","name":"record"}
             ]}
         })).unwrap();
-        let native: NativeThread = engine.start_with_tools(options, None, Some(specs), false)
+        let native: NativeThread = engine.start_with_tools(options, None, Some(specs.clone()), false)
             .await.unwrap();
         let state = native.current().unwrap();
+        crate::application_instructions::publish(&state.thread, "Run both tools.".into())
+            .await.unwrap();
         let tools = state.thread.thread_extension_data().get::<PythonTools>().unwrap();
         let hold = Arc::new(BeforeResult {
             call_id: "call-B".into(), entered: Semaphore::new(0), release: Semaphore::new(0),
@@ -128,8 +139,36 @@ async fn automatic_reply_waits_for_core_terminal_before_sealing() {
         // This must also work if Core finishes before the waiter subscribes.
         tools.wait_manual_progress(version).await.unwrap();
         assert!(manual_checkpoint::ready(&state, &native.manual).await.unwrap());
-        let checkpoint = manual_checkpoint::capture(&state, &native.manual, None, false).await.unwrap().unwrap();
+        let checkpoint = if hold_append {
+            let hold = Arc::new(crate::storage::CompletionHold {
+                parent: state.id,
+                entered: Semaphore::new(0),
+                release: Semaphore::new(0),
+            });
+            let store = engine.store.as_any()
+                .downcast_ref::<crate::storage::MemoryThreadStore>().unwrap();
+            *store.tool_output_hold.lock().unwrap() = Some(("call-B".into(), hold.clone()));
+            let capture = manual_checkpoint::capture(&state, &native.manual, None, false);
+            tokio::pin!(capture);
+            tokio::select! {
+                entered = hold.entered.acquire() => entered.unwrap().forget(),
+                _ = &mut capture => panic!("Capture finished before the exact sibling entered the writer"),
+            }
+            // The old 100 ms forced abort returned a checkpoint without call-B.
+            // Keep the exact append blocked beyond that deadline.
+            let early = tokio::time::timeout(std::time::Duration::from_millis(250), &mut capture)
+                .await;
+            store.tool_output_hold.lock().unwrap().take();
+            hold.release.add_permits(1);
+            assert!(early.is_err(), "Capture finished without joining the sibling write");
+            capture.await.unwrap().unwrap()
+        } else {
+            manual_checkpoint::capture(&state, &native.manual, None, false).await.unwrap().unwrap()
+        };
         assert_eq!(checkpoint["format_version"], 3);
+        manual_checkpoint::validate_for_opening(
+            &checkpoint, "Run both tools.", &specs, &[0], None,
+        ).unwrap();
         assert_eq!(checkpoint["native_continuation"]["pending_manual"][0]["call_id"], "call-A");
         let replies = checkpoint["native_continuation"]["accepted_replies"].as_object().unwrap();
         assert_eq!(replies.len(), 1);
