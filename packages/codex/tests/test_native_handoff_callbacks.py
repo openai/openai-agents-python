@@ -493,12 +493,20 @@ async def test_local_storage_preserves_the_accepted_callback_target(responses, t
         session_id = session.id
         assert responses.request_headers[-1][header] == old_route
 
-    target.model_settings = (
-        {"extra_headers": {header: new_route}} if transport == "configured" else {}
+    current_target = Agent(
+        name="Target",
+        instructions="target agent",
+        model_settings={"extra_headers": {header: new_route}} if transport == "configured" else {},
+    )
+    current_agent = Agent(
+        name="Source",
+        instructions="source agent",
+        provider=agent.provider,
+        handoffs=[Handoff(current_target, route)],
     )
     responses.respond(assistant_output("resumed target"))
-    async with agent.session(storage=storage, resume=session_id) as session:
-        assert await session.get_active_agent() is target
+    async with current_agent.session(storage=storage, resume=session_id) as session:
+        assert await session.get_active_agent() is current_target
         result = await (await session.submit("continue the accepted target")).get_result()
         assert result.final_output == "resumed target"
         current_header = responses.request_headers[-1].get(header)
