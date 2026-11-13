@@ -1099,7 +1099,11 @@
     {
       "path": "sdk-native-handoff-provider-routing.patch",
       "sha256": "ec9e78eaa2b222f609257068d3eca280e295903d5c211d04e65a3de3c65e93c2"
+    },
+    {
+      "path": "sdk-encrypted-caller-developer-expiry.patch",
+      "sha256": "04b7049d31c8d5b083f1d98a6b373763470f62d2ab801cb33721c4f6dfd05375"
     }
   ],
-  "result_tree": "7c6f2c75ca76ef6b43655098e7fae22381050159"
+  "result_tree": "fecfc681e1950426e102745fb2866e8f1fe8fd30"
 }

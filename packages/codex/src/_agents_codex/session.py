@@ -3250,6 +3250,48 @@ def _prepare_open_state(
     return state, managed_source
 
 
+def _capture_opening_checkpoint(
+    state: SessionState,
+    *,
+    resume_budget: RunBudget | None,
+    auth: CodexLogin | SignInWithChatGPT | None,
+    instructions: str,
+    graph: bool,
+    has_output_override: bool,
+) -> tuple[
+    SessionState,
+    _RunBudget | None,
+    str | None,
+    str,
+    bool,
+    tuple[ToolRef, ...] | None,
+    tuple[str, ...],
+]:
+    if not isinstance(state, SessionState):
+        raise TypeError("state must be a SessionState")
+    # Capture caller-owned data before the first await. The native
+    # importer validates identities, revision, and current tool specs.
+    saved = state._capture_for_restore()
+    if "_sdk_history_ttl_seconds" in saved.agent_options:
+        raise CapabilityError("Encrypted history retention requires the original storage backend")
+    restored_budget = _RunBudget.restore_checkpoint(saved.run_budget, resume_budget)
+    saved_plan_provider = _checkpoint_plan_provider(saved, auth)
+    if not isinstance(auth, SignInWithChatGPT):
+        _check_checkpoint(saved, instructions, graph=graph)
+    checkpoint, override, defaults, resource_servers = _prepare_native_checkpoint(
+        saved, has_output_override=has_output_override
+    )
+    return (
+        saved,
+        restored_budget,
+        saved_plan_provider,
+        checkpoint,
+        override,
+        defaults,
+        resource_servers,
+    )
+
+
 def _prepare_native_checkpoint(
     saved: SessionState, *, has_output_override: bool
 ) -> tuple[str, bool, tuple[ToolRef, ...] | None, tuple[str, ...]]:
@@ -3707,6 +3749,184 @@ def _current_attempt_controls(
     }
 
 
+def _acquire_opening_profile_providers(
+    native: Any,
+    provider: NativeProvider,
+    profiles: Sequence[_AgentProfile],
+    opening: _OpeningOwner,
+    provider_keys: dict[str, str],
+) -> None:
+    key = None
+    try:
+        for profile in profiles:
+            target = profile.declaration.provider
+            if (
+                target is not None
+                and target is not provider
+                and id(target) not in opening.profile_leases
+            ):
+                _, _, target_lease = target._acquire_lease()
+                opening.profile_leases[id(target)] = target_lease
+            route = profile.native_provider_id
+            if route is not None and route not in provider_keys:
+                assert target is not None
+                key = target.api_key
+                if key is None:
+                    key = native._read_openai_api_key_from_env()
+                if not key or not key.strip():
+                    raise ValueError("A distinct handoff provider requires an API key")
+                provider_keys[route] = key.strip()
+                opening.profile_keys[id(target)] = provider_keys[route]
+    finally:
+        key = None
+
+
+async def _extend_opening_profile_provider_config(
+    provider_config: dict[str, Any],
+    profiles: Sequence[_AgentProfile],
+    opening: _OpeningOwner,
+    *,
+    standalone_web_search: bool,
+) -> None:
+    for profile in profiles:
+        route = profile.native_provider_id
+        if route is None or f"model_providers.{route}" in provider_config:
+            continue
+        target = profile.declaration.provider
+        assert target is not None
+        target_config = await _opening_provider_config(
+            target,
+            opening,
+            captured_api_key=None,
+            captured_siwc_provider=None,
+            saved_plan_provider=None,
+            standalone_web_search=standalone_web_search,
+        )
+        provider_config[f"model_providers.{route}"] = target_config["model_providers.native_agent"]
+
+
+def _opening_private_run_policy(
+    provider: NativeProvider,
+    provider_config: dict[str, Any],
+    startup_transport: Any,
+    *,
+    private_opening: bool,
+    bounded: bool,
+    no_context: bool,
+    no_handoffs: bool,
+    no_tracing: bool,
+    plain_output: bool,
+    no_output_retries: bool,
+    completed_input: bool,
+    has_provider_history: bool,
+    private_text_run: bool,
+    private_wss_candidate: bool,
+) -> tuple[bool, bool, bool, bool]:
+    private_run = (
+        private_opening
+        and bounded
+        and no_context
+        and provider is not None
+        and provider.model_backend is None
+        and provider.auth is None
+        and no_handoffs
+        and no_tracing
+        and plain_output
+        and no_output_retries
+    )
+    use_completed_owner = private_run and completed_input
+    websockets_enabled = provider._websockets_enabled and not (
+        has_provider_history and provider.supports_websockets is None
+    )
+    private_http = False
+    # Conservative subset of SdkModelHttpPool::client eligibility;
+    # explicit CA/proxy profiles keep their existing transport selection.
+    if (
+        private_run
+        and (private_text_run or use_completed_owner)
+        and (startup_transport or {}).get("mode") != "websocket"
+        and _default_private_tls_profile(provider, provider_config, websockets_enabled)
+    ):
+        private_http = True
+        websockets_enabled = False
+    private_wss_tls = (
+        private_wss_candidate
+        and bounded
+        and provider.model_backend is None
+        and provider.auth is None
+        and no_tracing
+        and no_output_retries
+        and _default_private_tls_profile(provider, provider_config, websockets_enabled)
+    )
+    return use_completed_owner, websockets_enabled, private_http, private_wss_tls
+
+
+def _opening_callback_options(
+    agent: Agent[Any, Any],
+    input_guardrails: Sequence[InputGuardrail[Any]],
+    output_guardrails: Sequence[OutputGuardrail[Any]],
+    *,
+    hold_assistant_completion: bool,
+    parent_trace: TraceContext | None,
+) -> dict[str, Any]:
+    return {
+        "_transform_context": agent.transform_context is not None
+        or agent.hosted_prompt is not None,
+        "_before_compact": agent.before_compact is not None or agent.compaction is not None,
+        "_post_turn_compact": agent.compaction is not None,
+        "_before_complete": _needs_before_complete(agent, input_guardrails, output_guardrails),
+        "_hold_assistant_completion": hold_assistant_completion,
+        "_tool_batch_completion": agent.tool_batch_completion is not None,
+        **({"parent_trace": parent_trace.to_headers()} if parent_trace is not None else {}),
+    }
+
+
+def _opening_continuation_slot_options(
+    restored_catalog: _ToolCatalog,
+    operation_slots: Sequence[int] | None,
+    saved: SessionState | None,
+    *,
+    run_formatter: bool,
+) -> dict[str, Any]:
+    return {
+        "_configured_continuation_tool_slots": [
+            slot
+            for slot, tool in enumerate(restored_catalog.tools)
+            if isinstance(tool, _CapturedFunction)
+            and tool.configured_agent is not None
+            and (operation_slots is None or slot in operation_slots)
+            and saved is not None
+            and saved.native_continuation is not None
+            and any(
+                pending.tool == tool.name and pending.continuation is not None
+                for pending in saved.native_continuation.pending_manual
+            )
+        ],
+        "_terminal_tool_slots": restored_catalog.finish_slots(),
+        "_input_error_tool_slots": restored_catalog.input_error_slots(run_formatter=run_formatter),
+    }
+
+
+def _opening_response_policy(
+    agent: Agent[Any, Any],
+    profiles: Sequence[_AgentProfile],
+    output_guardrails: Sequence[OutputGuardrail[Any]],
+    provider_history: ProviderHistory | None,
+) -> bool:
+    if provider_history is not None and any(
+        profile.native_provider_id is not None for profile in profiles
+    ):
+        raise CapabilityError("Distinct handoff providers require SDK-managed history")
+    hold_assistant_completion = bool(
+        output_guardrails
+        or agent.output_guardrails
+        or any(profile.declaration.output_guardrails for profile in profiles)
+    )
+    if provider_history is not None and hold_assistant_completion:
+        raise CapabilityError("Output guardrails require SDK-managed conversation history")
+    return hold_assistant_completion
+
+
 def _opening_history_ttl(storage: LocalStorage | CustomStorage | None) -> int | None:
     from .canonical_storage_encrypt import EncryptedSessionStore
 
@@ -3726,6 +3946,50 @@ def _check_history_retention_opening(
         raise ValueError("Encrypted history TTL cannot combine with provider-owned history")
     if any(profile.declaration.prepare_handoff_input is not None for profile in profiles):
         raise ValueError("Handoff input preparation cannot combine with encrypted history TTL")
+
+
+def _opening_restored_output_contract(
+    output: _PreparedOutput,
+    restored_output_type: OutputSpec[Any] | None,
+    selected: _RestoreDeclaration | None,
+    restored_profile: _ProfileRuntime | None,
+    saved: SessionState | None,
+    *,
+    manual_restore: bool,
+    restored_default: str | None,
+    authorized_restore_model: str | None,
+) -> tuple[_PreparedOutput, tuple[str, dict[str, Any]] | None, bool]:
+    continuation = saved.native_continuation if saved is not None else None
+    # Carry the owned root's exact contract through this checked restore.
+    # The opening default still applies to the next explicit request.
+    restored_output = (
+        _prepare_spec(restored_output_type)
+        if restored_output_type is not None
+        else selected.output
+        if selected is not None and manual_restore
+        else restored_profile.output
+        if restored_profile is not None
+        else output
+    )
+    # A handoff without its own model inherits the opening Agent's model.
+    trusted_restore_default = restored_default
+    if (
+        continuation is not None
+        and continuation.model_override is None
+        and authorized_restore_model is not None
+    ):
+        trusted_restore_default = authorized_restore_model
+    restored_model_settings = (
+        _manual_restore_model_settings(
+            saved,
+            authorized_model=authorized_restore_model,
+            trusted_default=trusted_restore_default,
+        )
+        if saved is not None and manual_restore
+        else None
+    )
+    verify_current_default = restored_model_settings is not None and trusted_restore_default is None
+    return restored_output, restored_model_settings, verify_current_default
 
 
 def _prepare_opening_model_settings(
@@ -4056,7 +4320,7 @@ class Session(Generic[ContextT, OutputT]):
         environment = None
         runtime: dict[str, Any] = {}
         native_environment: dict[str, Any] | None = None
-        session = None
+        session: Session[ContextT, OutputT] | None = None
         with opening:
             input_guardrails, output_guardrails = _capture_opening_guardrails(
                 input_guardrails, output_guardrails
@@ -4119,17 +4383,9 @@ class Session(Generic[ContextT, OutputT]):
             profiles = (
                 _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
             )
-            if provider_history is not None and any(
-                profile.native_provider_id is not None for profile in profiles
-            ):
-                raise CapabilityError("Distinct handoff providers require SDK-managed history")
-            hold_assistant_completion = bool(
-                output_guardrails
-                or agent.output_guardrails
-                or any(profile.declaration.output_guardrails for profile in profiles)
+            hold_assistant_completion = _opening_response_policy(
+                agent, profiles, output_guardrails, provider_history
             )
-            if provider_history is not None and hold_assistant_completion:
-                raise CapabilityError("Output guardrails require SDK-managed conversation history")
             history_ttl_seconds = _opening_history_ttl(storage)
             _check_history_retention_opening(history_ttl_seconds, provider_history, profiles)
             auth = agent.provider.auth if agent.provider is not None else None
@@ -4160,28 +4416,23 @@ class Session(Generic[ContextT, OutputT]):
             restored_override = False
             saved_plan_provider = None
             if state is not None:
-                if not isinstance(state, SessionState):
-                    raise TypeError("state must be a SessionState")
-                # Capture caller-owned data before the first await. The native
-                # importer validates identities, revision, and current tool specs.
-                saved = state._capture_for_restore()
-                if "_sdk_history_ttl_seconds" in saved.agent_options:
-                    raise CapabilityError(
-                        "Encrypted history retention requires the original storage backend"
-                    )
-                approval_checkpoint = saved
-                restored_budget = _RunBudget.restore_checkpoint(saved.run_budget, resume_budget)
-                saved_plan_provider = _checkpoint_plan_provider(saved, auth)
-                if not uses_siwc:
-                    _check_checkpoint(saved, instructions, graph=bool(profiles))
                 (
+                    saved,
+                    restored_budget,
+                    saved_plan_provider,
                     checkpoint,
                     restored_override,
                     restored_defaults,
                     restored_resource_servers,
-                ) = _prepare_native_checkpoint(
-                    saved, has_output_override=restored_output_type is not None
+                ) = _capture_opening_checkpoint(
+                    state,
+                    resume_budget=resume_budget,
+                    auth=auth,
+                    instructions=instructions,
+                    graph=bool(profiles),
+                    has_output_override=restored_output_type is not None,
                 )
+                approval_checkpoint = saved
                 manual_restore = saved.native_continuation is not None
                 continuation = saved.native_continuation
             if isinstance(storage, LocalStorage) and programmatic_tool_calling:
@@ -4315,36 +4566,17 @@ class Session(Generic[ContextT, OutputT]):
                 if restored_profile is not None and saved.managed_tool_specs is not None
                 else catalog
             )
-            # Carry the owned root's exact contract through this checked restore.
-            # The opening default still applies to the next explicit request.
-            restored_output = (
-                _prepare_spec(restored_output_type)
-                if restored_output_type is not None
-                else selected.output
-                if selected is not None and manual_restore
-                else restored_profile.output
-                if restored_profile is not None
-                else output
-            )
-            # A handoff without its own model inherits the opening Agent's model.
-            trusted_restore_default = restored_declaration.model or agent.model
-            if (
-                continuation is not None
-                and continuation.model_override is None
-                and authorized_restore_model is not None
-            ):
-                trusted_restore_default = authorized_restore_model
-            restored_model_settings = (
-                _manual_restore_model_settings(
-                    saved,
-                    authorized_model=authorized_restore_model,
-                    trusted_default=trusted_restore_default,
+            restored_output, restored_model_settings, verify_current_default = (
+                _opening_restored_output_contract(
+                    output,
+                    restored_output_type,
+                    selected,
+                    restored_profile,
+                    saved if state is not None else None,
+                    manual_restore=manual_restore,
+                    restored_default=restored_declaration.model or agent.model,
+                    authorized_restore_model=authorized_restore_model,
                 )
-                if state is not None and manual_restore
-                else None
-            )
-            verify_current_default = (
-                restored_model_settings is not None and trusted_restore_default is None
             )
             model, settings = _prepare_opening_model_settings(
                 agent,
@@ -4574,27 +4806,11 @@ class Session(Generic[ContextT, OutputT]):
                 native, transport, provider_lease = provider._acquire_lease()
                 opening.lease = provider_lease
                 profile_provider_keys: dict[str, str] = {}
-                for profile in profiles:
-                    target = profile.declaration.provider
-                    if (
-                        target is not None
-                        and target is not provider
-                        and id(target) not in opening.profile_leases
-                    ):
-                        _, _, target_lease = target._acquire_lease()
-                        opening.profile_leases[id(target)] = target_lease
-                    route = profile.native_provider_id
-                    if route is not None and route not in profile_provider_keys:
-                        assert target is not None
-                        key = target.api_key
-                        if key is None:
-                            key = native._read_openai_api_key_from_env()
-                        if not key or not key.strip():
-                            raise ValueError("A distinct handoff provider requires an API key")
-                        profile_provider_keys[route] = key.strip()
-                        opening.profile_keys[id(target)] = profile_provider_keys[route]
-                engine = None
-                thread = None
+                _acquire_opening_profile_providers(
+                    native, provider, profiles, opening, profile_provider_keys
+                )
+                engine: Any = None
+                thread: Any = None
                 provider_config = await _opening_provider_config(
                     provider,
                     opening,
@@ -4605,76 +4821,35 @@ class Session(Generic[ContextT, OutputT]):
                     and web_search.route == "standalone",
                     provider_history=provider_history,
                 )
-                for profile in profiles:
-                    route = profile.native_provider_id
-                    if route is None or f"model_providers.{route}" in provider_config:
-                        continue
-                    target = profile.declaration.provider
-                    assert target is not None
-                    target_config = await _opening_provider_config(
-                        target,
-                        opening,
-                        captured_api_key=None,
-                        captured_siwc_provider=None,
-                        saved_plan_provider=None,
-                        standalone_web_search=web_search is not None
-                        and web_search.route == "standalone",
-                    )
-                    provider_config[f"model_providers.{route}"] = target_config[
-                        "model_providers.native_agent"
-                    ]
+                await _extend_opening_profile_provider_config(
+                    provider_config,
+                    profiles,
+                    opening,
+                    standalone_web_search=web_search is not None
+                    and web_search.route == "standalone",
+                )
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
 
                 startup_transport = settings.get("request_controls", {}).get("request_transport")
 
-                def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool, bool]:
-                    private_run = (
-                        (_atomic_first_turn or _private_default_opening)
-                        and observation_retention == "bounded"
-                        and context is None
-                        and provider is not None
-                        and provider.model_backend is None
-                        and provider.auth is None
-                        and not agent.handoffs
-                        and _tracing_context is None
-                        and (agent.output_type is None or agent.output_type is str)
-                        and not output.max_retries
-                    )
-                    use_completed_owner = (
-                        private_run and not available and _completed_input is not None
-                    )
-                    websockets_enabled = provider._websockets_enabled and not (
-                        provider_history is not None and provider.supports_websockets is None
-                    )
-                    private_http = False
-                    # Conservative subset of SdkModelHttpPool::client eligibility;
-                    # explicit CA/proxy profiles keep their existing transport selection.
-                    if (
-                        private_run
-                        and (_private_text_run or use_completed_owner)
-                        and (startup_transport or {}).get("mode") != "websocket"
-                        and _default_private_tls_profile(
-                            provider, provider_config, websockets_enabled
-                        )
-                    ):
-                        private_http = True
-                        websockets_enabled = False
-                    private_wss_tls = (
-                        _private_wss_candidate
-                        and observation_retention == "bounded"
-                        and provider.model_backend is None
-                        and provider.auth is None
-                        and _tracing_context is None
-                        and not output.max_retries
-                        and _default_private_tls_profile(
-                            provider, provider_config, websockets_enabled
-                        )
-                    )
-                    return use_completed_owner, websockets_enabled, private_http, private_wss_tls
-
                 use_completed_owner, websockets_enabled, private_http, private_wss_tls = (
-                    private_run_policy(provider)
+                    _opening_private_run_policy(
+                        provider,
+                        provider_config,
+                        startup_transport,
+                        private_opening=_atomic_first_turn or _private_default_opening,
+                        bounded=observation_retention == "bounded",
+                        no_context=context is None,
+                        no_handoffs=not agent.handoffs,
+                        no_tracing=_tracing_context is None,
+                        plain_output=agent.output_type is None or agent.output_type is str,
+                        no_output_retries=not output.max_retries,
+                        completed_input=not available and _completed_input is not None,
+                        has_provider_history=provider_history is not None,
+                        private_text_run=_private_text_run,
+                        private_wss_candidate=_private_wss_candidate,
+                    )
                 )
                 _atomic_first_turn = any((_atomic_first_turn, use_completed_owner, private_wss_tls))
                 config = _native_session_config(
@@ -4747,20 +4922,12 @@ class Session(Generic[ContextT, OutputT]):
                         else {}
                     ),
                     "_buffered_responses": provider.response_mode == "buffered",
-                    "_transform_context": agent.transform_context is not None
-                    or agent.hosted_prompt is not None,
-                    "_before_compact": agent.before_compact is not None
-                    or agent.compaction is not None,
-                    "_post_turn_compact": agent.compaction is not None,
-                    "_before_complete": _needs_before_complete(
-                        agent, input_guardrails, output_guardrails
-                    ),
-                    "_hold_assistant_completion": hold_assistant_completion,
-                    "_tool_batch_completion": agent.tool_batch_completion is not None,
-                    **(
-                        {"parent_trace": parent_trace.to_headers()}
-                        if parent_trace is not None
-                        else {}
+                    **_opening_callback_options(
+                        agent,
+                        input_guardrails,
+                        output_guardrails,
+                        hold_assistant_completion=hold_assistant_completion,
+                        parent_trace=parent_trace,
                     ),
                     "config": config,
                     **(
@@ -4799,22 +4966,11 @@ class Session(Generic[ContextT, OutputT]):
                     "_application_instructions": instructions,
                     "_sdk_instruction_files": instruction_receipts,
                     "_manual_tool_slots": manual_slots,
-                    "_configured_continuation_tool_slots": [
-                        slot
-                        for slot, tool in enumerate(restored_catalog.tools)
-                        if isinstance(tool, _CapturedFunction)
-                        and tool.configured_agent is not None
-                        and (operation_slots is None or slot in operation_slots)
-                        and state is not None
-                        and saved.native_continuation is not None
-                        and any(
-                            pending.tool == tool.name and pending.continuation is not None
-                            for pending in saved.native_continuation.pending_manual
-                        )
-                    ],
-                    "_terminal_tool_slots": restored_catalog.finish_slots(),
-                    "_input_error_tool_slots": restored_catalog.input_error_slots(
-                        run_formatter=tool_error_formatter is not None
+                    **_opening_continuation_slot_options(
+                        restored_catalog,
+                        operation_slots,
+                        saved if state is not None else None,
+                        run_formatter=tool_error_formatter is not None,
                     ),
                     **_native_agent_options(native_agents),
                     "tool_policy": _opening_tool_policy(
@@ -11923,7 +12079,8 @@ class Session(Generic[ContextT, OutputT]):
                             request["tracing_context"] = state.tracing.context
                         if state.continued_from is not None:
                             request["expected_previous_turn_id"] = state.continued_from
-                        request["profile_output_override"] = state.output_override
+                        if state.realtime_tool is None:
+                            request["profile_output_override"] = state.output_override
                         if state.output.mode == "native" and state.realtime_tool is None:
                             request["start"] = {"final_output_json_schema": state.output.schema}
                         if state.model_override is not None:
