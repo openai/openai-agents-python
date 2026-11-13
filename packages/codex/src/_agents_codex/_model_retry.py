@@ -172,7 +172,12 @@ async def _resolve_retry(
                 if advice is not None:
                     from dataclasses import replace
 
-                    context = replace(context, provider_advice=advice)
+                    context = replace(
+                        context,
+                        provider_advice=advice,
+                        response_started=context.response_started
+                        or advice.response_started is True,
+                    )
         decision = None
         if policy_enabled:
             if not callable(policy):
@@ -193,7 +198,11 @@ async def _resolve_retry(
             }
         return {
             "decision": decision,
-            "provider_advice": asdict(advice) if advice is not None else None,
+            "provider_advice": (
+                {key: value for key, value in asdict(advice).items() if key != "response_started"}
+                if advice is not None
+                else None
+            ),
         }
     finally:
         # Policy/advice failures must not retain a failed request through traceback locals.
