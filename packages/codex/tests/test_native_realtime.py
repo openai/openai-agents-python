@@ -33,6 +33,7 @@ from agents.realtime import (
     RealtimeConfig,
     RealtimeDelegation,
     RealtimeResponse,
+    RealtimeToolCall,
     background_result,
 )
 from tests._asyncio import timeout
@@ -2236,3 +2237,144 @@ async def test_noninterrupting_speech_preserves_native_function_continuation_unt
                 *(task for task in (observed, unexpected) if task is not None),
                 return_exceptions=True,
             )
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_native_voice_history_combines_exact_call_and_output(
+    realtime_peer: RealtimePeer, fails: bool
+) -> None:
+    peer = realtime_peer
+
+    @function_tool(error_function=lambda _context, _error: "safe failure")
+    async def lookup(key: str) -> str:
+        """Return a synthetic record."""
+        if fails:
+            raise RuntimeError("PRIVATE_TOOL_FAILURE")
+        return f"found:{key}"
+
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="synthetic-rich-history", supports_websockets=False
+        ) as provider,
+        Agent(instructions="Use lookup.", tools=[lookup], provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime", tools=(lookup,))) as voice,
+    ):
+        await peer.function("lookup", {"key": "retained"}, "rich-call")
+        output = await peer.frame(
+            lambda frame: (
+                frame["type"] == "conversation.item.create"
+                and frame.get("item", {}).get("call_id") == "rich-call"
+            )
+        )
+        expected = "safe failure" if fails else "found:retained"
+        assert output["item"]["output"] == expected
+        async with aclosing(voice.events()) as events:
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeToolCall)
+                    and event.call_id == "rich-call"
+                    and event.status in {"completed", "failed"}
+                ):
+                    break
+        rows = [item for item in voice.history if item.kind == "function_call"]
+        assert len(rows) == 1
+        row = rows[0]
+        assert (row.call_id, row.item_id, row.provider_item_id, row.name) == (
+            "rich-call",
+            "item-rich-call",
+            "item-rich-call",
+            "lookup",
+        )
+        assert row.arguments == json.dumps({"key": "retained"})
+        assert row.session_id == next(
+            item.session_id for item in voice.history if item.kind == "realtime_session_started"
+        )
+        assert row.output == expected
+        assert row.status == ("failed" if fails else "completed")
+        assert "PRIVATE_TOOL_FAILURE" not in repr(voice.history)
+        retained = tuple(item for item in voice.history if item.kind == "function_call")
+    assert tuple(item for item in voice.history if item.kind == "function_call") == retained
+
+
+async def test_native_voice_history_keeps_interleaved_call_fragments_separate(
+    realtime_peer: RealtimePeer,
+) -> None:
+    peer = realtime_peer
+
+    @function_tool
+    async def lookup(key: str) -> str:
+        """Return a synthetic record."""
+        return f"found:{key}"
+
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-rich-interleave",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Use lookup.", tools=[lookup], provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime", tools=(lookup,))) as voice,
+    ):
+        assert peer.socket is not None
+        await peer.socket.send_json({"type": "response.created", "response": {"id": "interleaved"}})
+        items = [
+            {
+                "id": f"item-{key}",
+                "type": "function_call",
+                "call_id": f"call-{key}",
+                "name": "lookup",
+                "arguments": json.dumps({"key": key}),
+            }
+            for key in ["first", "second"]
+        ]
+        for index, item in enumerate(items):
+            await peer.socket.send_json(
+                {
+                    "type": "response.output_item.added",
+                    "response_id": "interleaved",
+                    "output_index": index,
+                    "item": {**item, "arguments": ""},
+                }
+            )
+        for offset in [0, 7]:
+            for item in reversed(items):
+                fragment = (
+                    item["arguments"][offset:7] if offset == 0 else item["arguments"][offset:]
+                )
+                await peer.socket.send_json(
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "response_id": "interleaved",
+                        "item_id": item["id"],
+                        "delta": fragment,
+                    }
+                )
+        for index, item in enumerate(items):
+            await peer.socket.send_json(
+                {
+                    "type": "response.output_item.done",
+                    "response_id": "interleaved",
+                    "output_index": index,
+                    "item": item,
+                }
+            )
+        await peer.socket.send_json(
+            {"type": "response.done", "response": {"id": "interleaved", "output": items}}
+        )
+        async with aclosing(voice.events()) as events:
+            finished = set()
+            async for event in events:
+                if isinstance(event, RealtimeToolCall) and event.status == "completed":
+                    finished.add(event.call_id)
+                    if len(finished) == 2:
+                        break
+        rows = {item.call_id: item for item in voice.history if item.kind == "function_call"}
+        assert set(rows) == {"call-first", "call-second"}
+        for item in items:
+            row = rows[item["call_id"]]
+            assert row.arguments == item["arguments"]
+            assert row.item_id == row.provider_item_id == item["id"]
+            assert row.output == "found:" + json.loads(item["arguments"])["key"]
+            assert row.status == "completed"
