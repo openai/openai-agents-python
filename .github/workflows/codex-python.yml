@@ -47,6 +47,8 @@ jobs:
     runs-on: >-
       ${{ fromJSON(
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64-xl"}' ||
+        github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04-arm' && inputs.native_source_run == '' && github.event_name == 'push' && (github.ref == 'refs/heads/feat/codex-harness' || github.ref == 'refs/heads/ci/hillclimb/python-current-seed-32') &&
+          '{"group":"codex-runners","labels":"codex-linux-arm64"}' ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
           (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
            (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness' &&
@@ -123,8 +125,11 @@ jobs:
           uname -m
           getconf GNU_LIBC_VERSION
           df -h "$RUNNER_TEMP"
-          # Leave one CPU and memory headroom on the standard 4-vCPU, 16-GB runner.
-          echo "CARGO_BUILD_JOBS=3" >> "$GITHUB_ENV"
+          # Leave CPU and memory headroom on the larger or standard ARM64 producer.
+          echo "CARGO_BUILD_JOBS=$ARM_CARGO_BUILD_JOBS" >> "$GITHUB_ENV"
+        env:
+          ARM_CARGO_BUILD_JOBS: >-
+            ${{ github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04-arm' && inputs.native_source_run == '' && github.event_name == 'push' && (github.ref == 'refs/heads/feat/codex-harness' || github.ref == 'refs/heads/ci/hillclimb/python-current-seed-32') && '14' || '3' }}
       - name: Select shared Cargo directories
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
