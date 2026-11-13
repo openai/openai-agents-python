@@ -743,6 +743,9 @@ def main():
                     path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                     for path in sorted(directory.glob("*.py"))
                 }
+                after["requirements-http2-peer.txt"] = hashlib.sha256(
+                    (directory / "requirements-http2-peer.txt").read_bytes()
+                ).hexdigest()
                 if args.default_host_setup:
                     after.update(
                         {

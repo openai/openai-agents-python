@@ -1002,6 +1002,7 @@ class PostflightTests(unittest.TestCase):
         self.signal_writes = 0
         self.launched = False
         self.postflight = False
+        self.dependency_drift = False
         self.publications = []
         previous = signal.getsignal(signal.SIGTERM)
         self.addCleanup(signal.signal, signal.SIGTERM, previous)
@@ -1032,6 +1033,8 @@ class PostflightTests(unittest.TestCase):
                 self.postflight = True
                 if self.read_error is not None:
                     raise self.read_error
+                if self.dependency_drift and path.name == "requirements-http2-peer.txt":
+                    return original_read(path) + b"\n# changed peer dependency\n"
             return original_read(path)
 
         def write(path, text, *args, **kwargs):
@@ -1081,6 +1084,15 @@ class PostflightTests(unittest.TestCase):
 
     def metadata(self):
         return compare.json.loads((self.output / "metadata.json").read_text())
+
+    def test_changed_peer_dependency_retracts_completion(self):
+        self.dependency_drift = True
+        with self.assertRaisesRegex(RuntimeError, "Benchmark harness changed"):
+            compare.main()
+        metadata = self.metadata()
+        self.assertFalse(metadata["completed"])
+        key = "requirements-http2-peer.txt"
+        self.assertNotEqual(metadata["harness_sha256"][key], metadata["harness_sha256_end"][key])
 
     def test_postflight_read_failure_preserves_validation_exception(self):
         self.primary = ValueError("scheduled row invalid")
