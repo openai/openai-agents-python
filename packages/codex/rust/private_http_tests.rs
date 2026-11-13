@@ -37,7 +37,7 @@ async fn private_http_changes_only_owned_provider_and_attaches_its_retained_pool
     let pool = crate::private_http::pool();
     let ordinary_pool = codex_http_client::SdkModelHttpPool::default();
     let mut child = StartThreadOptions::new(parent.clone());
-    prepare_private_transport(&mut child, Some(&pool), true).unwrap();
+    prepare_private_transport(&mut child, Some(&pool), true, true).unwrap();
     let mut expected = original.clone();
     expected.supports_websockets = false;
     assert_eq!(child.config.model_provider, expected);
@@ -58,7 +58,7 @@ async fn private_http_changes_only_owned_provider_and_attaches_its_retained_pool
 
     // A later ordinary child of the same parent keeps both its permission and pool.
     let mut ordinary = StartThreadOptions::new(parent.clone());
-    prepare_private_transport(&mut ordinary, Some(&ordinary_pool), false).unwrap();
+    prepare_private_transport(&mut ordinary, Some(&ordinary_pool), false, false).unwrap();
     assert_eq!(ordinary.config.model_provider, original);
     assert!(
         ordinary
@@ -67,7 +67,7 @@ async fn private_http_changes_only_owned_provider_and_attaches_its_retained_pool
             .is_some()
     );
     let mut independent = StartThreadOptions::new(parent.clone());
-    prepare_private_transport(&mut independent, Some(&pool), true).unwrap();
+    prepare_private_transport(&mut independent, Some(&pool), true, true).unwrap();
     assert!(matches!(&child.initial_history, InitialHistory::New));
     assert!(matches!(&independent.initial_history, InitialHistory::New));
     // Independent scopes share only this uncredentialed socket owner.
@@ -103,7 +103,7 @@ async fn private_http_rejects_explicit_http_without_mutating_provider_or_pool() 
     let original = config.model_provider.clone();
     let mut startup = StartThreadOptions::new(config);
     let pool = codex_http_client::SdkModelHttpPool::default();
-    assert!(prepare_private_transport(&mut startup, Some(&pool), true).is_err());
+    assert!(prepare_private_transport(&mut startup, Some(&pool), true, true).is_err());
     assert_eq!(startup.config.model_provider, original);
     assert!(
         startup
@@ -136,7 +136,7 @@ async fn private_http_rejects_both_sign_in_with_chatgpt_provider_names() {
         let original = config.model_provider.clone();
         let original_catalog = config.model_providers.clone();
         let mut startup = StartThreadOptions::new(config);
-        assert!(prepare_private_transport(&mut startup, Some(&pool), true).is_err());
+        assert!(prepare_private_transport(&mut startup, Some(&pool), true, true).is_err());
         assert_eq!(startup.config.model_provider, original);
         assert_eq!(startup.config.model_providers, original_catalog);
         assert!(
@@ -200,23 +200,33 @@ async fn process_http_intent_declines_hooks_and_preserves_ordinary_startup() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn websocket_tls_hint_is_fresh_thread_only_and_never_attaches_http_pool() {
+async fn private_function_scope_preserves_wss_and_borrows_http_pool() {
     let (_directory, parent) = parent_config().await;
     let ordinary: crate::options::ThreadOptions = serde_json::from_value(json!({})).unwrap();
-    let private: crate::options::ThreadOptions =
-        serde_json::from_value(json!({"_sdk_websocket_tls":true})).unwrap();
-    assert!(!ordinary.private_wss_tls && private.private_wss_tls);
+    assert!(!ordinary.private_function_scope);
+    for untrusted in [
+        json!({"_sdk_websocket_tls":true}),
+        json!({"private_function_scope":true}),
+    ] {
+        assert!(serde_json::from_value::<crate::options::ThreadOptions>(untrusted).is_err());
+    }
+    let private = crate::options::ThreadOptions {
+        private_function_scope: true,
+        ..Default::default()
+    };
     let original = parent.model_provider.clone();
     let catalog = parent.model_providers.clone();
     let mut child = StartThreadOptions::new(parent.clone());
-    crate::private_wss::install(&mut child, ordinary.private_wss_tls);
+    crate::private_wss::install(&mut child, ordinary.private_function_scope);
     assert!(
         child
             .thread_extension_init
             .get::<codex_api::SdkWebsocketTlsSelector>()
             .is_none()
     );
-    crate::private_wss::install(&mut child, private.private_wss_tls);
+    let pool = crate::private_http::pool();
+    prepare_private_transport(&mut child, Some(&pool), true, false).unwrap();
+    crate::private_wss::install(&mut child, private.private_function_scope);
     assert!(
         child
             .thread_extension_init
@@ -227,7 +237,7 @@ async fn websocket_tls_hint_is_fresh_thread_only_and_never_attaches_http_pool() 
         child
             .thread_extension_init
             .get::<codex_http_client::SdkModelHttpPool>()
-            .is_none()
+            .is_some()
     );
     assert_eq!(child.config.model_provider, original);
     assert_eq!(child.config.model_providers, catalog);
