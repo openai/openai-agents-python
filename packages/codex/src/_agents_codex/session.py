@@ -118,6 +118,7 @@ from ._opening_compatibility import (
     _validate_custom_storage_capabilities,
     _validate_storage_opening as _validate_storage_opening,
 )
+from ._output_guardrails import _settle_output_guardrails
 from ._projection import (
     _error_code as _error_code,
     project_execution_completion as project_execution_completion,
@@ -13501,47 +13502,14 @@ class Session(Generic[ContextT, OutputT]):
             return
         agent = self._original_agent_for_message(message)
 
-        async def check(guardrail: OutputGuardrail[Any]) -> GuardrailRecord:
-            result = await self._call_decision_callback(
-                state,
-                message,
-                guardrail.callback,
-                active,
-                replace(request, final_output=deepcopy(request.final_output)),
-                agent,
+        async def invoke(guardrail: OutputGuardrail[Any], request: CompletionContext[Any]) -> Any:
+            return await self._call_decision_callback(
+                state, message, guardrail.callback, active, request, agent
             )
-            if not active():
-                raise asyncio.CancelledError()
-            if not isinstance(result, GuardrailResult):
-                raise TypeError("Guardrail callback must return GuardrailResult")
-            record = GuardrailRecord(
-                kind="output",
-                name=guardrail.name,
-                result=result,
-                agent=agent,
-                session_id=request.session_id,
-                turn_id=request.turn_id,
-                subagent_id=request.subagent_id,
-                tool_call=request.tool_call,
-            )
-            state.guardrail_results.append(record)
-            return record
 
-        tasks = [asyncio.create_task(check(guardrail)) for guardrail in checks]
-        tripped = None
-        try:
-            for done in asyncio.as_completed(tasks):
-                record = await done
-                if record.result.tripwire_triggered:
-                    tripped = record
-                    break
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-        if tripped is not None:
-            raise GuardrailTripwire(tripped, tuple(state.guardrail_results))
+        await _settle_output_guardrails(
+            checks, agent, request, state.guardrail_results, invoke, active
+        )
 
     def _has_mcp_discovery_filters(self) -> bool:
         tools = [*self._bindings]
