@@ -44,19 +44,20 @@ Compile bytecode for every environment before measurement, as shown above. Worke
 
 ## Verify and run a small correctness check
 
-Before execution, verify the eight source hashes and inventory against `benchmark-source-manifest.json`. Run ordinary Python without optimization or instrumentation. The controller and worker reject known environment overrides, even when the variables are empty. If a command reports `Unset inherited benchmark overrides`, unset every variable it lists and run the command again. `PYTHONSAFEPATH` and the controller's fixed `PYTHONHASHSEED=0` remain supported.
+Before running the benchmark, check the file list and SHA-256 hashes in `benchmark-source-manifest.json`. Run ordinary Python without optimization or instrumentation. The controller and worker reject known environment overrides, even when the variables are empty. If a command reports `Unset inherited benchmark overrides`, unset every variable it lists and run the command again. `PYTHONSAFEPATH` and the controller's fixed `PYTHONHASHSEED=0` remain supported.
 
 ```sh
 "$PEER_PY" - "$BENCH" <<'VERIFY'
 import hashlib, json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 expected = json.loads((root / "benchmark-source-manifest.json").read_text())
-if set(expected) != {p.name for p in root.glob("*.py")}:
-    raise SystemExit("Unexpected Python inventory")
+actual = {p.name for p in root.glob("*.py")} | {"requirements-http2-peer.txt"}
+if set(expected) != actual:
+    raise SystemExit("Unexpected benchmark file list")
 for name, digest in expected.items():
     if hashlib.sha256((root / name).read_bytes()).hexdigest() != digest:
         raise SystemExit("Source hash mismatch: " + name)
-print("PASS: eight source hashes")
+print(f"PASS: {len(expected)} benchmark file hashes")
 VERIFY
 (
   unset PYTHONPATH PYTHONHOME PYTHONOPTIMIZE LD_PRELOAD LD_AUDIT
