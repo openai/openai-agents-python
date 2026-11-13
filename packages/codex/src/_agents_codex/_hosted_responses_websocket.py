@@ -25,6 +25,7 @@ from ._responses_websocket import (
     _limited,
     _socket_frame_size,
     _socket_scope,
+    _SocketJsonBudget,
 )
 from .models import (
     ModelRequest,
@@ -69,6 +70,8 @@ class _Active:
 @dataclass
 class _Run:
     socket_scope: str | None = None
+    retired: bool = False
+    recovered_budget: _SocketJsonBudget = field(default_factory=_SocketJsonBudget)
     active: _Active | None = None
     request: ModelRequest | None = None
     account: Callable[[dict[str, Any]], str | None] | None = None
@@ -102,6 +105,8 @@ class HostedResponsesWebSocketModel:
         async def connect(request: ModelRequest, options: ResponsesSocketOptions) -> Any:
             assert request.run_owner is not None
             run = self._runs.setdefault(request.run_owner, _Run())
+            if run.retired:
+                raise ValueError("Hosted response owner is retired after failed reconciliation")
             scope = _socket_scope(options)
             if run.socket_scope is not None and run.socket_scope != scope:
                 raise ValueError("Hosted active response cannot change provider scope")
@@ -412,10 +417,17 @@ class _Socket:
             del self, frame, active
 
     async def _drain_terminal(self, active: _Active) -> None:
-        event = item = None
+        event = item = kind = None
         try:
+            observe = self._run.request is not None and getattr(
+                self._run.request, "_observe_raw_provider_events", False
+            )
             while active.terminal is None:
-                event = await self._read(active)
+                if observe and len(self._run.recovered) >= _MAX_RESPONSE_ITEMS:
+                    raise ValueError("Hosted reconciliation exceeds its retained frame limit")
+                event = await self._read(
+                    active, budget=self._run.recovered_budget if observe else None
+                )
                 kind = event.get("type")
                 if kind in _TERMINAL:
                     self._terminal(active, event)
@@ -429,23 +441,22 @@ class _Socket:
                         raise ValueError("Closed hosted response contains an unadmitted call")
                 elif kind in {"response.inject.failed", "response.error", "error"}:
                     raise ValueError("Closed hosted response did not settle")
-                if self._run.request is not None and getattr(
-                    self._run.request, "_observe_raw_provider_events", False
-                ):
+                if observe:
                     self._run.recovered.append(_ResponsesWebSocketFrame(event, raw=True))
         except BaseException as error:
             _clear_error_frames(error)
             raise
         finally:
-            del self, active, event, item
+            del self, active, event, item, kind
 
     async def _reconcile_terminal(self, active: _Active) -> None:
         try:
             await _limited(self._drain_terminal(active), 1)
-        except (asyncio.CancelledError, ValueError):
+        except BaseException as error:
+            self._run.retired = True
+            if isinstance(error, Exception) and not isinstance(error, ValueError):
+                raise ValueError("Closed hosted response has no genuine terminal") from error
             raise
-        except Exception as error:
-            raise ValueError("Closed hosted response has no genuine terminal") from error
         finally:
             del self, active
 
@@ -475,14 +486,16 @@ class _Socket:
         finally:
             del self, payload, frame, active, items, ids
 
-    async def _read(self, active: _Active) -> dict[str, Any]:
+    async def _read(
+        self, active: _Active, *, budget: _SocketJsonBudget | None = None
+    ) -> dict[str, Any]:
         payload = event = None
         try:
             payload = await self._socket.recv()
             remaining = _MAX_RESPONSE_BYTES - active.size
             limit = remaining if self._max_size is None else min(remaining, self._max_size)
             frame_size = _socket_frame_size(payload, limit)
-            event = _decode_socket_frame(payload, self._max_size)
+            event = _decode_socket_frame(payload, self._max_size, budget=budget)
             active.size += frame_size
             if "response" in event:
                 _provider_object(event["response"], "Hosted Responses response must be an object")
@@ -495,7 +508,10 @@ class _Socket:
         acknowledged_call = None
         try:
             if self._run.recovered:
-                return self._run.recovered.popleft()
+                event = self._run.recovered.popleft()
+                if not self._run.recovered:
+                    self._run.recovered_budget = _SocketJsonBudget()
+                return event
             while not self._queue:
                 active = self._run.active
                 if active is None:

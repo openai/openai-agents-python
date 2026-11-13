@@ -250,7 +250,12 @@ _JSON_TOKEN = re.compile(r'[\[\]{}"]|[^ \t\r\n\[\]{}":,]+')
 _JSON_STRING_SPECIAL = re.compile(r'["\\]')
 
 
-def _check_socket_json_structure(payload: str) -> None:
+class _SocketJsonBudget:
+    def __init__(self) -> None:
+        self.remaining = _MAX_SOCKET_JSON_NODES
+
+
+def _check_socket_json_structure(payload: str, max_nodes: int | None = None) -> int:
     nodes = depth = position = 0
     while (token := _JSON_TOKEN.search(payload, position)) is not None:
         position = token.end()
@@ -259,7 +264,7 @@ def _check_socket_json_structure(payload: str) -> None:
             depth -= 1
             continue
         nodes += 1
-        if nodes > _MAX_SOCKET_JSON_NODES:
+        if nodes > _MAX_SOCKET_JSON_NODES or (max_nodes is not None and nodes > max_nodes):
             raise ValueError("Responses WebSocket frame exceeds its JSON node limit")
         if first in "{[":
             depth += 1
@@ -274,7 +279,8 @@ def _check_socket_json_structure(payload: str) -> None:
                     break
                 position += 1
             else:
-                return  # The normal decoder rejects an unterminated string.
+                return nodes  # The normal decoder rejects an unterminated string.
+    return nodes
 
 
 def _socket_frame_size(payload: Any, limit: int | None) -> int:
@@ -300,25 +306,30 @@ def _socket_frame_size(payload: Any, limit: int | None) -> int:
     raise ValueError("Responses WebSocket received an invalid frame size") from None
 
 
-def _decode_socket_frame(payload: Any, limit: int | None) -> dict[str, Any]:
+def _decode_socket_frame(
+    payload: Any, limit: int | None, *, budget: _SocketJsonBudget | None = None
+) -> dict[str, Any]:
     decoded: Any = None
+    nodes = 0
     try:
         _socket_frame_size(payload, limit)
         if isinstance(payload, (bytes, bytearray)):
             # Preserve the standard decoder's supported byte encodings.
             payload = payload.decode(json.detect_encoding(payload), "surrogatepass")
         if isinstance(payload, str):
-            _check_socket_json_structure(payload)
+            nodes = _check_socket_json_structure(payload, budget.remaining if budget else None)
         decoded = json.loads(
             payload, parse_constant=_reject_json_constant, parse_float=_finite_json_float
         )
         if isinstance(decoded, dict):
+            if budget is not None:
+                budget.remaining -= nodes
             return decoded
     except (ValueError, TypeError, RecursionError):
         # Decoder exceptions and their tracebacks can retain the input value.
         pass
     finally:
-        del payload, decoded
+        del payload, decoded, budget
     raise ValueError("Responses WebSocket received an invalid JSON frame") from None
 
 
