@@ -214,6 +214,47 @@ class Application:
     marker: str
 
 
+@pytest.mark.parametrize("explicit_selection", [False, True])
+async def test_native_realtime_advertises_only_direct_function_callers(
+    realtime_peer: RealtimePeer, explicit_selection: bool
+) -> None:
+    peer = realtime_peer
+
+    @function_tool(allowed_callers=("direct",))
+    def direct_only() -> str:
+        return "direct"
+
+    @function_tool(allowed_callers=("code",))
+    def code_only() -> str:
+        return "code"
+
+    @function_tool
+    def unrestricted() -> str:
+        return "default"
+
+    tools = (direct_only, code_only, unrestricted)
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-realtime-caller-policy",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Use the direct tools.", tools=tools, provider=provider
+        ).session() as session,
+        session.realtime(
+            config=RealtimeConfig(
+                model="fixture-realtime", tools=tools if explicit_selection else None
+            )
+        ),
+    ):
+        initial = await peer.frame(lambda frame: frame["type"] == "session.update")
+        names = {tool["name"] for tool in initial["session"]["tools"]}
+        assert {"direct_only", "unrestricted"} <= names
+        assert "code_only" not in names
+
+
 @pytest.mark.parametrize("deny", [False, True])
 async def test_native_realtime_function_uses_captured_policy_and_shared_history(
     realtime_peer: RealtimePeer, deny: bool

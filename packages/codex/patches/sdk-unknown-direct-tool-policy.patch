@@ -1,0 +1,111 @@
+diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
+index f790c9634d277b44cb424966c7b24abea5b52b67..2827183a02c341a8959a52e375b19f358cf05cef 100644
+--- a/codex-rs/core/src/session/step_context.rs
++++ b/codex-rs/core/src/session/step_context.rs
+@@ -166,6 +166,16 @@ impl StepContext {
+             receipt["operation_declaration_source"] = serde_json::to_value(source)
+                 .expect("Agent profile receipt contains only JSON primitives");
+         }
++        if self
++            .turn
++            .extension_data
++            .get::<codex_extension_api::ToolNotFoundBehavior>()
++            .as_deref()
++            == Some(&codex_extension_api::ToolNotFoundBehavior::RaiseError)
++        {
++            receipt[codex_extension_api::ToolNotFoundBehavior::RECEIPT_KEY] =
++                serde_json::json!(codex_extension_api::ToolNotFoundBehavior::STRICT_RECEIPT_VALUE);
++        }
+         Some(receipt)
+     }
+
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index ae798b24683b905345f64396be9ab7ea4324b58a..7dcf06dc7e2785baa92ad6c860c18c931169a12f 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -657,7 +657,21 @@ impl ToolRegistry {
+                     &tool_result_tags,
+                     /*extra_trace_fields*/ &[],
+                 );
+-                let err = FunctionCallError::RespondToModel(message);
++                let strict_unknown_function = matches!(&invocation.payload, ToolPayload::Function { .. })
++                    && matches!(
++                        &invocation.source,
++                        crate::tools::context::ToolCallSource::Direct
++                            | crate::tools::context::ToolCallSource::DirectPlaintextMessage
++                    )
++                    && invocation.turn.extension_data
++                        .get::<codex_extension_api::ToolNotFoundBehavior>()
++                        .as_deref()
++                        == Some(&codex_extension_api::ToolNotFoundBehavior::RaiseError);
++                let err = if strict_unknown_function {
++                    FunctionCallError::Fatal(message)
++                } else {
++                    FunctionCallError::RespondToModel(message)
++                };
+                 dispatch_trace.record_failed(&err);
+                 return Err(err);
+             }
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index f2c37f1bef29e85c685b56bf604006ef2c713af1..bb9439bba8269c3442d68676c09e4fada05c7974 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -4,6 +4,7 @@ mod provider_image_reference_policy;
+ mod registry;
+ mod session_isolation;
+ mod state;
++mod tool_not_found;
+ mod tool_policy;
+ mod turn_admission;
+ mod user_instructions;
+@@ -11,6 +12,7 @@ mod user_instructions;
+ pub use provider_image_reference_policy::ProviderImageReferencePolicy;
+ pub use session_isolation::IsolatedSessionExtensions;
+ pub use session_isolation::SessionIsolation;
++pub use tool_not_found::ToolNotFoundBehavior;
+ pub use tool_policy::ToolPolicy;
+
+ pub use capabilities::ConversationHistorySnapshot;
+diff --git a/codex-rs/ext/extension-api/src/tool_not_found.rs b/codex-rs/ext/extension-api/src/tool_not_found.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d9c15eabd548d2ce645324644c9d736202b0508b
+--- /dev/null
++++ b/codex-rs/ext/extension-api/src/tool_not_found.rs
+@@ -0,0 +1,37 @@
++use codex_history::RolloutItem;
++
++/// Unknown direct function-call handling for one admitted operation.
++/// Supply through that operation's turn ExtensionDataInit. Absence preserves
++/// model-visible recovery; this policy does not change known-tool admission.
++#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
++pub enum ToolNotFoundBehavior {
++    #[default]
++    ReturnErrorToModel,
++    RaiseError,
++}
++
++impl ToolNotFoundBehavior {
++    pub const RECEIPT_KEY: &'static str = "tool_not_found_behavior";
++    pub const STRICT_RECEIPT_VALUE: &'static str = "raise_error";
++
++    /// Recover the operation choice from the same turn's native sampling history.
++    /// Older receipts omit this setting and keep the default behavior.
++    pub fn from_turn_history(
++        history: &[RolloutItem],
++        turn_id: &str,
++    ) -> Result<Option<Self>, &'static str> {
++        let marker = history.iter().rev().find_map(|item| match item {
++            RolloutItem::TurnContext(context) if context.turn_id.as_deref() == Some(turn_id) => {
++                context.sdk_receipt.as_ref()?.get(Self::RECEIPT_KEY)
++            }
++            _ => None,
++        });
++        match marker {
++            None => Ok(None),
++            Some(marker) if marker.as_str() == Some(Self::STRICT_RECEIPT_VALUE) => {
++                Ok(Some(Self::RaiseError))
++            }
++            Some(_) => Err("Invalid native tool-not-found behavior receipt"),
++        }
++    }
++}

@@ -17,6 +17,78 @@ from tests.test_native_sandbox_memory import _workspace_gateway
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="UnixLocal memory fixture")
 
 
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_terminal_continuation_keeps_public_root_memory_ownership(
+    tmp_path, monkeypatch, cancelled
+):
+    from agents.observation import TurnStarted
+    from tests.test_review_ii_steering_tail import ProjectContinuation
+
+    workspace = tmp_path / "workspace"
+    entered, hold = asyncio.Event(), asyncio.Event()
+
+    @function_tool(error_function=None)
+    async def continuation_lookup() -> str:
+        entered.set()
+        if not cancelled:
+            raise ValueError("SYNTHETIC_CONTINUATION_FAILURE")
+        await hold.wait()
+        return "unexpected"
+
+    extract = {
+        "rollout_slug": "continuation",
+        "rollout_summary": "Stopped.",
+        "raw_memory": "Context.",
+    }
+    consolidate = {"summary": "Context.", "memory": "Context."}
+    async with (
+        timeout(30),
+        _workspace_gateway(workspace, monkeypatch) as connect,
+        ScriptedResponses(
+            [text("Initial native result.")],
+            [tool_call("continuation_lookup", {}, call_id="continuation-tool")],
+            [text(json.dumps(extract))],
+            [text(json.dumps(consolidate))],
+        ) as peer,
+    ):
+        environment = sandbox_environment(
+            UnixLocalSandboxClient(),
+            manifest=Manifest(root=str(workspace)),
+            options=UnixLocalSandboxClientOptions(),
+            connect=connect,
+            memory=SandboxMemoryOptions(
+                phase_one=Agent(instructions="Extract.", provider=peer.provider),
+                phase_two=Agent(instructions="Consolidate.", provider=peer.provider),
+            ),
+        )
+        agent = Agent(instructions="Answer.", provider=peer.provider, tools=[continuation_lookup])
+        async with agent.session(environment=environment) as session:
+            # Existing controlled-tail projection retains real native turn IDs,
+            # model requests, callbacks and the public continuation join.
+            monkeypatch.setattr(session, "_native", ProjectContinuation(session._native))
+            turn = await session.submit("SYNTHETIC_PUBLIC_ROOT_SOURCE")
+            await entered.wait()
+            if cancelled:
+                await turn.cancel()
+            error_type = TurnStoppedError if cancelled else ValueError
+            with pytest.raises(error_type) as original:
+                await turn.get_result()
+            started = [event async for event in turn.events() if isinstance(event, TurnStarted)]
+            assert len({event.turn_id for event in started}) == 2
+            await session.flush_memory()
+            await session.flush_memory()
+            with pytest.raises(error_type) as after:
+                await turn.get_result()
+            assert after.value is original.value
+            lines = (workspace / "sessions" / f"{session.id}.jsonl").read_text().splitlines()
+            assert len(lines) == 1
+            assert json.loads(lines[0])["terminal_metadata"]["terminal_state"] == (
+                "cancelled" if cancelled else "failed"
+            )
+            assert "SYNTHETIC_PUBLIC_ROOT_SOURCE" in lines[0]
+            assert len(peer.requests) == 4
+
+
 @pytest.mark.parametrize("terminal_state", ["cancelled", "failed"])
 async def test_terminal_source_flushes_once_and_preserves_the_original_outcome(
     tmp_path, monkeypatch, terminal_state

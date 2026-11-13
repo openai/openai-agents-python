@@ -44,6 +44,7 @@ mod storage;
 mod stored_history;
 mod subagents;
 mod telemetry;
+mod tool_callers;
 mod turn_settlement;
 mod verification;
 
@@ -254,7 +255,7 @@ impl Engine {
         let mut options: options::ThreadOptions =
             config::decode(serde_json::from_str(options_json).map_err(py_error)?)
                 .map_err(py_error)?;
-        let specs: Option<Vec<codex_protocol::dynamic_tools::DynamicToolSpec>> = specs_json
+        let specs: Option<tool_callers::ToolDeclarations> = specs_json
             .map(serde_json::from_str)
             .transpose()
             .map_err(py_error)?;
@@ -398,7 +399,7 @@ impl Engine {
         async_bridge::future_factory_into_py(py, move || async move {
             let _context_operation = inner.operation(false).map_err(py_error)?;
             let thread = inner
-                .start_with_tools(options, None, Some(specs), false)
+                .start_with_initial_messages(options, None, Some(specs), false, None)
                 .await
                 .map_err(py_error)?;
             if let Some(lease) = lease {
@@ -2923,6 +2924,14 @@ impl NativeThread {
         })
     }
 
+    fn _manual_raises_unknown_tool(&self) -> PyResult<bool> {
+        let frame = self
+            .manual
+            .lock()
+            .map_err(|_| py_error("Manual continuation poisoned"))?;
+        Ok(frame.as_ref().is_some_and(|frame| frame.raise_on_unknown_tool))
+    }
+
     #[pyo3(signature = (observation_submission_id=None, tracing_context=None, trace_json=None, operation_declaration_source_json=None))]
     fn _continue_manual<'py>(
         &self,
@@ -4356,7 +4365,8 @@ fn conversation_opening(
     let files = options.sdk_instruction_files.clone().unwrap_or_default();
     use codex_protocol::dynamic_tools::{DynamicToolNamespaceTool, DynamicToolSpec};
 
-    let specs: Vec<DynamicToolSpec> = serde_json::from_str(specs_json).map_err(py_error)?;
+    let specs: tool_callers::ToolDeclarations =
+        serde_json::from_str(specs_json).map_err(py_error)?;
     let process_private_wss = process_private_runtime
         && !private_http
         && !private_disposable
@@ -4417,7 +4427,7 @@ fn conversation_opening(
         let inner = engine.current()?;
         let _operation = inner.operation(false).map_err(py_error)?;
         let thread = inner
-            .start_with_tools(options, None, Some(specs), true)
+            .start_with_initial_messages(options, None, Some(specs), true, None)
             .await
             .map_err(py_error)?;
         lease.register_thread(thread.inner.clone())?;
@@ -4588,11 +4598,10 @@ fn create_checkpoint_engine<'py>(
     let lease = provider_lease.map(|lease| lease.inner.clone());
     let config_json = config_json.to_owned();
     let runtime_json = runtime_json.to_owned();
-    let initial_specs: Option<Vec<codex_protocol::dynamic_tools::DynamicToolSpec>> =
-        initial_specs_json
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(py_error)?;
+    let initial_specs: Option<tool_callers::ToolDeclarations> = initial_specs_json
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(py_error)?;
     let initial_model = initial_checkpoint
         .map(|encoded| {
             let raw = serde_json::from_str(encoded).map_err(py_error)?;
@@ -4656,7 +4665,7 @@ fn config_schema() -> &'static str {
 
 #[pyfunction]
 fn _validate_python_tool_declarations(specs_json: &str) -> PyResult<()> {
-    let specs: Vec<codex_protocol::dynamic_tools::DynamicToolSpec> =
+    let specs: tool_callers::ToolDeclarations =
         serde_json::from_str(specs_json)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
     python_tools::validate_declarations(&specs)
@@ -4665,8 +4674,9 @@ fn _validate_python_tool_declarations(specs_json: &str) -> PyResult<()> {
 
 #[pyfunction]
 fn _python_tool_parameters(specs_json: &str) -> PyResult<String> {
-    let specs = serde_json::from_str(specs_json).map_err(py_error)?;
-    let parameters = python_tools::model_parameters(specs).map_err(py_error)?;
+    let specs: tool_callers::ToolDeclarations =
+        serde_json::from_str(specs_json).map_err(py_error)?;
+    let parameters = python_tools::model_parameters(&specs).map_err(py_error)?;
     serde_json::to_string(&parameters).map_err(py_error)
 }
 

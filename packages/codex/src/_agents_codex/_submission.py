@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from .mcp import _MCP
     from .observation import ToolStarted
     from .prepared_request import _PrepareRequest
+    from .retry import RetryPolicy
     from .schema import _PreparedOutput
     from .session import (
         Completed,
@@ -97,6 +98,9 @@ class _Submission:
     step_index: int = 0
     budget: _RunBudget | None = None
     model_override: str | None = None
+    model_settings_override: dict[str, Any] | None = None
+    retry_policy_override: RetryPolicy | None = field(default=None, repr=False)
+    raise_on_unknown_tool: bool = False
     operation_slots: tuple[int, ...] | None = None
     operation_mcp: tuple[_MCP[Any], ...] | None = None
     operation_refs: tuple[ToolRef, ...] | None = None

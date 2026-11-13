@@ -5,6 +5,7 @@ use codex_history::RolloutItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentStatus;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 async fn idle(state: &ThreadState) -> anyhow::Result<()> {
@@ -144,6 +145,7 @@ pub async fn replace(
 }
 
 const MEMORY_INPUT_ADMITTED: &str = "sandbox_memory_input_admitted";
+const MEMORY_ORIGINAL_DIGESTS: &str = "sandbox_memory_original_sha256";
 
 fn sampling_receipt(context: &codex_protocol::protocol::TurnContextItem) -> bool {
     context.sdk_receipt.as_ref().is_some_and(|receipt| {
@@ -168,7 +170,19 @@ pub async fn record_memory_input_admission(
         total <= 256,
         "Native sandbox memory supports at most 256 original records"
     );
-    drop(items);
+    // Capture the exact originals while this submission still owns admission.
+    // Imported or edited originals cannot inherit an older turn's authority.
+    let mut digests = Vec::new();
+    for raw in &items {
+        let item: Value = serde_json::from_str(raw)?;
+        if item
+            .pointer("/internal_chat_message_metadata_passthrough/turn_id")
+            .and_then(Value::as_str)
+            == Some(turn_id)
+        {
+            digests.push(format!("{:x}", Sha256::digest(raw.as_bytes())));
+        }
+    }
     let history = crate::subagents::read_history(state, None).await?;
     let mut context = history
         .iter()
@@ -197,6 +211,7 @@ pub async fn record_memory_input_admission(
         .and_then(Value::as_object_mut)
         .context("Memory input admission requires an object sampling receipt")?;
     receipt.insert(MEMORY_INPUT_ADMITTED.to_owned(), Value::Bool(true));
+    receipt.insert(MEMORY_ORIGINAL_DIGESTS.to_owned(), json!(digests));
     state
         .thread
         .append_rollout_items(&[RolloutItem::TurnContext(context)])
@@ -220,6 +235,7 @@ pub async fn memory_snapshot(state: &ThreadState, turn_id: &str) -> anyhow::Resu
     );
     let history = crate::subagents::read_history(state, None).await?;
     let mut admitted = HashSet::new();
+    let mut originals = HashSet::new();
     for item in &history {
         match item {
             RolloutItem::TurnContext(context)
@@ -231,8 +247,27 @@ pub async fn memory_snapshot(state: &ThreadState, turn_id: &str) -> anyhow::Resu
                         .and_then(Value::as_bool)
                         == Some(true) =>
             {
-                if let Some(turn) = &context.turn_id {
+                let digests = context
+                    .sdk_receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.get(MEMORY_ORIGINAL_DIGESTS))
+                    .and_then(Value::as_array)
+                    .filter(|digests| digests.len() <= 256)
+                    .filter(|digests| {
+                        digests.iter().all(|digest| {
+                            digest.as_str().is_some_and(|digest| {
+                                digest.len() == 64
+                                    && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                        })
+                    });
+                if let (Some(turn), Some(digests)) = (&context.turn_id, digests) {
                     admitted.insert(turn.clone());
+                    originals.extend(digests.iter().filter_map(|digest| {
+                        digest
+                            .as_str()
+                            .map(|digest| (turn.clone(), digest.to_owned()))
+                    }));
                 }
             }
             _ => {}
@@ -253,8 +288,13 @@ pub async fn memory_snapshot(state: &ThreadState, turn_id: &str) -> anyhow::Resu
                 .get("internal_chat_message_metadata_passthrough")
                 .and_then(|metadata| metadata.get("turn_id"))
                 .and_then(Value::as_str);
-            turn.is_some_and(|turn| admitted.contains(turn))
-                .then_some(Ok(raw))
+            turn.is_some_and(|turn| {
+                originals.contains(&(
+                    turn.to_owned(),
+                    format!("{:x}", Sha256::digest(raw.as_bytes())),
+                ))
+            })
+            .then_some(Ok(raw))
         })
         .collect::<Result<Vec<_>, serde_json::Error>>()?;
     Ok(json!({"revision":revision,"total":total,"items":items}))

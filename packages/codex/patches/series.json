@@ -899,7 +899,39 @@
     {
       "path": "sdk-staged-manual-continuation-input.patch",
       "sha256": "9954e733d95ce8fac27fb8fbac4286067149eec4191363c09428ffaa00be64d4"
+    },
+    {
+      "path": "sdk-function-tool-callers.patch",
+      "sha256": "21594792346cd2fa805d34ae09d55737c9b8a7f1d3e55c733c4748edbeeafb7d"
+    },
+    {
+      "path": "sdk-request-transport-overrides.patch",
+      "sha256": "75adf85dded181bed0b7d305f84a62fc9833aeadf4458bc2cb1202a09eab3fdc"
+    },
+    {
+      "path": "sdk-run-model-settings-override.patch",
+      "sha256": "849b156deac04874666679f7ee72cc0e8b8fa078f0897cebe5bdaf1b05748b09"
+    },
+    {
+      "path": "sdk-request-transport-persistence.patch",
+      "sha256": "f8e67bc2384ebccf6875d5cdafd96ce79b3aaec9be3b7d7237431fe665b5b3b3"
+    },
+    {
+      "path": "sdk-request-transport-startup-warmup.patch",
+      "sha256": "a7409b913c6d9fc3a8e9aae391dede4d31c273b11f6492ceb03c21817444c2ab"
+    },
+    {
+      "path": "sdk-agent-profile-request-transport.patch",
+      "sha256": "8ebc06c4e9b3dadbabf9dc68595d141a83602f0a425e1095e909f2ad4869f193"
+    },
+    {
+      "path": "sdk-unknown-direct-tool-policy.patch",
+      "sha256": "708d7a5b452a6c2dcc799c5c64057888b64a302812272b522a2ecf4fad45fa06"
+    },
+    {
+      "path": "sdk-agent-harness-span-metadata.patch",
+      "sha256": "edac1f3bc0818c8454af005f8393dc583a5e579c625dab7f93489067ffaec9d7"
     }
   ],
-  "result_tree": "952284e1f4e38f0d7ffd071a53b685ab438aa818"
+  "result_tree": "ccf4295bbfa1a1f4c65426a53b8c45a886a48d82"
 }

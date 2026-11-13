@@ -60,6 +60,7 @@ from ._lifecycle import (
 from ._mcp_errors import _protect_mcp_methods
 from ._media import _MAX_AUDIO_INPUT_BYTES, _check_audio_json, _contains_audio
 from ._model_settings import (
+    Omit,
     ProviderCompactionPolicy as ProviderCompactionPolicy,
     _capture_model_settings,
 )
@@ -76,7 +77,7 @@ from .input import InitialMessage, _native_input, _response_content
 from .model_context import HostedPromptSource, _ContextTransform
 from .models import ModelProvider, NativeModel, _capture_model_override
 from .retry import ModelRetrySettings as ModelRetrySettings
-from .tools import ToolRef
+from .tools import ToolNotFoundBehavior, ToolRef, _capture_tool_not_found_behavior
 from .usage import RunBudget
 
 if TYPE_CHECKING:
@@ -164,6 +165,10 @@ class ModelSettings(TypedDict, total=False, closed=True):
     the current model's context-window ratio. Explicit ``context_management``
     takes precedence, including ``None``. ``store=True``
     requires API-key authentication.
+    ``extra_headers`` and ``extra_query`` have been selecting per-request metadata.
+    Header ``None`` and OpenAI ``omit`` values have been removing inherited
+    header names. Query ``None`` values have been omitting pairs. Top-level
+    ``None`` has been clearing the corresponding SDK override.
 
     ``reset_tool_choice=True``: ordinary text sampling only; opt-in release of
     required/named forcing after an
@@ -190,6 +195,8 @@ class ModelSettings(TypedDict, total=False, closed=True):
     temperature: float | None
     top_p: float | None
     top_logprobs: int | None
+    extra_headers: Mapping[str, str | Omit | None] | None
+    extra_query: Mapping[str, Any] | None
     parallel_tool_calls: bool | None
     verbosity: Literal["low", "medium", "high"] | None
     metadata: Mapping[str, str] | None
@@ -380,6 +387,8 @@ class NativeProvider:
     For API-key authentication, an omitted key uses ``OPENAI_API_KEY`` when
     the Session opens. Credentials and connection URLs are excluded from the
     descriptor's representation.
+    Set ``agent_harness_id`` to route new agent traces to a specific harness.
+    The provider captures the process or environment default at construction.
     With ``supports_websockets=None``, the SDK permits WebSockets only when
     ``base_url=None``; an explicit ``base_url`` defaults to HTTP. Set ``True``
     to permit WebSockets for a compatible custom provider, or ``False`` to use
@@ -467,8 +476,16 @@ class NativeProvider:
     stream_idle_timeout_ms: int | None = field(default=None, repr=False)
     websocket_connect_timeout_ms: int | None = field(default=None, repr=False)
     websocket_base_url: str | None = field(default=None, repr=False)
+    agent_harness_id: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        from .telemetry import _normalize_agent_harness_id, get_default_agent_harness_id
+
+        object.__setattr__(
+            self,
+            "agent_harness_id",
+            _normalize_agent_harness_id(self.agent_harness_id) or get_default_agent_harness_id(),
+        )
         for name in (
             "request_max_retries",
             "stream_max_retries",
@@ -1734,11 +1751,18 @@ class Agent(Generic[ContextT, OutputT]):
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
         from .session import Completed, Session
-        from .telemetry import _capture
+        from .telemetry import _capture, get_default_agent_harness_id
 
         try:
             parent_trace = _trace_context(parent_trace)
-            captured = _capture(trace_options)
+            harness_id = None
+            if parent_trace is None:
+                selected_provider = provider if provider is not None else self.provider
+                provider_harness_id = (
+                    selected_provider.agent_harness_id if selected_provider is not None else None
+                )
+                harness_id = provider_harness_id or get_default_agent_harness_id()
+            captured = _capture(trace_options, agent_harness_id=harness_id)
         finally:
             del trace_options
         trace_error: BaseException | None = None
@@ -1826,6 +1850,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
@@ -1861,6 +1886,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
@@ -1896,6 +1922,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
@@ -1930,6 +1957,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
@@ -1998,6 +2026,9 @@ class Agent(Generic[ContextT, OutputT]):
         Token/cost limits have been rejecting active capture. return_state=True
         has been remaining available for idle results.
 
+        tool_not_found_behavior selects the new turn's handling of unknown direct function
+        calls. Pass "raise_error" to stop the turn, or use the default model-visible error.
+
         Pass state to restore with current bindings. For a supported pending
         manual checkpoint, input=None resumes the existing turn. Idle state
         needs input for a new turn. return_state=True captures a successful
@@ -2059,6 +2090,7 @@ class Agent(Generic[ContextT, OutputT]):
             from .tools import _HOSTED_TOOLS, WebSearch, _CapturedFunction
 
             model_override = _capture_model_override(model_override)
+            raise_on_unknown_tool = _capture_tool_not_found_behavior(tool_not_found_behavior)
             if budget is not None and not isinstance(budget, RunBudget):
                 raise TypeError("budget must be a RunBudget or None")
             if prepare_request is not None:
@@ -2092,6 +2124,8 @@ class Agent(Generic[ContextT, OutputT]):
             if resume_manual and state is not None:
                 if model_override is not None:
                     raise ValueError("Cannot replace a restored turn's model override")
+                if tool_not_found_behavior is not None:
+                    raise ValueError("Cannot replace a restored turn's tool_not_found_behavior")
                 if budget is not None and state.run_budget is None:
                     raise CapabilityError("Cannot set a budget when restoring an active checkpoint")
                 if input is not None:
@@ -2228,6 +2262,7 @@ class Agent(Generic[ContextT, OutputT]):
                         return_history or return_raw_usage or return_items or capture_error_details
                     )
                     and model_override is None
+                    and not raise_on_unknown_tool
                     and _private_text_run_eligible(
                         self, input, context, return_state, parent_trace, trace_options
                     )
@@ -2238,6 +2273,7 @@ class Agent(Generic[ContextT, OutputT]):
                         return_history or return_raw_usage or return_items or capture_error_details
                     )
                     and model_override is None
+                    and not raise_on_unknown_tool
                     and _completed_run_eligible(
                         self, input, context, return_state, parent_trace, trace_options
                     )
@@ -2408,6 +2444,8 @@ class Agent(Generic[ContextT, OutputT]):
                     submit_options: dict[str, Any] = {}
                     if model_override is not None:
                         submit_options["model_override"] = model_override
+                    if tool_not_found_behavior is not None:
+                        submit_options["tool_not_found_behavior"] = tool_not_found_behavior
                     if prepare_request is not None:
                         submit_options["prepare_request"] = prepare_request
                     if budget is not None:
@@ -2469,6 +2507,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
@@ -2504,6 +2543,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
@@ -2539,6 +2579,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
@@ -2573,6 +2614,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
@@ -2615,6 +2657,7 @@ class Agent(Generic[ContextT, OutputT]):
         """
         initial_messages = _capture_initial_messages(initial_messages, state=state)
         model_override = _capture_model_override(model_override)
+        _capture_tool_not_found_behavior(tool_not_found_behavior)
         if budget is not None and not isinstance(budget, RunBudget):
             raise TypeError("budget must be a RunBudget or None")
         options: dict[str, Any] = {}
@@ -2670,6 +2713,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["budget"] = budget
                 if model_override is not None:
                     options["model_override"] = model_override
+                if tool_not_found_behavior is not None:
+                    options["tool_not_found_behavior"] = tool_not_found_behavior
                 return _SyncRun().run(
                     self.run(
                         input,

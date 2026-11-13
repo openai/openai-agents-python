@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from agents import CustomStorage, SessionStoreCleanup, SQLiteSessionStore, get_cleanup
+from agents import CustomStorage, RunUsage, SessionStoreCleanup, SQLiteSessionStore, get_cleanup
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="Reference adapter requires POSIX locks")
 
@@ -48,6 +48,63 @@ def test_sqlite_canonical_store_retains_committed_history(tmp_path: Path) -> Non
     with pytest.raises(RuntimeError, match="stale or closed"):
         store.commit("thread", token, 1, "stale", "{}")
     reopened.release("thread", next_token)
+
+
+async def test_sqlite_run_usage_survives_reopen_and_groups_explicit_branches(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "history.sqlite"
+    store = SQLiteSessionStore(path)
+    primary = RunUsage(
+        input_tokens=10,
+        cached_input_tokens=2,
+        cache_write_input_tokens=1,
+        output_tokens=4,
+        reasoning_output_tokens=1,
+        total_tokens=14,
+        requests=2,
+        missing_usage_requests=0,
+    )
+    fork = RunUsage(
+        input_tokens=20,
+        cached_input_tokens=6,
+        cache_write_input_tokens=2,
+        output_tokens=8,
+        reasoning_output_tokens=2,
+        total_tokens=28,
+        requests=3,
+        missing_usage_requests=1,
+    )
+
+    assert await store.get_session_usage("session") is None
+    await store.store_run_usage("session", "turn-1", fork)
+    await store.store_run_usage("session", "turn-1", primary)
+    await store.store_run_usage("session", "turn-1", primary)
+    await store.store_run_usage("session", "turn-1", fork, branch_id="fork")
+    await store.store_run_usage("other", "turn-1", fork)
+
+    reopened = SQLiteSessionStore(path)
+    assert await reopened.get_turn_usage("session") == {"turn-1": primary}
+    assert await reopened.get_turn_usage("session", branch_id="fork") == {"turn-1": fork}
+    assert await reopened.get_turn_usage("session", turn_id="unknown") == {}
+    assert await reopened.get_session_usage("session") == {
+        "input_tokens": 30,
+        "cached_input_tokens": 8,
+        "cache_write_input_tokens": 3,
+        "output_tokens": 12,
+        "reasoning_output_tokens": 3,
+        "total_tokens": 42,
+        "requests": 5,
+        "missing_usage_requests": 1,
+        "total_turns": 2,
+    }
+    summary = await reopened.get_session_usage("session", branch_id="fork")
+    assert summary is not None and summary["requests"] == 3 and summary["total_turns"] == 1
+
+    await reopened.clear_run_usage("session", branch_id="fork", turn_id="turn-1")
+    assert await reopened.get_session_usage("session", branch_id="fork") is None
+    assert await reopened.get_turn_usage("session") == {"turn-1": primary}
+    assert await reopened.get_turn_usage("other") == {"turn-1": fork}
 
 
 def test_sqlite_obsolete_release_preserves_reacquired_writer(tmp_path: Path) -> None:
