@@ -586,8 +586,27 @@ async fn export_inner(
         reader.as_ref(),
     )
     .await?;
-    let root_memory_mode = memory_mode(state, state.id).await?;
-    let root_checklist = capture_checklist(state, state.id, &history, reader.as_ref()).await?;
+    let canonical = state
+        .engine
+        .store
+        .as_any()
+        .is::<crate::canonical_storage::CanonicalStore>();
+    // Canonical storage admits one root, with no native checklist or pending effects.
+    let (root_memory_mode, root_checklist) = if canonical {
+        ensure!(
+            before.is_empty()
+                && pending.is_none()
+                && !suspended
+                && interrupted_thread_ids.is_empty(),
+            "canonical checkpoints require an idle root without descendants"
+        );
+        (None, None)
+    } else {
+        (
+            memory_mode(state, state.id).await?,
+            capture_checklist(state, state.id, &history, reader.as_ref()).await?,
+        )
+    };
     let root_goal = goal(state, state.id).await?;
     let mut descendants = Vec::new();
     for child in &before {
@@ -621,8 +640,8 @@ async fn export_inner(
         check_capture(state, key)?;
     }
     let mut history = history;
-    // Only the admitted idle LocalStorage export detaches these live decisions.
-    if reader.is_some() && pending.is_none() && !suspended {
+    // An idle persistent export keeps these approvals as historical data.
+    if (canonical || reader.is_some()) && pending.is_none() && !suspended {
         archive_exported_mcp_approvals(&mut history)?;
         for child in &mut descendants {
             archive_exported_mcp_approvals(&mut child.history)?;

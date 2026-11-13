@@ -3191,6 +3191,7 @@ def _prepare_native_checkpoint(
     payload.pop("continuation_trace_id", None)
     payload.pop("codex_login_binding", None)
     payload.pop("executor_read_only", None)
+    payload.get("agent_options", {}).pop("_sdk_history_ttl_seconds", None)
     if saved.format_version in (8, 9):
         payload["format_version"] = 3 if saved.format_version == 8 else 5
     elif saved.format_version in (4, 5, 6, 7):
@@ -3627,18 +3628,27 @@ def _current_attempt_controls(
     }
 
 
+def _opening_history_ttl(
+    storage: LocalStorage | CustomStorage | None, state: SessionState | None
+) -> int | None:
+    from .canonical_storage_encrypt import EncryptedSessionStore
+
+    if state is not None and "_sdk_history_ttl_seconds" in state.agent_options:
+        ttl = state.agent_options["_sdk_history_ttl_seconds"]
+        if type(ttl) is not int or not 0 <= ttl < 2**64:
+            raise ValueError("Invalid checkpoint history TTL")
+        return ttl
+    if isinstance(storage, CustomStorage) and isinstance(storage.backend, EncryptedSessionStore):
+        return storage.backend._native_history_ttl_seconds
+    return None
+
+
 def _check_history_retention_opening(
-    storage: LocalStorage | CustomStorage | None,
+    history_ttl_seconds: int | None,
     provider_history: ProviderHistory | None,
     profiles: tuple[_AgentProfile, ...],
 ) -> None:
-    from .canonical_storage_encrypt import EncryptedSessionStore
-
-    if not (
-        isinstance(storage, CustomStorage)
-        and isinstance(storage.backend, EncryptedSessionStore)
-        and storage.backend._native_history_ttl_seconds is not None
-    ):
+    if history_ttl_seconds is None:
         return
     if provider_history is not None:
         raise ValueError("Encrypted history TTL cannot combine with provider-owned history")
@@ -4037,7 +4047,8 @@ class Session(Generic[ContextT, OutputT]):
             profiles = (
                 _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
             )
-            _check_history_retention_opening(storage, provider_history, profiles)
+            history_ttl_seconds = _opening_history_ttl(storage, state)
+            _check_history_retention_opening(history_ttl_seconds, provider_history, profiles)
             auth = agent.provider.auth if agent.provider is not None else None
             codex_login = auth if isinstance(auth, CodexLogin) else None
             uses_siwc = isinstance(auth, SignInWithChatGPT)
@@ -4911,13 +4922,11 @@ class Session(Generic[ContextT, OutputT]):
                     session._writable_roots = _writable_roots(executor.writable_roots)
                 session._bind_native_agents(native_agents)
                 session._storage = storage
-                if isinstance(storage, CustomStorage):
-                    from .canonical_storage_encrypt import EncryptedSessionStore
-
-                    if isinstance(storage.backend, EncryptedSessionStore):
-                        await session._native._configure_history_retention(
-                            ttl_seconds=storage.backend._native_history_ttl_seconds
-                        )
+                if history_ttl_seconds is not None:
+                    await session._native._configure_history_retention(
+                        ttl_seconds=history_ttl_seconds
+                    )
+                    session._history_ttl_seconds = history_ttl_seconds
                 if checkpoint is not None:
                     await session._restore_opening_checkpoint(
                         saved,
@@ -5364,6 +5373,7 @@ class Session(Generic[ContextT, OutputT]):
         self._trace_context: str | None = None
         self._provider_lease: Any = None
         self._storage: LocalStorage | CustomStorage | None = None
+        self._history_ttl_seconds: int | None = None
         self._environment_lease: _EnvironmentLease | None = None
         self._sandbox_events: _OperationObserver | None = None
         self._memory_flush: asyncio.Task[None] | None = None
@@ -17863,14 +17873,15 @@ class Session(Generic[ContextT, OutputT]):
         Settled native stored values and terminal cell observations survive
         restoration without rerunning cells. Active code cells are not captured.
         LocalStorage snapshots include the native graph and accepted sidecar state.
+        CustomStorage snapshots include the settled native root.
         Restore without storage into isolated memory using the current Agent.
-        CustomStorage export and persistent manual suspension/fork remain unsupported.
+        Persistent manual suspension and fork require a different session.
         """
         return await self._save_state()
 
     async def _save_state(self, *, probe: bool = False) -> SessionState:
         self._check_open()
-        self._check_portable_capture(allow_local=True)
+        self._check_portable_capture(allow_idle_storage=True)
         self._check_callback_operation("save its own Session")
         if self._active is not None:
             raise RuntimeError(
@@ -17909,7 +17920,7 @@ class Session(Generic[ContextT, OutputT]):
         if kind not in ("idle", "manual_wait"):
             raise ValueError("kind must be 'idle' or 'manual_wait'")
         try:
-            self._check_portable_capture(allow_local=kind == "idle")
+            self._check_portable_capture(allow_idle_storage=kind == "idle")
             if kind == "idle":
                 await self._save_state(probe=True)
             else:
@@ -18077,7 +18088,7 @@ class Session(Generic[ContextT, OutputT]):
                 self._configured_capture = None
         return await self._checkpoint(active, before_seal=before_seal)
 
-    def _check_portable_capture(self, *, allow_local: bool = False) -> None:
+    def _check_portable_capture(self, *, allow_idle_storage: bool = False) -> None:
         if self._realtime is not None:
             raise CapabilityError("Close the Realtime connection before capturing a checkpoint")
         if self._active is not None and self._active.budget is not None:
@@ -18089,13 +18100,12 @@ class Session(Generic[ContextT, OutputT]):
             )
         if self._queued_roots:
             raise RuntimeError("Cannot checkpoint a Session with queued work")
-        if self._storage is not None and not (
-            allow_local and isinstance(self._storage, LocalStorage)
-        ):
-            raise CapabilityError(
-                "Persistent storage cannot export portable SessionState; "
-                "retain Session.id and reopen with the same storage backend"
-            )
+        if self._storage is not None:
+            if not allow_idle_storage:
+                raise CapabilityError(
+                    "Persistent storage cannot export this portable SessionState; "
+                    "retain Session.id and reopen with the same storage backend"
+                )
         if self._repair_receipts_incomplete:
             raise CapabilityError("Cannot export an incomplete prompted-output repair receipt")
         if self._active is not None and self._active.repairing:
@@ -18466,6 +18476,8 @@ class Session(Generic[ContextT, OutputT]):
             payload["executor_policy_digest"] = executor_policy_digest
             if self._executor is not None and self._executor.read_only:
                 payload["executor_read_only"] = True
+            if self._history_ttl_seconds is not None:
+                payload["agent_options"]["_sdk_history_ttl_seconds"] = self._history_ttl_seconds
             if active is not None:
                 if active.original_input is not None:
                     payload["original_input"] = active.original_input

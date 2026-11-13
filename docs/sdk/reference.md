@@ -267,7 +267,7 @@ Import `LocalStorage` from `agents` and construct it with a `pathlib.Path`, for 
 
 After closing the Session, reopen the conversation with `agent.session(storage=profile, resume=saved_id)` using the original profile directory and current tools, context and provider. Only one native writer can own the conversation at a time.
 
-`resume` requires `storage`. Neither option can be used with portable `state`. A Session using local storage cannot export portable state through `save_state()`, `suspend()` or `fork()`.
+`resume` requires `storage`. Supply portable `state` on its own. An idle local session can export portable state with `save_state()`. Use an in-memory session for `suspend()` or `fork()`.
 
 In `0.24.0-alpha.7` or later, `LocalStorage` rejects `Agent(programmatic_tool_calling=True)` before opening because nested tool calls lack durable intent/result receipts. Use the [matching preview wheel](installation.md) and [storage support limits](state.md#choose-how-to-store-a-conversation).
 
