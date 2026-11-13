@@ -640,12 +640,12 @@ def test_single_sdk_producer_checks_installed_wheel_before_upload() -> None:
     for platform in ("linux", "macos"):
         assert jobs[f"produce-{platform}"]["needs"] == "changes"
         assert jobs[f"produce-{platform}"]["if"] == "needs.changes.outputs.code == 'true'"
-        assert set(jobs[f"native-{platform}"]["needs"]) == {
-            "changes",
-            "produce-linux",
-            "produce-windows",
-            "produce-macos",
-        }
+        expected = (
+            {"changes", "produce-macos"}
+            if platform == "macos"
+            else {"changes", "produce-linux", "produce-windows", "produce-macos"}
+        )
+        assert set(jobs[f"native-{platform}"]["needs"]) == expected
     workflow = yaml.safe_load((ROOT / ".github/workflows/codex-python-qualify.yml").read_text())
     steps = workflow["jobs"]["build"]["steps"]
     names = [step.get("name", "") for step in steps]
@@ -696,7 +696,8 @@ def test_committed_version_controls_windows_scheduling(
     gate = next(step for step in changes["steps"] if step.get("id") == "release-windows")
     assert gate["env"] == {
         "V1_QUALIFICATION": (
-            "${{ inputs.native_only || github.ref_name == 'feat/codex-harness' || "
+            "${{ inputs.native_only || (github.ref_name == 'feat/codex-harness' || "
+            "startsWith(github.ref_name, 'ci/hillclimb/')) || "
             "github.base_ref == 'feat/codex-harness' || "
             "github.event.pull_request.stack.base.ref == 'feat/codex-harness' || "
             "github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness' }}"
@@ -872,6 +873,7 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
         pytest.param("push", "main", "", "", "true", True, id="default-push"),
         pytest.param("push", "feat/codex-harness", "", "", "true", True, id="feature-push"),
         pytest.param("push", "feature/parent", "", "", "true", False, id="other-push"),
+        pytest.param("push", "ci/hillclimb/probe", "", "", "true", True, id="shadow-push"),
         pytest.param(
             "merge_group",
             "gh-readonly-queue/main/pr-199",
@@ -923,7 +925,7 @@ def test_native_selection_only_runs_for_trusted_code_events(
         selection["if"],
     )
     condition = condition.replace("&&", " and ").replace("||", " or ")
-    assert eval(condition, {"__builtins__": {}}, {}) is expected
+    assert eval(condition, {"__builtins__": {}, "startsWith": str.startswith}, {}) is expected
 
 
 @pytest.mark.parametrize(
@@ -941,6 +943,7 @@ def test_native_selection_only_runs_for_trusted_code_events(
         ("", "", "feat/codex-harness", "feature", "feat/codex-harness", "feat/codex-harness"),
         ("", "", "", "feat/codex-harness", "feat/codex-harness", ""),
         ("main", "feature/parent", "", "199/merge", "main", "feature/parent"),
+        ("", "", "", "ci/hillclimb/probe", "feat/codex-harness", ""),
     ],
 )
 def test_native_selection_routes_stack_sources_and_pr_provenance(
@@ -975,7 +978,10 @@ def test_native_selection_routes_stack_sources_and_pr_provenance(
             expression,
         )
         expression = expression.replace("&&", " and ").replace("||", " or ")
-        assert eval(expression, {"__builtins__": {}}, {}) == expected
+        assert (
+            eval(f"({expression})", {"__builtins__": {}, "startsWith": str.startswith}, {})
+            == expected
+        )
 
 
 @pytest.mark.parametrize(

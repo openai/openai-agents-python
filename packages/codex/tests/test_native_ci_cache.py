@@ -76,7 +76,7 @@ def _condition(expression: str, values: dict[str, str]) -> bool:
     return bool(
         eval(
             expression.replace("&&", " and ").replace("||", " or ").replace("!cancelled()", "True"),
-            {"__builtins__": {}},
+            {"__builtins__": {}, "startsWith": str.startswith},
         )
     )
 
@@ -463,7 +463,7 @@ def test_native_reuse_never_forces_cache_warming(donor: str, event: str, runner:
             assert _condition(step["if"], values) is bool(expected[step["name"]])
 
 
-def test_native_publication_is_a_global_barrier() -> None:
+def test_native_publication_barrier_excludes_only_the_exact_ref_macos_experiment() -> None:
     caller = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)
     jobs = caller["jobs"]
     producers = {"produce-linux", "produce-windows", "produce-macos"}
@@ -475,8 +475,20 @@ def test_native_publication_is_a_global_barrier() -> None:
         return set(needs).union(*(ancestors(parent) for parent in needs))
 
     for name in jobs:
-        if name not in {"changes", "produce-linux-arm64", "native-linux-arm64-pr"} | producers:
+        if (
+            name
+            not in {
+                "changes",
+                "produce-linux-arm64",
+                "native-linux-arm64-pr",
+                "native-macos",
+                "native-macos-sandbox",
+            }
+            | producers
+        ):
             assert producers <= ancestors(name), name
+    assert set(jobs["native-macos"]["needs"]) == {"changes", "produce-macos"}
+    assert jobs["native-macos-sandbox"]["needs"] == "native-macos"
     for name in producers:
         assert jobs[name]["needs"] == "changes"
     steps = _steps()
@@ -509,6 +521,7 @@ def test_native_publication_is_a_global_barrier() -> None:
         ("pull_request", "feat/codex-harness", "true", True, False),
         ("merge_group", "feat/codex-harness", "true", True, False),
         ("push", "feat/codex-harness", "true", False, True),
+        ("push", "ci/hillclimb/probe", "true", False, True),
         ("push", "feat/codex-harness", "false", False, False),
         ("pull_request", "feat/codex-harness", "false", False, False),
         ("pull_request", "main", "true", False, False),
@@ -597,8 +610,11 @@ def test_global_publication_failure_blocks_every_sdk_entry(
     }
     for name in ("lint", "build-docs"):
         assert _condition(jobs[name]["if"], values) is sdk
-    for name in ("native-linux", "native-macos"):
-        assert _condition(jobs[name]["if"], values) is native
+    assert _condition(jobs["native-linux"]["if"], values) is native
+    assert _condition(
+        jobs["native-macos"]["if"],
+        {**values, "github.ref_name": "ci/hillclimb/python-macos-early-03"},
+    ) is (event == "push" and code == "true" and macos_result == "success")
     assert _condition(jobs["native-windows"]["if"], values) is (native and windows == "true")
 
 
@@ -621,9 +637,42 @@ def test_review_entries_tolerate_only_windows_publication_failure(
         "needs.produce-macos.result": "failure" if failed_platform == "macos" else "success",
         "needs.produce-windows.result": windows_result,
     }
-    for name in ("lint", "build-docs", "native-linux", "native-macos"):
+    for name in ("lint", "build-docs", "native-linux"):
         assert _condition(jobs[name]["if"], values) is (failed_platform is None)
     assert not _condition(jobs["native-windows"]["if"], values)
+    assert not _condition(
+        jobs["native-macos"]["if"],
+        {**values, "github.ref_name": "feat/codex-harness"},
+    )
+
+
+@pytest.mark.parametrize("event", ["push", "pull_request", "merge_group", "workflow_dispatch"])
+@pytest.mark.parametrize(
+    "ref", ["ci/hillclimb/python-macos-early-03", "feat/codex-harness", "ci/hillclimb/other"]
+)
+@pytest.mark.parametrize("macos_result", ["success", "failure", "cancelled", "skipped"])
+@pytest.mark.parametrize("code", ["true", "false"])
+def test_early_macos_qualification_requires_only_its_exact_ref_snapshot(
+    event: str, ref: str, macos_result: str, code: str
+) -> None:
+    jobs = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)[
+        "jobs"
+    ]
+    values = {
+        "github.event_name": event,
+        "github.ref_name": ref,
+        "needs.changes.result": "success",
+        "needs.changes.outputs.code": code,
+        "needs.produce-macos.result": macos_result,
+        "needs.produce-linux.result": "failure",
+        "needs.produce-windows.result": "failure",
+    }
+    assert _condition(jobs["native-macos"]["if"], values) is (
+        event == "push"
+        and ref == "ci/hillclimb/python-macos-early-03"
+        and code == "true"
+        and macos_result == "success"
+    )
 
 
 def test_qualification_repack_receives_verified_overlay_in_its_environment(
@@ -1070,6 +1119,7 @@ def test_manual_native_entrypoint_uses_the_existing_qualified_package_pipeline(
         conditions = {
             "inputs.native_only": False,
             "github.event_name": "workflow_dispatch",
+            "github.ref_name": "feat/codex-harness",
             "needs.changes.result": "success",
             "needs.changes.outputs.code": "true",
             "needs.changes.outputs.windows": "true",
