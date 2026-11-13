@@ -27,6 +27,7 @@ from agents import (
 )
 from agents.observation import OutputTextDelta
 from tests._asyncio import timeout
+from tests.native_fixtures import text_response
 
 
 def _chat_event_frames(completion):
@@ -63,10 +64,12 @@ async def _exercise_borrowed_provider(
     penalties=False,
     reasoning=False,
     streaming=False,
+    anyllm_api=None,
 ):
     seen = []
     effects = []
     fallback = []
+    routes = []
     entered = asyncio.Event()
     release = asyncio.Event()
 
@@ -78,6 +81,7 @@ async def _exercise_borrowed_provider(
     async def create(request):
         body = await request.json()
         seen.append(body)
+        routes.append(request.path)
         entered.set()
         if outcome == "cancel" and not streaming:
             await release.wait()
@@ -88,7 +92,7 @@ async def _exercise_borrowed_provider(
                 replayed = next(item for item in body["input"] if item.get("type") == "reasoning")
                 assert replayed["encrypted_content"] == "synthetic-opaque-reasoning"
                 assert replayed["id"] == "rs_synthetic"
-        if adapter == "responses":
+        if adapter in ("responses", "any_llm_responses"):
             output = (
                 [
                     {
@@ -131,24 +135,42 @@ async def _exercise_borrowed_provider(
                         "content": [{"type": "refusal", "refusal": "synthetic-private-refusal"}],
                     }
                 )
-            return web.json_response(
-                {
-                    "id": f"resp_{len(seen)}",
-                    "object": "response",
-                    "created_at": 0,
-                    "model": "gpt-4.1",
-                    "status": "incomplete" if outcome == "incomplete" else "completed",
-                    "output": output,
-                    "usage": {
-                        "input_tokens": "synthetic-private-output"
-                        if outcome == "invalid_usage"
-                        else 3,
-                        "output_tokens": 2,
-                        "total_tokens": 5,
-                        "input_tokens_details": {"cached_tokens": 1},
-                        "output_tokens_details": {"reasoning_tokens": 1},
-                    },
-                }
+            completed = {
+                "id": f"resp_{len(seen)}",
+                "object": "response",
+                "created_at": 0,
+                "model": "gpt-4.1",
+                "status": "incomplete" if outcome == "incomplete" else "completed",
+                "output": output,
+                "usage": {
+                    "input_tokens": "synthetic-private-output" if outcome == "invalid_usage" else 3,
+                    "output_tokens": 2,
+                    "total_tokens": 5,
+                    "input_tokens_details": {"cached_tokens": 1},
+                    "output_tokens_details": {"reasoning_tokens": 1},
+                },
+            }
+            if not streaming:
+                return web.json_response(completed)
+            frames = [{"type": "response.created", "response": {"id": completed["id"]}}]
+            if outcome == "cancel":
+                frames.extend(text_response("msg_cancel", "partial")[:2])
+                response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+                await response.prepare(request)
+                for frame in frames:
+                    await response.write(f"data: {json.dumps(frame)}\n\n".encode())
+                await release.wait()
+                return response
+            if final:
+                frames.extend(text_response("msg_result", "42"))
+            else:
+                frames.append(
+                    {"type": "response.output_item.done", "output_index": 0, "item": output[0]}
+                )
+            frames.append({"type": "response.completed", "response": completed})
+            return web.Response(
+                body="".join(f"data: {json.dumps(frame)}\n\n" for frame in frames).encode(),
+                content_type="text/event-stream",
             )
         message = {"role": "assistant", "content": "42" if final else None}
         if streaming and outcome == "cancel":
@@ -230,6 +252,8 @@ async def _exercise_borrowed_provider(
                 borrowed = any_llm.AnyLLM.create(
                     "openai", api_key="synthetic", api_base=base, max_retries=0
                 )
+                if anyllm_api is not None:
+                    options["api"] = anyllm_api
                 backend = AnyLLMModel(borrowed, "gpt-4.1", **options)
             async with NativeProvider(
                 base_url=str(server.make_url("/fallback/v1")), model_backend=backend
@@ -302,6 +326,11 @@ async def _exercise_borrowed_provider(
             assert seen[0].get("stream", False) is streaming
             if adapter == "responses":
                 assert not client.is_closed()
+            if adapter == "any_llm_responses":
+                assert routes == ["/v1/responses"] * len(seen)
+                assert all(body["client_metadata"]["session_id"] for body in seen)
+                assert not borrowed.client.is_closed()
+                await borrowed.client.close()
 
             if penalties:
                 assert all(body["frequency_penalty"] == 0.4 for body in seen)
@@ -343,6 +372,38 @@ async def test_native_provider_cache_key_retains_native_ownership(adapter, cache
 @pytest.mark.parametrize("adapter", ["chat", "litellm", "any_llm"])
 async def test_native_chat_penalties_reach_borrowed_clients(adapter, monkeypatch):
     await _exercise_borrowed_provider(adapter, "complete", monkeypatch, penalties=True)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("api", ["responses", "auto"])
+async def test_anyllm_responses_uses_native_tool_continuation(api, streaming, monkeypatch):
+    await _exercise_borrowed_provider(
+        "any_llm_responses", "complete", monkeypatch, streaming=streaming, anyllm_api=api
+    )
+
+
+async def test_anyllm_responses_cancel_keeps_borrowed_client_owned(monkeypatch):
+    await _exercise_borrowed_provider(
+        "any_llm_responses", "cancel", monkeypatch, streaming=True, anyllm_api="responses"
+    )
+
+
+@pytest.mark.parametrize("provider_name", ["openai", "gemini"])
+def test_anyllm_responses_rejects_unqualified_provider_before_io(provider_name):
+    async def old_openai_responses(model, input_data, **kwargs):
+        raise AssertionError("the provider must not be called")
+
+    async def gemini_responses(model, input_data, *, extra_body=None):
+        raise AssertionError("the provider must not be called")
+
+    provider = SimpleNamespace(
+        PROVIDER_NAME=provider_name,
+        SUPPORTS_RESPONSES=True,
+        aresponses=old_openai_responses if provider_name == "openai" else gemini_responses,
+    )
+    with pytest.raises(ValueError, match="OpenAI provider with public aresponses extra_body"):
+        AnyLLMModel(provider, api="responses")
+    assert AnyLLMModel(provider, api="auto") == AnyLLMModel(provider)
 
 
 async def test_responses_reasoning_replays_through_native_tool_continuation(monkeypatch):
