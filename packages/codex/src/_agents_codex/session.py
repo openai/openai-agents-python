@@ -1367,6 +1367,14 @@ class _ConfiguredChild:
     seal_hold: asyncio.Event = field(default_factory=asyncio.Event)
 
 
+@dataclass(frozen=True, slots=True)
+class _SuspendBoundary:
+    session: Session[Any, Any]
+    active: _Submission
+    child: _ConfiguredChild | None
+    descendant: _SuspendBoundary | None = None
+
+
 def _native_callback_cancelled(state: _CallbackState) -> bool:
     invocation = _invocation.get()
     owner = None
@@ -17412,32 +17420,92 @@ class Session(Generic[ContextT, OutputT]):
         return await self._suspend()
 
     async def _suspend(self, *, before_seal: Callable[[], None] | None = None) -> SessionState:
-        if self._configured_capture is not None:
-            return await _join(self._configured_capture)
+        try:
+            ready = await self._wait_suspend_ready()
+        except _ManualBoundaryLost:
+            # Another caller may have sealed the child while this caller
+            # was waiting for the same live manual boundary.
+            if self._configured_capture is None and self._sealed_checkpoint is None:
+                raise
+            ready = None
+        return await self._suspend_ready(ready, before_seal=before_seal)
+
+    def _configured_checkpoint_child(self, active: _Submission) -> _ConfiguredChild | None:
+        if not self._configured_children:
+            return None
+        if len(self._configured_children) != 1 or self._configured_children[0].owner is not active:
+            raise RuntimeError("Concurrent configured continuations are not supported")
+        child = self._configured_children[0]
+        if any(not task.done() and task is not child.callback_task for task in active.callbacks):
+            raise RuntimeError("Other automatic callbacks have not settled")
+        if self._profiles or child.session._profiles:
+            raise CapabilityError(
+                "Configured checkpoints cannot capture managed handoff profiles; "
+                "reply in the live Session"
+            )
+        return child
+
+    async def _wait_suspend_ready(self) -> _SuspendBoundary | None:
+        # Readiness is a passive wait, including inside configured descendants.
+        # Leave replies, cancellation, and close available until a seal starts.
+        if self._configured_capture is not None or self._sealed_checkpoint is not None:
+            return None
         self._check_portable_capture()
         active = self._active
         self._check_manual_capture(active)
         assert active is not None
-        if self._configured_children:
-            configured_children = tuple(self._configured_children)
-            if len(configured_children) != 1 or configured_children[0].owner is not active:
-                raise RuntimeError("Concurrent configured continuations are not supported")
-            child = configured_children[0]
-            if any(
-                not task.done() and task is not child.callback_task for task in active.callbacks
-            ):
-                raise RuntimeError("Other automatic callbacks have not settled")
-            if self._profiles or child.session._profiles:
-                raise CapabilityError(
-                    "Configured checkpoints cannot capture managed handoff profiles; "
-                    "reply in the live Session"
-                )
+        child = self._configured_checkpoint_child(active)
+        if child is not None:
+            descendant = (
+                await child.session._wait_suspend_ready() if child.checkpoint is None else None
+            )
+            return _SuspendBoundary(self, active, child, descendant)
+        if self._child_admissions:
+            raise RuntimeError("Cannot save while native child work or callbacks remain active")
+        children = tuple(
+            child.completion
+            for child in self._child_callbacks.values()
+            if not child.completion.done()
+        )
+        if children:
+            # Native settlement can precede delivery of the host terminal
+            # receipt. Join those owners before taking the checkpoint.
+            if not await self._native._manual_children_settled():
+                raise RuntimeError("Cannot save while native child work or callbacks remain active")
+            await asyncio.gather(*(asyncio.shield(child) for child in children))
+        if not await self._wait_manual_boundary(active, require_request=True):
+            raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
+        return _SuspendBoundary(self, active, None)
+
+    async def _suspend_ready(
+        self,
+        ready: _SuspendBoundary | None,
+        *,
+        before_seal: Callable[[], None] | None = None,
+    ) -> SessionState:
+        if self._configured_capture is not None:
+            return await _join(self._configured_capture)
+        if self._sealed_checkpoint is not None:
+            return SessionState.from_json(self._sealed_checkpoint)
+        self._check_portable_capture()
+        active = self._active
+        self._check_manual_capture(active)
+        assert active is not None
+        child = self._configured_checkpoint_child(active)
+        if (
+            ready is None
+            or ready.session is not self
+            or ready.active is not active
+            or ready.child is not child
+        ):
+            raise _ManualBoundaryLost("The active submission changed before checkpoint sealing")
+        if child is not None:
 
             async def capture_configured() -> SessionState:
                 if child.checkpoint is None:
                     child.sealing = True
                     try:
-                        child.checkpoint = await child.session.suspend()
+                        child.checkpoint = await child.session._suspend_ready(ready.descendant)
                     except BaseException:
                         child.sealing = False
                         raise
@@ -17482,24 +17550,6 @@ class Session(Generic[ContextT, OutputT]):
                 return await _join(capture)
             finally:
                 self._configured_capture = None
-        # Waiting precedes checkpoint ownership: cancellation or close can
-        # still stop a callback that has not reached a safe sealing boundary.
-        if self._child_admissions:
-            raise RuntimeError("Cannot save while native child work or callbacks remain active")
-        children = tuple(
-            child.completion
-            for child in self._child_callbacks.values()
-            if not child.completion.done()
-        )
-        if children:
-            # Native settlement can precede delivery of the host terminal
-            # receipt. Join those owners before taking the checkpoint.
-            if not await self._native._manual_children_settled():
-                raise RuntimeError("Cannot save while native child work or callbacks remain active")
-            await asyncio.gather(*(asyncio.shield(child) for child in children))
-        if not await self._wait_manual_boundary(active, require_request=True):
-            raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
-        self._check_open()
         return await self._checkpoint(active, before_seal=before_seal)
 
     def _check_portable_capture(self) -> None:

@@ -6,8 +6,17 @@ from dataclasses import replace
 
 import pytest
 
-from agents import Agent, ApprovalRequested, CapabilityError, Environment, PendingRequests
+from agents import (
+    Agent,
+    ApprovalRequested,
+    CapabilityError,
+    Environment,
+    PendingRequests,
+    TurnStoppedError,
+    function_tool,
+)
 from tests._asyncio import timeout
+from tests.native_fixtures import function_call
 from tests.test_native_configured_agent_tool import fixture
 
 
@@ -21,20 +30,20 @@ async def test_configured_capture_joins_child_seal_before_waiter_or_close(monkey
             assert isinstance(boundary, PendingRequests)
             await sibling.wait()
             [child] = source._configured_children
-            suspend_child = child.session.suspend
+            suspend_child = child.session._suspend_ready
             sealed = asyncio.Event()
             release = asyncio.Event()
             calls = 0
 
-            async def hold_after_native_seal():
+            async def hold_after_native_seal(*args, **kwargs):
                 nonlocal calls
                 calls += 1
-                saved = await suspend_child()
+                saved = await suspend_child(*args, **kwargs)
                 sealed.set()
                 await release.wait()
                 return saved
 
-            monkeypatch.setattr(child.session, "suspend", hold_after_native_seal)
+            monkeypatch.setattr(child.session, "_suspend_ready", hold_after_native_seal)
             first = asyncio.create_task(source.suspend())
             others = []
             try:
@@ -70,6 +79,77 @@ async def test_configured_capture_joins_child_seal_before_waiter_or_close(monkey
             assert (await restored.restored_turn.get_result()).final_output == "parent complete"
         assert effects == ["accepted-sibling", "child-effect"]
         assert len(root_model.requests) == len(child_model.requests) == 2
+
+
+@pytest.mark.parametrize("stop", ["cancel", "close"])
+async def test_configured_capture_leaves_child_readiness_cancellable(monkeypatch, stop):
+    async with timeout(35), fixture() as values:
+        parent, child_agent, context, _root_model, child_model, effects, _guards, sibling = values
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        retired = asyncio.Event()
+
+        @function_tool
+        async def wait_for_release() -> str:
+            entered.set()
+            try:
+                await release.wait()
+                return "released"
+            finally:
+                retired.set()
+
+        child = replace(child_agent, tools=[*(child_agent.tools or []), wait_for_release])
+        parent = replace(
+            parent,
+            tools=[child.as_tool("nested_child"), (parent.tools or [])[1]],
+        )
+        child_model.replies[0].append(function_call("wait_for_release", {}, "held-child-call"))
+        async with parent.session(context=context) as source:
+            turn = await source.submit("Wait at the configured child boundary.")
+            await entered.wait()
+            await sibling.wait()
+            pending = await turn.wait_for_request_or_result()
+            assert isinstance(pending, PendingRequests)
+            [request] = pending.requests
+            assert isinstance(request, ApprovalRequested)
+            [owner] = source._configured_children
+            wait_manual = owner.session._wait_manual_boundary
+            waiting = asyncio.Event()
+
+            async def observe_wait(*args, **kwargs):
+                waiting.set()
+                return await wait_manual(*args, **kwargs)
+
+            monkeypatch.setattr(owner.session, "_wait_manual_boundary", observe_wait)
+            capture = asyncio.create_task(source.suspend())
+            closer = None
+            try:
+                await waiting.wait()
+                if stop == "cancel":
+                    capture.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        async with timeout(2):
+                            await asyncio.shield(capture)
+                    await source.respond(request.reply(True))
+                    assert not retired.is_set()
+                    release.set()
+                    assert (await turn.get_result()).final_output == "parent complete"
+                    assert effects == ["accepted-sibling", "child-effect"]
+                else:
+                    closer = asyncio.create_task(source.aclose())
+                    async with timeout(5):
+                        await asyncio.shield(closer)
+                    with pytest.raises((RuntimeError, TurnStoppedError)):
+                        await capture
+                    assert retired.is_set()
+                    assert effects == ["accepted-sibling"]
+                assert source._sealed_checkpoint is None
+                assert owner.session._sealed_checkpoint is None
+            finally:
+                release.set()
+                await asyncio.gather(
+                    capture, *([closer] if closer is not None else []), return_exceptions=True
+                )
 
 
 async def test_configured_capture_rejects_handoff_profiles_before_retiring_child():
