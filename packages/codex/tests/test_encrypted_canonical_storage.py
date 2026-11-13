@@ -1,8 +1,10 @@
 """Encryption preserves the real canonical backend's ownership and CAS contract."""
 
+import asyncio
 import json
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -148,6 +150,50 @@ async def test_encrypted_store_native_session_restores_canonical_context(
         assert "SYNTHETIC_PRIVATE" not in encrypted and "first answer" not in encrypted
     finally:
         backend.release(identity, token)
+
+
+@pytest.mark.parametrize("cold", [False, True])
+async def test_encrypted_ttl_excludes_old_items_from_native_model_context(
+    tmp_path: Path, responses, cold: bool
+) -> None:
+    backend = SQLiteSessionStore(tmp_path / "canonical-ttl.sqlite")
+    key = "synthetic-encrypted-ttl-key"
+    storage = CustomStorage(EncryptedSessionStore(backend, encryption_key=key, ttl=0))
+    responses.respond(assistant_output("OLD_ANSWER"))
+    responses.respond(assistant_output("NEW_ANSWER"))
+
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-native-encrypted-ttl"
+    ) as provider:
+        agent = Agent(instructions="TTL controls model context.", provider=provider)
+
+        async def check_expiry(session):
+            assert "OLD_REQUEST" not in str((await session.model_context()).items)
+            assert "OLD_ANSWER" not in str((await session.model_context()).items)
+            assert "OLD_REQUEST" in str((await session.history_snapshot()).items)
+            assert (await (await session.submit("NEW_REQUEST")).get_result()).final_output == (
+                "NEW_ANSWER"
+            )
+
+        async with agent.session(storage=storage) as session:
+            identity = session.id
+            assert (await (await session.submit("OLD_REQUEST")).get_result()).final_output == (
+                "OLD_ANSWER"
+            )
+            # Wait for the second containing the acknowledged turn to expire.
+            until = int(time.time()) + 1
+            while time.time() < until:
+                await asyncio.sleep(0.01)
+            if not cold:
+                await check_expiry(session)
+        if cold:
+            reopened = CustomStorage(EncryptedSessionStore(backend, encryption_key=key, ttl=0))
+            async with agent.session(storage=reopened, resume=identity) as session:
+                await check_expiry(session)
+    assert len(responses.requests) == 2
+    input_json = json.dumps(responses.requests[-1]["input"])
+    assert "OLD_REQUEST" not in input_json and "OLD_ANSWER" not in input_json
+    assert "NEW_REQUEST" in input_json
 
 
 @pytest.mark.parametrize(

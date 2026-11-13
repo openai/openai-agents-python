@@ -32,6 +32,9 @@ pub(crate) struct OpeningProfiles {
     pub(crate) root_id: String,
     pub(crate) roster: Vec<ProfileSpec>,
     pub(crate) fingerprint: String,
+    // Fresh presentation callbacks never participate in the effect-authority fingerprint.
+    #[serde(default)]
+    pub(crate) input_preparations: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -457,6 +460,19 @@ pub(crate) fn install_opening(
             .is_none(),
         "Captured Agent graph is already installed"
     );
+    for (id, names) in &opening.input_preparations {
+        let source = opening.roster.iter().find(|profile| &profile.id == id)
+            .context("Handoff input source is outside the captured graph")?;
+        let unique: HashSet<_> = names.iter().collect();
+        ensure!(unique.len() == names.len() && names.iter().all(|name|
+            (source.handoffs.contains_key(name) || source.decision_handoffs.contains_key(name))),
+            "Handoff input callback is outside its exact captured declarations");
+    }
+    if opening.input_preparations.values().any(|names| !names.is_empty()) {
+        startup.thread_extension_init.insert(
+            codex_protocol::agent_profile::AgentProfileHandoffInputCapture,
+        );
+    }
     startup.thread_extension_init.insert(OpeningFiles(files));
     startup.thread_extension_init.insert(opening);
     Ok(())
@@ -468,6 +484,24 @@ struct PersistedProfile {
     profile_id: String,
     epoch: u64,
     model: AgentProfileModelSettings,
+    #[serde(default)]
+    presentation: Option<codex_protocol::agent_profile::AgentProfileHandoffPresentation>,
+}
+
+impl PersistedProfile {
+    fn validate_presentation(&self) -> Result<()> {
+        let destination = AgentProfileReceipt {
+            profile_id: self.profile_id.clone(),
+            epoch: self.epoch,
+        };
+        ensure!(
+            self.presentation
+                .as_ref()
+                .is_none_or(|value| value.belongs_to(&destination)),
+            "Restored presentation belongs to another Agent destination"
+        );
+        Ok(())
+    }
 }
 
 fn rebind_runtime_controls(
@@ -490,6 +524,7 @@ fn rebind_runtime_controls(
 pub(crate) fn profile_receipt(value: &Value) -> Result<AgentProfileReceipt> {
     let source: PersistedProfile = serde_json::from_value(value.clone())
         .map_err(|_| anyhow::anyhow!("Invalid restored Agent receipt"))?;
+    source.validate_presentation()?;
     Ok(AgentProfileReceipt {
         profile_id: source.profile_id,
         epoch: source.epoch,
@@ -529,6 +564,7 @@ fn restored_envelope<'a>(
             .context("Missing restored Agent receipt")?,
     )
     .map_err(|_| anyhow::anyhow!("Invalid restored Agent receipt"))?;
+    receipt.validate_presentation()?;
     ensure!(
         opening
             .roster
@@ -845,6 +881,7 @@ pub(crate) async fn admit_realtime_graph(
     let opening = match &current {
         Some(current) => current.opening.clone(),
         None => Arc::new(OpeningProfiles {
+            input_preparations: Default::default(),
             root_id: root_id.to_owned(),
             roster: roster.clone(),
             fingerprint: roster_fingerprint(&roster, root_id)?,
@@ -1417,6 +1454,11 @@ pub(crate) async fn update_active(
             target.model.personality = Some(personality);
         }
     }
+    // An identical settings reset keeps the already committed publication and view.
+    // Instruction and catalog updates still pass through the native publication owner.
+    if instructions.is_none() && catalog.is_none() && target.model == captured.profile.model {
+        return Ok(true);
+    }
     let accepted = captured
         .profile
         .data
@@ -1575,6 +1617,15 @@ pub(crate) fn restore_handoff(
                 .is_some_and(|targets| targets.contains(&receipt.target_profile_id)),
         "Restored handoff is outside its source declaration"
     );
+    if profiles.opening.input_preparations.get(&receipt.source.profile_id)
+        .is_some_and(|names| names.iter().any(|name| name == &tool_name.name)) {
+        state.thread.thread_extension_data().insert(
+            codex_protocol::agent_profile::AgentProfileHandoffInputRequest {
+                turn_id:turn.to_owned(), tool_name:tool_name.name.clone(),
+                handoff:receipt.clone(), restored:true,
+            },
+        );
+    }
     let mut pending = profiles
         .reservation
         .lock()
@@ -1681,9 +1732,27 @@ impl TurnLifecycleContributor for Contributor {
                 .thread
                 .upgrade()
                 .ok_or("Native Agent thread is closed")?;
-            let target = profiles
+            let mut target = profiles
                 .candidate(&thread, &target_id)
                 .map_err(|error| error.to_string())?;
+            if let Some(request) = input.turn_store.get::<
+                codex_protocol::agent_profile::AgentProfileHandoffInputRequest,
+            >() {
+                let proposed = input.turn_store.get::<
+                    codex_protocol::agent_profile::AgentProfileHandoffPresentation,
+                >().ok_or("Handoff input lacks its native grouped proposal")?;
+                if proposed.handoff != request.handoff || request.turn_id != input.turn_id {
+                    return Err("Handoff input proposal belongs to another accepted call".into());
+                }
+                let captured = thread.captured_agent_profile().await
+                    .map_err(|error| error.to_string())?.ok_or("Handoff source profile closed")?;
+                let prepared = profiles.tools.prepare_handoff_input(
+                    input.turn_store, input.thread_store.level_id(), input.turn_id, &captured, &request, &proposed,
+                ).await.map_err(|error| error.to_string())?;
+                let mut with_input = (*target).clone();
+                with_input.data.insert(prepared);
+                target = Arc::new(with_input);
+            }
             Ok(Some(AgentProfileActivation { expected, target }))
         })
     }
@@ -1841,6 +1910,19 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
                 call_id: call_id.into(),
             })
         })();
+        if let Some(handoff) = &handoff {
+            if self.profiles.opening.input_preparations.get(&self.source.profile_id)
+                .is_some_and(|names| names.contains(&self.name)) {
+                if let Some(thread) = self.profiles.thread.upgrade() {
+                    thread.thread_extension_data().insert(
+                        codex_protocol::agent_profile::AgentProfileHandoffInputRequest {
+                            turn_id:turn_id.to_owned(), tool_name:self.name.clone(),
+                            handoff:handoff.clone(), restored:false,
+                        },
+                    );
+                }
+            }
+        }
         // This wrapper alone owns the transfer receipt; retain other accepted metadata.
         outcome.handoff = handoff;
         outcome
@@ -2117,6 +2199,7 @@ mod tests {
         let open = |raw: Value| {
             let raw = raw.to_string();
             OpeningProfiles {
+                input_preparations: Default::default(),
                 root_id: "a".into(),
                 roster: serde_json::from_str(&raw).unwrap(),
                 fingerprint: fingerprint(&raw, "a").unwrap(),
@@ -2204,6 +2287,7 @@ mod tests {
         raw[0]["handoffs"] = json!({});
         raw[0]["decision_handoffs"] = json!({"lookup":{"slot":0,"targets":["b"]}});
         let opening = OpeningProfiles {
+            input_preparations: Default::default(),
             root_id: "a".into(),
             roster: serde_json::from_value(raw.clone()).unwrap(),
             fingerprint: fingerprint(&raw.to_string(), "a").unwrap(),
@@ -2245,6 +2329,7 @@ mod tests {
     fn queued_operation_origin_is_distinct_from_admitted_and_restored_actor() {
         let raw = roster().to_string();
         let opening = OpeningProfiles {
+            input_preparations: Default::default(),
             root_id: "a".into(),
             roster: serde_json::from_str(&raw).unwrap(),
             fingerprint: fingerprint(&raw, "a").unwrap(),

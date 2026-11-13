@@ -1176,6 +1176,21 @@ impl NativeThread {
         })
     }
 
+    #[pyo3(signature = (*, ttl_seconds=None))]
+    fn _configure_history_retention<'py>(
+        &self,
+        py: Python<'py>,
+        ttl_seconds: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            context::configure_history_retention(&inner, ttl_seconds)
+                .await
+                .map_err(py_error)
+        })
+    }
+
     fn _read_model_context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
@@ -2707,6 +2722,25 @@ impl NativeThread {
             .reply_provider_response_span(id, data_json, error, thread, instance)
             .map_err(py_error)?;
         Ok(true)
+    }
+
+    #[pyo3(signature = (id, data, thread=None, instance=None))]
+    fn _reply_handoff_input(
+        &self,
+        id: u64,
+        data: Option<&str>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Handoff input requires current tools"))?;
+        tools
+            .reply_handoff_input(id, data, thread, instance)
+            .map_err(py_error)
     }
 
     #[pyo3(signature = (id, items_json, thread=None, instance=None))]
@@ -4796,6 +4830,7 @@ fn _agent_profiles_restore_source(
     history_json: &str,
 ) -> PyResult<String> {
     let opening = agent_profiles::OpeningProfiles {
+        input_preparations: Default::default(),
         root_id: root_id.to_owned(),
         roster: serde_json::from_str(roster_json).map_err(py_error)?,
         fingerprint: agent_profiles::fingerprint(roster_json, root_id).map_err(py_error)?,
@@ -4816,6 +4851,7 @@ fn _agent_profiles_operation_source(
     turn_id: &str,
 ) -> PyResult<String> {
     let opening = agent_profiles::OpeningProfiles {
+        input_preparations: Default::default(),
         root_id: root_id.to_owned(),
         roster: serde_json::from_str(roster_json).map_err(py_error)?,
         fingerprint: agent_profiles::fingerprint(roster_json, root_id).map_err(py_error)?,

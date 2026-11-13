@@ -1,3 +1,6 @@
+#[path = "handoff_inputs.rs"]
+pub(crate) mod handoff_inputs;
+
 #[path = "sandbox_events.rs"]
 mod sandbox_events;
 
@@ -266,6 +269,7 @@ pub(crate) enum ToolCompletionReply {
 }
 
 enum PreparationReply {
+    HandoffInput(oneshot::Sender<std::result::Result<handoff_inputs::Groups, ()>>),
     ProviderResponseSpan(
         oneshot::Sender<
             std::result::Result<Option<codex_extension_api::SdkProviderResponseSpanAdmission>, ()>,
@@ -302,6 +306,7 @@ enum PreparationReply {
 impl PreparationReply {
     fn is_closed(&self) -> bool {
         match self {
+            Self::HandoffInput(reply) => reply.is_closed(),
             Self::ProviderResponseSpan(reply) => reply.is_closed(),
             Self::ModelRetry(reply) => reply.is_closed(),
             Self::PreparedRequest { ticket, reply } => reply.is_closed() || !ticket.admits(),
@@ -7320,6 +7325,30 @@ impl ToolOutput for PythonOutput {
 #[cfg(test)]
 pub(crate) mod admission_order_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn handoff_reply_wrong_kind_preserves_the_original_preparation() {
+        let tools = sdk();
+        tools.family.members.write().unwrap()
+            .insert("thread".into(), Arc::downgrade(&tools));
+        let id = tools.family.next_invocation.fetch_add(1, Ordering::Relaxed);
+        let mut request = json!({"id":"turn", "msg":{"thread":"thread"}});
+        let callback = tools.preparation_callback(id, &mut request);
+        let receipt = callback.receipt.clone();
+        let (reply, mut receive) = oneshot::channel::<Option<ModelContextUpdate>>();
+        tools.preparation_replies.lock().unwrap().as_mut().unwrap().insert(id,
+            PreparationSlot {turn:"turn".into(), reply:Some(PreparationReply::Context(reply)), callback});
+        assert!(tools.callback_operation("thread", &receipt, "enter"));
+        assert!(tools.reply_handoff_input(id, Some(r#"{"input":[],"previous":[],"generated":[]}"#),
+            Some("thread"), None).is_err());
+        assert!(matches!(receive.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        let PreparationReply::Context(original) = tools.take_preparation(id).unwrap() else {
+            panic!("The original callback kind changed");
+        };
+        assert!(original.send(None).is_ok());
+        assert!(receive.await.unwrap().is_none());
+        assert!(tools.callback_operation("thread", &receipt, "release"));
+    }
 
     // Thread-scoped only. Core has detached the real task before this SDK hook
     // runs, but it has not sent TurnComplete or cleared the active slot yet.

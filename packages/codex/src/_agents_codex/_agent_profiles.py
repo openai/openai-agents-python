@@ -98,6 +98,7 @@ def _capture_agent_graph(
             output_type=cast(OutputSpec[Any], source.output_type),
             programmatic_tool_calling=source.programmatic_tool_calling,
             transform_context=source.transform_context,
+            prepare_handoff_input=source.prepare_handoff_input,
             before_compact=source.before_compact,
             compaction=source.compaction,
             before_complete=source.before_complete,

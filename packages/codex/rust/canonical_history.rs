@@ -128,14 +128,12 @@ async fn edit(state: &ThreadState, expected: String, edit: HistoryEdit) -> anyho
             let retained = state.thread.sdk_history_projection(Some(keep)).await?;
             crate::context::check_pairs(&projected, &(0..retained.len()).collect::<Vec<_>>())
                 .context("canonical history requires complete tool call/result pairs")?;
-            let appended: Vec<ResponseItem> = items
-                .iter()
-                .map(|item| codex_history::sdk_originals::input_projection(item))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| anyhow::anyhow!("Invalid canonical history item"))?
-                .into_iter()
-                .flatten()
-                .collect();
+            let appended: Vec<ResponseItem> =
+                codex_history::sdk_originals::input_projections(&items)
+                    .map_err(|_| anyhow::anyhow!("Invalid canonical history item"))?
+                    .into_iter()
+                    .flatten()
+                    .collect();
             crate::context::check_pairs(&appended, &(0..appended.len()).collect::<Vec<_>>())
                 .context("canonical history requires complete tool call/result pairs")?;
             state

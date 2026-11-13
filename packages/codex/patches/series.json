@@ -1003,7 +1003,19 @@
     {
       "path": "sdk-provider-websocket-frame-cap.patch",
       "sha256": "4236dfecf6a01d471582da77fdbb78d1416c0e61249bffed060138a51e07702e"
+    },
+    {
+      "path": "sdk-handoff-input-presentation.patch",
+      "sha256": "04fdc8654425085261cd2c645f275c372aff6e4b1b17a9bf9ef48b81394c6a55"
+    },
+    {
+      "path": "sdk-historical-mcp-archive.patch",
+      "sha256": "8c20fc080d5b050a91428d036b1e27ae5d9619cde6987ed8ea73ab0a03477412"
+    },
+    {
+      "path": "sdk-encrypted-history-ttl.patch",
+      "sha256": "c932f3fc6c712e927d19653617c95f53705f2368866dd2cbe79ec0e8fbd98625"
     }
   ],
-  "result_tree": "691233eb5a1e1133061eaa84be7c70c948279bc9"
+  "result_tree": "c160646b28460604e3e5b08078e87206b5e5f315"
 }

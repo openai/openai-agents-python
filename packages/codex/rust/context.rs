@@ -6,6 +6,22 @@ use crate::engine::{EngineState, ThreadState};
 
 pub async fn read(state: &ThreadState) -> anyhow::Result<Value> {
     let _mutation = state.mutations.lock().await;
+    ensure_idle(state).await?;
+    let snapshot = state
+        .thread
+        .retained_conversation_history_snapshot()
+        .await?;
+    Ok(json!({
+        "thread_id": state.id,
+        "history_version": snapshot.history_version(),
+        "user_message_revision": snapshot.user_message_revision(),
+        "guardian_review_context_revision": snapshot.guardian_review_context_revision(),
+        "retained_context": snapshot.retained_context(),
+        "items": snapshot.items().collect::<Vec<_>>(),
+    }))
+}
+
+async fn ensure_idle(state: &ThreadState) -> anyhow::Result<()> {
     ensure!(
         state
             .thread
@@ -25,15 +41,20 @@ pub async fn read(state: &ThreadState) -> anyhow::Result<Value> {
     {
         tools.check_idle(&state.thread).await?;
     }
-    let snapshot = state.thread.conversation_history_snapshot().await;
-    Ok(json!({
-        "thread_id": state.id,
-        "history_version": snapshot.history_version(),
-        "user_message_revision": snapshot.user_message_revision(),
-        "guardian_review_context_revision": snapshot.guardian_review_context_revision(),
-        "retained_context": snapshot.retained_context(),
-        "items": snapshot.items().collect::<Vec<_>>(),
-    }))
+    Ok(())
+}
+
+pub async fn configure_history_retention(
+    state: &ThreadState,
+    ttl_seconds: Option<u64>,
+) -> anyhow::Result<()> {
+    let _mutation = state.mutations.lock().await;
+    ensure_idle(state).await?;
+    state
+        .thread
+        .configure_sdk_history_retention(ttl_seconds)
+        .await?;
+    Ok(())
 }
 
 // A short-lived SDK transaction owns this lease. Ordinary public native ingress
@@ -77,7 +98,10 @@ pub async fn begin(state: std::sync::Arc<ThreadState>) -> anyhow::Result<Change>
     );
     // read() takes the mutation gate and verifies native idle/pending ownership.
     read(&state).await?;
-    let snapshot = state.thread.conversation_history_snapshot().await;
+    let snapshot = state
+        .thread
+        .retained_conversation_history_snapshot()
+        .await?;
     let settings = state.thread.thread_settings_snapshot().await;
     let executor_policy = if state
         .thread
@@ -210,6 +234,17 @@ impl Change {
             );
             candidate_store.insert((*writes).clone());
         }
+        if let Some(policy) = self
+            .state
+            .thread
+            .thread_extension_data()
+            .get::<codex_core::SdkHistoryRetention>()
+        {
+            candidate
+                .thread
+                .configure_sdk_history_retention(policy.ttl_seconds)
+                .await?;
+        }
         // Startup options already restore these preferences in the common case.
         // Avoid rewriting an absent tier: native clear normalizes it to "default".
         let before = candidate.thread.thread_settings_snapshot().await;
@@ -335,7 +370,16 @@ impl Change {
                 "content_item_kinds": ["compaction.summary"]
             }
         }))?;
-        replacement.push(ResponseItemEnvelope::new(summary_item));
+        let mut summary_envelope = ResponseItemEnvelope::new(summary_item);
+        if let Some(policy) = self
+            .state
+            .thread
+            .thread_extension_data()
+            .get::<codex_core::SdkHistoryRetention>()
+        {
+            policy.stamp_new_items(std::slice::from_mut(&mut summary_envelope));
+        }
+        replacement.push(summary_envelope);
         let guardian_history = if self.snapshot.uses_independent_review_history() {
             Some(GuardianHistoryCheckpoint(original_envelopes(
                 &self.snapshot.review_items().cloned().collect::<Vec<_>>(),

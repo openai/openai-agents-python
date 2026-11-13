@@ -196,6 +196,7 @@ from .guardrails import (
     InputGuardrail,
     OutputGuardrail,
 )
+from .handoffs import HandoffInput
 from .history import (
     CanonicalHistoryPop,
     CanonicalHistorySnapshot,
@@ -2754,6 +2755,12 @@ def _install_profile_options(
         "root_id": profiles[0].id,
         "roster": roster,
         "fingerprint": fingerprint,
+        "input_preparations": {
+            profile.id: [*profile.handoffs, *profile.decision_handoffs]
+            if profile.declaration.prepare_handoff_input is not None
+            else []
+            for profile in profiles
+        },
     }
     for flag in ("transform_context", "before_compact", "before_complete", "tool_batch_completion"):
         options[f"_{flag}"] = any(row.get(flag, False) for row in roster)
@@ -4833,6 +4840,13 @@ class Session(Generic[ContextT, OutputT]):
                     session._writable_roots = _writable_roots(executor.writable_roots)
                 session._bind_native_agents(native_agents)
                 session._storage = storage
+                if isinstance(storage, CustomStorage):
+                    from .canonical_storage_encrypt import EncryptedSessionStore
+
+                    if isinstance(storage.backend, EncryptedSessionStore):
+                        await session._native._configure_history_retention(
+                            ttl_seconds=storage.backend._native_history_ttl_seconds
+                        )
                 if checkpoint is not None:
                     await session._restore_opening_checkpoint(
                         saved,
@@ -4864,6 +4878,9 @@ class Session(Generic[ContextT, OutputT]):
                     allowed_mcp=startup_allowed_mcp,
                     generation=catalog.generation,
                     profile_roster=profile_roster,
+                    restored_profile_id=(
+                        restored_profile.profile.id if restored_profile is not None else None
+                    ),
                     default_slots=_ordinary_default_slots(restored_catalog, restored_defaults),
                     default_handoffs=_handoff_default_names(restored_defaults, restored_handoffs),
                 )
@@ -5636,6 +5653,7 @@ class Session(Generic[ContextT, OutputT]):
         allowed_mcp: tuple[_MCP[Any], ...],
         generation: int,
         profile_roster: list[dict[str, Any]],
+        restored_profile_id: str | None = None,
         default_slots: list[int] | None = None,
         default_handoffs: list[str] | None = None,
     ) -> None:
@@ -5675,7 +5693,21 @@ class Session(Generic[ContextT, OutputT]):
 
         if validate_provider_model and (not fresh or "model" not in settings):
             await self._publish_startup(thread._validate_provider_model())
-        if restored and (not profile_roster or manual_restore):
+        rebound_profile_controls = (
+            restored and not manual_restore and restored_profile_id is not None
+        )
+        if rebound_profile_controls:
+            # Rebind fresh runtime preferences before the native graph restores its receipt.
+            # The profile identifier selects controls from the fresh declaration only;
+            # native graph binding below still validates the stored transfer authority.
+            model = next(row["model"] for row in profile_roster if row["id"] == restored_profile_id)
+            controls = _current_attempt_controls(
+                settings.get("request_controls", {}), model["request_controls"]
+            )
+            if provider_history is not None:
+                controls["store"] = model["request_controls"].get("store")
+            await publish_attempt_controls(controls, invocation_settings=model)
+        elif restored and (not profile_roster or manual_restore):
             await publish_attempt_controls(
                 settings.get("request_controls", {}),
                 invocation_settings=settings if manual_restore else None,
@@ -5718,14 +5750,15 @@ class Session(Generic[ContextT, OutputT]):
             if restored and not manual_restore:
                 # Pending continuations already have their current controls before
                 # the graph binds their sealed profile receipt.
-                active = receipt["active"]["profile_id"]
-                model = next(row["model"] for row in profile_roster if row["id"] == active)
-                controls = _current_attempt_controls(
-                    settings.get("request_controls", {}), model["request_controls"]
-                )
-                if provider_history is not None:
-                    controls["store"] = model["request_controls"].get("store")
-                await publish_attempt_controls(controls, invocation_settings=model)
+                if not rebound_profile_controls:
+                    active = receipt["active"]["profile_id"]
+                    model = next(row["model"] for row in profile_roster if row["id"] == active)
+                    controls = _current_attempt_controls(
+                        settings.get("request_controls", {}), model["request_controls"]
+                    )
+                    if provider_history is not None:
+                        controls["store"] = model["request_controls"].get("store")
+                    await publish_attempt_controls(controls, invocation_settings=model)
                 await self._refresh_profile_bindings(preserve_current=True)
 
     async def _prepare_realtime_mcp(self) -> None:
@@ -13616,6 +13649,46 @@ class Session(Generic[ContextT, OutputT]):
             state, message, prepare, reply, reject, synchronous_id_policy=True
         )
 
+    async def _prepare_handoff_input(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        def prepare(_active: Callable[[], bool]) -> tuple[Callable[..., Any], HandoffInput[Any]]:
+            declaration = self._agent_for_message(message)
+            callback = declaration.prepare_handoff_input
+            if callback is None:
+                raise NativeError("Missing exact captured handoff input callback")
+            source = self._source_profile_runtime(message["profile_id"]).profile
+            name, target_id = message["tool_name"], message["target_profile_id"]
+            target = self._profiles.get(target_id)
+            declared = source.handoffs.get(
+                name
+            ) == target_id or target_id in source.decision_handoffs.get(name, {}).get("targets", ())
+            if target is None or not declared:
+                raise NativeError("Handoff input destination differs from its captured target")
+            groups = [
+                tuple(json.loads(json.dumps(message[name], allow_nan=False)))
+                for name in ("input", "previous", "generated")
+            ]
+            request = HandoffInput(*groups, context=self._context, target=target.profile.agent)
+            return callback, request
+
+        def reply(result: Any) -> None:
+            if not isinstance(result, HandoffInput):
+                raise TypeError("prepare_handoff_input must return HandoffInput")
+            data = json.dumps(
+                {name: getattr(result, name) for name in ("input", "previous", "generated")},
+                allow_nan=False,
+                ensure_ascii=False,
+            )
+            self._native._reply_handoff_input(
+                message["step_id"], data, message["thread"], message["instance"]
+            )
+
+        def reject() -> None:
+            self._native._reply_handoff_input(
+                message["step_id"], None, message["thread"], message["instance"]
+            )
+
+        await self._run_owned_context_callback(state, message, prepare, reply, reject)
+
     async def _transform_context(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span("context callback", "callback", message.get("tracing_context")) as tracing:
             await self._transform_context_body(state, message)
@@ -14908,6 +14981,7 @@ class Session(Generic[ContextT, OutputT]):
         preparation_callbacks = {
             "_sdk_select_step": self._select_step,
             "_sdk_provider_response_span": self._admit_provider_response_span,
+            "_sdk_handoff_input": self._prepare_handoff_input,
             "_sdk_transform_context": self._transform_context,
             "_sdk_before_compact": self._before_compact,
             "_sdk_before_compact_policy": self._before_compact,
@@ -17469,12 +17543,15 @@ class Session(Generic[ContextT, OutputT]):
         suspend() to retire a session at a supported manual-tool boundary.
         Settled native stored values and terminal cell observations survive
         restoration without rerunning cells. Active code cells are not captured.
+        LocalStorage snapshots include the native graph and accepted sidecar state.
+        Restore without storage into isolated memory using the current Agent.
+        CustomStorage export and persistent manual suspension/fork remain unsupported.
         """
         return await self._save_state()
 
     async def _save_state(self, *, probe: bool = False) -> SessionState:
         self._check_open()
-        self._check_portable_capture()
+        self._check_portable_capture(allow_local=True)
         self._check_callback_operation("save its own Session")
         if self._active is not None:
             raise RuntimeError(
@@ -17513,7 +17590,7 @@ class Session(Generic[ContextT, OutputT]):
         if kind not in ("idle", "manual_wait"):
             raise ValueError("kind must be 'idle' or 'manual_wait'")
         try:
-            self._check_portable_capture()
+            self._check_portable_capture(allow_local=kind == "idle")
             if kind == "idle":
                 await self._save_state(probe=True)
             else:
@@ -17681,7 +17758,7 @@ class Session(Generic[ContextT, OutputT]):
                 self._configured_capture = None
         return await self._checkpoint(active, before_seal=before_seal)
 
-    def _check_portable_capture(self) -> None:
+    def _check_portable_capture(self, *, allow_local: bool = False) -> None:
         if self._realtime is not None:
             raise CapabilityError("Close the Realtime connection before capturing a checkpoint")
         if self._active is not None and self._active.budget is not None:
@@ -17693,7 +17770,9 @@ class Session(Generic[ContextT, OutputT]):
             )
         if self._queued_roots:
             raise RuntimeError("Cannot checkpoint a Session with queued work")
-        if self._storage is not None:
+        if self._storage is not None and not (
+            allow_local and isinstance(self._storage, LocalStorage)
+        ):
             raise CapabilityError(
                 "Persistent storage cannot export portable SessionState; "
                 "retain Session.id and reopen with the same storage backend"

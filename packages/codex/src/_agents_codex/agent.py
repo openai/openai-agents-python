@@ -71,6 +71,7 @@ from .compaction import ResponsesCompaction, _BeforeCompact
 from .completion import _BeforeComplete, _ToolBatchCompletion
 from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .guardrails import InputGuardrail, OutputGuardrail
+from .handoffs import _PrepareHandoffInput
 from .history import _InputStoragePolicy
 from .hosted_mcp import HostedMCP
 from .initial_messages import _capture_initial_messages, _initial_messages_json
@@ -997,6 +998,7 @@ class Agent(Generic[ContextT, OutputT]):
     output_type: OutputSpec[OutputT] | None
     programmatic_tool_calling: bool
     transform_context: _ContextTransform[ContextT] | None
+    prepare_handoff_input: _PrepareHandoffInput[ContextT] | None
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
     decisions: DecisionProvider | None
@@ -1036,6 +1038,7 @@ class Agent(Generic[ContextT, OutputT]):
             | None = None,
             output_type: None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
+            prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
             tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1059,6 +1062,7 @@ class Agent(Generic[ContextT, OutputT]):
             ]
             | None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
+            prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
             tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1098,6 +1102,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
         tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1133,6 +1138,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
         tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1164,6 +1170,7 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
         tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1197,6 +1204,7 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
         tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1227,6 +1235,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: OutputSpec[OutputT] | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
         tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1249,6 +1258,8 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("name must be a string or None")
         if not isinstance(programmatic_tool_calling, bool):
             raise TypeError("programmatic_tool_calling must be a bool")
+        if prepare_handoff_input is not None and not callable(prepare_handoff_input):
+            raise TypeError("prepare_handoff_input must be callable or None")
         if transform_context is not None and not callable(transform_context):
             raise TypeError("transform_context must be callable or None")
         if before_compact is not None and not callable(before_compact):
@@ -1304,6 +1315,7 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(self, "output_type", output_type)
         object.__setattr__(self, "programmatic_tool_calling", programmatic_tool_calling)
         object.__setattr__(self, "transform_context", transform_context)
+        object.__setattr__(self, "prepare_handoff_input", prepare_handoff_input)
         object.__setattr__(self, "before_compact", before_compact)
         object.__setattr__(self, "before_complete", before_complete)
         object.__setattr__(self, "tool_batch_completion", tool_batch_completion)

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, TypeVar
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from ._function_tools import FunctionTool, _PythonTool
 from ._public import preserve_module_identity
@@ -13,6 +14,29 @@ if TYPE_CHECKING:
 
 ContextT = TypeVar("ContextT")
 OutputT = TypeVar("OutputT")
+
+
+@dataclass(frozen=True)
+class HandoffInput(Generic[ContextT]):
+    """Detached application presentation at the accepted native transfer boundary.
+
+    input has been retaining the operation's initial input; previous has been
+    retaining earlier generated items; generated has been including the settled
+    current response and sibling outputs. context has been retaining the current
+    application's context. Returning groups has not been changing canonical
+    effects, protected instructions, tools or destination identity.
+    """
+
+    input: tuple[dict[str, Any], ...]
+    previous: tuple[dict[str, Any], ...]
+    generated: tuple[dict[str, Any], ...]
+    context: ContextT | None = field(default=None, repr=False, compare=False)
+    target: Agent[ContextT, Any] = field(kw_only=True, repr=False, compare=False)
+
+
+_PrepareHandoffInput = Callable[
+    [HandoffInput[ContextT]], HandoffInput[ContextT] | Awaitable[HandoffInput[ContextT]]
+]
 
 
 @dataclass(frozen=True)

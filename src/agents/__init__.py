@@ -95,7 +95,7 @@ if TYPE_CHECKING:
         InputGuardrail as InputGuardrail,
         OutputGuardrail as OutputGuardrail,
     )
-    from .handoffs import Handoff as Handoff
+    from .handoffs import Handoff as Handoff, HandoffInput as HandoffInput
     from .hosted_mcp import (
         HostedMCP as HostedMCP,
         HostedMCPApprovalArguments as HostedMCPApprovalArguments,
@@ -405,6 +405,7 @@ _MODULES = {
     "Interaction": ".manual",
     "Agent": ".agent",
     "Handoff": ".handoffs",
+    "HandoffInput": ".handoffs",
     "CodexAccount": ".agent",
     "CodexLogin": ".agent",
     "ModelSettings": ".agent",

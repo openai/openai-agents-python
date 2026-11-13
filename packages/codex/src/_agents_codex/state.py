@@ -41,9 +41,9 @@ class LocalStorage:
 
     Code mode is rejected before opening because nested tool identities do not
     yet have durable intent and result receipts. Nonpersistent code mode remains
-    available. Native local conversations cannot export portable SessionState. Missing
-    receipts are unknown effects: reconcile them with your external system,
-    never retry the tool automatically. This is not a checkpoint store.
+    available. An idle local conversation can export a portable SessionState.
+    Missing receipts are unknown effects: reconcile them with your external system
+    before retrying a tool.
     """
 
     path: Path
