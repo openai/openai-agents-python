@@ -18,6 +18,12 @@ if os.name != "nt":
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="UnixLocal memory fixture")
 
+if os.name != "nt":
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
+
 
 @pytest.mark.parametrize("previous", [False, True])
 @pytest.mark.parametrize("failure", ["trip", "raise", "invalid"])

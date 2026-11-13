@@ -125,6 +125,7 @@ async def test_host_routes_exact_submission_and_drops_retired_metadata() -> None
 
     session = object.__new__(Session)
     session._id = "thread"
+    session._configured_usage_parent = None
     session._observations = _ObservationBuffer("thread")
     session._configured_usage_parent = None
     state = _Submission(cast(Any, None))
