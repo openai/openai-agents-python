@@ -66,6 +66,8 @@ def _validate_custom_storage_capabilities(
         or any(name not in ("project_glob", "project_grep") for name in environment.tools)
         or bool(environment.capability_directories)
     )
+    # Do not retain a caller-owned environment in the rejection traceback.
+    del environment
     if (
         native_agents is not None
         or goals

@@ -65,6 +65,7 @@ async def _exercise_borrowed_provider(
     reasoning=False,
     streaming=False,
     anyllm_api=None,
+    anyllm_provider="openai",
 ):
     seen = []
     effects = []
@@ -82,6 +83,8 @@ async def _exercise_borrowed_provider(
         body = await request.json()
         seen.append(body)
         routes.append(request.path)
+        if anyllm_provider == "azureopenai":
+            assert request.headers["Authorization"] == "Bearer synthetic"
         entered.set()
         if outcome == "cancel" and not streaming:
             await release.wait()
@@ -228,6 +231,7 @@ async def _exercise_borrowed_provider(
 
     app = web.Application()
     app.router.add_post("/v1/responses", create)
+    app.router.add_post("/openai/v1/responses", create)
     app.router.add_post("/v1/chat/completions", create)
     app.router.add_route("*", "/fallback/{tail:.*}", unexpected)
     async with timeout(30), TestServer(app) as server:
@@ -250,7 +254,12 @@ async def _exercise_borrowed_provider(
             else:
                 any_llm = pytest.importorskip("any_llm")
                 borrowed = any_llm.AnyLLM.create(
-                    "openai", api_key="synthetic", api_base=base, max_retries=0
+                    anyllm_provider,
+                    api_key="synthetic",
+                    api_base=str(server.make_url("/"))
+                    if anyllm_provider == "azureopenai"
+                    else base,
+                    max_retries=0,
                 )
                 if anyllm_api is not None:
                     options["api"] = anyllm_api
@@ -327,7 +336,9 @@ async def _exercise_borrowed_provider(
             if adapter == "responses":
                 assert not client.is_closed()
             if adapter == "any_llm_responses":
-                assert routes == ["/v1/responses"] * len(seen)
+                assert routes == [
+                    "/openai/v1/responses" if anyllm_provider == "azureopenai" else "/v1/responses"
+                ] * len(seen)
                 assert all(body["client_metadata"]["session_id"] for body in seen)
                 assert not borrowed.client.is_closed()
                 await borrowed.client.close()
@@ -376,15 +387,33 @@ async def test_native_chat_penalties_reach_borrowed_clients(adapter, monkeypatch
 
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("api", ["responses", "auto"])
-async def test_anyllm_responses_uses_native_tool_continuation(api, streaming, monkeypatch):
+@pytest.mark.parametrize(
+    "provider_name", ["openai", "openrouter", "azureopenai", "gmi", "deepseek", "meta"]
+)
+async def test_anyllm_responses_uses_native_tool_continuation(
+    api, streaming, monkeypatch, provider_name
+):
     await _exercise_borrowed_provider(
-        "any_llm_responses", "complete", monkeypatch, streaming=streaming, anyllm_api=api
+        "any_llm_responses",
+        "complete",
+        monkeypatch,
+        streaming=streaming,
+        anyllm_api=api,
+        anyllm_provider=provider_name,
     )
 
 
-async def test_anyllm_responses_cancel_keeps_borrowed_client_owned(monkeypatch):
+@pytest.mark.parametrize(
+    "provider_name", ["openai", "openrouter", "azureopenai", "gmi", "deepseek", "meta"]
+)
+async def test_anyllm_responses_cancel_keeps_borrowed_client_owned(monkeypatch, provider_name):
     await _exercise_borrowed_provider(
-        "any_llm_responses", "cancel", monkeypatch, streaming=True, anyllm_api="responses"
+        "any_llm_responses",
+        "cancel",
+        monkeypatch,
+        streaming=True,
+        anyllm_api="responses",
+        anyllm_provider=provider_name,
     )
 
 
@@ -401,7 +430,10 @@ def test_anyllm_responses_rejects_unqualified_provider_before_io(provider_name):
         SUPPORTS_RESPONSES=True,
         aresponses=old_openai_responses if provider_name == "openai" else gemini_responses,
     )
-    with pytest.raises(ValueError, match="OpenAI provider with public aresponses extra_body"):
+    with pytest.raises(
+        ValueError,
+        match="supported OpenAI-compatible provider with public aresponses extra_body",
+    ):
         AnyLLMModel(provider, api="responses")
     assert AnyLLMModel(provider, api="auto") == AnyLLMModel(provider)
 

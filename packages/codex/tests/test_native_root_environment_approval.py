@@ -248,18 +248,26 @@ async def test_root_approval_enqueue_joins_before_successor(
                 def __getattr__(self, name):
                     return getattr(original, name)
 
+                async def _hold(self, operation):
+                    if operation != route + "_approval" or reached.is_set():
+                        return
+                    reached.set()
+                    try:
+                        await released.wait()
+                    except asyncio.CancelledError:
+                        # Preserve actual retirement ownership until this
+                        # controlled, already running operation releases.
+                        cancelling.set()
+                        await released.wait()
+                        raise
+
                 async def call(self, operation, *args):
-                    if operation == route + "_approval" and not reached.is_set():
-                        reached.set()
-                        try:
-                            await released.wait()
-                        except asyncio.CancelledError:
-                            # Preserve actual retirement ownership until this
-                            # controlled, already running operation releases.
-                            cancelling.set()
-                            await released.wait()
-                            raise
+                    await self._hold(operation)
                     return await original.call(operation, *args)
+
+                async def _respond_child_question(self, question_id, operation, encoded):
+                    await self._hold(operation)
+                    return await original._respond_child_question(question_id, operation, encoded)
 
             session._native = HeldEnqueue()
             old = await session.submit("First root turn")
@@ -335,7 +343,24 @@ async def test_cancelled_responder_preserves_consumed_live_root_approval(
         async with Agent(instructions="Use selected tools", provider=native).session(
             environment=declaration(peer, write_policy="legacy")
         ) as session:
-            observe = Observe(session._native)
+            reached = asyncio.Event()
+            released = asyncio.Event()
+
+            class HeldResponse(Observe):
+                async def call(self, operation, *args):
+                    if operation == "exec_approval":
+                        reached.set()
+                        await released.wait()
+                    return await self.original.call(operation, *args)
+
+                async def _respond_child_question(self, question_id, operation, encoded):
+                    reached.set()
+                    await released.wait()
+                    return await self.original._respond_child_question(
+                        question_id, operation, encoded
+                    )
+
+            observe = HeldResponse(session._native)
             session._native = observe
             turn = await session.submit("Run the original builtin")
             async with aclosing(session.interactions()) as reader:
@@ -343,11 +368,14 @@ async def test_cancelled_responder_preserves_consumed_live_root_approval(
             assert isinstance(question, ApprovalRequest)
             assert await session.pending_interactions() == (question,)
             responder = asyncio.create_task(question.respond("allow_once"))
-            # The responder consumes the grant and queues the private submit;
-            # this task then resumes before that submit gets its first step.
-            await asyncio.sleep(0)
-            assert await session.pending_interactions() == ()
-            assert responder.cancel()
+            # The private enqueue starts only after the responder consumes
+            # the grant. Cancel the observer at that precise boundary.
+            try:
+                await reached.wait()
+                assert await session.pending_interactions() == ()
+                assert responder.cancel()
+            finally:
+                released.set()
             with pytest.raises(asyncio.CancelledError):
                 await responder
             assert (await asyncio.wait_for(turn.get_result(), 4)).final_output == "finished"

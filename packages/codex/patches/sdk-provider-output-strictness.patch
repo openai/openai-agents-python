@@ -1,0 +1,78 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 7cbe82e6899a5d604a6c1cf431516094cd086af7..897a9702fb0653911ce31251e81b78d2f1030a18 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2292,6 +2292,12 @@ async fn run_sampling_request(
+                 }
+             }
+             prompt.request_controls = step_context.settings.request_controls().clone();
++            if !crate::guardian::is_basic_session_source(&turn_context.session_source) {
++                prompt.output_schema_strict = prompt
++                    .request_controls
++                    .output_schema_strict
++                    .unwrap_or(prompt.output_schema_strict);
++            }
+             if prompt.tool_choice == codex_protocol::config_types::ToolChoice::Required
+                 && tool_choice_reset_applies(&step_context.settings, &turn_context.extension_data)
+             {
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index e9217855d5ec77bcaa6abdde3f1cf788c9ae62d5..9f0181d26bf55c5b6d798ce96dc0f0d0585364cf 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -167,6 +167,11 @@ impl RunModelSettingsOverride {
+ #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ #[serde(deny_unknown_fields)]
+ pub struct ModelRequestControls {
++    /// Captured SDK output contract; local validation remains independent.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub output_schema_strict: Option<bool>,
++
+     /// Request-scoped headers and query; never provider body fields or credentials.
+     #[serde(
+         default,
+@@ -386,7 +391,8 @@ impl ModelRequestControls {
+     }
+
+     pub fn is_empty(&self) -> bool {
+-        self.request_transport.is_none()
++        self.output_schema_strict.is_none()
++            && self.request_transport.is_none()
+             && self.retry.is_none()
+             && self.attempt_timeout_ms.is_none()
+             && self.hosted_prompt.is_none()
+@@ -414,6 +420,10 @@ impl ModelRequestControls {
+     }
+
+     pub fn apply_patch(&mut self, patch: &Self) {
++        if patch.output_schema_strict.is_some() {
++            self.output_schema_strict = patch.output_schema_strict;
++        }
++
+         match (&mut self.request_transport, &patch.request_transport) {
+             (Some(Some(current)), Some(Some(update))) => current.apply_patch(update),
+             (_, Some(update)) => self.request_transport = Some(update.clone()),
+@@ -924,4 +934,23 @@ mod explicit_prompt_cache_tests {
+             .is_err()
+         );
+     }
++    #[test]
++    fn output_strictness_is_an_owned_sparse_control() {
++        let loose: ModelRequestControls =
++            serde_json::from_value(serde_json::json!({"output_schema_strict": false})).unwrap();
++        assert!(!loose.is_empty());
++        let mut controls = ModelRequestControls::default();
++        controls.apply_patch(&loose);
++        controls.apply_patch(&ModelRequestControls::default());
++        assert_eq!(controls.output_schema_strict, Some(false));
++        assert_eq!(
++            serde_json::to_value(&controls).unwrap()["output_schema_strict"],
++            false
++        );
++        controls.apply_patch(
++            &serde_json::from_value(serde_json::json!({"output_schema_strict": true})).unwrap(),
++        );
++        assert_eq!(controls.output_schema_strict, Some(true));
++    }
++
+ }

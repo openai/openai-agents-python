@@ -27,13 +27,20 @@ OutputT = TypeVar("OutputT")
 
 @dataclass(frozen=True)
 class NativeOutput(Generic[OutputT]):
-    """Request a native strict schema and validate the final output once in Python.
+    """Request a native schema and validate the final output once in Python.
+
+    strict=False opts out of provider enforcement without skipping local validation.
 
     An explicit NativeOutput(str) uses the native response object, not plain
     text. Unsupported native schema shapes fail before a turn starts.
     """
 
     type_: type[OutputT]
+    strict: bool = True
+
+    def __post_init__(self) -> None:
+        if type(self.strict) is not bool:
+            raise TypeError("NativeOutput strict must be a boolean")
 
 
 @dataclass(frozen=True)
@@ -104,10 +111,13 @@ class _PreparedOutput:
     wrapped: bool = False
     max_retries: int = 0
     value_adapter: TypeAdapter[Any] | None = None
+    strict: bool = True
 
     @property
     def fingerprint(self) -> str:
         identity: dict[str, Any] = {"mode": self.mode, "schema": self.schema}
+        if not self.strict:
+            identity["strict"] = False
         # Keep existing zero-retry checkpoints compatible.
         if self.max_retries:
             identity["max_retries"] = self.max_retries
@@ -185,8 +195,11 @@ def _prepare_spec(output: OutputSpec[Any] | None) -> _PreparedOutput:
             value_adapter=adapter,
         )
     native_type = output.type_ if isinstance(output, NativeOutput) else output
-    adapter, schema, wrapped, value_adapter = _prepare_output(native_type)
-    return _PreparedOutput("native", adapter, schema, wrapped, value_adapter=value_adapter)
+    strict = output.strict if isinstance(output, NativeOutput) else True
+    adapter, schema, wrapped, value_adapter = _prepare_output(native_type, strict=strict)
+    return _PreparedOutput(
+        "native", adapter, schema, wrapped, value_adapter=value_adapter, strict=strict
+    )
 
 
 def output_schema(output_type: Any) -> dict[str, Any] | None:
@@ -194,7 +207,7 @@ def output_schema(output_type: Any) -> dict[str, Any] | None:
 
 
 def _prepare_output(
-    output_type: Any, *, wrap_scalars: bool = True
+    output_type: Any, *, wrap_scalars: bool = True, strict: bool = True
 ) -> tuple[TypeAdapter[Any], dict[str, Any], bool, TypeAdapter[Any]]:
     adapter: TypeAdapter[Any] = TypeAdapter(output_type)
     value_adapter = adapter
@@ -239,7 +252,8 @@ def _prepare_output(
         for branch in node.get("anyOf", []):
             close(branch)
 
-    close(schema)
+    if strict:
+        close(schema)
     return adapter, schema, wrapped, value_adapter
 
 

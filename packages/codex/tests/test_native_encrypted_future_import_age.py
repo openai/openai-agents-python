@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 import time
 from contextlib import AsyncExitStack
 
@@ -10,6 +11,10 @@ import pytest
 from agents import Agent, CustomStorage, EncryptedSessionStore, NativeProvider, SQLiteSessionStore
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, responses as responses
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="SQLiteSessionStore requires POSIX file locking"
+)
 
 
 def envelopes(value, identity):

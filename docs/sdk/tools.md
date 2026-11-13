@@ -246,6 +246,36 @@ agent = Agent(
 
 The Session captures each declaration when it opens. When you supply an explicit tool selection for a turn, include the captured declaration to enable that tool. Leaving it out of that selection disables it for that turn. Open a new Session to change its settings. Declare each hosted tool once. Hosted tools can run alongside Python functions, but their reserved names cannot also name a Python function. The provider executes hosted tools; Python function callbacks do not receive their calls.
 
+Applications have been selecting provider-hosted tools through `model_settings["tool_choice"]`. The selector has been requiring a matching declaration in the final offered tool catalog. The preview search selector has been using the hosted search route:
+
+```python
+from agents import Agent, HostedMCP, WebSearch
+
+preview_search = Agent(
+    instructions="Search the web.",
+    model="gpt-5.5",
+    tools=[WebSearch(route="hosted")],
+    model_settings={"tool_choice": {"type": "web_search_preview"}},
+)
+
+mcp_servers = [
+    HostedMCP(tool_config={
+        "type": "mcp",
+        "server_label": label,
+        "server_url": f"https://{label}.example.com/mcp",
+    })
+    for label in ("docs", "support")
+]
+any_offered_mcp = Agent(
+    instructions="Use an offered MCP server.",
+    model="gpt-5.5",
+    tools=mcp_servers,
+    model_settings={"tool_choice": {"type": "mcp"}},
+)
+```
+
+The MCP example has been declaring two provider-hosted servers with placeholder URLs. The bare selector has been allowing the provider to choose among those offered servers. Adding `"server_label": "docs"` has been selecting that server. Adding `"name": "lookup"` alongside its label has been selecting an allowed tool on that server. A tool name without a server label has been failing validation. These selectors have been retaining the declarations' approval and allowed-tool settings.
+
 `FileSearch` accepts metadata `filters` and `ranking_options` in the provider's format. Set `include_search_results=True` to request raw retrieved chunks. The resulting `file_search_call` item exposes `queries`, `results`, and the full `provider_data`. Without that setting, the provider can omit raw results. Assistant text retains file citations in its `annotations`.
 
 For Code Interpreter, supply an existing container ID or an auto-container configuration with optional `file_ids`, `memory_limit`, and `network_policy`. The provider owns container creation, reuse, and expiration. Closing or cancelling a Session does not delete the container. Each `code_interpreter_call` item exposes its `container_id`, `code`, and `outputs`. Generated-file citations retain the container and file IDs in text `annotations`. Use the provider's Containers API to download files while the container remains active. See the [provider container guide](https://developers.openai.com/api/docs/guides/tools-code-interpreter#containers).

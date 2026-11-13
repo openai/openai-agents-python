@@ -70,6 +70,7 @@ def _capture_hosted_tool_choice(value: Mapping[str, Any]) -> Mapping[str, Any]:
     kind = value.get("type")
     supported = {
         "web_search",
+        "web_search_preview",
         "file_search",
         "code_interpreter",
         "image_generation",
@@ -78,6 +79,7 @@ def _capture_hosted_tool_choice(value: Mapping[str, Any]) -> Mapping[str, Any]:
         "shell",
         "apply_patch",
         "tool_search",
+        "programmatic_tool_calling",
         "mcp",
     }
     if (
@@ -88,13 +90,20 @@ def _capture_hosted_tool_choice(value: Mapping[str, Any]) -> Mapping[str, Any]:
         raise ValueError("hosted tool choice needs a supported provider selector")
     copied = dict(value)
     if kind == "mcp" and (
-        not isinstance(copied.get("server_label"), str)
-        or not copied["server_label"].strip()
+        (
+            "server_label" in copied
+            and (not isinstance(copied["server_label"], str) or not copied["server_label"].strip())
+        )
         or (
-            "name" in copied and (not isinstance(copied["name"], str) or not copied["name"].strip())
+            "name" in copied
+            and (
+                "server_label" not in copied
+                or not isinstance(copied["name"], str)
+                or not copied["name"].strip()
+            )
         )
     ):
-        raise ValueError("hosted MCP choice needs a captured server and tool identity")
+        raise ValueError("hosted MCP choice needs a captured server for a named tool")
     return MappingProxyType(copied)
 
 
@@ -210,11 +219,17 @@ def _capture_model_settings(
             captured[key] = json.loads(
                 json.dumps(dict(value) if isinstance(value, Mapping) else value, allow_nan=False)
             )
-        elif key in ("verbosity", "prompt_cache_retention", "prompt_cache_ttl"):
+        elif key in (
+            "verbosity",
+            "prompt_cache_retention",
+            "prompt_cache_ttl",
+            "prompt_cache_mode",
+        ):
             allowed = {
                 "verbosity": ("low", "medium", "high"),
                 "prompt_cache_retention": ("in_memory", "24h"),
                 "prompt_cache_ttl": ("30m", "12h"),
+                "prompt_cache_mode": ("explicit",),
             }[key]
             if value not in allowed:
                 raise ValueError(f"Unsupported {key}")

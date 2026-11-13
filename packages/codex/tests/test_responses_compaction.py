@@ -231,6 +231,7 @@ async def test_session_compaction_transforms_input_before_client_effects(cancel)
         return await implementation._call_callback(callback, admitted, request)
 
     owner = SimpleNamespace(
+        _profiles={},
         id="session",
         _context=None,
         _model_api_key=None,

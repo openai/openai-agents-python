@@ -168,6 +168,25 @@ class _StepMcpTool(BaseModel):
     name: str
 
 
+class _PendingMCPApproval(BaseModel):
+    """Passive native MCP source data; current declarations own fresh approvals."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
+    source_thread_id: str
+    turn_id: str
+    call_id: str
+    request_id: str
+    receipt: str
+    token: str
+    version: Literal[1]
+    server_name: str
+    tool_name: str
+    callable_namespace: str
+    callable_name: str
+    declaration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    arguments: JsonValue | None
+
+
 class _PendingManual(BaseModel):
     """Captured input only; restoration creates new native reply authority."""
 
@@ -237,6 +256,7 @@ class _ManualContinuation(BaseModel):
     reply_order: list[str]
     accepted_replies: dict[str, dict[str, Any]]
     pending_manual: list[_PendingManual]
+    pending_mcp: list[_PendingMCPApproval] = Field(default_factory=list, repr=False)
     tool_outcomes: _ToolOutcomes | None = None
     output_schema: dict[str, Any] | None = None
     model_override: str | None = None
@@ -253,7 +273,7 @@ class _ManualContinuation(BaseModel):
 
     @model_validator(mode="after")
     def validate_manual_boundary(self) -> "_ManualContinuation":
-        if self.staged_retry and self.pending_manual:
+        if self.staged_retry and (self.pending_manual or self.pending_mcp):
             raise ValueError("A staged retry cannot have pending manual replies")
         return self
 

@@ -1,6 +1,7 @@
 """Authenticated read-only searches with canonical storage and cold resume."""
 
 import json
+import sys
 from contextlib import asynccontextmanager
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from agents import Agent, CustomStorage, Environment, NativeProvider, SQLiteSessionStore
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
+from tests.native_storage_fixtures import MemorySessionStore
 from tests.native_fixtures import (
     assistant_output,
     function_call,
@@ -16,6 +18,10 @@ from tests.native_fixtures import (
 )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Strict remote search requires Linux or macOS sandboxed file access",
+)
 @pytest.mark.parametrize("kind", ["direct", "lease", "persistent"])
 async def test_remote_readonly_search_with_canonical_storage(
     responses, tmp_path, monkeypatch, kind
@@ -90,7 +96,7 @@ async def test_remote_readonly_search_with_canonical_storage(
 async def test_unsupported_remote_storage_grants_reject_before_acquisition(
     responses, tmp_path, options
 ):
-    class UnopenedStore(SQLiteSessionStore):
+    class UnopenedStore(MemorySessionStore):
         def acquire(self, thread_id):
             pytest.fail("Unsupported environment acquired canonical storage")
 
@@ -99,7 +105,7 @@ async def test_unsupported_remote_storage_grants_reject_before_acquisition(
         agent = Agent(instructions="Search safely.", provider=provider)
         with pytest.raises(ValueError, match="CustomStorage preview does not support"):
             async with agent.session(
-                storage=CustomStorage(UnopenedStore(tmp_path / "store.sqlite")),
+                storage=CustomStorage(UnopenedStore()),
                 environment=environment,
             ):
                 pytest.fail("Unsupported environment opened")
@@ -116,7 +122,7 @@ async def test_custom_storage_rejects_uncaptured_environment_lease(responses, tm
         agent = Agent(instructions="Search safely.", provider=provider)
         with pytest.raises(ValueError, match="CustomStorage preview does not support"):
             async with agent.session(
-                storage=CustomStorage(SQLiteSessionStore(tmp_path / "store.sqlite")),
+                storage=CustomStorage(MemorySessionStore()),
                 environment=lease(),
             ):
                 pytest.fail("Unsupported lease opened")

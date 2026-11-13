@@ -278,6 +278,7 @@ async def test_producer_captures_its_complete_property_once_before_callback_entr
     )
     owner = SimpleNamespace(
         _active=state,
+        _profiles=None,
         _model_backend=Model(),
         _native=native,
         _catalog_for_message=lambda *args: None,
@@ -436,6 +437,7 @@ async def test_revoked_producer_retains_expected_abort_only_for_advice(error_kin
 
     owner = SimpleNamespace(
         _active=state,
+        _profiles=None,
         _model_backend=Model(),
         _native=object(),
         _catalog_for_message=lambda *args: None,

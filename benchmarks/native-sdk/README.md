@@ -226,6 +226,10 @@ Omitted mode has been accepting the default-host profile's fresh no-tool cases a
 
 In default-host omitted mode, `--native-transport` has been declaring the target wheel's expected default route, without changing the SDK transport. `--reference-transport` has been declaring that route for a v1 reference arm. A WSS reference and an HTTP/SSE target have been remaining comparable with the same omitted-Provider entrypoint. Standalone summaries have been recording both effective transports. Caller-owned default-host mode has been continuing to accept only HTTP/SSE.
 
+`--native-request-transport {auto,http,websocket}` has been selecting the per-run `ModelSettings.request_transport` for every native arm, including `--reference-engine v1`. This option has been requiring fresh calls with an omitted Provider in default-host mode. The v0 adapter has been keeping its existing behavior.
+
+Omitting the option has been preserving prompt-only `Agent.run` calls and the SDK's default transport selection. `--native-transport` and `--reference-transport` have been checking the observed wire independently. Rows, metadata, and summaries have been recording `native_request_transport` separately from those expectations. Explicit HTTP requests have been using the omitted Provider and normal API hostname.
+
 In omitted mode, `Agent.run` has been owning each call's Provider creation and close inside the call measurement. Process-owned caches have been remaining outside the Adapter's final-close ownership. The existing all-thread process CPU clocks have been retaining their measurement windows; `full_owner_*` has not been claiming process-exit CPU or final cached-resource retirement. Comparisons have been describing the selected Provider lifetime and its transport ownership, without isolating Engine construction cost.
 
 ### Fresh implicit tools and dense output
@@ -297,7 +301,7 @@ Inside that guide's existing owned container command, the following comparison h
 "$PEER_PY" "$BENCH/compare.py" \
   --peer-http-mode dual --default-host-setup /run/sdk-benchmark/setup.json \
   --reference-engine v1 --native-provider-mode omitted \
-  --reference-transport http --native-transport http \
+  --reference-transport http --native-transport http --native-request-transport http \
   --v0-python "$REFERENCE_NATIVE_PY" --v1-python "$NATIVE_PY" \
   --v0-version "$REFERENCE_NATIVE_VERSION" --v1-version "$NATIVE_VERSION" \
   --server-python "$PEER_PY" --output-dir "$LAB/fresh-tools-h2" \

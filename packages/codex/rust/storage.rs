@@ -441,6 +441,82 @@ impl MemoryThreadStore {
             .insert(checklist.thread_id, checklist);
     }
 
+    pub(crate) async fn native_mcp_suspension_ready(
+        &self,
+        id: ThreadId,
+        captured: &codex_core::CapturedMcpApproval,
+    ) -> anyhow::Result<bool> {
+        let writers = self.writers.lock().await;
+        let Some(writer) = writers.get(&id) else {
+            return Ok(false);
+        };
+        Ok(self
+            .native_mcp_suspension(id, writer, &captured.checkpoint_data())
+            .await?
+            .is_some())
+    }
+
+    pub(crate) async fn begin_native_mcp_suspension(
+        &self,
+        id: ThreadId,
+        claim: &codex_core::ClaimedMcpApproval,
+    ) -> anyhow::Result<bool> {
+        let mut writers = self.writers.lock().await;
+        let Some(writer) = writers.get_mut(&id) else {
+            return Ok(false);
+        };
+        if !claim.is_live() {
+            return Ok(false);
+        }
+        let Some(suspension) = self
+            .native_mcp_suspension(id, writer, &claim.checkpoint_data())
+            .await?
+        else {
+            return Ok(false);
+        };
+        if !claim.is_live() {
+            return Ok(false);
+        }
+        writer.suspension = Some(suspension);
+        Ok(true)
+    }
+
+    async fn native_mcp_suspension(
+        &self,
+        id: ThreadId,
+        writer: &MemoryWriter,
+        data: &codex_core::McpApprovalCheckpointData,
+    ) -> anyhow::Result<Option<LossSuspension>> {
+        if writer.suspension.is_some()
+            || data.source_thread_id != id
+            || writer.sampling.turn_id.as_deref() != Some(data.turn_id.as_str())
+            || writer.sampling.tool_calls != 1
+            || writer.sampling.completed_tool_calls != 1
+        {
+            return Ok(None);
+        }
+        self.inner.flush_thread(id).await?;
+        let history = self
+            .inner
+            .load_latest_model_context(LoadThreadHistoryParams {
+                thread_id: id,
+                include_archived: true,
+            })
+            .await?;
+        if !native_mcp_prefix_matches(&history.items, data) {
+            return Ok(None);
+        }
+        Ok(LossSuspension::bind_calls(
+            &writer.sampling,
+            vec![SuspendedCall {
+                turn: data.turn_id.clone(),
+                call: data.call_id.clone(),
+            }],
+            history.items,
+            false,
+        ))
+    }
+
     pub(crate) async fn begin_manual_suspension(
         &self,
         id: ThreadId,
@@ -607,10 +683,14 @@ impl MemoryThreadStore {
                         );
                     }
                     ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
-                        anyhow::ensure!(calls.get(call_id.as_str()) == Some(&CallKind::ApplyPatch) && unfinished.remove(call_id.as_str()), UnsupportedManualState::NativeWork);
+                        anyhow::ensure!(
+                            calls.get(call_id.as_str()) == Some(&CallKind::ApplyPatch)
+                                && unfinished.remove(call_id.as_str()),
+                            UnsupportedManualState::NativeWork
+                        );
                     }
                     ResponseItem::ComputerCallOutput { call_id, .. }
-            | ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
+                    | ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
                         anyhow::ensure!(
                             calls.get(call_id.as_str()) == Some(&CallKind::Computer)
                                 && unfinished.remove(call_id.as_str()),
@@ -630,11 +710,13 @@ impl MemoryThreadStore {
             }
         }
         anyhow::ensure!(
-            pending.iter().all(|key| match calls.get(key.call.as_str()) {
-                Some(CallKind::ApplyPatch) => application_patches.contains(key.call.as_str()),
-                Some(CallKind::Custom | CallKind::Computer) => false,
-                _ => true,
-            }),
+            pending
+                .iter()
+                .all(|key| match calls.get(key.call.as_str()) {
+                    Some(CallKind::ApplyPatch) => application_patches.contains(key.call.as_str()),
+                    Some(CallKind::Custom | CallKind::Computer) => false,
+                    _ => true,
+                }),
             UnsupportedManualState::NativeWork
         );
         if unfinished
@@ -1297,9 +1379,55 @@ impl SamplingState {
     }
 }
 
+fn native_mcp_prefix_matches(
+    history: &[RolloutItem],
+    data: &codex_core::McpApprovalCheckpointData,
+) -> bool {
+    let Some(start) = history.iter().rposition(|row| {
+        matches!(row,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(turn)) if turn.turn_id == data.turn_id)
+    }) else {
+        return false;
+    };
+    let mut calls = 0;
+    for row in &history[start..] {
+        match row {
+            RolloutItem::EventMsg(EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) => {
+                return false;
+            }
+            RolloutItem::ResponseItem(item) => match &item.item {
+                ResponseItem::FunctionCall { .. } => {
+                    if !data.matches_canonical_call(&item.item) {
+                        return false;
+                    }
+                    calls += 1;
+                }
+                ResponseItem::FunctionCallOutput { .. }
+                | ResponseItem::CustomToolCall { .. }
+                | ResponseItem::CustomToolCallOutput { .. }
+                | ResponseItem::ComputerCall { .. }
+                | ResponseItem::ComputerCallOutput { .. }
+                | ResponseItem::ApplyPatchCall { .. }
+                | ResponseItem::ApplyPatchCallOutput { .. }
+                | ResponseItem::ShellCall { .. }
+                | ResponseItem::ShellCallOutput { .. } => return false,
+                ResponseItem::Message { .. } | ResponseItem::Reasoning { .. } => {}
+                _ => return false,
+            },
+            _ => {}
+        }
+    }
+    calls == 1
+}
+
+struct SuspendedCall {
+    turn: String,
+    call: String,
+}
+
 struct LossSuspension {
     turn_id: String,
-    pending: Vec<crate::python_tools::PendingKey>,
+    pending: Vec<SuspendedCall>,
     // RawResponseCompleted is intentionally absent from the flushed prefix.
     // This is its observed live position, not a reconstruction from usage.
     completed_tool_calls: usize,
@@ -1327,6 +1455,26 @@ impl LossSuspension {
         items: Vec<RolloutItem>,
         application_patches: bool,
     ) -> Option<Self> {
+        Self::bind_calls(
+            sampling,
+            pending
+                .into_iter()
+                .map(|key| SuspendedCall {
+                    turn: key.turn,
+                    call: key.call,
+                })
+                .collect(),
+            items,
+            application_patches,
+        )
+    }
+
+    fn bind_calls(
+        sampling: &SamplingState,
+        pending: Vec<SuspendedCall>,
+        items: Vec<RolloutItem>,
+        application_patches: bool,
+    ) -> Option<Self> {
         let turn_id = sampling.turn_id.clone()?;
         let Some(start) = items.iter().rposition(|item| {
             matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(turn))
@@ -1347,14 +1495,25 @@ impl LossSuspension {
             let mut calls = 0;
             for item in &items[start..] {
                 if let RolloutItem::ResponseItem(envelope) = item {
-                    if matches!(&envelope.item, ResponseItem::ApplyPatchCall { call_id, .. } if *call_id == key.call) {
-                        if !application_patches || !crate::local_reconciliation::owns_application_patch(envelope) { return None; }
+                    if matches!(&envelope.item, ResponseItem::ApplyPatchCall { call_id, .. } if *call_id == key.call)
+                    {
+                        if !application_patches
+                            || !crate::local_reconciliation::owns_application_patch(envelope)
+                        {
+                            return None;
+                        }
                         calls += 1;
-                    } else if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. } if *call_id == key.call) {
+                    } else if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. } if *call_id == key.call)
+                    {
                         return None;
                     } else if match &envelope.item {
                         ResponseItem::FunctionCall { call_id, .. } => call_id == &key.call,
-                        ResponseItem::ShellCall { provider_fields, .. } => crate::local_reconciliation::shell_call_id(provider_fields) == Some(&key.call),
+                        ResponseItem::ShellCall {
+                            provider_fields, ..
+                        } => {
+                            crate::local_reconciliation::shell_call_id(provider_fields)
+                                == Some(&key.call)
+                        }
                         _ => false,
                     } {
                         calls += 1;
@@ -1417,11 +1576,22 @@ impl LossSuspension {
                         }
                         RolloutItem::ResponseItem(envelope) => match &envelope.item {
                             ResponseItem::FunctionCall { call_id, .. }
-                            | ResponseItem::ApplyPatchCall { call_id, .. } if matches!(&envelope.item, ResponseItem::FunctionCall { .. })
-                                || crate::local_reconciliation::owns_application_patch(envelope) => {
+                            | ResponseItem::ApplyPatchCall { call_id, .. }
+                                if matches!(&envelope.item, ResponseItem::FunctionCall { .. })
+                                    || crate::local_reconciliation::owns_application_patch(
+                                        envelope,
+                                    ) =>
+                            {
                                 tool_calls += 1;
                                 if *call_id == key.call {
-                                    if shell || matches!(&envelope.item, ResponseItem::ApplyPatchCall { .. }) != patch { preserve = false; }
+                                    if shell
+                                        || matches!(
+                                            &envelope.item,
+                                            ResponseItem::ApplyPatchCall { .. }
+                                        ) != patch
+                                    {
+                                        preserve = false;
+                                    }
                                     sampled = Some(tool_calls <= self.completed_tool_calls);
                                     if ordinal >= self.prefix.len() {
                                         // Another attempt makes attribution ambiguous.
@@ -1470,19 +1640,34 @@ impl LossSuspension {
                                 }
                             }
                             ResponseItem::ApplyPatchCallOutput {
-                                call_id, status, internal_chat_message_metadata_passthrough: meta, ..
+                                call_id,
+                                status,
+                                internal_chat_message_metadata_passthrough: meta,
+                                ..
                             } if *call_id == key.call => {
-                                if patch && sampled == Some(true) && ordinal >= self.prefix.len()
+                                if patch
+                                    && sampled == Some(true)
+                                    && ordinal >= self.prefix.len()
                                     && *status == codex_protocol::models::ApplyPatchStatus::Failed
-                                    && meta.as_ref().and_then(|m| m.turn_id.as_deref()) == Some(key.turn.as_str()) {
+                                    && meta.as_ref().and_then(|m| m.turn_id.as_deref())
+                                        == Some(key.turn.as_str())
+                                {
                                     matches.push(ordinal - self.prefix.len());
-                                } else { preserve = false; }
+                                } else {
+                                    preserve = false;
+                                }
                             }
-                            ResponseItem::ComputerCallOutput { call_id, .. } if *call_id == key.call => {
+                            ResponseItem::ComputerCallOutput { call_id, .. }
+                                if *call_id == key.call =>
+                            {
                                 preserve = false;
                             }
-                            ResponseItem::FunctionCallOutput { call_id: Some(call_id), .. }
-                                if *call_id == key.call && patch => { preserve = false; }
+                            ResponseItem::FunctionCallOutput {
+                                call_id: Some(call_id),
+                                ..
+                            } if *call_id == key.call && patch => {
+                                preserve = false;
+                            }
                             ResponseItem::FunctionCallOutput {
                                 call_id: Some(call_id),
                                 name,

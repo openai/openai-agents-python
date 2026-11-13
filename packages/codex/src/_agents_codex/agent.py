@@ -145,6 +145,7 @@ class HostedToolChoice(TypedDict, total=False, closed=True):
             "shell",
             "apply_patch",
             "tool_search",
+            "programmatic_tool_calling",
             "mcp",
         ]
     ]
@@ -217,6 +218,7 @@ class ModelSettings(TypedDict, total=False, closed=True):
     store: bool | None
     prompt_cache_retention: Literal["in_memory", "24h"] | None
     prompt_cache_ttl: Literal["30m", "12h"] | None
+    prompt_cache_mode: Literal["explicit"] | None
     invocation_timeout_ms: int | None
     attempt_timeout_ms: int | None
     retry: ModelRetrySettings | None
@@ -955,6 +957,9 @@ class Agent(Generic[ContextT, OutputT]):
     Targets are resolved once when the Session captures the graph; subsequent
     model handoffs select from those captured declarations.
 
+    ``tool_name_collision_policy="warn"`` keeps the last eager bare function or
+    handoff with a given name. A handoff takes precedence over a function.
+
     ``transform_context`` runs before each model request, including children,
     output repair, and model-based compaction. Return replacement input items
     or None to keep the original input. The callback does not edit saved history.
@@ -1009,6 +1014,7 @@ class Agent(Generic[ContextT, OutputT]):
     hosted_prompt: HostedPromptSource | None
     compaction: ResponsesCompaction[ContextT] | None
     prepare_handoff_input: _PrepareHandoffInput[ContextT] | None
+    tool_name_collision_policy: Literal["error", "warn"]
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -1112,6 +1118,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     @overload
@@ -1147,6 +1154,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         realtime: RealtimeAgentConfig | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     @overload
@@ -1180,6 +1188,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     @overload
@@ -1213,6 +1222,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         realtime: RealtimeAgentConfig | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     def __init__(
@@ -1245,6 +1255,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None:
         if isinstance(instructions, _OmittedInstructions):
             instructions = None
@@ -1315,6 +1326,9 @@ class Agent(Generic[ContextT, OutputT]):
         )
         object.__setattr__(self, "output_type", output_type)
         object.__setattr__(self, "programmatic_tool_calling", programmatic_tool_calling)
+        if tool_name_collision_policy not in ("error", "warn"):
+            raise ValueError("tool_name_collision_policy must be error or warn")
+        object.__setattr__(self, "tool_name_collision_policy", tool_name_collision_policy)
         object.__setattr__(self, "transform_context", transform_context)
         object.__setattr__(self, "prepare_handoff_input", prepare_handoff_input)
         object.__setattr__(self, "before_compact", before_compact)
@@ -1404,6 +1418,7 @@ class Agent(Generic[ContextT, OutputT]):
         only be checked when a Session opens. This never reads credentials or
         connects to a provider, executor or MCP server.
         """
+        from ._agent_profiles import _capture_agent_graph, _resolve_tool_name_collisions
         from .schema import _prepare_spec
         from .session import _OpeningTools
 
@@ -1431,9 +1446,12 @@ class Agent(Generic[ContextT, OutputT]):
             _prepare_spec(declaration.output_type)
 
         if self.handoffs:
-            from ._agent_profiles import _capture_agent_graph
-
             declarations = tuple(profile.declaration for profile in _capture_agent_graph(self))
+        elif self.tool_name_collision_policy == "warn" and getattr(
+            self, "_hosted_tools_provided", True
+        ):
+            tools, _ = _resolve_tool_name_collisions(self.tools, ())
+            declarations = (replace(self, tools=tools),)
         else:
             declarations = (self,)
         for declaration in declarations:
@@ -1855,8 +1873,11 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("tool_error_formatter must be callable or None")
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
+        from ._cache_affinity import _claim_cache_affinity
         from .session import Completed, Session
         from .telemetry import _capture, get_default_agent_harness_id
+
+        prompt_cache_key = _claim_cache_affinity(self)
 
         try:
             parent_trace = _trace_context(parent_trace)
@@ -1907,6 +1928,7 @@ class Agent(Generic[ContextT, OutputT]):
                 _completed_input=_completed_input,
                 _private_text_run=_private_text_run,
                 _tracing_context_policy_only=captured.policy_only,
+                _prompt_cache_key=prompt_cache_key,
                 **cast(
                     "_TracingOpeningOptions",
                     {"_tracing_context": captured.context} if captured.context is not None else {},
@@ -2432,10 +2454,14 @@ class Agent(Generic[ContextT, OutputT]):
                 produced_items_token = _produced_items_restore.set(
                     (self, state, asyncio.current_task())
                 )
-            async with session_factory(
-                context=cast(SessionContextT, context),
-                **options,
-            ) as session:
+            from ._cache_affinity import _cache_affinity_opening, _cache_key
+            from .telemetry import _options as _trace_options
+
+            group = _trace_options(trace_options).group_id if trace_options is not None else None
+            async with (
+                _cache_affinity_opening(self, _cache_key("group", group)),
+                session_factory(context=cast(SessionContextT, context), **options) as session,
+            ):
                 from .session import Completed
 
                 if raw_usage_token is not None:

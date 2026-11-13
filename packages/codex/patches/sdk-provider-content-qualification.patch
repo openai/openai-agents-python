@@ -1,0 +1,218 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index 50f2603d..f7a4d4ef 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -4335,7 +4335,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "serde_with",
+- "sha2",
++ "sha2 0.10.9",
+  "strum 0.27.2",
+  "strum_macros 0.28.0",
+  "sys-locale",
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 13001f79..f92ae078 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -3074,9 +3074,9 @@ impl ModelClientSession {
+                 payload.input = payload.input.borrow_with(input);
+             }
+             if !previous_response_id_from_untraced_warmup {
+-                if let Some(logical) = logical_history_input.as_deref() {
++                if let Some(logical) = logical_history_input.as_ref() {
+                     let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
+-                    let logical = payload.input.borrow_with(logical);
++                    let logical = payload.input.borrow_with(logical.as_ref());
+                     let wire = std::mem::replace(&mut payload.input, logical);
+                     inference_trace_attempt.record_started(&ws_request);
+                     let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
+diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
+index fb966db8..4aaa1e19 100644
+--- a/codex-rs/core/src/client/provider_history.rs
++++ b/codex-rs/core/src/client/provider_history.rs
+@@ -575,7 +575,7 @@ impl Cursor {
+         request_transport: Option<&codex_protocol::model_request_transport::RequestTransportOverrides>,
+         attempt: Option<std::sync::Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
+         history_transport: HistoryTransport<'_>,
+-    ) -> Result<Option<Vec<ResponseItem>>> {
++    ) -> Result<Option<codex_api::CacheAnnotatedInput<Vec<ResponseItem>>>> {
+         check_items(request.input.iter())?;
+         let canonical_input = request
+             .request_controls
+@@ -626,7 +626,7 @@ impl Cursor {
+             )
+         };
+         let full_len = request.input.len();
+-        let full_digest = input_digest(&request.input)?;
++        let full_digest = input_digest(request.input.as_ref())?;
+         let unsent = if let Some(window) = &saved.window {
+             let canonical = if let Some(canonical) = canonical_window(window) {
+                 if canonical_input.prefix_len + canonical_input.wire_input_indices.len() != full_len
+@@ -773,10 +773,11 @@ impl Cursor {
+         self.persist().await?;
+         let logical = unsent.map(|indices| {
+             let full = std::mem::take(&mut request.input);
+-            request.input = indices
++            let selected = indices
+                 .into_iter()
+                 .map(|index| full[index].clone())
+-                .collect();
++                .collect::<Vec<_>>();
++            request.input = full.with_items(selected);
+             full
+         });
+         request.request_controls.provider_history = Some(saved.selection);
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index 089aa2fe..a544bb52 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -86,6 +86,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
+         .attach_to_compaction_prompt(&mut input);
+     input.push(ResponseItem::CompactionTrigger {});
+     let prompt = Prompt {
++        prompt_cache_annotations: Vec::new(),
+         request_controls: Default::default(),
+         prefer_buffered_response: sess
+             .services
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 054b05ee..7cbe82e6 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -4383,6 +4383,7 @@ fn sdk_request_may_have_provider_effects(
+                     | codex_tools::ToolSpec::CodeInterpreter(_)
+                     | codex_tools::ToolSpec::Shell(_)
+                     | codex_tools::ToolSpec::ImageGeneration(_)
++                    | codex_tools::ToolSpec::ProviderOnly(_)
+             )
+         })
+ }
+@@ -4410,6 +4411,12 @@ fn sdk_cold_recovery_classifies_provider_effect_capabilities() {
+         codex_tools::ToolSpec::ImageGeneration(
+             serde_json::from_value(serde_json::json!({})).unwrap(),
+         ),
++        codex_tools::ToolSpec::ProviderOnly(
++            codex_tools::ProviderToolDefinition::new(
++                serde_json::json!({"type":"programmatic_tool_calling"})
++                    .as_object().unwrap().clone(),
++            ).unwrap(),
++        ),
+     ];
+     for tool in hosted {
+         assert!(sdk_request_may_have_provider_effects(
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index 4430c706..214bb397 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -1232,6 +1232,7 @@ pub enum ResponseItem {
+         #[ts(optional)]
+         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+     },
++    #[serde(deserialize_with = "deserialize_direct_function_call")]
+     FunctionCall {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+@@ -1503,6 +1504,61 @@ pub enum ResponseItem {
+     Other,
+ }
+
++// Preserve the existing FunctionCall constructor while checking ownership on every wire route.
++type DirectFunctionCallFields = (
++    Option<ResponseItemId>,
++    String,
++    Option<String>,
++    String,
++    Option<Vec<String>>,
++    Option<bool>,
++    Option<String>,
++    String,
++    Option<InternalChatMessageMetadataPassthrough>,
++);
++
++fn deserialize_direct_function_call<'de, D>(
++    deserializer: D,
++) -> Result<DirectFunctionCallFields, D::Error>
++where
++    D: Deserializer<'de>,
++{
++    #[derive(Deserialize)]
++    struct WireCall {
++        id: Option<ResponseItemId>,
++        name: String,
++        namespace: Option<String>,
++        arguments: String,
++        encrypted_function_args: Option<Vec<String>>,
++        #[serde(rename = "async")]
++        asynchronous: Option<bool>,
++        status: Option<String>,
++        call_id: String,
++        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
++        caller: Option<serde_json::Value>,
++    }
++
++    let call = WireCall::deserialize(deserializer)?;
++    if call.caller.as_ref().is_some_and(|caller| {
++        caller.get("type").and_then(serde_json::Value::as_str) != Some("direct")
++    }) {
++        return Err(serde::de::Error::custom(
++            "Only direct function callers are supported by the native runtime",
++        ));
++    }
++    Ok((
++        call.id,
++        call.name,
++        call.namespace,
++        call.arguments,
++        call.encrypted_function_args,
++        call.asynchronous,
++        call.status,
++        call.call_id,
++        call.internal_chat_message_metadata_passthrough,
++    ))
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+ #[serde(rename_all = "snake_case")]
+ pub enum ProgramOutputStatus {
+@@ -2976,6 +3032,41 @@ impl std::fmt::Display for FunctionCallOutputPayload {
+
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn function_call_caller_cannot_widen_direct_dispatch() {
++        let plain = serde_json::json!({
++            "type": "function_call",
++            "id": "fc_native_call",
++            "name": "lookup",
++            "namespace": "functions",
++            "arguments": "{}",
++            "encrypted_function_args": ["opaque"],
++            "async": true,
++            "status": "completed",
++            "call_id": "call_lookup"
++        });
++        let absent: super::ResponseItem = serde_json::from_value(plain.clone()).unwrap();
++        let mut direct = plain.clone();
++        direct["caller"] = serde_json::json!({"type": "direct"});
++        let direct: super::ResponseItem = serde_json::from_value(direct).unwrap();
++        assert_eq!(absent, direct);
++        let mut null = plain.clone();
++        null["caller"] = serde_json::Value::Null;
++        assert_eq!(absent, serde_json::from_value::<super::ResponseItem>(null).unwrap());
++        assert_eq!(serde_json::to_value(absent).unwrap(), plain);
++
++        for caller in [
++            serde_json::json!({"type": "program", "caller_id": "pc_provider"}),
++            serde_json::json!({"type": "programmatic", "program_call_id": "pc_provider"}),
++            serde_json::json!({"type": "unknown"}),
++            serde_json::json!(false),
++        ] {
++            let mut owned = plain.clone();
++            owned["caller"] = caller;
++            let error = serde_json::from_value::<super::ResponseItem>(owned).unwrap_err();
++            assert!(error.to_string().contains("Only direct function callers"));
++        }
++    }
+
+     #[test]
+     fn hosted_mcp_items_round_trip_provider_data_and_approval_reference() {

@@ -43,16 +43,28 @@ async def test_model_stream_rechecks_admission_before_next_iterator_entry() -> N
         finally:
             closed = True
 
-    async def accept_last_frame(request_id: int, data: str) -> bool:
+    async def accept_last_frame(request_id: int, data: str, **options: Any) -> bool:
         nonlocal admitted
+        assert request_id == 1
+        assert json.loads(data)["response"]["id"] == "revoked"
+        assert options == {"raw_chat_chunk": False, "raw_responses_websocket_frame": False}
         admitted = False
+        return True
+
+    def start_stream(request_id: int, **options: Any) -> bool:
+        assert request_id == 1
+        assert options == {
+            "chat_stream": False,
+            "responses_websocket_stream": False,
+            "upstream_request_id": None,
+        }
         return True
 
     session = cast(
         Session,
         SimpleNamespace(
             _native=SimpleNamespace(
-                _start_model_producer_stream=lambda request_id: True,
+                _start_model_producer_stream=start_stream,
                 _push_model_producer_event=accept_last_frame,
             )
         ),

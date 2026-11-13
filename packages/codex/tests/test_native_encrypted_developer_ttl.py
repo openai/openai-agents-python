@@ -1,4 +1,5 @@
 import json
+import sys
 from contextlib import AsyncExitStack
 
 import pytest
@@ -6,6 +7,10 @@ import pytest
 from agents import Agent, CustomStorage, EncryptedSessionStore, NativeProvider, SQLiteSessionStore
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, responses as responses
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="SQLiteSessionStore requires POSIX file locking"
+)
 
 
 @pytest.mark.parametrize("role", ["developer", "system"])

@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import AsyncIterator, Callable, Mapping
+import os
+import re
+import shutil
+import tempfile
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from copy import deepcopy
-from pathlib import Path
+from dataclasses import dataclass, field
+from pathlib import Path, PurePath
 from typing import Any, TypeVar, cast
+from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -40,10 +47,17 @@ from agents.classic.sandbox.session.sandbox_client import (
     BaseSandboxClientOptions,
 )
 from agents.classic.sandbox.session.sandbox_session import SandboxSession
+from agents.classic.sandbox.types import User
+from agents.classic.sandbox.workspace_paths import (
+    SandboxWorkspaceScope,
+    coerce_posix_path,
+    windows_absolute_path,
+)
 
 # Optional provider owners initialize before their shared resource types.
 # isort: split
 from _agents_shared.apply_diff import apply_diff
+from _agents_shared.blocking_workspace_io import run_blocking_workspace_io
 from _agents_shared.retry import BackoffStrategy, retry_async
 from _agents_shared.sandbox_limits import SandboxArchiveLimits, SandboxConcurrencyLimits
 from _agents_shared.sandbox_session_state import SandboxSessionState
@@ -88,15 +102,20 @@ from agents.classic.sandbox.session.sinks import (
     WorkspaceJsonlSink as WorkspaceJsonlSink,
 )
 
+from ._function_tools import FunctionTool
 from ._managed_workspace import (
+    _SANDBOX_CAPABILITIES_ATTRIBUTE,
     _SANDBOX_EVENTS_ATTRIBUTE,
     _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
     ManagedWorkspaceCheckpoint as ManagedWorkspaceCheckpoint,
     _ManagedWorkspaceSource,
 )
+from ._options import RuntimeEnvironment
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._sandbox_events import Instrumentation as Instrumentation, _OperationObserver
-from .executor import Environment
+from .agent import ModelSettings, _copy_model_settings
+from .executor import Environment, ExecutorToolName, _path_uri
+from .model_context import ModelRequestContext, _ContextTransform
 from .sandbox_memory import (
     _MEMORY_OWNER_ATTRIBUTE,
     MemoryLayoutConfig as MemoryLayoutConfig,
@@ -164,6 +183,363 @@ def _assert_current_mount_authority(state: SandboxSessionState, manifest: Manife
         )
 
 
+async def _apply_borrowed_manifest(
+    session: SandboxSession,
+    manifest: Manifest,
+    concurrency_limits: SandboxConcurrencyLimits | None = None,
+) -> None:
+    from _agents_shared.sandbox_manifest import _BorrowedManifestPolicy
+
+    current = session.state.manifest
+    _BorrowedManifestPolicy._validate_live_session_host_path_grants(
+        current_manifest=current, processed_manifest=manifest
+    )
+    _BorrowedManifestPolicy._validate_running_live_session_manifest_update(
+        current_manifest=current, processed_manifest=manifest
+    )
+    previous_limits: list[tuple[Any, int | None, int | None]] = []
+    if concurrency_limits is not None:
+        owner: Any = session
+        while True:
+            previous_limits.append(
+                (
+                    owner,
+                    owner._max_manifest_entry_concurrency,
+                    owner._max_local_dir_file_concurrency,
+                )
+            )
+            if not isinstance(owner, SandboxSession):
+                break
+            owner = owner._inner
+    try:
+        if concurrency_limits is not None:
+            session._set_concurrency_limits(concurrency_limits)
+        if current != manifest:
+            session.state = session.state.model_copy(
+                update={"manifest": manifest.model_copy(deep=True)}
+            )
+    except BaseException:
+        session.state = session.state.model_copy(update={"manifest": current})
+        for owner, manifest_entries, local_dir_files in previous_limits:
+            owner._max_manifest_entry_concurrency = manifest_entries
+            owner._max_local_dir_file_concurrency = local_dir_files
+        raise
+
+
+class SandboxCapability:
+    """A trusted sandbox contribution cloned for each environment source.
+
+    Override clone if the declaration shares application-owned handles.
+    Binding receives the resource selected by the sandbox provider and the
+    current model-facing workspace. Resource authorization stays with the
+    application and provider.
+    """
+
+    name: str
+    requires: tuple[str, ...] = ()
+
+    def clone(self) -> SandboxCapability:
+        return deepcopy(self)
+
+    def prepare_manifest(self, manifest: Manifest) -> Manifest:
+        return manifest
+
+    async def bind(
+        self, session: SandboxSession, *, user: User | None, workspace: SandboxWorkspaceScope
+    ) -> None:
+        pass
+
+    async def instructions(self, manifest: Manifest) -> str | None:
+        return None
+
+    def tools(self) -> Sequence[FunctionTool[Any, Any, Any]]:
+        """Return function declarations for this acquired sandbox."""
+        return ()
+
+    def sampling_settings(self, settings: ModelSettings) -> ModelSettings:
+        """Return typed overrides for this acquired sandbox."""
+        return {}
+
+    async def transform_context(
+        self, request: ModelRequestContext[Any]
+    ) -> Sequence[dict[str, Any]] | None:
+        """Project detached input for this acquired sandbox."""
+        return None
+
+
+@dataclass(frozen=True)
+class _SandboxContributions:
+    tools: tuple[FunctionTool[Any, Any, Any], ...]
+    capabilities: tuple[SandboxCapability, ...]
+
+    def settings(self, current: ModelSettings) -> ModelSettings:
+        result = _copy_model_settings(current)
+        for capability in self.capabilities:
+            result.update(
+                _copy_model_settings(capability.sampling_settings(_copy_model_settings(result)))
+            )
+        return result
+
+    def transforms(self) -> tuple[_ContextTransform[Any], ...]:
+        return tuple(
+            capability.transform_context
+            for capability in self.capabilities
+            if type(capability).transform_context is not SandboxCapability.transform_context
+        )
+
+
+def _capture_capabilities(
+    declarations: Sequence[SandboxCapability],
+) -> tuple[SandboxCapability, ...]:
+    originals = tuple(declarations)
+    if any(not isinstance(capability, SandboxCapability) for capability in originals):
+        raise TypeError("capabilities must contain SandboxCapability declarations")
+    captured = tuple(capability.clone() for capability in originals)
+    original_ids = {id(capability) for capability in originals}
+    if len({id(capability) for capability in captured}) != len(captured) or any(
+        not isinstance(capability, SandboxCapability) or id(capability) in original_ids
+        for capability in captured
+    ):
+        raise ValueError("Sandbox capability clone must return a fresh instance")
+    names = {capability.name for capability in captured}
+    if len(names) != len(captured) or any(not name.strip() for name in names):
+        raise ValueError("Sandbox capability names must be unique and nonempty")
+    for capability in captured:
+        missing = set(capability.requires) - names
+        if missing:
+            raise ValueError(
+                f"Sandbox capability {capability.name} requires {', '.join(sorted(missing))}"
+            )
+    return captured
+
+
+def _capability_workspace(
+    session: SandboxSession, environment: Environment[Any]
+) -> SandboxWorkspaceScope:
+    cwd = urlsplit(_path_uri(environment.cwd))
+    root_uri = urlsplit(_path_uri(str(session.state.manifest.root)))
+    cwd_authority = "" if cwd.netloc.lower() == "localhost" else cwd.netloc.lower()
+    root_authority = "" if root_uri.netloc.lower() == "localhost" else root_uri.netloc.lower()
+    try:
+        if cwd.scheme != "file" or root_uri.scheme != "file" or cwd_authority != root_authority:
+            raise ValueError("Different workspace authority")
+        relative: PurePath
+        windows_root = windows_absolute_path(session.state.manifest.root)
+        if windows_root is not None:
+            windows_path = windows_absolute_path(unquote(cwd.path).removeprefix("/"))
+            if windows_path is None:
+                raise ValueError("Different workspace path flavor")
+            relative = windows_path.relative_to(windows_root)
+        else:
+            relative = coerce_posix_path(unquote(cwd.path)).relative_to(
+                coerce_posix_path(unquote(root_uri.path))
+            )
+        return SandboxWorkspaceScope.from_cwd(None if not relative.parts else relative.as_posix())
+    except ValueError:
+        raise ValueError(
+            "Sandbox capability requires the gateway cwd within the workspace"
+        ) from None
+
+
+def _docker_unix_adapter_type() -> type[Any]:
+    from docker.transport.unixconn import UnixHTTPAdapter  # type: ignore[import-untyped]
+
+    return cast(type[Any], UnixHTTPAdapter)
+
+
+def _docker_daemon_info(api: Any) -> Any:
+    from requests import Request
+
+    def check_scope() -> None:
+        if (
+            api.base_url != "http+docker://localhost"
+            or api.auth is not None
+            or api.cookies
+            or api.params
+            or api.cert is not None
+            or api.hooks != {"response": []}
+        ):
+            raise ValueError("DockerGateway cannot match the current HTTP authentication scope")
+        # Preparing the same fixed authority applies requests' current netrc policy.
+        # Inspect names only; never copy credentials into CLI arguments or state.
+        prepared = api.prepare_request(Request("GET", "http+docker://localhost/_ping"))
+        if any(
+            name in prepared.headers for name in ("Authorization", "Proxy-Authorization", "Cookie")
+        ):
+            raise ValueError("DockerGateway cannot match the current HTTP authentication scope")
+
+    check_scope()
+    info = api.info()
+    check_scope()
+    return info
+
+
+def _current_docker_executable() -> str:
+    cli = shutil.which("docker")
+    if cli is None or not Path(cli).is_absolute():
+        raise ValueError("DockerGateway requires a current absolute Docker executable")
+    executable = Path(cli).resolve(strict=True)
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ValueError("DockerGateway requires a current executable Docker CLI")
+    return str(executable)
+
+
+@dataclass(frozen=True, kw_only=True)
+class _DockerStdioEnvironment(Environment[object]):
+    _argv: tuple[str, ...] = field(repr=False)
+
+    def _validate_remote_url(self) -> None:
+        if not self.url.startswith("docker://") or self.headers:
+            raise ValueError("Docker execution requires its current SDK resource source")
+
+    def _to_native(self) -> RuntimeEnvironment:
+        result = super()._to_native()
+        result["stdio_command"] = {
+            "program": "/usr/bin/env",
+            "args": list(self._argv),
+            "env": {},
+            "cwd": None,
+        }
+        return result
+
+
+@dataclass(frozen=True)
+class DockerGateway:
+    """Attach a fresh SDK-owned Linux Docker resource to the native executor.
+
+    Pass this object as sandbox_environment's connect argument. The current
+    standard Unix-socket Docker client supplies daemon authority. Explicit
+    session auth, cookies, custom request settings, and effective netrc auth
+    require an application gateway. The normal trust_env=True client remains
+    supported when requests prepares no authentication for its Unix authority.
+    This helper
+    ignores ambient Docker configuration and opens no listener or host mount.
+    The selected image must supply a compatible exec-server at exec_server_path.
+    Its image-configured process user applies; capability_user is metadata only.
+    Borrowed, resumed, snapshot-created, and custom-authenticated clients require
+    an explicit application gateway instead.
+    """
+
+    client: BaseSandboxClient[Any] = field(repr=False)
+    exec_server_path: str = "/usr/local/bin/exec-server"
+    tools: tuple[ExecutorToolName, ...] = ()
+
+    def __post_init__(self) -> None:
+        from agents.classic.sandbox.sandboxes.docker import DockerSandboxClient
+
+        if not isinstance(self.client, DockerSandboxClient):
+            raise TypeError("DockerGateway requires the current DockerSandboxClient")
+        api = self.client.docker_client.api
+        adapter = cast(Any, api.get_adapter(api.base_url))
+        if type(adapter) is not _docker_unix_adapter_type():
+            raise ValueError("DockerGateway requires the standard current Unix socket client")
+        if not Path(adapter.socket_path).is_absolute():
+            raise ValueError("DockerGateway requires an absolute current Unix socket")
+        if (
+            not isinstance(self.exec_server_path, str)
+            or not self.exec_server_path.startswith("/")
+            or any(part == ".." for part in self.exec_server_path.split("/"))
+            or any(ord(c) < 32 for c in self.exec_server_path)
+        ):
+            raise ValueError("exec_server_path must be an absolute container executable path")
+        cli = shutil.which("docker")
+        if cli is None or not Path(cli).is_absolute() or not Path("/usr/bin/env").is_file():
+            raise ValueError("DockerGateway requires Docker CLI and /usr/bin/env")
+
+    def _validate_acquisition(self, client: BaseSandboxClient[Any], *, fresh: bool) -> None:
+        if client is not self.client or not fresh:
+            raise ValueError("DockerGateway requires fresh creation by its current SDK client")
+
+    async def _preflight(self) -> tuple[Any, str, str]:
+        from agents.classic.sandbox.sandboxes.docker import DockerSandboxClient
+
+        if not isinstance(self.client, DockerSandboxClient):
+            raise TypeError("DockerGateway requires its current Docker client")
+        api = self.client.docker_client.api
+        adapter = cast(Any, api.get_adapter(api.base_url))
+        if type(adapter) is not _docker_unix_adapter_type() or set(api.headers) - {
+            "User-Agent",
+            "Accept-Encoding",
+            "Accept",
+            "Connection",
+        }:
+            raise ValueError("DockerGateway cannot prove the current daemon authorization scope")
+        info = await run_blocking_workspace_io(lambda: _docker_daemon_info(api))
+        plugins = info.get("Plugins")
+        if (
+            info.get("OSType") != "linux"
+            or not isinstance(plugins, dict)
+            or "Authorization" not in plugins
+            or plugins["Authorization"] not in (None, [])
+        ):
+            raise ValueError("DockerGateway requires a Linux daemon without custom authorization")
+        identity = info.get("ID")
+        if not isinstance(identity, str) or not identity:
+            raise ValueError("DockerGateway requires a current daemon identity")
+        socket = str(adapter.socket_path)
+        stamp = hashlib.sha256((socket + "\0" + identity).encode()).hexdigest()
+        return api, socket, stamp
+
+    @asynccontextmanager
+    async def __call__(self, resource: SandboxSession) -> AsyncIterator[Environment[object]]:
+        from _agents_shared.sandbox_manifest import _borrowed_manifest_owner
+        from agents.classic.sandbox.sandboxes.docker import (
+            DockerSandboxSession,
+            DockerSandboxSessionState,
+        )
+
+        api, socket, daemon = await self._preflight()
+        inner = _borrowed_manifest_owner(resource)
+        if not isinstance(inner, DockerSandboxSession):
+            raise ValueError("DockerGateway resource does not belong to the current client")
+        container_client = inner._container.client
+        if container_client is None or container_client.api is not api:
+            raise ValueError("DockerGateway resource does not belong to the current client")
+        cid = inner._container.id
+        if not isinstance(cid, str) or re.fullmatch(r"[0-9a-f]{64}", cid) is None:
+            raise ValueError("DockerGateway requires the full current container identity")
+        inspected = await run_blocking_workspace_io(lambda: api.inspect_container(cid))
+        state = resource.state
+        if (
+            not isinstance(state, DockerSandboxSessionState)
+            or inspected.get("Id") != cid
+            or state.container_id != cid
+        ):
+            raise ValueError("DockerGateway current resource identity changed")
+        root = str(resource.state.manifest.root)
+        writes = (
+            root,
+            *(g.path for g in resource.state.manifest.extra_path_grants if not g.read_only),
+        )
+        with tempfile.TemporaryDirectory(prefix="codex-docker-gateway-") as config:
+            await run_blocking_workspace_io(lambda: Path(config, "config.json").write_text("{}"))
+            executable = await run_blocking_workspace_io(_current_docker_executable)
+            argv = (
+                "-i",
+                "PATH=/usr/bin:/bin",
+                "HOME=" + config,
+                "DOCKER_CONFIG=" + config,
+                executable,
+                "--config",
+                config,
+                "--host",
+                "unix://" + socket,
+                "exec",
+                "--interactive",
+                "--workdir=" + root,
+                cid,
+                self.exec_server_path,
+                "stdio",
+            )
+            yield _DockerStdioEnvironment(
+                url="docker://" + daemon + "/" + cid,
+                cwd=root,
+                writable_roots=writes,
+                tools=self.tools,
+                _argv=argv,
+            )
+
+
 @redact_mount_error_data_sync
 def sandbox_environment(
     client: BaseSandboxClient[_OptionsT],
@@ -180,17 +556,28 @@ def sandbox_environment(
     managed_workspace: bool = False,
     authorized_resume_checkpoint: ManagedWorkspaceCheckpoint | None = None,
     memory: SandboxMemoryOptions | None = None,
+    capabilities: Sequence[SandboxCapability] = (),
+    capability_user: User | None = None,
 ) -> SandboxEnvironmentSource[_ContextT]:
     """Own a provider-selected sandbox and its native gateway for one native Session.
 
     Each prepared acquisition has been supplying filesystem and mount guidance to
     the native Session. Entry descriptions have been appearing in model context,
     requiring text without secrets. Set memory to enable explicit Session.flush_memory.
+    Capabilities can prepare the current manifest and add workspace guidance
+    after binding. capability_user identifies the user supplied to those plugins.
+    The gateway still controls native process identity.
 
     The connect manager must connect to the supplied sandbox and own gateway cleanup.
     The provider validates and materializes the captured manifest for create and
     resume. A borrowed session must match the current mount authority. A supplied live
-    session is borrowed: only its gateway is closed. An authorized_resume_state
+    session is borrowed: only its gateway is closed. Its existing manifest entries
+    must already match the current declaration. Generic providers do not offer
+    atomic multi-entry updates, so additions, replacements and entry metadata
+    changes reject before filesystem writes. Use an owned fresh resource or
+    snapshot creation for new entries; no-op borrowed acquisition stays supported.
+    Older provider states can reconnect the same mutable filesystem and do not
+    provide rollback authority. An authorized_resume_state
     explicitly authorizes all provider identity and snapshot fields, not merely
     their types. Never pass untrusted deserialized state without authorizing those
     fields. Resume uses the current manifest for filesystem authority. Snapshot,
@@ -208,6 +595,15 @@ def sandbox_environment(
     this boundary. SDK-retired in-memory pairs have been retaining provenance;
     deserialization has been requiring this explicit trusted whole-pair grant.
     """
+    if isinstance(connect, DockerGateway):
+        connect._validate_acquisition(
+            client,
+            fresh=session is None
+            and authorized_resume_state is None
+            and snapshot is None
+            and not managed_workspace
+            and authorized_resume_checkpoint is None,
+        )
     try:
         captured_options = deepcopy(
             cast(_OptionsT, BaseSandboxClientOptions.parse(dict(options)))
@@ -250,7 +646,11 @@ def sandbox_environment(
     ):
         raise ValueError("Eager skills require a new sandbox resource")
     skill_lease = None if captured_skills is None else _SkillLease(captured_skills)
+    captured_capabilities = _capture_capabilities(capabilities)
+    captured_user = None if capability_user is None else capability_user.model_copy(deep=True)
     captured_manifest = _manifest(manifest)
+    for capability in captured_capabilities:
+        captured_manifest = _manifest(capability.prepare_manifest(captured_manifest))
     if captured_skills is not None:
         captured_manifest = captured_skills.process_manifest(captured_manifest)
     if session is not None or authorized_resume_state is not None:
@@ -301,6 +701,8 @@ def sandbox_environment(
     @asynccontextmanager
     async def source() -> AsyncIterator[Environment[_ContextT]]:
         async with AsyncExitStack() as owners:
+            if isinstance(connect, DockerGateway):
+                await connect._preflight()
             selected = session
             if selected is None:
                 selected = (
@@ -371,11 +773,19 @@ def sandbox_environment(
                         raise ValueError("Managed resume requires a supported snapshot factory")
                     selected.state.snapshot = publication.build(uuid4().hex)
             else:
-                _assert_current_mount_authority(selected.state, captured_manifest)
-                await selected._validate_manifest_application(manifest=captured_manifest)
-                await client.assert_borrowed_session_authority(selected, captured_options)
-                if concurrency_limits is not None:
-                    selected._set_concurrency_limits(concurrency_limits)
+                from _agents_shared.sandbox_manifest import (
+                    _assert_borrowed_manifest_reusable,
+                    _borrowed_manifest_lock,
+                )
+
+                async with _borrowed_manifest_lock(selected._inner):
+                    _assert_borrowed_manifest_reusable(selected)
+                    if skill_lease is not None:
+                        skill_lease._validate_borrowed_manifest(selected, captured_manifest)
+                    _assert_current_mount_authority(selected.state, captured_manifest)
+                    await selected._validate_manifest_application(manifest=captured_manifest)
+                    await client.assert_borrowed_session_authority(selected, captured_options)
+                    await _apply_borrowed_manifest(selected, captured_manifest, concurrency_limits)
                 if archive_limits is not None:
                     selected._set_archive_limits(archive_limits)
             if skill_lease is not None and (
@@ -393,6 +803,36 @@ def sandbox_environment(
                         borrowed_manifest=captured_manifest if session is not None else None,
                     )
                     instructions = _append_skill_instructions(instructions, skill_instructions)
+                if captured_capabilities:
+                    workspace = _capability_workspace(selected, environment)
+                    for capability in captured_capabilities:
+                        await capability.bind(
+                            selected,
+                            user=None
+                            if captured_user is None
+                            else captured_user.model_copy(deep=True),
+                            workspace=workspace,
+                        )
+                        guidance = await capability.instructions(_manifest(selected.state.manifest))
+                        instructions = _append_skill_instructions(instructions, guidance)
+                    tools = tuple(
+                        tool for capability in captured_capabilities for tool in capability.tools()
+                    )
+                    if any(
+                        not isinstance(tool, FunctionTool)
+                        or tool._bind is None
+                        or tool.needs_approval is not False
+                        or tool.defer_loading
+                        for tool in tools
+                    ):
+                        raise TypeError(
+                            "Sandbox capability tools must be eager automatic function callbacks"
+                        )
+                    setattr(
+                        source_manager,
+                        _SANDBOX_CAPABILITIES_ATTRIBUTE,
+                        _SandboxContributions(tools, captured_capabilities),
+                    )
                 setattr(source_manager, _WORKSPACE_INSTRUCTIONS_ATTRIBUTE, instructions)
                 if create_memory is not None:
                     setattr(source_manager, _MEMORY_OWNER_ATTRIBUTE, create_memory(selected))
@@ -591,6 +1031,7 @@ def _render_workspace_instructions(manifest: Manifest, environment: Environment[
 
 
 __all__ = [
+    "DockerGateway",
     "Instrumentation",
     "EventPayloadPolicy",
     "SandboxSessionEvent",

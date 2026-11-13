@@ -1,0 +1,169 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 44b9e0b9..f07779d3 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1279,7 +1279,15 @@ impl ModelClient {
+                         "hosted tool choice is outside the final offered catalog".into(),
+                     )
+                 })?;
+-                if matches.next().is_some() {
++                if matches.next().is_some()
++                    && !matches!(
++                        choice,
++                        codex_protocol::model_request_controls::HostedToolChoice::Mcp {
++                            server_label: None,
++                            name: None
++                        }
++                    )
++                {
+                     return Err(CodexErr::InvalidRequest(
+                         "hosted tool choice is ambiguous in the final offered catalog".into(),
+                     ));
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index 9f0181d2..a092accc 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -34,6 +34,7 @@ pub enum PromptCacheMode {
+ #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+ pub enum HostedToolChoice {
+     WebSearch {},
++    WebSearchPreview {},
+     FileSearch {},
+     CodeInterpreter {},
+     ImageGeneration {},
+@@ -44,7 +45,9 @@ pub enum HostedToolChoice {
+     ToolSearch {},
+     ProgrammaticToolCalling {},
+     Mcp {
+-        server_label: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        server_label: Option<String>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         name: Option<String>,
+     },
+@@ -53,8 +56,9 @@ pub enum HostedToolChoice {
+ impl HostedToolChoice {
+     pub fn validate(&self) -> Result<(), String> {
+         if let Self::Mcp { server_label, name } = self
+-            && (server_label.trim().is_empty()
+-                || name.as_ref().is_some_and(|name| name.trim().is_empty()))
++            && (server_label.as_ref().is_some_and(|label| label.trim().is_empty())
++                || name.as_ref().is_some_and(|name| name.trim().is_empty())
++                || (server_label.is_none() && name.is_some()))
+         {
+             return Err(
+                 "hosted MCP choice needs a nonempty captured server and tool identity".into(),
+diff --git a/codex-rs/protocol/tests/hosted_tool_choice.rs b/codex-rs/protocol/tests/hosted_tool_choice.rs
+index c2855f37..9d666d87 100644
+--- a/codex-rs/protocol/tests/hosted_tool_choice.rs
++++ b/codex-rs/protocol/tests/hosted_tool_choice.rs
+@@ -39,8 +39,20 @@ fn hosted_tool_choice_rejects_function_shape_and_extra_authority() {
+             .is_err()
+     );
+     let choice = HostedToolChoice::Mcp {
+-        server_label: " ".into(),
++        server_label: Some(" ".into()),
+         name: None,
+     };
+     assert!(choice.validate().is_err());
+ }
++
++#[test]
++fn hosted_selector_preview_and_mcp_category_preserve_exact_wire() {
++    for value in [json!({"type":"web_search_preview"}), json!({"type":"mcp"})] {
++        let selected: HostedToolChoice = serde_json::from_value(value.clone()).unwrap();
++        selected.validate().unwrap();
++        assert_eq!(serde_json::to_value(selected).unwrap(), value);
++    }
++    let invalid: HostedToolChoice =
++        serde_json::from_value(json!({"type":"mcp","name":"lookup"})).unwrap();
++    assert!(invalid.validate().is_err());
++}
+diff --git a/codex-rs/tools/src/tool_spec.rs b/codex-rs/tools/src/tool_spec.rs
+index 95e9e2ff..2174e981 100644
+--- a/codex-rs/tools/src/tool_spec.rs
++++ b/codex-rs/tools/src/tool_spec.rs
+@@ -146,7 +146,7 @@ impl ToolSpec {
+     ) -> Option<codex_protocol::model_request_controls::HostedToolChoice> {
+         use codex_protocol::model_request_controls::HostedToolChoice as Choice;
+         let matches = match (self, choice) {
+-            (Self::WebSearch { .. }, Choice::WebSearch {})
++            (Self::WebSearch { .. }, Choice::WebSearch {} | Choice::WebSearchPreview {})
+             | (Self::FileSearch(_), Choice::FileSearch {})
+             | (Self::CodeInterpreter(_), Choice::CodeInterpreter {})
+             | (Self::ImageGeneration(_), Choice::ImageGeneration {})
+@@ -164,7 +164,8 @@ impl ToolSpec {
+                 return Some(Choice::ComputerUsePreview {});
+             }
+             (Self::Mcp(tool), Choice::Mcp { server_label, name }) => {
+-                tool.server_label == *server_label
++                server_label.as_ref().is_none_or(|label| tool.server_label == *label)
++                    && (server_label.is_some() || name.is_none())
+                     && name.as_ref().is_none_or(|name| {
+                         match tool.provider_data.get("allowed_tools") {
+                             None | Some(Value::Null) => true,
+diff --git a/codex-rs/tools/tests/hosted_tool_choice.rs b/codex-rs/tools/tests/hosted_tool_choice.rs
+index 3ef80dc4..fd480e9f 100644
+--- a/codex-rs/tools/tests/hosted_tool_choice.rs
++++ b/codex-rs/tools/tests/hosted_tool_choice.rs
+@@ -46,7 +46,7 @@ fn hosted_tool_choice_mcp_respects_the_captured_server_and_allowed_names() {
+                 .clone(),
+     });
+     let select = |server: &str, name: &str| Choice::Mcp {
+-        server_label: server.into(),
++        server_label: Some(server.into()),
+         name: Some(name.into()),
+     };
+     assert!(
+@@ -86,3 +86,50 @@ fn hosted_mcp_filter_omission_does_not_create_an_empty_name_list() {
+         assert_eq!(spec.captured_hosted_choice(&choice).is_some(), allowed);
+     }
+ }
++
++#[test]
++fn mcp_category_never_promotes_a_name_without_its_server() {
++    let spec = ToolSpec::Mcp(crate::HostedMcpTool {
++        server_label: "search".into(),
++        provider_data:
++            json!({"server_url":"https://fixture.invalid/mcp","allowed_tools":["lookup"]})
++                .as_object()
++                .unwrap()
++                .clone(),
++    });
++    assert_eq!(
++        spec.captured_hosted_choice(&Choice::Mcp {
++            server_label: None,
++            name: None
++        }),
++        Some(Choice::Mcp {
++            server_label: None,
++            name: None
++        })
++    );
++    assert_eq!(
++        spec.captured_hosted_choice(&Choice::Mcp {
++            server_label: None,
++            name: Some("lookup".into())
++        }),
++        None
++    );
++}
++
++#[test]
++fn preview_search_selects_the_offered_hosted_search_without_renaming_it() {
++    let spec = ToolSpec::WebSearch {
++        external_web_access: None,
++        indexed_web_access: None,
++        filters: None,
++        user_location: None,
++        search_context_size: None,
++        image_settings: None,
++        search_content_types: None,
++    };
++    assert_eq!(
++        spec.captured_hosted_choice(&Choice::WebSearchPreview {}),
++        Some(Choice::WebSearchPreview {})
++    );
++    assert_eq!(serde_json::to_value(spec).unwrap()["type"], "web_search");
++}

@@ -120,15 +120,15 @@ index f33cf41f..dd7b182d 100644
 +    }
  }
 diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
-index e36b9858..8e5e3607 100644
+index 00ee8ccb..0c14e0ac 100644
 --- a/codex-rs/core/src/session/inject.rs
 +++ b/codex-rs/core/src/session/inject.rs
-@@ -538,7 +538,7 @@ impl Session {
+@@ -557,7 +557,7 @@ impl Session {
                              .thread_extension_data
                              .get::<crate::SdkHistoryRetention>()
                          {
 -                            policy.stamp_new_items(std::slice::from_mut(&mut envelope));
 +                            policy.stamp_imported_items(std::slice::from_mut(&mut envelope));
                          }
-                         envelope
-                     });
+                         if !cache_breakpoints.is_empty()
+                             && let (Some(id), ResponseItem::Message { content, .. }) =

@@ -1,0 +1,79 @@
+diff --git a/codex-rs/core/src/session/model_attempts.rs b/codex-rs/core/src/session/model_attempts.rs
+--- a/codex-rs/core/src/session/model_attempts.rs
++++ b/codex-rs/core/src/session/model_attempts.rs
+@@ -383,6 +383,13 @@ impl ModelAttemptAdmission for Attempt {
+                     usage.requests_without_token_usage = missing;
+                     Ok(Some(lineage))
+                 }
++                ProviderRequestAccounting::Dispatch { lineage } if measurement.provider_managed => {
++                    if state.open_provider_request.as_deref() != Some(lineage.as_str()) {
++                        return Err("Native provider request owner mismatch".into());
++                    }
++                    self.mark_provider_effect();
++                    Ok(None)
++                }
+                 ProviderRequestAccounting::Terminal {
+                     lineage,
+                     usage: measured,
+@@ -716,6 +725,47 @@ mod tests {
+         assert_eq!(usage.token_usage.total_tokens, 5);
+     }
+
++    #[test]
++    fn only_the_current_managed_transport_can_fence_replay() {
++        use ProviderRequestAccounting::{Create, Dispatch, Manage};
++
++        let ledger = Arc::new(AttemptLedger::default());
++        let parent = Arc::new(TurnSamplingStop::default());
++        let first = begin(&ledger, &parent);
++        first.account_provider_request(Manage).unwrap();
++        let lineage = first.account_provider_request(Create).unwrap().unwrap();
++        first
++            .account_provider_request(Dispatch {
++                lineage: lineage.clone(),
++            })
++            .unwrap();
++        assert!(first.provider_effects.load(Ordering::Acquire));
++        ledger.settle(&first).unwrap();
++
++        let second = begin(&ledger, &parent);
++        assert!(
++            second
++                .account_provider_request(Dispatch {
++                    lineage: lineage.clone()
++                })
++                .is_err()
++        );
++        second.account_provider_request(Manage).unwrap();
++        assert!(
++            second
++                .account_provider_request(Dispatch {
++                    lineage: "wrong owner".to_owned()
++                })
++                .is_err()
++        );
++        assert!(!second.provider_effects.load(Ordering::Acquire));
++        second
++            .account_provider_request(Dispatch { lineage })
++            .unwrap();
++        assert!(second.provider_effects.load(Ordering::Acquire));
++        assert_eq!(ledger.snapshot().usage.requests, 1);
++    }
++
+     #[test]
+     fn managed_replacement_retains_preceding_unmeasured_request() {
+         use ProviderRequestAccounting::{Create, Manage, Terminal};
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -528,6 +528,10 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
+ pub enum ProviderRequestAccounting {
+     Manage,
+     Create,
++    /// Fence replay before a hosted request or injection may reach the provider.
++    Dispatch {
++        lineage: String,
++    },
+     Terminal {
+         lineage: String,
+         usage: Option<codex_protocol::protocol::TokenUsage>,

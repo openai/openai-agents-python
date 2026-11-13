@@ -1,6 +1,7 @@
 """Settled hosted approvals export as historical data, without live authority."""
 
 import json
+import sys
 
 from agents import Agent, HostedMCP, LocalStorage, NativeProvider, SessionState
 from tests._asyncio import timeout
@@ -70,7 +71,11 @@ async def test_settled_local_hosted_approval_exports_without_replay_authority(re
             )
             saved = SessionState.from_json((await source.save_state()).to_json())
             assert await source.history_snapshot() == before
-        directory.rename(tmp_path / "removed-source")
+        serialized = saved.to_json()
+        for path in (str(directory), directory.as_posix()):
+            assert json.dumps(path, ensure_ascii=False)[1:-1] not in serialized
+        if sys.platform != "win32":
+            directory.rename(tmp_path / "removed-source")
         async with agent.session(state=saved) as restored:
             restored_history = await restored.history_snapshot()
             for item in before.items:

@@ -148,19 +148,11 @@ class OpenedWithoutSend(Exception):
 async def capture_scope(*args, **kwargs):
     assert kwargs["_process_private_runtime"] is True
     assert kwargs["_share_model_http"] is False
-    assert kwargs["_private_http"] is False
-    assert json.loads(args[2])["_sdk_websocket_tls"] is True
-    args = list(args)
-    config = json.loads(args[0])
-    # This is a native lifetime witness, not the real WSS protocol witness.
-    # Disable transport before Core startup and stop before the first submission.
-    provider = config["model_providers.native_agent"]
-    provider["supports_websockets"] = False
-    provider["base_url"] = "http://127.0.0.1:1/v1"
-    args[0] = json.dumps(config)
-    options = json.loads(args[2])
-    options["config"] = config
-    args[2] = json.dumps(options)
+    assert kwargs["_private_http"] is True
+    assert not kwargs.get("_process_private_http", False)
+    assert not json.loads(args[2]).get("_sdk_websocket_tls", False)
+    assert json.loads(args[0])["model_providers.native_agent"]["supports_websockets"] is True
+    # The fresh scope has been borrowing HTTP; no model request follows startup.
     engine, thread, home = await open_conversation(*args, **kwargs)
     assert home is None, "a managed scope must retain the parent-owned home"
     thread_ids.append(thread.id)

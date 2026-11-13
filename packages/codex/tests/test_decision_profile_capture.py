@@ -340,6 +340,7 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
     session._context = {"tenant": "fixture"}
     session._owned_provider = provider
     session._model_api_key = "synthetic-profile-key"
+    session._profile_provider_keys = {}
     session._codex_login_binding = None
     session._repair_session = None
     session._repair_transport_settings = None

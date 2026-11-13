@@ -564,3 +564,73 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
     for name in expected:
         source = "codex-code-mode-host" if name == "codex-code-mode-host" else "codex-sdk-runtime"
         assert (helpers / f"{name}{suffix}").read_text() == source
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_native_build_checks_indirect_musl_archive_and_binding_pins(
+    monkeypatch, tmp_path, verified
+):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    import native_env
+
+    target = "x86_64-unknown-linux-musl"
+    stem = f"rusty_v8_ptrcomp_sandbox_release_{target}"
+    archive, binding, release = (
+        f"lib{stem}.a.gz",
+        f"src_binding_ptrcomp_sandbox_release_{target}.rs",
+        f"{stem}.sha256",
+    )
+    archive_bytes, binding_bytes = b"native v8 archive", b"native v8 source binding"
+
+    def sha(value: bytes) -> str:
+        return hashlib.sha256(value).hexdigest()
+
+    release_bytes = f"{sha(archive_bytes)}  {archive}\n{sha(binding_bytes)}  {binding}\n".encode()
+    pins = tmp_path / ".upstream/codex/third_party/v8"
+    pins.mkdir(parents=True)
+    (tmp_path / "Cargo.lock").write_text('[[package]]\nname = "v8"\nversion = "150.4.0"\n')
+    (pins / "rusty_v8_150_4_0.sha256").write_text("")
+    (pins / "rusty_v8_150_4_0_release_manifests.sha256").write_text(
+        f"{sha(release_bytes)}  {release}\n"
+    )
+    for key in (
+        "RUSTY_V8_ARCHIVE",
+        "RUSTY_V8_SRC_BINDING_PATH",
+        "RUSTY_V8_MIRROR",
+        "V8_FORCE_DEBUG",
+        "CARGO_BUILD_TARGET",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(
+        native_env.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            ["rustc", "-vV"], 0, stdout=f"host: {target}\n"
+        ),
+    )
+    calls = []
+    payloads = {
+        release: release_bytes if verified else b"unverified manifest",
+        archive: archive_bytes,
+        binding: binding_bytes,
+    }
+
+    def open_url(url, *, timeout):
+        assert url.startswith(
+            "https://github.com/openai/codex/releases/download/rusty-v8-v150.4.0/"
+        )
+        filename = url.rsplit("/", 1)[1]
+        calls.append(filename)
+        return io.BytesIO(payloads[filename])
+
+    monkeypatch.setattr(native_env.urllib.request, "urlopen", open_url)
+    if not verified:
+        with pytest.raises(ValueError, match="SHA256 mismatch"):
+            native_env.build_environment(tmp_path)
+        assert calls == [release]
+        return
+
+    environment = native_env.build_environment(tmp_path)
+    assert Path(environment["RUSTY_V8_ARCHIVE"]).read_bytes() == archive_bytes
+    assert Path(environment["RUSTY_V8_SRC_BINDING_PATH"]).read_bytes() == binding_bytes
+    assert calls == [release, archive, binding]

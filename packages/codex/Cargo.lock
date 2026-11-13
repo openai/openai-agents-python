@@ -3147,6 +3147,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "sha2 0.10.9",
  "strum",
  "strum_macros 0.28.0",
  "sys-locale",

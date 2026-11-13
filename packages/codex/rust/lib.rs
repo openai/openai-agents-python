@@ -1269,6 +1269,25 @@ impl NativeThread {
             .is_some_and(|control| control.handoff(nonce)))
     }
 
+    fn _take_native_mcp_transport_error(
+        &self,
+        py: Python<'_>,
+        nonce: u64,
+        turn_id: &str,
+        call_id: &str,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let error = self
+            .mcp_result_control()?
+            .and_then(|control| control.owner(nonce))
+            .and_then(|control| control.take_transport_error(nonce, turn_id, call_id));
+        Ok(error.map(|error| {
+            let error = PyRuntimeError::new_err(mcp_result_control::transport_error_message(
+                error.as_ref(),
+            ));
+            error.into_value(py).into_any()
+        }))
+    }
+
     fn _check_native_mcp_result(&self, nonce: u64) -> PyResult<bool> {
         Ok(self
             .mcp_result_control()?
@@ -2519,12 +2538,13 @@ impl NativeThread {
             .is_some_and(|tools| tools.check_model_producer(request_id)))
     }
 
-    #[pyo3(signature = (request_id, *, chat_stream=false, upstream_request_id=None))]
+    #[pyo3(signature = (request_id, *, chat_stream=false, upstream_request_id=None, responses_websocket_stream=false))]
     fn _start_model_producer_stream(
         &self,
         request_id: u64,
         chat_stream: bool,
         upstream_request_id: Option<String>,
+        responses_websocket_stream: bool,
     ) -> PyResult<bool> {
         let Some(inner) = self.live()? else {
             return Ok(false);
@@ -2541,17 +2561,19 @@ impl NativeThread {
                     observe_raw,
                     chat_stream,
                     upstream_request_id,
+                    responses_websocket_stream,
                 )
             }))
     }
 
-    #[pyo3(signature = (request_id, data_json, *, raw_chat_chunk=false))]
+    #[pyo3(signature = (request_id, data_json, *, raw_chat_chunk=false, raw_responses_websocket_frame=false))]
     fn _push_model_producer_event<'py>(
         &self,
         py: Python<'py>,
         request_id: u64,
         data_json: String,
         raw_chat_chunk: bool,
+        raw_responses_websocket_frame: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let tools = self.live()?.and_then(|inner| {
             inner
@@ -2564,7 +2586,12 @@ impl NativeThread {
                 return Ok(false);
             };
             Ok(tools
-                .push_model_producer_event(request_id, &data_json, raw_chat_chunk)
+                .push_model_producer_event(
+                    request_id,
+                    &data_json,
+                    raw_chat_chunk,
+                    raw_responses_websocket_frame,
+                )
                 .await)
         })
     }
@@ -2641,6 +2668,48 @@ impl NativeThread {
                 &owner.attempt_id,
                 &owner.callback,
                 usage,
+            )
+            .map_err(py_error)
+    }
+
+    fn _account_provider_request(
+        &self,
+        owner_json: &str,
+        operation_json: &str,
+    ) -> PyResult<Option<String>> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct UsageOwner {
+            attempt_id: String,
+            callback: serde_json::Value,
+        }
+        if owner_json.len() > 16_384 || operation_json.len() > 65_536 {
+            return Err(py_error(
+                "Native provider request accounting exceeds capacity",
+            ));
+        }
+        let owner: UsageOwner = serde_json::from_str(owner_json).map_err(py_error)?;
+        let operation = serde_json::from_str(operation_json).map_err(py_error)?;
+        let Some(inner) = self.live()? else {
+            return Err(py_error(
+                "Native provider request accounting receipt expired",
+            ));
+        };
+        let Some(tools) = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+        else {
+            return Err(py_error(
+                "Native provider request accounting receipt expired",
+            ));
+        };
+        tools
+            .account_provider_request(
+                &inner.id.to_string(),
+                &owner.attempt_id,
+                &owner.callback,
+                operation,
             )
             .map_err(py_error)
     }
@@ -4523,10 +4592,9 @@ fn conversation_opening(
 
     let specs: tool_callers::ToolDeclarations =
         serde_json::from_str(specs_json).map_err(py_error)?;
-    let process_private_wss = process_private_runtime
-        && !private_http
+    let process_private_functions = process_private_runtime
         && !private_disposable
-        && options.private_wss_tls
+        && private_http
         && cfg!(target_os = "linux")
         && options.permits_private_functions()
         && !specs.is_empty()
@@ -4546,12 +4614,13 @@ fn conversation_opening(
         && cfg!(target_os = "linux")
         && options.permits_private_disposable()
         && specs.is_empty();
-    let process_runtime = process_private_http || process_private_wss;
+    options.private_function_scope = process_private_functions;
+    let process_runtime = process_private_http || process_private_functions;
     if process_runtime {
         provider_owner::check_process_runtime_pid()?;
     }
-    // A WSS scope must never inherit a previous implicit Provider's HTTP owner.
-    let share_model_http = share_model_http && !process_private_wss;
+    // Function scopes have been borrowing the parent pool, never an implicit Provider's.
+    let share_model_http = share_model_http && !process_private_functions;
     let settings_value: serde_json::Value = serde_json::from_str(settings_json)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let has_settings = settings_value
@@ -4570,8 +4639,10 @@ fn conversation_opening(
             )
             .await?;
         if private_http {
-            // Only this scope selects an idle transport owner, never the parent.
-            state.model_http_pool = Some(if process_private_http {
+            // The fresh scope has been borrowing the parent HTTP pool.
+            state.model_http_pool = Some(if process_private_functions {
+                state.private_function_http_pool()
+            } else if process_private_http {
                 private_http::process_pool()
             } else {
                 lease.private_model_http_pool()?

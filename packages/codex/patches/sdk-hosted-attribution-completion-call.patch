@@ -1,0 +1,42 @@
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -14374,7 +14374,7 @@
+         cancellation_token: CancellationToken::new(),
+     };
+
+-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
++    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, None)
+         .await
+         .expect("tool call should be handled");
+
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -322,7 +322,7 @@
+     let mut ctx = output_context(Arc::new(session), Arc::new(turn_context));
+     let item = assistant_output_text("original assistant text");
+
+-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
++    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, None)
+         .await
+         .expect("assistant message should complete");
+
+@@ -355,7 +355,7 @@
+             "arguments": arguments.to_string(),
+         }))
+         .expect("direct input");
+-        let result = handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None)
++        let result = handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, None)
+             .await
+             .expect("direct call should be handled");
+         assert!(result.needs_follow_up);
+@@ -414,7 +414,7 @@
+         }))
+         .expect("direct input");
+         pending.push(
+-            handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None)
++            handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, None)
+                 .await
+                 .expect("direct call should be handled")
+                 .tool_future

@@ -358,11 +358,32 @@ class ToolSearch:
         )
 
 
-_HOSTED_TOOLS = (FileSearch, CodeInterpreter, HostedShell, ImageGeneration, ToolSearch)
+@dataclass(frozen=True, kw_only=True)
+class HostedProgrammaticToolCalling:
+    """Declare provider-side programmatic tool calling for Responses.
+
+    Use with a provider tool that permits programmatic callers or with tool
+    search. The Responses provider owns execution of the program.
+    """
+
+
+_HOSTED_TOOLS = (
+    FileSearch,
+    CodeInterpreter,
+    HostedShell,
+    ImageGeneration,
+    ToolSearch,
+    HostedProgrammaticToolCalling,
+)
 
 
 def _hosted_tool_name(
-    tool: FileSearch | CodeInterpreter | HostedShell | ImageGeneration | ToolSearch,
+    tool: FileSearch
+    | CodeInterpreter
+    | HostedShell
+    | ImageGeneration
+    | ToolSearch
+    | HostedProgrammaticToolCalling,
 ) -> str:
     if isinstance(tool, FileSearch):
         return "file_search"
@@ -372,6 +393,8 @@ def _hosted_tool_name(
         return "shell"
     if isinstance(tool, ToolSearch):
         return "tool_search"
+    if isinstance(tool, HostedProgrammaticToolCalling):
+        return "programmatic_tool_calling"
     return "image_generation"
 
 
@@ -419,6 +442,14 @@ def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
             if tool.execution != "client":
                 specs.append(tool._provider_spec())
             continue
+        if isinstance(tool, HostedProgrammaticToolCalling):
+            specs.append(
+                {
+                    "type": "provider_only",
+                    "definition": {"type": "programmatic_tool_calling"},
+                }
+            )
+            continue
         fields = asdict(tool)
         provider_data = fields.pop("provider_data")
         specs.append(_hosted_tool_spec(_hosted_tool_name(tool), fields, provider_data))
@@ -448,7 +479,7 @@ class ToolSearchResult:
         object.__setattr__(self, "tool_refs", refs)
 
 
-ToolCaller = Literal["direct", "code"]
+ToolCaller = Literal["direct", "code", "programmatic"]
 ToolNotFoundBehavior = Literal["return_error_to_model", "raise_error"]
 
 
@@ -998,7 +1029,12 @@ _capture_tools.__module__ = "agents.session"
 
 
 def _function_parameters(
-    callback: Callable[..., Any], *, name: str, hints: dict[str, Any], skip_first: bool = False
+    callback: Callable[..., Any],
+    *,
+    name: str,
+    hints: dict[str, Any],
+    skip_first: bool = False,
+    extra_arguments: Literal["forbid", "ignore"],
 ) -> type[BaseModel]:
     """Build the one argument model shared by native function declarations."""
     fields: dict[str, Any] = {}
@@ -1014,7 +1050,11 @@ def _function_parameters(
         default = ... if parameter.default is inspect.Parameter.empty else parameter.default
         fields[parameter_name] = (hints[parameter_name], default)
     model: type[BaseModel] = create_model(
-        f"{name}_arguments", __config__=ConfigDict(extra="forbid"), **fields
+        f"{name}_arguments",
+        __config__=ConfigDict(
+            extra=extra_arguments, json_schema_extra={"additionalProperties": False}
+        ),
+        **fields,
     )
     omitted = fields.keys() - model.model_fields.keys()
     if omitted:

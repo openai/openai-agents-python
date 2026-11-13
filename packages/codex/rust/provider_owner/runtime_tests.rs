@@ -78,7 +78,33 @@ fn matching_scopes_outlive_idle_interval_and_failed_retirement_stays_owned() {
     pyo3_async_runtimes::tokio::get_runtime().block_on(async {
         close_process_runtime().await.unwrap();
         let first = opening("pool-key-a", true).await;
-        let manager = first.2.current().unwrap().manager.clone();
+        let first_state = first.2.current().unwrap();
+        let manager = first_state.manager.clone();
+        let parent = process_slot()
+            .unwrap()
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .engine
+            .as_ref()
+            .unwrap()
+            .current()
+            .unwrap();
+        assert!(parent.private_function_http_pool.get().is_none());
+        let function_http = first_state.private_function_http_pool();
+        assert!(parent.private_function_http_pool.get().is_some());
+        drop(parent);
+        assert!(first_state.private_function_http_pool.get().is_none());
+        let factory = codex_http_client::HttpClientFactory::new(
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        );
+        assert!(
+            function_http
+                .client(&factory, "invalid-url", false, http::HeaderMap::new())
+                .unwrap()
+                .is_none()
+        );
         let home = process_slot()
             .unwrap()
             .read()
@@ -95,6 +121,7 @@ fn matching_scopes_outlive_idle_interval_and_failed_retirement_stays_owned() {
         // The timer must not queue a writer behind this active acquisition.
         tokio::time::sleep(PROCESS_IDLE + Duration::from_millis(100)).await;
         let second = opening("pool-key-a", true).await;
+        let second_http = second.2.current().unwrap().private_function_http_pool();
         assert!(Arc::ptr_eq(&manager, &second.2.current().unwrap().manager));
         assert!(!Arc::ptr_eq(
             &first.2.current().unwrap().agent_graph,
@@ -124,6 +151,15 @@ fn matching_scopes_outlive_idle_interval_and_failed_retirement_stays_owned() {
             &manager,
             &explicit.2.current().unwrap().manager
         ));
+        assert!(
+            explicit
+                .2
+                .current()
+                .unwrap()
+                .private_function_http_pool
+                .get()
+                .is_none()
+        );
         release(explicit).await;
         assert!(
             home.exists(),
@@ -135,6 +171,19 @@ fn matching_scopes_outlive_idle_interval_and_failed_retirement_stays_owned() {
         first.1.orphan().unwrap();
         assert!(first.1.inner.close_orphan().await.is_err());
         release(second).await;
+        // Both short-lived Provider owners have closed; the parent transport stays open.
+        assert!(
+            function_http
+                .client(&factory, "invalid-url", false, http::HeaderMap::new())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            second_http
+                .client(&factory, "invalid-url", false, http::HeaderMap::new())
+                .unwrap()
+                .is_none()
+        );
         assert!(
             process_slot().unwrap().clone().try_write_owned().is_err(),
             "failed orphan cleanup must keep its read lease"
@@ -145,6 +194,13 @@ fn matching_scopes_outlive_idle_interval_and_failed_retirement_stays_owned() {
 
         let blocked = BlockedHome::new(home.clone());
         assert!(close_process_runtime().await.is_err());
+        // Native shutdown succeeds before this deliberately failed home removal.
+        for pool in [&function_http, &second_http] {
+            assert!(
+                pool.client(&factory, "invalid-url", false, http::HeaderMap::new())
+                    .is_err()
+            );
+        }
         assert!(
             process_slot()
                 .unwrap()

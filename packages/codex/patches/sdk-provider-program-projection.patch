@@ -1,0 +1,57 @@
+diff --git a/codex-rs/core/src/event_mapping.rs b/codex-rs/core/src/event_mapping.rs
+index 54674972..9fcfdf72 100644
+--- a/codex-rs/core/src/event_mapping.rs
++++ b/codex-rs/core/src/event_mapping.rs
+@@ -263,7 +263,9 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
+         | ResponseItem::ShellCall { id, .. }
+         | ResponseItem::ShellCallOutput { id, .. }
+         | ResponseItem::McpListTools { id, .. }
+-        | ResponseItem::McpCall { id, .. } => Some(TurnItem::HostedToolCall(
++        | ResponseItem::McpCall { id, .. }
++        | ResponseItem::Program { id, .. }
++        | ResponseItem::ProgramOutput { id, .. } => Some(TurnItem::HostedToolCall(
+             codex_protocol::items::HostedToolCallItem {
+                 id: id.as_deref()?.to_string(),
+                 item: item.clone(),
+diff --git a/codex-rs/core/src/session/sdk_produced_items.rs b/codex-rs/core/src/session/sdk_produced_items.rs
+index 5f6bf406..dd893edc 100644
+--- a/codex-rs/core/src/session/sdk_produced_items.rs
++++ b/codex-rs/core/src/session/sdk_produced_items.rs
+@@ -179,7 +179,9 @@ fn is_produced_response(item: &ResponseItem) -> bool {
+         | ResponseItem::ShellCallOutput { .. }
+         | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::McpListTools { .. }
+-        | ResponseItem::McpCall { .. } => true,
++        | ResponseItem::McpCall { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. } => true,
+         _ => false,
+     }
+ }
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index e0fe34b3..054b05ee 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -4440,10 +4440,19 @@ fn admit_hosted_program_item(
+     calls: &mut HashMap<String, bool>,
+     item: &ResponseItem,
+ ) -> CodexResult<()> {
+-    if !prompt.tools.iter().any(|tool| {
+-        matches!(tool, codex_tools::ToolSpec::ProviderOnly(tool)
++    let opaque_prompt_catalog = prompt.tools.is_empty()
++        && prompt
++            .request_controls
++            .hosted_prompt
++            .as_ref()
++            .and_then(Option::as_ref)
++            .is_some_and(|hosted| hosted.omit_tools);
++    if !opaque_prompt_catalog
++        && !prompt.tools.iter().any(|tool| {
++            matches!(tool, codex_tools::ToolSpec::ProviderOnly(tool)
+             if tool.tool_type() == "programmatic_tool_calling")
+-    }) {
++        })
++    {
+         return Err(CodexErr::InvalidRequest(
+             "Provider returned a program without an offered programmatic tool".into(),
+         ));

@@ -68,6 +68,7 @@ async def test_checkpoint_diagnostic_validation_precedes_irreversible_native_sea
     failure = ValueError("invalid diagnostic source")
     seal = AsyncMock()
     owner = SimpleNamespace(
+        _profiles={},
         _executor=None,
         _strict_executor_writes=False,
         _executor_policy_digest=AsyncMock(return_value=None),

@@ -81,6 +81,7 @@ def _capture_opening_agent(
         decisions=agent.decisions,
         output_type=cast(OutputSpec[OutputT], agent.output_type),
         programmatic_tool_calling=agent.programmatic_tool_calling,
+        tool_name_collision_policy=agent.tool_name_collision_policy,
         transform_context=agent.transform_context,
         prepare_handoff_input=agent.prepare_handoff_input,
         before_compact=agent.before_compact,

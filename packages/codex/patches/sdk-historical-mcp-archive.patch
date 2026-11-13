@@ -1,8 +1,8 @@
 diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
-index 1a9e2ce5c3aa5ae266e07ea974d2309e33fc2a98..988a8b48e106ae86dc9100a15f52c01f21b4d96d 100644
+index a7fc7707..223114ba 100644
 --- a/codex-rs/core/src/session/inject.rs
 +++ b/codex-rs/core/src/session/inject.rs
-@@ -489,7 +489,7 @@ impl Session {
+@@ -506,7 +506,7 @@ impl Session {
          edit: SdkHistoryEdit,
      ) -> codex_protocol::error::Result<(String, Option<String>, bool)> {
          use crate::context_manager::HistoryReplacement;
@@ -11,29 +11,53 @@ index 1a9e2ce5c3aa5ae266e07ea974d2309e33fc2a98..988a8b48e106ae86dc9100a15f52c01f
          use codex_protocol::error::CodexErr;
          let invalid = |message: &str| CodexErr::InvalidRequest(message.into());
          let active = self.active_turn.lock().await;
-@@ -522,13 +522,13 @@ impl Session {
+@@ -539,26 +539,26 @@ impl Session {
                      return Err(invalid("history keep exceeds snapshot length"));
                  }
                  let mut originals = current.prefix(keep);
 -                for original in appended {
++                let projections = input_projections(&appended)
++                    .map_err(|_| invalid("Invalid canonical history item"))?;
++                for (original, projection) in appended.into_iter().zip(projections) {
+                     let cache_breakpoints = codex_protocol::prompt_cache::response_breakpoints(&original)
+                         .map_err(|_| invalid("Invalid canonical history cache breakpoint"))?;
 -                    let projection = input_projection(&original)
 -                        .map_err(|_| invalid("Invalid canonical history item"))?
 -                        .map(|mut item| {
 -                            Self::assign_missing_response_item_id(&mut item);
--                            self.annotate_client_response_item(item)
+-                            let mut envelope = self.annotate_client_response_item(item);
+-                            if !cache_breakpoints.is_empty()
+-                                && let (Some(id), ResponseItem::Message { content, .. }) =
+-                                    (envelope.item.id(), &envelope.item)
+-                                && let Ok(Some(annotation)) = codex_protocol::prompt_cache::PromptCacheAnnotation::bind(
+-                                    id.to_string(), content, &cache_breakpoints,
+-                                )
+-                            {
+-                                envelope.metadata.get_or_insert_with(codex_history::CodexHarnessMetadata::default)
+-                                    .prompt_cache = Some(annotation);
+-                            }
+-                            envelope
 -                        });
-+                let projections = input_projections(&appended)
-+                    .map_err(|_| invalid("Invalid canonical history item"))?;
-+                for (original, projection) in appended.into_iter().zip(projections) {
 +                    let projection = projection.map(|mut item| {
 +                        Self::assign_missing_response_item_id(&mut item);
-+                        self.annotate_client_response_item(item)
++                        let mut envelope = self.annotate_client_response_item(item);
++                        if !cache_breakpoints.is_empty()
++                            && let (Some(id), ResponseItem::Message { content, .. }) =
++                                (envelope.item.id(), &envelope.item)
++                            && let Ok(Some(annotation)) = codex_protocol::prompt_cache::PromptCacheAnnotation::bind(
++                                id.to_string(), content, &cache_breakpoints,
++                            )
++                        {
++                            envelope.metadata.get_or_insert_with(codex_history::CodexHarnessMetadata::default)
++                                .prompt_cache = Some(annotation);
++                        }
++                        envelope
 +                    });
                      originals.append(SdkOriginalItem {
                          original,
                          projection,
 diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
-index 0087076f2578ef327c0120e1d96114bd59a060f7..614adb1bbb2d4c0358b476a58215d2bc7c56bb3c 100644
+index f152a249..16064983 100644
 --- a/codex-rs/history/src/sdk_originals.rs
 +++ b/codex-rs/history/src/sdk_originals.rs
 @@ -4,7 +4,7 @@ use schemars::JsonSchema;
@@ -42,13 +66,13 @@ index 0087076f2578ef327c0120e1d96114bd59a060f7..614adb1bbb2d4c0358b476a58215d2bc
  use sha2::{Digest, Sha256};
 -use std::collections::BTreeMap;
 +use std::collections::{BTreeMap, BTreeSet};
-
+ 
  use crate::ResponseItemEnvelope;
-
-@@ -99,6 +99,67 @@ pub fn input_projection(value: &str) -> Result<Option<ResponseItem>, String> {
+ 
+@@ -106,6 +106,67 @@ pub fn input_projection(value: &str) -> Result<Option<ResponseItem>, String> {
      })
  }
-
+ 
 +/// Imported approvals are historical data, never a new provider decision.
 +/// Keep their exact originals while presenting each record as ordinary text.
 +/// A denial-only group retains the existing native protocol projection.
@@ -113,7 +137,7 @@ index 0087076f2578ef327c0120e1d96114bd59a060f7..614adb1bbb2d4c0358b476a58215d2bc
  /// The serialized catalog has one owner and no public execution authority.
  #[derive(Clone, Debug, Serialize, JsonSchema)]
  pub struct SdkOriginalHistory {
-@@ -1808,3 +1869,60 @@ mod tests {
+@@ -1815,3 +1876,60 @@ mod tests {
          assert_ne!(history.prefix(9999).revision(), history.revision());
      }
  }

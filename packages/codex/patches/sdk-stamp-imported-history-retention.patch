@@ -1,12 +1,11 @@
 diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index f0e7ac58..00ee8ccb 100644
 --- a/codex-rs/core/src/session/inject.rs
 +++ b/codex-rs/core/src/session/inject.rs
-@@ -532,7 +532,15 @@
-                 for (original, projection) in appended.into_iter().zip(projections) {
+@@ -552,6 +552,13 @@ impl Session {
                      let projection = projection.map(|mut item| {
                          Self::assign_missing_response_item_id(&mut item);
--                        self.annotate_client_response_item(item)
-+                        let mut envelope = self.annotate_client_response_item(item);
+                         let mut envelope = self.annotate_client_response_item(item);
 +                        if let Some(policy) = self
 +                            .services
 +                            .thread_extension_data
@@ -14,7 +13,6 @@ diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inj
 +                        {
 +                            policy.stamp_new_items(std::slice::from_mut(&mut envelope));
 +                        }
-+                        envelope
-                     });
-                     originals.append(SdkOriginalItem {
-                         original,
+                         if !cache_breakpoints.is_empty()
+                             && let (Some(id), ResponseItem::Message { content, .. }) =
+                                 (envelope.item.id(), &envelope.item)

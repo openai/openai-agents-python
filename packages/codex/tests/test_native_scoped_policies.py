@@ -707,6 +707,8 @@ class AskingPeer(Peer):
         schema=None,
         form_method="elicitation/create",
         form_meta=None,
+        form_request_id=873,
+        effect_before_prompt=False,
     ):
         super().__init__(names=("search",))
         self.startup = startup
@@ -714,6 +716,8 @@ class AskingPeer(Peer):
         self.form_mode = form_mode
         self.form_method = form_method
         self.form_meta = form_meta
+        self.form_request_id = form_request_id
+        self.effect_before_prompt = effect_before_prompt
         self.schema = schema
         self.answers: list[dict[str, Any]] = []
         self.prompted = asyncio.Event()
@@ -722,14 +726,19 @@ class AskingPeer(Peer):
 
     async def handle(self, request):
         body = await request.json()
-        if body.get("id") == 873 and "method" not in body:
+        if body.get("id") == self.form_request_id and "method" not in body:
             self.answers.append(body)
             self.answered.set()
             return web.Response(status=202)
         if body.get("method") == ("tools/list" if self.startup else "tools/call"):
             self.requests.append(body)
+            if self.effect_before_prompt and not self.startup:
+                self.calls.append(body["params"])
             stream = web.StreamResponse(
-                headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"}
+                headers={
+                    "Content-Type": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                }
             )
             await stream.prepare(request)
             fields = (
@@ -743,7 +752,7 @@ class AskingPeer(Peer):
             )
             prompt = {
                 "jsonrpc": "2.0",
-                "id": 873,
+                "id": self.form_request_id,
                 "method": self.form_method,
                 "params": {
                     "mode": "url",
@@ -768,7 +777,8 @@ class AskingPeer(Peer):
                 if self.startup:
                     result = {"tools": []}
                 else:
-                    self.calls.append(body["params"])
+                    if not self.effect_before_prompt:
+                        self.calls.append(body["params"])
                     result = {"content": [{"type": "text", "text": json.dumps(self.answers)}]}
                 await stream.write(
                     (
@@ -1113,7 +1123,7 @@ async def test_root_native_mcp_reply_retirement_owns_its_enqueue(responses, kind
                     def __getattr__(self, name):
                         return getattr(original, name)
 
-                    async def call(self, operation, *args):
+                    async def _hold_first_reply(self, operation):
                         if operation == "resolve_elicitation" and not reached.is_set():
                             reached.set()
                             try:
@@ -1122,7 +1132,16 @@ async def test_root_native_mcp_reply_retirement_owns_its_enqueue(responses, kind
                                 cancelled.set()
                                 await released.wait()
                                 raise
+
+                    async def call(self, operation, *args):
+                        await self._hold_first_reply(operation)
                         return await original.call(operation, *args)
+
+                    async def _respond_child_question(self, question_id, operation, encoded):
+                        await self._hold_first_reply(operation)
+                        return await original._respond_child_question(
+                            question_id, operation, encoded
+                        )
 
                 s._native = HeldReply()
                 turn = await s.submit("Start the old request")

@@ -1146,15 +1146,42 @@ impl PythonTools {
         receipt: &Value,
         usage: codex_protocol::protocol::TokenUsage,
     ) -> Result<bool> {
+        Ok(self
+            .with_model_attempt_receipt(root, attempt_id, receipt, |attempt| {
+                attempt.report_usage(usage)
+            })?
+            .is_some())
+    }
+
+    pub(crate) fn account_provider_request(
+        self: &Arc<Self>,
+        root: &str,
+        attempt_id: &str,
+        receipt: &Value,
+        operation: codex_extension_api::ProviderRequestAccounting,
+    ) -> Result<Option<String>> {
+        self.with_model_attempt_receipt(root, attempt_id, receipt, |attempt| {
+            attempt.account_provider_request(operation)
+        })?
+        .ok_or_else(|| anyhow::anyhow!("Native provider request accounting receipt expired"))
+    }
+
+    fn with_model_attempt_receipt<T>(
+        self: &Arc<Self>,
+        root: &str,
+        attempt_id: &str,
+        receipt: &Value,
+        apply: impl FnOnce(&dyn codex_extension_api::ModelAttemptAdmission) -> Result<T, String>,
+    ) -> Result<Option<T>> {
         let Some((owner, id)) = self.preparation_callback_owner(root, receipt) else {
-            return Ok(false);
+            return Ok(None);
         };
         let replies = owner
             .preparation_replies
             .lock()
             .expect("Python preparation replies poisoned");
         let Some(slot) = replies.as_ref().and_then(|pending| pending.get(&id)) else {
-            return Ok(false);
+            return Ok(None);
         };
         let callback = &slot.callback;
         // Cancellation revokes execution, but an entered worker can still measure its own
@@ -1163,16 +1190,17 @@ impl PythonTools {
             || !callback.entered.load(Ordering::Acquire)
             || callback.released.load(Ordering::Acquire)
         {
-            return Ok(false);
+            return Ok(None);
         }
         let Some(attempt) = &callback.model_attempt else {
-            return Ok(false);
+            return Ok(None);
         };
         if attempt.id() != attempt_id {
-            return Ok(false);
+            return Ok(None);
         }
-        attempt.report_usage(usage).map_err(anyhow::Error::msg)?;
-        Ok(true)
+        apply(attempt.as_ref())
+            .map(Some)
+            .map_err(anyhow::Error::msg)
     }
 
     fn preparation_callback_operation(
@@ -1661,6 +1689,63 @@ impl PythonTools {
             "Managed Agent callback requires its captured native step profile"
         );
         Ok(self.snapshot())
+    }
+
+    /// Native restore validates only the application's current root selection.
+    pub(crate) fn native_mcp_root_source(
+        &self,
+        thread: &ExtensionData,
+        binding: &codex_mcp::McpBinding,
+        server: &str,
+        raw_tool: &str,
+    ) -> Result<ExtensionData> {
+        ensure!(
+            !self.managed_profiles.load(Ordering::Acquire) && self.descendant_source.is_none(),
+            "Native MCP root restore requires an ordinary current root"
+        );
+        ensure!(
+            self.policy
+                .allowed_mcp_tools
+                .as_ref()
+                .is_none_or(
+                    |tools| tools
+                        .iter()
+                        .any(
+                            |(selected_server, selected_tool, _)| selected_server == server
+                                && selected_tool == raw_tool
+                        )
+                ),
+            "Native MCP tool is no longer selected by the current root"
+        );
+        let control = self
+            .interception
+            .get()
+            .and_then(Weak::upgrade)
+            .context("Native MCP root has no current policy owner")?;
+        let source = ExtensionData::new(thread.level_id());
+        source.insert(control.capture_mcp_source_for_binding(binding, &self.policy));
+        ensure!(
+            crate::native_interception::native_mcp_checkpoint_source(&source),
+            "Native MCP continuation cannot replay host callbacks"
+        );
+        Ok(source)
+    }
+
+    pub(crate) fn native_mcp_checkpoint_specs(&self, source: &ExtensionData) -> Result<Value> {
+        let generation = source
+            .get::<ProfileCatalog>()
+            .map(|catalog| catalog.generation.clone())
+            .or_else(|| {
+                source
+                    .get::<StepCatalog>()
+                    .map(|catalog| catalog.generation.clone())
+            })
+            .context("Native MCP checkpoint requires its original SDK catalog")?;
+        ensure!(
+            self.admits_generation(&generation),
+            "Native MCP catalog is no longer admitted"
+        );
+        checkpoint_specs(&generation.specs)
     }
 
     pub(crate) fn request_sampling_stop(&self, turn_id: &str) {
@@ -2502,7 +2587,9 @@ impl PythonTools {
     ) -> Result<Generation> {
         validate_declarations(&specs)?;
         let mut entries = Vec::new();
-        for (declaration, (namespace, tool)) in specs.iter().zip(functions(&specs)) {
+        for (slot, (declaration, (namespace, tool))) in
+            specs.iter().zip(functions(&specs)).enumerate()
+        {
             let name = ToolName::new(
                 namespace.as_ref().map(|ns| ns.name.clone()),
                 tool.name.clone(),
@@ -2551,6 +2638,17 @@ impl PythonTools {
                 _ => {
                     let mut function = dynamic_tool_to_responses_api_tool(&tool)?;
                     function.defer_loading = None;
+                    if let Some(callers) = specs.provider_callers(slot) {
+                        use codex_tools::{ProviderToolCaller, ProviderToolCallers};
+                        let mut values = Vec::new();
+                        if callers.contains(ProviderToolCallers::DIRECT) {
+                            values.push(ProviderToolCaller::Direct);
+                        }
+                        if callers.contains(ProviderToolCallers::PROGRAMMATIC) {
+                            values.push(ProviderToolCaller::Programmatic);
+                        }
+                        function.allowed_callers = Some(values);
+                    }
                     match namespace.filter(|_| !key.is_default_namespace()) {
                         None => ToolSpec::Function(function),
                         Some(ns) => ToolSpec::Namespace(ResponsesApiNamespace {
@@ -4233,7 +4331,9 @@ impl PythonTools {
             None,
             None,
             Some(&builtin_tools),
-        )?;
+
+                    None,
+)?;
         // Opening has not published the Thread or started its Python reader yet.
         self.pending
             .lock()
@@ -4312,7 +4412,9 @@ impl PythonTools {
             None,
             None,
             None,
-        )
+
+                    None,
+)
         .map(|(_, _, receiver)| receiver)
     }
 
@@ -4687,7 +4789,9 @@ impl PythonTools {
         self.enqueue_profile(
             thread, generation, slot, turn, call, arguments, None, source, model, reentry, None,
             media, None, None,
-        )
+
+                    None,
+)
     }
 
     fn enqueue_profile(
@@ -4706,6 +4810,7 @@ impl PythonTools {
         media: Option<NativeMediaContext>,
         realtime_tool_call: Option<Value>,
         builtin_tools: Option<&HashSet<ToolName>>,
+        provider_agent_metadata: Option<Value>,
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         let entry = &generation.entries[slot];
         let key = PendingKey {
@@ -4754,6 +4859,11 @@ impl PythonTools {
                 "_sdk_trace": codex_otel::current_span_w3c_trace_context()
             }
         });
+        if matches!(source, ToolCallSource::Direct) {
+            if let Some(metadata) = provider_agent_metadata {
+                request["msg"]["_sdk_hosted_agent_metadata"] = metadata;
+            }
+        }
         if let Some(error) = argument_error {
             request["msg"]["_sdk_argument_error"] = json!(error);
         }
@@ -6402,6 +6512,7 @@ impl ToolContributor for PythonContributor {
                     .specs
                     .caller_limits(slot)
                     .is_some_and(|callers| !callers.contains(codex_tools::ToolExposures::DIRECT))
+                    && (voice || generation.specs.provider_callers(slot).is_none())
                 || defaults.as_ref().is_some_and(|defaults| {
                     !defaults.iter().any(|name| {
                         name.clone().with_default_namespace()
@@ -6902,7 +7013,8 @@ impl ToolContributor for PythonContributor {
                     request["msg"]["initial_input"] = json!(records);
                 }
             }
-            if step.get::<codex_extension_api::StagedInputPreparation>()
+            if step
+                .get::<codex_extension_api::StagedInputPreparation>()
                 .is_some_and(|preparation| preparation.is_for(turn.level_id()))
             {
                 request["msg"]["staged_input_preparation"] = json!(true);
@@ -7008,14 +7120,19 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
         self.generation.entries[self.slot].spec.clone()
     }
 
+    fn allowed_provider_callers(&self) -> Option<codex_tools::ProviderToolCallers> {
+        self.generation.specs.provider_callers(self.slot)
+    }
+
     fn allowed_callers(&self) -> Option<codex_tools::ToolExposures> {
-        self.generation.specs.caller_limits(self.slot)
+        self.generation.specs.model_surfaces(self.slot)
     }
 
     fn exposure(&self) -> ToolExposure {
         let exposure = self.generation.entries[self.slot].exposure;
-        let model_only_custom = matches!(self.generation.specs[self.slot], DynamicToolSpec::Custom(_))
-            && !self.explicitly_allows_code();
+        let model_only_custom =
+            matches!(self.generation.specs[self.slot], DynamicToolSpec::Custom(_))
+                && !self.explicitly_allows_code();
         if model_only_custom && exposure == ToolExposure::Direct {
             return ToolExposure::DirectModelOnly;
         }
@@ -7128,7 +7245,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 self.builtin_tools
                     .as_ref()
                     .and_then(|receipt| receipt.names()),
-            );
+
+                    call.conversation_history.provider_agent_metadata().cloned(),
+);
             let (key, invocation, receiver) = match pending {
                 Ok(pending) => pending,
                 Err(error) => {
@@ -10105,6 +10224,7 @@ pub(crate) mod managed_tests {
 
     pub(super) fn call(call_id: &str, original_name: &str, original_args: &str) -> ResponseItem {
         ResponseItem::FunctionCall {
+            caller: None,
             id: None,
             namespace: Some("_agents_sdk".into()),
             name: "dispatch".into(),

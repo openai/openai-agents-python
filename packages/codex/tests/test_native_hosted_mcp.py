@@ -18,6 +18,7 @@ from agents import (
     CustomStorage,
     FunctionTool,
     HostedMCP,
+    HostedProgrammaticToolCalling,
     InteractionExpiredError,
     InteractionRequired,
     LocalStorage,
@@ -1032,7 +1033,7 @@ async def test_native_hosted_mcp_unbound_program_caller_fails_before_exposure(
                 instructions="Use docs.",
                 provider=native,
                 model="gpt-5.2",
-                tools=[tool],
+                tools=[tool, HostedProgrammaticToolCalling()],
                 programmatic_tool_calling=programmatic,
             ).run("Lookup.", on_interaction=answer if manual else None)
     assert observed == []

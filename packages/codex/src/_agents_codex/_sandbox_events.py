@@ -221,6 +221,11 @@ class Instrumentation(_Instrumentation):
             length = event.data.get("bytes")
             if type(length) is int and 0 <= length <= 2**53 - 1:
                 safe.data = {"bytes": length}
+        if safe.op == "resolve_exposed_port":
+            key = "server.port" if safe.phase == "finish" else "port"
+            port = event.data.get(key)
+            if type(port) is int and 1 <= port <= 65535:
+                safe.data[key] = port
         if isinstance(safe, SandboxSessionFinishEvent):
             safe.error_type = "SandboxOperationError" if not safe.ok else None
             safe.error_message = None
@@ -228,6 +233,14 @@ class Instrumentation(_Instrumentation):
             safe.error_retryable = None
             safe.stdout = safe.stderr = None
             safe.stdout_bytes = safe.stderr_bytes = None
+            if safe.op == "running":
+                alive = event.data.get("alive")
+                if type(alive) is bool:
+                    safe.data["alive"] = alive
+            if safe.op == "exec":
+                code = event.data.get("process.exit.code")
+                if type(code) is int and -(2**31) <= code < 2**32:
+                    safe.data.update({"exit_code": code, "process.exit.code": code})
             if safe.op in ("exec", "write_stdin"):
                 for stream in ("stdout", "stderr"):
                     raw = getattr(event, stream + "_bytes")

@@ -18,6 +18,7 @@ from tests.native_fixtures import (
         "removed-json",
         "removed-receipt-json",
         "rewritten-initial-json",
+        "rewritten-root-json",
         "trusted-recapture",
     ],
 )
@@ -82,7 +83,7 @@ async def test_removing_handoff_presentation_cannot_disclose_canonical_source(re
                     del profile["presentation"]
                     count += 1
         assert count > 0
-        if case in ("removed-receipt-json", "rewritten-initial-json"):
+        if case in ("removed-receipt-json", "rewritten-initial-json", "rewritten-root-json"):
             for history in (
                 saved.history,
                 *(child.history for child in saved.descendants),
@@ -100,6 +101,16 @@ async def test_removing_handoff_presentation_cannot_disclose_canonical_source(re
             assert len(profiles) >= 2
             profiles[0]["profile_id"] = profiles[1]["profile_id"]
             profiles[0]["model"] = profiles[1]["model"]
+        if case == "rewritten-root-json":
+            profiles = [
+                row["metadata"]["sdk_agent_profile"]
+                for row in saved.history
+                if (row.get("metadata") or {}).get("sdk_agent_profile")
+            ]
+            root_profile = profiles[0]
+            for profile in profiles[1:]:
+                profile["profile_id"] = root_profile["profile_id"]
+                profile["model"] = root_profile["model"]
         try:
             async with source.session(state=saved) as restored:
                 result = await (await restored.submit("cold follow-up")).get_result()
@@ -117,7 +128,7 @@ async def test_removing_handoff_presentation_cannot_disclose_canonical_source(re
         pytest.fail("Removed presentation restored without independent authentication")
 
 
-async def test_filtered_graph_without_handoff_keeps_ordinary_unverified_root_capture(responses):
+async def test_unfiltered_graph_keeps_ordinary_unverified_root_capture(responses):
     responses.respond(assistant_output("source continued"))
     responses.respond(assistant_output("source restored"))
     async with NativeProvider(
@@ -132,7 +143,6 @@ async def test_filtered_graph_without_handoff_keeps_ordinary_unverified_root_cap
             model="gpt-5.5",
             provider=provider,
             handoffs=[destination],
-            prepare_handoff_input=lambda value: value,
         )
         async with source.session() as session:
             await (await session.submit("ordinary root input")).get_result()
@@ -144,7 +154,7 @@ async def test_filtered_graph_without_handoff_keeps_ordinary_unverified_root_cap
     assert "ordinary root input" in json.dumps(responses.requests[1]["input"])
 
 
-async def test_unrelated_configured_child_keeps_ordinary_unverified_root_capture(
+async def test_unrelated_configured_child_keeps_owned_root_capture(
     responses,
 ):
     responses.respond(function_call("nested_child", {"input": "child question"}, "root-child"))
@@ -175,7 +185,7 @@ async def test_unrelated_configured_child_keeps_ordinary_unverified_root_capture
         async with source.session() as session:
             result = await (await session.submit("ordinary root input")).get_result()
             assert result.final_output == "parent answer"
-            saved = SessionState.from_json((await session.save_state()).to_json())
+            saved = await session.save_state()
         async with source.session(state=saved) as restored:
             result = await (await restored.submit("Continue.")).get_result()
             assert result.final_output == "parent restored"
@@ -258,3 +268,42 @@ async def test_filtered_handoff_returning_to_root_requires_current_authority(res
             request = json.dumps(responses.requests[3]["input"])
             assert "private canonical source context" not in request
             pytest.fail("An unsigned return to the root bypassed current graph authority")
+
+
+@pytest.mark.parametrize("authority", ["owned", "digest", "unsigned"])
+async def test_prepared_graph_authenticates_root_before_any_handoff(responses, authority):
+    from hashlib import sha256
+
+    responses.respond(assistant_output("root captured"))
+    responses.respond(assistant_output("root restored"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-prepared-root", supports_websockets=False
+    ) as provider:
+        destination = Agent(name="destination", instructions="Destination.")
+        source = Agent(
+            instructions="Source.",
+            model="gpt-5.5",
+            provider=provider,
+            handoffs=[destination],
+            prepare_handoff_input=lambda value: value,
+        )
+        async with source.session() as session:
+            await (await session.submit("ordinary root input")).get_result()
+            saved = await session.save_state()
+        raw = saved.to_json()
+        if authority == "unsigned":
+            with pytest.raises(ValueError, match="requires authenticated state"):
+                async with source.session(state=SessionState.from_json(raw)):
+                    pytest.fail("Unsigned prepared-graph root opened")
+            assert len(responses.requests) == 1
+            return
+        state = (
+            saved
+            if authority == "owned"
+            else SessionState.from_json(raw, expected_sha256=sha256(raw.encode()).hexdigest())
+        )
+        async with source.session(state=state) as restored:
+            assert (
+                await (await restored.submit("Continue.")).get_result()
+            ).final_output == "root restored"
+        assert len(responses.requests) == 2

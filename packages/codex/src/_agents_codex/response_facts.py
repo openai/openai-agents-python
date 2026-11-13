@@ -45,6 +45,17 @@ class TextProbabilitiesFact(TypedDict):
     capture_complete: bool
 
 
+class HostedAgentAttributionFact(TypedDict):
+    kind: Literal["hosted_agent_attribution"]
+    item_fingerprint: str
+    agent_name: str
+    phase: str | None
+
+
+class HostedAgentAttributionSummary(TypedDict):
+    kind: Literal["hosted_agent_attribution"]
+
+
 class CaptureTruncatedFact(TypedDict):
     kind: Literal["capture_truncated"]
 
@@ -54,7 +65,11 @@ class MalformedProbabilitiesFact(TypedDict):
 
 
 ResponseFact: TypeAlias = (
-    RefusalFact | TextProbabilitiesFact | CaptureTruncatedFact | MalformedProbabilitiesFact
+    RefusalFact
+    | TextProbabilitiesFact
+    | HostedAgentAttributionFact
+    | CaptureTruncatedFact
+    | MalformedProbabilitiesFact
 )
 
 
@@ -74,7 +89,10 @@ class ResponseFactContentSummary(TypedDict):
 
 
 ResponseFactSummary: TypeAlias = (
-    ResponseFactContentSummary | CaptureTruncatedFact | MalformedProbabilitiesFact
+    ResponseFactContentSummary
+    | HostedAgentAttributionSummary
+    | CaptureTruncatedFact
+    | MalformedProbabilitiesFact
 )
 
 
@@ -95,6 +113,8 @@ def _summarize_response_fact(
     fact = result["fact"]
     if fact["kind"] in ("refusal", "text_probabilities"):
         result["fact"] = {"kind": fact["kind"], "capture_complete": fact["capture_complete"]}
+    elif fact["kind"] == "hosted_agent_attribution":
+        result["fact"] = {"kind": fact["kind"]}
     return cast(RecordedResponseFactSummary, result)
 
 
@@ -179,6 +199,16 @@ def _response_fact_record(payload: Any) -> RecordedResponseFact | None:
             "tokens",
             "capture_complete",
         )
+    elif (
+        kind == "hosted_agent_attribution"
+        and isinstance(fact.get("item_fingerprint"), str)
+        and len(fact["item_fingerprint"]) == 64
+        and all(c in "0123456789abcdef" for c in fact["item_fingerprint"])
+        and isinstance(fact.get("agent_name"), str)
+        and fact["agent_name"]
+        and (fact.get("phase") is None or isinstance(fact["phase"], str))
+    ):
+        fields = ("kind", "item_fingerprint", "agent_name", "phase")
     elif kind in ("capture_truncated", "malformed_probabilities"):
         fields = ("kind",)
     else:

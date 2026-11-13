@@ -30,13 +30,17 @@ from weakref import WeakKeyDictionary
 from pydantic import AnyUrl
 from typing_extensions import NotRequired, TypedDict
 
-from ._lifecycle import _close_after_error, _join, _retain_cleanup_error
+from ._lifecycle import (
+    _clear_error_frames as _clear_adapter_error_frames,
+    _close_after_error,
+    _join,
+    _retain_cleanup_error,
+)
 from ._public import preserve_module_identity as _preserve_module_identity
 from .realtime_adapter import (
     NativeRealtimeAdapter as NativeRealtimeAdapter,
     NativeRealtimeConnection as NativeRealtimeConnection,
     RealtimeAdapterContext as RealtimeAdapterContext,
-    _clear_adapter_error_frames,
     _RealtimeAdapterDriver,
 )
 from .realtime_agents import (

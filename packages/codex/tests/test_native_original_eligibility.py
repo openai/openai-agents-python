@@ -1,6 +1,7 @@
 """Stored raw history filtering and clear use the original native identity."""
 
 import json
+import sys
 
 import pytest
 
@@ -64,7 +65,18 @@ def originals():
     ]
 
 
-@pytest.mark.parametrize("kind", ["local", "custom"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "local",
+        pytest.param(
+            "custom",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32", reason="SQLiteSessionStore requires POSIX file locking"
+            ),
+        ),
+    ],
+)
 async def test_stored_middle_filter_pair_delete_and_clear_keep_identity(responses, tmp_path, kind):
     effects = []
 
@@ -174,7 +186,18 @@ async def test_clearing_stored_branch_keeps_parent_materialized_history(response
             assert "KEEP_" not in json.dumps(responses.requests[1]["input"])
 
 
-@pytest.mark.parametrize("kind", ["local", "custom"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "local",
+        pytest.param(
+            "custom",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32", reason="SQLiteSessionStore requires POSIX file locking"
+            ),
+        ),
+    ],
+)
 async def test_bounded_originals_exclude_standalone_native_instruction_receipts(
     responses, tmp_path, kind
 ):

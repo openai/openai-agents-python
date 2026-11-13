@@ -22,7 +22,17 @@ class Adapter:
         transport: str = "http",
         default_host: bool = False,
         provider_mode: str = "caller-owned",
+        request_transport: str | None = None,
     ):
+        if request_transport not in (None, "auto", "http", "websocket"):
+            raise ValueError("Unknown native request transport")
+        if request_transport is not None and (not default_host or provider_mode != "omitted"):
+            raise ValueError("Request transport requires omitted Provider default-host calls")
+        self._run_options = (
+            {"model_settings": {"request_transport": request_transport}}
+            if request_transport is not None
+            else {}
+        )
         if provider_mode not in ("caller-owned", "omitted"):
             raise ValueError("Unknown native Provider mode")
         if provider_mode == "omitted" and (
@@ -127,7 +137,7 @@ class Adapter:
         if self.stream:
             async with self.conversation() as conversation:
                 return await conversation.run(prompt)
-        result = await self.agent.run(prompt)
+        result = await self.agent.run(prompt, **self._run_options)
         return {"text": result.final_output, "deltas": [], "first_delta_ns": None}
 
     async def _drain_turn(self, state):
@@ -191,7 +201,7 @@ class Adapter:
             task = asyncio.create_task(self._drain_turn(state))
         self._pending[operation] = state
         try:
-            result = await self.agent.run(prompt)
+            result = await self.agent.run(prompt, **self._run_options)
             assert self.agent.provider is None
             context = state["context"]
             assert context is not None and context.submission is result.turn

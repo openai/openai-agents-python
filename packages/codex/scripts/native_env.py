@@ -130,23 +130,35 @@ def build_environment(root: Path) -> dict[str, str]:
         if target.endswith("-windows-msvc")
         else f"librusty_v8_ptrcomp_sandbox_release_{target}.a.gz"
     )
-    if archive not in checksums:
-        raise ValueError(f"No pinned V8 artifacts for native host {target}")
     binding = f"src_binding_ptrcomp_sandbox_release_{target}.rs"
     base_url = f"https://github.com/openai/codex/releases/download/rusty-v8-v{version}"
-    if binding not in checksums and keys[1] not in environment:
-        # Windows binding digests are pinned indirectly via Codex's release manifests.
+    needed = [
+        filename
+        for key, filename in zip(keys, (archive, binding), strict=True)
+        if key not in environment
+    ]
+    if any(filename not in checksums for filename in needed):
+        # Some targets pin these digests through the upstream release manifest.
         release = f"rusty_v8_ptrcomp_sandbox_release_{target}.sha256"
-        release_pins = _checksums(manifest.with_name(f"{manifest.stem}_release_manifests.sha256"))
+        release_pins = _checksums(
+            manifest.with_name(f"{manifest.stem}_release_manifests.sha256")
+        )
+        if release not in release_pins:
+            raise ValueError(f"No pinned V8 artifacts for native host {target}")
         verified = _download(
             f"{base_url}/{release}", root / ".cache/v8" / release, release_pins[release]
         )
-        checksums.update(_checksums(verified))
+        for name, checksum in _checksums(verified).items():
+            checksums.setdefault(name, checksum)
     for key, filename in zip(keys, (archive, binding), strict=True):
         if key in environment:
             continue
+        if filename not in checksums:
+            raise ValueError(f"No pinned V8 checksum for {filename}")
         # Upstream renames Windows downloads in its checksum manifest.
-        remote = filename.replace("rusty_v8_release_", "rusty_v8_ptrcomp_sandbox_release_")
+        remote = filename.replace(
+            "rusty_v8_release_", "rusty_v8_ptrcomp_sandbox_release_"
+        )
         path = _download(
             f"{base_url}/{remote}",
             root / ".cache/v8" / filename,
