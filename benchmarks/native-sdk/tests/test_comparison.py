@@ -726,7 +726,7 @@ class ProviderModeTests(unittest.IsolatedAsyncioTestCase):
                     provider_options = (
                         {"response_mode": "buffered", "supports_websockets": False}
                         if response_mode == "buffered"
-                        else {}
+                        else {"supports_websockets": False}
                     )
                     constructor.assert_called_once_with(
                         api_key="synthetic-benchmark-key", **provider_options
@@ -1413,6 +1413,34 @@ class DualHTTPQualificationTests(unittest.TestCase):
                     v1_response_mode="buffered",
                 )
             target[field] = previous
+
+    def test_streaming_dual_peer_accepts_http1_without_alpn(self):
+        value = self.dual_records()
+        for result in value["oneshot_text"]["v1"]:
+            result["server"]["tls_transports"]["1"].update(
+                http_version="1.1", alpn_protocol=None
+            )
+            for receipt in result["server"]["receipts"]:
+                receipt.update(http_version="1.1", tls_alpn_protocol=None)
+        summary = compare.summarize(
+            value,
+            expected_versions=VERSIONS,
+            default_host=True,
+            peer_http_mode="dual",
+        )
+        self.assertEqual(summary["oneshot_text"]["v1_response_mode"], "streaming")
+
+    def test_buffered_dual_peer_accepts_complete_http2_json(self):
+        value = self.dual_records()
+        buffered_rows(value["oneshot_text"]["v1"])
+        summary = compare.summarize(
+            value,
+            expected_versions=VERSIONS,
+            default_host=True,
+            peer_http_mode="dual",
+            v1_response_mode="buffered",
+        )
+        self.assertEqual(summary["oneshot_text"]["v1_response_mode"], "buffered")
 
     def test_dual_protocol_schedule_survives_summary(self):
         summary = compare.summarize(

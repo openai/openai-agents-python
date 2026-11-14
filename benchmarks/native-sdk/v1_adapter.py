@@ -62,6 +62,8 @@ class Adapter:
         self.tool_calls = 0
         self._pending = {}
         self._implicit_tool = provider_mode == "omitted" and with_tool
+        if transport == "http":
+            provider_options["supports_websockets"] = False
         if not default_host:
             provider_options.update(base_url=base_url, supports_websockets=transport == "websocket")
         self.provider = (

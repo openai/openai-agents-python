@@ -5,8 +5,8 @@
   "protocol_peer.py": "755c36bb35512c087411a26e59e54be6bb434e3bcf19e6e58fa035d68f915534",
   "requirements-http2-peer.txt": "48f4a1ac96b99d27cfa9b2e01f11db3305c73ffafc441cae1b38c1cbdd06762d",
   "v0_adapter.py": "9ed442de1513879b62298cedf29f4ceef7071e31b3a5cad9b2986fa3f36bc0cc",
-  "v1_adapter.py": "5d8fbbab4b4ef4b01d35e37ff7f435e909cdab909e4bc7104bc15fc40876fef4",
+  "v1_adapter.py": "9c2d325c726bbcd8523adec9cbbc2b56ec8fb15688d0b2383cbb7d26926f52e1",
   "validate_peer.py": "fe63e1cafe4e7089d61c0a9117099d4ef519ee30edc048447592389a349fa08c",
-  "worker.py": "55d8a4855b209c4e6cd5906774a4442d7f5601fcda093baced1674947f061ebf",
+  "worker.py": "36d0b69c674632f25fa4f3b3803e16c2a932e3352d248a6b04fabb98c10af52f",
   "workloads.py": "96a7da23414f10667c85f87dbc0f3ffde509409dd3ee26e22548c73bbc4e6f28"
 }
