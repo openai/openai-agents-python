@@ -1,6 +1,6 @@
 # Releasing an accepted answer
 
-The application in [accepted_output.py](accepted_output.py) keeps draft text private while displaying its own progress messages. It releases an answer only after `await turn.get_result()` and application validation. This pattern serves report generation, support replies, and structured results using the existing native `Agent` and `Session` APIs.
+The report and support scenarios in [accepted_output.py](accepted_output.py) have been keeping drafts private and publishing final answers after `await turn.get_result()` and application validation. The section scenarios have been publishing independently checked content, including from a tool callback before final settlement. These examples have been using the native `Agent` and `Session` APIs.
 
 ## Running the example
 
@@ -38,7 +38,7 @@ The support example obtains approval from trusted application context. It checks
 
 The rejected and cancelled turns raise `TurnStoppedError` through `get_result()`. An approval callback exception fails the turn. A wrong case identifier fails the application's post-completion validation. Each path skips publication and displays only an application-owned status. The cancellation example waits for approval checking before calling `await turn.cancel()`.
 
-The recipe demonstrates private computation, accepted completion, application checks, then publication. The same sequence applies to a response body, an answer record, or an artifact download. Cancellation does not undo completed tool effects or earlier publication. The application's publishing operation manages durable writes, retries, concurrent updates, and delivery failures separately.
+The report and support scenarios have been separating private computation, accepted completion, application checks, and publication. The same sequence applies to a response body, an answer record, or an artifact download. Cancellation does not undo completed tool effects or earlier publication. The application's publishing operation manages durable writes, retries, concurrent updates, and delivery failures separately.
 
 The synthetic report check matches a phrase to keep the example focused. Real report validation requires application-specific checks for facts, citations, and format. The scripted peer exercises application control flow and the native runtime; it does not evaluate live model quality.
 
@@ -50,11 +50,11 @@ This pattern applies when each section has its own evidence and permission to pu
 
 ## Publishing sections within one turn
 
-The same-turn scenario has been using an application-owned `publish_section` function tool. The application has been checking each proposed section against trusted facts before storing it by section ID in its in-memory destination. Repeating an accepted section has been replacing that section's entry. The peer has been verifying the inventory section's publication before responding to the next model request. It has then been proposing an unsupported delivery section, which the tool has been withholding. One submission has been covering both calls and a later final proposal.
+Within one submission, the `publish_section` function tool has been checking sections against trusted facts and storing accepted sections by ID in an in-memory map. Repeated publication has been replacing the same entry. The scripted peer has been checking that the inventory section has been reaching this destination before proposing an unsupported delivery section and a final summary.
 
-The completion callback has been rejecting that final proposal. The application has been keeping the provisional summary private while retaining the independently accepted inventory section. Section publication has been taking effect inside the tool callback, before SDK acceptance of the tool result or final answer. Later tool policies, cancellation, and final-answer rejection have not been undoing that application effect. The application has been checking facts at its publication point; final-answer acceptance has been remaining separate.
+The tool has been withholding the delivery section, and the completion callback has been rejecting the final summary. The inventory section has been staying published. Its publication has been taking effect inside the tool callback, before SDK acceptance of the tool result or final answer. Later tool policies, cancellation, and final-answer rejection have not been undoing that effect.
 
-This pattern has been supporting independently checked inventory facts and individually approved support updates. The example has been keeping delivery in memory. Production destinations have been requiring publication authorization, durable receipts, and reconciliation after an unknown acknowledgment. The in-memory section map has not been providing durable idempotency. Passive observations have been allowing gaps and have not been providing a durable delivery queue. Whole-answer checks that can invalidate earlier sections have been requiring publication after final acceptance instead. This recipe has not been turning raw text deltas into accepted incremental output.
+This pattern has been supporting independently checked facts and individually approved updates. Production destinations have been requiring publication authorization, durable receipts, and reconciliation after an unknown acknowledgment. The in-memory map has not been providing durable idempotency, and passive observations have not been providing a durable delivery queue. Checks that can invalidate earlier sections have been requiring publication after final acceptance. This recipe has not been turning raw text deltas into accepted incremental output.
 
 ## Observing accepted output
 
