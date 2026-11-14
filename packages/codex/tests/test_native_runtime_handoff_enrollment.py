@@ -17,6 +17,8 @@ from tests.native_fixtures import (
 
 
 async def child(mode: str, url: str, path: Path, variant: str = "current") -> None:
+    receipt = path / f"{mode}-{variant}.receipt.json"
+    assert not receipt.exists()
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -43,6 +45,7 @@ async def child(mode: str, url: str, path: Path, variant: str = "current") -> No
         await process.wait()
         raise
     assert process.returncode == 0, output.decode()
+    assert json.loads(receipt.read_text())["pid"] == process.pid != os.getpid()
 
 
 async def test_explicit_enrollment_restores_current_owner_without_factory_replay(
@@ -74,8 +77,7 @@ async def test_explicit_enrollment_restores_current_owner_without_factory_replay
         {"owner": "read", "value": "first"},
         {"owner": "again", "value": "second"},
     ]
-    receipts = [json.loads(p.read_text()) for p in tmp_path.glob("*.receipt.json")]
-    assert len(receipts) == 6 and len({receipt["pid"] for receipt in receipts}) == 6
+    assert len(list(tmp_path.glob("*.receipt.json"))) == 6
 
 
 async def test_enrollment_refuses_opening_name_collision_before_capture(responses, tmp_path):
