@@ -2485,10 +2485,79 @@ index b8a07d35..686aa8da 100644
      fn idle_catalog_cache_stays_byte_bounded_across_ten_thousand_originals() {
          let mut cache = SdkOriginalHistoryCache::default();
 diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
-index a5acf45b..7845ccbb 100644
+index a5acf45b25013d0a27578087732c07db3b1c3cf8..eb222ebb43ed59c21e56894e76ade637f3fb98c2 100644
 --- a/codex-rs/thread-store/src/in_memory.rs
 +++ b/codex-rs/thread-store/src/in_memory.rs
-@@ -970,6 +970,29 @@ impl ThreadStore for InMemoryThreadStore {
+@@ -437,6 +437,43 @@ mod tests {
+         assert_eq!(updated.name.as_deref(), Some("renamed"));
+     }
+ 
++    #[tokio::test]
++    async fn metadata_write_updates_thread_before_returning() {
++        let store = InMemoryThreadStore::default();
++        let thread_id = ThreadId::new();
++        let params = || UpdateThreadMetadataParams {
++            thread_id,
++            patch: ThreadMetadataPatch {
++                name: Some(Some("written".to_string())),
++                ..Default::default()
++            },
++            include_archived: false,
++        };
++
++        assert!(matches!(
++            store.write_thread_metadata(params()).await,
++            Err(ThreadStoreError::ThreadNotFound { thread_id: missing }) if missing == thread_id
++        ));
++        store
++            .create_thread(create_thread_params(thread_id, ThreadHistoryMode::Legacy))
++            .await
++            .expect("create thread");
++        store
++            .write_thread_metadata(params())
++            .await
++            .expect("write metadata");
++
++        let thread = store
++            .read_thread(ReadThreadParams {
++                thread_id,
++                include_archived: false,
++                include_history: false,
++            })
++            .await
++            .expect("read thread");
++        assert_eq!(thread.name.as_deref(), Some("written"));
++    }
++
+     fn create_thread_params(
+         thread_id: ThreadId,
+         history_mode: ThreadHistoryMode,
+@@ -764,6 +801,15 @@ impl InMemoryThreadStore {
+         &self,
+         params: UpdateThreadMetadataParams,
+     ) -> ThreadStoreResult<StoredThread> {
++        let thread_id = params.thread_id;
++        let state = self.apply_thread_metadata(params).await?;
++        stored_thread_from_state(&state, thread_id, /*include_history*/ false)
++    }
++
++    async fn apply_thread_metadata(
++        &self,
++        params: UpdateThreadMetadataParams,
++    ) -> ThreadStoreResult<tokio::sync::MutexGuard<'_, InMemoryThreadStoreState>> {
+         if params.patch.project_id.is_some() {
+             return Err(ThreadStoreError::Unsupported {
+                 operation: "projects",
+@@ -784,7 +830,7 @@ impl InMemoryThreadStore {
+             .entry(params.thread_id)
+             .or_default()
+             .merge(params.patch);
+-        stored_thread_from_state(&state, params.thread_id, /*include_history*/ false)
++        Ok(state)
+     }
+ 
+     async fn move_thread_to_section(
+@@ -970,6 +1016,29 @@ impl ThreadStore for InMemoryThreadStore {
          Box::pin(InMemoryThreadStore::load_history(self, params))
      }
  
@@ -2518,6 +2587,34 @@ index a5acf45b..7845ccbb 100644
      fn load_latest_model_context(
          &self,
          params: LoadThreadHistoryParams,
+@@ -1051,6 +1120,13 @@ impl ThreadStore for InMemoryThreadStore {
+         })
+     }
+ 
++    fn write_thread_metadata(
++        &self,
++        params: UpdateThreadMetadataParams,
++    ) -> ThreadStoreFuture<'_, ()> {
++        Box::pin(async move { self.apply_thread_metadata(params).await.map(drop) })
++    }
++
+     fn move_thread_to_section(
+         &self,
+         params: MoveThreadToSectionParams,
+@@ -1087,11 +1163,11 @@ fn stored_thread_from_state(
+         .created_threads
+         .get(&thread_id)
+         .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+-    let history_items = state.histories.get(&thread_id).cloned().unwrap_or_default();
++    let items = state.histories.get(&thread_id).cloned().unwrap_or_default();
+     let history = include_history.then(|| StoredThreadHistory {
+         revision: None,
+         thread_id,
+-        items: history_items.clone(),
++        items: items.clone(),
+     });
+     let name = state.names.get(&thread_id).cloned().flatten();
+     let metadata = state.metadata_updates.get(&thread_id);
 diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
 index 9cf12675..8060d931 100644
 --- a/codex-rs/thread-store/src/lib.rs
@@ -2541,7 +2638,7 @@ index 9cf12675..8060d931 100644
  pub use projects::CreatedProject;
  pub use projects::DeletedProject;
 diff --git a/codex-rs/thread-store/src/live_thread.rs b/codex-rs/thread-store/src/live_thread.rs
-index f4c1140d..cfb6c524 100644
+index f4c1140dbc6b2577fa8a6a1b7177afd934b2030b..64816e32514e4e4df971e1ac044df1d5339a0f07 100644
 --- a/codex-rs/thread-store/src/live_thread.rs
 +++ b/codex-rs/thread-store/src/live_thread.rs
 @@ -373,6 +373,21 @@ impl LiveThread {
@@ -2566,6 +2663,18 @@ index f4c1140d..cfb6c524 100644
      pub async fn read_thread(
          &self,
          include_archived: bool,
+@@ -486,10 +501,7 @@ impl LiveThread {
+             include_archived: true,
+         };
+         let result = if context == PersistContext::Standard {
+-            self.thread_store
+-                .update_thread_metadata(params)
+-                .await
+-                .map(|_| ())
++            self.thread_store.write_thread_metadata(params).await
+         } else {
+             self.thread_store.record_thread_metadata(params).await
+         };
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
 index f0edcaac..a0481f9a 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
@@ -2682,9 +2791,27 @@ index 00000000..be9fcd83
 +    ) -> ThreadStoreResult<OriginalHistorySnapshot>;
 +}
 diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
-index d604f478..6f5b4d01 100644
+index d604f47875e4a440b3c44b35a72498be1a108b86..f0234a824201f5177378af8f003b13161d4fc5a7 100644
 --- a/codex-rs/thread-store/src/store.rs
 +++ b/codex-rs/thread-store/src/store.rs
+@@ -162,7 +162,7 @@ pub trait ThreadStore: Any + Send + Sync {
+     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()>;
+ 
+     /// Records metadata derived from rollout items.
+-    /// Unlike [`Self::update_thread_metadata`], this allows the write to be deferred.
++    /// Unlike [`Self::write_thread_metadata`], this allows the write to be deferred.
+     ///
+     /// The default implementation awaits the update. Deferred writes must respect the
+     /// flush and shutdown guarantees documented by [`Self::persist_thread`].
+@@ -170,7 +170,7 @@ pub trait ThreadStore: Any + Send + Sync {
+         &self,
+         params: UpdateThreadMetadataParams,
+     ) -> ThreadStoreFuture<'_, ()> {
+-        Box::pin(async move { self.update_thread_metadata(params).await.map(|_| ()) })
++        self.write_thread_metadata(params)
+     }
+ 
+     /// Materializes the thread if persistence is lazy, then persists all queued items.
 @@ -206,6 +206,20 @@ pub trait ThreadStore: Any + Send + Sync {
          params: LoadThreadHistoryParams,
      ) -> ThreadStoreFuture<'_, StoredThreadHistory>;
@@ -2706,3 +2833,18 @@ index d604f478..6f5b4d01 100644
      /// Loads the persisted rollout items needed to reconstruct the latest model-visible context.
      ///
      /// Implementations that cannot perform a targeted read may return the full persisted history.
+@@ -507,6 +521,14 @@ pub trait ThreadStore: Any + Send + Sync {
+         })
+     }
+ 
++    /// Applies a literal metadata patch before returning, without requesting a thread snapshot.
++    fn write_thread_metadata(
++        &self,
++        params: UpdateThreadMetadataParams,
++    ) -> ThreadStoreFuture<'_, ()> {
++        Box::pin(async move { self.update_thread_metadata(params).await.map(|_| ()) })
++    }
++
+     /// Applies a literal metadata patch and returns the updated thread when one was materialized.
+     ///
+     /// `None` means the update succeeded without materializing a thread, for example because the

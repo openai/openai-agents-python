@@ -1103,6 +1103,22 @@ impl ThreadStore for MemoryThreadStore {
         })
     }
 
+    fn write_thread_metadata(
+        &self,
+        params: UpdateThreadMetadataParams,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            let id = params.thread_id;
+            let mode = params.patch.memory_mode;
+            let mut memory_modes = self.memory_modes.lock().await;
+            self.inner.write_thread_metadata(params).await?;
+            if let Some(mode) = mode {
+                memory_modes.insert(id, mode);
+            }
+            Ok(())
+        })
+    }
+
     fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
             self.inner
