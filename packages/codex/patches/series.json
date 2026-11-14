@@ -1523,7 +1523,11 @@
     {
       "path": "sdk-retire-scoped-executor-connections.patch",
       "sha256": "b2ca618ba90702a56da989543402a216d3b9d18fee7e75e1c721f1e94dae8c51"
+    },
+    {
+      "path": "sdk-settle-rejected-remote-start.patch",
+      "sha256": "0fc2a64c33f3457067ae8e4e3f0a8d59db84b8a60f993e3116d03be84ddc42c3"
     }
   ],
-  "result_tree": "9dc1a2b6d4d80eb4d73d87d695e92b5949304549"
+  "result_tree": "1b27034645b2848ac8458fbd60281df4404f72e1"
 }

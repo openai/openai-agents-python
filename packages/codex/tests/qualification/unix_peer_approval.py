@@ -45,9 +45,12 @@ async def test_unix_peer_approval(peer_os, tmp_path, monkeypatch):
                 reply = {"result": {"sessionId": "fixture", "environmentInfo": info}}
             elif method == "environment/info":
                 reply = {"result": info}
+            elif method == "process/start":
+                starts.append(rpc["params"])
+                reply = {
+                    "error": {"code": -32602, "message": "protocol fixture refused process/start"}
+                }
             else:
-                if method == "process/start":
-                    starts.append(rpc["params"])
                 reply = {"error": {"code": -32000, "message": "protocol fixture refused " + method}}
             await ws.send_json({"id": rpc["id"], **reply})
         return ws
