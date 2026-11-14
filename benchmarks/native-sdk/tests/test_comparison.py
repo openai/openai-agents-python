@@ -1417,9 +1417,7 @@ class DualHTTPQualificationTests(unittest.TestCase):
     def test_streaming_dual_peer_accepts_http1_without_alpn(self):
         value = self.dual_records()
         for result in value["oneshot_text"]["v1"]:
-            result["server"]["tls_transports"]["1"].update(
-                http_version="1.1", alpn_protocol=None
-            )
+            result["server"]["tls_transports"]["1"].update(http_version="1.1", alpn_protocol=None)
             for receipt in result["server"]["receipts"]:
                 receipt.update(http_version="1.1", tls_alpn_protocol=None)
         summary = compare.summarize(
