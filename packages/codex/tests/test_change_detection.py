@@ -878,6 +878,24 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
         pytest.param(
             "pull_request",
             "199/merge",
+            "feat/codex-harness",
+            "example/sdk",
+            "true",
+            True,
+            id="harness-pr",
+        ),
+        pytest.param(
+            "pull_request",
+            "199/merge",
+            "feat/codex-harness",
+            "example/fork",
+            "true",
+            False,
+            id="fork-harness-pr",
+        ),
+        pytest.param(
+            "pull_request",
+            "199/merge",
             "feature/parent",
             "example/sdk",
             "true",
@@ -961,10 +979,15 @@ def test_native_selection_only_runs_for_trusted_code_events(
                 selection["env"]["REUSE_ARM64"].removeprefix("${{ ").removesuffix(" }}"),
             )
             .replace("&&", " and ")
+            .replace("||", " or ")
             .replace("!", " not ")
         )
         assert eval(arm64, {"__builtins__": {}}, {}) is (
-            event == "push" and ref == "feat/codex-harness" and not native_only
+            not native_only
+            and (
+                (event == "push" and ref == "feat/codex-harness")
+                or (event == "pull_request" and base == "feat/codex-harness" and expected)
+            )
         )
 
 
@@ -1109,6 +1132,10 @@ def test_native_selection_routes_stack_sources_and_pr_provenance(
         "harness_push_arm64_native_only",
         "arm64_reuse",
         "harness_pr_arm64_reuse",
+        "harness_pr_arm64_completed",
+        "harness_pr_arm64_late",
+        "harness_pr_arm64_qualifier_failed",
+        "harness_pr_arm64_branch",
         "dependencies_harness_push_arm64_reuse",
         "current_run",
         "unrelated_source",
@@ -1243,11 +1270,15 @@ def test_native_build_selection(
     scenario = scenario.removeprefix("harness_pr_").removeprefix("harness_push_")
     arm64_case = scenario.removeprefix("arm64_") if scenario.startswith("arm64_") else ""
     if arm64_case:
-        scenario = "reuse"
+        scenario = "branch_same" if arm64_case == "branch" else "reuse"
     pending_python = (
         scenario == "in_progress"
         or scenario.startswith("pending_python_")
-        or (harness_pr and scenario not in {"failed_run", "retried_during_selection"})
+        or (
+            harness_pr
+            and scenario not in {"failed_run", "retried_during_selection"}
+            and arm64_case not in {"completed", "branch"}
+        )
     )
     scenario = scenario.removeprefix("pending_python_")
     repo, initial = change_repo
@@ -2370,7 +2401,7 @@ def test_native_build_selection(
             else "push"
         ),
         "GH_TOKEN": "placeholder",
-        "REUSE_ARM64": str(harness_push and arm64_case != "native_only").lower(),
+        "REUSE_ARM64": str((harness_push or harness_pr) and arm64_case != "native_only").lower(),
         "REQUIRE_WINDOWS": (
             ""
             if scenario.startswith("unknown_")
@@ -2443,9 +2474,9 @@ def test_native_build_selection(
                     ("Linux-X64", "Windows-X64", "macOS-ARM64")
                     + (
                         ("Linux-ARM64",)
-                        if harness_push
+                        if (harness_push or harness_pr)
                         and not dependency_cache
-                        and arm64_case in {"reuse", "copied"}
+                        and arm64_case in {"reuse", "copied", "completed"}
                         else ()
                     )
                 )
