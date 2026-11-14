@@ -924,6 +924,21 @@ def test_native_selection_only_runs_for_trusted_code_events(
     )
     condition = condition.replace("&&", " and ").replace("||", " or ")
     assert eval(condition, {"__builtins__": {}}, {}) is expected
+    values["github.ref"] = f"refs/heads/{ref}"
+    for native_only in (False, True):
+        values["inputs.native_only"] = native_only
+        arm64 = (
+            re.sub(
+                r"\b(?:github|inputs)(?:\.[a-zA-Z_][a-zA-Z_0-9]*)+",
+                lambda match: repr(values[match.group()]),
+                selection["env"]["REUSE_ARM64"].removeprefix("${{ ").removesuffix(" }}"),
+            )
+            .replace("&&", " and ")
+            .replace("!", " not ")
+        )
+        assert eval(arm64, {"__builtins__": {}}, {}) is (
+            event == "push" and ref == "feat/codex-harness" and not native_only
+        )
 
 
 @pytest.mark.parametrize(
@@ -1052,6 +1067,22 @@ def test_native_selection_routes_stack_sources_and_pr_provenance(
         "harness_pr_producer_different_attempt",
         "harness_pr_qualifier_different_attempt",
         "harness_push_in_progress",
+        "harness_push_arm64_reuse",
+        "harness_push_arm64_copied",
+        "harness_push_arm64_missing",
+        "harness_push_arm64_late",
+        "harness_push_arm64_equal",
+        "harness_push_arm64_expired",
+        "harness_push_arm64_producer_failed",
+        "harness_push_arm64_bad_mode",
+        "harness_push_arm64_qualifier_failed",
+        "harness_push_arm64_latest_failed",
+        "harness_push_arm64_duplicate",
+        "harness_push_arm64_invalid_digest",
+        "harness_push_arm64_native_only",
+        "arm64_reuse",
+        "harness_pr_arm64_reuse",
+        "dependencies_harness_push_arm64_reuse",
         "current_run",
         "unrelated_source",
         "native_changed",
@@ -1183,6 +1214,9 @@ def test_native_build_selection(
     harness_pr = scenario.startswith("harness_pr_")
     harness_push = scenario.startswith("harness_push_")
     scenario = scenario.removeprefix("harness_pr_").removeprefix("harness_push_")
+    arm64_case = scenario.removeprefix("arm64_") if scenario.startswith("arm64_") else ""
+    if arm64_case:
+        scenario = "reuse"
     pending_python = (
         scenario == "in_progress"
         or scenario.startswith("pending_python_")
@@ -1961,6 +1995,41 @@ def test_native_build_selection(
             ("macos", "macos-latest"),
         )
     )
+    if arm64_case and arm64_case != "missing":
+        # Add one same-run ARM producer without changing the legacy donor fixtures.
+        producer = json.loads(json.dumps(jobs[0]))
+        producer["name"] = "produce-linux-arm64 / Native snapshot (ubuntu-24.04-arm)"
+        qualifier = dict(next(job for job in jobs if job["name"].startswith("native-linux /")))
+        qualifier["name"] = "native-linux-arm64 / Native package (ubuntu-24.04-arm)"
+        artifact = dict(artifacts[0], id=1003)
+        artifact["name"] = artifact["name"].replace("Linux-X64", "Linux-ARM64")
+        jobs.extend((producer, qualifier))
+        artifacts.append(artifact)
+        if arm64_case in {"late", "equal"}:
+            producer["steps"][-1]["completed_at"] = (
+                "2026-11-04T01:00:21Z" if arm64_case == "late" else "2026-11-04T01:00:20Z"
+            )
+        elif arm64_case == "expired":
+            artifact["expired"] = True
+        elif arm64_case == "producer_failed":
+            producer["conclusion"] = "failure"
+        elif arm64_case in {"bad_mode", "copied"}:
+            for step in producer["steps"]:
+                if step["name"] in {
+                    "Build the SDK and native runtime together",
+                    "Build the shared test executor",
+                }:
+                    step["conclusion"] = "skipped"
+                elif step["name"] == "Download the qualified native build":
+                    step["conclusion"] = "success" if arm64_case == "copied" else "skipped"
+        elif arm64_case == "qualifier_failed":
+            qualifier["conclusion"] = "failure"
+        elif arm64_case == "latest_failed":
+            jobs.append(dict(qualifier, run_attempt=2, conclusion="failure"))
+        elif arm64_case == "duplicate":
+            artifacts.append(dict(artifact, id=1004))
+        elif arm64_case == "invalid_digest":
+            artifact["digest"] = "invalid"
     if scenario == "cross_platform_interleaving":
         jobs.append({"name": "tests (3.11)", "started_at": "2026-11-04T01:00:04Z"})
     if scenario == "replacement_artifact":
@@ -2274,6 +2343,7 @@ def test_native_build_selection(
             else "push"
         ),
         "GH_TOKEN": "placeholder",
+        "REUSE_ARM64": str(harness_push and arm64_case != "native_only").lower(),
         "REQUIRE_WINDOWS": (
             ""
             if scenario.startswith("unknown_")
@@ -2292,7 +2362,7 @@ def test_native_build_selection(
     if scenario.startswith("incomplete_"):
         with pytest.raises(SystemExit, match="Incomplete source metadata"):
             exec(compile(script, workflow_path, "exec"), {})
-    elif scenario == "invalid_snapshot_digest":
+    elif scenario == "invalid_snapshot_digest" or arm64_case == "invalid_digest":
         with pytest.raises(SystemExit, match="Invalid native snapshot digest"):
             exec(compile(script, workflow_path, "exec"), {})
     elif scenario == "missing_sdk_start":
@@ -2342,13 +2412,23 @@ def test_native_build_selection(
                         else {"name": "native-snapshot-" + identity + "-" + native_identity}
                     ),
                 }
-                for index, identity in enumerate(("Linux-X64", "Windows-X64", "macOS-ARM64"))
+                for index, identity in enumerate(
+                    ("Linux-X64", "Windows-X64", "macOS-ARM64")
+                    + (
+                        ("Linux-ARM64",)
+                        if harness_push
+                        and not dependency_cache
+                        and arm64_case in {"reuse", "copied"}
+                        else ()
+                    )
+                )
                 if identity != "Windows-X64" or os.environ["REQUIRE_WINDOWS"] != "false"
             },
             sort_keys=True,
         )
         + "\n"
-        if not missing_cleanup
+        if arm64_case != "invalid_digest"
+        and not missing_cleanup
         and not (dependency_cache and scenario == "branch_copied")
         and (
             harness_pr
