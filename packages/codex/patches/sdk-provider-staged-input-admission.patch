@@ -1,0 +1,1521 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 4869045a8a9f8f982b647e71c8646694d58eac90..c895dd8f5fd4e844786c29109674abae079cb805 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -327,6 +327,7 @@ pub struct ModelClientSession {
+     /// An auth ownership change clears it so the new owner gets fresh routing state.
+     turn_state: Arc<OnceLock<String>>,
+     provider_history_rx: Option<oneshot::Receiver<LastResponse>>,
++    provider_history_sources: Option<crate::session::staged_input_terminal::SourcesOwner>,
+ }
+ 
+ /// Minted from the native HTTP response collector, never from saved JSON.
+@@ -362,6 +363,27 @@ struct LastResponse {
+     items_added: Vec<ResponseItem>,
+ }
+ 
++/// Consumed only by the current native Completed owner. Saved response IDs
++/// and application callbacks cannot construct an acceptance receipt.
++pub(crate) struct ProviderHistoryTerminal {
++    cursor: Arc<provider_history::Cursor>,
++    response: LastResponse,
++    sources: crate::session::staged_input_terminal::SourcesOwner,
++}
++
++impl ProviderHistoryTerminal {
++    pub(crate) fn belongs_to(
++        &self,
++        sources: &crate::session::staged_input_terminal::SourcesOwner,
++    ) -> bool {
++        self.sources.matches(sources)
++    }
++
++    pub(crate) async fn accept(self) -> Result<()> {
++        self.cursor.accept(self.response).await
++    }
++}
++
+ struct WebsocketContinuation {
+     response_id: String,
+     items: Vec<ResponseItem>,
+@@ -915,6 +937,7 @@ impl ModelClient {
+             allow_http_fallback: true,
+             turn_state: Arc::new(OnceLock::new()),
+             provider_history_rx: None,
++            provider_history_sources: None,
+         }
+     }
+ 
+@@ -1443,16 +1466,37 @@ impl ModelClient {
+             )));
+             prefix.push(instructions);
+         }
++        let staged_sources = prompt.tool_admission.as_ref()
++            .and_then(|admission| admission.step_store())
++            .and_then(|store| store.get::<crate::session::staged_input_terminal::SampledSources>());
++        let text_receipt = self.provider_history.as_deref().map(|cursor| &cursor.text_receipt);
+         let canonical_history_input = wire_input_indices
+             .map(|indices| {
++                if let Some(source) = &staged_sources {
++                    let (canonical, origins) = source.0.current_projection()
++                        .map_err(CodexErr::InvalidRequest)?;
++                    let mut projection = provider_history::sampling_input_projection_from_origins(
++                        &canonical, &prompt.input, &origins, indices, prefix.len(), text_receipt,
++                    )?;
++                    if let Some(captured) = &prompt.canonical_history_input {
++                        let base = provider_history::canonical_input_projection(
++                            source.0.base_input(), Vec::new(), 0, text_receipt,
++                        )?;
++                        projection.retained_item_count = captured.retained_item_count
++                            .checked_add(projection.retained_item_count - base.retained_item_count)
++                            .ok_or_else(|| CodexErr::InvalidRequest("Staged retained count overflow".into()))?;
++                        projection.retained_json_bytes = captured.retained_json_bytes
++                            .checked_add(projection.retained_json_bytes - base.retained_json_bytes)
++                            .ok_or_else(|| CodexErr::InvalidRequest("Staged retained size overflow".into()))?;
++                    }
++                    return Ok(projection);
++                }
+                 provider_history::sampling_input_projection(
+                     prompt.canonical_history_input.as_deref(),
+                     &prompt.input,
+                     indices,
+                     prefix.len(),
+-                    self.provider_history
+-                        .as_deref()
+-                        .map(|cursor| &cursor.text_receipt),
++                    text_receipt,
+                 )
+             })
+             .transpose()?;
+@@ -2121,6 +2165,25 @@ impl ModelClientSession {
+ 
+     pub(crate) fn has_provider_history(&self) -> bool { self.client.provider_history.is_some() }
+ 
++    pub(crate) fn take_provider_history_terminal(
++        &mut self,
++        response_id: &str,
++    ) -> Result<ProviderHistoryTerminal> {
++        let cursor = self.client.provider_history.as_ref().ok_or_else(||
++            CodexErr::InvalidRequest("Staged terminal admission requires provider history".into()))?;
++        let sources = self.provider_history_sources.take().ok_or_else(||
++            CodexErr::InvalidRequest("The current request has no native staged projection owner".into()))?;
++        let mut receiver = self.provider_history_rx.take().ok_or_else(||
++            CodexErr::InvalidRequest("The current request has no provider terminal owner".into()))?;
++        let response = receiver.try_recv().map_err(|_| CodexErr::InvalidRequest(
++            "The current request has no acknowledged completion".into()))?;
++        if response_id.is_empty() || response.response_id != response_id {
++            return Err(CodexErr::InvalidRequest(
++                "Provider terminal identity does not match the current request".into()));
++        }
++        Ok(ProviderHistoryTerminal { cursor: Arc::clone(cursor), response, sources })
++    }
++
+     pub(crate) async fn accept_provider_history(&mut self) -> Result<()> {
+         let Some(cursor) = &self.client.provider_history else { return Ok(()); };
+         let Some(mut receiver) = self.provider_history_rx.take() else { return Ok(()); };
+@@ -2536,6 +2599,11 @@ impl ModelClientSession {
+         inference_trace: &InferenceTraceContext,
+         auth_recovery: &mut RequestAuthRecovery,
+     ) -> Result<ResponseStream> {
++        let provider_history_sources = prompt.tool_admission.as_ref()
++            .and_then(|admission| admission.step_store())
++            .and_then(|store| store.get::<crate::session::staged_input_terminal::SampledSources>())
++            .map(|sources| sources.0.owner());
++
+         loop {
+             let mut client_setup = self
+                 .client
+@@ -2869,6 +2937,7 @@ impl ModelClientSession {
+                     stream.producer_stop = producer_stop;
+                     stream.request_observation = request_observation;
+                     if self.client.provider_history.is_some() {
++                        self.provider_history_sources = provider_history_sources.clone();
+                         self.provider_history_rx = Some(response);
+                         self.pending_http_response = None;
+                     } else {
+@@ -2955,6 +3024,11 @@ impl ModelClientSession {
+         inference_trace: &InferenceTraceContext,
+         auth_recovery: &mut RequestAuthRecovery,
+     ) -> Result<WebsocketStreamOutcome> {
++        let provider_history_sources = prompt.tool_admission.as_ref()
++            .and_then(|admission| admission.step_store())
++            .and_then(|store| store.get::<crate::session::staged_input_terminal::SampledSources>())
++            .map(|sources| sources.0.owner());
++
+         let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
+         let provider = Arc::clone(&self.client.state.provider);
+         loop {
+@@ -3400,6 +3474,7 @@ impl ModelClientSession {
+             );
+             stream.request_observation = request_observation;
+             if self.client.provider_history.is_some() {
++                self.provider_history_sources = provider_history_sources.clone();
+                 self.provider_history_rx = Some(last_request_rx);
+             } else {
+                 self.websocket_session.last_response_rx = Some(last_request_rx);
+@@ -3546,7 +3621,18 @@ impl ModelClientSession {
+         responses_metadata: &CodexResponsesMetadata,
+         inference_trace: &InferenceTraceContext,
+     ) -> Result<ResponseStream> {
++        let staged_sources = prompt.tool_admission.as_ref()
++            .and_then(|admission| admission.step_store())
++            .and_then(|store| store.get::<crate::session::staged_input_terminal::SampledSources>());
+         let websocket_enabled = self.websocket_for_prompt(prompt)?;
++        if staged_sources.is_some()
++            && (websocket_enabled || model_info.use_responses_lite
++                || prompt.request_controls.hosted_prompt.as_ref().and_then(Option::as_ref).is_some())
++        {
++            return Err(CodexErr::InvalidRequest(
++                "Selected staged input requires ordinary HTTP Responses without a hosted prompt".into()));
++        }
++        let mut source_origins = (0..prompt.input.len()).map(Some).collect::<Vec<_>>();
+         self.allow_http_fallback = Self::request_transport_mode(prompt) != codex_protocol::model_request_transport::RequestTransportMode::Websocket;
+         let projected_model = request_model_info(prompt, model_info);
+         let model_info = projected_model.as_ref();
+@@ -3578,6 +3664,8 @@ impl ModelClientSession {
+                 .as_deref()
+                 .ok_or_else(|| CodexErr::InvalidRequest("Missing model context owner".into()))?;
+             let projected = transformed.get_or_insert_with(|| prompt.clone());
++            let before = staged_sources.as_ref().map(|_| projected.input.clone());
++            let mut next_sources = None;
+             contributor
+                 .transform_context(codex_extension_api::ModelContextInput {
+                     turn_store: prompt
+@@ -3600,10 +3688,25 @@ impl ModelClientSession {
+                         .hosted_prompt
+                         .as_mut()
+                         .and_then(Option::as_mut),
++                    source_indices: staged_sources.as_ref().map(|_| &mut next_sources),
+                     items: &mut projected.input,
+                 })
+                 .await
+                 .map_err(CodexErr::InvalidRequest)?;
++            if let (Some(source), Some(before)) = (&staged_sources, before) {
++                let map = match next_sources {
++                    Some(map) => map,
++                    None if before == projected.input => (0..before.len()).map(Some).collect(),
++                    None => return Err(CodexErr::InvalidRequest(
++                        "Changed staged context has no current native source map".into())),
++                };
++                source_origins = crate::session::staged_input_sources::compose(
++                    &before, &projected.input, &map, &source_origins, &source.0.staged_origins(),
++                ).map_err(CodexErr::InvalidRequest)?;
++            }
++        }
++        if let Some(source) = &staged_sources {
++            source.0.select(&source_origins).map_err(CodexErr::InvalidRequest)?;
+         }
+         if let Some(projected) = &transformed
+             && let Some(recorder) = &self.client.executed_tool_calls
+diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
+index 26d2c01d7604b02c5457f511c23119982a69b518..d02a8b28fbabc6d8f4d4cf814d85639dad91c526 100644
+--- a/codex-rs/core/src/client/provider_history.rs
++++ b/codex-rs/core/src/client/provider_history.rs
+@@ -628,6 +628,51 @@ pub(super) fn sampling_input_projection(
+     Ok(projection)
+ }
+ 
++/// Select canonical occurrences from a current native source map. Equal text
++/// never substitutes for an omitted original, and only sampled staged rows
++/// belong in canonical_items. This function does not accept the cursor.
++pub(super) fn sampling_input_projection_from_origins(
++    canonical_items: &[ResponseItem],
++    items: &[ResponseItem],
++    origins: &[Option<usize>],
++    wire_input_indices: Vec<usize>,
++    prefix_len: usize,
++    receipt: Option<&TextReceiptCache>,
++) -> Result<codex_api::ProviderHistoryInputProjection> {
++    check_items(items.iter(), receipt)?;
++    if origins.len() != items.len() {
++        return Err(invalid("Sampling origins do not cover the current input"));
++    }
++    let mut projection = canonical_input_projection(
++        canonical_items, wire_input_indices, prefix_len, receipt,
++    )?;
++    projection.sampling_item_sha256 = items.iter().map(|item| item_digest_with_receipt(item, receipt))
++        .collect::<Result<Vec<_>>>()?;
++    let mut delivered = std::collections::HashSet::new();
++    for ((item, digest), origin) in items.iter()
++        .zip(&projection.sampling_item_sha256).zip(origins)
++    {
++        let user = matches!(item, ResponseItem::Message { role, .. } if role == "user");
++        match origin {
++            Some(index) => {
++                if projection.item_sha256.get(*index) != Some(digest) {
++                    return Err(invalid("Sampling origin does not match its canonical occurrence"));
++                }
++                if !delivered.insert(*index) && user {
++                    return Err(invalid("One original user occurrence was sampled twice"));
++                }
++            }
++            None if user => {
++                return Err(invalid("A sampled user row has no current native origin"));
++            }
++            None => {}
++        }
++    }
++    projection.delivered_input_indices = delivered.into_iter().collect();
++    projection.delivered_input_indices.sort_unstable();
++    Ok(projection)
++}
++
+ fn canonical_window(window: &ProviderHistoryWindowReceipt) -> Option<ProviderHistoryWindowReceipt> {
+     let boundary = window.canonical_input.as_ref()?;
+     Some(ProviderHistoryWindowReceipt {
+@@ -1634,6 +1679,42 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn explicit_origins_keep_equal_text_occurrences_distinct_when_reordered() {
++        let mut first = input_message("msg_a", "same");
++        first.set_id(None);
++        let cache = TextReceiptCache::default();
++        let original = vec![first.clone(), first.clone()];
++        let projection = sampling_input_projection_from_origins(
++            &original, &[first.clone(), first.clone()],
++            &[Some(1), Some(0)], vec![0, 1], 0,
++            Some(&cache),
++        ).unwrap();
++        assert_eq!(projection.delivered_input_indices, vec![0, 1]);
++        assert!(sampling_input_projection_from_origins(
++            &original, &[first.clone(), first],
++            &[Some(0), Some(0)], vec![0, 1], 0,
++            Some(&cache),
++        ).is_err());
++    }
++
++    #[test]
++    fn explicit_origins_refuse_changed_missing_and_out_of_range_user_sources() {
++        let original = vec![input_message("msg_a", "original")];
++        let cache = TextReceiptCache::default();
++        for origins in [vec![], vec![None], vec![Some(1)]] {
++            assert!(sampling_input_projection_from_origins(
++                &original, &original, &origins, vec![0], 0,
++                Some(&cache),
++            ).is_err());
++        }
++        assert!(sampling_input_projection_from_origins(
++            &original, &[input_message("msg_a", "changed")],
++            &[Some(0)], vec![0], 0,
++            Some(&cache),
++        ).is_err());
++    }
++
+     #[test]
+     fn sampling_append_and_same_identity_replacement_keep_canonical_boundary() {
+         let original = vec![input_message("msg_original", "original")];
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index c1bb5681980609f64b294071c718804ac6d2129a..370ba0be30005948286285a32dd4229074049464 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -322,6 +322,9 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
+     }
+     let _ = sess.conversation.shutdown().await;
+     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
++    if let Err(error) = super::staged_input_terminal::join_thread(sess).await {
++        tracing::error!(%error, "staged terminal writer failed during shutdown");
++    }
+     {
+         // A normally completed task can already have detached its active handle. Join its
+         // terminal delivery and idle flush before any shutdown work releases the writer.
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index d43aafc9425ff310a19132b7b2ba3c901473da68..e499a65610462521357b27c26ba1a067e24d92ae 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -1,4 +1,6 @@
+ mod agent_profile;
++pub(crate) mod staged_input_sources;
++pub(crate) mod staged_input_terminal;
+ mod handoff_history;
+ pub(crate) mod startup;
+ 
+@@ -3979,12 +3981,26 @@ impl Session {
+     }
+ 
+     async fn record_prepared_conversation_items(
++        &self,
++        turn_context: &TurnContext,
++        model_info: &ModelInfo,
++        items: Vec<ResponseItemEnvelope>,
++        image_preparations: Vec<ImagePreparationMetadata>,
++        pending_exec: Option<crate::unified_exec::PendingLocalExec>,
++    ) {
++        self.record_prepared_conversation_items_with_observations(
++            turn_context, model_info, items, image_preparations, pending_exec, true,
++        ).await;
++    }
++
++    async fn record_prepared_conversation_items_with_observations(
+         &self,
+         turn_context: &TurnContext,
+         model_info: &ModelInfo,
+         mut items: Vec<ResponseItemEnvelope>,
+         image_preparations: Vec<ImagePreparationMetadata>,
+         pending_exec: Option<crate::unified_exec::PendingLocalExec>,
++        notify_raw: bool,
+     ) {
+         // SDK stores can acknowledge a result before Core's ordered drain. Reuse
+         // that exact item instead of minting a second original identity or time.
+@@ -4155,8 +4171,9 @@ impl Session {
+         {
+             mark_thread_memory_mode_polluted_if_external_context(self, turn_context, item).await;
+         }
+-        self.send_raw_response_items(turn_context, &response_items)
+-            .await;
++        if notify_raw {
++            self.send_raw_response_items(turn_context, &response_items).await;
++        }
+     }
+ 
+     pub(crate) async fn record_step_world_state_if_changed(
+diff --git a/codex-rs/core/src/session/staged_input_sources.rs b/codex-rs/core/src/session/staged_input_sources.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..7d65cff10b7fa046a0a2da4d644e12664b4b5600
+--- /dev/null
++++ b/codex-rs/core/src/session/staged_input_sources.rs
+@@ -0,0 +1,139 @@
++//! Validate live contributor positions before any staged input can be acknowledged.
++use codex_protocol::models::ResponseItem;
++use std::collections::HashSet;
++
++/// Compose one contributor's local positions into the immutable sampled input.
++/// Reordering preserves identity. Repeated requests do not mutate this mapping.
++pub(crate) fn compose(
++    before: &[ResponseItem],
++    after: &[ResponseItem],
++    source_indices: &[Option<usize>],
++    origins: &[Option<usize>],
++    staged_origins: &HashSet<usize>,
++) -> Result<Vec<Option<usize>>, String> {
++    if origins.len() != before.len() || source_indices.len() != after.len() {
++        return Err("Context source map has the wrong input or output length".into());
++    }
++    let mut selected = HashSet::new();
++    let mut composed = Vec::with_capacity(after.len());
++    for (item, index) in after.iter().zip(source_indices) {
++        let origin = match index {
++            Some(index) => {
++                let original = before
++                    .get(*index)
++                    .ok_or("Context source map is outside its captured input")?;
++                if original != item {
++                    return Err("Context source map refers to a changed input item".into());
++                }
++                origins[*index]
++            }
++            None => None,
++        };
++        let user = matches!(item, ResponseItem::Message { role, .. } if role == "user");
++        if user && origin.is_none() {
++            return Err("Selected staged input requires original user objects".into());
++        }
++        if let Some(origin) = origin
++            && (user || staged_origins.contains(&origin))
++            && !selected.insert(origin)
++        {
++            return Err("Context source map repeats an original user occurrence".into());
++        }
++        composed.push(origin);
++    }
++    Ok(composed)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn item(role: &str, text: &str) -> ResponseItem {
++        serde_json::from_value(serde_json::json!({
++            "type":"message","role":role,
++            "content":[{"type":"input_text","text":text}]
++        }))
++        .unwrap()
++    }
++    #[test]
++    fn equal_payloads_keep_distinct_sources_under_reordering_and_retries() {
++        let same = item("user", "same");
++        let input = vec![same.clone(), same.clone()];
++        let origins = vec![Some(4), Some(9)];
++        let staged = HashSet::from([4, 9]);
++        let map = vec![Some(1), Some(0)];
++        assert_eq!(
++            compose(&input, &input, &map, &origins, &staged).unwrap(),
++            vec![Some(9), Some(4)]
++        );
++        assert_eq!(
++            compose(&input, &input, &map, &origins, &staged).unwrap(),
++            vec![Some(9), Some(4)]
++        );
++    }
++    #[test]
++    fn the_same_original_user_occurrence_cannot_be_duplicated() {
++        let row = item("user", "same");
++        assert!(
++            compose(
++                &[row.clone()],
++                &[row.clone(), row],
++                &[Some(0), Some(0)],
++                &[Some(3)],
++                &HashSet::from([3])
++            )
++            .is_err()
++        );
++    }
++    #[test]
++    fn range_content_and_unowned_user_changes_are_rejected() {
++        let a = item("user", "A");
++        let b = item("user", "B");
++        assert!(
++            compose(
++                &[a.clone()],
++                &[a.clone()],
++                &[Some(7)],
++                &[Some(0)],
++                &HashSet::from([0])
++            )
++            .is_err()
++        );
++        assert!(
++            compose(
++                &[a.clone()],
++                &[b],
++                &[Some(0)],
++                &[Some(0)],
++                &HashSet::from([0])
++            )
++            .is_err()
++        );
++        assert!(compose(&[a.clone()], &[a], &[None], &[Some(0)], &HashSet::from([0])).is_err());
++    }
++    #[test]
++    fn multiple_contributors_compose_through_generated_nonuser_rows() {
++        let a = item("user", "A");
++        let b = item("user", "B");
++        let extra = item("assistant", "reference");
++        let first = vec![b.clone(), extra.clone()];
++        let origins = compose(
++            &[a, b.clone()],
++            &first,
++            &[Some(1), None],
++            &[Some(0), Some(1)],
++            &HashSet::from([0, 1]),
++        )
++        .unwrap();
++        assert_eq!(
++            compose(
++                &first,
++                &[extra, b],
++                &[Some(1), Some(0)],
++                &origins,
++                &HashSet::from([0, 1])
++            )
++            .unwrap(),
++            vec![None, Some(1)]
++        );
++    }
++}
+diff --git a/codex-rs/core/src/session/staged_input_terminal.rs b/codex-rs/core/src/session/staged_input_terminal.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..23083f0b724478041e721d81c836f942db017fa4
+--- /dev/null
++++ b/codex-rs/core/src/session/staged_input_terminal.rs
+@@ -0,0 +1,576 @@
++//! Own selected staged inputs through terminal acceptance, not transport dispatch.
++//!
++//! The selected batch remains fail-closed in turn admission until the caller
++//! installs the matching request projection and completed-output slot.
++
++use std::collections::HashSet;
++use std::sync::Arc;
++use std::sync::Mutex;
++use std::sync::OnceLock;
++use std::sync::Weak;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
++
++use codex_extension_api::StagedInputBatch;
++use codex_history::ResponseItemEnvelope;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::FunctionCallOutputBody;
++use codex_protocol::models::ResponseItem;
++use codex_protocol::openai_models::ModelInfo;
++use futures::FutureExt;
++use futures::future::BoxFuture;
++use futures::future::Shared;
++use tokio::sync::Mutex as AsyncMutex;
++use tokio::sync::OnceCell;
++
++use super::Session;
++use super::StepContext;
++use super::TurnContext;
++use crate::client::ProviderHistoryTerminal;
++
++type WriteJoin = Shared<BoxFuture<'static, Result<(), String>>>;
++
++/// Native request identity. Only Sources can mint one; request collection can
++/// retain a clone without identifying a request by provider-supplied text.
++#[derive(Clone, Debug)]
++pub(crate) struct SourcesOwner(Arc<()>);
++
++impl SourcesOwner {
++    pub(crate) fn matches(&self, other: &Self) -> bool {
++        Arc::ptr_eq(&self.0, &other.0)
++    }
++}
++
++/// Core installs this exact request view before the client starts collecting
++/// the response. It must not reuse the slot for another in-flight request.
++pub(crate) struct SampledSources(pub(crate) Arc<Sources>);
++
++/// One turn owns one original batch and one prepared identity for each row.
++#[derive(Default)]
++struct PendingWrites {
++    owners: Mutex<Vec<Weak<Pending>>>,
++    failure: Mutex<Option<String>>,
++}
++
++struct Pending {
++    session: Weak<Session>,
++    turn: Weak<TurnContext>,
++    batch: Arc<StagedInputBatch>,
++    prepared: OnceCell<Arc<Vec<ResponseItemEnvelope>>>,
++    settlement: AsyncMutex<()>,
++    write: Mutex<Option<WriteJoin>>,
++}
++
++/// One sampled request owns a frozen projection and its eventual terminal write.
++/// Equal message text does not identify an occurrence.
++pub(crate) struct Sources {
++    owner: SourcesOwner,
++    pending: Arc<Pending>,
++    model_info: Arc<ModelInfo>,
++    input: Vec<ResponseItem>,
++    base_len: usize,
++    entries: Vec<(usize, usize)>,
++    selected: OnceLock<Vec<usize>>,
++    origins: OnceLock<Vec<Option<usize>>>,
++    outputs: Mutex<Vec<ResponseItemEnvelope>>,
++    facts: Mutex<Vec<crate::stream_events_utils::DeferredResponseFacts>>,
++    error: Mutex<Option<String>>,
++    write: Mutex<Option<WriteJoin>>,
++    accepted: Arc<AtomicBool>,
++}
++
++impl Sources {
++    pub(crate) fn owner(&self) -> SourcesOwner {
++        self.owner.clone()
++    }
++
++    /// Compose against native origins after every contributor has run. Callers
++    /// validate each immediate source map with staged_input_sources::compose.
++    pub(crate) fn select(&self, origins: &[Option<usize>]) -> Result<(), String> {
++        if let Some(existing) = self.origins.get() {
++            return if existing == origins {
++                Ok(())
++            } else {
++                Err("The current request has changed its frozen source map".into())
++            };
++        }
++        let mut seen = HashSet::new();
++        for index in origins.iter().flatten().copied() {
++            let Some(item) = self.input.get(index) else {
++                return Err("Staged source is outside its sampled request".into());
++            };
++            let protected = self.entries.iter().any(|(source, _)| *source == index)
++                || matches!(item, ResponseItem::Message { role, .. } if role == "user");
++            if protected && !seen.insert(index) {
++                return Err("One original user occurrence was sampled twice".into());
++            }
++        }
++        let selected = self
++            .entries
++            .iter()
++            .filter(|(source, _)| origins.contains(&Some(*source)))
++            .map(|(_, ordinal)| *ordinal)
++            .collect::<Vec<_>>();
++        if let Some(existing) = self.selected.get() {
++            return if *existing == selected {
++                Ok(())
++            } else {
++                Err("A sampled staged projection cannot change".into())
++            };
++        }
++        self.origins
++            .set(origins.to_vec())
++            .map_err(|_| "The current request source map changed concurrently".to_string())?;
++        match self.selected.set(selected) {
++            Ok(()) => Ok(()),
++            Err(selected) if self.selected.get() == Some(&selected) => Ok(()),
++            Err(_) => Err("A sampled staged projection changed concurrently".into()),
++        }
++    }
++
++    /// Build the prospective cursor window without accepting it. Only selected
++    /// rows enter this window, in original occurrence order.
++    pub(crate) fn prospective_input(
++        &self,
++        origins: &[Option<usize>],
++    ) -> Result<(Vec<ResponseItem>, Vec<Option<usize>>), String> {
++        let selected = self
++            .selected
++            .get()
++            .ok_or("Staged sources have not been selected")?;
++        let mut canonical = self.input[..self.base_len].to_vec();
++        let mut rebased = (0..self.input.len())
++            .map(|index| (index < self.base_len).then_some(index))
++            .collect::<Vec<_>>();
++        for (source, ordinal) in &self.entries {
++            if selected.contains(ordinal) {
++                rebased[*source] = Some(canonical.len());
++                canonical.push(self.input[*source].clone());
++            }
++        }
++        let wire_origins = origins
++            .iter()
++            .map(|origin| match origin {
++                None => Ok(None),
++                Some(index) => rebased
++                    .get(*index)
++                    .copied()
++                    .flatten()
++                    .map(Some)
++                    .ok_or_else(|| "Wire source was not selected".to_string()),
++            })
++            .collect::<Result<Vec<_>, _>>()?;
++        Ok((canonical, wire_origins))
++    }
++
++    pub(crate) fn base_input(&self) -> &[ResponseItem] {
++        &self.input[..self.base_len]
++    }
++
++    pub(crate) fn staged_origins(&self) -> HashSet<usize> {
++        self.entries.iter().map(|(source, _)| *source).collect()
++    }
++
++    pub(crate) fn current_projection(
++        &self,
++    ) -> Result<(Vec<ResponseItem>, Vec<Option<usize>>), String> {
++        self.prospective_input(
++            self.origins
++                .get()
++                .ok_or("The current request has no frozen source map")?,
++        )
++    }
++
++    pub(crate) async fn accept_queued(
++        &self,
++        terminal: ProviderHistoryTerminal,
++    ) -> Result<(), String> {
++        if let Some(error) = self
++            .error
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone()
++        {
++            return Err(error);
++        }
++        let outputs = std::mem::take(
++            &mut *self
++                .outputs
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner),
++        );
++        self.accept_terminal(terminal, outputs).await
++    }
++
++    pub(crate) fn terminal_accepted(&self) -> bool {
++        self.accepted.load(Ordering::Acquire)
++    }
++
++    /// Completed model rows have already notified raw-item observers. The caller
++    /// supplies their exact prepared envelopes; this write does not mint IDs.
++    /// A current native terminal receipt is required before any history mutation.
++    pub(crate) async fn accept_terminal(
++        &self,
++        terminal: ProviderHistoryTerminal,
++        outputs: Vec<ResponseItemEnvelope>,
++    ) -> Result<(), String> {
++        if !terminal.belongs_to(&self.owner) {
++            return Err("Provider terminal belongs to another sampled projection".into());
++        }
++        let _settlement = self.pending.settlement.lock().await;
++        if self
++            .write
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .is_some()
++        {
++            return Err("This sampled request already owns a terminal write".into());
++        }
++        let previous = self
++            .pending
++            .write
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone();
++        if let Some(previous) = previous {
++            previous.await?;
++        }
++        let selected = self
++            .selected
++            .get()
++            .ok_or("Staged sources have not been selected")?
++            .clone();
++        let session = self
++            .pending
++            .session
++            .upgrade()
++            .ok_or("Staged source session has closed")?;
++        let turn = self
++            .pending
++            .turn
++            .upgrade()
++            .ok_or("Staged source turn has closed")?;
++        let remaining = self
++            .pending
++            .batch
++            .pending_occurrences_for(&turn.sub_id)
++            .into_iter()
++            .map(|(ordinal, _)| ordinal)
++            .collect::<HashSet<_>>();
++        if selected.iter().any(|ordinal| !remaining.contains(ordinal)) {
++            return Err("Another request has already accepted a selected occurrence".into());
++        }
++        let prepared = self
++            .pending
++            .prepared
++            .get()
++            .ok_or("Staged rows have not been prepared")?;
++        let mut items = selected
++            .iter()
++            .map(|ordinal| prepared[*ordinal].clone())
++            .collect::<Vec<_>>();
++        let accepted_inputs = items
++            .iter()
++            .map(|envelope| envelope.item.clone())
++            .collect::<Vec<_>>();
++        items.extend(outputs);
++        let batch = Arc::clone(&self.pending.batch);
++        let model_info = Arc::clone(&self.model_info);
++        let accepted = Arc::clone(&self.accepted);
++        let facts = std::mem::take(
++            &mut *self
++                .facts
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner),
++        );
++        // The runtime owns this write after spawn. Dropping a request future
++        // cannot orphan accepted effects or make capture race the cursor write.
++        self.pending.batch.begin_terminal_write()?;
++        let completion_batch = Arc::clone(&self.pending.batch);
++        let registry = session.services.thread_extension_data.get_or_init(PendingWrites::default);
++        let task = tokio::spawn(async move {
++            session
++                .record_prepared_conversation_items_with_observations(
++                    &turn,
++                    &model_info,
++                    items,
++                    Vec::new(),
++                    None,
++                    false,
++                )
++                .await;
++            session
++                .ensure_rollout_durable()
++                .await
++                .map_err(|error| error.to_string())?;
++            terminal.accept().await.map_err(|error| error.to_string())?;
++            batch.acknowledge_occurrences(&selected)?;
++            accepted.store(true, Ordering::Release);
++            session
++                .send_raw_response_items(&turn, &accepted_inputs)
++                .await;
++            for fact in facts {
++                fact.publish(&session, &turn).await;
++            }
++            session
++                .ensure_rollout_durable()
++                .await
++                .map_err(|error| error.to_string())
++        });
++        let write = async move {
++            let result = match task.await {
++                Ok(result) => result,
++                Err(error) => Err(format!("Staged terminal writer failed: {error}")),
++            };
++            completion_batch.finish_terminal_write(result.is_ok());
++            if let Err(error) = &result {
++                registry.failure.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
++                    .get_or_insert_with(|| error.clone());
++            }
++            result
++        }
++        .boxed()
++        .shared();
++        *self
++            .write
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(write.clone());
++        *self
++            .pending
++            .write
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(write.clone());
++        write.await
++    }
++}
++
++/// Append detached prepared copies to the sampled prompt. Neither history nor
++/// the acknowledgment mask changes here.
++pub(crate) async fn append(
++    session: &Arc<Session>,
++    step: &StepContext,
++    batch: &Arc<StagedInputBatch>,
++    input: &mut Vec<ResponseItem>,
++) -> Result<Arc<Sources>, String> {
++    if !batch.projects_occurrences() {
++        return Err("The staged batch has no terminal occurrence owner".into());
++    }
++    let pending = step.turn.extension_data.get_or_init(|| Pending {
++        session: Arc::downgrade(session),
++        turn: Arc::downgrade(&step.turn),
++        batch: Arc::clone(batch),
++        prepared: OnceCell::new(),
++        settlement: AsyncMutex::new(()),
++        write: Mutex::new(None),
++    });
++    if !Arc::ptr_eq(&pending.batch, batch) {
++        return Err("The turn already owns another staged batch".into());
++    }
++    let registry = session
++        .services
++        .thread_extension_data
++        .get_or_init(PendingWrites::default);
++    {
++        let mut owners = registry
++            .owners
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        owners.retain(|owner| owner.strong_count() > 0);
++        let weak = Arc::downgrade(&pending);
++        if !owners.iter().any(|owner| Weak::ptr_eq(owner, &weak)) {
++            owners.push(weak);
++        }
++    }
++    let _settlement = pending.settlement.lock().await;
++    let previous = pending
++        .write
++        .lock()
++        .unwrap_or_else(std::sync::PoisonError::into_inner)
++        .clone();
++    if let Some(previous) = previous {
++        previous.await?;
++    }
++    let prepared = pending
++        .prepared
++        .get_or_try_init(|| async {
++            let originals = batch
++                .items_for(&step.turn.sub_id)
++                .ok_or("The staged batch does not belong to this pending turn")?;
++            // This first owner does not perform image/file preparation before a
++            // provider accepts the request. Broader media routes retain their gates.
++            if originals.iter().any(|item| {
++                !matches!(
++                    item, ResponseItem::Message { role, content, .. }
++                    if role == "user" && content.iter().all(|part|
++                        matches!(part, ContentItem::InputText { .. }))
++                )
++            }) {
++                return Err(
++                    "Terminal staged admission currently requires text user rows".to_string(),
++                );
++            }
++            let annotated = originals
++                .iter()
++                .cloned()
++                .map(|item| session.annotate_client_response_item(item))
++                .collect();
++            let (prepared, images) = session
++                .prepare_annotated_conversation_items_for_history(
++                    &step.turn,
++                    &step.settings.model_info,
++                    annotated,
++                )
++                .await;
++            if prepared.len() != originals.len() || !images.is_empty() {
++                return Err("Staged preparation changed native occurrence boundaries".into());
++            }
++            Ok(Arc::new(prepared))
++        })
++        .await?;
++    let base_len = input.len();
++    let mut entries = Vec::new();
++    for (ordinal, _) in batch.pending_occurrences_for(&step.turn.sub_id) {
++        entries.push((input.len(), ordinal));
++        input.push(prepared[ordinal].item.clone());
++    }
++    Ok(Arc::new(Sources {
++        owner: SourcesOwner(Arc::new(())),
++        pending: Arc::clone(&pending),
++        model_info: Arc::clone(&step.settings.model_info),
++        input: input.clone(),
++        base_len,
++        entries,
++        selected: OnceLock::new(),
++        origins: OnceLock::new(),
++        outputs: Mutex::new(Vec::new()),
++        facts: Mutex::new(Vec::new()),
++        error: Mutex::new(None),
++        write: Mutex::new(None),
++        accepted: Arc::new(AtomicBool::new(false)),
++    }))
++}
++
++/// Capture, cancellation and subsequent sampling must join this owner before
++/// they export a pending mask or inspect canonical provider history.
++pub(crate) async fn join(turn: &TurnContext) -> Result<(), String> {
++    let Some(pending) = turn.extension_data.get::<Pending>() else {
++        return Ok(());
++    };
++    let _settlement = pending.settlement.lock().await;
++    let write = pending
++        .write
++        .lock()
++        .unwrap_or_else(std::sync::PoisonError::into_inner)
++        .clone();
++    match write {
++        Some(write) => write.await,
++        None => Ok(()),
++    }
++}
++
++/// This queue owns only model-generated canonical rows; tool results continue
++/// through their existing ordered acceptance owner after the completion gate.
++pub(crate) async fn queue_output(
++    session: &Session,
++    step: &StepContext,
++    envelope: ResponseItemEnvelope,
++    facts: Option<crate::stream_events_utils::DeferredResponseFacts>,
++) -> bool {
++    let Some(source) = step.extension_data.get::<SampledSources>() else {
++        return false;
++    };
++    let allowed = match &envelope.item {
++        ResponseItem::Message { role, content, .. } => {
++            role == "assistant"
++                && content
++                    .iter()
++                    .all(|part| matches!(part, ContentItem::OutputText { .. }))
++        }
++        ResponseItem::Reasoning { .. } | ResponseItem::FunctionCall { .. } => true,
++        ResponseItem::FunctionCallOutput { output, .. } => {
++            matches!(&output.body, FunctionCallOutputBody::Text(_))
++        }
++        _ => false,
++    };
++    if !allowed {
++        *source
++            .0
++            .error
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) =
++            Some("Selected staged input cannot admit this model output kind".into());
++        return true;
++    }
++    let (prepared, images) = session
++        .prepare_annotated_conversation_items_for_history(
++            &step.turn,
++            &step.settings.model_info,
++            vec![envelope],
++        )
++        .await;
++    if !images.is_empty() {
++        *source
++            .0
++            .error
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) =
++            Some("Selected staged output cannot perform image preparation".into());
++        return true;
++    }
++    let raw = prepared
++        .iter()
++        .map(|item| item.item.clone())
++        .collect::<Vec<_>>();
++    source
++        .0
++        .outputs
++        .lock()
++        .unwrap_or_else(std::sync::PoisonError::into_inner)
++        .extend(prepared);
++    if let Some(facts) = facts {
++        source
++            .0
++            .facts
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .push(facts);
++    }
++    session.send_raw_response_items(&step.turn, &raw).await;
++    true
++}
++
++pub(crate) async fn join_thread(session: &Session) -> Result<(), String> {
++    let Some(registry) = session
++        .services
++        .thread_extension_data
++        .get::<PendingWrites>()
++    else {
++        return Ok(());
++    };
++    let owners = registry
++        .owners
++        .lock()
++        .unwrap_or_else(std::sync::PoisonError::into_inner)
++        .iter()
++        .filter_map(Weak::upgrade)
++        .collect::<Vec<_>>();
++    let mut failure = registry.failure.lock()
++        .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
++    for pending in owners {
++        let _settlement = pending.settlement.lock().await;
++        let write = pending
++            .write
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone();
++        if let Some(write) = write
++            && let Err(error) = write.await
++        {
++            failure.get_or_insert(error);
++        }
++    }
++    match failure {
++        Some(error) => Err(error),
++        None => Ok(()),
++    }
++}
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index f4c9a9a7f2f7a4030556b0d279fbb20c23aabc16..727d78b66a35e01c181a69d13e91746e2ad93ac0 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -771,6 +771,7 @@ pub(crate) async fn run_turn(
+             }
+         };
+         if let Some(staged) = &staged_input
++            && !staged.projects_occurrences()
+             && let Some(items) = staged.items_for(&turn_context.sub_id)
+         {
+             if cancellation_token.is_cancelled() {
+@@ -2545,6 +2546,26 @@ async fn run_sampling_request(
+                 ) = retained.retained();
+             }
+             prompt.canonical_history_input = canonical.map(Arc::new);
++            super::staged_input_terminal::join_thread(&sess)
++                .await.map_err(CodexErr::Fatal)?;
++            step_context.extension_data.remove::<super::staged_input_terminal::SampledSources>();
++            if let Some(batch) = turn_context.extension_data.get::<codex_extension_api::StagedInputBatch>()
++                && batch.projects_occurrences() && batch.is_pending()
++            {
++                if sess.services.model_client.provider_history_selection().is_none()
++                    || step_context.settings.model_info.use_responses_lite
++                    || step_context.tool_router.has_provider_programmatic_tool()
++                {
++                    return Err(CodexErr::InvalidRequest(
++                        "Selected staged input requires ordinary native provider history".into()));
++                }
++                let source = super::staged_input_terminal::append(
++                    &sess, &step_context, &batch, &mut prompt.input,
++                ).await.map_err(CodexErr::InvalidRequest)?;
++                step_context.extension_data.insert(
++                    super::staged_input_terminal::SampledSources(source),
++                );
++            }
+             {
+                 let history = sess.clone_history().await;
+                 if history.model_items().iter().any(|envelope| {
+@@ -5323,8 +5344,12 @@ async fn try_run_sampling_request(
+             .extension_data
+             .remove::<crate::model_request::PostTerminalToolDispatch>();
+     }
+-    // Without a configured observer, preserve native streaming tool dispatch.
+-    let completion_gate = (!observers.is_empty()).then(CancellationToken::new);
++    let staged_sources = step_context.extension_data
++        .get::<super::staged_input_terminal::SampledSources>();
++    // The ordinary route retains streaming dispatch. A selected staged request
++    // cannot publish local effects before its terminal input/output transaction.
++    let completion_gate = (!observers.is_empty() || staged_sources.is_some())
++        .then(CancellationToken::new);
+     let mut completion_hook_accepted = false;
+     let mut completed_items = Vec::new();
+     let mut completed_items_bytes = 0;
+@@ -6000,8 +6025,31 @@ async fn try_run_sampling_request(
+                     usage_metadata,
+                     end_turn,
+                 } => {
++                    if let Some(source) = &staged_sources {
++                        if sample_cancel.is_cancelled() {
++                            tool_cancellation.cancel();
++                            break 'provider Err(CodexErr::TurnAborted);
++                        }
++                        let mut take = || client_session.take_provider_history_terminal(&response_id);
++                        let terminal = if let Some(attempt) = &model_attempt {
++                            let stop = attempt.sampling_stop();
++                            stop.try_commit(|| stop.with_model_deadline_admission(take))
++                                .flatten().unwrap_or_else(|| Err(CodexErr::TurnAborted))
++                        } else {
++                            take()
++                        };
++                        let accepted = match terminal {
++                            Ok(terminal) => source.0.accept_queued(terminal).await
++                                .map_err(CodexErr::Fatal),
++                            Err(error) => Err(error),
++                        };
++                        if let Err(error) = accepted {
++                            tool_cancellation.cancel();
++                            break 'provider Err(error);
++                        }
++                    }
+                     if completion_gate.is_some() {
+-                        let admission = prompt.tool_admission.as_ref().expect("configured response observer");
++                        let admission = prompt.tool_admission.as_ref().expect("SDK terminal admission");
+                         for observer in &observers {
+                             let result = observer.observe_completed_model_response(
+                                 codex_extension_api::SdkCompletedModelResponse {
+@@ -6345,10 +6393,23 @@ async fn try_run_sampling_request(
+     if timeout_ms.is_some() || model_attempt.is_some() {
+         deadline_cleanup_errors.extend(deadline.retire_tasks().await);
+     }
+-    let history_acceptance = if outcome.is_ok()
++    // Suspension owns this join after its bounded physical task retirement.
++    // Otherwise a cancelled sampler could wait on store I/O inside the hard
++    // tool join and falsely report an unjoined tool.
++    let suspending = turn_context.extension_data
++        .get::<codex_extension_api::HeldToolCompletionResults>()
++        .is_some_and(|held| held.suspending.load(std::sync::atomic::Ordering::Acquire));
++    let staged_join = if suspending { Ok(()) } else {
++        super::staged_input_terminal::join(&turn_context)
++            .await.map_err(CodexErr::Fatal)
++    };
++    let history_acceptance = if let Err(error) = staged_join {
++        Err(error)
++    } else if outcome.is_ok()
+         && !deadline.expired()
+         && deadline_cleanup_errors.is_empty()
+         && client_session.has_provider_history()
++        && staged_sources.is_none()
+     {
+         async {
+             sess.ensure_rollout_durable().await?;
+@@ -6360,6 +6421,7 @@ async fn try_run_sampling_request(
+     };
+     if let Some(gate) = completion_gate {
+         if completion_hook_accepted
++            && staged_sources.as_ref().is_none_or(|source| source.0.terminal_accepted())
+             && outcome.is_ok()
+             && history_acceptance.is_ok()
+             && deadline_cleanup_errors.is_empty()
+diff --git a/codex-rs/core/src/session/turn_suspension.rs b/codex-rs/core/src/session/turn_suspension.rs
+index 61fbbb4f3315174b51df9f18ca5cc9f2e3993c15..15d3511ccee329178df7f5ebd22a5c6ea0929c29 100644
+--- a/codex-rs/core/src/session/turn_suspension.rs
++++ b/codex-rs/core/src/session/turn_suspension.rs
+@@ -113,6 +113,8 @@ pub(super) async fn suspend_turn_and_shutdown(
+     // If either persistence step fails, do not report success: the current worker
+     // retains ownership until worker-failure recovery can take responsibility.
+     let materialized: CodexResult<()> = async {
++        super::staged_input_terminal::join_thread(session)
++            .await.map_err(CodexErr::Fatal)?;
+         if !portable_manual {
+             return Ok(());
+         }
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index eef6b96b0c138503e556ac42473005f53edcbb03..b4cb21ebe9eb01496ab43875f0bced18d55f9d05 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -103,6 +103,18 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
+     metadata: Option<CodexHarnessMetadata>,
+ ) {
+     let turn_context = &step_context.turn;
++    if step_context.extension_data.get::<crate::session::staged_input_terminal::SampledSources>().is_some()
++        && crate::session::staged_input_terminal::queue_output(
++        sess, step_context,
++        ResponseItemEnvelope { item: item.clone(), metadata: metadata.clone() },
++        Some(DeferredResponseFacts {
++            item: item.clone(),
++            finalized_facts: finalized_facts.cloned(),
++            session_telemetry: step_context.session_telemetry.clone(),
++        }),
++    ).await {
++        return;
++    }
+     if let Some(metadata) = metadata {
+         sess.record_annotated_conversation_items(
+             turn_context,
+@@ -121,12 +133,38 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
+         )
+         .await;
+     }
++    publish_completed_response_facts(
++        sess, turn_context, &step_context.session_telemetry, item, finalized_facts,
++    ).await;
++}
++
++pub(crate) struct DeferredResponseFacts {
++    item: ResponseItem,
++    finalized_facts: Option<FinalizedTurnItemFacts>,
++    session_telemetry: codex_otel::SessionTelemetry,
++}
++
++impl DeferredResponseFacts {
++    pub(crate) async fn publish(self, sess: &Session, turn: &TurnContext) {
++        publish_completed_response_facts(
++            sess, turn, &self.session_telemetry, &self.item, self.finalized_facts.as_ref(),
++        ).await;
++    }
++}
++
++async fn publish_completed_response_facts(
++    sess: &Session,
++    turn_context: &TurnContext,
++    session_telemetry: &codex_otel::SessionTelemetry,
++    item: &ResponseItem,
++    finalized_facts: Option<&FinalizedTurnItemFacts>,
++) {
+     if turn_context.config.otel.agent_response_logging_enabled() {
+         turn_context
+             .extension_data
+             .get_or_init(codex_otel::AgentResponseLogger::default)
+             .record(
+-                &step_context.session_telemetry,
++                session_telemetry,
+                 item,
+                 codex_otel::AgentResponseContext {
+                     turn_id: &turn_context.sub_id,
+@@ -632,13 +670,18 @@ pub(crate) async fn handle_output_item_done(
+             )
+             .await;
+             if let Some(response_item) = response_input_to_response_item(&response) {
+-                ctx.sess
++                let queued = crate::session::staged_input_terminal::queue_output(
++                    ctx.sess.as_ref(), ctx.step_context.as_ref(),
++                    ResponseItemEnvelope { item: response_item.clone(), metadata: None },
++                    None,
++                ).await;
++                if !queued { ctx.sess
+                     .record_conversation_items(
+                         &ctx.step_context.turn,
+                         &ctx.step_context.settings.model_info,
+                         std::slice::from_ref(&response_item),
+                     )
+-                    .await;
++                    .await; }
+             }
+ 
+             output.needs_follow_up = true;
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 0034b2b0e04f00f6c9184f108f43a38976f88c74..c522dcd4fc78c5ca555383a54a7cd00bf54b05dc 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -1604,6 +1604,12 @@ impl Session {
+                     self.send_event(&task.turn_context, EventMsg::Error(event)).await;
+                 }
+             }
++            if let Err(failure) = crate::session::staged_input_terminal::join(&task.turn_context).await {
++                let event = CodexErr::Fatal(failure).to_error_event(None);
++                if error.is_none() {
++                    self.send_event(&task.turn_context, EventMsg::Error(event.clone())).await;
++                }
++            }
+             if let Err(cleanup_error) = self.end_owned_child_stdio(&task.turn_context).await {
+                 warn!("Child stdio cleanup failed while aborting: {cleanup_error}");
+             }
+@@ -1661,6 +1667,13 @@ impl Session {
+             ).await;
+         }
+ 
++        if let Err(failure) = crate::session::staged_input_terminal::join(&task.turn_context).await {
++            let event = CodexErr::Fatal(failure).to_error_event(None);
++            if error.is_none() {
++                self.send_event(&task.turn_context, EventMsg::Error(event.clone())).await;
++            }
++            error.get_or_insert(event);
++        }
+         if let Err(cleanup_error) = self.end_owned_child_stdio(&task.turn_context).await {
+             warn!("Child stdio cleanup failed while aborting: {cleanup_error}");
+         }
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index e8b35f13e8173547fe59feadf45dd54884f5e0df..ee42b0ad857e2faf6fd225aa76cfa4b92737e7dc 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -185,6 +185,8 @@ pub struct StagedInputBatch {
+     turn_id: String,
+     items: Arc<[ResponseItem]>,
+     admitted: Arc<AtomicBool>,
++    selected: Option<Arc<std::sync::Mutex<Vec<bool>>>>,
++    terminal_write: Arc<std::sync::atomic::AtomicU8>,
+ }
+ 
+ impl StagedInputBatch {
+@@ -193,19 +195,105 @@ impl StagedInputBatch {
+             turn_id,
+             items: items.into(),
+             admitted: Arc::new(AtomicBool::new(false)),
++            selected: None,
++            terminal_write: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+         }
+     }
+ 
++    /// Select individual original occurrences only after provider terminal acceptance.
++    /// Core refuses this mode until the current terminal owner has been installed.
++    pub fn selected_after_terminal(turn_id: String, items: Vec<ResponseItem>) -> Self {
++        let mut batch = Self::new(turn_id, items);
++        batch.selected = Some(Arc::new(std::sync::Mutex::new(vec![false; batch.items.len()])));
++        batch
++    }
++
++    /// An export must not certify an in-flight or failed terminal transaction.
++    pub fn ensure_terminal_settled(&self) -> Result<(), String> {
++        match self.terminal_write.load(Ordering::Acquire) {
++            1 => Err("Staged terminal write has not joined".into()),
++            3 => Err("Staged terminal write failed; portable state is unavailable".into()),
++            _ => Ok(()),
++        }
++    }
++
++    pub fn begin_terminal_write(&self) -> Result<(), String> {
++        if !self.projects_occurrences() {
++            return Err("Staged batch has no terminal owner".into());
++        }
++        self.terminal_write.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
++            matches!(state, 0 | 2).then_some(1)
++        }).map(|_| ()).map_err(|_| "Staged terminal writer is pending or failed".into())
++    }
++
++    pub fn finish_terminal_write(&self, success: bool) {
++        self.terminal_write.store(if success { 2 } else { 3 }, Ordering::Release);
++    }
++
++    pub fn projects_occurrences(&self) -> bool {
++        self.selected.is_some()
++    }
++
++    // The original route retains its borrowed view and atomic acknowledgment.
+     pub fn items_for(&self, turn_id: &str) -> Option<&[ResponseItem]> {
+         (self.turn_id == turn_id && self.is_pending()).then_some(self.items.as_ref())
+     }
+ 
++    pub fn guard_items_for(&self, turn_id: &str) -> Option<std::borrow::Cow<'_, [ResponseItem]>> {
++        if self.projects_occurrences() {
++            let items = self.pending_occurrences_for(turn_id).into_iter()
++                .map(|(_, item)| item).collect::<Vec<_>>();
++            (!items.is_empty()).then_some(std::borrow::Cow::Owned(items))
++        } else {
++            self.items_for(turn_id).map(std::borrow::Cow::Borrowed)
++        }
++    }
++
++    pub fn pending_occurrences_for(&self, turn_id: &str) -> Vec<(usize, ResponseItem)> {
++        if self.turn_id != turn_id {
++            return Vec::new();
++        }
++        let Some(selected) = &self.selected else {
++            return if self.admitted.load(Ordering::Acquire) {
++                Vec::new()
++            } else {
++                self.items.iter().cloned().enumerate().collect()
++            };
++        };
++        let selected = selected.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++        self.items.iter().enumerate().filter(|(index, _)| !selected[*index])
++            .map(|(index, item)| (index, item.clone())).collect()
++    }
++
+     pub fn is_pending(&self) -> bool {
+-        !self.items.is_empty() && !self.admitted.load(Ordering::Acquire)
++        if let Some(selected) = &self.selected {
++            selected.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
++                .iter().any(|admitted| !admitted)
++        } else {
++            !self.items.is_empty() && !self.admitted.load(Ordering::Acquire)
++        }
+     }
+ 
+     pub fn acknowledge(&self) {
+         self.admitted.store(true, Ordering::Release);
++        if let Some(selected) = &self.selected {
++            selected.lock().unwrap_or_else(std::sync::PoisonError::into_inner).fill(true);
++        }
++    }
++
++    /// Called only by the current owner after joined canonical persistence.
++    /// Repeated acknowledgment is idempotent; invalid positions change nothing.
++    pub fn acknowledge_occurrences(&self, positions: &[usize]) -> Result<(), String> {
++        let selected = self.selected.as_ref()
++            .ok_or("Staged batch has no selected occurrence owner")?;
++        let mut selected = selected.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++        if positions.iter().any(|index| *index >= selected.len()) {
++            return Err("Staged occurrence is outside its native batch".into());
++        }
++        for index in positions {
++            selected[*index] = true;
++        }
++        Ok(())
+     }
+ }
+ 
+@@ -222,6 +310,8 @@ pub struct ModelContextInput<'a> {
+     pub model: &'a str,
+     pub compaction: bool,
+     pub hosted_prompt: Option<&'a mut codex_protocol::model_request_controls::HostedPromptControls>,
++    /// Current callback positions relative to its immediate input, never saved identity.
++    pub source_indices: Option<&'a mut Option<Vec<Option<usize>>>>,
+     pub items: &'a mut Vec<ResponseItem>,
+ }
+ 
+@@ -757,3 +847,44 @@ mod sampling_stop_tests {
+         assert_eq!(TurnSamplingStop::default().try_commit(|| 3), Some(3));
+     }
+ }
++
++
++#[cfg(test)]
++mod staged_terminal_occurrence_tests {
++    use super::*;
++    fn item(text: &str) -> ResponseItem {
++        serde_json::from_value(serde_json::json!({
++            "type":"message", "role":"user",
++            "content":[{"type":"input_text","text":text}]
++        })).unwrap()
++    }
++    #[test]
++    fn equal_payloads_and_repeated_acknowledgment_keep_exact_positions() {
++        let row = item("same");
++        let batch = StagedInputBatch::selected_after_terminal("turn".into(), vec![row.clone(), row.clone()]);
++        let shared = batch.clone();
++        assert!(batch.pending_occurrences_for("other").is_empty());
++        batch.acknowledge_occurrences(&[1, 1]).unwrap();
++        shared.acknowledge_occurrences(&[1]).unwrap();
++        assert_eq!(batch.pending_occurrences_for("turn"), vec![(0, row)]);
++        assert!(batch.is_pending());
++        batch.acknowledge_occurrences(&[0]).unwrap();
++        assert!(!shared.is_pending());
++    }
++    #[test]
++    fn invalid_acknowledgment_does_not_partially_accept() {
++        let batch = StagedInputBatch::selected_after_terminal("turn".into(), vec![item("A"), item("B")]);
++        assert!(batch.acknowledge_occurrences(&[0, 99]).is_err());
++        assert_eq!(batch.pending_occurrences_for("turn").len(), 2);
++    }
++    #[test]
++    fn default_batch_keeps_its_original_whole_batch_acknowledgment() {
++        let batch = StagedInputBatch::new("turn".into(), vec![item("A"), item("A")]);
++        assert!(!batch.projects_occurrences());
++        assert_eq!(batch.items_for("turn").unwrap().len(), 2);
++        assert!(matches!(batch.guard_items_for("turn"), Some(std::borrow::Cow::Borrowed(_))));
++        batch.acknowledge();
++        assert!(batch.items_for("turn").is_none());
++        assert!(!batch.is_pending());
++    }
++}

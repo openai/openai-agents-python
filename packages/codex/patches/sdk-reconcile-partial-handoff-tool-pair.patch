@@ -1,0 +1,97 @@
+--- a/codex-rs/core/src/session/handoff_history.rs
++++ b/codex-rs/core/src/session/handoff_history.rs
+@@ -20,6 +20,7 @@
+     pub checkpoint: CompactedItem,
+     pub originals: SdkOriginalHistory,
+     pub envelopes: Vec<ResponseItemEnvelope>,
++    pub reconciled_calls: HashMap<String, serde_json::Value>,
+ }
+ 
+ fn droppable_function_pair_part(row: &ResponseItemEnvelope) -> Option<(&str, bool)> {
+@@ -148,7 +149,7 @@
+         {
+             return Err(invalid("Canonical handoff generated occurrences changed"));
+         }
+-        let keep = selection.keep.iter().copied().collect::<HashSet<_>>();
++        let mut keep = selection.keep.iter().copied().collect::<HashSet<_>>();
+         let mut function_parts: HashMap<&str, Vec<(usize, bool)>> = HashMap::new();
+         for (ordinal, (index, _)) in generated.iter().enumerate() {
+             if let Some((id, is_call)) = droppable_function_pair_part(&rows[*index]) {
+@@ -156,6 +157,20 @@
+                     .entry(id)
+                     .or_default()
+                     .push((ordinal, is_call));
++            }
++        }
++        // The saved transcript must not retain one half of an ordinary settled pair.
++        // Only the complete pair in this native generated group can be removed.
++        let mut reconciled_calls = HashMap::new();
++        for (id, parts) in &function_parts {
++            if *id != selection.handoff.call_id
++                && let [(call, true), (output, false)] = parts.as_slice()
++                && (keep.contains(call) != keep.contains(output))
++            {
++                let retained = if keep.contains(call) { *call } else { *output };
++                keep.remove(call);
++                keep.remove(output);
++                reconciled_calls.insert((*id).to_owned(), generated[retained].1.clone());
+             }
+         }
+         let mut drop_rows = HashSet::new();
+@@ -324,6 +339,7 @@
+             checkpoint,
+             originals,
+             envelopes,
++            reconciled_calls,
+         }))
+     }
+ }
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -941,6 +941,7 @@
+         let presentation = target
+             .data
+             .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>();
++        let mut presentation = presentation;
+         let mut target = target;
+         if let Some(presentation) = &presentation {
+             let expected_transfer = task_fence.is_some()
+@@ -997,6 +998,38 @@
+         } else {
+             None
+         };
++        if let Some(replacement) = &history_replacement
++            && !replacement.reconciled_calls.is_empty()
++            && let Some(view) = presentation.as_ref()
++        {
++            let mut view = view.as_ref().clone();
++            // A complete model-only pair stays intact. Drop a lone half in the
++            // generated view only when it belongs to the reconciled current pair.
++            let lone = replacement
++                .reconciled_calls
++                .iter()
++                .filter_map(|(id, retained)| {
++                    let matching = view
++                        .input
++                        .iter()
++                        .chain(&view.previous)
++                        .chain(&view.generated)
++                        .filter(|row| {
++                            matches!(
++                                row.get("type").and_then(serde_json::Value::as_str),
++                                Some("function_call" | "function_call_output")
++                            ) && row.get("call_id").and_then(serde_json::Value::as_str)
++                                == Some(id.as_str())
++                        });
++                    (matching.take(2).count() == 1).then_some(retained)
++                })
++                .collect::<Vec<_>>();
++            if !lone.is_empty() {
++                view.generated.retain(|row| !lone.contains(&row));
++            }
++            Arc::make_mut(&mut target).data.insert(view.clone());
++            presentation = Some(Arc::new(view));
++        }
+         let mut envelope = target.application_instructions.clone();
+         if saved.items.iter().any(|item| matches!(item, RolloutItem::ResponseItem(prior) if prior.item.id() == envelope.item.id())) {
+             return Err(invalid("Agent activation requires a fresh instruction publication identity"));

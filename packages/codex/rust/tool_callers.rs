@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
 use codex_protocol::dynamic_tools::DynamicToolSpec;
@@ -22,9 +22,14 @@ pub(crate) struct ToolDeclarations {
     specs: Vec<DynamicToolSpec>,
     limits: BTreeMap<usize, CallerLimits>,
     configured_agent_roles: BTreeMap<usize, String>,
+    managed_approvals: BTreeSet<usize>,
 }
 
 impl ToolDeclarations {
+    pub(crate) fn managed_approval(&self, slot: usize) -> bool {
+        self.managed_approvals.contains(&slot)
+    }
+
     pub(crate) fn configured_agent_role(&self, slot: usize) -> Option<&str> {
         self.configured_agent_roles.get(&slot).map(String::as_str)
     }
@@ -32,6 +37,9 @@ impl ToolDeclarations {
     pub(crate) fn without_configured_agent_roles(&self) -> Self {
         let mut declarations = self.clone();
         declarations.configured_agent_roles.clear();
+        // Only roster_fingerprint consumes this projection. Observer timing is
+        // current application binding data, not a saved graph identity change.
+        declarations.managed_approvals.clear();
         declarations
     }
 
@@ -72,6 +80,9 @@ impl ToolDeclarations {
     }
 
     pub(crate) fn append_captured(&mut self, source: &Self, slot: usize) {
+        if source.managed_approval(slot) {
+            self.managed_approvals.insert(self.specs.len());
+        }
         if let Some(role) = source.configured_agent_roles.get(&slot) {
             self.configured_agent_roles.insert(self.specs.len(), role.clone());
         }
@@ -98,6 +109,7 @@ impl From<Vec<DynamicToolSpec>> for ToolDeclarations {
             specs,
             limits: BTreeMap::new(),
             configured_agent_roles: BTreeMap::new(),
+            managed_approvals: BTreeSet::new(),
         }
     }
 }
@@ -129,7 +141,18 @@ impl<'de> Deserialize<'de> for ToolDeclarations {
             let configured_role = value
                 .as_object_mut()
                 .and_then(|object| object.remove("configuredAgentRole"));
+            let managed_approval = value.as_object_mut()
+                .and_then(|object| object.remove("_sdkManagedApproval"));
             let spec: DynamicToolSpec = serde_json::from_value(value).map_err(D::Error::custom)?;
+            if let Some(managed) = managed_approval {
+                let managed = bool::deserialize(managed).map_err(D::Error::custom)?;
+                if managed {
+                    if !matches!(spec, DynamicToolSpec::Function(_) | DynamicToolSpec::Namespace(_)) {
+                        return Err(D::Error::custom("Managed approval requires a captured function"));
+                    }
+                    result.managed_approvals.insert(result.specs.len());
+                }
+            }
             if let Some(role) = configured_role {
                 let role = String::deserialize(role).map_err(D::Error::custom)?;
                 if role.trim().is_empty() || !matches!(spec, DynamicToolSpec::Function(_)) {
@@ -198,7 +221,7 @@ impl<'de> Deserialize<'de> for ToolDeclarations {
 
 impl Serialize for ToolDeclarations {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if self.limits.is_empty() && self.configured_agent_roles.is_empty() {
+        if self.limits.is_empty() && self.configured_agent_roles.is_empty() && self.managed_approvals.is_empty() {
             return self.specs.serialize(serializer);
         }
         let mut values: Vec<Value> = self
@@ -222,6 +245,9 @@ impl Serialize for ToolDeclarations {
         }
         for (slot, role) in &self.configured_agent_roles {
             values[*slot]["configuredAgentRole"] = serde_json::json!(role);
+        }
+        for slot in &self.managed_approvals {
+            values[*slot]["_sdkManagedApproval"] = serde_json::json!(true);
         }
         values.serialize(serializer)
     }
@@ -263,5 +289,32 @@ mod programmatic_declaration_tests {
         ] {
             assert!(serde_json::from_value::<ToolDeclarations>(declaration(callers)).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod managed_approval_declaration_tests {
+    use super::*;
+    #[test]
+    fn managed_approval_is_captured_separately_from_protocol_specs() {
+        let value = serde_json::json!([{
+            "type":"function", "name":"read", "description":"Read.",
+            "inputSchema":{"type":"object","properties":{}},
+            "_sdkManagedApproval":true
+        }]);
+        let declarations: ToolDeclarations = serde_json::from_value(value).unwrap();
+        assert!(declarations.managed_approval(0));
+        assert!(serde_json::to_value(&declarations[0]).unwrap().get("_sdkManagedApproval").is_none());
+        let mut appended = ToolDeclarations::default();
+        appended.append_captured(&declarations, 0);
+        assert!(appended.managed_approval(0));
+        let plain: ToolDeclarations = serde_json::from_value(serde_json::json!([{
+            "type":"function", "name":"read", "description":"Read.",
+            "inputSchema":{"type":"object","properties":{}}
+        }])).unwrap();
+        assert!(!plain.managed_approval(0));
+        assert_eq!(serde_json::to_value(declarations.without_configured_agent_roles()).unwrap(),
+                   serde_json::to_value(&plain).unwrap());
+        assert_eq!(serde_json::to_value(&declarations).unwrap()[0]["_sdkManagedApproval"], true);
     }
 }

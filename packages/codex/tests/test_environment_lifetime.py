@@ -265,6 +265,7 @@ async def test_session_scope_joins_native_before_source_before_provider(
     session._resources_retired = False
     session._repair_session = None
     session._environment_lease = _EnvironmentLease(source())
+    session._environment_owner = session._environment_lease
     await session._environment_lease.acquire()
     if source_failure:
         with pytest.raises(OSError) as caught:

@@ -1,8 +1,11 @@
 """Application-owned projections of the context sent to a model."""
 
+from __future__ import annotations
+
 from collections.abc import Awaitable as Awaitable, Callable as Callable, Sequence as Sequence
 from dataclasses import dataclass as dataclass, field as field
 from typing import (
+    TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
     Generic as Generic,
     Literal as Literal,
@@ -13,6 +16,9 @@ from typing import (
 
 from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
+
+if TYPE_CHECKING:
+    from .agent import Agent
 
 ContextT = TypeVar("ContextT")
 
@@ -35,7 +41,9 @@ class ModelRequestContext(Generic[ContextT]):
     """Detached input and identity for one awaited context transformation.
 
     ``items`` contains native Responses-shaped input items. Return replacement
-    items from the callback, or ``None`` to keep the original input. Replacements
+    items from the callback, or ``None`` to keep the original input. Return
+    ``ModelContextProjection`` to replace application instructions and
+    optionally input items together for an ordinary root turn. Replacements
     do not rewrite the original history items. Generated replies and compaction
     summaries are recorded normally. Preserve valid tool-call and result
     relationships when filtering items. Tool results may already be truncated
@@ -50,6 +58,17 @@ class ModelRequestContext(Generic[ContextT]):
     Native children use their parent Python Session's ``session_id`` and their
     own ``turn_id`` and ``subagent_id``. Output repair reports the identifiers
     of its separate internal Session.
+    ``agent`` identifies the original application Agent captured for a root
+    Session request, including a selected handoff destination. Native child
+    requests have no distinct Python Agent and report ``None``.
+    ``instructions`` contains the accepted application instruction text for
+    this step. It is ``None`` for compaction, hosted prompts that omit local
+    instructions, and steps without a captured application instruction owner.
+    Native base instructions and provider-specific wire changes are separate.
+    These fields observe this transformation's input; later transformations may
+    still replace the request. Both fields default to ``None`` for contexts
+    constructed by application code.
+
     Async callbacks run on the Session event loop; sync callbacks run in a
     worker. Cancellation joins admitted callback work and discards late results.
     """
@@ -62,6 +81,31 @@ class ModelRequestContext(Generic[ContextT]):
     request_id: str
     model: str
     purpose: Literal["turn", "compaction", "output_repair"]
+    agent: Agent[Any, Any] | None = field(default=None, repr=False, kw_only=True)
+    instructions: str | None = field(default=None, repr=False, kw_only=True)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModelContextProjection:
+    """Project application instructions for one native root turn request.
+
+    The request appends a directive that supersedes earlier accepted application
+    text in processing order. Already acknowledged provider context may still
+    contain the original text. Pass ``instructions=None`` to clear application
+    instructions for this request. ``items=None`` keeps the original input.
+    Native system instructions, unrelated
+    developer messages, and saved history retain their existing owners.
+    Return this only for an ordinary root request with captured application
+    instructions. Hosted prompts, compaction, and output repair use their
+    existing context callback forms.
+    """
+
+    instructions: str | None = field(repr=False)
+    items: Sequence[dict[str, Any]] | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.instructions is not None and not isinstance(self.instructions, str):
+            raise TypeError("instructions must be str or None")
 
 
 @_sdk_dataclass(frozen=True)
@@ -96,9 +140,9 @@ HostedPromptSource: TypeAlias = (
 )
 
 
+_ContextTransformResult: TypeAlias = Sequence[dict[str, Any]] | ModelContextProjection | None
 _ContextTransform: TypeAlias = Callable[
-    [ModelRequestContext[ContextT]],
-    Sequence[dict[str, Any]] | None | Awaitable[Sequence[dict[str, Any]] | None],
+    [ModelRequestContext[ContextT]], _ContextTransformResult | Awaitable[_ContextTransformResult]
 ]
 
 

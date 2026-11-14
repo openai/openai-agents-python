@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from contextvars import Context, copy_context
 from typing import TYPE_CHECKING, Any
 
@@ -30,7 +30,8 @@ class _EnvironmentLease:
         self._borrower = asyncio.current_task()
         self._sync_run: _SyncRun | None = None
         self._woke_borrower = False
-        self.interrupted = False
+        self._interrupted = False
+        self._companions: list[_EnvironmentLease] = []
         self._workspace_instructions: str | None = None
         self._sandbox_events: _OperationObserver | None = None
         self._sandbox_memory: _SandboxMemoryOwner | None = None
@@ -69,7 +70,7 @@ class _EnvironmentLease:
                 # A Source ending early must not release an executor in native use.
                 # Wake only its own borrower and wait for the existing opening/close
                 # path to join native work. Never join the Source from native close.
-                self.interrupted = True
+                self._interrupted = True
                 if self._borrower is not None:
                     self._woke_borrower = self._borrower.cancel(self)
                 await _close_after_error(error, lambda: _join(self._retired))
@@ -91,13 +92,44 @@ class _EnvironmentLease:
             self.raise_if_interrupted(error)
             raise
 
+    @property
+    def interrupted(self) -> bool:
+        return self._interrupted or any(lease.interrupted for lease in self._companions)
+
+    def retain(self, lease: _EnvironmentLease) -> None:
+        self._companions.append(lease)
+
+    def for_source(self, source: object | None) -> _EnvironmentLease | None:
+        if self.source is source:
+            return self
+        for companion in self._companions:
+            lease = companion.for_source(source)
+            if lease is not None:
+                return lease
+        return None
+
+    def check_loop(self) -> None:
+        if not self._owner.done() and self._owner.get_loop() is not asyncio.get_running_loop():
+            raise RuntimeError("Close the retained Environment on the event loop where it opened")
+        for lease in self._companions:
+            lease.check_loop()
+
     def raise_if_interrupted(self, error: BaseException) -> None:
-        if self.interrupted and isinstance(error, asyncio.CancelledError) and error.args == (self,):
+        if (
+            self._interrupted
+            and isinstance(error, asyncio.CancelledError)
+            and error.args == (self,)
+        ):
             if error.__context__ is not None:
                 raise error.__context__ from None
             raise RuntimeError("Environment lease ended before Session retirement") from None
 
+        for lease in self._companions:
+            lease.raise_if_interrupted(error)
+
     def detach_borrower(self) -> None:
+        for lease in self._companions:
+            lease.detach_borrower()
         if self._woke_borrower:
             self._woke_borrower = False
             if sys.version_info >= (3, 11):
@@ -107,6 +139,15 @@ class _EnvironmentLease:
 
 
 async def _release_environment(lease: _EnvironmentLease) -> None:
+    # Every manager retires after native work, in reverse acquisition order.
+    lease.check_loop()
+    async with AsyncExitStack() as owners:
+        owners.push_async_callback(_release_single_environment, lease)
+        for companion in lease._companions:
+            owners.push_async_callback(_release_environment, companion)
+
+
+async def _release_single_environment(lease: _EnvironmentLease) -> None:
     # Only signal after native retirement; the Source owns normal exception policy
     # inside its manager. It cannot suppress an error in the separate Session body.
     if not lease._owner.done() and lease._owner.get_loop() is not asyncio.get_running_loop():

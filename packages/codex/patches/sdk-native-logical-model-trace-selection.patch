@@ -1,0 +1,37 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 5271e356..0046a224 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3486,6 +3486,7 @@ async fn admit_sdk_provider_response_span(
+             .admit_provider_response_span(codex_extension_api::SdkProviderResponseSpanInput {
+                 admission: admission.clone(),
+                 tool_scope: None,
++                model: Some(step.settings.model_info.slug.clone()),
+                 parent_context: parent.token().to_owned(),
+                 cancellation: cancellation.clone(),
+             })
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 87f032e4..fdad7e82 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -709,6 +709,7 @@ async fn admit_tool_span(
+             .admit_tool_span(codex_extension_api::SdkProviderResponseSpanInput {
+                 admission: admission.clone(),
+                 tool_scope: Some(scope.clone()),
++                model: None,
+                 parent_context: parent.token().to_owned(),
+                 cancellation: cancellation.clone(),
+             })
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index b48411b9..d242c7d2 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -382,6 +382,8 @@ pub struct SdkProviderResponseSpanInput {
+     pub admission: Arc<dyn ModelToolAdmission>,
+     /// A named tool or handoff on the same native dispatch owner.
+     pub tool_scope: Option<SdkToolSpanScope>,
++    /// The model selected for a logical response; absent for named tool scopes.
++    pub model: Option<String>,
+     pub parent_context: String,
+     pub cancellation: tokio_util::sync::CancellationToken,
+ }

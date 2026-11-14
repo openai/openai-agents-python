@@ -10,6 +10,7 @@ from _agents_codex.model_context import (
     HostedPromptSource as HostedPromptSource,
     Literal as Literal,
     ModelCompletionContext as ModelCompletionContext,
+    ModelContextProjection as ModelContextProjection,
     ModelContextSnapshot as ModelContextSnapshot,
     ModelRequestContext as ModelRequestContext,
     Sequence as Sequence,

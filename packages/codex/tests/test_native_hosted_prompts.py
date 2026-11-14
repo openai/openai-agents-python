@@ -128,6 +128,8 @@ async def test_native_prompt_defaults_and_explicit_empty_overrides(
         return reference
 
     def transform(context: Any) -> None:
+        assert context.agent is agent
+        assert context.instructions == ("" if explicit else None)
         reference["variables"]["topic"] = "changed after capture"  # type: ignore[index]
 
     options: dict[str, Any] = (

@@ -888,7 +888,7 @@ async def test_reconciliation_retains_release_without_repeating_receipt(
             storage=CustomStorage(competitor), resume=identity
         ) as session,
     ):
-        assert session.capabilities.get("native_output_manual_restore").status == "unsupported"
+        assert session.capabilities.get("native_output_manual_restore").status == "supported"
         result = await (await session.submit("Continue.")).get_result()
         assert result.final_output == "continued without replay"
     assert not (tmp_path / "effects").exists()

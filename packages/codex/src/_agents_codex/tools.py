@@ -578,7 +578,10 @@ class _ToolCatalog:
             if type(tool) is not _CapturedFunction:
                 from .manual import _CapturedApproval
 
-                function = tool.function if isinstance(tool, _CapturedApproval) else tool
+                if isinstance(tool, _CapturedApproval):
+                    function = tool.function
+                    # Application binding metadata never reaches the provider tool schema.
+                    spec["_sdkManagedApproval"] = True
             if isinstance(function, _CapturedFunction) and function.configured_agent is not None:
                 spec["configuredAgentRole"] = function.configured_agent.agent.name or function.name
             specs.append(spec)

@@ -353,6 +353,26 @@ def _check_saved_prompt_history(history: list[dict[str, Any]]) -> None:
                         _check_saved_prompt_envelope(item.get("projection"))
 
 
+def _passive_pending_items(value: object) -> list[dict[str, JsonValue]]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"version", "items"}
+        or type(value.get("version")) is not int
+        or value["version"] != 1
+        or not isinstance(value.get("items"), list)
+        or not 1 <= len(value["items"]) <= 4096
+    ):
+        raise ValueError("Invalid passive pending input")
+    items = _PENDING_INPUT.validate_python(value["items"])
+    if (
+        len(json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode())
+        > 8 * 1024 * 1024
+    ):
+        raise ValueError("Passive pending input exceeds its byte limit")
+    _check_audio_json(items)
+    return items
+
+
 class _RememberedApproval(BaseModel):
     """An application-keyed future policy, never a native invocation grant."""
 
@@ -440,6 +460,7 @@ class SessionState(BaseModel):
     repair_items: list[SessionItem] = Field(default_factory=list)
     application_tool_outputs: list[ApplicationToolOutput] = Field(default_factory=list, repr=False)
     remembered_approvals: list[_RememberedApproval] = Field(default_factory=list, repr=False)
+    remembered_mcp_approvals: dict[str, bool] = Field(default_factory=dict, repr=False)
     network_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     executor_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     # Additive SDK overlay. Older writable checkpoints omit it.
@@ -459,7 +480,13 @@ class SessionState(BaseModel):
         ]
         if len(set(approvals)) != len(approvals):
             raise ValueError("Remembered approvals must identify distinct declarations")
-        if approvals and self.format_version not in (4, 5, 6, 7, 8, 9):
+        mcp_approvals = self.remembered_mcp_approvals
+        if len(mcp_approvals) > 4096 or any(
+            len(key) != 64 or any(char not in "0123456789abcdef" for char in key)
+            for key in mcp_approvals
+        ):
+            raise ValueError("Invalid remembered MCP policy")
+        if (approvals or mcp_approvals) and self.format_version not in (4, 5, 6, 7, 8, 9):
             raise ValueError("Remembered approvals require an SDK checkpoint")
         if self.original_input is not None:
             if self.native_continuation is None:
@@ -476,6 +503,10 @@ class SessionState(BaseModel):
             raise ValueError("Settled manual continuation requires format_version 3, 5, 7, 8 or 9")
         if self.native_continuation is not None and self.native_continuation.pending_input:
             self._check_pending_input_budget()
+        if "_sdk_pending_input" in self.agent_options:
+            if self.format_version not in (4, 6) or self.native_continuation is not None:
+                raise ValueError("Passive pending input requires an idle SDK checkpoint")
+            _passive_pending_items(self.agent_options["_sdk_pending_input"])
         if self.operation_tools is not None:
             if self.format_version not in (5, 7, 8, 9):
                 raise ValueError("Operation tools require an SDK manual checkpoint")
@@ -553,7 +584,8 @@ class SessionState(BaseModel):
     def pending_input(self) -> list[dict[str, JsonValue]]:
         """Return detached model input staged for the next resumed request."""
         if self.native_continuation is None:
-            return []
+            value = self.agent_options.get("_sdk_pending_input")
+            return deepcopy(_passive_pending_items(value)) if value is not None else []
         return deepcopy(self.native_continuation.pending_input)
 
     def with_pending_input(self, input: str | Sequence[dict[str, JsonValue]]) -> "SessionState":
@@ -580,6 +612,14 @@ class SessionState(BaseModel):
     def without_pending_input(self) -> "SessionState":
         """Return a checkpoint with the staged input cleared."""
         continuation = self.native_continuation
+        if continuation is None and "_sdk_pending_input" in self.agent_options:
+            options = dict(self.agent_options)
+            options.pop("_sdk_pending_input")
+            state = self.model_copy(update={"agent_options": options})
+            authority = self._authenticated_state_digest
+            if authority is not None and authority == sha256(self.to_json().encode()).hexdigest():
+                state._record_handoff_presentation_authority()
+            return state
         if continuation is None or not continuation.pending_input:
             return self
         cleared = continuation.model_copy(update={"pending_input": []})

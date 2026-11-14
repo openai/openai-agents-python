@@ -37,6 +37,8 @@ class _ConfiguredAgentTool:
     extractor: Callable[[Completed[Any]], str | Awaitable[str]] | None
     observer: Callable[[AgentToolStreamEvent], None | Awaitable[None]] | None
     max_pending_events: int | None
+    include_raw_provider_events: bool
+    return_items: bool
 
 
 def _create_agent_tool(
@@ -46,6 +48,8 @@ def _create_agent_tool(
     extractor: Callable[[Completed[OutputT]], str | Awaitable[str]] | None,
     observer: Callable[[AgentToolStreamEvent], None | Awaitable[None]] | None,
     max_pending_events: int | None,
+    include_raw_provider_events: bool,
+    return_items: bool,
 ) -> _PythonTool[ContextT, object]:
     if observer is not None and not callable(observer):
         raise TypeError("on_stream must be callable or None")
@@ -53,6 +57,12 @@ def _create_agent_tool(
         type(max_pending_events) is not int or max_pending_events <= 0
     ):
         raise ValueError("on_stream_max_pending_events must be a positive integer or None")
+    if type(include_raw_provider_events) is not bool:
+        raise TypeError("include_raw_provider_events must be a bool")
+    if type(return_items) is not bool:
+        raise TypeError("return_items must be a bool")
+    if return_items and extractor is None:
+        raise ValueError("return_items requires custom_output_extractor")
 
     async def invoke(context: ToolContext[Any], input: str) -> str:
         if context._configured_agent_invoker is None:
@@ -68,7 +78,9 @@ def _create_agent_tool(
     )(invoke)
     bind = declaration._bind
     assert bind is not None
-    configured = _ConfiguredAgentTool(agent, extractor, observer, max_pending_events)
+    configured = _ConfiguredAgentTool(
+        agent, extractor, observer, max_pending_events, include_raw_provider_events, return_items
+    )
 
     def capture(
         context: object, policy_context: object, source: FunctionTool[Any, Any, Any]
@@ -100,6 +112,7 @@ async def _observed_agent_tool_result(
         maxsize=0 if limit is None else limit + 1
     )
     cursor = turn.events()
+    cursor._include_raw_provider_events = configured.include_raw_provider_events
 
     async def produce() -> None:
         nonlocal active_agent

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass as dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
@@ -21,11 +21,22 @@ OutputT = TypeVar("OutputT")
 class HandoffInput(Generic[ContextT]):
     """Detached application presentation at the accepted native transfer boundary.
 
-    input has been retaining the operation's initial input; previous has been
-    retaining earlier generated items; generated has been including the settled
-    current response and sibling outputs. context has been retaining the current
-    application's context. Returning groups has not been changing canonical
-    effects, protected instructions, tools or destination identity.
+    input contains the initial input. previous contains earlier generated
+    items, and generated contains the current settled response and sibling
+    outputs. context carries the application's current context.
+
+    Return presentation groups to change what the destination sees. Use
+    recorded_generated to select which original generated records stay in
+    canonical history. You can omit closed assistant text or an ordinary
+    settled function pair from the current response. Omitting either part
+    removes both from canonical history. Retain the transfer receipt and
+    authority-bearing records. Keep selected objects
+    unchanged and in order. To append plain assistant text, include the
+    same new message object in generated and at the end of recorded_generated.
+    Supply only the assistant role, message type, and nonempty output text.
+    Core assigns the message ID. Leave recorded_generated unset to keep the
+    original canonical history.
+    Earlier audit records can still appear in exported SessionState.
     """
 
     input: tuple[dict[str, Any], ...]
@@ -33,6 +44,8 @@ class HandoffInput(Generic[ContextT]):
     generated: tuple[dict[str, Any], ...]
     context: ContextT | None = field(default=None, repr=False, compare=False)
     target: Agent[ContextT, Any] = field(kw_only=True, repr=False, compare=False)
+    # Retained source objects followed by explicit application text additions.
+    recorded_generated: tuple[dict[str, Any], ...] | None = field(default=None, kw_only=True)
 
 
 _PrepareHandoffInput = Callable[
@@ -70,6 +83,44 @@ class Handoff(Generic[ContextT, OutputT]):
             raise ValueError("A handoff callback cannot finish the turn")
         if callback.namespace not in (None, "functions"):
             raise ValueError("A handoff callback must use the default function namespace")
+
+
+def remove_all_tools(value: HandoffInput[ContextT]) -> HandoffInput[ContextT]:
+    """Omit tool calls, results, and reasoning from the destination's input.
+
+    Canonical history and recorded_generated stay unchanged. Apply this filter
+    before nesting history if the summary must exclude tool data.
+    """
+    from .handoff_history import _remove_all_tools
+
+    return _remove_all_tools(value)
+
+
+def nest_handoff_history(
+    value: HandoffInput[ContextT],
+    *,
+    history_mapper: Callable[[list[dict[str, Any]]], Sequence[dict[str, Any]]] | None = None,
+    history_wrappers: tuple[str, str] = (
+        "<CONVERSATION HISTORY>",
+        "</CONVERSATION HISTORY>",
+    ),
+) -> HandoffInput[ContextT]:
+    """Summarize model presentation while preserving canonical source history.
+
+    Default summaries have been flattening before the next summary. Current
+    messages have been retaining their order between summary segments. A custom
+    mapper receives copied source items, expanding earlier summaries generated
+    by this helper and retained by the native session. Its return value supplies
+    native input dictionaries.
+    Tool arguments and outputs have been remaining in the summary; callers have
+    been owning redaction. Target, context and recorded_generated have been
+    retaining their original identities.
+    """
+    from .handoff_history import _nest_handoff_history
+
+    return _nest_handoff_history(
+        value, history_mapper=history_mapper, history_wrappers=history_wrappers
+    )
 
 
 preserve_module_identity(globals(), "agents.handoffs")

@@ -123,14 +123,14 @@ class RecordedResponse(TypedDict):
 
 
 class RecordedRequestUsage(TokenUsage):
-    """One SDK-managed model attempt or hosted request, in native owner order.
+    """One native model attempt, hosted request or observed compaction request.
 
     Zero fields with token_usage_known=False are accounting placeholders, not
     received provider measurements. Retries hidden inside an external library
     have no separate native identity and are not synthesized here.
     """
 
-    scope: Literal["sdk_model_attempt", "provider_request"]
+    scope: Literal["sdk_model_attempt", "provider_request", "compaction"]
     thread_id: str
     turn_id: str
     owner_attempt_id: str
@@ -166,7 +166,7 @@ class RecordedTurn(TypedDict):
     # Retained native attempt measurements; absent without native facts.
     # JSON fields match RunUsage. Child owners and external reports stay separate.
     run_usage: NotRequired[dict[str, int]]
-    # SDK-owned attempts only; opaque internal library retries remain outside this scope.
+    # Observed native requests. Internal retries in external libraries remain opaque.
     request_usage_entries: NotRequired[list[RecordedRequestUsage]]
     # False for missing settled facts or legacy requests without native attempt identities.
     request_usage_entries_complete: NotRequired[bool]

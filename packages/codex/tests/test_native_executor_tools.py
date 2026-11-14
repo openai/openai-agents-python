@@ -111,6 +111,66 @@ def declaration(peer: ExecutorPeer, **kwargs: Any) -> Environment:
     )
 
 
+@pytest.mark.parametrize(
+    ("requested", "advertised", "expected"),
+    [
+        ("bash", (), "/executor/default/bash"),
+        (
+            "/model/untrusted/sh",
+            ({"name": "sh", "path": "/executor/alternate/sh"},),
+            "/executor/alternate/sh",
+        ),
+        ("sh", (), None),
+        ("fish", ({"name": "sh", "path": "/executor/alternate/sh"},), None),
+    ],
+    ids=["legacy-default", "advertised-alternate", "legacy-unadvertised", "unknown-type"],
+)
+async def test_remote_shell_path_comes_from_the_selected_executor(
+    requested, advertised, expected, responses, tmp_path, monkeypatch
+):
+    async with (
+        timeout(25),
+        ExecutorPeer(
+            tmp_path / "executor",
+            synthetic_process_output="private-executor-proof",
+            advertised_shell={"name": "bash", "path": "/executor/default/bash"},
+            advertised_alternate_shells=advertised,
+        ).serve() as peer,
+        provider(responses) as native,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        environment = Environment(
+            url=peer.url,
+            cwd=str(peer.root),
+            headers={"Authorization": "Bearer " + peer.token},
+            tools=["exec_command"],
+            write_policy="legacy",
+        )
+        responses.respond(
+            function_call(
+                "exec_command",
+                {"cmd": "printf shell-proof", "shell": requested, "login": False},
+                "remote-shell",
+            )
+        )
+        responses.respond(assistant_output("done"))
+        async with Agent(instructions="Use the selected shell.", provider=native).session(
+            environment=environment
+        ) as session:
+            assert (await (await session.submit("Run once.")).get_result()).final_output == "done"
+        starts = [request for request in peer.requests if request.get("method") == "process/start"]
+        output = tool_output(responses.requests[1], "remote-shell")
+        if expected is None:
+            assert not starts
+            assert "environment" in output and "only supports" in output
+        else:
+            [start] = starts
+            assert start["params"]["argv"] == [expected, "-c", "printf shell-proof"]
+            assert start["params"]["cwd"] == peer.root.as_uri()
+            assert "private-executor-proof" in output
+
+
 @pytest.mark.requires_native_linux_sandbox
 @pytest.mark.parametrize("structured", [False, True])
 async def test_chat_completions_applies_native_workspace_patch(

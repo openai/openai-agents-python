@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import json
 import re
@@ -16,6 +17,7 @@ from _agents_codex._function_tools import FunctionTool, ToolContext
 from _agents_codex._mcp_names import _project_tool_names
 from _agents_codex.mcp import _capture_tool_name_overrides, _launch_text
 from _agents_codex.native_interception import Allow, Deny
+from _agents_codex.telemetry import _owned_span
 from _agents_codex.tools import _CapturedFunction
 from _agents_shared.strict_schema import ensure_strict_json_schema
 
@@ -81,10 +83,19 @@ class _CapturedMCPTool(_CapturedFunction):
 class _SelectedMCPTool(FunctionTool[_Arguments, ToolOutput, _Binder[ContextT]]):
     _schema_json: str = field(repr=False)
     _selected_context: ContextT = field(repr=False)
+    _strict_schema_json: str | None = field(default=None, repr=False)
 
-    def __init__(self, *, _schema_json: str, _selected_context: ContextT, **options: Any) -> None:
+    def __init__(
+        self,
+        *,
+        _schema_json: str,
+        _selected_context: ContextT,
+        _strict_schema_json: str | None = None,
+        **options: Any,
+    ) -> None:
         object.__setattr__(self, "_schema_json", _schema_json)
         object.__setattr__(self, "_selected_context", _selected_context)
+        object.__setattr__(self, "_strict_schema_json", _strict_schema_json)
         super().__init__(**options)
 
     @property
@@ -92,6 +103,13 @@ class _SelectedMCPTool(FunctionTool[_Arguments, ToolOutput, _Binder[ContextT]]):
         return True
 
     def _spec_json(self) -> str:
+        schema = json.loads(self._schema_json)
+        if self.strict:
+            schema = (
+                json.loads(self._strict_schema_json)
+                if self._strict_schema_json is not None
+                else ensure_strict_json_schema(schema)
+            )
         return json.dumps(
             {
                 "type": "namespace",
@@ -102,11 +120,7 @@ class _SelectedMCPTool(FunctionTool[_Arguments, ToolOutput, _Binder[ContextT]]):
                         "type": "function",
                         "name": self.name,
                         "description": self.description,
-                        "inputSchema": (
-                            ensure_strict_json_schema(json.loads(self._schema_json))
-                            if self.strict
-                            else json.loads(self._schema_json)
-                        ),
+                        "inputSchema": schema,
                         "deferLoading": self.defer_loading,
                         **({"strict": True} if self.strict else {}),
                     }
@@ -129,6 +143,7 @@ async def select_mcp_tools(
     filter_context: tuple[RunContextWrapper[ContextT], AgentBase[ContextT]] | None = None,
     approval: _Approval[ContextT] | None = None,
     tool_name_overrides: Mapping[str, str] | None = None,
+    strict_tool_schemas: bool = False,
 ) -> tuple[FunctionTool[_Arguments, ToolOutput, _Binder[ContextT]], ...]:
     """Authenticate, discover, and capture tools from one selected namespace.
 
@@ -147,6 +162,10 @@ async def select_mcp_tools(
     The discovered catalog is limited to 16,384 tools, 4,096 UTF-8 bytes per tool
     name, and 1 MiB of tool-name bytes in total, before native name projection.
 
+    strict_tool_schemas opts into the same best-effort conversion as managed MCP.
+    Convertible tools use strict schemas; unsupported shapes keep their captured
+    non-strict schema. Selection never changes the client's discovered schemas.
+
     Selection and native Session cleanup leave connection ownership with the
     caller. Keep the client's authentication scope stable while its bindings are
     in use. A fresh selection refreshes supported client caches for future
@@ -164,6 +183,8 @@ async def select_mcp_tools(
     require Classic approval or for servers with metadata and result hooks,
     error policies, or guardrails.
     """
+    if type(strict_tool_schemas) is not bool:
+        raise TypeError("MCP strict_tool_schemas must be a bool")
     if isinstance(tool_names, (str, bytes)):
         raise TypeError("MCP tool_names must be a sequence of names")
     requested = None if tool_names is None else tuple(tool_names)
@@ -222,11 +243,41 @@ async def select_mcp_tools(
         invalidated = invalidate()
         if inspect.isawaitable(invalidated):
             await invalidated
-    discovered = (
-        await server.list_tools()
-        if filter_context is None
-        else await server.list_tools(*filter_context)
-    )
+    with _owned_span(namespace.name[:4096], "mcp_tools") as discovery:
+        discovered = (
+            await server.list_tools()
+            if filter_context is None
+            else await server.list_tools(*filter_context)
+        )
+        if (
+            discovery is not None
+            and not discovery.context.disabled
+            and discovery.context.include_sensitive_data
+        ):
+            traced_names: list[str] = []
+            remaining_bytes = 60 * 1024
+            for tool in discovered[:_MAX_DISCOVERED_TOOLS]:
+                traced_name = getattr(tool, "name", None)
+                if (
+                    not isinstance(traced_name, str)
+                    or len(traced_name) > _MAX_DISCOVERED_NAME_BYTES
+                ):
+                    break
+                try:
+                    size = len(json.dumps(traced_name, ensure_ascii=False).encode("utf-8")) + 1
+                except UnicodeError:
+                    break
+                if size > remaining_bytes:
+                    break
+                traced_names.append(traced_name)
+                remaining_bytes -= size
+            discovery.set_outcome(
+                status="ok",
+                data={
+                    "tools": traced_names,
+                    "omitted_tool_count": len(discovered) - len(traced_names),
+                },
+            )
     if len(discovered) > _MAX_DISCOVERED_TOOLS:
         raise ValueError("MCP discovery exceeds the 16384-tool limit")
     by_name: dict[str, MCPTool] = {}
@@ -269,6 +320,7 @@ async def select_mcp_tools(
             use_structured_content,
             approval,
             ToolRef(**projected[namespace.name, name]),
+            strict_tool_schemas,
         )
         for name in names
     )
@@ -282,16 +334,25 @@ def _capture_tool(
     use_structured_content: bool,
     approval: _Approval[ContextT] | None,
     model_ref: ToolRef,
+    strict_tool_schemas: bool,
 ) -> _SelectedMCPTool[ContextT]:
     raw_name = tool.name
     schema = tool_input_schema(tool)
     if not isinstance(schema, dict) or schema.get("type", "object") != "object":
         raise ValueError("Selected MCP tools require an object input schema")
+    peer_schema = schema
     if "type" not in schema:
         schema = {"properties": {}, **schema, "type": "object"}
     description = "" if tool.description is None else tool.description
     _launch_text(description, "tool description", allow_empty=True)
     schema_json = json.dumps(schema, allow_nan=False)
+    strict_schema_json = (
+        importlib.import_module("agents._native")._best_effort_strict_mcp_schema(
+            json.dumps(peer_schema, allow_nan=False)
+        )
+        if strict_tool_schemas
+        else None
+    )
     output_adapter = TypeAdapter(ToolOutput)
 
     async def invoke(*, root: dict[str, Any]) -> ToolOutput:
@@ -339,6 +400,8 @@ def _capture_tool(
         namespace=model_ref.namespace,
         namespace_description=namespace.description,
         _schema_json=schema_json,
+        _strict_schema_json=strict_schema_json,
+        strict=strict_schema_json is not None,
         _selected_context=context,
         _bind=bind,
         before=approval,

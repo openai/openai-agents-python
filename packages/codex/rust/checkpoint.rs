@@ -60,6 +60,8 @@ pub struct Checkpoint {
     managed_tool_specs: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_environment_policy_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "_sdk_pending_input")]
+    passive_input: Option<crate::manual_checkpoint::PassiveInputData>,
 }
 
 /// Rebind the accepted active catalog to current declarations before allocation.
@@ -242,7 +244,7 @@ struct Descendant {
 }
 
 pub async fn export(state: &ThreadState, pending: Option<&Value>) -> anyhow::Result<Value> {
-    export_inner(state, pending, false, None, None).await
+    export_inner(state, pending, false, None, None, None).await
 }
 
 pub(crate) async fn export_suspended(
@@ -254,7 +256,36 @@ pub(crate) async fn export_suspended(
         matches!(state.thread.agent_status().await, AgentStatus::Shutdown),
         "Manual checkpoint requires a closed Core writer"
     );
-    export_inner(state, None, true, Some(code_states), Some(managed_specs)).await
+    export_inner(
+        state,
+        None,
+        true,
+        Some(code_states),
+        Some(managed_specs),
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn export_canonical_manual(
+    state: &ThreadState,
+    code_states: &CodeStates,
+    managed_specs: &Value,
+    seal: &crate::canonical_storage::CanonicalManualSeal,
+) -> anyhow::Result<Value> {
+    ensure!(
+        matches!(state.thread.agent_status().await, AgentStatus::Shutdown),
+        "Manual checkpoint requires a closed Core writer"
+    );
+    export_inner(
+        state,
+        None,
+        true,
+        Some(code_states),
+        Some(managed_specs),
+        Some(seal),
+    )
+    .await
 }
 
 // The manual owner holds the native mutation gate and validates its live
@@ -272,7 +303,11 @@ pub(crate) async fn export_restored_manual(state: &ThreadState) -> anyhow::Resul
             ),
         "Manual reentry requires an idle, open Core thread"
     );
-    export_inner(state, None, true, None, None).await
+    let seal = state
+        .thread
+        .thread_extension_data()
+        .get::<crate::canonical_storage::CanonicalManualSeal>();
+    export_inner(state, None, true, None, None, seal.as_deref()).await
 }
 
 struct ManualDescendants {
@@ -538,7 +573,9 @@ async fn export_inner(
     suspended: bool,
     captured_code: Option<&CodeStates>,
     captured_specs: Option<&Value>,
+    canonical_seal: Option<&crate::canonical_storage::CanonicalManualSeal>,
 ) -> anyhow::Result<Value> {
+    crate::manual_checkpoint::ensure_staged_export_ready(state)?;
     let tools = state
         .thread
         .thread_extension_data()
@@ -593,13 +630,27 @@ async fn export_inner(
         .store
         .as_any()
         .is::<crate::canonical_storage::CanonicalStore>();
-    // Canonical storage admits one root, with no native checklist or pending effects.
+    // Only the ordinary live writer seal extends canonical capture beyond idle.
     let (root_memory_mode, root_checklist) = if canonical {
+        let sealed = if let Some(seal) = canonical_seal {
+            let store = state
+                .engine
+                .store
+                .as_any()
+                .downcast_ref::<crate::canonical_storage::CanonicalStore>()
+                .context("Canonical manual seal has the wrong store owner")?;
+            store.check_manual_seal(state.id, seal).await?;
+            true
+        } else {
+            false
+        };
         ensure!(
             before.is_empty()
                 && pending.is_none()
-                && !suspended
-                && interrupted_thread_ids.is_empty(),
+                && ((!suspended && interrupted_thread_ids.is_empty())
+                    || (suspended
+                        && sealed
+                        && interrupted_thread_ids.iter().all(|id| *id == state.id))),
             "canonical checkpoints require an idle root without descendants"
         );
         (None, None)
@@ -641,6 +692,16 @@ async fn export_inner(
     if let Some(key) = pending {
         check_capture(state, key)?;
     }
+    if let Some(seal) = canonical_seal {
+        state
+            .engine
+            .store
+            .as_any()
+            .downcast_ref::<crate::canonical_storage::CanonicalStore>()
+            .context("Canonical manual seal has the wrong store owner")?
+            .check_manual_seal(state.id, seal)
+            .await?;
+    }
     let mut history = history;
     // An idle persistent export keeps these approvals as historical data.
     if (canonical || reader.is_some()) && pending.is_none() && !suspended {
@@ -649,7 +710,7 @@ async fn export_inner(
             archive_exported_mcp_approvals(&mut child.history)?;
         }
     }
-    Ok(serde_json::to_value(Checkpoint {
+    let mut captured = serde_json::to_value(Checkpoint {
         format_version: if code_states.is_empty() { 2 } else { 4 },
         codex_revision: include_str!("../CODEX_REVISION").trim().to_owned(),
         source_session_id: state.id,
@@ -667,7 +728,12 @@ async fn export_inner(
             .thread_extension_data()
             .get::<crate::agent_profiles::ProfileEnvironments>()
             .map(|environments| environments.digest.clone()),
-    })?)
+        passive_input: None,
+    })?;
+    if let Some(enrollment) = crate::agent_profiles::runtime_enrollment_for_capture(&state.thread)? {
+        captured["_sdk_runtime_enrollment"] = enrollment;
+    }
+    Ok(captured)
 }
 
 // Only the managed tool ingress may capture before an effect, under its
@@ -994,13 +1060,72 @@ pub(crate) fn remove_replayed_mcp_approvals(history: &mut Arc<Vec<RolloutItem>>)
 
 pub async fn restore(
     engine: &Arc<EngineState>,
-    mut checkpoint: Checkpoint,
-    mut options: options::ThreadOptions,
+    checkpoint: Checkpoint,
+    options: options::ThreadOptions,
     python_specs: Option<ToolDeclarations>,
     source: Option<&crate::context::Change>,
 ) -> anyhow::Result<NativeThread> {
     let _lifecycle = engine.lifecycle.lock().await;
+    restore_inner(engine, checkpoint, options, python_specs, source, false).await
+}
+
+pub(crate) async fn restore_canonical(
+    engine: &Arc<EngineState>,
+    checkpoint: Checkpoint,
+    options: options::ThreadOptions,
+    python_specs: Option<ToolDeclarations>,
+    frame: &Value,
+) -> anyhow::Result<NativeThread> {
+    let store = engine
+        .store
+        .as_any()
+        .downcast_ref::<crate::canonical_storage::CanonicalStore>()
+        .context("Manual canonical restore requires its CustomStorage owner")?;
+    let _lifecycle = engine.lifecycle.lock().await;
+    let root = checkpoint.source_session_id;
+    engine.ensure_no_live_owner(root).await?;
+    ensure!(
+        options.agent_profiles.is_none() && checkpoint.descendants.is_empty(),
+        "CustomStorage restore requires one ordinary root Agent"
+    );
+    let result = async {
+        store.check_saved_manual_checkpoint(root, frame).await?;
+        let restored = restore_inner(engine, checkpoint, options, python_specs, None, true).await?;
+        // No Frame has been published or prepared yet. Claim before configured
+        // reentry can enqueue an application callback or expose the child reply.
+        if let Some(seal) = store.claim_configured_checkpoint(root, frame).await? {
+            restored
+                .current()?
+                .thread
+                .thread_extension_data()
+                .insert(seal);
+        }
+        Ok(restored)
+    }
+    .await;
+    if let Err(error) = result {
+        return match engine.store.discard_thread(root).await {
+            Ok(()) => Err(error),
+            Err(cleanup) => {
+                Err(error.context(format!("Canonical restore cleanup failed: {cleanup}")))
+            }
+        };
+    }
+    result
+}
+
+async fn restore_inner(
+    engine: &Arc<EngineState>,
+    mut checkpoint: Checkpoint,
+    mut options: options::ThreadOptions,
+    python_specs: Option<ToolDeclarations>,
+    source: Option<&crate::context::Change>,
+    canonical: bool,
+) -> anyhow::Result<NativeThread> {
     checkpoint.check_revision()?;
+    if let Some(passive) = &checkpoint.passive_input {
+        passive.validate()?;
+    }
     if let Err(error) = validate_external_mcp_approvals(&checkpoint.history) {
         source.ok_or(error)?.validate_mcp_provider(engine)?;
     }
@@ -1043,6 +1168,9 @@ pub async fn restore(
     );
     for id in &ids {
         engine.ensure_no_live_owner(*id).await?;
+        if canonical {
+            continue;
+        }
         match engine
             .store
             .read_thread(ReadThreadParams {
@@ -1214,6 +1342,17 @@ pub async fn restore(
                 crate::application_instructions::Instructions::restored(accepted),
             );
         }
+    }
+    if let Some(passive) = checkpoint.passive_input.take() {
+        crate::manual_checkpoint::seed_passive_input(&mut startup.thread_extension_init, passive)?;
+    }
+    if canonical {
+        ensure!(
+            initial_receipt.is_none(),
+            "Canonical manual restore requires sampled history"
+        );
+        startup.initial_history = engine.history(&root.to_string()).await?;
+        return engine.start_prepared(startup, instructions).await;
     }
     let store = engine
         .store

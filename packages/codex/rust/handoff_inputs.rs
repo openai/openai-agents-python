@@ -1,7 +1,7 @@
 //! One owned preparation reply edits presentation, never the accepted transfer receipt.
 use super::*;
 use codex_protocol::agent_profile::{
-    AgentProfileHandoffInputRequest, AgentProfileHandoffPresentation,
+    AgentProfileHandoffInputRequest, AgentProfileHandoffPresentation, HandoffSummary,
 };
 
 #[derive(Deserialize, Serialize)]
@@ -10,6 +10,12 @@ pub(crate) struct Groups {
     pub input: Vec<Value>,
     pub previous: Vec<Value>,
     pub generated: Vec<Value>,
+    #[serde(default)]
+    pub summaries: Vec<HandoffSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_generated_indices: Option<Vec<usize>>,
+    #[serde(default)]
+    pub recorded_assistant_text: Vec<Vec<String>>,
 }
 
 impl PythonTools {
@@ -48,13 +54,29 @@ impl PythonTools {
                 "generation":generation,"tool_name":request.tool_name,
                 "target_profile_id":request.handoff.target_profile_id,
                 "input":proposed.input,"previous":proposed.previous,"generated":proposed.generated,
+                "summaries":proposed.summaries,
             }}),
             |reply: std::result::Result<Groups, ()>| reply.map_err(|_| anyhow::anyhow!("Handoff input preparation failed")),
         ).await?;
+        if let Some(indices) = &groups.recorded_generated_indices {
+            ensure!(
+                indices.windows(2).all(|pair| pair[0] < pair[1])
+                    && indices
+                        .iter()
+                        .all(|index| *index < proposed.generated.len()),
+                "Canonical handoff history has changed source occurrences"
+            );
+            store.insert(codex_extension_api::HandoffGeneratedHistorySelection {
+                handoff: request.handoff.clone(),
+                keep: indices.clone(),
+                append_assistant_text: groups.recorded_assistant_text,
+            });
+        }
         Ok(AgentProfileHandoffPresentation {
             input: groups.input,
             previous: groups.previous,
             generated: groups.generated,
+            summaries: groups.summaries,
             ..proposed.clone()
         })
     }
@@ -73,13 +95,23 @@ impl PythonTools {
         );
         let groups = data.map(serde_json::from_str::<Groups>).transpose()?;
         let owner = self.step_owner(thread, instance)?;
-        let mut preparations = owner.preparation_replies.lock()
+        let mut preparations = owner
+            .preparation_replies
+            .lock()
             .expect("Python preparation replies poisoned");
-        let slot = preparations.as_mut().context("Expired preparation")?
-            .get_mut(&id).filter(|slot| !slot.is_closed()).context("Expired preparation")?;
-        ensure!(matches!(slot.reply.as_ref(), Some(PreparationReply::HandoffInput(_))),
-            "Invalid handoff input reply");
-        let Some(PreparationReply::HandoffInput(reply)) = slot.reply.take() else { unreachable!() };
+        let slot = preparations
+            .as_mut()
+            .context("Expired preparation")?
+            .get_mut(&id)
+            .filter(|slot| !slot.is_closed())
+            .context("Expired preparation")?;
+        ensure!(
+            matches!(slot.reply.as_ref(), Some(PreparationReply::HandoffInput(_))),
+            "Invalid handoff input reply"
+        );
+        let Some(PreparationReply::HandoffInput(reply)) = slot.reply.take() else {
+            unreachable!()
+        };
         drop(preparations);
         reply
             .send(groups.ok_or(()))

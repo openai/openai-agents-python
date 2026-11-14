@@ -101,8 +101,9 @@ impl ToolOutcomes {
         else {
             return Ok(None);
         };
-        if record.observation.status
-            != codex_protocol::protocol::ResponseObservationStatus::Completed
+        if record.compaction == Some(true)
+            || record.observation.status
+                != codex_protocol::protocol::ResponseObservationStatus::Completed
         {
             return Ok(None);
         }
@@ -1256,6 +1257,11 @@ fn portable_manual_actions(
             ResponseItem::CustomToolCallOutput { call_id, .. } => {
                 custom_receipts.insert(call_id);
             }
+            // A completed hosted File Search is canonical provider data. Its
+            // item ID never participates in the pending local tool partition.
+            ResponseItem::FileSearchCall {
+                id: Some(id), status, ..
+            } if status == "completed" && !id.is_empty() => {}
             ResponseItem::ToolSearchOutput {
                 call_id: Some(call_id),
                 execution,
@@ -1414,29 +1420,246 @@ impl Frame {
     }
 }
 
+/// Passive caller data has no continuation or reply authority.
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PassiveInputData {
+    version: u8,
+    items: Vec<Value>,
+}
+impl PassiveInputData {
+    pub(crate) fn validate(&self) -> Result<Vec<ResponseItem>> {
+        ensure!(self.version == 1 && !self.items.is_empty() && self.items.len() <= 4096,
+            "Invalid passive pending input");
+        ensure!(serde_json::to_vec(self)?.len() <= 8 * 1024 * 1024,
+            "Passive pending input exceeds its byte limit");
+        self.items.iter().map(|value| {
+            let item: ResponseItem = serde_json::from_value(value.clone())
+                .map_err(|_| anyhow::anyhow!("Unsupported passive pending item"))?;
+            ensure!(!matches!(item, ResponseItem::Other), "Unsupported passive pending item");
+            crate::checkpoint::validate_external_response_item(&item)?;
+            Ok(item)
+        }).collect()
+    }
+    fn from_items(items: Vec<ResponseItem>) -> Result<Option<Self>> {
+        if items.is_empty() { return Ok(None); }
+        let data = Self { version: 1, items: items.into_iter()
+            .map(serde_json::to_value).collect::<std::result::Result<_,_>>()? };
+        data.validate()?;
+        Ok(Some(data))
+    }
+}
+
+struct PassiveInput {
+    source_turn: String,
+    batch: codex_extension_api::StagedInputBatch,
+    current_turn: Arc<std::sync::Mutex<String>>,
+}
+impl PassiveInput {
+    fn remaining(&self) -> Result<Vec<ResponseItem>> {
+        self.batch.ensure_terminal_settled().map_err(anyhow::Error::msg)?;
+        Ok(self.batch.pending_occurrences_for(&self.source_turn)
+            .into_iter().map(|(_, item)| item).collect())
+    }
+}
+
+// An empty completed owner must not hide a later turn's retry. Failed or
+// in-flight writers keep their fence even when their visible mask is empty.
+fn pending_passive(
+    store: &codex_extension_api::ExtensionData,
+) -> Result<Option<Arc<PassiveInput>>> {
+    let Some(passive) = store.get::<PassiveInput>() else { return Ok(None) };
+    if passive.remaining()?.is_empty() { return Ok(None); }
+    Ok(Some(passive))
+}
+
+pub(crate) fn seed_passive_input(
+    init: &mut codex_extension_api::ExtensionDataInit,
+    data: PassiveInputData,
+) -> Result<()> {
+    let source_turn = "sdk-passive-pending".to_owned();
+    let batch = codex_extension_api::StagedInputBatch::selected_after_terminal(
+        source_turn.clone(), data.validate()?);
+    init.insert(PassiveInput {
+        source_turn, batch, current_turn: Arc::new(std::sync::Mutex::new(String::new())),
+    });
+    Ok(())
+}
+
+pub(crate) fn retain_passive_at_stop(
+    store: &codex_extension_api::ExtensionData, turn: &str,
+) {
+    if !matches!(pending_passive(store), Ok(None)) { return; }
+    let Some(retry) = store.get::<StagedRetry>() else { return };
+    if retry.turn != turn || !retry.batch.projects_occurrences()
+        || !retry.batch.is_pending() || !retry.batch.terminal_was_accepted() {
+        return;
+    }
+    store.insert(PassiveInput {
+        source_turn: retry.turn.clone(), batch: retry.batch.clone(),
+        current_turn: Arc::new(std::sync::Mutex::new(retry.turn.clone())),
+    });
+}
+
+fn completed_source(history: &[RolloutItem], turn: &str) -> bool {
+    let mut last = None;
+    let mut completed = false;
+    for row in history {
+        match row {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                last = Some(event.turn_id.as_str());
+                completed = false;
+            }
+            RolloutItem::EventMsg(EventMsg::TurnComplete(event))
+                if last == Some(event.turn_id.as_str()) => {
+                    completed = event.error.is_none();
+                }
+            RolloutItem::EventMsg(EventMsg::TurnAborted(_)) => completed = false,
+            _ => {}
+        }
+    }
+    last == Some(turn) && completed
+}
+
+pub(crate) fn passive_input(
+    thread: &crate::engine::ThreadState, checkpoint: &Value,
+) -> Result<Option<PassiveInputData>> {
+    if let Some(passive) = pending_passive(thread.thread.thread_extension_data())? {
+        return PassiveInputData::from_items(passive.remaining()?);
+    }
+    let Some(retry) = thread.thread.thread_extension_data().get::<StagedRetry>() else {
+        return Ok(None);
+    };
+    retry.batch.ensure_terminal_settled().map_err(anyhow::Error::msg)?;
+    if !retry.batch.projects_occurrences() || !retry.batch.is_pending() { return Ok(None); }
+    let history: Vec<RolloutItem> = serde_json::from_value(checkpoint["history"].clone())?;
+    if !completed_source(&history, &retry.turn) { return Ok(None); }
+    PassiveInputData::from_items(remaining_staged_input(thread, &retry.turn)?)
+}
+
+pub(crate) async fn fresh_passive_input(
+    thread: &crate::engine::ThreadState,
+) -> Result<Option<Arc<codex_extension_api::FreshStagedInput>>> {
+    let store = thread.thread.thread_extension_data();
+    if pending_passive(store)?.is_none() {
+        let Some(retry) = store.get::<StagedRetry>() else { return Ok(None) };
+        if !retry.batch.projects_occurrences() || !retry.batch.is_pending() { return Ok(None); }
+        let checkpoint = crate::checkpoint::export(thread, None).await?;
+        if passive_input(thread, &checkpoint)?.is_none() { return Ok(None); }
+        store.insert(PassiveInput {
+            source_turn: retry.turn.clone(), batch: retry.batch.clone(),
+            current_turn: Arc::new(std::sync::Mutex::new(retry.turn.clone())),
+        });
+    }
+    let passive = pending_passive(store)?.context("Missing passive pending input")?;
+    if passive.remaining()?.is_empty() { return Ok(None); }
+    ensure!(thread.thread.thread_settings_snapshot().await.provider_history.is_some(),
+        "Passive terminal input requires current provider history");
+    Ok(Some(Arc::new(codex_extension_api::FreshStagedInput::new(
+        thread.id.to_string(), passive.batch.clone(), Arc::clone(&passive.current_turn),
+    ).map_err(anyhow::Error::msg)?)))
+}
+
 struct StagedRetry {
     turn: String,
     continuation: Value,
     batch: codex_extension_api::StagedInputBatch,
 }
 
+pub(crate) fn ensure_staged_export_ready(thread: &crate::engine::ThreadState) -> Result<()> {
+    if let Some(passive) = thread.thread.thread_extension_data().get::<PassiveInput>() {
+        passive.batch.ensure_terminal_settled().map_err(anyhow::Error::msg)?;
+    }
+    if let Some(retry) = thread.thread.thread_extension_data().get::<StagedRetry>() {
+        retry.batch.ensure_terminal_settled().map_err(anyhow::Error::msg)?;
+    }
+    Ok(())
+}
+
+fn remaining_staged_input(
+    thread: &crate::engine::ThreadState,
+    turn: &str,
+) -> Result<Vec<ResponseItem>> {
+    if let Some(passive) = pending_passive(thread.thread.thread_extension_data())? {
+        let remaining = passive.remaining()?;
+        if !remaining.is_empty() {
+            ensure!(*passive.current_turn.lock().unwrap_or_else(std::sync::PoisonError::into_inner) == turn,
+                "Passive staged input belongs to another turn");
+        }
+        return Ok(remaining);
+    }
+    let Some(retry) = thread.thread.thread_extension_data().get::<StagedRetry>() else {
+        return Ok(Vec::new());
+    };
+    retry.batch.ensure_terminal_settled().map_err(anyhow::Error::msg)?;
+    if retry.batch.projects_occurrences() && retry.batch.is_pending() {
+        ensure!(retry.turn == turn, "Unaccepted staged input belongs to another turn");
+    }
+    Ok(retry.batch.pending_occurrences_for(turn).into_iter().map(|(_, item)| item).collect())
+}
+
 pub(crate) fn staged_retry(
     thread: &crate::engine::ThreadState,
     checkpoint: &Value,
-) -> Option<Value> {
-    let retry = thread.thread.thread_extension_data().get::<StagedRetry>()?;
-    if !retry.batch.is_pending() {
-        return None;
+) -> Result<Option<Value>> {
+    if passive_input(thread, checkpoint)?.is_some()
+        || pending_passive(thread.thread.thread_extension_data())?.is_some() {
+        return Ok(None);
     }
-    let last_turn = checkpoint["history"]
-        .as_array()?
+    let Some(retry) = thread.thread.thread_extension_data().get::<StagedRetry>() else {
+        return Ok(None);
+    };
+    retry.batch.ensure_terminal_settled().map_err(anyhow::Error::msg)?;
+    if !retry.batch.is_pending() {
+        return Ok(None);
+    }
+    let history: Vec<RolloutItem> = serde_json::from_value(checkpoint["history"].clone())?;
+    let (start, last_turn) = history
         .iter()
+        .enumerate()
         .rev()
-        .find(|record| {
-            record["type"] == "event_msg" && record["payload"]["type"] == "task_started"
-        })?["payload"]["turn_id"]
-        .as_str()?;
-    (last_turn == retry.turn.as_str()).then(|| retry.continuation.clone())
+        .find_map(|(index, item)| match item {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => Some((index, event.turn_id.as_str())),
+            _ => None,
+        })
+        .context("Staged retry has no native source turn")?;
+    if last_turn != retry.turn {
+        ensure!(!retry.batch.projects_occurrences(), "Unaccepted staged input belongs to an earlier turn");
+        return Ok(None);
+    }
+    let mut continuation = retry.continuation.clone();
+    continuation["pending_input"] = serde_json::to_value(remaining_staged_input(thread, &retry.turn)?)?;
+    let mut seen = continuation["seen_call_ids"].as_array()
+        .context("Staged retry has no native seen-call set")?.iter()
+        .filter_map(Value::as_str).map(str::to_owned).collect::<HashSet<_>>();
+    for item in &history[start..] {
+        match item {
+            RolloutItem::TokenUsageRecord(record) if record.turn_id == retry.turn
+                && record.thread_id == thread.id => {
+                continuation["turn_usage"] = serde_json::to_value(&record.turn_token_usage)?;
+            }
+            RolloutItem::ResponseItem(envelope) => match &envelope.item {
+                ResponseItem::FunctionCallOutput { call_id: Some(id), .. } => { seen.insert(id.clone()); }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    let mut seen = seen.into_iter().collect::<Vec<_>>();seen.sort();
+    continuation["seen_call_ids"] = serde_json::to_value(seen)?;
+    if let Some(outcomes) = ToolOutcomes::capture(&history, thread.id, &retry.turn)? {
+        continuation["tool_outcomes"] = serde_json::to_value(outcomes)?;
+    } else {
+        continuation.as_object_mut().context("Staged continuation is not an object")?
+            .remove("tool_outcomes");
+    }
+    if let Some(model) = model_override(&history, &retry.turn) {
+        continuation["model_override"] = Value::String(model);
+    }
+    if let Some(settings) = model_settings_override(&history, &retry.turn) {
+        continuation["model_settings_override"] = serde_json::to_value(settings)?;
+    }
+    Ok(Some(continuation))
 }
 
 pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) -> Result<()> {
@@ -1828,10 +2051,9 @@ pub(crate) async fn continue_if_ready(
     if let Some(source) = operation_declaration_source {
         recovery_options["operation_declaration_source"] = serde_json::to_value(source)?;
     }
-    let reset_tool_choice = thread
-        .thread
-        .thread_settings_snapshot()
-        .await
+    let current_settings = thread.thread.thread_settings_snapshot().await;
+    let terminal_staged_input = current_settings.provider_history.is_some();
+    let reset_tool_choice = current_settings
         .request_controls
         .reset_tool_choice
         .flatten()
@@ -1840,10 +2062,12 @@ pub(crate) async fn continue_if_ready(
         None
     } else {
         let continuation = frame.continuation_snapshot(true)?;
-        let batch = codex_extension_api::StagedInputBatch::new(
-            frame.turn.clone(),
-            std::mem::take(&mut frame.staged_input),
-        );
+        let items = std::mem::take(&mut frame.staged_input);
+        let batch = if terminal_staged_input {
+            codex_extension_api::StagedInputBatch::selected_after_terminal(frame.turn.clone(), items)
+        } else {
+            codex_extension_api::StagedInputBatch::new(frame.turn.clone(), items)
+        };
         thread.thread.thread_extension_data().insert(StagedRetry {
             turn: frame.turn.clone(),
             continuation,
@@ -2091,6 +2315,67 @@ async fn capture_native_mcp(
     Ok(Some(result?))
 }
 
+// Ordinary application-manual calls retain the existing store identity.
+// Native MCP suspension keeps its separate, memory-only path above.
+enum OrdinaryManualStore<'a> {
+    Memory(&'a crate::storage::MemoryThreadStore),
+    Canonical(&'a crate::canonical_storage::CanonicalStore),
+}
+impl<'a> OrdinaryManualStore<'a> {
+    fn from_thread(thread: &'a crate::engine::ThreadState) -> Result<Self> {
+        let store = thread.engine.store.as_any();
+        if let Some(store) = store.downcast_ref::<crate::storage::MemoryThreadStore>() {
+            Ok(Self::Memory(store))
+        } else if let Some(store) = store.downcast_ref::<crate::canonical_storage::CanonicalStore>()
+        {
+            Ok(Self::Canonical(store))
+        } else {
+            anyhow::bail!("Manual continuation requires a supported SDK-owned writer")
+        }
+    }
+    async fn ready(
+        &self,
+        id: ThreadId,
+        pending: &[crate::python_tools::PendingKey],
+        completed: &HashSet<String>,
+    ) -> Result<bool> {
+        match self {
+            Self::Memory(store) => store.manual_suspension_ready(id, pending, completed).await,
+            Self::Canonical(store) => store.manual_suspension_ready(id, pending, completed).await,
+        }
+    }
+    async fn begin(
+        &self,
+        id: ThreadId,
+        pending: Vec<crate::python_tools::PendingKey>,
+        completed: &HashSet<String>,
+    ) -> Result<bool> {
+        match self {
+            Self::Memory(store) => store.begin_manual_suspension(id, pending, completed).await,
+            Self::Canonical(store) => store.begin_manual_suspension(id, pending, completed).await,
+        }
+    }
+    async fn finish(
+        &self,
+        id: ThreadId,
+        turn: Option<&str>,
+    ) -> Result<(bool, Option<crate::canonical_storage::CanonicalManualSeal>)> {
+        match self {
+            Self::Memory(store) => Ok((store.finish_manual_suspension(id, turn).await?, None)),
+            Self::Canonical(store) => {
+                let seal = store.finish_manual_suspension(id, turn).await?;
+                Ok((seal.is_some(), seal))
+            }
+        }
+    }
+    async fn release_after_capture(&self, id: ThreadId, suspended: bool) -> Result<()> {
+        if suspended && let Self::Canonical(store) = self {
+            codex_thread_store::ThreadStore::shutdown_thread(*store, id).await?;
+        }
+        Ok(())
+    }
+}
+
 pub(crate) async fn ready(thread: &crate::engine::ThreadState, owner: &Owner) -> Result<bool> {
     let restored = owner
         .lock()
@@ -2129,17 +2414,9 @@ pub(crate) async fn ready(thread: &crate::engine::ThreadState, owner: &Owner) ->
     }
     let completed = tools.completed_calls(&pending[0].turn);
     if !restored {
-        let store = thread
-            .engine
-            .store
-            .as_any()
-            .downcast_ref::<crate::storage::MemoryThreadStore>()
-            .context("Manual continuation requires the in-memory store")?;
+        let store = OrdinaryManualStore::from_thread(thread)?;
         let held = completed_ready_outputs(&tools, &pending[0].turn);
-        if !store
-            .manual_suspension_ready(thread.id, &pending, &held)
-            .await?
-        {
+        if !store.ready(thread.id, &pending, &held).await? {
             return Ok(false);
         }
     }
@@ -2236,39 +2513,63 @@ pub(crate) async fn capture(
             .context("Manual continuation requires current tools")?;
         let pending = tools.pending_manual_keys(&thread.id.to_string())?;
         let configured = tools.continuations(&pending)?;
-        let mut current = owner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Manual continuation poisoned"))?;
-        let frame = current
-            .as_mut()
-            .context("Manual continuation is no longer pending")?;
-        ensure!(
-            pending.iter().all(|key| key.turn == frame.turn),
-            "Configured continuations belong to another restored turn"
-        );
-        snapshot["format_version"] = serde_json::json!(if snapshot["format_version"] == 4 {
-            5
-        } else {
-            3
-        });
-        let mut continuation = frame.continuation_snapshot(false)?;
-        for call in continuation["pending_manual"]
-            .as_array_mut()
-            .context("Missing pending manual calls")?
         {
-            let id = call["call_id"].as_str().context("Missing manual call ID")?;
-            if let Some(value) = configured.get(id) {
-                call["continuation"] = value.clone();
+            let mut current = owner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Manual continuation poisoned"))?;
+            let frame = current
+                .as_mut()
+                .context("Manual continuation is no longer pending")?;
+            ensure!(
+                pending.iter().all(|key| key.turn == frame.turn),
+                "Configured continuations belong to another restored turn"
+            );
+            snapshot["format_version"] = serde_json::json!(if snapshot["format_version"] == 4 {
+                5
             } else {
-                ensure!(
-                    call.get("continuation").is_none(),
-                    "Configured continuation is no longer parked"
-                );
+                3
+            });
+            let mut continuation = frame.continuation_snapshot(false)?;
+            for call in continuation["pending_manual"]
+                .as_array_mut()
+                .context("Missing pending manual calls")?
+            {
+                let id = call["call_id"].as_str().context("Missing manual call ID")?;
+                if let Some(value) = configured.get(id) {
+                    call["continuation"] = value.clone();
+                } else {
+                    ensure!(
+                        call.get("continuation").is_none(),
+                        "Configured continuation is no longer parked"
+                    );
+                }
             }
+            snapshot["native_continuation"] = continuation;
         }
-        snapshot["native_continuation"] = continuation;
-        frame.sealed = true;
-        frame.receivers.clear();
+        if let Some(seal) = thread
+            .thread
+            .thread_extension_data()
+            .get::<crate::canonical_storage::CanonicalManualSeal>()
+        {
+            let store = thread
+                .engine
+                .store
+                .as_any()
+                .downcast_ref::<crate::canonical_storage::CanonicalStore>()
+                .context("Restored canonical seal has the wrong store owner")?;
+            store
+                .save_manual_checkpoint(thread.id, &seal, &snapshot)
+                .await?;
+        }
+        {
+            let mut current = owner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Manual continuation poisoned"))?;
+            let frame = current.as_mut().context("Manual continuation disappeared during save")?;
+            ensure!(!frame.sealed, "Manual continuation was sealed during save");
+            frame.sealed = true;
+            frame.receivers.clear();
+        }
         return Ok(Some(snapshot));
     }
     match native_mcp_context(thread).await {
@@ -2303,12 +2604,7 @@ pub(crate) async fn capture(
         pending.iter().all(|key| key.turn == turn),
         "Manual calls span different turns"
     );
-    let store = thread
-        .engine
-        .store
-        .as_any()
-        .downcast_ref::<crate::storage::MemoryThreadStore>()
-        .context("Manual continuation requires the in-memory store")?;
+    let store = OrdinaryManualStore::from_thread(thread)?;
     // Capture the accepted catalog before suspension revokes all live getters.
     let managed_specs = match crate::agent_profiles::active_specs(&thread.thread).await? {
         Some(specs) => specs,
@@ -2320,7 +2616,7 @@ pub(crate) async fn capture(
         Err(error) => return Err(error),
     };
     match store
-        .begin_manual_suspension(
+        .begin(
             thread.id,
             pending.clone(),
             &completed_ready_outputs(&tools, &turn),
@@ -2337,7 +2633,7 @@ pub(crate) async fn capture(
     // it must not inherit a store still intercepting cancellation receipts.
     let outcome: Result<_> = async {
         crate::checkpoint::retire_manual_descendants(thread).await?;
-        Ok(thread.thread.suspend_turn_and_shutdown().await?)
+        Ok(thread.thread.suspend_manual_turn_and_shutdown().await?)
     }
     .await;
     let suspended_turn = match &outcome {
@@ -2354,14 +2650,11 @@ pub(crate) async fn capture(
         }
         _ => None,
     };
-    let preserved = store
-        .finish_manual_suspension(thread.id, suspended_turn)
-        .await;
+    let preserved = store.finish(thread.id, suspended_turn).await;
     let suspended = suspended_turn.is_some();
     let held_outputs = tools.held_tool_outputs(&turn);
-    let mut tool_outcomes = None;
     let snapshot = match preserved {
-        Ok(true) if suspended_turn == Some(turn.as_str()) => {
+        Ok((true, seal)) if suspended_turn == Some(turn.as_str()) => {
             async {
                 let final_history = thread.engine.load_checkpoint_history(thread.id).await?;
                 ensure!(
@@ -2377,8 +2670,12 @@ pub(crate) async fn capture(
                     ),
                     UnsupportedManualState::NativeWork
                 );
-                tool_outcomes = ToolOutcomes::capture(&final_history, thread.id, &turn)?;
-                crate::checkpoint::export_suspended(thread, &code_states, &managed_specs).await
+                let tool_outcomes = ToolOutcomes::capture(&final_history, thread.id, &turn)?;
+                let snapshot = match seal.as_ref() {
+                    Some(seal) => crate::checkpoint::export_canonical_manual(thread, &code_states, &managed_specs, seal).await,
+                    None => crate::checkpoint::export_suspended(thread, &code_states, &managed_specs).await,
+                }?;
+                Ok((snapshot, seal, tool_outcomes))
             }
             .await
         }
@@ -2387,11 +2684,57 @@ pub(crate) async fn capture(
         )),
         Err(error) => Err(error.into()),
     };
+    let snapshot = (|| {
+        let (snapshot, seal, tool_outcomes) = snapshot?;
+        let snapshot = finish_fresh_capture(
+            snapshot,
+            thread,
+            &turn,
+            &pending,
+            &approvals,
+            &configured,
+            held_outputs,
+            tools.unpublished_tool_outputs(&turn),
+            tool_outcomes,
+            output_schema,
+        )?;
+        Ok::<_, anyhow::Error>((snapshot, seal))
+    })();
+    let snapshot = match snapshot {
+        Ok((snapshot, Some(seal))) => {
+            let OrdinaryManualStore::Canonical(canonical) = &store else {
+                unreachable!("Canonical seal requires its writer");
+            };
+            canonical
+                .save_manual_checkpoint(thread.id, &seal, &snapshot)
+                .await
+                .map(|()| snapshot)
+                .map_err(Into::into)
+        }
+        Ok((snapshot, None)) => Ok(snapshot),
+        Err(error) => Err(error),
+    };
     if suspended {
         thread.retire_suspended(drain_events).await;
     }
+    let released = store.release_after_capture(thread.id, suspended).await;
     outcome?;
-    let mut snapshot = snapshot?;
+    released?;
+    Ok(Some(snapshot?))
+}
+
+fn finish_fresh_capture(
+    mut snapshot: Value,
+    thread: &crate::engine::ThreadState,
+    turn: &str,
+    pending: &[crate::python_tools::PendingKey],
+    approvals: &HashMap<String, (bool, Option<Value>)>,
+    configured: &HashMap<String, Value>,
+    held_outputs: Vec<(ResponseItemEnvelope, bool)>,
+    unpublished_outputs: Vec<(ResponseItemEnvelope, bool)>,
+    mut tool_outcomes: Option<ToolOutcomes>,
+    output_schema: Option<Value>,
+) -> Result<Value> {
     snapshot["format_version"] = serde_json::json!(if snapshot["format_version"] == 4 {
         5
     } else {
@@ -2481,7 +2824,7 @@ pub(crate) async fn capture(
         outputs.insert(id.clone(), output);
     }
     let mut unpublished_ids = HashSet::new();
-    for (output, succeeded) in tools.unpublished_tool_outputs(&turn) {
+    for (output, succeeded) in unpublished_outputs {
         let id = match &output.item {
             ResponseItem::FunctionCallOutput {
                 call_id: Some(id), ..
@@ -2584,13 +2927,17 @@ pub(crate) async fn capture(
             Some(item)
         })
         .collect();
-    let admitted_override = model_override(&history, &turn);
-    let admitted_settings = model_settings_override(&history, &turn);
+    let admitted_override = model_override(&history, turn);
+    let admitted_settings = model_settings_override(&history, turn);
     snapshot["history"] = serde_json::to_value(history)?;
     snapshot["native_continuation"] = serde_json::json!({
         "turn_id":turn,"seen_call_ids":calls.iter().map(|(id,_)|id).collect::<Vec<_>>(),
         "turn_usage":usage,"reply_order":order,"accepted_replies":encode_accepted_replies(&accepted)?,"pending_manual":pending_manual
     });
+    let remaining = remaining_staged_input(thread, turn)?;
+    if !remaining.is_empty() {
+        snapshot["native_continuation"]["pending_input"] = serde_json::to_value(remaining)?;
+    }
     if let Some(name) = admitted_override {
         snapshot["native_continuation"]["model_override"] = Value::String(name);
     }
@@ -2604,7 +2951,7 @@ pub(crate) async fn capture(
     if let Some(schema) = output_schema {
         snapshot["native_continuation"]["output_schema"] = schema;
     }
-    Ok(Some(snapshot))
+    Ok(snapshot)
 }
 
 #[cfg(test)]
@@ -2641,6 +2988,27 @@ mod apply_patch_portability_tests {
             &HashSet::new(),
             |_| false
         ));
+    }
+
+    #[test]
+    fn hosted_file_search_is_portable_only_as_completed_data_with_an_id() {
+        for (id, status, expected) in [
+            (Some("fs_completed"), "completed", true),
+            (Some("fs_pending"), "in_progress", false),
+            (Some("fs_failed"), "failed", false),
+            (Some(""), "completed", false),
+            (None, "completed", false),
+        ] {
+            let record = serde_json::from_value(serde_json::json!({
+                "type": "response_item",
+                "payload": {"type": "file_search_call", "id": id, "status": status},
+            })).unwrap();
+            assert_eq!(
+                portable_manual_actions(&[record], &HashSet::new(), |_| false),
+                expected,
+                "{id:?} {status}"
+            );
+        }
     }
 
     #[test]

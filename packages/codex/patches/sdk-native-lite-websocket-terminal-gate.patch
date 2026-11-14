@@ -1,0 +1,127 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index b753666f..a0731024 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -2717,12 +2717,10 @@ impl ModelClientSession {
+                 &mut request.client_metadata,
+                 prompt.tool_admission.clone(),
+             );
+-            if crate::model_request::requires_post_terminal_tool_dispatch(
+-                prompt.tool_admission.as_ref(),
+-            ) {
+-                // This list belongs to this exact HTTP attempt. Check before
+-                // admission, observation, custom production, or provider send.
+-                crate::model_request::check_post_terminal_http_interceptors(&interceptors)
++            if crate::model_request::post_terminal_tool_dispatch(prompt.tool_admission.as_ref())
++                .is_some()
++            {
++                crate::model_request::check_post_terminal_interceptors(&interceptors)
+                     .map_err(CodexErr::InvalidRequest)?;
+             }
+             if codex_protocol::input_video::contains_video_input(&request.input)
+@@ -3079,6 +3077,14 @@ impl ModelClientSession {
+                 &mut interceptor_metadata,
+                 prompt.tool_admission.clone(),
+             );
++            if !warmup
++                && crate::model_request::post_terminal_tool_dispatch(prompt.tool_admission.as_ref())
++                    .is_some()
++            {
++                // Validate the exact wrappers before connecting or sending.
++                crate::model_request::check_post_terminal_interceptors(&interceptors)
++                    .map_err(CodexErr::InvalidRequest)?;
++            }
+             if Self::request_transport_mode(prompt) != codex_protocol::model_request_transport::RequestTransportMode::Auto
+                 && interceptors.iter().any(|interceptor| interceptor.produces_response()) {
+                 return Err(CodexErr::InvalidRequest("Explicit request transport requires the native Responses provider".into()));
+@@ -3615,9 +3621,8 @@ impl ModelClientSession {
+         let projected_model = request_model_info(prompt, model_info);
+         let model_info = projected_model.as_ref();
+         if websocket_enabled
+-            && crate::model_request::requires_post_terminal_tool_dispatch(
+-                prompt.tool_admission.as_ref(),
+-            )
++            && crate::model_request::post_terminal_tool_dispatch(prompt.tool_admission.as_ref())
++                .is_some_and(|dispatch| dispatch.provider_programmatic)
+         {
+             return Err(CodexErr::InvalidRequest(
+                 crate::model_request::MODEL_COMPLETION_BOUNDARY_ERROR.into(),
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index 01ea1cb7..923daee6 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -26,18 +26,19 @@ pub(crate) const MODEL_COMPLETION_BOUNDARY_ERROR: &str =
+     "Model completion hooks require a provider response that can finish before local tool execution";
+ 
+ /// Captured from the same request's selected completion observers and tools.
+-pub(crate) struct PostTerminalToolDispatch;
++pub(crate) struct PostTerminalToolDispatch {
++    pub(crate) provider_programmatic: bool,
++}
+ 
+-pub(crate) fn requires_post_terminal_tool_dispatch(
++pub(crate) fn post_terminal_tool_dispatch(
+     admission: Option<&Arc<dyn ModelToolAdmission>>,
+-) -> bool {
++) -> Option<Arc<PostTerminalToolDispatch>> {
+     admission
+         .and_then(|admission| admission.step_store())
+         .and_then(|store| store.get::<PostTerminalToolDispatch>())
+-        .is_some()
+ }
+ 
+-pub(crate) fn check_post_terminal_http_interceptors(
++pub(crate) fn check_post_terminal_interceptors(
+     interceptors: &[Box<dyn ModelResponseInterceptor>],
+ ) -> Result<(), String> {
+     if interceptors.iter().all(|interceptor| {
+@@ -398,7 +399,7 @@ fn bound_interceptor_forwards_provider_window_attestation() {
+ }
+ 
+ #[cfg(test)]
+-mod post_terminal_http_tests {
++mod post_terminal_tests {
+     use super::*;
+ 
+     struct Native;
+@@ -430,12 +431,12 @@ mod post_terminal_http_tests {
+     }
+ 
+     #[test]
+-    fn only_owned_native_http_wrappers_allow_terminal_before_tools() {
+-        assert!(check_post_terminal_http_interceptors(&[]).is_ok());
+-        assert!(check_post_terminal_http_interceptors(&[Box::new(Native)]).is_ok());
++    fn only_owned_native_wrappers_allow_terminal_before_tools() {
++        assert!(check_post_terminal_interceptors(&[]).is_ok());
++        assert!(check_post_terminal_interceptors(&[Box::new(Native)]).is_ok());
+         assert!(
+-            check_post_terminal_http_interceptors(&[Box::new(Native), Box::new(Unknown)]).is_err()
++            check_post_terminal_interceptors(&[Box::new(Native), Box::new(Unknown)]).is_err()
+         );
+-        assert!(check_post_terminal_http_interceptors(&[Box::new(Producer)]).is_err());
++        assert!(check_post_terminal_interceptors(&[Box::new(Producer)]).is_err());
+     }
+ }
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index b949e5ad..5271e356 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -5527,15 +5527,13 @@ async fn try_run_sampling_request(
+                 .collect()
+         })
+         .unwrap_or_default();
++    let provider_programmatic = step_context.tool_router.has_provider_programmatic_tool();
+     if !observers.is_empty()
+-        && (step_context.settings.model_info.use_responses_lite
+-            || step_context.tool_router.has_provider_programmatic_tool())
++        && (step_context.settings.model_info.use_responses_lite || provider_programmatic)
+     {
+-        // The concrete client checks its selected transport and captured
+-        // interceptors before dispatch. Do not infer transport from Lite alone.
+         step_context
+             .extension_data
+-            .insert(crate::model_request::PostTerminalToolDispatch);
++            .insert(crate::model_request::PostTerminalToolDispatch { provider_programmatic });
+     } else {
+         step_context
+             .extension_data

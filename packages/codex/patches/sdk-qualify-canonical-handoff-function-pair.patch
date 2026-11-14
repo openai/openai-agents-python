@@ -1,0 +1,32 @@
+--- a/codex-rs/core/src/session/handoff_history.rs
++++ b/codex-rs/core/src/session/handoff_history.rs
+@@ -27,6 +27,10 @@
+     ) || row.metadata.as_ref().is_some_and(|metadata| {
+         metadata.sdk_agent_handoff.is_some()
+             || metadata.sdk_managed_agent_tool.is_some()
++            || metadata.sdk_application_tool.is_some()
++            || metadata.mcp_attribution.is_some()
++            || metadata.realtime_tool_call.is_some()
++            || metadata.sdk_start_response.is_some()
+             || metadata.delivered_assistant_message.is_some()
+     }) {
+         return None;
+@@ -144,12 +148,17 @@
+                 // The native suffix is pinned by the handoff sampling frontier.
+                 // Reject ambiguous equality instead of editing an earlier use
+                 // of the same call ID or dropping an unrelated raw record.
++                // The live executor tracks success separately from the recorded item.
++                let mut recorded = row.clone();
++                if let ResponseItem::FunctionCallOutput { output, .. } = &mut recorded.item {
++                    output.success = None;
++                }
+                 current
+                     .items
+                     .iter()
+                     .enumerate()
+                     .filter_map(|(index, original)| {
+-                        (original.projection.as_ref() == Some(row)).then_some(index)
++                        (original.projection.as_ref() == Some(&recorded)).then_some(index)
+                     })
+                     .collect::<Vec<_>>()
+             } else {

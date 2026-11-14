@@ -1,0 +1,95 @@
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -136,6 +136,7 @@
+ pub struct HandoffGeneratedHistorySelection {
+     pub handoff: codex_protocol::agent_profile::AgentProfileHandoff,
+     pub keep: Vec<usize>,
++    pub append_assistant_text: Vec<Vec<String>>,
+ }
+ 
+ /// Request identity and additional metadata supplied before sending to the provider.
+--- a/codex-rs/core/src/session/handoff_history.rs
++++ b/codex-rs/core/src/session/handoff_history.rs
+@@ -1,10 +1,12 @@
+-//! Canonical removal of current, occurrence-bound records at an accepted transfer.
++//! Canonical history edits at an accepted transfer.
+ use std::collections::HashMap;
+ use std::collections::HashSet;
+ 
++use codex_history::CodexHarnessMetadata;
+ use codex_history::CompactedItem;
+ use codex_history::ResponseItemEnvelope;
+ use codex_history::sdk_originals::SdkOriginalHistory;
++use codex_history::sdk_originals::SdkOriginalItem;
+ use codex_history::sdk_originals::client_tool_pair_part;
+ use codex_protocol::agent_profile::AgentProfileHandoffPresentation;
+ use codex_protocol::error::CodexErr;
+@@ -91,7 +93,9 @@
+                 "Canonical handoff history has another source selection",
+             ));
+         }
+-        if selection.keep.len() == source.generated.len() {
++        if selection.keep.len() == source.generated.len()
++            && selection.append_assistant_text.is_empty()
++        {
+             return Ok(None);
+         }
+         let current = self.sdk_load_original_history().await?;
+@@ -241,7 +245,7 @@
+             }
+             drop_rows.insert(*index);
+         }
+-        let envelopes = rows
++        let mut envelopes = rows
+             .iter()
+             .enumerate()
+             .filter_map(|(index, row)| (!drop_rows.contains(&index)).then(|| row.clone()))
+@@ -251,6 +255,48 @@
+             if !drop_originals.contains(&index) {
+                 originals.append(original);
+             }
++        }
++        let mut original_bytes = originals
++            .items
++            .iter()
++            .map(|item| item.original.len())
++            .sum::<usize>();
++        for text in &selection.append_assistant_text {
++            if text.is_empty() || text.iter().any(String::is_empty) {
++                return Err(invalid(
++                    "Canonical handoff can add only nonempty assistant text",
++                ));
++            }
++            let mut item = ResponseItem::Message {
++                id: None,
++                role: "assistant".into(),
++                content: text
++                    .iter()
++                    .map(|text| ContentItem::OutputText {
++                        text: text.clone(),
++                        annotations: None,
++                    })
++                    .collect(),
++                phase: None,
++                internal_chat_message_metadata_passthrough: None,
++            };
++            Self::assign_missing_response_item_id(&mut item);
++            let envelope = ResponseItemEnvelope {
++                item,
++                metadata: Some(CodexHarnessMetadata {
++                    client_authored: true,
++                    ..Default::default()
++                }),
++            };
++            let original = SdkOriginalItem::from_native(envelope.clone());
++            original_bytes += original.original.len();
++            if originals.items.len() >= 4096 || original_bytes > 8 * 1024 * 1024 {
++                return Err(invalid(
++                    "Canonical handoff history exceeds 4096 records or 8 MiB",
++                ));
++            }
++            envelopes.push(envelope);
++            originals.append(original);
+         }
+         let checkpoint = CompactedItem {
+             sdk_originals: Some(originals.clone().into()),

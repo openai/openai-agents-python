@@ -23,11 +23,11 @@ use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::sandbox::SandboxType;
 use codex_protocol::turn_input::*;
-use codex_protocol::user_input::UserInput;
 use codex_utils_path_uri::PathUri;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 const PERSISTENT_APPROVAL_ERROR: &str =
@@ -1092,6 +1092,29 @@ async fn start_with_params<'a>(
         responsesapi_client_metadata: p.responsesapi_client_metadata,
         trace: p.trace,
     };
+    let turn_init = if let Some((state, _)) = managed.as_ref() {
+        let fresh = crate::manual_checkpoint::fresh_passive_input(state).await?;
+        let mut init = match turn_init {
+            Some(init) => init,
+            None => thread.config_snapshot().await.turn_extension_init,
+        };
+        init.insert(None::<Arc<codex_extension_api::FreshStagedInput>>);
+        if let Some(fresh) = fresh {
+            if !matches!(p.mode, Mode::StartIfIdle)
+                || !request.additional_context.is_empty()
+                || !request.prompt_cache_breakpoints.is_empty()
+                || !matches!(&request.input, TurnInput::UserInput { content, .. } if content.iter().all(|part|
+                    matches!(part, codex_protocol::user_input::UserInput::Text { text, .. } if text.is_empty())))
+            {
+                return Ok(json!({"status":"not_submitted","reason":{
+                    "type":"pending_input_refused",
+                    "message":"Pending terminal input requires an empty fresh submission"
+                }}));
+            }
+            init.insert(Some(fresh));
+        }
+        Some(init)
+    } else { turn_init };
     match p.mode {
         Mode::StartIfIdle | Mode::StartOrSteer
             if p.expected_turn_id.is_some() || p.expected_previous_turn_id.is_some() =>

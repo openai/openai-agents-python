@@ -102,8 +102,12 @@ pub struct ThreadOptions {
     pub(crate) before_complete: bool,
     #[serde(rename = "_agent_lifecycle")]
     pub(crate) agent_lifecycle: Vec<String>,
+    #[serde(rename = "_tool_lifecycle")]
+    pub(crate) tool_lifecycle: bool,
     #[serde(rename = "_hold_assistant_completion")]
     hold_assistant_completion: bool,
+    #[serde(rename = "_format_tool_not_found")]
+    format_tool_not_found: bool,
     #[serde(rename = "_tool_batch_completion")]
     pub(crate) tool_batch_completion: bool,
     #[serde(rename = "_buffered_responses")]
@@ -139,6 +143,8 @@ pub struct ThreadOptions {
     chatgpt_apps: Option<Value>,
     user_instructions: Option<UserInstructions>,
     user_instructions_appendix: Option<String>,
+    #[serde(rename = "_sdk_workspace_guidance")]
+    workspace_guidance: Option<String>,
     tool_policy: Option<Policy>,
 }
 
@@ -322,6 +328,11 @@ impl ThreadOptions {
                     self.profile_provider_keys,
                 ));
         }
+        if self.format_tool_not_found {
+            options
+                .thread_extension_init
+                .insert(crate::python_tools::FormatToolNotFound);
+        }
         if self.hold_assistant_completion {
             anyhow::ensure!(
                 options.config.sdk_provider_history.is_none(),
@@ -472,6 +483,11 @@ impl ThreadOptions {
         options.disabled_plugin_ids = self.disabled_plugin_ids;
         options.client_mcp_extensions =
             codex_protocol::mcp::ClientMcpExtensions::new(self.client_mcp_extensions);
+        if let Some(guidance) = self.workspace_guidance {
+            options.thread_extension_init.insert(
+                codex_extension_api::AgentProfileWorkspaceGuidance(Some(guidance)),
+            );
+        }
         options.user_instructions_appendix = self.user_instructions_appendix;
         options.user_instructions = self.user_instructions.map(|user| LoadedUserInstructions {
             instructions: user.instructions.map(|i| Instructions {

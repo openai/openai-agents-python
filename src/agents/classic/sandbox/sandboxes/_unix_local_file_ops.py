@@ -191,7 +191,7 @@ class _FileOps:
                 except FileNotFoundError:
                     pass
 
-    def write_new(self, path: Path, stream: io.IOBase) -> None:
+    def write_new(self, path: Path, stream: io.IOBase, *, mode: int | None = None) -> None:
         """Create a file that must not already exist.
 
         O_EXCL fails with EEXIST when the name is taken by anything, including a directory
@@ -207,6 +207,8 @@ class _FileOps:
             )
         try:
             try:
+                if mode is not None:
+                    os.fchmod(fd, mode)
                 out = os.fdopen(fd, "wb")
             except BaseException:
                 os.close(fd)

@@ -647,6 +647,7 @@ class EventStream(AsyncIterator[Observation]):
         self._reading = False
         self._turn = _turn
         self._include_execution_details = _include_execution_details is True
+        self._include_raw_provider_events = self._include_execution_details
         self._respect_admission_floor = False
 
     def __aiter__(self) -> EventStream:
@@ -694,7 +695,7 @@ class EventStream(AsyncIterator[Observation]):
                         self._after = event.sequence
                         if (
                             isinstance(event, RawProviderEvent)
-                            and not self._include_execution_details
+                            and not self._include_raw_provider_events
                         ):
                             continue
                         if self._turn is not None and not isinstance(event, EventGap):

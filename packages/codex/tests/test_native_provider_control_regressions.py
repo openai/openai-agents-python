@@ -301,6 +301,88 @@ async def test_chat_unsupported_thinking_rejected_before_native_tool_effect(conf
     assert len(seen) == (0 if configured else 1)
 
 
+@pytest.mark.parametrize("configured", [False, True])
+async def test_litellm_does_not_replay_claude_thinking_to_other_models(configured, monkeypatch):
+    litellm = pytest.importorskip("litellm")
+    seen, effects = [], []
+
+    @function_tool
+    def record() -> str:
+        effects.append("entered")
+        return "done"
+
+    async def respond(request):
+        seen.append(await request.json())
+        first = len(seen) == 1
+        message = {"role": "assistant", "content": None if first else "done"}
+        if first:
+            message.update(
+                reasoning_content="synthetic-private-reasoning",
+                thinking_blocks=[
+                    {"type": "thinking", "thinking": "private", "signature": "opaque"}
+                ],
+                tool_calls=[
+                    {
+                        "id": "call_record",
+                        "type": "function",
+                        "function": {"name": "record", "arguments": "{}"},
+                    }
+                ],
+            )
+        return web.json_response(
+            {
+                "id": "chat_reasoning",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gpt-4.1",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "tool_calls" if first else "stop",
+                        "message": message,
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        )
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", respond)
+    async with timeout(25), TestServer(app) as server:
+        monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+        monkeypatch.setattr(litellm, "telemetry", False)
+        monkeypatch.setattr(litellm, "api_base", str(server.make_url("/v1")))
+        monkeypatch.setattr(litellm, "api_key", "synthetic")
+        async with NativeProvider(
+            model_backend=LitellmModel(litellm, "openai/gpt-4.1")
+        ) as provider:
+            agent = Agent(
+                instructions="Use record.",
+                model="gpt-4.1",
+                tools=[record],
+                provider=provider,
+                **(
+                    {
+                        "model_settings": {
+                            "extra_body": {"thinking": {"type": "enabled", "budget_tokens": 128}}
+                        }
+                    }
+                    if configured
+                    else {}
+                ),
+            )
+            assert (await agent.run("go")).final_output == "done"
+    assert effects == ["entered"]
+    assert len(seen) == 2
+    replay = seen[1]["messages"]
+    assert any(message.get("tool_calls") for message in replay)
+    assert all(
+        "thinking_blocks" not in message and "reasoning_content" not in message
+        for message in replay
+    )
+    assert "synthetic-private-reasoning" not in str(replay)
+
+
 async def test_chat_reasoning_input_rejected_before_client_entry():
     entered = []
 

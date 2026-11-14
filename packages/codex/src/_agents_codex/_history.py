@@ -11,6 +11,7 @@ from . import _tool_response_types as _wire_types
 if _TYPE_CHECKING:
     from ._events import (
         FunctionCallItem as FunctionCallItem,
+        InputTokensDetails,
         SessionItem as SessionItem,
     )
 from ._compiled_dataclasses import dataclass as _sdk_dataclass
@@ -248,8 +249,35 @@ def _received_usage(raw: dict[str, Any] | None) -> ReceivedTokenUsage | None:
     return cast(ReceivedTokenUsage, usage)
 
 
+def _compaction_request_usage(payload: dict[str, Any], ordinal: int) -> RecordedRequestUsage:
+    usage = _received_usage(payload.get("usage")) or {}
+    details = usage.get("input_tokens_details", {})
+    input_details: InputTokensDetails = {"cached_tokens": details.get("cached_tokens", 0)}
+    cache_write = details.get("cache_write_tokens")
+    if cache_write is not None:
+        input_details["cache_write_tokens"] = cache_write
+    return {
+        "scope": "compaction",
+        "thread_id": payload["thread_id"],
+        "turn_id": payload["turn_id"],
+        "owner_attempt_id": payload["id"],
+        "attempt_id": payload["id"],
+        "request_ordinal": ordinal,
+        "token_usage_known": all(
+            key in usage for key in ("input_tokens", "output_tokens", "total_tokens")
+        ),
+        "input_tokens": usage.get("input_tokens", 0),
+        "input_tokens_details": input_details,
+        "output_tokens": usage.get("output_tokens", 0),
+        "output_tokens_details": {
+            "reasoning_tokens": usage.get("output_tokens_details", {}).get("reasoning_tokens", 0)
+        },
+        "total_tokens": usage.get("total_tokens", 0),
+    }
+
+
 def _request_usage_entries(
-    facts: list[dict[str, Any]], owners: dict[str | None, _UsageCollector]
+    facts: list[tuple[str, dict[str, Any]]], owners: dict[str | None, _UsageCollector]
 ) -> tuple[list[RecordedRequestUsage], bool]:
     entries: list[RecordedRequestUsage] = []
     totals: dict[str, tuple[int, dict[str, int], int]] = {}
@@ -264,7 +292,14 @@ def _request_usage_entries(
         "total_tokens",
     )
     managed: dict[str, dict[str, int]] = {}
-    for payload in facts:
+    compactions: set[str] = set()
+    for kind, payload in facts:
+        if kind == "compaction":
+            occurrence = payload["id"]
+            if occurrence not in compactions:
+                compactions.add(occurrence)
+                entries.append(_compaction_request_usage(payload, len(compactions)))
+            continue
         fact = payload["data"]
         if fact["phase"] != "finished":
             continue
@@ -374,7 +409,8 @@ def _request_usage_entries(
         totals[owner] = ordinal, dict(tokens), missing
         seen[key] = attempt, usage
         attempt_ids.add((owner, attempt))
-    complete = True
+    # Terminal compaction facts cannot count requests that failed before a terminal.
+    complete = not compactions
     for owner, measured in owners.items():
         snapshot = measured.snapshot()
         if measured._managed_model_owner is not None:
@@ -417,6 +453,7 @@ def project_history(
     uncertain_calls: list[UncertainCall] | None = None,
     item_record_indexes: dict[int, int] | None = None,
     tool_success_by_record: dict[int, bool] | None = None,
+    preserve_record_occurrences: bool = False,
 ) -> "tuple[list[RecordedTurn], list[_wire_types._events.SessionItem]]":
     """Prefer native item events over raw records, retaining first-seen order."""
     projector = EventProjector(session_id, source_id=subagent_id)
@@ -426,7 +463,7 @@ def project_history(
     latest_calls: dict[tuple[str, str, str], _HistoryItem] = {}
     usage: dict[str, Any] = {}
     model_owners: dict[str, dict[str | None, _UsageCollector]] = {}
-    model_usage_facts: dict[str, list[dict[str, Any]]] = {}
+    request_usage_facts: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     legacy_usage: dict[str, _UsageCollector] = {}
     responses: list[tuple[str, RecordedResponse]] = []
     response_facts: list[RecordedResponseFact] = []
@@ -453,7 +490,7 @@ def project_history(
             kind if is_output or is_execution else "item",
             item["id"],
         )
-        occurrence = identities.get(identity)
+        occurrence = None if preserve_record_occurrences else identities.get(identity)
         call_kind = _CALL_TYPES_BY_OUTPUT.get(kind, kind)
         call_key = (item["turn_id"], call_kind, item.get("call_id") or item["id"])
         call = latest_calls.get(call_key)
@@ -479,7 +516,8 @@ def project_history(
             occurrence.value = item
             occurrence.native = native
             occurrence.recorded_id = recorded_id
-        identities[identity] = occurrence
+        if not preserve_record_occurrences:
+            identities[identity] = occurrence
         if kind in {"function_call", "shell_call", "tool_search_call"}:
             if kind == "function_call" and not native:
                 occurrence.original_input = original_input
@@ -542,6 +580,10 @@ def project_history(
             if isinstance(payload.get("upstream_request_id"), str):
                 response["upstream_request_id"] = payload["upstream_request_id"]
             responses.append((kind, response))
+            if payload.get("compaction") is True:
+                request_usage_facts.setdefault(response["turn_id"], []).append(
+                    ("compaction", payload)
+                )
         elif kind == "token_usage_record":
             usage[payload["turn_id"]] = _usage(payload["turn_token_usage"])
             if payload.get("thread_id") is not None:
@@ -663,7 +705,7 @@ def project_history(
                         turns.pop(old, None)
                         usage.pop(old, None)
                         model_owners.pop(old, None)
-                        model_usage_facts.pop(old, None)
+                        request_usage_facts.pop(old, None)
                         legacy_usage.pop(old, None)
                     responses = [entry for entry in responses if entry[1]["turn_id"] not in removed]
                     items = [item for item in items if item.value["turn_id"] not in removed]
@@ -686,7 +728,7 @@ def project_history(
                 owners = model_owners.setdefault(turn_id, {})
                 owner = owners.setdefault(fact.get("owner_attempt_id"), _UsageCollector())
                 owner.replace_model_attempt(fact)
-                model_usage_facts.setdefault(turn_id, []).append(payload)
+                request_usage_facts.setdefault(turn_id, []).append(("model_attempt", payload))
             elif event_kind in {"task_complete", "turn_complete", "turn_aborted"}:
                 snapshot = payload.get("model_attempt")
                 if snapshot is not None:
@@ -769,17 +811,19 @@ def project_history(
     for turn_id, turn in turns.items():
         if turn_id in usage:
             turn["usage"] = usage[turn_id]
+        measured = legacy_usage.get(turn_id) or _UsageCollector()
+        has_legacy_requests = measured.snapshot().requests > 0
         if turn_id in model_owners:
-            measured = legacy_usage.get(turn_id) or _UsageCollector()
-            has_legacy_requests = measured.snapshot().requests > 0
             for owner in model_owners[turn_id].values():
                 measured.attach(owner)
             turn["run_usage"] = asdict(measured.snapshot())
-            entries, complete = _request_usage_entries(
-                model_usage_facts.get(turn_id, []), model_owners[turn_id]
-            )
+        if turn_id in model_owners or turn_id in request_usage_facts:
+            owners = model_owners.get(turn_id, {})
+            entries, complete = _request_usage_entries(request_usage_facts.get(turn_id, []), owners)
             turn["request_usage_entries"] = entries
-            turn["request_usage_entries_complete"] = complete and not has_legacy_requests
+            turn["request_usage_entries_complete"] = (
+                bool(owners) and complete and not has_legacy_requests
+            )
     projected_fact_ids: set[str] = set()
     for fact in response_facts:
         fact_turn = turns.get(fact["turn_id"])

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, cast
 from . import tools as _tool_types
 from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._function_tools import FunctionTool
+from ._tool_catalog import _SCOPED_HOSTED_TYPES
 from .agent import Agent
 from .handoffs import Handoff
 from .schema import OutputSpec, _prepare_spec
@@ -107,6 +108,7 @@ def _capture_agent_graph(
     *,
     root_declaration: Agent[Any, Any] | None = None,
     id_prefix: str = "agent_",
+    restored_ids: Mapping[str, str] | None = None,
 ) -> tuple[_AgentProfile, ...]:
     """Resolve each target once and retain separate declarations and identities.
 
@@ -127,9 +129,45 @@ def _capture_agent_graph(
         if not (
             type(tool) is FunctionTool
             or isinstance(tool, (FunctionTool, _tool_types._MCP, _tool_types.HostedMCP))
+            or opening.realtime is None
+            and isinstance(tool, _SCOPED_HOSTED_TYPES)
         )
     )
+    # Names locate current reachable declarations; native graph validation proves identity.
+    restored_ids = dict(restored_ids or {})
+    if root.name in restored_ids:
+        raise ValueError("Runtime enrollment requires the original root Agent")
     indices = {id(root): 0}
+    next_base_index = 1
+    restored_seen: dict[str, int] = {}
+
+    def capture_target(target: Agent[Any, Any]) -> int:
+        nonlocal next_base_index
+        existing = indices.get(id(target))
+        if existing is not None:
+            return existing
+        if target.name in restored_ids:
+            assert target.name is not None
+            if target.name in restored_seen and restored_seen[target.name] != id(target):
+                raise ValueError("Runtime enrollment requires unique current Agent names")
+            if any(type(tool) is not FunctionTool or tool._bind is None for tool in target.tools):
+                raise ValueError("Runtime enrollment requires actual current Python callbacks")
+            restored_seen[target.name] = id(target)
+            # Existing graph identities must not shift when a late leaf becomes reachable.
+            index = 1024 + len(restored_seen)
+        else:
+            index = next_base_index
+            next_base_index += 1
+        indices[id(target)] = index
+        agents.append(target)
+        return index
+
+    def profile_id(target: Agent[Any, Any]) -> str:
+        if target.name in restored_ids:
+            assert target.name is not None
+            return restored_ids[target.name]
+        return f"{id_prefix}{indices[id(target)]}"
+
     resolved: dict[int, tuple[Callable[[], Agent[Any, Any]], Agent[Any, Any]]] = {}
     provider_ids: dict[int, str] = {}
 
@@ -204,6 +242,7 @@ def _capture_agent_graph(
             environment=source.environment,
             before_complete=source.before_complete,
             on_lifecycle=source.on_lifecycle,
+            on_tool_lifecycle=source.on_tool_lifecycle,
             tool_batch_completion=source.tool_batch_completion,
             input_guardrails=source.input_guardrails,
             output_guardrails=source.output_guardrails,
@@ -266,6 +305,8 @@ def _capture_agent_graph(
                 if not (
                     type(tool) is FunctionTool
                     or isinstance(tool, (FunctionTool, _tool_types._MCP, _tool_types.HostedMCP))
+                    or opening.realtime is None
+                    and isinstance(tool, _SCOPED_HOSTED_TYPES)
                 )
             )
             != runtime_tools
@@ -287,17 +328,23 @@ def _capture_agent_graph(
                 name = reference.name
                 if name in targets or name in decision_handoffs:
                     raise ValueError(f"Duplicate handoff name in Agent {agent.name!r}: {name}")
-                selected_targets = {}
+                selected_targets: dict[str, Any] = {}
+                factories = []
                 for key, target in reference.targets.items():
-                    index = indices.get(id(target))
-                    if index is None:
-                        index = len(agents)
-                        indices[id(target)] = index
-                        agents.append(target)
-                    selected_targets[key] = f"{id_prefix}{index}"
+                    if callable(target):
+                        factories.append(key)
+                        selected_targets[key] = target
+                        continue
+                    capture_target(target)
+                    selected_targets[key] = profile_id(target)
                 decision_handoffs[name] = {
                     "slot": python_slots + len(callback_tools),
-                    "targets": tuple(dict.fromkeys(selected_targets.values())),
+                    "targets": tuple(
+                        dict.fromkeys(
+                            value for value in selected_targets.values() if isinstance(value, str)
+                        )
+                    ),
+                    **({"factories": tuple(factories)} if factories else {}),
                 }
                 callback_tools.append(_decision_handoff_tool(reference, selected_targets))
                 continue
@@ -312,12 +359,8 @@ def _capture_agent_graph(
             name = name_for(reference) if not callable(reference) else _handoff_name(target)
             if not name or len(name) > 64 or re.fullmatch(r"[a-zA-Z0-9_-]+", name) is None:
                 raise ValueError("A handoff name must contain 1 to 64 letters, digits, '_' or '-'")
-            index = indices.get(id(target))
-            if index is None:
-                index = len(agents)
-                indices[id(target)] = index
-                agents.append(target)
-            target_id = f"{id_prefix}{index}"
+            capture_target(target)
+            target_id = profile_id(target)
             if name in decision_handoffs:
                 raise ValueError(f"Duplicate handoff name in Agent {agent.name!r}: {name}")
             previous = targets.get(name)
@@ -358,7 +401,7 @@ def _capture_agent_graph(
             )
         profiles.append(
             _AgentProfile(
-                f"{id_prefix}{indices[id(agent)]}",
+                profile_id(agent),
                 agent,
                 declaration,
                 MappingProxyType(targets),

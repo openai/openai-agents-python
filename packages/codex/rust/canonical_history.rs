@@ -51,7 +51,7 @@ pub async fn snapshot(
 }
 
 enum HistoryEdit {
-    Replace { keep: usize, items: Vec<String> },
+    Replace { keep: usize, items: Vec<String>, allow_rebuild: bool },
     Pop { allow_rebuild: bool },
     Recover { id: String, text: String },
 }
@@ -61,8 +61,9 @@ pub async fn replace(
     expected: String,
     keep: usize,
     items: Vec<String>,
+    allow_rebuild: bool,
 ) -> anyhow::Result<Value> {
-    edit(state, expected, HistoryEdit::Replace { keep, items }).await
+    edit(state, expected, HistoryEdit::Replace { keep, items, allow_rebuild }).await
 }
 
 pub async fn pop(
@@ -177,7 +178,7 @@ async fn edit(state: &ThreadState, expected: String, edit: HistoryEdit) -> anyho
         "history transactions do not rewrite goal-backed sessions"
     );
     let result = match edit {
-        HistoryEdit::Replace { keep, items } => {
+        HistoryEdit::Replace { keep, items, allow_rebuild } => {
             // The Core revision is rechecked under its state lock when replacing below.
             // Validate before durability: neither retained nor appended history may split
             // a client tool call/result pair. Provider-hosted records keep their existing
@@ -201,11 +202,12 @@ async fn edit(state: &ThreadState, expected: String, edit: HistoryEdit) -> anyho
                     .collect();
             crate::context::check_pairs(&appended, &(0..appended.len()).collect::<Vec<_>>())
                 .context("canonical history requires complete tool call/result pairs")?;
-            state
-                .thread
-                .sdk_replace_history(&expected, keep, items)
-                .await
-                .map(|revision| json!({"revision": revision}))
+            let revision = if allow_rebuild {
+                state.thread.sdk_replace_history_allow_rebuild(&expected, keep, items).await
+            } else {
+                state.thread.sdk_replace_history(&expected, keep, items).await
+            };
+            revision.map(|revision| json!({"revision": revision}))
         }
         HistoryEdit::Recover { id, text } => {
             let (current_revision, total, _) = state.thread.sdk_history_snapshot(Some(0)).await?;

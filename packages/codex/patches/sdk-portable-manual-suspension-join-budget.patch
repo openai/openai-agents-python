@@ -1,0 +1,32 @@
+--- a/codex-rs/core/src/session/turn_suspension.rs
++++ b/codex-rs/core/src/session/turn_suspension.rs
+@@ -10,6 +10,10 @@
+ use std::time::Duration;
+ use tracing::warn;
+ 
++// Manual checkpoint suspension must join owned tool-result cleanup before handing
++// off the writer. Keep a bounded join without using the interactive abort budget.
++const PORTABLE_MANUAL_SUSPENSION_TIMEOUT: Duration = Duration::from_secs(2);
++
+ pub(super) async fn suspend_turn_and_shutdown(
+     session: &Arc<Session>,
+     submission_id: String,
+@@ -84,12 +88,12 @@
+         .turn_metadata_state
+         .cancel_git_enrichment_task();
+     let mut task_handle = task.handle.detach();
+-    let joined = match tokio::time::timeout(
+-        Duration::from_millis(crate::tasks::GRACEFULL_INTERRUPTION_TIMEOUT_MS),
+-        &mut task_handle,
+-    )
+-    .await
+-    {
++    let join_timeout = if portable_manual {
++        PORTABLE_MANUAL_SUSPENSION_TIMEOUT
++    } else {
++        Duration::from_millis(crate::tasks::GRACEFULL_INTERRUPTION_TIMEOUT_MS)
++    };
++    let joined = match tokio::time::timeout(join_timeout, &mut task_handle).await {
+         Ok(Ok(())) => true,
+         Ok(Err(error)) => {
+             warn!(thread_id = %session.thread_id, %error, "suspended turn task exited abnormally");

@@ -572,6 +572,94 @@ async def test_original_catalog_survives_supplied_compaction_and_rejects_ambiguo
             assert "old original" not in wire
 
 
+@pytest.mark.parametrize("cold_restore", [False, True])
+async def test_explicit_positive_prefix_rebuilds_compacted_model_context(responses, cold_restore):
+    responses.respond(assistant_output("retained context continued"))
+    first = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "retained original message"}],
+    }
+    audit = {"type": "application_note", "value": "retained audit row"}
+    removed = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "deleted original message"}],
+    }
+    replacement = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "replacement input message"}],
+    }
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-rebuilt-prefix"
+    ) as provider:
+        agent = Agent(instructions="Retained agent instructions.", provider=provider)
+        async with agent.session() as session:
+            initial = await session.history_snapshot()
+            await session.transact_history(
+                expected_revision=initial.revision, keep=0, items=[first, audit, removed]
+            )
+            before = await session.history_snapshot()
+            await session.compact(summary="deleted and retained compacted summary")
+            await session.transact_history(
+                expected_revision=before.revision,
+                keep=2,
+                items=[replacement],
+                rebuild_model_context=True,
+            )
+            retained = await session.history_snapshot()
+            assert retained.items == (first, audit, replacement)
+            assert responses.requests == []
+            if cold_restore:
+                state = await session.save_state()
+            else:
+                result = await (await session.submit("continue from retained prefix")).get_result()
+
+        if cold_restore:
+            async with agent.session(state=state) as restored:
+                assert await restored.history_snapshot() == retained
+                result = await (await restored.submit("continue from retained prefix")).get_result()
+
+    assert result.final_output == "retained context continued"
+    assert len(responses.requests) == 1
+    wire = json.dumps(responses.requests[0]["input"])
+    assert "Retained agent instructions." in json.dumps(responses.requests[0])
+    assert "retained original message" in wire
+    assert "replacement input message" in wire
+    assert "deleted original message" not in wire
+    assert "deleted and retained compacted summary" not in wire
+    assert "retained audit row" not in wire
+
+
+@pytest.mark.parametrize("kind", ["compaction", "context_compaction"])
+async def test_explicit_prefix_rebuild_rejects_retained_opaque_compaction(responses, kind):
+    original = {"type": kind, "id": "opaque-original", "encrypted_content": "opaque-state"}
+    tail = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "removed input"}],
+    }
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-opaque-prefix"
+    ) as provider:
+        async with Agent(instructions="Answer.", provider=provider).session() as session:
+            initial = await session.history_snapshot()
+            await session.transact_history(
+                expected_revision=initial.revision, keep=0, items=[original, tail]
+            )
+            before = await session.history_snapshot()
+            await session.compact(summary="opaque history summary")
+            model = await session.model_context()
+            with pytest.raises(RuntimeError, match="cannot rebuild a retained provider compaction"):
+                await session.transact_history(
+                    expected_revision=before.revision, keep=1, rebuild_model_context=True
+                )
+            assert await session.history_snapshot() == before
+            assert (await session.model_context()).items == model.items
+    assert responses.requests == []
+
+
 async def test_native_original_tool_result_survives_prefix_edit_without_untruncating_model(
     responses,
 ):

@@ -1,0 +1,260 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1,3 +1,6 @@
++#[derive(Debug)]
++pub(crate) struct PortableManualSuspension;
++
+ use crate::WithTurnExtensionData;
+ use crate::agent::AgentStatus;
+ use crate::agent::api::AgentControl;
+@@ -632,6 +635,19 @@
+     /// Callers must not transfer ownership until suspension succeeds, which
+     /// requires stopping execution, flushing history, and closing its writer.
+     pub async fn suspend_turn_and_shutdown(&self) -> CodexResult<SuspendTurnOutcome> {
++        self.suspend_turn_and_shutdown_inner(false).await
++    }
++
++    /// Suspend an SDK-admitted ordinary manual checkpoint with a joined persistence owner.
++    #[doc(hidden)]
++    pub async fn suspend_manual_turn_and_shutdown(&self) -> CodexResult<SuspendTurnOutcome> {
++        self.suspend_turn_and_shutdown_inner(true).await
++    }
++
++    async fn suspend_turn_and_shutdown_inner(
++        &self,
++        portable_manual: bool,
++    ) -> CodexResult<SuspendTurnOutcome> {
+         if self.session_source.is_non_root_agent() {
+             return Err(CodexErr::UnsupportedOperation(
+                 "turn suspension requires the owning root thread".to_string(),
+@@ -647,7 +663,11 @@
+                 trace_policy: None,
+                 id: new_submission_id(),
+                 op: Op::SuspendTurnAndShutdown { reply },
+-                turn_extension_init: None,
++                turn_extension_init: portable_manual.then(|| {
++                    let mut init = codex_extension_api::ExtensionDataInit::new();
++                    init.insert(PortableManualSuspension);
++                    init
++                }),
+                 trace: current_span_w3c_trace_context(),
+                 parent_turn_id: None,
+                 root_turn_id: None,
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -984,9 +984,12 @@
+                     false
+                 }
+                 Op::SuspendTurnAndShutdown { reply } => {
+-                    let result =
+-                        super::turn_suspension::suspend_turn_and_shutdown(&sess, sub.id.clone())
+-                            .await;
++                    let portable_manual = sub.turn_extension_init.as_ref().is_some_and(|init| {
++                        init.get::<crate::codex_thread::PortableManualSuspension>().is_some()
++                    });
++                    let result = super::turn_suspension::suspend_turn_and_shutdown(
++                        &sess, sub.id.clone(), portable_manual,
++                    ).await;
+                     // Exit only after history is durable and its writer has closed; an error
+                     // must leave responsibility for the thread with the current worker.
+                     let should_exit = matches!(
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -6455,18 +6455,53 @@
+     }
+     history_acceptance?;
+ 
+-    // Tool effects have completed. Save their results before any dependent work.
+-    sess.ensure_rollout_durable().await?;
++    // Suspension has no dependent model/tool work. Its joined owner performs the
++    // same materialization and flush after all task callbacks have stopped.
++    let suspended = cancellation_token.is_cancelled()
++        && !deadline.expired()
++        && !prompt.sampling_stop.as_deref().is_some_and(|stop| stop.requested())
++        && deadline_cleanup_errors.is_empty()
++        && match &outcome {
++            Ok(_) => true,
++            Err(error) => matches!(error.details(), CodexErrorDetails::TurnAborted),
++        }
++        && turn_context
++            .extension_data
++            .get::<codex_extension_api::HeldToolCompletionResults>()
++            .is_some_and(|owner| {
++                owner.portable_suspension.get().is_some()
++                    && owner.suspending.load(std::sync::atomic::Ordering::Acquire)
++            });
++    if !suspended {
++        sess.ensure_rollout_durable().await?;
++    }
+ 
+     if should_emit_token_count {
+         // A tool call such as request_user_input can intentionally pause the turn. Emit token
+         // counts only after pending tools resolve so clients do not see progress events while the
+         // turn is waiting on the user. This also needs to happen before returning cancellation so
+         // token usage already recorded from the completed response is still persisted.
+-        sess.send_token_count_event(&turn_context).await;
++        if suspended
++            && let Some(owner) = turn_context
++                .extension_data
++                .get::<codex_extension_api::HeldToolCompletionResults>()
++        {
++            owner.suspension_token_count.store(true, std::sync::atomic::Ordering::Release);
++        } else {
++            sess.send_token_count_event(&turn_context).await;
++        }
+     }
+ 
+     if cancellation_token.is_cancelled() {
++        if suspended
++            && !deadline.expired()
++            && !prompt.sampling_stop.as_deref().is_some_and(|stop| stop.requested())
++            && let Some(owner) = turn_context
++                .extension_data
++                .get::<codex_extension_api::HeldToolCompletionResults>()
++        {
++            owner.suspension_drained.store(true, std::sync::atomic::Ordering::Release);
++        }
+         return Err(CodexErr::TurnAborted);
+     }
+ 
+diff --git a/codex-rs/core/src/session/turn_suspension.rs b/codex-rs/core/src/session/turn_suspension.rs
+--- a/codex-rs/core/src/session/turn_suspension.rs
++++ b/codex-rs/core/src/session/turn_suspension.rs
+@@ -13,6 +13,7 @@
+ pub(super) async fn suspend_turn_and_shutdown(
+     session: &Arc<Session>,
+     submission_id: String,
++    portable_manual: bool,
+ ) -> CodexResult<SuspendTurnOutcome> {
+     {
+         let active = session.active_turn.lock().await;
+@@ -69,11 +70,15 @@
+     let turn_id = task.turn_context.sub_id.clone();
+     // Normal shutdown records a terminal turn event, preventing another worker from
+     // recovering this turn under its original ID. Cancel the task without that event.
+-    task.turn_context
++    let suspension = task.turn_context
+         .extension_data
+-        .get_or_init(codex_extension_api::HeldToolCompletionResults::default)
+-        .suspending
+-        .store(true, std::sync::atomic::Ordering::Release);
++        .get_or_init(codex_extension_api::HeldToolCompletionResults::default);
++    if portable_manual {
++        suspension.portable_suspension.get_or_init(|| ());
++    }
++    suspension.suspension_drained.store(false, std::sync::atomic::Ordering::Release);
++    suspension.suspension_token_count.store(false, std::sync::atomic::Ordering::Release);
++    suspension.suspending.store(true, std::sync::atomic::Ordering::Release);
+     task.cancellation_token.cancel();
+     task.turn_context
+         .turn_metadata_state
+@@ -107,10 +112,30 @@
+     // Stop all producers before flushing their final history and closing its writer.
+     // If either persistence step fails, do not report success: the current worker
+     // retains ownership until worker-failure recovery can take responsibility.
++    let materialized: CodexResult<()> = async {
++        if !portable_manual {
++            return Ok(());
++        }
++        live_thread.persist(codex_thread_store::PersistContext::Standard).await.map_err(|error| {
++            CodexErr::Fatal(format!("persist after root turn suspension failed: {error}"))
++        })?;
++        live_thread.flush().await.map_err(|error| {
++            CodexErr::Fatal(format!("flush before suspended usage publication failed: {error}"))
++        })
++    }.await;
++    if materialized.is_ok()
++        && joined
++        && suspension.suspension_drained.load(std::sync::atomic::Ordering::Acquire)
++        && suspension.suspension_token_count.swap(false, std::sync::atomic::Ordering::AcqRel)
++    {
++        session.send_token_count_event(&task.turn_context).await;
++    }
+     handlers::shutdown_session_runtime(session).await;
+-    live_thread.flush().await.map_err(|error| {
++    let flushed = live_thread.flush().await.map_err(|error| {
+         CodexErr::Fatal(format!("flush after root turn suspension failed: {error}"))
+-    })?;
++    });
++    materialized?;
++    flushed?;
+     live_thread.shutdown().await.map_err(|error| {
+         CodexErr::Fatal(format!("close suspended root turn writer failed: {error}"))
+     })?;
+@@ -122,7 +147,10 @@
+             msg: EventMsg::ShutdownComplete,
+         })
+         .await;
+-    if !joined {
++    if !joined
++        || (portable_manual
++            && !suspension.suspension_drained.load(std::sync::atomic::Ordering::Acquire))
++    {
+         return Err(CodexErr::InvalidRequest(
+             "Root turn suspension did not join its tool results; no checkpoint was authorized"
+                 .into(),
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -601,9 +601,27 @@
+                 }
+             };
+             let sess = Arc::clone(&session);
+-            // Private reviewers save their transcript together with the terminal event.
+-            // Errors and cancellation retain their existing save path.
+-            if (!sess.is_private_guardian_reviewer().await
++            let suspension = ctx_for_finish
++                .extension_data
++                .get::<codex_extension_api::HeldToolCompletionResults>();
++            let deferred_suspension = task_cancellation_token.is_cancelled()
++                && suspension.as_ref().is_some_and(|owner| {
++                    owner.portable_suspension.get().is_some()
++                        && owner.suspending.load(std::sync::atomic::Ordering::Acquire)
++                        && owner.suspension_drained.load(std::sync::atomic::Ordering::Acquire)
++                })
++                && matches!(&task_result, Err(error) if matches!(error.details(), CodexErrorDetails::TurnAborted))
++                && !sess.services.code_mode_service.has_pending_fatal_for_turn(&ctx_for_finish)
++                && ctx_for_finish.extension_data.get::<PendingCompactionFatal>().is_none();
++            if !deferred_suspension
++                && let Some(owner) = suspension.as_ref()
++            {
++                owner.suspension_drained.store(false, std::sync::atomic::Ordering::Release);
++            }
++            // Only a verified suspension transfers persistence to its joined owner.
++            // Other errors and cancellation retain their existing save path.
++            if !deferred_suspension
++                && (!sess.is_private_guardian_reviewer().await
+                 || task_cancellation_token.is_cancelled()
+                 || task_result.is_err())
+                 && let Err(err) = sess.flush_rollout().await
+@@ -631,6 +649,10 @@
+             {
+                 // Self-cancellation has no external abort owner. Recheck the exact
+                 // active task under the existing finalization gate before settling.
++                if let Some(owner) = suspension.as_ref() {
++                    owner.suspension_drained.store(false, std::sync::atomic::Ordering::Release);
++                    owner.suspension_token_count.store(false, std::sync::atomic::Ordering::Release);
++                }
+                 sess.finish_task(Arc::clone(&ctx_for_finish), task_result, true).await;
+                 if let Some(dispatch) = realtime_for_finish { dispatch.mark_settled(); }
+             }
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -208,6 +208,13 @@
+     pub unpublished_progress: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+     pub outputs: std::sync::Mutex<Vec<(codex_history::ResponseItemEnvelope, bool)>>,
+     pub suspending: std::sync::atomic::AtomicBool,
++    /// Opt in only through the SDK portable-manual suspension submission.
++    pub portable_suspension: std::sync::OnceLock<()>,
++    /// The sampler has joined owned request/tool cleanup for this exact suspension.
++    /// The task wrapper clears this proof unless cancellation returns the expected result.
++    pub suspension_drained: std::sync::atomic::AtomicBool,
++    /// Publish final usage only after the suspension owner has persisted tool results.
++    pub suspension_token_count: std::sync::atomic::AtomicBool,
+ }
+ 
+ pub use codex_protocol::agent_profile::AgentProfileReceipt;

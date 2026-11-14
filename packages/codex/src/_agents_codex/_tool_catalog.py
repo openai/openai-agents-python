@@ -337,6 +337,9 @@ class HostedProgrammaticToolCalling:
     """
 
 
+_SCOPED_HOSTED_TYPES = (FileSearch, CodeInterpreter)
+
+
 _HOSTED_TOOLS = (
     FileSearch,
     CodeInterpreter,

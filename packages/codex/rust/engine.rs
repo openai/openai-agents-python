@@ -439,9 +439,8 @@ impl EngineState {
             ))
         });
         ensure!(
-            canonical_store.is_none()
-                || (local_checklist_store.is_none() && !goals_enabled && !checkpoint),
-            "Custom canonical storage cannot combine with local storage, goals or checkpoints"
+            canonical_store.is_none() || (local_checklist_store.is_none() && !goals_enabled),
+            "Custom canonical storage cannot combine with local storage or goals"
         );
         let store: Arc<dyn ThreadStore> = if let Some(backend) = canonical_store {
             crate::canonical_storage::CanonicalStore::new(backend)
@@ -870,6 +869,9 @@ impl EngineState {
                     .is_empty(),
                 "SDK resume cannot authorize saved startup tools; use an SDK-created thread"
             );
+            startup
+                .thread_extension_init
+                .insert(crate::agent_profiles::IdResumedProfiles);
         }
         if let Some(history) = history {
             startup.initial_history = history;
@@ -1147,6 +1149,8 @@ impl EngineState {
             child_instances: RwLock::new(HashMap::new()),
             child_questions,
             child_question_gate: Mutex::new(()),
+            remembered_mcp_approvals: Default::default(),
+            restored_mcp_approvals: Default::default(),
             closed: AtomicBool::new(false),
             closing: watch::channel(false).0,
             manual_event_drain: AtomicBool::new(false),
@@ -2169,6 +2173,7 @@ impl EngineState {
             "Codex engine is closed"
         );
         let agent_lifecycle = options.agent_lifecycle.clone();
+        let tool_lifecycle = options.tool_lifecycle;
         let finish_slots = options.terminal_tool_slots.clone();
         let input_error_slots = options.input_error_tool_slots.clone();
         let (mut startup, instructions) = options
@@ -2192,6 +2197,9 @@ impl EngineState {
             .insert(crate::python_tools::agent_lifecycle::Bindings(
                 agent_lifecycle,
             ));
+        startup.thread_extension_init.insert(
+            crate::python_tools::tool_observers::Bindings(tool_lifecycle),
+        );
         self.apply_deferred_environment(&mut startup)?;
         crate::agent_profiles::bind_profile_providers(&mut startup).await?;
         if startup.environments.is_none()
@@ -2432,6 +2440,8 @@ pub struct ThreadState {
     pub(crate) child_instances: RwLock<HashMap<ThreadId, crate::native_agents::Instance>>,
     child_questions: Arc<std::sync::Mutex<HashMap<String, OwnedChildQuestion>>>,
     pub(crate) child_question_gate: Mutex<()>,
+    remembered_mcp_approvals: std::sync::Mutex<Vec<(codex_core::LiveMcpApprovalPolicy, bool)>>,
+    restored_mcp_approvals: std::sync::Mutex<HashMap<String, bool>>,
 }
 
 #[derive(Clone)]
@@ -3194,12 +3204,103 @@ impl ThreadState {
         question.grant.cancel_url_completion().await
     }
 
+    pub async fn can_remember_mcp_question(&self, id: &str) -> anyhow::Result<bool> {
+        let _question_gate = self.child_question_gate.lock().await;
+        if !self.child_question_pending(id).await {
+            return Ok(false);
+        }
+        let question = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned();
+        let Some(question) = question.filter(|question| question.root) else {
+            return Ok(false);
+        };
+        let Some(policy) = question.grant.live_mcp_approval_policy().await? else {
+            return Ok(false);
+        };
+        let choices = self
+            .remembered_mcp_approvals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(choices.len() < 4096 || choices.iter().any(|(known, _)| known.matches(&policy)))
+    }
+
+    pub async fn remembered_mcp_decision(&self, id: &str) -> anyhow::Result<Option<(bool, bool)>> {
+        let _question_gate = self.child_question_gate.lock().await;
+        if !self.child_question_pending(id).await {
+            return Ok(None);
+        }
+        let question = self
+            .child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned();
+        let Some(question) = question.filter(|question| question.root) else {
+            return Ok(None);
+        };
+        let Some(policy) = question.grant.live_mcp_approval_policy().await? else {
+            return Ok(None);
+        };
+        let choices = self
+            .remembered_mcp_approvals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, choice)) = choices.iter().find(|(known, _)| known.matches(&policy)) {
+            return Ok(Some((*choice, false)));
+        }
+        let Some(key) = policy.portable_declaration() else {
+            return Ok(None);
+        };
+        if choices.len() >= 4096 {
+            return Ok(None);
+        }
+        Ok(self
+            .restored_mcp_approvals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key).map(|choice| (*choice, true)))
+    }
+
+    pub(crate) fn export_mcp_approval_choices(&self) -> HashMap<String, bool> {
+        self.remembered_mcp_approvals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|(policy, choice)| policy.portable_declaration().map(|key| (key, *choice)))
+            .collect()
+    }
+
+    pub(crate) fn restore_mcp_approval_choices(&self, choices: HashMap<String, bool>) -> anyhow::Result<()> {
+        ensure!(choices.len() <= 4096 && choices.keys().all(|key| {
+            key.len() == 64 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        }), "Invalid remembered MCP policy");
+        *self.restored_mcp_approvals.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = choices;
+        Ok(())
+    }
+
     pub async fn respond_child_question(
         &self,
         id: &str,
         operation: &str,
         params: serde_json::Value,
+        remember_mcp: Option<bool>,
+        use_portable_mcp: bool,
     ) -> anyhow::Result<bool> {
+        ensure!(!use_portable_mcp || remember_mcp.is_some(), "Portable MCP requires a choice");
+        if let Some(approve) = remember_mcp {
+            ensure!(
+                operation == "resolve_elicitation"
+                    && params.get("decision").and_then(serde_json::Value::as_str)
+                        == Some(if approve { "accept" } else { "decline" })
+                    && params.get("content").is_none_or(serde_json::Value::is_null)
+                    && params.get("meta").is_none_or(serde_json::Value::is_null),
+                "Remembered MCP choice requires its ordinary one-shot decision"
+            );
+        }
         let response = crate::ops::question_response(operation, params)?;
         let _question_gate = self.child_question_gate.lock().await;
         if !self.child_question_pending(id).await {
@@ -3214,9 +3315,56 @@ impl ThreadState {
         else {
             return Ok(false);
         };
+        let remembered = if let Some(approve) = remember_mcp {
+            ensure!(
+                question.root,
+                "Remembered MCP choice requires a root request"
+            );
+            let policy = question
+                .grant
+                .live_mcp_approval_policy()
+                .await?
+                .context("Remembering requires an actual current MCP approval")?;
+            let choices = self
+                .remembered_mcp_approvals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ensure!(
+                choices.len() < 4096 || choices.iter().any(|(known, _)| known.matches(&policy)),
+                "Remembered MCP choice limit exceeded"
+            );
+            let portable_key = policy.portable_declaration();
+            if use_portable_mcp {
+                let key = portable_key.as_ref().context("Portable MCP policy is no longer current")?;
+                ensure!(
+                    self.restored_mcp_approvals.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner).get(key) == Some(&approve),
+                    "Portable MCP policy is no longer current"
+                );
+            }
+            Some((policy, approve, portable_key))
+        } else {
+            None
+        };
         let url = question.grant.url_completion_status().await != Some(false);
         // The Core grant checks the captured turn-state identity again at consumption.
         let accepted = question.grant.respond(response).await;
+        if accepted && let Some((policy, approve, portable_key)) = remembered {
+            if let Some(key) = portable_key {
+                self.restored_mcp_approvals.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
+            }
+            let mut choices = self
+                .remembered_mcp_approvals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((_, choice)) = choices.iter_mut().find(|(known, _)| known.matches(&policy))
+            {
+                *choice = approve;
+            } else {
+                choices.push((policy, approve));
+            }
+        }
         if !url {
             self.child_questions
                 .lock()
@@ -3423,6 +3571,10 @@ impl ThreadState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        self.remembered_mcp_approvals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.closed.store(true, Ordering::Release);
         if let Some(error) = process_shutdown_error {
             return Err(error.into());
@@ -3450,6 +3602,10 @@ impl ThreadState {
             .store(drain_events, Ordering::Release);
         self.closing.send_replace(true);
         self.child_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.remembered_mcp_approvals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();

@@ -1,0 +1,307 @@
+diff --git a/codex-rs/core/src/prepared_request.rs b/codex-rs/core/src/prepared_request.rs
+index c8d06360..fa2b39f4 100644
+--- a/codex-rs/core/src/prepared_request.rs
++++ b/codex-rs/core/src/prepared_request.rs
+@@ -172,15 +172,50 @@ fn protected_handoff_item(item: &ResponseItem) -> bool {
+ fn handoff_input(
+     presentation: &codex_protocol::agent_profile::AgentProfileHandoffPresentation,
+ ) -> Result<Vec<ResponseItem>, String> {
+-    // Reuse the native original/provider-history aggregate admission ceiling.
+-    // Count borrowed JSON before cloning or parsing any application item.
+-    check_handoff_budget(
+-        presentation
++    // Count the retained markers in the same native history budget as the input.
++    let mut budget = crate::client::provider_history::HistoryBudget::default();
++    for item in presentation
++        .input
++        .iter()
++        .chain(&presentation.previous)
++        .chain(&presentation.generated)
++    {
++        budget.observe(item).map_err(|error| error.to_string())?;
++    }
++    for summary in &presentation.summaries {
++        budget.observe(summary).map_err(|error| error.to_string())?;
++    }
++    if presentation
++        .summaries
++        .windows(2)
++        .any(|pair| pair[0].index >= pair[1].index)
++    {
++        return Err("Handoff summary occurrences must be unique and ordered".into());
++    }
++    for summary in &presentation.summaries {
++        let item = presentation
+             .input
+-            .iter()
+-            .chain(&presentation.previous)
+-            .chain(&presentation.generated),
+-    )?;
++            .get(summary.index)
++            .ok_or("Handoff summary occurrence is outside the presentation")?;
++        let parts = item.get("content").and_then(serde_json::Value::as_array);
++        if item.get("role").and_then(serde_json::Value::as_str) != Some("assistant")
++            || !parts.is_some_and(|parts| {
++                parts.len() == 1
++                    && parts[0].get("type").and_then(serde_json::Value::as_str)
++                        == Some("output_text")
++                    && parts[0]
++                        .get("text")
++                        .and_then(serde_json::Value::as_str)
++                        .is_some()
++            })
++            || summary
++                .wrappers
++                .iter()
++                .any(|wrapper| wrapper.is_empty() || wrapper.len() > 4096)
++        {
++            return Err("Invalid handoff summary occurrence".into());
++        }
++    }
+     presentation
+         .input
+         .iter()
+@@ -324,6 +359,7 @@ mod tests {
+             generated: vec![
+                 json!({"type":"message","role":"user","content":[{"type":"input_text","text":"allowed current"}]}),
+             ],
++            summaries: vec![],
+         };
+         let original = Prompt {
+             input: vec![
+@@ -341,8 +377,14 @@ mod tests {
+     #[test]
+     fn handoff_sampling_keeps_publication_and_settled_pair_across_steps() {
+         let (original, presentation, receipt, publication) = handoff_case();
+-        let projected =
+-            apply_handoff_presentation(&original, &presentation, &receipt, &publication, &publication).unwrap();
++        let projected = apply_handoff_presentation(
++            &original,
++            &presentation,
++            &receipt,
++            &publication,
++            &publication,
++        )
++        .unwrap();
+         assert_eq!(projected.input[0], publication);
+         for (index, group) in [
+             &presentation.input,
+@@ -371,7 +413,8 @@ mod tests {
+         let mut later = original.clone();
+         later.input.push(parse_preserving(json!({"type":"message","role":"user","content":[{"type":"input_text","text":"later input"}]})).unwrap());
+         let second =
+-            apply_handoff_presentation(&later, &presentation, &receipt, &publication, &publication).unwrap();
++            apply_handoff_presentation(&later, &presentation, &receipt, &publication, &publication)
++                .unwrap();
+         assert_eq!(&second.input[4..], &later.input[2..]);
+         assert!(
+             serde_json::to_string(&original.input)
+@@ -397,7 +440,14 @@ mod tests {
+             ]);
+             assert!(validate_handoff_presentation(&rejected).is_err());
+             assert!(
+-                apply_handoff_presentation(&original, &rejected, &receipt, &publication, &publication).is_err()
++                apply_handoff_presentation(
++                    &original,
++                    &rejected,
++                    &receipt,
++                    &publication,
++                    &publication
++                )
++                .is_err()
+             );
+         }
+         assert!(validate_handoff_presentation(&presentation).is_ok());
+@@ -494,16 +544,29 @@ mod tests {
+         stale.destination.epoch = 2;
+         let mut provider_calls = 0;
+         for rejected in [invalid, discarded, over_count, over_bytes, stale] {
+-            let result = apply_handoff_presentation(&original, &rejected, &receipt, &publication, &publication)
+-                .map(|_| {
+-                    provider_calls += 1;
+-                });
++            let result = apply_handoff_presentation(
++                &original,
++                &rejected,
++                &receipt,
++                &publication,
++                &publication,
++            )
++            .map(|_| {
++                provider_calls += 1;
++            });
+             assert!(result.is_err());
+         }
+         let mut missing = original.clone();
+         missing.input.remove(1);
+         assert!(
+-            apply_handoff_presentation(&missing, &presentation, &receipt, &publication, &publication).is_err()
++            apply_handoff_presentation(
++                &missing,
++                &presentation,
++                &receipt,
++                &publication,
++                &publication
++            )
++            .is_err()
+         );
+         assert_eq!(provider_calls, 0);
+     }
+@@ -638,4 +701,37 @@ mod tests {
+         assert!(!preserves(&json!([1]), &json!([1, 2])));
+         assert!(!preserves(&json!(1), &json!(2)));
+     }
++    #[test]
++    fn handoff_summary_marks_only_bounded_assistant_occurrences() {
++        use codex_protocol::agent_profile::HandoffSummary;
++
++        let (_, mut presentation, _, _) = handoff_case();
++        presentation.input = vec![
++            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"Transcript"}]}),
++            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"Unmarked"}]}),
++        ];
++        let mark = HandoffSummary {
++            index: 0,
++            wrappers: ["<T>".into(), "</T>".into()],
++        };
++        presentation.summaries = vec![mark.clone()];
++        assert!(validate_handoff_presentation(&presentation).is_ok());
++        presentation.summaries.push(mark.clone());
++        assert!(validate_handoff_presentation(&presentation).is_err());
++        presentation.summaries = vec![HandoffSummary {
++            index: 1,
++            ..mark.clone()
++        }];
++        assert!(validate_handoff_presentation(&presentation).is_err());
++        presentation.summaries = vec![HandoffSummary {
++            index: 2,
++            ..mark.clone()
++        }];
++        assert!(validate_handoff_presentation(&presentation).is_err());
++        presentation.summaries = vec![HandoffSummary {
++            wrappers: ["x".repeat(4097), "end".into()],
++            ..mark
++        }];
++        assert!(validate_handoff_presentation(&presentation).is_err());
++    }
+ }
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index 860738b8..576f2962 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -519,7 +519,9 @@ impl Session {
+         context
+             .extension_data
+             .remove::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>();
+-        context.extension_data.remove::<codex_extension_api::HandoffGeneratedHistorySelection>();
++        context
++            .extension_data
++            .remove::<codex_extension_api::HandoffGeneratedHistorySelection>();
+         context
+             .extension_data
+             .remove::<codex_protocol::agent_profile::AgentProfileHandoffInputRequest>();
+@@ -977,17 +979,21 @@ impl Session {
+             crate::prepared_request::validate_handoff_presentation(presentation)
+                 .map_err(invalid)?;
+         }
+-        let history_replacement = if let Some(selection) = context
+-            .extension_data
+-            .remove::<codex_extension_api::HandoffGeneratedHistorySelection>()
++        let history_replacement = if let Some(selection) =
++            context
++                .extension_data
++                .remove::<codex_extension_api::HandoffGeneratedHistorySelection>()
+         {
+             if task_fence.is_none()
+                 || presentation.as_ref().map(|value| &value.handoff) != Some(&selection.handoff)
+                 || expected.as_ref() != Some(&selection.handoff.source)
+             {
+-                return Err(invalid("Canonical handoff history requires this owned transfer"));
++                return Err(invalid(
++                    "Canonical handoff history requires this owned transfer",
++                ));
+             }
+-            self.prepare_handoff_history_replacement(&context, &selection).await?
++            self.prepare_handoff_history_replacement(&context, &selection)
++                .await?
+         } else {
+             None
+         };
+@@ -1093,7 +1099,8 @@ impl Session {
+                 None,
+                 crate::context_manager::HistoryReplacement::Reset,
+             );
+-            state.sdk_originals = codex_history::sdk_originals::SdkOriginalHistoryCache::from(&replacement.originals);
++            state.sdk_originals =
++                codex_history::sdk_originals::SdkOriginalHistoryCache::from(&replacement.originals);
+         }
+         state.record_annotated_items(
+             &mut vec![envelope],
+@@ -1349,6 +1356,7 @@ impl Session {
+             })
+             .collect();
+         let values = |selected: &[&ResponseItem]| handoff_source_values(&approved, selected);
++        let mut summaries = Vec::new();
+         let mut input = values(&items[..frontier.root_count])?;
+         let mut previous = values(&items[frontier.root_count..frontier.sample_count])?;
+         if let Some(source) = source {
+@@ -1373,6 +1381,7 @@ impl Session {
+                 }
+                 let anchor = anchors[0] + 1;
+                 input = presentation.input.clone();
++                summaries.clone_from(&presentation.summaries);
+                 if anchor > frontier.root_count {
+                     previous = presentation
+                         .previous
+@@ -1406,6 +1415,7 @@ impl Session {
+             input,
+             previous,
+             generated: values(&items[frontier.sample_count..])?,
++            summaries,
+         };
+         crate::prepared_request::validate_handoff_presentation(&presentation).map_err(invalid)?;
+         Ok(presentation)
+@@ -1531,6 +1541,7 @@ mod tests {
+             generated: vec![
+                 serde_json::json!({"type":"message","role":"user","content":[{"type":"input_text","text":"generated-0"}]}),
+             ],
++            summaries: vec![],
+         };
+         let envelope = |profile: &AgentProfile, epoch, presentation| {
+             let mut envelope = profile.application_instructions.clone();
+diff --git a/codex-rs/protocol/src/agent_profile.rs b/codex-rs/protocol/src/agent_profile.rs
+index 5339e989..aaf3c7b7 100644
+--- a/codex-rs/protocol/src/agent_profile.rs
++++ b/codex-rs/protocol/src/agent_profile.rs
+@@ -27,6 +27,14 @@ impl AgentProfileHandoff {
+     }
+ }
+ 
++/// An SDK-generated assistant transcript occurrence and its rendering delimiters.
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct HandoffSummary {
++    pub index: usize,
++    pub wrappers: [String; 2],
++}
++
+ /// An accepted destination presentation, separate from canonical effect history.
+ /// This source prototype has not been connected to public input or persistence.
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+@@ -37,6 +45,8 @@ pub struct AgentProfileHandoffPresentation {
+     pub input: Vec<serde_json::Value>,
+     pub previous: Vec<serde_json::Value>,
+     pub generated: Vec<serde_json::Value>,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub summaries: Vec<HandoffSummary>,
+ }
+ 
+ impl AgentProfileHandoffPresentation {
+@@ -70,6 +80,7 @@ mod presentation_tests {
+             input: vec![serde_json::json!({"occurrence":"input-1"})],
+             previous: vec![],
+             generated: vec![serde_json::json!({"occurrence":"generated-0"})],
++            summaries: vec![],
+         };
+         let restored: AgentProfileHandoffPresentation =
+             serde_json::from_str(&serde_json::to_string(&accepted).unwrap()).unwrap();

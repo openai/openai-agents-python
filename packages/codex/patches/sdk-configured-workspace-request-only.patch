@@ -1,0 +1,11 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2829,6 +2829,7 @@
+                 }
+                 if let Some(guidance) = step_context.settings.agent_profile.as_ref()
+                     .and_then(|profile| profile.profile.data.get::<codex_extension_api::AgentProfileWorkspaceGuidance>())
++                    .or_else(|| sess.services.thread_extension_data.get::<codex_extension_api::AgentProfileWorkspaceGuidance>())
+                 {
+                     append_profile_workspace_guidance(
+                         sampling_prompt.to_mut(), &guidance,

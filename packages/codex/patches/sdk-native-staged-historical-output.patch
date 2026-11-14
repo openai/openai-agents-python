@@ -1,0 +1,24 @@
+diff --git a/codex-rs/core/src/session/staged_input_terminal.rs b/codex-rs/core/src/session/staged_input_terminal.rs
+index 6c99aa2b..c0bfc389 100644
+--- a/codex-rs/core/src/session/staged_input_terminal.rs
++++ b/codex-rs/core/src/session/staged_input_terminal.rs
+@@ -434,12 +434,15 @@ pub(crate) async fn append(
+                         _ => false,
+                     })
+                 }
++                // Detached historical outputs have no pending-call authority.
++                // The checkpoint boundary already excludes the current call identities.
++                ResponseItem::FunctionCallOutput { output, .. } => {
++                    !matches!(&output.body, FunctionCallOutputBody::Text(_))
++                }
++                ResponseItem::LocalShellCallOutput { .. } => false,
+                 _ => true,
+             }) {
+-                return Err(
+-                    "Terminal staged admission requires text messages or user file inputs"
+-                        .to_string(),
+-                );
++                return Err("Unsupported item in terminal staged input".to_string());
+             }
+             let annotated = originals
+                 .iter()

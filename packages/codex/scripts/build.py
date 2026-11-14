@@ -139,9 +139,11 @@ def main():
         shutil.copy2(binaries / source, destination / name)
     mode = "develop" if args.develop else "build"
     output = ["--out", str(args.out.resolve())] if args.out is not None else []
-    # A regular abi3 extension cannot load in a free-threaded interpreter.
-    # Maturin requires this interpreter explicitly to produce its compatible tag.
-    if mode == "build" and sysconfig.get_config_var("Py_GIL_DISABLED") == 1:
+    # Maturin defaults to a CPython abi3 wheel without an explicit interpreter.
+    # PyPy and free-threaded CPython each need a different ABI tag.
+    if mode == "build" and (
+        sys.implementation.name == "pypy" or sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+    ):
         output.extend(["--interpreter", sys.executable])
     if pgo:
         # Keep instrumented/profile-use dependencies out of ordinary Cargo caches.

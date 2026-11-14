@@ -1,0 +1,408 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 2ce8c903..4916c5cb 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -176,6 +176,41 @@ pub(crate) struct McpStartupRequirements {
+ ///   conversation history and consider the turn complete.
+ ///
+ pub(crate) async fn run_turn(
++    sess: Arc<Session>,
++    turn_context: Arc<TurnContext>,
++    input: Vec<TurnInput>,
++    mcp_startup_requirements: &mut McpStartupRequirements,
++    prewarmed_client_session: Option<ModelClientSession>,
++    initial_step: Option<Arc<StepContext>>,
++    cancellation_token: CancellationToken,
++) -> CodexResult<Option<String>> {
++    let agent_owner = codex_otel::sdk_trace::ContextLease::capture()
++        .filter(|_| codex_otel::sdk_trace::current_scope_policy().is_some_and(|p| !p.disabled))
++        .map(|parent| Arc::new(SdkAgentSpanOwner {
++            parent,
++            active: Arc::new(std::sync::Mutex::new((false, None))),
++        }));
++    let _agent_guard = SdkAgentRunGuard(agent_owner.clone());
++    if let Some(owner) = &agent_owner {
++        turn_context.extension_data.insert(SdkAgentSpanState(Arc::clone(&owner.active)));
++    }
++    let result = run_turn_agent_owned(
++        Arc::clone(&sess), Arc::clone(&turn_context), input, mcp_startup_requirements,
++        prewarmed_client_session, initial_step, cancellation_token, agent_owner.clone(),
++    ).await;
++    if let Some(owner) = agent_owner {
++        owner.finish(if result.as_ref().err().is_some_and(|error| matches!(error.details(), CodexErrorDetails::TurnAborted)) {
++            codex_otel::sdk_trace::ProviderResponseOutcome::Cancelled
++        } else if result.is_err() || turn_context.extension_data.get::<ReportedTurnError>().is_some() {
++            codex_otel::sdk_trace::ProviderResponseOutcome::Error
++        } else {
++            codex_otel::sdk_trace::ProviderResponseOutcome::Ok
++        });
++    }
++    result
++}
++
++async fn run_turn_agent_owned(
+     sess: Arc<Session>,
+     turn_context: Arc<TurnContext>,
+     mut input: Vec<TurnInput>,
+@@ -183,6 +218,7 @@ pub(crate) async fn run_turn(
+     prewarmed_client_session: Option<ModelClientSession>,
+     mut initial_step: Option<Arc<StepContext>>,
+     cancellation_token: CancellationToken,
++    agent_owner: Option<Arc<SdkAgentSpanOwner>>,
+ ) -> CodexResult<Option<String>> {
+     sess.check_agent_profile_admission()?;
+     check_provider_history_budget(&sess, &input).await?;
+@@ -356,6 +392,9 @@ pub(crate) async fn run_turn(
+         }
+         Err(err) => return Err(err),
+     };
++    if let Some(owner) = &agent_owner {
++        admit_sdk_agent_lifetime(&sess, &first_step_context, owner, false, cancellation_token.clone()).await?;
++    }
+     // Keep the exact model-visible state used by this turn and its inline compactions.
+     let (world_state, display_roots) = tokio::join!(
+         sess.record_context_updates_and_set_reference_context_item(first_step_context.as_ref()),
+@@ -703,15 +742,24 @@ pub(crate) async fn run_turn(
+         )
+         .await;
+ 
+-        if sess
++        let accepted_agent_handoff = pending_agent_handoff.take();
++        let prior_agent = turn_context.next_step_settings.load_full().agent_profile
++            .as_ref().map(|profile| profile.receipt.clone());
++        let restored_agent_handoff = sess.services.thread_extension_data
++            .get::<codex_protocol::agent_profile::AgentProfileHandoffInputRequest>()
++            .filter(|request| request.restored && request.turn_id == turn_context.sub_id
++                && Some(&request.handoff.source) == prior_agent.as_ref())
++            .map(|request| request.handoff.clone());
++        let activated_agent = sess
+             .activate_agent_at_tool_boundary(
+-                &turn_context,
+-                &cancellation_token,
+-                pending_agent_handoff.take().as_ref(),
+-            )
+-            .await?
+-            .is_some()
+-        {
++                &turn_context, &cancellation_token, accepted_agent_handoff.as_ref(),
++            ).await?;
++        let agent_entry_changed = activated_agent.as_ref().is_some_and(|next| {
++            accepted_agent_handoff.as_ref().or(restored_agent_handoff.as_ref())
++                .is_some_and(|handoff| handoff.matches_destination(next))
++                || prior_agent.as_ref().is_some_and(|prior| prior.profile_id != next.profile_id)
++        });
++        if activated_agent.is_some() {
+             next_step_context = None;
+         }
+ 
+@@ -770,6 +818,9 @@ pub(crate) async fn run_turn(
+                 .await?
+             }
+         };
++        if let Some(owner) = &agent_owner {
++            admit_sdk_agent_lifetime(&sess, &step_context, owner, agent_entry_changed, cancellation_token.clone()).await?;
++        }
+         if let Some(staged) = &staged_input
+             && !staged.projects_occurrences()
+             && let Some(items) = staged.items_for(&turn_context.sub_id)
+@@ -3258,6 +3309,86 @@ async fn poll_provider_response<F: std::future::Future>(
+     }
+ }
+ 
++struct SdkAgentSpanOwner {
++    parent: codex_otel::sdk_trace::ContextLease,
++    active: Arc<std::sync::Mutex<(bool, Option<codex_otel::sdk_trace::ProviderResponseSpan>)>>,
++}
++struct SdkAgentSpanState(Arc<std::sync::Mutex<(bool, Option<codex_otel::sdk_trace::ProviderResponseSpan>)>>);
++struct SdkAgentRunGuard(Option<Arc<SdkAgentSpanOwner>>);
++impl Drop for SdkAgentRunGuard {
++    fn drop(&mut self) {
++        if let Some(owner) = &self.0 {
++            owner.finish(codex_otel::sdk_trace::ProviderResponseOutcome::Cancelled);
++        }
++    }
++}
++
++impl SdkAgentSpanOwner {
++    fn finish(&self, outcome: codex_otel::sdk_trace::ProviderResponseOutcome) {
++        if let Some(span) = self.active.lock().unwrap_or_else(|e| e.into_inner()).1.take() {
++            span.finish(outcome);
++        }
++    }
++}
++
++pub(crate) fn sdk_agent_span_parent(
++    step: &StepContext,
++) -> Result<Option<codex_otel::sdk_trace::ContextLease>, String> {
++    let Some(owner) = step.turn.extension_data.get::<SdkAgentSpanState>() else {
++        return Ok(None);
++    };
++    let active = owner.0.lock().unwrap_or_else(|e| e.into_inner());
++    active.1.as_ref().map(|span| span.agent_parent_lease()).transpose()
++}
++
++async fn admit_sdk_agent_lifetime(
++    sess: &Session,
++    step: &Arc<StepContext>,
++    owner: &SdkAgentSpanOwner,
++    new_entry: bool,
++    cancellation: CancellationToken,
++) -> CodexResult<()> {
++    if step.extension_data.get::<codex_extension_api::SdkTurnReceiptSeed>().is_none() {
++        return Ok(());
++    }
++    if owner.active.lock().unwrap_or_else(|e| e.into_inner()).0 && !new_entry {
++        return Ok(());
++    }
++    if new_entry {
++        owner.finish(codex_otel::sdk_trace::ProviderResponseOutcome::Ok);
++    }
++    let admission = crate::model_request::tool_admission_for_step(
++        sess.thread_id.to_string(), step.clone(), Vec::new(),
++    );
++    let mut selected = None;
++    for contributor in sess.services.extensions.model_request_contributors() {
++        if cancellation.is_cancelled() { return Err(CodexErr::TurnAborted); }
++        let reply = contributor.admit_agent_span(codex_extension_api::SdkAgentSpanInput {
++            admission: admission.clone(),
++            parent_context: owner.parent.token().to_owned(), cancellation: cancellation.clone(),
++        }).await.map_err(CodexErr::Fatal)?;
++        if !matches!(reply, codex_extension_api::SdkAgentSpanAdmission::Unhandled)
++            && selected.replace(reply).is_some() {
++            return Err(CodexErr::Fatal("Multiple SDK Agent span admissions".into()));
++        }
++    }
++    if cancellation.is_cancelled() { return Err(CodexErr::TurnAborted); }
++    let Some(selected) = selected else { return Ok(()); };
++    // The accepted transition already committed. Only observation changes here.
++    owner.finish(codex_otel::sdk_trace::ProviderResponseOutcome::Ok);
++    let span = match selected {
++        codex_extension_api::SdkAgentSpanAdmission::Record(record) => Some(
++            codex_otel::sdk_trace::start_sdk_semantic_span(
++                &owner.parent, record.span_id, record.name, "agent",
++            ).map_err(CodexErr::Fatal)?
++        ),
++        codex_extension_api::SdkAgentSpanAdmission::Suppress => None,
++        codex_extension_api::SdkAgentSpanAdmission::Unhandled => unreachable!(),
++    };
++    *owner.active.lock().unwrap_or_else(|e| e.into_inner()) = (true, span);
++    Ok(())
++}
++
+ // One SDK scope owns all attempts in this logical model round. Generic Core
+ // turns and disabled/unowned contexts never ask a host for an identifier.
+ async fn admit_sdk_provider_response_span(
+@@ -3273,7 +3404,8 @@ async fn admit_sdk_provider_response_span(
+     {
+         return Ok(None);
+     }
+-    let Some(parent) = codex_otel::sdk_trace::ContextLease::capture() else {
++    let Some(parent) = sdk_agent_span_parent(step).map_err(CodexErr::Fatal)?
++        .or_else(codex_otel::sdk_trace::ContextLease::capture) else {
+         return Ok(None);
+     };
+     let admission =
+diff --git a/codex-rs/core/src/tools/lifecycle.rs b/codex-rs/core/src/tools/lifecycle.rs
+index 87945456..50b2229b 100644
+--- a/codex-rs/core/src/tools/lifecycle.rs
++++ b/codex-rs/core/src/tools/lifecycle.rs
+@@ -125,7 +125,7 @@ pub(crate) async fn notify_tool_finish(
+ ) {
+     notify_tool_finish_parts(
+         invocation.session.as_ref(),
+-        invocation.turn.as_ref(),
++        invocation.step_context.as_ref(),
+         invocation.call_id.as_str(),
+         &invocation.tool_name,
+         invocation.source.clone(),
+@@ -137,7 +137,7 @@ pub(crate) async fn notify_tool_finish(
+ 
+ pub(crate) async fn notify_tool_aborted(
+     session: &Session,
+-    turn: &TurnContext,
++    step: &crate::session::step_context::StepContext,
+     call_id: &str,
+     tool_name: &ToolName,
+     source: ToolCallSource,
+@@ -149,7 +149,7 @@ pub(crate) async fn notify_tool_aborted(
+ ) {
+     notify_tool_finish_parts(
+         session,
+-        turn,
++        step,
+         call_id,
+         tool_name,
+         source,
+@@ -161,7 +161,7 @@ pub(crate) async fn notify_tool_aborted(
+ 
+ async fn notify_tool_finish_parts(
+     session: &Session,
+-    turn: &TurnContext,
++    step: &crate::session::step_context::StepContext,
+     call_id: &str,
+     tool_name: &ToolName,
+     source: ToolCallSource,
+@@ -172,9 +172,11 @@ async fn notify_tool_finish_parts(
+         Option<i32>,
+     ),
+ ) {
++    let turn = step.turn.as_ref();
+     for contributor in session.services.extensions.tool_lifecycle_contributors() {
+         contributor
+             .on_tool_finish(ToolFinishInput {
++                step_store: Some(&step.extension_data),
+                 session_store: &session.services.session_extension_data,
+                 thread_store: &session.services.thread_extension_data,
+                 turn_store: turn.extension_data.as_ref(),
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index db1e68ee..87f032e4 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -474,7 +474,7 @@ impl ToolCallRuntime {
+             .map(|timing| Arc::clone(&timing.execution_started_at));
+         let abort_session = Arc::clone(&session);
+         let abort_source = source.clone();
+-        let abort_turn = Arc::clone(&turn);
++        let abort_step = Arc::clone(&step_context);
+         let dispatch_call_state = Arc::clone(&call_state);
+         let dispatch_call = call.clone();
+         let thread_id = session.thread_id;
+@@ -648,14 +648,14 @@ impl ToolCallRuntime {
+                                 let response = Self::aborted_response(&call, secs);
+                                 call_trace::result_ready(
+                                     thread_id,
+-                                    &abort_turn.sub_id,
++                                    &abort_step.turn.sub_id,
+                                     &call.tool_name,
+                                     &call.call_id,
+                                     trace_source,
+                                 );
+                                 notify_tool_aborted(
+                                     abort_session.as_ref(),
+-                                    abort_turn.as_ref(),
++                                    abort_step.as_ref(),
+                                     call.call_id.as_str(),
+                                     &call.tool_name,
+                                     abort_source,
+@@ -690,7 +690,9 @@ async fn admit_tool_span(
+     parent: Option<&codex_otel::sdk_trace::ContextLease>,
+     cancellation: &CancellationToken,
+ ) -> Result<(bool, Option<codex_otel::sdk_trace::ProviderResponseSpan>), FunctionCallError> {
+-    let Some(parent) = parent else {
++    let agent_parent = crate::session::turn::sdk_agent_span_parent(step)
++        .map_err(FunctionCallError::Fatal)?;
++    let Some(parent) = agent_parent.as_ref().or(parent) else {
+         return Ok((false, None));
+     };
+     let admission =
+diff --git a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+index cbffde32..61e4d6f6 100644
+--- a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+@@ -258,6 +258,8 @@ pub struct McpToolResultInput<'a> {
+ 
+ /// Input supplied when the host finishes executing one tool call.
+ pub struct ToolFinishInput<'a> {
++    /// Store scoped to the step that issued the tool call.
++    pub step_store: Option<&'a ExtensionData>,
+     /// Store scoped to the host session runtime.
+     pub session_store: &'a ExtensionData,
+     /// Store scoped to this thread runtime.
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 399a1f5f..88b4ec4b 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -178,6 +178,9 @@ pub use model_request::ModelToolAdmission;
+ pub use model_request::ProviderRequestAccounting;
+ pub use model_request::ProviderResponseAnchor;
+ pub use model_request::ResponseEvent;
++pub use model_request::SdkAgentSpanAdmission;
++pub use model_request::SdkAgentSpanInput;
++pub use model_request::SdkAgentSpanRecord;
+ pub use model_request::SdkCompletedModelResponse;
+ pub use model_request::SdkProviderResponseSpanAdmission;
+ pub use model_request::SdkProviderResponseSpanInput;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 95209ad9..b48411b9 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -399,6 +399,28 @@ pub enum SdkToolSpanAdmission {
+     Record(SdkProviderResponseSpanAdmission),
+ }
+ 
++/// Captured admission for one native Agent lifetime, separate from tool dispatch.
++#[derive(Clone)]
++pub struct SdkAgentSpanInput {
++    pub admission: Arc<dyn ModelToolAdmission>,
++    pub parent_context: String,
++    pub cancellation: tokio_util::sync::CancellationToken,
++}
++
++/// A current SDK Agent display label, admitted only for its native turn owner.
++#[derive(Debug, Clone, serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct SdkAgentSpanRecord {
++    pub name: String,
++    pub span_id: Option<String>,
++}
++
++pub enum SdkAgentSpanAdmission {
++    Unhandled,
++    Suppress,
++    Record(SdkAgentSpanRecord),
++}
++
+ /// A host-validated synchronous ID policy result for this exact admission.
+ /// Core validates the optional span ID again before constructing its real span.
+ #[derive(Debug, Clone, serde::Deserialize)]
+@@ -442,6 +464,14 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+         Box::pin(async { Ok(SdkToolSpanAdmission::Unhandled) })
+     }
+ 
++    /// Observer-only lifetime admission; never an Agent activation or tool grant.
++    fn admit_agent_span(
++        &self,
++        _input: SdkAgentSpanInput,
++    ) -> BoxFuture<'_, Result<SdkAgentSpanAdmission, String>> {
++        Box::pin(async { Ok(SdkAgentSpanAdmission::Unhandled) })
++    }
++
+     /// Captured host policy may await model completion before direct tool effects.
+     fn observes_completed_model_response(&self, _admission: &dyn ModelToolAdmission) -> bool {
+         false
+diff --git a/codex-rs/ext/goal/tests/goal_extension_backend.rs b/codex-rs/ext/goal/tests/goal_extension_backend.rs
+index bf3292db..be796781 100644
+--- a/codex-rs/ext/goal/tests/goal_extension_backend.rs
++++ b/codex-rs/ext/goal/tests/goal_extension_backend.rs
+@@ -1914,6 +1914,7 @@ impl GoalExtensionHarness {
+         for contributor in self.registry.tool_lifecycle_contributors() {
+             contributor
+                 .on_tool_finish(ToolFinishInput {
++                    step_store: None,
+                     builtin_sandbox_operation: None,
+                     builtin_sandbox_duration: None,
+                     builtin_sandbox_exit_code: None,
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+index 370dcb8b..d1f0f07a 100644
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -623,7 +623,7 @@ fn start_trace_span_options(
+         "mcp_tools",
+     ]
+     .contains(&options.kind.as_str())
+-        && !(native_semantic && ["model", "tool", "handoff"].contains(&options.kind.as_str()))
++        && !(native_semantic && ["model", "tool", "handoff", "agent"].contains(&options.kind.as_str()))
+     {
+         return Err("Unsupported native tracing span kind".into());
+     }
+@@ -844,6 +844,10 @@ pub fn start_sdk_semantic_span(
+ }
+ 
+ impl ProviderResponseSpan {
++    /// Retain this live native semantic scope as another captured callback parent.
++    pub fn agent_parent_lease(&self) -> Result<ContextLease, String> {
++        retain_trace_context(&self.key).map(|token| ContextLease { token })
++    }
+     pub fn context(&self) -> Context {
+         self.context.clone()
+     }

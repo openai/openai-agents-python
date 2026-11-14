@@ -1,0 +1,290 @@
+diff --git a/codex-rs/core/src/session/staged_input_terminal.rs b/codex-rs/core/src/session/staged_input_terminal.rs
+index 23083f0b..e79bf0c1 100644
+--- a/codex-rs/core/src/session/staged_input_terminal.rs
++++ b/codex-rs/core/src/session/staged_input_terminal.rs
+@@ -287,7 +287,10 @@ impl Sources {
+         // cannot orphan accepted effects or make capture race the cursor write.
+         self.pending.batch.begin_terminal_write()?;
+         let completion_batch = Arc::clone(&self.pending.batch);
+-        let registry = session.services.thread_extension_data.get_or_init(PendingWrites::default);
++        let registry = session
++            .services
++            .thread_extension_data
++            .get_or_init(PendingWrites::default);
+         let task = tokio::spawn(async move {
+             session
+                 .record_prepared_conversation_items_with_observations(
+@@ -317,20 +320,8 @@ impl Sources {
+                 .await
+                 .map_err(|error| error.to_string())
+         });
+-        let write = async move {
+-            let result = match task.await {
+-                Ok(result) => result,
+-                Err(error) => Err(format!("Staged terminal writer failed: {error}")),
+-            };
+-            completion_batch.finish_terminal_write(result.is_ok());
+-            if let Err(error) = &result {
+-                registry.failure.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+-                    .get_or_insert_with(|| error.clone());
+-            }
+-            result
+-        }
+-        .boxed()
+-        .shared();
++        let write =
++            monitor_terminal_write(Arc::clone(&self.pending), registry, completion_batch, task);
+         *self
+             .write
+             .lock()
+@@ -344,6 +335,41 @@ impl Sources {
+     }
+ }
+ 
++/// This independently driven monitor retains the discoverable Pending owner
++/// through final status publication, even after every request waiter drops.
++fn monitor_terminal_write(
++    owner: Arc<Pending>,
++    registry: Arc<PendingWrites>,
++    batch: Arc<StagedInputBatch>,
++    physical: tokio::task::JoinHandle<Result<(), String>>,
++) -> WriteJoin {
++    let monitor = tokio::spawn(async move {
++        let result = match physical.await {
++            Ok(result) => result,
++            Err(error) => Err(format!("Staged terminal writer failed: {error}")),
++        };
++        batch.finish_terminal_write(result.is_ok());
++        if let Err(error) = &result {
++            registry
++                .failure
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .get_or_insert_with(|| error.clone());
++        }
++        // No Session/Turn mutation follows this publication. Weak discovery may
++        // stop finding the owner only after its exact batch status has settled.
++        drop(owner);
++        result
++    });
++    async move {
++        monitor
++            .await
++            .map_err(|error| format!("Staged terminal monitor failed: {error}"))?
++    }
++    .boxed()
++    .shared()
++}
++
+ /// Append detached prepared copies to the sampled prompt. Neither history nor
+ /// the acknowledgment mask changes here.
+ pub(crate) async fn append(
+@@ -554,8 +580,11 @@ pub(crate) async fn join_thread(session: &Session) -> Result<(), String> {
+         .iter()
+         .filter_map(Weak::upgrade)
+         .collect::<Vec<_>>();
+-    let mut failure = registry.failure.lock()
+-        .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
++    let mut failure = registry
++        .failure
++        .lock()
++        .unwrap_or_else(std::sync::PoisonError::into_inner)
++        .clone();
+     for pending in owners {
+         let _settlement = pending.settlement.lock().await;
+         let write = pending
+@@ -569,6 +598,14 @@ pub(crate) async fn join_thread(session: &Session) -> Result<(), String> {
+             failure.get_or_insert(error);
+         }
+     }
++    if let Some(error) = registry
++        .failure
++        .lock()
++        .unwrap_or_else(std::sync::PoisonError::into_inner)
++        .clone()
++    {
++        failure.get_or_insert(error);
++    }
+     match failure {
+         Some(error) => Err(error),
+         None => Ok(()),
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index cad29f4e..db1e68ee 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -494,11 +494,35 @@ impl ToolCallRuntime {
+             .extension_data
+             .get::<codex_extension_api::SdkTurnReceiptSeed>()
+             .is_some()
+-            && codex_otel::sdk_trace::current_scope_policy().is_some_and(|policy| !policy.disabled))
++            && codex_otel::sdk_trace::current_scope_policy()
++                .is_some_and(|policy| !policy.disabled && policy.named_tool_policy)
++            && session
++                .services
++                .extensions
++                .model_request_contributors()
++                .iter()
++                .any(|contributor| contributor.has_tool_span_policy()))
+             .then(codex_otel::sdk_trace::ContextLease::capture)
+             .flatten();
+-        let abort_dispatch_span = Arc::new(OnceLock::<tracing::Span>::new());
+-        let dispatch_span_handle = Arc::clone(&abort_dispatch_span);
++        let dispatch_span = if scope_owner.is_some() {
++            trace_span!(
++                "dispatch_tool_call_with_code_mode_result",
++                tool_name = %call.tool_name,
++                thread.id = %session.thread_id,
++                call_id = call.call_id.as_str(),
++                aborted = false,
++            )
++        } else {
++            trace_span!(
++                "dispatch_tool_call_with_code_mode_result",
++                otel.name = %call.tool_name,
++                tool_name = %call.tool_name,
++                thread.id = %session.thread_id,
++                call_id = call.call_id.as_str(),
++                aborted = false,
++            )
++        };
++        let abort_dispatch_span = dispatch_span.clone();
+ 
+         let mut dispatch_handle = AbortOnDropHandle::new(tokio::spawn(
+             async move {
+@@ -525,12 +549,6 @@ impl ToolCallRuntime {
+                         "Canonical thread persistence failed; tool execution stopped".to_string(),
+                     )
+                 })?;
+-                // Admission through the parallel-execution gate marks the end
+-                // of dispatch waiting and the start of handler execution.
+-                if let Some(execution_started_at) = execution_started_at {
+-                    let _ = execution_started_at.set(Instant::now());
+-                }
+-
+                 let (named, trace) = admit_tool_span(
+                     &session,
+                     &step_context,
+@@ -539,28 +557,31 @@ impl ToolCallRuntime {
+                     &invocation_cancellation_token,
+                 )
+                 .await?;
+-                let native_span = if named {
+-                    trace_span!(
+-                        "dispatch_tool_call_with_code_mode_result",
++                let native_span = if let Some(trace) = &trace {
++                    let body = trace_span!(
++                        "tool_handler",
+                         tool_name = %dispatch_call.tool_name,
+                         thread.id = %session.thread_id,
+                         call_id = dispatch_call.call_id.as_str(),
+-                        aborted = false,
+-                    )
+-                } else {
++                    );
++                    codex_otel::set_parent_from_context(&body, trace.context());
++                    body
++                } else if !named && scope_owner.is_some() {
+                     trace_span!(
+-                        "dispatch_tool_call_with_code_mode_result",
++                        "tool_handler",
+                         otel.name = %dispatch_call.tool_name,
+                         tool_name = %dispatch_call.tool_name,
+                         thread.id = %session.thread_id,
+                         call_id = dispatch_call.call_id.as_str(),
+-                        aborted = false,
+                     )
++                } else {
++                    dispatch_span.clone()
+                 };
+-                if let Some(trace) = &trace {
+-                    codex_otel::set_parent_from_context(&native_span, trace.context());
++                // Readiness, durable admission and trace policy have settled.
++                // Only the handler is measured as tool execution.
++                if let Some(execution_started_at) = execution_started_at {
++                    let _ = execution_started_at.set(Instant::now());
+                 }
+-                let _ = dispatch_span_handle.set(native_span.clone());
+                 if let Some(captured) = step_context.extension_data.get::<codex_extension_api::CapturedModelAttempt>() {
+                     captured.0.mark_local_effect();
+                 }
+@@ -613,9 +634,7 @@ impl ToolCallRuntime {
+                         dispatch_handle.await.map_err(Self::tool_task_join_error)?
+                     } else {
+                         let secs = started.elapsed().as_secs_f32().max(0.1);
+-                        if let Some(span) = abort_dispatch_span.get() {
+-                            span.record("aborted", true);
+-                        }
++                        abort_dispatch_span.record("aborted", true);
+                         dispatch_handle.abort();
+                         match dispatch_handle.await {
+                             Ok(result) => result,
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index ee42b0ad..95209ad9 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -429,6 +429,11 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+         Box::pin(async { Ok(None) })
+     }
+ 
++    /// Advertise a live SDK tool span policy before scheduling native dispatch.
++    fn has_tool_span_policy(&self) -> bool {
++        false
++    }
++
+     /// Consult host tracing without giving the host tool execution authority.
+     fn admit_tool_span(
+         &self,
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+index 12f96df6..c8e4afcd 100644
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -42,6 +42,7 @@ impl std::fmt::Debug for SpanAnnotations {
+ pub struct ScopePolicy {
+     pub disabled: bool,
+     pub include_sensitive_data: bool,
++    pub named_tool_policy: bool,
+     pub(crate) credential: Option<crate::sdk_trace_routes::TraceCredentialLease>,
+     pub(crate) root_descriptor: Arc<RootDescriptor>,
+     // Validated per-span data stays with its existing owner, independent of attributes.
+@@ -88,6 +89,7 @@ impl ScopeRestriction {
+             Some(policy) => ScopePolicy {
+                 disabled,
+                 include_sensitive_data: false,
++                named_tool_policy: policy.named_tool_policy,
+                 credential: policy.credential.clone(),
+                 root_descriptor: Arc::clone(&policy.root_descriptor),
+                 annotations: None,
+@@ -433,6 +435,8 @@ struct Options {
+     metadata: Option<Box<serde_json::value::RawValue>>,
+     disabled: Option<bool>,
+     include_sensitive_data: Option<bool>,
++    #[serde(default)]
++    named_tool_policy: bool,
+     credential_ref: Option<String>,
+ }
+ #[derive(Serialize)]
+@@ -616,6 +620,7 @@ fn start_trace_span_options(
+         "validation",
+         "operation",
+         "guardrail",
++        "mcp_tools",
+     ]
+     .contains(&options.kind.as_str())
+         && !(native_semantic && ["model", "tool", "handoff"].contains(&options.kind.as_str()))
+@@ -666,6 +671,8 @@ fn start_trace_span_options(
+     let policy = Arc::new(ScopePolicy {
+         disabled,
+         include_sensitive_data: capture,
++        named_tool_policy: options.named_tool_policy
++            || inherited.as_ref().is_some_and(|policy| policy.named_tool_policy),
+         credential,
+         root_descriptor: if options.detached {
+             Default::default()
+@@ -879,6 +886,7 @@ pub fn borrow_trace_context(
+             && restrictions
+                 .as_ref()
+                 .is_none_or(|policy| policy.include_sensitive_data),
++        named_tool_policy: captured.named_tool_policy,
+         credential: captured.credential.clone(),
+         root_descriptor: captured.root_descriptor.clone(),
+         annotations: captured.annotations.clone(),

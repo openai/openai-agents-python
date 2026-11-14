@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
-from .model_context import ModelRequestContext, _ContextTransform
+from .model_context import ModelContextProjection, ModelRequestContext, _ContextTransform
 from .usage import TokenUsage, _UsageCollector
 
 ContextT = TypeVar("ContextT")
@@ -319,6 +319,8 @@ async def _run_responses_compaction(
         )
         if not active():
             raise asyncio.CancelledError
+        if isinstance(replacement, ModelContextProjection):
+            raise ValueError("ModelContextProjection requires an ordinary root request")
         if replacement is not None:
             if (
                 not isinstance(replacement, Sequence)

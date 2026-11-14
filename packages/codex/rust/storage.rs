@@ -560,14 +560,7 @@ impl MemoryThreadStore {
         pending: &[crate::python_tools::PendingKey],
         completed: &HashSet<String>,
     ) -> anyhow::Result<Option<LossSuspension>> {
-        // Only a complete response sampled by this live writer may authorize
-        // parking. Imported history and partially sampled streams cannot.
-        if writer.suspension.is_some()
-            || pending.is_empty()
-            || writer.sampling.tool_calls == 0
-            || writer.sampling.tool_calls != writer.sampling.completed_tool_calls
-            || pending.iter().any(|key| key.reply.thread != id.to_string())
-        {
+        if !manual_sample_ready(id, writer, pending) {
             return Ok(None);
         }
         self.inner.flush_thread(id).await?;
@@ -578,159 +571,7 @@ impl MemoryThreadStore {
                 include_archived: true,
             })
             .await?;
-        let Some(turn_id) = writer.sampling.turn_id.as_deref() else {
-            return Ok(None);
-        };
-        if pending.iter().any(|key| key.turn != turn_id) {
-            return Ok(None);
-        }
-        let Some(start) = history.items.iter().rposition(|item| {
-            matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(turn))
-                if turn.turn_id == turn_id)
-        }) else {
-            return Ok(None);
-        };
-        let prefix = &history.items[start..];
-        let pending_ids: HashSet<_> = pending.iter().map(|key| key.call.as_str()).collect();
-        anyhow::ensure!(
-            pending_ids.len() == pending.len(),
-            UnsupportedManualState::NativeWork
-        );
-        // A result already in accepted Core history cannot be a parked manual
-        // request. Never remove or replay that result as part of suspension.
-        anyhow::ensure!(
-            !prefix.iter().any(|item| matches!(item,
-                RolloutItem::ResponseItem(envelope)
-                if crate::local_reconciliation::output_identity(&envelope.item)
-                    .is_some_and(|(call_id, _)| pending_ids.contains(call_id))
-            )),
-            UnsupportedManualState::NativeWork
-        );
-        // Sampling precedes dispatch. A not-yet-enqueued automatic sibling
-        // must not be mistaken for completed work. This contains identities
-        // only; Core remains the sole owner of actual result payloads.
-        let mut unfinished = HashSet::new();
-        // The ID space is shared by function, custom and computer calls. Remember the
-        // kind until the matching receipt arrives; a receipt cannot settle
-        // another kind of call, nor can a repeated ID inherit completion.
-        #[derive(PartialEq)]
-        enum CallKind {
-            Function,
-            Custom,
-            Computer,
-            ApplyPatch,
-            Shell,
-        }
-        let mut calls = HashMap::new();
-        let mut application_patches = HashSet::new();
-        for item in prefix {
-            match item {
-                RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
-                    unfinished.clear();
-                    calls.clear();
-                    application_patches.clear();
-                }
-                RolloutItem::ResponseItem(item) => match &item.item {
-                    ResponseItem::FunctionCall { call_id, .. }
-                    | ResponseItem::CustomToolCall { call_id, .. }
-                    | ResponseItem::ApplyPatchCall { call_id, .. }
-                    | ResponseItem::ComputerCall { call_id, .. } => {
-                        if crate::local_reconciliation::owns_application_patch(item) {
-                            application_patches.insert(call_id.as_str());
-                        }
-                        let kind = match &item.item {
-                            ResponseItem::FunctionCall { .. } => CallKind::Function,
-                            ResponseItem::CustomToolCall { .. } => CallKind::Custom,
-                            ResponseItem::ApplyPatchCall { .. } => CallKind::ApplyPatch,
-                            _ => CallKind::Computer,
-                        };
-                        anyhow::ensure!(
-                            calls.insert(call_id.as_str(), kind).is_none(),
-                            UnsupportedManualState::NativeWork
-                        );
-                        unfinished.insert(call_id.as_str());
-                    }
-                    ResponseItem::ShellCall {
-                        provider_fields, ..
-                    } => {
-                        let call_id = crate::local_reconciliation::shell_call_id(provider_fields)
-                            .context("Shell call lacks identity")?;
-                        anyhow::ensure!(
-                            calls.insert(call_id.as_str(), CallKind::Shell).is_none(),
-                            UnsupportedManualState::NativeWork
-                        );
-                        unfinished.insert(call_id.as_str());
-                    }
-                    ResponseItem::ShellCallOutput {
-                        provider_fields, ..
-                    } => {
-                        let call_id = crate::local_reconciliation::shell_call_id(provider_fields)
-                            .context("Shell output lacks identity")?;
-                        anyhow::ensure!(
-                            calls.get(call_id.as_str()) == Some(&CallKind::Shell)
-                                && unfinished.remove(call_id.as_str()),
-                            UnsupportedManualState::NativeWork
-                        );
-                    }
-                    ResponseItem::FunctionCallOutput {
-                        call_id: Some(call_id),
-                        ..
-                    } => {
-                        anyhow::ensure!(
-                            calls.get(call_id.as_str()) == Some(&CallKind::Function)
-                                && unfinished.remove(call_id.as_str()),
-                            UnsupportedManualState::NativeWork
-                        );
-                    }
-                    ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
-                        anyhow::ensure!(
-                            calls.get(call_id.as_str()) == Some(&CallKind::ApplyPatch)
-                                && unfinished.remove(call_id.as_str()),
-                            UnsupportedManualState::NativeWork
-                        );
-                    }
-                    ResponseItem::ComputerCallOutput { call_id, .. }
-                    | ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
-                        anyhow::ensure!(
-                            calls.get(call_id.as_str()) == Some(&CallKind::Computer)
-                                && unfinished.remove(call_id.as_str()),
-                            UnsupportedManualState::NativeWork
-                        );
-                    }
-                    ResponseItem::CustomToolCallOutput { call_id, .. } => {
-                        anyhow::ensure!(
-                            calls.get(call_id.as_str()) == Some(&CallKind::Custom)
-                                && unfinished.remove(call_id.as_str()),
-                            UnsupportedManualState::NativeWork
-                        );
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
-        }
-        anyhow::ensure!(
-            pending
-                .iter()
-                .all(|key| match calls.get(key.call.as_str()) {
-                    Some(CallKind::ApplyPatch) => application_patches.contains(key.call.as_str()),
-                    Some(CallKind::Custom | CallKind::Computer) => false,
-                    _ => true,
-                }),
-            UnsupportedManualState::NativeWork
-        );
-        if unfinished
-            .iter()
-            .any(|id| !completed.contains(*id) && !pending.iter().any(|key| key.call == *id))
-        {
-            return Ok(None);
-        }
-        let Some(suspension) =
-            LossSuspension::bind_pending(&writer.sampling, pending.to_vec(), history.items, true)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(suspension))
+        manual_suspension_for_history(id, writer, pending, completed, history.items)
     }
 
     // Called only after Core's joined suspension outcome. On failure all Core
@@ -1364,22 +1205,200 @@ struct ChecklistWriter {
 }
 
 #[derive(Default)]
-struct MemoryWriter {
-    sampling: SamplingState,
-    suspension: Option<LossSuspension>,
+pub(crate) struct MemoryWriter {
+    pub(crate) sampling: SamplingState,
+    pub(crate) suspension: Option<LossSuspension>,
+}
+
+pub(crate) fn manual_sample_ready(
+    id: ThreadId,
+    writer: &MemoryWriter,
+    pending: &[crate::python_tools::PendingKey],
+) -> bool {
+    !(writer.suspension.is_some()
+        || pending.is_empty()
+        || writer.sampling.tool_calls == 0
+        || writer.sampling.tool_calls != writer.sampling.completed_tool_calls
+        || pending.iter().any(|key| key.reply.thread != id.to_string()))
+}
+
+// The caller holds the live writer mutex and has flushed its current prefix.
+// A stored snapshot cannot supply the sampling counts in `writer`.
+pub(crate) fn manual_suspension_for_history(
+    id: ThreadId,
+    writer: &MemoryWriter,
+    pending: &[crate::python_tools::PendingKey],
+    completed: &HashSet<String>,
+    history: Vec<RolloutItem>,
+) -> anyhow::Result<Option<LossSuspension>> {
+    if !manual_sample_ready(id, writer, pending) {
+        return Ok(None);
+    }
+    let Some(turn_id) = writer.sampling.turn_id.as_deref() else {
+        return Ok(None);
+    };
+    if pending.iter().any(|key| key.turn != turn_id) {
+        return Ok(None);
+    }
+    let Some(start) = history.iter().rposition(|item| {
+        matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(turn))
+                if turn.turn_id == turn_id)
+    }) else {
+        return Ok(None);
+    };
+    let prefix = &history[start..];
+    let pending_ids: HashSet<_> = pending.iter().map(|key| key.call.as_str()).collect();
+    anyhow::ensure!(
+        pending_ids.len() == pending.len(),
+        UnsupportedManualState::NativeWork
+    );
+    // A result already in accepted Core history cannot be a parked manual
+    // request. Never remove or replay that result as part of suspension.
+    anyhow::ensure!(
+        !prefix.iter().any(|item| matches!(item,
+            RolloutItem::ResponseItem(envelope)
+            if crate::local_reconciliation::output_identity(&envelope.item)
+                .is_some_and(|(call_id, _)| pending_ids.contains(call_id))
+        )),
+        UnsupportedManualState::NativeWork
+    );
+    // Sampling precedes dispatch. A not-yet-enqueued automatic sibling
+    // must not be mistaken for completed work. This contains identities
+    // only; Core remains the sole owner of actual result payloads.
+    let mut unfinished = HashSet::new();
+    // The ID space is shared by function, custom and computer calls. Remember the
+    // kind until the matching receipt arrives; a receipt cannot settle
+    // another kind of call, nor can a repeated ID inherit completion.
+    #[derive(PartialEq)]
+    enum CallKind {
+        Function,
+        Custom,
+        Computer,
+        ApplyPatch,
+        Shell,
+    }
+    let mut calls = HashMap::new();
+    let mut application_patches = HashSet::new();
+    for item in prefix {
+        match item {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
+                unfinished.clear();
+                calls.clear();
+                application_patches.clear();
+            }
+            RolloutItem::ResponseItem(item) => match &item.item {
+                ResponseItem::FunctionCall { call_id, .. }
+                | ResponseItem::CustomToolCall { call_id, .. }
+                | ResponseItem::ApplyPatchCall { call_id, .. }
+                | ResponseItem::ComputerCall { call_id, .. } => {
+                    if crate::local_reconciliation::owns_application_patch(item) {
+                        application_patches.insert(call_id.as_str());
+                    }
+                    let kind = match &item.item {
+                        ResponseItem::FunctionCall { .. } => CallKind::Function,
+                        ResponseItem::CustomToolCall { .. } => CallKind::Custom,
+                        ResponseItem::ApplyPatchCall { .. } => CallKind::ApplyPatch,
+                        _ => CallKind::Computer,
+                    };
+                    anyhow::ensure!(
+                        calls.insert(call_id.as_str(), kind).is_none(),
+                        UnsupportedManualState::NativeWork
+                    );
+                    unfinished.insert(call_id.as_str());
+                }
+                ResponseItem::ShellCall {
+                    provider_fields, ..
+                } => {
+                    let call_id = crate::local_reconciliation::shell_call_id(provider_fields)
+                        .context("Shell call lacks identity")?;
+                    anyhow::ensure!(
+                        calls.insert(call_id.as_str(), CallKind::Shell).is_none(),
+                        UnsupportedManualState::NativeWork
+                    );
+                    unfinished.insert(call_id.as_str());
+                }
+                ResponseItem::ShellCallOutput {
+                    provider_fields, ..
+                } => {
+                    let call_id = crate::local_reconciliation::shell_call_id(provider_fields)
+                        .context("Shell output lacks identity")?;
+                    anyhow::ensure!(
+                        calls.get(call_id.as_str()) == Some(&CallKind::Shell)
+                            && unfinished.remove(call_id.as_str()),
+                        UnsupportedManualState::NativeWork
+                    );
+                }
+                ResponseItem::FunctionCallOutput {
+                    call_id: Some(call_id),
+                    ..
+                } => {
+                    anyhow::ensure!(
+                        calls.get(call_id.as_str()) == Some(&CallKind::Function)
+                            && unfinished.remove(call_id.as_str()),
+                        UnsupportedManualState::NativeWork
+                    );
+                }
+                ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
+                    anyhow::ensure!(
+                        calls.get(call_id.as_str()) == Some(&CallKind::ApplyPatch)
+                            && unfinished.remove(call_id.as_str()),
+                        UnsupportedManualState::NativeWork
+                    );
+                }
+                ResponseItem::ComputerCallOutput { call_id, .. } => {
+                    anyhow::ensure!(
+                        calls.get(call_id.as_str()) == Some(&CallKind::Computer)
+                            && unfinished.remove(call_id.as_str()),
+                        UnsupportedManualState::NativeWork
+                    );
+                }
+                ResponseItem::CustomToolCallOutput { call_id, .. } => {
+                    anyhow::ensure!(
+                        calls.get(call_id.as_str()) == Some(&CallKind::Custom)
+                            && unfinished.remove(call_id.as_str()),
+                        UnsupportedManualState::NativeWork
+                    );
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    anyhow::ensure!(
+        pending
+            .iter()
+            .all(|key| match calls.get(key.call.as_str()) {
+                Some(CallKind::ApplyPatch) => application_patches.contains(key.call.as_str()),
+                Some(CallKind::Custom | CallKind::Computer) => false,
+                _ => true,
+            }),
+        UnsupportedManualState::NativeWork
+    );
+    if unfinished
+        .iter()
+        .any(|id| !completed.contains(*id) && !pending.iter().any(|key| key.call == *id))
+    {
+        return Ok(None);
+    }
+    let Some(suspension) =
+        LossSuspension::bind_pending(&writer.sampling, pending.to_vec(), history, true)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(suspension))
 }
 
 // Positions in this live attempt, observed before the native history filter.
 // Imported history can provide a turn owner, never a sampling boundary.
 #[derive(Clone, Default)]
-struct SamplingState {
+pub(crate) struct SamplingState {
     turn_id: Option<String>,
     tool_calls: usize,
     completed_tool_calls: usize,
 }
 
 impl SamplingState {
-    fn observe(&mut self, item: &RolloutItem) {
+    pub(crate) fn observe(&mut self, item: &RolloutItem) {
         observe_turn(&mut self.turn_id, item);
         match item {
             RolloutItem::EventMsg(
@@ -1454,7 +1473,7 @@ struct SuspendedCall {
     call: String,
 }
 
-struct LossSuspension {
+pub(crate) struct LossSuspension {
     turn_id: String,
     pending: Vec<SuspendedCall>,
     // RawResponseCompleted is intentionally absent from the flushed prefix.
@@ -1463,7 +1482,7 @@ struct LossSuspension {
     // The unchanged, flushed current attempt. A further sample may complete
     // in the ordered suffix before the native tool drain.
     prefix: Vec<RolloutItem>,
-    suffix: Vec<Vec<RolloutItem>>,
+    pub(crate) suffix: Vec<Vec<RolloutItem>>,
     // Supplied only by the admitted SDK suspension path, never by worker loss.
     sdk_approval: bool,
     continuations: HashMap<String, serde_json::Value>,
@@ -1566,7 +1585,7 @@ impl LossSuspension {
 
     // Preserve every suffix row unless the joined Core outcome and exact live
     // request binding prove which cancellation rows came from this suspension.
-    fn exclusions(&self, suspended_turn: Option<&str>) -> (bool, HashSet<usize>) {
+    pub(crate) fn exclusions(&self, suspended_turn: Option<&str>) -> (bool, HashSet<usize>) {
         let mut preserve = suspended_turn == Some(self.turn_id.as_str());
         let mut excluded = HashSet::new();
         if preserve {

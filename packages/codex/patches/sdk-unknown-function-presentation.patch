@@ -1,0 +1,127 @@
+diff --git a/codex-rs/core/src/tools/lifecycle.rs b/codex-rs/core/src/tools/lifecycle.rs
+index e82734bab70adf7988475b8b8f77a4c4cae05e2d..8794545696480ed0e300b22a4e7453f5e3fab7a8 100644
+--- a/codex-rs/core/src/tools/lifecycle.rs
++++ b/codex-rs/core/src/tools/lifecycle.rs
+@@ -209,3 +209,34 @@ pub(crate) fn extension_tool_call_source(source: ToolCallSource) -> ExtensionToo
+         },
+     }
+ }
++
++/// The caller has already rejected handler lookup and excluded strict rejection.
++pub(crate) async fn format_tool_not_found(
++    invocation: &ToolInvocation,
++    default_message: &str,
++) -> Result<Option<String>, ()> {
++    for contributor in invocation
++        .session
++        .services
++        .extensions
++        .tool_lifecycle_contributors()
++    {
++        let formatted = contributor
++            .on_tool_not_found(codex_extension_api::ToolNotFoundInput {
++                step_store: Some(&invocation.step_context.extension_data),
++                thread_store: &invocation.session.services.thread_extension_data,
++                turn_store: invocation.turn.extension_data.as_ref(),
++                turn_id: &invocation.turn.sub_id,
++                call_id: &invocation.call_id,
++                tool_name: &invocation.tool_name,
++                model: &invocation.step_context.settings.model_info.slug,
++                default_message,
++                cancellation: invocation.cancellation_token.clone(),
++            })
++            .await?;
++        if formatted.is_some() {
++            return Ok(formatted);
++        }
++    }
++    Ok(None)
++}
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 072f0d4c96ba2dee28f8c3917a26330e48726b17..d91c6466fae401e14eaceed826b7cd168b9b987f 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -685,6 +685,21 @@ impl ToolRegistry {
+                 let err = if strict_unknown_function {
+                     FunctionCallError::Fatal(message)
+                 } else {
++                    let message = if matches!(&invocation.payload, ToolPayload::Function { .. })
++                        && matches!(
++                            &invocation.source,
++                            crate::tools::context::ToolCallSource::Direct
++                                | crate::tools::context::ToolCallSource::DirectPlaintextMessage
++                        ) {
++                        crate::tools::lifecycle::format_tool_not_found(&invocation, &message)
++                            .await
++                            .map_err(|()| {
++                                FunctionCallError::Fatal("Tool error formatting cancelled".into())
++                            })?
++                            .unwrap_or(message)
++                    } else {
++                        message
++                    };
+                     FunctionCallError::RespondToModel(message)
+                 };
+                 dispatch_trace.record_failed(&err);
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 1338ff8b265977773f8c936c63768008b1c4c5e6..ea734d21fd1d79f618af0241578cd483bd8e21cd 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -56,6 +56,7 @@ pub use tool_lifecycle::McpToolSource;
+ pub use tool_lifecycle::ToolCallOutcome;
+ pub use tool_lifecycle::ToolFinishInput;
+ pub use tool_lifecycle::ToolLifecycleFuture;
++pub use tool_lifecycle::ToolNotFoundInput;
+ pub use tool_lifecycle::ToolStartInput;
+ pub use tool_lifecycle::ToolTimingBoundary;
+ pub use tool_lifecycle::ToolTimingInput;
+@@ -511,6 +512,15 @@ pub trait ToolContributor: Send + Sync {
+ /// rewriting the invocation. Use `ToolContributor` for owning a tool implementation
+ /// and hooks for policy that changes tool payloads.
+ pub trait ToolLifecycleContributor: Send + Sync {
++    /// Format only a rejected unknown direct function in recoverable mode.
++    /// None preserves the host error. Strict rejection never calls this method.
++    fn on_tool_not_found<'a>(
++        &'a self,
++        _input: ToolNotFoundInput<'a>,
++    ) -> crate::ExtensionFuture<'a, Result<Option<String>, ()>> {
++        Box::pin(async { Ok(None) })
++    }
++
+     /// Opt into whole-result control for selected native Environment tools.
+     /// The host preserves ordinary streaming when this returns false.
+     fn controls_builtin_result(
+diff --git a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+index a5d47e46b67609fe9f62d5d24d64adc3aaf4343c..cbffde320b65ed6fb0a5b0c5977a4694822e7843 100644
+--- a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+@@ -341,3 +341,17 @@ pub struct BuiltinToolResultInput<'a> {
+     /// Cancellation of this exact native invocation, including yielded cells.
+     pub cancelled: crate::ExtensionFuture<'a, ()>,
+ }
++
++/// Presentation for an unknown direct function after handler lookup has rejected it.
++/// A response changes only the error text, never tool admission or execution.
++pub struct ToolNotFoundInput<'a> {
++    pub step_store: Option<&'a ExtensionData>,
++    pub thread_store: &'a ExtensionData,
++    pub turn_store: &'a ExtensionData,
++    pub turn_id: &'a str,
++    pub call_id: &'a str,
++    pub tool_name: &'a ToolName,
++    pub model: &'a str,
++    pub default_message: &'a str,
++    pub cancellation: tokio_util::sync::CancellationToken,
++}
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index ea0c384d7d6dc5587f16270657aafd0292c18664..aa74bc5a163a901d34736feb5c9fcab04a6d5d23 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -118,6 +118,7 @@ pub use contributors::ToolContributor;
+ pub use contributors::ToolFinishInput;
+ pub use contributors::ToolLifecycleContributor;
+ pub use contributors::ToolLifecycleFuture;
++pub use contributors::ToolNotFoundInput;
+ pub use contributors::ToolStartInput;
+ pub use contributors::ToolTimingBoundary;
+ pub use contributors::ToolTimingInput;

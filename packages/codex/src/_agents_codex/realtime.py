@@ -1915,6 +1915,11 @@ class RealtimeSession:
                     expected = snapshot["profile_receipt"]
 
                 environment = self._session._environment_for_profile(expected)
+                environment_source = (
+                    self._session._source_profile_runtime(expected["profile_id"]).environment_source
+                    if expected is not None
+                    else self._session._tool_sandbox_source({})
+                )
 
                 async def admit() -> dict[str, Any]:
                     async with self._session._catalog_publication_lock:
@@ -1968,6 +1973,10 @@ class RealtimeSession:
                                 runtime,
                                 catalog=replace(runtime.catalog, generation=catalogs[key]),
                                 environment=environment,
+                                environment_source=environment_source,
+                                sandbox_observer=self._session._sandbox_observer_for_profile(
+                                    expected
+                                ),
                             )
                             self._session._voice_profiles[key] = captured
                             self._session._profile_catalogs[(key, catalogs[key])] = captured.catalog

@@ -13,6 +13,8 @@ use codex_protocol::ThreadId;
 use codex_thread_store::*;
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 fn failure() -> ThreadStoreError {
@@ -146,14 +148,237 @@ struct Snapshot {
     items: Vec<RolloutItem>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pending_shell_calls: BTreeSet<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manual_checkpoint: Option<StoredManualCheckpoint>,
     patch: ThreadMetadataPatch,
     summary: StoredThread,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredManualCheckpoint {
+    digest: String,
+    turn: String,
+    call: String,
+    history_digest: String,
+    history_len: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    configured_child: Option<Value>,
+}
+
+// Only these two maintenance timestamps may advance after a claimed import.
+// Exhaustive destructuring keeps future snapshot fields under explicit review.
+fn protected_manual_metadata(snapshot: &Snapshot) -> ThreadStoreResult<Value> {
+    let Snapshot {
+        schema_version,
+        sdk,
+        runtime_revision,
+        revision: _,
+        write_id: _,
+        create,
+        items: _,
+        pending_shell_calls,
+        manual_checkpoint: _,
+        patch,
+        summary,
+    } = snapshot;
+    let mut patch = serde_json::to_value(patch).map_err(|_| failure())?;
+    let mut summary = serde_json::to_value(summary).map_err(|_| failure())?;
+    patch
+        .as_object_mut()
+        .ok_or_else(failure)?
+        .remove("updated_at");
+    summary
+        .as_object_mut()
+        .ok_or_else(failure)?
+        .remove("updated_at");
+    Ok(serde_json::json!([
+        schema_version,
+        sdk,
+        runtime_revision,
+        create,
+        pending_shell_calls,
+        patch,
+        summary
+    ]))
+}
+
+fn matches_manual_seal(
+    id: ThreadId,
+    seal: &CanonicalManualSeal,
+    snapshot: &Snapshot,
+) -> ThreadStoreResult<bool> {
+    let Some(owner) = &seal.configured_owner else {
+        return Ok(snapshot.revision == seal.revision);
+    };
+    let Some(prefix) = snapshot.items.get(..owner.history_len) else {
+        return Ok(false);
+    };
+    Ok(snapshot.revision >= seal.revision
+        && snapshot.manual_checkpoint.is_none()
+        && protected_manual_metadata(snapshot)? == owner.protected_metadata
+        && canonical_items_digest(prefix).map_err(|_| failure())? == owner.history_digest
+        && snapshot.items[owner.history_len..]
+            .iter()
+            .all(|item| is_resume_settings(item, id))
+        && matches!(
+            pending_invocation(&snapshot.items, &owner.turn, &owner.call),
+            Ok(ResponseItem::FunctionCall { .. })
+        ))
+}
+
+// The portable SDK envelope removes private history fields and default-valued
+// manual fields before restore. Hash the shared native representation.
+fn manual_checkpoint_digest(payload: &Value) -> anyhow::Result<String> {
+    let mut history = payload["history"].clone();
+    for row in history.as_array_mut().ok_or_else(failure)? {
+        if row["type"] == "session_meta"
+            && let Some(meta) = row["payload"].as_object_mut()
+        {
+            meta.remove("creator_account_id");
+            meta.remove("creator_user_id");
+        }
+        if row["type"] == "turn_context"
+            && let Some(receipt) = row["payload"]["sdk_receipt"].as_object_mut()
+        {
+            receipt.remove("strict_executor_writes");
+            receipt.remove("executors");
+            receipt.remove("sandbox_memory_input_admitted");
+        }
+    }
+    let frame = &payload["native_continuation"];
+    let owned = serde_json::json!([
+        payload["source_session_id"],
+        payload["codex_revision"],
+        payload["managed_tool_specs"],
+        payload["root_metadata"],
+        history,
+        frame,
+    ]);
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&owned)?)))
+}
+
+fn canonical_items_digest(items: &[RolloutItem]) -> anyhow::Result<String> {
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(items)?)))
+}
+
+fn is_resume_settings(item: &RolloutItem, id: ThreadId) -> bool {
+    matches!(item, RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
+        if event.thread_id == Some(id))
+}
+
+// Only one ordinary portable child is admitted here. Its full captured envelope
+// is data owned by the canonical seal, never a new callback or executor grant.
+fn configured_checkpoint_child(payload: &Value) -> Option<&Value> {
+    let pending = payload["native_continuation"]["pending_manual"].as_array()?;
+    let [call] = pending.as_slice() else {
+        return None;
+    };
+    let continuation = &call["continuation"];
+    let child = &continuation["state"];
+    let source = ThreadId::from_string(payload["source_session_id"].as_str()?).ok()?;
+    let child_source = ThreadId::from_string(child["source_session_id"].as_str()?).ok()?;
+    if continuation["kind"] != "configured-child-v1"
+        || child["format_version"] != 5
+        || child["codex_revision"] != payload["codex_revision"]
+        || child_source == source
+        || child["descendants"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+        || !child["root_goal"].is_null()
+        || !child["root_checklist"].is_null()
+        || !child["root_code_mode"].is_null()
+        || !child["run_budget"].is_null()
+    {
+        return None;
+    }
+    let frame = &child["native_continuation"];
+    let child_pending = frame["pending_manual"].as_array()?;
+    let [child_call] = child_pending.as_slice() else {
+        return None;
+    };
+    frame["accepted_replies"].as_object()?;
+    let child_turn = frame["turn_id"].as_str().filter(|id| !id.is_empty())?;
+    let child_call_id = child_call["call_id"].as_str().filter(|id| !id.is_empty())?;
+    if !child_call["continuation"].is_null()
+        || frame["pending_mcp"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+        || frame["pending_input"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    {
+        return None;
+    }
+    let history: Vec<RolloutItem> = serde_json::from_value(child["history"].clone()).ok()?;
+    if !matches!(
+        pending_invocation(&history, child_turn, child_call_id),
+        Ok(ResponseItem::FunctionCall { .. })
+    ) {
+        return None;
+    }
+    Some(continuation)
+}
+
+fn manual_checkpoint_owner(payload: &Value) -> Option<(&str, &str, Option<&Value>)> {
+    if payload["format_version"] != 3
+        || payload["descendants"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+        || !payload["root_goal"].is_null()
+        || !payload["root_checklist"].is_null()
+        || !payload["root_code_mode"].is_null()
+    {
+        return None;
+    }
+    let frame = &payload["native_continuation"];
+    let pending = frame["pending_manual"].as_array()?;
+    let [call] = pending.as_slice() else {
+        return None;
+    };
+    let configured_child = if call["continuation"].is_null() {
+        None
+    } else {
+        Some(configured_checkpoint_child(payload)?)
+    };
+    if !frame["accepted_replies"].as_object()?.is_empty()
+        || frame["pending_mcp"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+        || frame["pending_input"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    {
+        return None;
+    }
+    Some((
+        frame["turn_id"].as_str().filter(|id| !id.is_empty())?,
+        call["call_id"].as_str().filter(|id| !id.is_empty())?,
+        configured_child,
+    ))
 }
 
 struct Writer {
     token: String,
     snapshot: Option<Snapshot>,
     failed: bool,
+    manual: crate::storage::MemoryWriter,
+}
+
+// This proof stays inside the binding. It is never serialized into checkpoint data.
+struct ConfiguredManualOwner {
+    turn: String,
+    call: String,
+    history_len: usize,
+    history_digest: String,
+    protected_metadata: Value,
+}
+
+pub(crate) struct CanonicalManualSeal {
+    id: ThreadId,
+    token: String,
+    revision: u64,
+    configured_owner: Option<ConfiguredManualOwner>,
 }
 
 pub(crate) struct CanonicalStore {
@@ -267,6 +492,7 @@ impl CanonicalStore {
                         token,
                         snapshot: Some(snapshot),
                         failed: false,
+                        manual: Default::default(),
                     },
                 );
                 Ok(())
@@ -280,6 +506,7 @@ impl CanonicalStore {
                             token,
                             snapshot: None,
                             failed: true,
+                            manual: Default::default(),
                         },
                     );
                 }
@@ -348,6 +575,315 @@ impl CanonicalStore {
         }
         writer.snapshot = Some(snapshot);
         Ok(())
+    }
+
+    fn flush_writer(&self, id: ThreadId, writer: &mut Writer) -> ThreadStoreResult<()> {
+        if writer.failed {
+            return Err(failure());
+        }
+        let result = Python::attach(|py| {
+            self.backend
+                .bind(py)
+                .call_method1("flush", (id.to_string(), writer.token.as_str()))
+                .map(|_| ())
+        });
+        if result.is_err() {
+            writer.failed = true;
+            self.failed.store(true, Ordering::Release);
+            return Err(failure());
+        }
+        Ok(())
+    }
+
+    async fn append_committed(
+        &self,
+        params: AppendThreadItemsParams,
+        writer: &mut Writer,
+    ) -> ThreadStoreResult<()> {
+        if writer.failed {
+            return Err(failure());
+        }
+        let mut sampling = writer.manual.sampling.clone();
+        for item in &params.items {
+            sampling.observe(item);
+        }
+        let mut snapshot = writer.snapshot.clone().ok_or_else(failure)?;
+        let pending = params
+            .items
+            .into_iter()
+            .filter(|item| !self.managed_calls.owns_output(params.thread_id, item))
+            .collect();
+        let items =
+            codex_rollout::into_persisted_rollout_items(pending, snapshot.create.history_mode);
+        if !items.is_empty() {
+            if items
+                .iter()
+                .any(|item| !is_resume_settings(item, params.thread_id))
+            {
+                snapshot.manual_checkpoint = None;
+            }
+            snapshot.items.extend(items.clone());
+            self.commit(params.thread_id, writer, snapshot)?;
+            self.inner
+                .append_items(AppendThreadItemsParams {
+                    thread_id: params.thread_id,
+                    items,
+                })
+                .await?;
+        }
+        writer.manual.sampling = sampling;
+        Ok(())
+    }
+
+    fn manual_prefix(
+        &self,
+        id: ThreadId,
+        writer: &mut Writer,
+        pending: &[crate::python_tools::PendingKey],
+        completed: &std::collections::HashSet<String>,
+    ) -> anyhow::Result<Option<crate::storage::LossSuspension>> {
+        if !crate::storage::manual_sample_ready(id, &writer.manual, pending) {
+            return Ok(None);
+        }
+        self.flush_writer(id, writer)?;
+        let snapshot = writer.snapshot.as_ref().ok_or_else(failure)?;
+        crate::storage::manual_suspension_for_history(
+            id,
+            &writer.manual,
+            pending,
+            completed,
+            snapshot.items.clone(),
+        )
+    }
+
+    pub(crate) async fn manual_suspension_ready(
+        &self,
+        id: ThreadId,
+        pending: &[crate::python_tools::PendingKey],
+        completed: &std::collections::HashSet<String>,
+    ) -> anyhow::Result<bool> {
+        let mut writers = self.writers.lock().await;
+        let Some(writer) = writers.get_mut(&id) else {
+            return Ok(false);
+        };
+        Ok(self
+            .manual_prefix(id, writer, pending, completed)?
+            .is_some())
+    }
+
+    pub(crate) async fn begin_manual_suspension(
+        &self,
+        id: ThreadId,
+        pending: Vec<crate::python_tools::PendingKey>,
+        completed: &std::collections::HashSet<String>,
+    ) -> anyhow::Result<bool> {
+        let mut writers = self.writers.lock().await;
+        let Some(writer) = writers.get_mut(&id) else {
+            return Ok(false);
+        };
+        let Some(suspension) = self.manual_prefix(id, writer, &pending, completed)? else {
+            return Ok(false);
+        };
+        writer.manual.suspension = Some(suspension);
+        Ok(true)
+    }
+
+    pub(crate) async fn finish_manual_suspension(
+        &self,
+        id: ThreadId,
+        suspended_turn: Option<&str>,
+    ) -> ThreadStoreResult<Option<CanonicalManualSeal>> {
+        let mut writers = self.writers.lock().await;
+        let writer = writers.get_mut(&id).ok_or_else(failure)?;
+        let suspension = writer.manual.suspension.take().ok_or_else(failure)?;
+        let (preserve, excluded) = suspension.exclusions(suspended_turn);
+        let mut ordinal = 0;
+        for batch in suspension.suffix {
+            let items = batch
+                .into_iter()
+                .filter_map(|item| {
+                    let keep = !preserve || !excluded.contains(&ordinal);
+                    ordinal += 1;
+                    keep.then_some(item)
+                })
+                .collect();
+            self.append_committed(
+                AppendThreadItemsParams {
+                    thread_id: id,
+                    items,
+                },
+                writer,
+            )
+            .await?;
+        }
+        self.flush_writer(id, writer)?;
+        Ok(preserve.then(|| CanonicalManualSeal {
+            id,
+            token: writer.token.clone(),
+            revision: writer
+                .snapshot
+                .as_ref()
+                .expect("flushed canonical snapshot")
+                .revision,
+            configured_owner: None,
+        }))
+    }
+
+    pub(crate) async fn check_manual_seal(
+        &self,
+        id: ThreadId,
+        seal: &CanonicalManualSeal,
+    ) -> ThreadStoreResult<()> {
+        let writers = self.writers.lock().await;
+        let writer = writers.get(&id).ok_or_else(failure)?;
+        let snapshot = writer.snapshot.as_ref().ok_or_else(failure)?;
+        if writer.failed
+            || seal.id != id
+            || writer.token != seal.token
+            || !matches_manual_seal(id, seal, snapshot)?
+        {
+            return Err(failure());
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn save_manual_checkpoint(
+        &self,
+        id: ThreadId,
+        seal: &CanonicalManualSeal,
+        payload: &Value,
+    ) -> anyhow::Result<()> {
+        let Some((turn, call, child)) = manual_checkpoint_owner(payload) else {
+            // Generic captures retain their existing portable-only route.
+            anyhow::ensure!(
+                seal.configured_owner.is_none(),
+                "Claimed configured checkpoint lost its owner"
+            );
+            return Ok(());
+        };
+        if let Some(expected) = &seal.configured_owner {
+            anyhow::ensure!(
+                turn == expected.turn.as_str() && call == expected.call.as_str() && child.is_some(),
+                "Claimed configured checkpoint owner changed"
+            );
+        }
+        let digest = manual_checkpoint_digest(payload)?;
+        let mut writers = self.writers.lock().await;
+        let writer = writers.get_mut(&id).ok_or_else(failure)?;
+        let mut snapshot = writer.snapshot.clone().ok_or_else(failure)?;
+        if writer.failed
+            || seal.id != id
+            || writer.token != seal.token
+            || !matches_manual_seal(id, seal, &snapshot)?
+        {
+            return Err(failure().into());
+        }
+        if !matches!(
+            pending_invocation(&snapshot.items, turn, call),
+            Ok(ResponseItem::FunctionCall { .. })
+        ) {
+            anyhow::ensure!(
+                seal.configured_owner.is_none(),
+                "Claimed configured call is no longer pending"
+            );
+            return Ok(());
+        }
+        snapshot.manual_checkpoint = Some(StoredManualCheckpoint {
+            digest,
+            turn: turn.to_owned(),
+            call: call.to_owned(),
+            history_digest: canonical_items_digest(&snapshot.items)?,
+            history_len: snapshot.items.len(),
+            configured_child: child.cloned(),
+        });
+        self.commit(id, writer, snapshot)?;
+        self.flush_writer(id, writer)?;
+        Ok(())
+    }
+
+    pub(crate) async fn check_saved_manual_checkpoint(
+        &self,
+        id: ThreadId,
+        payload: &Value,
+    ) -> anyhow::Result<()> {
+        let (turn, call, child) = manual_checkpoint_owner(payload).ok_or_else(|| {
+            anyhow::anyhow!("CustomStorage restore requires a sealed ordinary manual call")
+        })?;
+        let digest = manual_checkpoint_digest(payload)?;
+        let mut writers = self.writers.lock().await;
+        self.load(id, &mut writers).await?;
+        let snapshot = writers[&id].snapshot.as_ref().ok_or_else(failure)?;
+        let saved = snapshot
+            .manual_checkpoint
+            .as_ref()
+            .filter(|saved| saved.digest == digest && saved.turn == turn && saved.call == call);
+        let valid = if let Some(saved) = saved
+            && let Some(prefix) = snapshot.items.get(..saved.history_len)
+        {
+            let settings = &snapshot.items[saved.history_len..];
+            settings.iter().all(|item| is_resume_settings(item, id))
+                && saved.history_digest == canonical_items_digest(prefix)?
+                && saved.configured_child.as_ref() == child
+                && matches!(
+                    pending_invocation(&snapshot.items, turn, call),
+                    Ok(ResponseItem::FunctionCall { .. })
+                )
+        } else {
+            false
+        };
+        anyhow::ensure!(
+            valid,
+            "CustomStorage checkpoint no longer matches the original pending call"
+        );
+        Ok(())
+    }
+
+    // The outer configured invocation has one durable execution intent. Consume
+    // its safe captured boundary before opening the independent memory child.
+    // After this CAS, a crash cannot replay the old child frame; callers must
+    // reconcile an uncertain outer call unless they sealed a new boundary.
+    pub(crate) async fn claim_configured_checkpoint(
+        &self,
+        id: ThreadId,
+        payload: &Value,
+    ) -> anyhow::Result<Option<CanonicalManualSeal>> {
+        let (turn, call, child) = manual_checkpoint_owner(payload)
+            .ok_or_else(|| anyhow::anyhow!("Invalid configured checkpoint owner"))?;
+        let Some(child) = child else {
+            return Ok(None);
+        };
+        let digest = manual_checkpoint_digest(payload)?;
+        let mut writers = self.writers.lock().await;
+        let writer = writers.get_mut(&id).ok_or_else(failure)?;
+        let mut snapshot = writer.snapshot.clone().ok_or_else(failure)?;
+        anyhow::ensure!(
+            !writer.failed
+                && snapshot
+                    .manual_checkpoint
+                    .as_ref()
+                    .is_some_and(|saved| saved.digest == digest
+                        && saved.turn == turn
+                        && saved.call == call
+                        && saved.configured_child.as_ref() == Some(child)),
+            "Configured checkpoint has already been claimed or changed"
+        );
+        let configured_owner = ConfiguredManualOwner {
+            turn: turn.to_owned(),
+            call: call.to_owned(),
+            history_len: snapshot.items.len(),
+            history_digest: canonical_items_digest(&snapshot.items)?,
+            protected_metadata: protected_manual_metadata(&snapshot)?,
+        };
+        snapshot.manual_checkpoint = None;
+        self.commit(id, writer, snapshot)?;
+        self.flush_writer(id, writer)?;
+        let snapshot = writer.snapshot.as_ref().ok_or_else(failure)?;
+        Ok(Some(CanonicalManualSeal {
+            id,
+            token: writer.token.clone(),
+            revision: snapshot.revision,
+            configured_owner: Some(configured_owner),
+        }))
     }
 
     pub(crate) async fn record_shell_call(
@@ -436,6 +972,7 @@ impl CanonicalStore {
         }
         let record = RolloutItem::ResponseItem(codex_history::ResponseItemEnvelope::new(item));
         snapshot.items.push(record.clone());
+        snapshot.manual_checkpoint = None;
         self.commit(id, writer, snapshot)?;
         self.inner
             .append_items(AppendThreadItemsParams {
@@ -500,6 +1037,7 @@ impl CanonicalStore {
             snapshot.items.push(RolloutItem::ResponseItem(
                 codex_history::ResponseItemEnvelope::new(item),
             ));
+            snapshot.manual_checkpoint = None;
             self.commit(id, writer, snapshot)
         }
         .await;
@@ -580,6 +1118,7 @@ impl ThreadStore for CanonicalStore {
                     token: token.clone(),
                     snapshot: None,
                     failed: false,
+                    manual: Default::default(),
                 };
                 self.commit(
                     id,
@@ -593,6 +1132,7 @@ impl ThreadStore for CanonicalStore {
                         create: params,
                         items: history.items,
                         pending_shell_calls: BTreeSet::new(),
+                        manual_checkpoint: None,
                         patch: ThreadMetadataPatch::default(),
                         summary: self
                             .inner
@@ -621,6 +1161,7 @@ impl ThreadStore for CanonicalStore {
                                 token,
                                 snapshot: None,
                                 failed: true,
+                                manual: Default::default(),
                             },
                         );
                     }
@@ -657,25 +1198,11 @@ impl ThreadStore for CanonicalStore {
             if writer.failed {
                 return Err(failure());
             }
-            let mut snapshot = writer.snapshot.clone().ok_or_else(failure)?;
-            let pending = params
-                .items
-                .into_iter()
-                .filter(|item| !self.managed_calls.owns_output(params.thread_id, item))
-                .collect();
-            let items =
-                codex_rollout::into_persisted_rollout_items(pending, snapshot.create.history_mode);
-            if items.is_empty() {
+            if let Some(suspension) = &mut writer.manual.suspension {
+                suspension.suffix.push(params.items);
                 return Ok(());
             }
-            snapshot.items.extend(items.clone());
-            self.commit(params.thread_id, writer, snapshot)?;
-            self.inner
-                .append_items(AppendThreadItemsParams {
-                    thread_id: params.thread_id,
-                    items,
-                })
-                .await
+            self.append_committed(params, writer).await
         })
     }
 
@@ -687,21 +1214,7 @@ impl ThreadStore for CanonicalStore {
         Box::pin(async move {
             let mut writers = self.writers.lock().await;
             let writer = writers.get_mut(&id).ok_or_else(failure)?;
-            if writer.failed {
-                return Err(failure());
-            }
-            let result = Python::attach(|py| {
-                self.backend
-                    .bind(py)
-                    .call_method1("flush", (id.to_string(), writer.token.as_str()))
-                    .map(|_| ())
-            });
-            if result.is_err() {
-                writer.failed = true;
-                self.failed.store(true, Ordering::Release);
-                return Err(failure());
-            }
-            Ok(())
+            self.flush_writer(id, writer)
         })
     }
 
@@ -711,6 +1224,9 @@ impl ThreadStore for CanonicalStore {
             let Some(writer) = writers.get_mut(&id) else {
                 return Ok(());
             };
+            if writer.manual.suspension.is_some() {
+                return self.flush_writer(id, writer);
+            }
             // A failed writer is fenced. Retry only its unfinished release,
             // without replaying flush or any operation that already failed.
             let flushed = if writer.failed {

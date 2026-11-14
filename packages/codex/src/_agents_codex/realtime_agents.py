@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -20,6 +20,7 @@ from .realtime_settings import NativeRealtimePrompt
 from .tools import ToolRef, _CapturedFunction
 
 if TYPE_CHECKING:
+    from ._tool_catalog import Tool
     from .agent import Agent
 
 
@@ -355,9 +356,14 @@ async def _resolve_realtime_configuration(
 
 
 def _capture_voice_graph(
-    session: Any, agent: Any, prefix: str
+    session: Any,
+    agent: Any,
+    prefix: str,
+    *,
+    inherited_hosted: Sequence[Tool[Any]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     from ._agent_profiles import _capture_agent_graph
+    from ._tool_catalog import _SCOPED_HOSTED_TYPES
     from .agent import Agent
     from .mcp import _MCP
     from .schema import _prepare_spec
@@ -386,13 +392,20 @@ def _capture_voice_graph(
 
     def fixed(declaration: Agent[Any, Any]) -> tuple[Any, ...]:
         return tuple(
-            tool for tool in declaration.tools if not isinstance(tool, (FunctionTool, _MCP))
+            tool
+            for tool in declaration.tools
+            if not isinstance(tool, (FunctionTool, _MCP))
+            and (inherited_hosted is None or not isinstance(tool, _SCOPED_HOSTED_TYPES))
         )
 
     if fixed(agent) != fixed(opening):
         raise ValueError("A voice Agent cannot change the Session's fixed runtime tools")
     declaration = _capture_opening_agent(
-        agent, provider=opening.provider, model=None, model_settings=None, tool_selection=None
+        agent,
+        provider=opening.provider,
+        model=None,
+        model_settings=None,
+        tool_selection=(None if inherited_hosted is None else (*agent.tools, *inherited_hosted)),
     )
     profiles = _capture_agent_graph(agent, root_declaration=declaration, id_prefix=prefix)
     if any(profile.decision_handoffs for profile in profiles):

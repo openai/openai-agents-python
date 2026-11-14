@@ -7,12 +7,13 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, field
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, TypeVar, cast
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
@@ -24,7 +25,7 @@ from agents.classic.sandbox._mount_security import (
     rebind_manifest_mount_authority,
     redact_mount_error_data_sync,
 )
-from agents.classic.sandbox.entries import Dir, LocalDir, LocalFile
+from agents.classic.sandbox.entries import Dir, File, LocalDir, LocalFile
 from agents.classic.sandbox.entries.mounts import (
     AzureBlobMount,
     BoxMount,
@@ -184,6 +185,19 @@ def _assert_current_mount_authority(state: SandboxSessionState, manifest: Manife
         )
 
 
+def _borrowed_manifest_without_description_overrides(
+    current: Manifest, requested: Manifest
+) -> Manifest:
+    """Keep description-only changes out of the physical manifest update."""
+    physical = requested.model_copy(deep=True)
+    existing = dict(current.iter_entries())
+    for path, entry in physical.iter_entries():
+        prior = existing.get(path)
+        if type(prior) is File and type(entry) is File:
+            entry.description = prior.description
+    return physical
+
+
 async def _apply_borrowed_manifest(
     session: SandboxSession,
     manifest: Manifest,
@@ -192,6 +206,7 @@ async def _apply_borrowed_manifest(
     from _agents_shared.sandbox_manifest import _BorrowedManifestPolicy
 
     current = session.state.manifest
+    manifest = _borrowed_manifest_without_description_overrides(current, manifest)
     _BorrowedManifestPolicy._validate_live_session_host_path_grants(
         current_manifest=current, processed_manifest=manifest
     )
@@ -558,6 +573,51 @@ class DockerGateway:
             )
 
 
+def _portable_local_directory(path: Path) -> tuple[Path, int, int] | None:
+    try:
+        resolved = path.resolve(strict=True)
+        identity = resolved.stat()
+    except (OSError, RuntimeError):
+        return None
+    if not stat.S_ISDIR(identity.st_mode):
+        return None
+    return resolved, identity.st_dev, identity.st_ino
+
+
+def _portable_local_workspace_identity(
+    root: str, before: tuple[Path, int, int], cwd: PurePosixPath | None
+) -> str | None:
+    directory = _portable_local_directory(Path(root))
+    if directory is None or directory != before:
+        return None
+    working = directory if cwd is None else _portable_local_directory(Path(root) / cwd)
+    if working is None or not working[0].is_relative_to(directory[0]):
+        return None
+    return hashlib.sha256(
+        json.dumps(
+            [(str(path), device, inode) for path, device, inode in (directory, working)],
+            ensure_ascii=True,
+        ).encode("ascii")
+    ).hexdigest()
+
+
+async def _portable_workspace_identity(
+    source: object, environment: Environment[Any] | None
+) -> str | None:
+    root = getattr(source, "_sdk_portable_workspace_root", None)
+    lease = getattr(source, "_sdk_patch_workspace", None)
+    if root is None or environment is None or lease is None or lease[1] is not environment:
+        return None
+    try:
+        scope = _capability_workspace(lease[0], environment)
+    except ValueError:
+        return None
+    path, before = root
+    return await run_blocking_workspace_io(
+        _portable_local_workspace_identity, path, before, scope.cwd
+    )
+
+
 @redact_mount_error_data_sync
 def sandbox_environment(
     client: BaseSandboxClient[_OptionsT],
@@ -590,9 +650,10 @@ def sandbox_environment(
     The provider validates and materializes the captured manifest for create and
     resume. A borrowed session must match the current mount authority. A supplied live
     session is borrowed: only its gateway is closed. Its existing manifest entries
-    must already match the current declaration. Generic providers do not offer
-    atomic multi-entry updates, so additions, replacements and entry metadata
-    changes reject before filesystem writes. Use an owned fresh resource or
+    must already match the current declaration. Descriptions on existing plain
+    files can supply guidance for this acquisition. Generic providers do not
+    offer atomic multi-entry updates, so additions, replacements and other entry
+    metadata changes reject before filesystem writes. Use an owned fresh resource or
     snapshot creation for new entries; no-op borrowed acquisition stays supported.
     Older provider states can reconnect the same mutable filesystem and do not
     provide rollback authority. An authorized_resume_state
@@ -675,6 +736,19 @@ def sandbox_environment(
         captured_manifest = _manifest(
             client.resolve_trusted_manifest_for_resume(captured_manifest, captured_options)
         )
+    from ._sandbox_profile_workspace import (
+        ATTRIBUTE as profile_workspace_attribute,
+        _OwnedProfileWorkspace,
+    )
+
+    profile_workspace = _OwnedProfileWorkspace(
+        captured_capabilities,
+        captured_manifest,
+        session is None
+        and snapshot is None
+        and authorized_resume_state is None
+        and not managed_workspace,
+    )
     if concurrency_limits is not None:
         concurrency_limits = deepcopy(concurrency_limits)
         concurrency_limits.validate()
@@ -716,11 +790,43 @@ def sandbox_environment(
         ):
             raise ValueError("Managed resume requires a supported snapshot factory")
 
+    # Import UnixLocal only for its own backend. Importing it on Windows
+    # would also break unrelated sandbox providers.
+    unix_local_client = False
+    if client.backend_id == "unix_local" and os.name == "posix":
+        from agents.classic.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+        unix_local_client = type(client) is UnixLocalSandboxClient
+    portable_local_workspace = (
+        unix_local_client
+        and session is None
+        and snapshot is None
+        and authorized_resume_state is None
+        and not managed_workspace
+        and memory is None
+        and skills is None
+        and not captured_capabilities
+        and captured_user is None
+        and captured_manifest.root != "/workspace"
+        and Path(captured_manifest.root).is_absolute()
+        # A new local acquisition applies its manifest again. A durable
+        # reattachment cannot overwrite files created by an earlier turn.
+        and not captured_manifest.entries
+        and not captured_manifest.extra_path_grants
+    )
+
     @asynccontextmanager
     async def source() -> AsyncIterator[Environment[_ContextT]]:
         async with AsyncExitStack() as owners:
             if isinstance(connect, DockerGateway):
                 await connect._preflight()
+            portable_workspace_root = (
+                await run_blocking_workspace_io(
+                    _portable_local_directory, Path(captured_manifest.root)
+                )
+                if portable_local_workspace
+                else None
+            )
             selected = session
             if selected is None:
                 selected = (
@@ -810,6 +916,7 @@ def sandbox_environment(
                 original_authorized_state is not None or isinstance(snapshot, SnapshotBase)
             ):
                 await skill_lease.materialize_eager(selected)
+            profile_workspace.reserve(selected)
             environment = await owners.enter_async_context(connect(selected))
             environment = copy(environment)
             object.__setattr__(
@@ -817,7 +924,10 @@ def sandbox_environment(
             )
             observer = None
             try:
-                instructions = _render_workspace_instructions(selected.state.manifest, environment)
+                guidance_manifest = (
+                    captured_manifest if session is not None else selected.state.manifest
+                )
+                instructions = _render_workspace_instructions(guidance_manifest, environment)
                 if skill_lease is not None:
                     skill_instructions = await skill_lease.activate(
                         selected,
@@ -835,7 +945,7 @@ def sandbox_environment(
                             else captured_user.model_copy(deep=True),
                             workspace=workspace,
                         )
-                        guidance = await capability.instructions(_manifest(selected.state.manifest))
+                        guidance = await capability.instructions(_manifest(guidance_manifest))
                         instructions = _append_skill_instructions(instructions, guidance)
                     tools = tuple(
                         tool for capability in captured_capabilities for tool in capability.tools()
@@ -855,7 +965,18 @@ def sandbox_environment(
                         _SANDBOX_CAPABILITIES_ATTRIBUTE,
                         _SandboxContributions(tools, captured_capabilities),
                     )
+                await profile_workspace.attach(
+                    selected,
+                    environment,
+                    captured_user,
+                    getattr(source_manager, _SANDBOX_CAPABILITIES_ATTRIBUTE, None),
+                )
                 setattr(source_manager, _WORKSPACE_INSTRUCTIONS_ATTRIBUTE, instructions)
+                if portable_workspace_root is not None:
+                    cast(Any, source_manager)._sdk_portable_workspace_root = (
+                        selected.state.manifest.root,
+                        portable_workspace_root,
+                    )
                 cast(Any, source_manager)._sdk_patch_workspace = (
                     selected,
                     environment,
@@ -874,6 +995,8 @@ def sandbox_environment(
                         setattr(managed_source, _SANDBOX_EVENTS_ATTRIBUTE, observer)
                 yield environment
             finally:
+                profile_workspace.retire()
+                cast(Any, source_manager)._sdk_portable_workspace_root = None
                 cast(Any, source_manager)._sdk_patch_workspace = None
                 if observer is not None:
                     observer.active = False
@@ -881,6 +1004,7 @@ def sandbox_environment(
                     skill_lease.retire()
 
     source_manager = source()
+    setattr(source_manager, profile_workspace_attribute, profile_workspace)
     cast(Any, source_manager).skill_tools = () if skill_lease is None else skill_lease.tools
     if managed_workspace:
         if original_authorized_state is not None:

@@ -13,7 +13,7 @@ from agents import (
     SessionState,
     function_tool,
 )
-from agents.observation import AgentProfileChanged, OutputTextDelta
+from agents.observation import AgentProfileChanged, OutputTextDelta, RawProviderEvent
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, text_response
 from tests.test_native_configured_agent_tool import MODEL, peer
@@ -155,7 +155,8 @@ async def test_configured_child_stream_uses_the_restored_handoff_destination(par
         parent_model.respond(assistant_output("parent complete"))
         child_model.respond(function_call("transfer_to_destination", {}, "transfer"))
         child_model.respond(function_call("gated", {}, "gated-call"))
-        child_model.respond(*text_response("msg_after_approval", "approved child"))
+        raw_frame = {"type": "response.fixture.after_approval", "extension": {"index": 0}}
+        child_model.respond(raw_frame, *text_response("msg_after_approval", "approved child"))
         effects: list[str] = []
         observed: list[AgentToolStreamEvent] = []
 
@@ -189,7 +190,13 @@ async def test_configured_child_stream_uses_the_restored_handoff_destination(par
                     instructions="Use specialist.",
                     model=MODEL,
                     provider=root_provider,
-                    tools=[configured.as_tool("specialist", on_stream=observed.append)],
+                    tools=[
+                        configured.as_tool(
+                            "specialist",
+                            on_stream=observed.append,
+                            include_raw_provider_events=True,
+                        )
+                    ],
                 )
                 if not parent_handoff:
                     return coordinator
@@ -249,6 +256,55 @@ async def test_configured_child_stream_uses_the_restored_handoff_destination(par
             assert len(deltas) == 1
             assert deltas[0].event.delta == "approved child"
             assert deltas[0].agent is destination and deltas[0].tool_call.call_id == "outer-call"
+            [raw] = [
+                event
+                for event in observed
+                if isinstance(event.event, RawProviderEvent) and event.event.payload == raw_frame
+            ]
+            assert raw.agent is destination and raw.tool_call.call_id == "outer-call"
+            assert raw.event.turn_id == deltas[0].event.turn_id
+            assert raw.event.sequence < deltas[0].event.sequence
             assert effects == ["gated"]
             assert len(parent_model.requests) == 2 + parent_handoff
             assert len(child_model.requests) == 3
+
+
+@pytest.mark.parametrize("raw", [False, True])
+async def test_configured_child_observer_opts_into_raw_provider_frames(raw: bool) -> None:
+    frame = {"type": "response.fixture.child", "extension": {"index": 0}}
+    async with timeout(12), peer() as root, peer() as child:
+        root.respond(function_call("specialist", {"input": "Work."}, "parent-call"))
+        root.respond(assistant_output("parent complete"))
+        child.respond(frame, *text_response("msg_child", "child text"))
+        observed = []
+        async with (
+            NativeProvider(base_url=root.url, api_key="synthetic-root") as root_provider,
+            NativeProvider(base_url=child.url, api_key="synthetic-child") as child_provider,
+        ):
+            specialist = Agent(instructions="Respond.", model=MODEL, provider=child_provider)
+            parent = Agent(
+                instructions="Use specialist.",
+                model=MODEL,
+                provider=root_provider,
+                tools=[
+                    specialist.as_tool(
+                        "specialist",
+                        on_stream=observed.append,
+                        include_raw_provider_events=raw,
+                    )
+                ],
+            )
+            async with parent.session(include_raw_provider_events=True) as session:
+                turn = await session.submit("Start.")
+                assert (await turn.get_result()).final_output == "parent complete"
+        assert observed and all(event.agent is specialist for event in observed)
+        assert all(event.tool_call.call_id == "parent-call" for event in observed)
+        deltas = [event.event for event in observed if isinstance(event.event, OutputTextDelta)]
+        assert [event.delta for event in deltas] == ["child text"]
+        frames = [event.event for event in observed if isinstance(event.event, RawProviderEvent)]
+        if raw:
+            [opaque] = [event for event in frames if event.payload == frame]
+            assert opaque.turn_id == deltas[0].turn_id
+            assert opaque.sequence < deltas[0].sequence
+        else:
+            assert not frames

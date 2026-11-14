@@ -45,6 +45,11 @@ struct Interceptor {
 }
 
 impl ModelResponseInterceptor for Interceptor {
+    fn permits_post_terminal_tool_dispatch(&self) -> bool {
+        // This owned wrapper validates or buffers the response without executing tools.
+        true
+    }
+
     fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {
         (!self.registered_plan)
             .then(|| self.text_demand.clone())

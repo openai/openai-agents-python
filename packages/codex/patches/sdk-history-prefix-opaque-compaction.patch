@@ -1,0 +1,17 @@
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 0584cc3b79f4d419931cf12bd52680b72422cd72..88f33bdfa9a9e654a3ec7550ea59f071db341667 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -616,7 +616,11 @@ impl Session {
+                             .collect();
+                         if retained
+                             .iter()
+-                            .any(crate::context_manager::is_provider_compaction_boundary)
++                            .any(|row| matches!(
++                                &row.item,
++                                ResponseItem::Compaction { .. }
++                                    | ResponseItem::ContextCompaction { .. }
++                            ))
+                         {
+                             return Err(invalid(
+                                 "cannot rebuild a retained provider compaction boundary",

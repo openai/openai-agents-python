@@ -1,0 +1,56 @@
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 5e5602d2..86a4233d 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -387,7 +387,22 @@ pub(crate) async fn build_tool_router(
+             }
+         }
+         if let Some(target) = forced_tool {
+-            let target = target.clone().with_default_namespace();
++            let target = if let Some(hosted) = hosted_file_search.as_ref()
++                && target.is_default_namespace()
++                && target.name == hosted.name
++                && step_store
++                    .get::<codex_extension_api::CapturedAgentProfile>()
++                    .is_some_and(|profile| {
++                        profile
++                            .profile
++                            .data
++                            .get::<codex_extension_api::AgentProfileHostedFileSearchRef>()
++                            .is_some()
++                    }) {
++                hosted.clone()
++            } else {
++                target.clone().with_default_namespace()
++            };
+             if !candidates
+                 .iter()
+                 .any(|candidate| candidate.clone().with_default_namespace() == target)
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 13dd5ba0..3cd77995 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -13,6 +13,7 @@ pub use provider_image_reference_policy::ProviderImageReferencePolicy;
+ pub use session_isolation::IsolatedSessionExtensions;
+ pub use session_isolation::SessionIsolation;
+ pub use tool_not_found::ToolNotFoundBehavior;
++pub use tool_policy::AgentProfileHostedFileSearchRef;
+ pub use tool_policy::FinalStepBuiltinTools;
+ pub use tool_policy::ToolPolicy;
+ 
+diff --git a/codex-rs/ext/extension-api/src/tool_policy.rs b/codex-rs/ext/extension-api/src/tool_policy.rs
+index 89f20494..dd22a8e6 100644
+--- a/codex-rs/ext/extension-api/src/tool_policy.rs
++++ b/codex-rs/ext/extension-api/src/tool_policy.rs
+@@ -24,6 +24,11 @@ impl FinalStepBuiltinTools {
+     }
+ }
+ 
++/// The frozen Agent profile permits its legacy default File Search name to
++/// select typed hosted File Search because it has no local function with that name.
++#[derive(Clone, Copy, Debug)]
++pub struct AgentProfileHostedFileSearchRef;
++
+ /// Supply through `ExtensionDataInit` before starting a thread. The host captures
+ /// the policy once; later extension-state changes cannot relax it. Callers must
+ /// supply it again when resuming a thread.

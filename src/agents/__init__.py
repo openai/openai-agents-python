@@ -32,7 +32,10 @@ if TYPE_CHECKING:
         SignInWithChatGPT as SignInWithChatGPT,
         SignInWithChatGPTCredentials as SignInWithChatGPTCredentials,
     )
-    from .agent_lifecycle import AgentLifecycleContext as AgentLifecycleContext
+    from .agent_lifecycle import (
+        AgentLifecycleContext as AgentLifecycleContext,
+        ToolLifecycleContext as ToolLifecycleContext,
+    )
     from .apply_patch import (
         ApplyPatchEditor as ApplyPatchEditor,
         ApplyPatchOperation as ApplyPatchOperation,
@@ -98,7 +101,12 @@ if TYPE_CHECKING:
         InputGuardrail as InputGuardrail,
         OutputGuardrail as OutputGuardrail,
     )
-    from .handoffs import Handoff as Handoff, HandoffInput as HandoffInput
+    from .handoffs import (
+        Handoff as Handoff,
+        HandoffInput as HandoffInput,
+        nest_handoff_history as nest_handoff_history,
+        remove_all_tools as remove_all_tools,
+    )
     from .hosted_mcp import (
         HostedMCP as HostedMCP,
         HostedMCPApprovalArguments as HostedMCPApprovalArguments,
@@ -163,6 +171,7 @@ if TYPE_CHECKING:
         HostedPromptReference as HostedPromptReference,
         HostedPromptSource as HostedPromptSource,
         ModelCompletionContext as ModelCompletionContext,
+        ModelContextProjection as ModelContextProjection,
         ModelContextSnapshot as ModelContextSnapshot,
         ModelRequestContext as ModelRequestContext,
     )
@@ -372,6 +381,7 @@ _MODULES = {
     "ToolBatchCompletionContext": ".completion",
     "ToolBatchResult": ".completion",
     "ModelCompletionContext": ".model_context",
+    "ModelContextProjection": ".model_context",
     "ModelContextSnapshot": ".model_context",
     "ModelRequestContext": ".model_context",
     "HostedPromptReference": ".model_context",
@@ -431,7 +441,10 @@ _MODULES = {
     "Agent": ".agent",
     "Handoff": ".handoffs",
     "HandoffInput": ".handoffs",
+    "nest_handoff_history": ".handoffs",
+    "remove_all_tools": ".handoffs",
     "AgentLifecycleContext": ".agent_lifecycle",
+    "ToolLifecycleContext": ".agent_lifecycle",
     "AgentToolStreamEvent": ".agent",
     "CodexAccount": ".agent",
     "CodexLogin": ".agent",

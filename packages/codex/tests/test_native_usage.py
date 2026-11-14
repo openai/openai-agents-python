@@ -135,11 +135,25 @@ async def test_native_original_provider_usage_includes_automatic_compaction(
     responses.respond(assistant_output("done"))
     agent = Agent(instructions="Look up the record.", tools=[lookup], provider=provider(responses))
     async with timeout(30):
-        result = await agent.run("Find it.", return_raw_usage=True)
+        result = await agent.run("Find it.", return_raw_usage=True, return_state=True)
 
     assert result.final_output == "done"
     assert len(responses.requests) == 3
     assert COMPACTION_MARKER in json.dumps(responses.requests[1])
+    assert result.state is not None
+    async with agent.session(state=SessionState.from_json(result.state.to_json())) as restored:
+        restored_turns = [turn async for turn in restored.turns()]
+    recorded = next(turn for turn in restored_turns if turn.get("request_usage_entries"))
+    entries = recorded["request_usage_entries"]
+    assert [entry["scope"] for entry in entries] == [
+        "sdk_model_attempt",
+        "compaction",
+        "sdk_model_attempt",
+    ]
+    assert entries[1]["request_ordinal"] == 1
+    assert entries[1]["token_usage_known"] is True
+    assert entries[1]["total_tokens"] == 24
+    assert recorded["request_usage_entries_complete"] is False
     assert result.raw_usage is not None
     assert [
         (record.response_id, record.usage["provider_sequence"]) for record in result.raw_usage

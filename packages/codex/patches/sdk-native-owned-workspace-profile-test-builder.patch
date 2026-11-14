@@ -1,0 +1,19 @@
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index f25d10ab..8ec1040f 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -2914,9 +2914,12 @@ for line in sys.stdin:
+             attach_thread_persistence(&mut session).await;
+             let source = session.activate_agent_profile(None, profile(&context, "a", "owned-source"))
+                 .await.unwrap();
+-            let target = profile(&context, "b", "owned-target");
++            let mut target = profile(&context, "b", "owned-target");
+             let observer = Arc::new(ObserveProfileAdmission::default());
+-            target.data.insert(codex_extension_api::AgentProfileAdmissionObserverOwner(observer.clone()));
++            Arc::get_mut(&mut target)
++                .expect("fresh test profile")
++                .data
++                .insert(codex_extension_api::AgentProfileAdmissionObserverOwner(observer.clone()));
+             let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
+             extensions.turn_lifecycle_contributor(Arc::new(BoundaryActivation {
+                 candidate: std::sync::Mutex::new(Some(codex_extension_api::AgentProfileActivation {

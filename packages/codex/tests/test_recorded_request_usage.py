@@ -119,3 +119,45 @@ def test_native_hosted_replay_updates_original_request_with_later_terminal_usage
         (entry["attempt_id"], entry["token_usage_known"], entry["total_tokens"])
         for entry in result["request_usage_entries"]
     ] == [("physical-first", True, 7), ("physical-second", False, 0)]
+
+
+def test_compaction_occurrences_preserve_order_and_unknown_counters():
+    def compact(id, usage):
+        return {
+            "type": "response_observation_record",
+            "payload": {
+                "id": id,
+                "thread_id": "original-thread",
+                "turn_id": "turn",
+                "response_id": "shared-provider-id",
+                "status": "completed",
+                "compaction": True,
+                "usage": usage,
+            },
+        }
+
+    first = compact(
+        "compact-1",
+        {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cache_write_input_tokens": 0},
+    )
+    turn = project(
+        attempt("before", 1, 4),
+        first,
+        first,
+        compact("compact-2", {"input_tokens": 9007199254740993}),
+        attempt("after", 1, 3),
+    )
+    entries = turn["request_usage_entries"]
+    assert [(entry["scope"], entry["attempt_id"]) for entry in entries] == [
+        ("sdk_model_attempt", "before-1"),
+        ("compaction", "compact-1"),
+        ("compaction", "compact-2"),
+        ("sdk_model_attempt", "after-1"),
+    ]
+    assert [entry["request_ordinal"] for entry in entries[1:3]] == [1, 2]
+    assert entries[1]["token_usage_known"] is True
+    assert entries[1]["input_tokens_details"]["cache_write_tokens"] == 0
+    assert entries[2]["token_usage_known"] is False
+    assert entries[2]["input_tokens"] == 9007199254740993
+    assert "cache_write_tokens" not in entries[2]["input_tokens_details"]
+    assert turn["request_usage_entries_complete"] is False

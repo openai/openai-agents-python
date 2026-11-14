@@ -356,10 +356,9 @@ async def test_composed_context_keeps_native_admission_before_cancel_delivery(
     source = SimpleNamespace(
         **{_SANDBOX_CAPABILITIES_ATTRIBUTE: _SandboxContributions((), capabilities)}
     )
-    _apply_sandbox_contributions(
-        agent, SimpleNamespace(source=source), has_graph=False, manual_restore=False
-    )
+    _apply_sandbox_contributions(agent, SimpleNamespace(source=source), allowed=True)
     session._agent_for_message = lambda message: agent
+    session._original_agent_for_message = lambda message: agent
     message = {
         "step_id": 7,
         "thread": "thread",

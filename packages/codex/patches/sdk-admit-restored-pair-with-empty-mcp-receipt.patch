@@ -1,0 +1,16 @@
+--- a/codex-rs/core/src/session/handoff_history.rs
++++ b/codex-rs/core/src/session/handoff_history.rs
+@@ -28,7 +28,12 @@
+         metadata.sdk_agent_handoff.is_some()
+             || metadata.sdk_managed_agent_tool.is_some()
+             || metadata.sdk_application_tool.is_some()
+-            || metadata.mcp_attribution.is_some()
++            // Restore may attach an empty cumulative MCP checkpoint to
++            // the next ordinary result. Keep populated or error receipts.
++            || metadata
++                .mcp_attribution
++                .as_ref()
++                .is_some_and(|receipt| *receipt != Default::default())
+             || metadata.realtime_tool_call.is_some()
+             || metadata.sdk_start_response.is_some()
+             || metadata.delivered_assistant_message.is_some()
