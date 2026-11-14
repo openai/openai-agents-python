@@ -91,7 +91,8 @@ async def run(mode: str, url: str, directory: Path, variant: str) -> None:
                 root = current_target
             if variant in {"changed", "missing", "root"}:
                 try:
-                    unexpected = await root.session(state=state)
+                    async with root.session(state=state):
+                        raise AssertionError("Restore accepted the wrong current owner")
                 except (ValueError, RuntimeError) as error:
                     expected = {
                         "root": "original root",
@@ -99,9 +100,6 @@ async def run(mode: str, url: str, directory: Path, variant: str) -> None:
                         "changed": "target declaration differs",
                     }[variant]
                     assert expected in str(error), str(error)
-                else:
-                    await unexpected.close()
-                    raise AssertionError("Restore accepted the wrong current owner")
                 assert not effects.exists()
             else:
                 async with root.session(
