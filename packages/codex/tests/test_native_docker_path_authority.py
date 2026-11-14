@@ -37,12 +37,14 @@ class MountedFixtureClient(FixtureClient):
             assert inspection["HostConfig"]["NetworkMode"] == "none"
             assert not inspection["HostConfig"]["Privileged"]
             assert not inspection["HostConfig"].get("CapAdd")
-            for grant, mount in zip(
-                resource.state.manifest.extra_path_grants, inspection["Mounts"], strict=True
-            ):
+            grants = resource.state.manifest.extra_path_grants
+            mounts = {mount["Destination"]: mount for mount in inspection["Mounts"]}
+            assert len(mounts) == len(inspection["Mounts"])
+            assert set(mounts) == {grant.path for grant in grants}
+            for grant in grants:
+                mount = mounts[grant.path]
                 assert mount["Type"] == "bind"
                 assert mount["Source"] == grant.host_path
-                assert mount["Destination"] == grant.path
                 assert mount["RW"] == (not grant.read_only)
             archive = await run_blocking_workspace_io(fixture_archive)
             await run_blocking_workspace_io(
