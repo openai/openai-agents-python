@@ -8787,6 +8787,7 @@ pub(crate) mod managed_tests {
                 client_metadata: &mut metadata,
                 model: "fixture",
                 model_omitted: false,
+                native_reasoning_context: false,
             }));
         };
         steering_item(&state, &old_turn, None).await;

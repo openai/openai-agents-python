@@ -1758,6 +1758,7 @@ mod steering_capture_tests {
             client_metadata: &mut metadata,
             model: "fixture",
             model_omitted: false,
+            native_reasoning_context: false,
         }));
         assert_eq!(tentative.wait().await.unwrap().0, "original answer");
         state.close().await.unwrap();
