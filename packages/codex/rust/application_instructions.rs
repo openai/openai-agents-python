@@ -418,12 +418,14 @@ pub(crate) fn take_initial_receipt(
                 if receipt_index.is_none()
                     && envelope.item.id() == Some(&latest.id)
                     && envelope.metadata.as_ref().is_none_or(|metadata| {
-                        metadata.sdk_instruction_files.is_some()
-                            && *metadata
-                                == CodexHarnessMetadata {
-                                    sdk_instruction_files: metadata.sdk_instruction_files.clone(),
-                                    ..Default::default()
-                                }
+                        *metadata
+                            == CodexHarnessMetadata {
+                                sdk_instruction_files: metadata.sdk_instruction_files.clone(),
+                                sdk_agent_environment_policy: metadata
+                                    .sdk_agent_environment_policy
+                                    .clone(),
+                                ..Default::default()
+                            }
                     }) =>
             {
                 receipt_index = Some(index);
@@ -533,6 +535,21 @@ async fn publish_with_settings(
     Ok(())
 }
 
+/// Recover the last accepted standalone root's executor grant from canonical history.
+pub(crate) fn recorded_environment_policy(history: &[RolloutItem]) -> Result<Option<&str>> {
+    for row in history.iter().rev() {
+        if let RolloutItem::ResponseItem(envelope) = row
+            && accepted(&envelope.item)?.is_some()
+        {
+            return Ok(envelope
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.sdk_agent_environment_policy.as_deref()));
+        }
+    }
+    Ok(None)
+}
+
 /// Prepare a fresh accepted instruction envelope without publishing or changing authority.
 /// Agent profile activation commits this envelope and its captured Accepted value together.
 pub(crate) fn prepare(
@@ -546,6 +563,15 @@ pub(crate) fn prepare(
             .metadata
             .get_or_insert_with(Default::default)
             .sdk_instruction_files = Some(serde_json::to_value(files)?);
+    }
+    if let Some(environment) = thread
+        .thread_extension_data()
+        .get::<crate::agent_profiles::ProfileEnvironments>()
+    {
+        envelope
+            .metadata
+            .get_or_insert_with(Default::default)
+            .sdk_agent_environment_policy = Some(environment.digest.clone());
     }
     let accepted = accepted_envelope(&envelope)?
         .context("missing prepared application instruction publication")?;
@@ -638,6 +664,13 @@ async fn confirm_publication(
                     .as_ref()
                     .and_then(|value| value.sdk_instruction_files.as_ref()),
             "native application instruction file receipt was not confirmed"
+        );
+        let policy =
+            |metadata: &CodexHarnessMetadata| metadata.sdk_agent_environment_policy.clone();
+        ensure!(
+            recorded.metadata.as_ref().and_then(policy)
+                == envelope.metadata.as_ref().and_then(policy),
+            "native application instruction executor grant was not confirmed"
         );
     }
     *owner.0.lock().unwrap_or_else(PoisonError::into_inner) =

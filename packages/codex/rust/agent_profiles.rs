@@ -912,9 +912,13 @@ pub(crate) fn validate_restored_environment(
             .filter(|metadata| metadata.sdk_agent_profile.is_some()),
         _ => None,
     });
-    let recorded =
-        latest_profile.and_then(|metadata| metadata.sdk_agent_environment_policy.as_deref());
+    let recorded = if let Some(profile) = latest_profile {
+        profile.sdk_agent_environment_policy.as_deref()
+    } else {
+        crate::application_instructions::recorded_environment_policy(history)?
+    };
     let no_profile_or_sampling = latest_profile.is_none()
+        && recorded.is_none()
         && !history.iter().any(|item| {
             matches!(item,
                 RolloutItem::TurnContext(context) if context.sdk_receipt.is_some()
@@ -924,7 +928,7 @@ pub(crate) fn validate_restored_environment(
         recorded == expected || no_profile_or_sampling,
         "Restore requires the recorded Agent environment grants"
     );
-    Ok(recorded.is_some())
+    Ok(latest_profile.is_some() && recorded.is_some())
 }
 
 pub(crate) struct ExecutorResumeAdmission {

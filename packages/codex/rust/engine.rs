@@ -876,8 +876,8 @@ impl EngineState {
         }
         if let Some(profiles) = agent_profiles {
             crate::agent_profiles::install_opening(&mut startup, profiles, profile_files)?;
-            crate::agent_profiles::prepare_environments(self, &mut startup).await?;
         }
+        crate::agent_profiles::prepare_environments(self, &mut startup).await?;
         if let Some(specs) = python_specs {
             ensure!(
                 (resume.is_some() || matches!(startup.initial_history, InitialHistory::New))
@@ -1225,6 +1225,8 @@ impl EngineState {
             } else {
                 crate::agent_profiles::prepare_environments(self, &mut startup).await?;
             }
+        } else {
+            crate::agent_profiles::prepare_environments(self, &mut startup).await?;
         }
         crate::python_tools::PythonTools::install(
             &mut startup,
@@ -1620,8 +1622,8 @@ impl EngineState {
             startup.initial_history = history.clone();
             if let Some(profiles) = agent_profiles {
                 crate::agent_profiles::install_opening(&mut startup, profiles, profile_files)?;
-                crate::agent_profiles::prepare_environments(self, &mut startup).await?;
             }
+            crate::agent_profiles::prepare_environments(self, &mut startup).await?;
             crate::python_tools::PythonTools::install(
                 &mut startup,
                 specs,

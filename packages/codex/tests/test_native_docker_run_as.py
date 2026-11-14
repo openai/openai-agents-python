@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agents import Agent, ToolRef
+from agents import Agent, SessionState, ToolRef
 from agents.classic.sandbox.util.blocking_io import run_blocking_workspace_io
 from agents.sandbox import DockerGateway, Manifest, sandbox_environment
 from tests.native_fixtures import (
@@ -214,6 +214,38 @@ async def test_native_docker_file_reads_follow_selected_process_user(responses, 
             else:
                 assert output["matches"] == []
         assert client.deleted_ids == client.created_ids
+    finally:
+        await native.aclose()
+        connection.close()
+
+
+async def test_native_plain_docker_identity_rebinds_on_cold_restore(responses):
+    assert IMAGE is not None and SOCKET is not None
+    connection = docker.DockerClient(base_url="unix://" + SOCKET)
+    client = IdentityClient(connection)
+    native = provider(responses)
+    try:
+        image = connection.images.get(IMAGE).id
+        agent = Agent(instructions="Use the current workspace.", provider=native)
+        responses.respond(assistant_output("first"))
+        async with agent.session(environment=source_for(client, image, "10001:10001")) as session:
+            result = await (await session.submit("First turn.")).get_result()
+            assert result.final_output == "first"
+            saved = SessionState.from_json((await session.save_state()).to_json())
+            assert saved.agent_environment_policy_digest
+        responses.respond(assistant_output("restored"))
+        async with agent.session(
+            state=saved, environment=source_for(client, image, "10001:10001")
+        ) as session:
+            result = await (await session.submit("Continue.")).get_result()
+            assert result.final_output == "restored"
+        with pytest.raises(RuntimeError, match="recorded Agent environment grants"):
+            async with agent.session(
+                state=saved, environment=source_for(client, image, "10002:10002")
+            ):
+                pytest.fail("A different selected user cannot restore the recorded grants")
+        assert len(responses.requests) == 2
+        assert sorted(client.deleted_ids) == sorted(client.created_ids)
     finally:
         await native.aclose()
         connection.close()
