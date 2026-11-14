@@ -578,7 +578,7 @@
     },
     {
       "path": "sdk-fork-originals-lineage.patch",
-      "sha256": "3f315e7d82ebdc5e30cb9d336282876d05a410458dce6bdf7a6d5576fcf65411"
+      "sha256": "17e0a086b9a709c6563801c1175ec83e39ddf7505d98742b0932b12dff002348"
     },
     {
       "path": "sdk-cold-child-workspace-user-instructions.patch",
@@ -1233,5 +1233,5 @@
       "sha256": "1b79a88ebc1410402b65558ccc541a3b3d9c4c1771525423c1d9db6fdea199e1"
     }
   ],
-  "result_tree": "075a573d0ada11658572563c2ee2f86f89a3c93b"
+  "result_tree": "eeee86425cb27a74adbd8cecaf44aa217f0575de"
 }
