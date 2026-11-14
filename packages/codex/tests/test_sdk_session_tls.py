@@ -18,8 +18,10 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from agents import Agent, NativeError, NativeProvider, TurnStoppedError
+from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output
+from tests.test_buffered_responses import json_peer, json_response
 from tests.test_native_provider_websockets import WebSocketPeer
 from tests.test_sdk_session_transport import disconnected, http_peer
 
@@ -155,7 +157,10 @@ def tls_files(tmp_path: Path) -> dict[str, Path]:
 
 @asynccontextmanager
 async def https_peer(
-    files: dict[str, Path], issuer: str = "A", *, finite_http_response: bool = False
+    files: dict[str, Path],
+    issuer: str = "A",
+    *,
+    finite_http_response: bool = False,
 ) -> AsyncIterator[HTTPSPeer]:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(files[f"server-{issuer}.pem"], files[f"server-{issuer}.key"])
@@ -650,6 +655,45 @@ async def test_https_equal_ca_material_at_new_path_and_no_proxy_change_use_new_c
         await completed(peer, agent, "new-no-proxy")
         assert peer.transports[-1] is not selected
         assert len(peer.requests) == 3
+
+
+async def test_restored_buffered_session_keeps_http1_when_server_offers_http2(
+    tls_files: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEX_CA_CERTIFICATE", str(tls_files["ca-A.pem"]))
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(tls_files["server-A.pem"], tls_files["server-A.key"])
+    context.set_alpn_protocols(["h2", "http/1.1"])
+    async with (
+        timeout(40),
+        json_peer(ssl_context=context) as peer,
+        NativeProvider(
+            base_url=peer.url,
+            api_key="synthetic-buffered-restore-key",
+            supports_websockets=False,
+            response_mode="buffered",
+            request_max_retries=0,
+            stream_max_retries=0,
+        ) as provider,
+    ):
+        agent = Agent(model="gpt-5.2", instructions="Keep checkpoint history.", provider=provider)
+        peer.json_replies.append(json_response("before restore", "resp_source", "msg_source"))
+        async with agent.session() as source:
+            assert (await (await source.submit("original input")).get_result()).final_output == (
+                "before restore"
+            )
+            state = SessionState.from_json((await source.save_state()).to_json())
+        peer.json_replies.append(json_response("after restore", "resp_restored", "msg_restored"))
+        async with agent.session(state=state) as restored:
+            assert restored.id == state.source_session_id
+            assert (await (await restored.submit("continued input")).get_result()).final_output == (
+                "after restore"
+            )
+            assert len(peer.requests) == 2
+            assert all(request["stream"] is False for request in peer.requests)
+            assert "original input" in str(peer.requests[-1]["input"])
+            assert "continued input" in str(peer.requests[-1]["input"])
+            assert peer.alpn_protocols == ["http/1.1", "http/1.1"]
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Provider HTTP pooling is Linux-only")

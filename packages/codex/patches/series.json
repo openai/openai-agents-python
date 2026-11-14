@@ -254,7 +254,7 @@
     },
     {
       "path": "0057-reuse-model-http-clients.patch",
-      "sha256": "8c602ad3af14a1e8f622a77a0106b11c001a1a975a115cbccc366a159c6878b8"
+      "sha256": "0de0b602b3d558ff04d8c0325d59161701eb28c75131fe8bd6396097d88a43f1"
     },
     {
       "path": "0058-reuse-bundled-model-catalog.patch",
@@ -1285,5 +1285,5 @@
       "sha256": "8fd6f5d9b02da7ff5a5ec9d82f0926c7a47bc250242500b6d6c84f8c46fbe7bb"
     }
   ],
-  "result_tree": "3dbd0885277e810ae12f3bcef22e4284a381ff59"
+  "result_tree": "a1a2d2e04de6ddb6cd519fd090943b628772ac2b"
 }

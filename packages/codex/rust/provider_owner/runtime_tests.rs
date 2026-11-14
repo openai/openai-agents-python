@@ -4,7 +4,7 @@ use super::*;
 use serde_json::json;
 
 async fn opening(key: &str, process: bool) -> (NativeProviderOwner, NativeProviderLease, Engine) {
-    let owner = NativeProviderOwner::new();
+    let owner = NativeProviderOwner::new(false);
     let lease = owner.acquire().unwrap();
     let source = json!({
         "model":"gpt-5.1-codex", "model_provider":"pool-test",

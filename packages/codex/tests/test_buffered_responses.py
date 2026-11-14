@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
+from ssl import SSLContext
 from typing import Any, Literal
 
 import pytest
@@ -43,6 +44,7 @@ from tests.test_sdk_session_transport import HTTPPeer, disconnected
 @dataclass
 class JSONPeer(HTTPPeer):
     json_replies: deque[dict[str, Any] | bytes] = field(default_factory=deque)
+    alpn_protocols: list[str | None] = field(default_factory=list)
     response_statuses: deque[int] = field(default_factory=deque)
     response_headers: dict[str, str] = field(default_factory=dict)
     body_gate: asyncio.Event | None = None
@@ -55,6 +57,9 @@ class JSONPeer(HTTPPeer):
         transport = request.transport
         assert transport is not None
         self.transports.append(transport)
+        tls = transport.get_extra_info("ssl_object")
+        if tls is not None:
+            self.alpn_protocols.append(tls.selected_alpn_protocol())
         self.requests.append(body)
         self.request_headers.append({key.lower(): value for key, value in request.headers.items()})
         assert body["model"] == self.expected_model
@@ -85,11 +90,13 @@ class JSONPeer(HTTPPeer):
 
 
 @asynccontextmanager
-async def json_peer() -> AsyncIterator[JSONPeer]:
+async def json_peer(*, ssl_context: SSLContext | None = None) -> AsyncIterator[JSONPeer]:
     peer = JSONPeer()
     app = web.Application()
     app.router.add_post("/v1/responses", peer.handle)
-    async with TestServer(app) as server:
+    server = TestServer(app)
+    await server.start_server(ssl=ssl_context)
+    async with server:
         peer.url = str(server.make_url("/v1"))
         yield peer
 
