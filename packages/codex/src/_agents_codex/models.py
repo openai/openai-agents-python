@@ -754,7 +754,8 @@ class ChatCompletionsModel:
         tools: Any = None
         value: Any = None
         video: dict[str, Any] | None = None
-        pending_reasoning = replay = None
+        pending_reasoning: dict[str, Any] | None = None
+        replay = None
         input_index = None
         try:
             messages = []

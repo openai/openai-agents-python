@@ -312,13 +312,14 @@ def _request_usage_entries(
                     positions[request_id] = len(entries)
                     entries.append(entry)
                     continue
-                prior = entries[index]
+                previous_entry = entries[index]
                 if any(
-                    prior[key] != entry[key] for key in ("request_ordinal", "thread_id", "turn_id")
+                    previous_entry[key] != entry[key]
+                    for key in ("request_ordinal", "thread_id", "turn_id")
                 ):
                     return [], False
                 if entry["token_usage_known"]:
-                    if prior["token_usage_known"] and prior != entry:
+                    if previous_entry["token_usage_known"] and previous_entry != entry:
                         return [], False
                     entries[index] = entry
             continue
@@ -370,11 +371,11 @@ def _request_usage_entries(
     for owner, measured in owners.items():
         snapshot = measured.snapshot()
         if measured._managed_model_owner is not None:
-            positions = managed.get(cast(str, owner))
-            if positions is None:
+            owner_positions = managed.get(cast(str, owner))
+            if owner_positions is None:
                 complete = False
                 continue
-            physical = [entries[index] for index in positions.values()]
+            physical = [entries[index] for index in owner_positions.values()]
             count = len(physical)
             missing = sum(not entry["token_usage_known"] for entry in physical)
             tokens = {

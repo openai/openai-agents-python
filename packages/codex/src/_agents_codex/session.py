@@ -3002,9 +3002,9 @@ def _complete_profile_mcp(
             if profile is profiles[0] or declaration.environment is None
             else declaration.environment
         )
+        if selected is not None and not isinstance(selected, Environment):
+            raise TypeError("Per-Agent Environment sources require joined graph acquisition")
         if graph_environments:
-            if selected is not None and not isinstance(selected, Environment):
-                raise TypeError("Per-Agent Environment sources require joined graph acquisition")
             if selected is not None and any(
                 callback is not None
                 for callback in (
@@ -10600,9 +10600,9 @@ class Session(Generic[ContextT, OutputT]):
                 raise failure.result()
 
         try:
-            tasks = (waiter, reader, failure)
+            tasks: list[asyncio.Future[Any]] = [waiter, reader, failure]
             if observation_reader is not None:
-                tasks = (*tasks, observation_reader)
+                tasks.append(observation_reader)
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             if failure.done():
                 raise failure.result()
@@ -14949,7 +14949,7 @@ class Session(Generic[ContextT, OutputT]):
             for profile_id, runtime in self._profiles.items()
             if runtime.profile.declaration.after_model is not None
         ]
-        root = not self._profiles and self._agent.after_model is not None
+        root = not self._profiles and self._effective_agent().after_model is not None
         if root or profiles:
             thread._configure_model_completion(root, profiles)
 
