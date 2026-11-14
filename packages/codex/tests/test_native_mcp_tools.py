@@ -53,6 +53,7 @@ class Peer:
     annotations: dict[str, bool] | None = field(default_factory=lambda: {"readOnlyHint": True})
     is_error: bool = False
     call_result: dict[str, Any] | None = None
+    input_schemas: dict[str, Any] = field(default_factory=dict)
 
     async def handle(self, request: web.Request) -> web.Response:
         body = await request.json()
@@ -83,12 +84,15 @@ class Peer:
                             if self.annotations is not None
                             else {}
                         ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {"key": {"type": "string"}},
-                            "required": ["key"],
-                            "additionalProperties": False,
-                        },
+                        "inputSchema": self.input_schemas.get(
+                            name,
+                            {
+                                "type": "object",
+                                "properties": {"key": {"type": "string"}},
+                                "required": ["key"],
+                                "additionalProperties": False,
+                            },
+                        ),
                     }
                     for name in self.names
                 ]
@@ -1030,3 +1034,61 @@ def test_mcp_declarations_project_colliding_unicode_and_long_raw_names(tools: li
         assert ref.name.isascii()
         assert all(character.isalnum() or character == "_" for character in ref.name)
         assert len((ref.namespace + "::" + ref.name).encode("ascii")) <= 128
+
+
+@pytest.mark.parametrize("strict_tool_schemas", [False, True])
+async def test_ordinary_http_mcp_uses_opt_in_best_effort_strict_schemas(
+    responses: ResponsesFixture, strict_tool_schemas: bool
+) -> None:
+    peer = Peer(
+        names=("lookup", "open_tool"),
+        input_schemas={
+            "lookup": {
+                "type": "object",
+                "properties": {"key": {"type": "string"}, "optional": {"type": "string"}},
+                "required": ["key"],
+                "additionalProperties": False,
+            },
+            "open_tool": {
+                "type": "object",
+                "properties": {"key": {"type": "string"}},
+                "required": [],
+                "additionalProperties": True,
+            },
+        },
+    )
+    responses.respond(assistant_output("done"))
+    native_provider = provider(responses)
+    try:
+        async with peer.serve() as url:
+            mcp = HttpMCP(
+                name="strict_fixture",
+                url=url,
+                tools=["lookup", "open_tool"],
+                strict_tool_schemas=strict_tool_schemas,
+            )
+            agent = Agent(
+                instructions="Review tool schemas.",
+                tools=[mcp],
+                provider=native_provider,
+                model="gpt-5.5",
+            )
+            async with agent.session() as session:
+                assert (await (await session.submit("Begin")).get_result()).final_output == "done"
+        namespace = next(
+            tool
+            for request in responses.requests
+            for tool in request.get("tools", ())
+            if tool.get("name") == "mcp__strict_fixture"
+        )
+        lookup = next(tool for tool in namespace["tools"] if tool["name"] == "lookup")
+        open_tool = next(tool for tool in namespace["tools"] if tool["name"] == "open_tool")
+        assert lookup["strict"] is strict_tool_schemas
+        assert lookup["parameters"]["required"] == (
+            ["key", "optional"] if strict_tool_schemas else ["key"]
+        )
+        assert open_tool["strict"] is False
+        assert open_tool["parameters"]["additionalProperties"] is True
+        assert not peer.calls
+    finally:
+        await native_provider.aclose()

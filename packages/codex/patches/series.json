@@ -1247,7 +1247,15 @@
     {
       "path": "sdk-model-provider-metadata.patch",
       "sha256": "b03f42f6e08f4acee8ec64ca643f01ce126a6e8f8d434556db3fa6198bee890d"
+    },
+    {
+      "path": "sdk-managed-mcp-strict-tool-schemas.patch",
+      "sha256": "ea86d5776211b53f5501b94108debe0c4014fddd93ad7cb32abd5072d879165c"
+    },
+    {
+      "path": "sdk-managed-mcp-schema-budget.patch",
+      "sha256": "49db34ae509b0a24d157a88b9882c5e227a497529d1af71573d4e11602cd29bf"
     }
   ],
-  "result_tree": "28d15b62984fd07a8195f641b9f77953887dfc85"
+  "result_tree": "b4e1874f83184b724c69bdf9ddcba31282208985"
 }

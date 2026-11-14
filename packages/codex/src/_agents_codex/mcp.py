@@ -400,6 +400,8 @@ class _MCP(Generic[ContextT_contra]):
     defer_loading: bool = False
     # Raw listing cache, independent of per-step narrowing.
     cache_tools_list: bool | None = None
+    # Best-effort strict provider schemas for ordinary managed servers.
+    strict_tool_schemas: bool = False
     # Text-step discovery only; no filtered server tools in Realtime/SIP catalogs.
     # Separate MCP declarations with approval callbacks for Realtime authorization.
     tool_filter: (
@@ -417,10 +419,13 @@ class _MCP(Generic[ContextT_contra]):
     def __post_init__(self) -> None:
         if self.cache_tools_list is not None and type(self.cache_tools_list) is not bool:
             raise TypeError("MCP cache_tools_list must be a bool or None")
+        if type(self.strict_tool_schemas) is not bool:
+            raise TypeError("MCP strict_tool_schemas must be a bool")
         if self.tool_filter is not None and not callable(self.tool_filter):
             raise TypeError("MCP tool_filter must be callable")
         if self.name == "codex_apps" and (
             self.tool_filter is not None or self.cache_tools_list is not None
+            or self.strict_tool_schemas
         ):
             raise ValueError("MCP discovery requires an ordinary StdioMCP or HttpMCP declaration")
         if self.request_metadata is not None and self.name == "codex_apps":
@@ -568,6 +573,8 @@ class _MCP(Generic[ContextT_contra]):
         }
         if self.cache_tools_list is not None:
             config["sdk_cache_tools_list"] = self.cache_tools_list
+        if self.strict_tool_schemas:
+            config["sdk_strict_tool_schemas"] = True
         approval_modes = {"preapproved": "approve", "prompt": "prompt"}
         tool_settings = {}
         for name in self.tools:
