@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, PlainValidator, StrictStr, TypeAdapter
 
-from agents.classic.sandbox.apply_patch import PatchFormat, WorkspaceEditor
+from _agents_shared.patch_format import PatchFormat
 
 from ._compat import cancellation_requested
 from ._function_tools import FunctionTool, ToolContext, function_tool
@@ -208,6 +208,7 @@ class _ScopedPatchEditor:
         self.patch_format = patch_format
 
     async def apply(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
+        from _agents_shared.workspace_editor import WorkspaceEditor
         from agents.classic.editor import ApplyPatchOperation as WorkspaceOperation
 
         from .sandbox import _capability_workspace

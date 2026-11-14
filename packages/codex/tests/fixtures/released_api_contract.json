@@ -155,13 +155,13 @@
           "from collections.abc import Awaitable, Callable",
           "from dataclasses import dataclass, field",
           "from typing import Any, Literal, Protocol",
+          "from _agents_shared.patch_format import PatchFormat",
           "from ._function_tools import FunctionTool, ToolContext",
-          "from .classic.sandbox.apply_patch import PatchFormat",
           "from .tools import ToolOutput"
         ],
         "references": {
           "FunctionTool": "agents._function_tools.FunctionTool",
-          "PatchFormat": "agents.classic.sandbox.apply_patch.PatchFormat",
+          "PatchFormat": "_agents_shared.patch_format.PatchFormat",
           "ToolContext": "agents._function_tools.ToolContext",
           "ToolOutput": "agents.tools.ToolOutput"
         }
@@ -3286,6 +3286,19 @@
         ],
         "references": {}
       },
+      "_agents_shared.patch_format": {
+        "declarations": [
+          "@runtime_checkable\nclass PatchFormat(Protocol):\n\n    @staticmethod\n    def apply_diff(input: str, diff: str, mode: ApplyDiffMode='default') -> str:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from typing import Protocol, runtime_checkable",
+          "from .apply_diff import ApplyDiffMode"
+        ],
+        "references": {
+          "ApplyDiffMode": "_agents_shared.apply_diff.ApplyDiffMode"
+        }
+      },
       "_agents_shared.retry": {
         "declarations": [
           "P = ParamSpec('P')",
@@ -3480,6 +3493,16 @@
           "from typing import Literal"
         ],
         "references": {}
+      },
+      "_agents_shared.workspace_editor": {
+        "declarations": [],
+        "exports": {},
+        "imports": [
+          "from _agents_shared.patch_format import PatchFormat"
+        ],
+        "references": {
+          "PatchFormat": "_agents_shared.patch_format.PatchFormat"
+        }
       },
       "agents._events": {
         "declarations": [
@@ -3839,16 +3862,6 @@
         "references": {
           "TResponseInputItem": "agents.classic.items.TResponseInputItem"
         }
-      },
-      "agents.classic.apply_diff": {
-        "declarations": [
-          "ApplyDiffMode = Literal['default', 'create']"
-        ],
-        "exports": {},
-        "imports": [
-          "from typing import Literal"
-        ],
-        "references": {}
       },
       "agents.classic.computer": {
         "declarations": [
@@ -4610,16 +4623,13 @@
         "references": {}
       },
       "agents.classic.sandbox.apply_patch": {
-        "declarations": [
-          "@runtime_checkable\nclass PatchFormat(Protocol):\n\n    @staticmethod\n    def apply_diff(input: str, diff: str, mode: ApplyDiffMode='default') -> str:\n        pass"
-        ],
+        "declarations": [],
         "exports": {},
         "imports": [
-          "from typing import Protocol, runtime_checkable",
-          "from ..apply_diff import ApplyDiffMode"
+          "from _agents_shared.patch_format import PatchFormat as PatchFormat"
         ],
         "references": {
-          "ApplyDiffMode": "agents.classic.apply_diff.ApplyDiffMode"
+          "PatchFormat": "_agents_shared.patch_format.PatchFormat"
         }
       },
       "agents.classic.sandbox.entries": {
