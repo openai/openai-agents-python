@@ -129,7 +129,9 @@ async def test_native_docker_path_grants_are_mapped_and_writes_are_scoped(
         async with agent.session(state=saved, environment=source()) as session:
             result = await (await session.submit("Inspect after reopening.")).get_result()
             assert result.final_output == "restored"
-        with pytest.raises(RuntimeError, match="recorded Agent environment grants"):
+        with pytest.raises(
+            ValueError, match="Checkpoint and Environment must agree on the applied executor policy"
+        ):
             async with agent.session(state=saved, environment=source(writable=False)):
                 pytest.fail("A weaker current grant cannot reopen the recorded executor authority")
         assert len(responses.requests) == 4
