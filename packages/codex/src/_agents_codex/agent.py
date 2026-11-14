@@ -1848,8 +1848,9 @@ class Agent(Generic[ContextT, OutputT]):
         Saved model settings take precedence over this Agent's model settings.
         Use update(model=...) to change the default after the Session becomes idle.
         Live submission handles
-        and workspace files do not transfer to the restored Session. Each restore
-        owns isolated native storage; applications coordinate shared state files.
+        and workspace files do not transfer to the restored Session. Restores
+        without ``storage`` have been using isolated native storage; applications
+        have been coordinating shared state files.
         Programmatic tool calling uses this Agent's current declaration, not a saved setting;
         enabling it on restore requires ``programmatic_tool_calling=True`` again.
         Load checkpoints only from trusted application storage: their history
@@ -1863,9 +1864,16 @@ class Agent(Generic[ContextT, OutputT]):
 
         With ``storage=CustomStorage(backend)``, use an application-owned
         canonical native backend. See SessionStore for its exclusive
-        ownership and commit contract. This preview supports root Sessions;
-        child agents, goals, checklist, code mode, manual and native tools,
-        and environments are rejected.
+        ownership and commit contract. Matching development builds have been
+        supporting root Sessions with automatic and ordinary manual Python tools,
+        preapproved HttpMCP tools, and read-only remote project search. Every
+        selected MCP tool has been requiring preapproval; stdio and codex_apps
+        MCP have been remaining unsupported. Remote Environments have been
+        requiring only project_glob/project_grep and no capability directories.
+        Managed function approvals, process tools, writable environments,
+        native child agents, goals, checklist, and code mode have been remaining unsupported.
+        A supported unchanged manual checkpoint has been allowing ``state``
+        with its original CustomStorage backend, without ``resume``.
 
         With ``storage=LocalStorage(path)``, use Core's native local storage.
         Retain Session.id and supply ``resume=id`` in a later process to reopen
