@@ -218,7 +218,8 @@ jobs:
           if [[ "$RUNNER_OS/$RUNNER_ARCH" == Linux/ARM64 ]]; then
             install_options+=(--only-binary=:all:)
           fi
-          "$python" -m pip install "${install_options[@]}" --constraint "$stage/constraints.txt" dist/*.whl aiohttp pytest pytest-asyncio
+          "$python" -m pip install "${install_options[@]}" --constraint "$stage/constraints.txt" dist/*.whl aiohttp pytest pytest-asyncio \
+            ${{ github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && 'pytest-xdist' || '' }}
           cd "$stage"
           "$python" -I -B - <<'PYTHON'
           import sys
@@ -262,6 +263,7 @@ jobs:
           chmod +x "$GITHUB_WORKSPACE/dist/exec-server-fixture"
           CODEX_EXEC_SERVER_TEST_BINARY="$GITHUB_WORKSPACE/dist/exec-server-fixture" \
             "$python" -I -B -m pytest -q -o "pythonpath=$stage/packages/codex" -o asyncio_mode=auto \
+            ${{ github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '-n 2 --dist worksteal' || '' }} \
             packages/codex/tests/test_canonical_storage.py packages/codex/tests/test_canonical_storage_example.py \
             packages/codex/tests/test_custom_storage_durability.py \
             packages/codex/tests/test_native_mcp_host_remote.py \
