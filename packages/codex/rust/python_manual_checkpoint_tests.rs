@@ -25,20 +25,28 @@ pub(crate) struct BeforeResult {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automatic_reply_waits_for_core_terminal_before_sealing() {
-    automatic_reply_waits_for_actual_core_result(false, false).await;
+    automatic_reply_waits_for_actual_core_result(false, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_sibling_without_core_receipt_declines_export_and_keeps_writer() {
-    automatic_reply_waits_for_actual_core_result(true, false).await;
+    automatic_reply_waits_for_actual_core_result(true, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn core_suspension_timeout_does_not_authorize_a_checkpoint() {
-    automatic_reply_waits_for_actual_core_result(true, true).await;
+    automatic_reply_waits_for_actual_core_result(true, Some(false)).await;
 }
 
-async fn automatic_reply_waits_for_actual_core_result(after_terminal: bool, force_timeout: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn portable_manual_suspension_timeout_does_not_authorize_a_checkpoint() {
+    automatic_reply_waits_for_actual_core_result(true, Some(true)).await;
+}
+
+async fn automatic_reply_waits_for_actual_core_result(
+    after_terminal: bool,
+    force_timeout: Option<bool>,
+) {
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -135,10 +143,22 @@ async fn automatic_reply_waits_for_actual_core_result(after_terminal: bool, forc
             }
         }
         hold.entered.acquire().await.unwrap().forget();
-        if force_timeout {
-            let outcome = state.thread.suspend_turn_and_shutdown().await;
+        if let Some(portable) = force_timeout {
+            let started = std::time::Instant::now();
+            let outcome = if portable {
+                state.thread.suspend_manual_turn_and_shutdown().await
+            } else {
+                state.thread.suspend_turn_and_shutdown().await
+            };
             hold.release.add_permits(1);
-            assert!(outcome.is_err(), "A forced turn abort cannot authorize a checkpoint");
+            let error = outcome.expect_err("A forced turn abort cannot authorize a checkpoint");
+            assert!(
+                error.to_string().contains("Root turn suspension did not join its tool results"),
+                "{error}"
+            );
+            if portable {
+                assert!(started.elapsed() >= std::time::Duration::from_secs(2));
+            }
             state.close().await.unwrap();
             engine.close().await.unwrap();
             server.abort();

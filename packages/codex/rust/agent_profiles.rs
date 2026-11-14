@@ -3487,6 +3487,14 @@ mod tests {
         let selection = DecisionHandoffSelection {
             targets: HashSet::from(["b".into()]),
             selected: Mutex::new(BTreeMap::new()),
+            factories: HashSet::new(),
+            name: "lookup".into(),
+            thread: "owner".into(),
+            source: AgentProfileReceipt {
+                profile_id: "a".into(),
+                epoch: 0,
+            },
+            dynamic: Mutex::new(BTreeMap::new()),
         };
         assert!(selection.record("turn", "call", "missing").is_err());
         selection.record("turn", "call", "b").unwrap();

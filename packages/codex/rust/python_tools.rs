@@ -8377,6 +8377,7 @@ pub(crate) mod manual_checkpoint_tests;
 #[cfg(test)]
 pub(crate) mod managed_tests {
     use super::*;
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn idle_catalog_joins_retired_callback_and_rejects_active_reply() {

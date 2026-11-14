@@ -3869,7 +3869,8 @@ def _prepare_native_checkpoint(
     # The binding still consumes its original idle/manual format.
     # Validate the SDK envelope before giving Core the native version.
     payload = json.loads(saved.to_json())
-    payload["agent_options"].pop("_sdk_runtime_enrollment", None)
+    if "_sdk_runtime_enrollment" in saved.agent_options:
+        payload["agent_options"].pop("_sdk_runtime_enrollment")
     if "_sdk_pending_input" in saved.agent_options:
         # This is only caller data. Native restore still validates the idle
         # history and current provider/catalog before a fresh turn can claim it.
