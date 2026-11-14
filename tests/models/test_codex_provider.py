@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -33,13 +34,17 @@ def native_turn(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_codex_provider_runs_through_runner_and_replays_text_history(tmp_path, native_turn):
-    config = RunConfig(model_provider=CodexProvider(cwd=tmp_path), tracing_disabled=True)
+    executable = Path(sys.executable).resolve()
+    config = RunConfig(
+        model_provider=CodexProvider(cwd=tmp_path, codex_executable=executable),
+        tracing_disabled=True,
+    )
     agent = Agent(name="test", instructions="Be brief.", model="gpt-5.3-codex")
     result = await Runner.run(agent, "Start here.", run_config=config)
     assert result.final_output == "A Codex response"
     assert result.context_wrapper.usage.total_tokens == 17
     native_turn.assert_awaited_once_with(
-        "Start here.", "Be brief.", "gpt-5.3-codex", str(tmp_path), []
+        "Start here.", "Be brief.", "gpt-5.3-codex", str(tmp_path), [], str(executable)
     )
 
     history = result.to_input_list()
@@ -59,6 +64,7 @@ async def test_codex_provider_runs_through_runner_and_replays_text_history(tmp_p
         "gpt-5.3-codex",
         str(tmp_path),
         [("user", "Start here."), ("assistant", "A Codex response")],
+        str(executable),
     )
 
 
@@ -85,3 +91,16 @@ async def test_codex_provider_reports_missing_extension_at_use(monkeypatch):
     config = RunConfig(model_provider=CodexProvider(), tracing_disabled=True)
     with pytest.raises(UserError, match="Install the Codex extension"):
         await Runner.run(Agent(name="test"), "Hello", run_config=config)
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_rejects_a_launcher_script(tmp_path, native_turn):
+    launcher = tmp_path / "codex.cmd"
+    launcher.write_text("#!/bin/sh\n")
+    launcher.chmod(0o700)
+    config = RunConfig(
+        model_provider=CodexProvider(codex_executable=launcher), tracing_disabled=True
+    )
+    with pytest.raises(UserError, match="native Codex binary"):
+        await Runner.run(Agent(name="test"), "Hello", run_config=config)
+    native_turn.assert_not_awaited()

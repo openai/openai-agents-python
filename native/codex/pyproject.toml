@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "openai-agents-codex"
-version = "0.1.0"
+version = "0.2.0"
 description = "Native Codex runtime for the OpenAI Agents SDK"
 requires-python = ">=3.10"
 

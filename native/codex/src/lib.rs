@@ -1,21 +1,27 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use codex_app_server_client::{
     DEFAULT_IN_PROCESS_CHANNEL_CAPACITY, EmbeddedNetworkPolicy, EnvironmentManager,
-    InProcessAppServerClient, InProcessClientStartArgs, InProcessServerEvent,
-    legacy_core::config::{ConfigBuilder, ConfigOverrides},
+    ExecServerRuntimeOptions, InProcessAppServerClient, InProcessClientStartArgs,
+    InProcessServerEvent,
+    legacy_core::config::{ConfigBuilder, ConfigOverrides, find_codex_home},
 };
 use codex_app_server_protocol::{
-    AskForApproval, ClientRequest, RequestId, SandboxMode, SandboxPolicy, ServerNotification,
+    ClientRequest, JSONRPCErrorError, McpServerElicitationAction,
+    McpServerElicitationRequestResponse, RequestId, ServerNotification, ServerRequest,
+    ThreadBackgroundTerminalsCleanParams, ThreadBackgroundTerminalsCleanResponse,
     ThreadInjectItemsParams, ThreadInjectItemsResponse, ThreadItem, ThreadStartParams,
-    ThreadStartResponse, TokenUsageBreakdown, TurnStartParams, TurnStartResponse, TurnStatus,
-    UserInput,
+    ThreadStartResponse, TokenUsageBreakdown, TurnInterruptParams, TurnInterruptResponse,
+    TurnStartParams, TurnStartResponse, TurnStatus, UserInput,
 };
-use codex_config::{CloudConfigBundleLoader, LoaderOverrides, TomlValue};
+use codex_arg0::Arg0DispatchPaths;
+use codex_config::{CloudConfigBundleLoader, LoaderOverrides};
 use codex_feedback::CodexFeedback;
-use codex_protocol::{config_types, models::MessagePhase, protocol::SessionSource};
+use codex_protocol::{
+    models::MessagePhase, permissions::FileSystemSandboxPolicy, protocol::SessionSource,
+};
 use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -29,6 +35,32 @@ struct TurnOutput {
     item_id: String,
     text: String,
     usage: Option<TokenUsageBreakdown>,
+}
+
+struct TurnInput {
+    prompt: String,
+    instructions: Option<String>,
+    model: Option<String>,
+    cwd: String,
+    history: Vec<Value>,
+}
+
+struct ExecutionHelpers<'a> {
+    executable: &'a Path,
+    aliases: Option<tempfile::TempDir>,
+}
+
+impl ExecutionHelpers<'_> {
+    fn require_protected_paths(&self, policy: &FileSystemSandboxPolicy, cwd: &Path) -> Result<()> {
+        if !policy.has_full_disk_write_access()
+            && std::iter::once(self.executable)
+                .chain(self.aliases.as_ref().map(|aliases| aliases.path()))
+                .any(|path| policy.can_write_local_path_with_cwd(path, cwd))
+        {
+            bail!("Place the Codex executable and CODEX_HOME outside sandbox-writable paths");
+        }
+        Ok(())
+    }
 }
 
 impl TurnOutput {
@@ -59,7 +91,7 @@ impl TurnOutput {
 }
 
 #[pyfunction]
-#[pyo3(signature = (prompt, instructions, model, cwd, history))]
+#[pyo3(signature = (prompt, instructions, model, cwd, history, codex_executable))]
 fn run_turn(
     py: Python<'_>,
     prompt: String,
@@ -67,6 +99,7 @@ fn run_turn(
     model: Option<String>,
     cwd: String,
     history: Vec<(String, String)>,
+    codex_executable: String,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let history = history
@@ -82,17 +115,22 @@ fn run_turn(
                 return;
             }
             let result = async {
-                let mut client = start_client(&cwd).await?;
-                let result = tokio::select! {
-                    biased;
-                    () = result_tx.closed() => Err(anyhow::anyhow!("Codex turn cancelled")),
-                    result = execute_turn(&mut client, prompt, instructions, model, cwd, history) => result,
+                let (mut client, helpers) =
+                    start_client(&cwd, Path::new(&codex_executable)).await?;
+                let input = TurnInput {
+                    prompt,
+                    instructions,
+                    model,
+                    cwd,
+                    history,
                 };
+                let result = execute_turn(&mut client, input, &helpers, &mut result_tx).await;
                 let shutdown = client.shutdown().await.context("Could not shut down Codex");
                 let output = result?;
                 shutdown?;
                 Ok(output)
-            }.await;
+            }
+            .await;
             let _ = result_tx.send(result);
         });
 
@@ -117,40 +155,134 @@ fn history_item((role, text): (String, String)) -> Result<Value> {
     }))
 }
 
-async fn start_client(cwd: &str) -> Result<InProcessAppServerClient> {
-    ensure_rustls_crypto_provider();
-    let loader_overrides = LoaderOverrides {
-        ignore_project_config: true,
+fn prepare_helper_paths(
+    executable: &Path,
+    codex_home: &Path,
+) -> Result<(Arg0DispatchPaths, Option<tempfile::TempDir>)> {
+    if !executable.is_absolute() || !executable.is_file() {
+        bail!("Codex execution requires the absolute path to a native Codex executable");
+    }
+    let paths = Arg0DispatchPaths {
+        codex_self_exe: Some(executable.to_path_buf()),
         ..Default::default()
     };
-    let cli_overrides = vec![
-        ("features.hooks".to_string(), TomlValue::Boolean(false)),
-        ("features.plugins".to_string(), TomlValue::Boolean(false)),
-    ];
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
+
+        let alias_root = codex_home.join("tmp/arg0");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&alias_root)
+            .context("Could not create Codex helper root")?;
+        let alias_root = alias_root
+            .canonicalize()
+            .context("Could not resolve Codex helper root")?;
+        #[cfg(not(debug_assertions))]
+        {
+            let codex_home = codex_home
+                .canonicalize()
+                .context("Could not resolve CODEX_HOME")?;
+            for temp_root in [std::env::temp_dir(), PathBuf::from("/tmp")] {
+                let temp_root = temp_root.canonicalize().unwrap_or(temp_root);
+                if codex_home.starts_with(&temp_root) || alias_root.starts_with(&temp_root) {
+                    bail!(
+                        "Use a CODEX_HOME and helper root outside system temporary directories for Codex execution"
+                    );
+                }
+            }
+        }
+        if std::fs::metadata(&alias_root)?.permissions().mode() & 0o022 != 0 {
+            bail!("The Codex helper root must not be writable by other users");
+        }
+        // The aliases retain Codex's argv[0] dispatch without changing Python's PATH.
+        let aliases = tempfile::Builder::new()
+            .prefix("codex-provider-arg0-")
+            .tempdir_in(alias_root)
+            .context("Could not create Codex helper directory")?;
+        let execve = aliases.path().join("codex-execve-wrapper");
+        symlink(executable, &execve).context("Could not create Codex shell helper alias")?;
+        let linux_sandbox = if cfg!(target_os = "linux") {
+            let alias = aliases.path().join("codex-linux-sandbox");
+            symlink(executable, &alias)
+                .context("Could not create Codex Linux sandbox helper alias")?;
+            Some(alias)
+        } else {
+            None
+        };
+        Ok((
+            Arg0DispatchPaths {
+                codex_linux_sandbox_exe: linux_sandbox,
+                main_execve_wrapper_exe: Some(execve),
+                ..paths
+            },
+            Some(aliases),
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = codex_home;
+        Ok((paths, None))
+    }
+}
+
+async fn start_client<'a>(
+    cwd: &str,
+    executable: &'a Path,
+) -> Result<(InProcessAppServerClient, ExecutionHelpers<'a>)> {
+    let cwd = PathBuf::from(cwd);
+    if !cwd.is_absolute() || !cwd.is_dir() {
+        bail!("Codex execution requires an existing absolute working directory");
+    }
+    ensure_rustls_crypto_provider();
+    let codex_home = find_codex_home().context("Could not resolve CODEX_HOME")?;
+    let (arg0_paths, aliases) = prepare_helper_paths(executable, codex_home.as_path())?;
+    let helpers = ExecutionHelpers {
+        executable,
+        aliases,
+    };
+    let loader_overrides = LoaderOverrides::default();
     let cloud_config_bundle = CloudConfigBundleLoader::default();
     let embedded_network_policy = EmbeddedNetworkPolicy::load(&loader_overrides).await;
     let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.to_path_buf())
         .harness_overrides(ConfigOverrides {
-            cwd: Some(PathBuf::from(cwd)),
-            sandbox_mode: Some(config_types::SandboxMode::ReadOnly),
-            approval_policy: Some(codex_protocol::protocol::AskForApproval::Never),
+            cwd: Some(cwd),
+            codex_self_exe: arg0_paths.codex_self_exe.clone(),
+            codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
+            main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
             ..Default::default()
         })
-        .cli_overrides(cli_overrides.clone())
         .loader_overrides(loader_overrides.clone())
         .cloud_config_bundle(cloud_config_bundle.clone())
         .build()
         .await
         .context("Could not load Codex configuration")?;
+    helpers.require_protected_paths(
+        &config.permissions.file_system_sandbox_policy(),
+        config.cwd.as_path(),
+    )?;
     embedded_network_policy.activate(&mut config);
-    // The Python process has no Codex executable for sandbox dispatch.
-    let environment_manager = EnvironmentManager::without_environments(
-        embedded_network_policy.bind(config.http_client_factory()),
+    let runtime_paths = ExecServerRuntimeOptions::from_optional_paths(
+        arg0_paths.codex_self_exe.clone(),
+        arg0_paths.codex_linux_sandbox_exe.clone(),
+    )?;
+    #[cfg(target_os = "macos")]
+    let runtime_paths = runtime_paths.with_allowed_symlinked_codex_home(
+        codex_config::allowed_symlinked_codex_home(&config.config_layer_stack, &config.codex_home),
     );
-    InProcessAppServerClient::start(InProcessClientStartArgs {
-        arg0_paths: Default::default(),
+    let environment_manager = EnvironmentManager::from_codex_home(
+        config.codex_home.clone(),
+        Some(runtime_paths),
+        embedded_network_policy.bind(config.http_client_factory()),
+    )
+    .await
+    .context("Could not load Codex execution environments")?;
+    let client = InProcessAppServerClient::start(InProcessClientStartArgs {
+        arg0_paths,
         config: Arc::new(config),
-        cli_overrides,
+        cli_overrides: Vec::new(),
         loader_overrides,
         strict_config: false,
         cloud_config_bundle,
@@ -170,69 +302,159 @@ async fn start_client(cwd: &str) -> Result<InProcessAppServerClient> {
         channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
     })
     .await
-    .context("Could not start Codex")
+    .context("Could not start Codex")?;
+    Ok((client, helpers))
+}
+
+async fn reject_interactive_request(
+    client: &InProcessAppServerClient,
+    request: ServerRequest,
+) -> Result<()> {
+    if let ServerRequest::McpServerElicitationRequest { request_id, .. } = request {
+        client
+            .resolve_server_request(
+                request_id,
+                serde_json::to_value(McpServerElicitationRequestResponse {
+                    action: McpServerElicitationAction::Cancel,
+                    content: None,
+                    meta: None,
+                })?,
+            )
+            .await?;
+    } else {
+        client
+            .reject_server_request(
+                request.id().clone(),
+                JSONRPCErrorError {
+                    code: -32000,
+                    message: "CodexProvider cannot answer interactive requests".into(),
+                    data: None,
+                },
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 async fn execute_turn(
     client: &mut InProcessAppServerClient,
-    prompt: String,
-    instructions: Option<String>,
-    model: Option<String>,
-    cwd: String,
-    history: Vec<Value>,
+    input: TurnInput,
+    helpers: &ExecutionHelpers<'_>,
+    result_tx: &mut oneshot::Sender<Result<TurnOutput>>,
 ) -> Result<TurnOutput> {
+    if result_tx.is_closed() {
+        bail!("Codex turn cancelled");
+    }
     let response: ThreadStartResponse = client
         .request_typed(ClientRequest::ThreadStart {
             request_id: RequestId::Integer(1),
             params: ThreadStartParams {
-                model,
-                cwd: Some(cwd),
-                developer_instructions: instructions,
-                approval_policy: Some(AskForApproval::Never),
-                sandbox: Some(SandboxMode::ReadOnly),
+                model: input.model,
+                cwd: Some(input.cwd),
+                developer_instructions: input.instructions,
                 ephemeral: Some(true),
-                environments: Some(Vec::new()),
                 ..Default::default()
             },
         })
         .await?;
-    if response.approval_policy != AskForApproval::Never
-        || response.sandbox
-            != (SandboxPolicy::ReadOnly {
-                network_access: false,
-            })
-    {
-        bail!("Codex configuration requires permissions unavailable to the provider");
-    }
     let thread_id = response.thread.id;
-    let mut model = response.model;
+    let result = async {
+        // Codex may reload project configuration after establishing project trust.
+        let file_policy = FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
+            &response.sandbox.to_core(),
+            response.cwd.as_path(),
+        );
+        helpers.require_protected_paths(&file_policy, response.cwd.as_path())?;
 
-    if !history.is_empty() {
-        client
-            .request_typed::<ThreadInjectItemsResponse>(ClientRequest::ThreadInjectItems {
-                request_id: RequestId::Integer(2),
-                params: ThreadInjectItemsParams {
+        if result_tx.is_closed() {
+            bail!("Codex turn cancelled");
+        }
+        if !input.history.is_empty() {
+            client
+                .request_typed::<ThreadInjectItemsResponse>(ClientRequest::ThreadInjectItems {
+                    request_id: RequestId::Integer(2),
+                    params: ThreadInjectItemsParams {
+                        thread_id: thread_id.clone(),
+                        items: input.history,
+                    },
+                })
+                .await?;
+            if result_tx.is_closed() {
+                bail!("Codex turn cancelled");
+            }
+        }
+
+        // Once turn/start is sent, retain its response even if Python cancels.
+        // The request can start tools before returning the owned turn ID.
+        let started = client
+            .request_typed::<TurnStartResponse>(ClientRequest::TurnStart {
+                request_id: RequestId::Integer(3),
+                params: TurnStartParams {
                     thread_id: thread_id.clone(),
-                    items: history,
+                    input: vec![UserInput::Text {
+                        text: input.prompt,
+                        text_elements: Vec::new(),
+                    }],
+                    ..Default::default()
                 },
             })
-            .await?;
+            .await;
+        let turn_id = match started {
+            Ok(started) => started.turn.id,
+            Err(error) => {
+                interrupt_turn(client, &thread_id, "").await;
+                return Err(error.into());
+            }
+        };
+        let mut terminal = false;
+        let result = tokio::select! {
+            biased;
+            () = result_tx.closed() => Err(anyhow::anyhow!("Codex turn cancelled")),
+            result = read_turn(client, &thread_id, &turn_id, response.model, &mut terminal) => result,
+        };
+        if !terminal {
+            interrupt_turn(client, &thread_id, &turn_id).await;
+        }
+        result
     }
+    .await;
 
-    let response: TurnStartResponse = client
-        .request_typed(ClientRequest::TurnStart {
-            request_id: RequestId::Integer(3),
-            params: TurnStartParams {
-                thread_id: thread_id.clone(),
-                input: vec![UserInput::Text {
-                    text: prompt,
-                    text_elements: Vec::new(),
-                }],
-                ..Default::default()
+    // Stock turn interruption leaves background terminals running for reuse.
+    // This provider owns an ephemeral thread, so it must also clean its terminals.
+    let cleanup = client
+        .request_typed::<ThreadBackgroundTerminalsCleanResponse>(
+            ClientRequest::ThreadBackgroundTerminalsClean {
+                request_id: RequestId::Integer(5),
+                params: ThreadBackgroundTerminalsCleanParams { thread_id },
+            },
+        )
+        .await;
+    let output = result?;
+    cleanup.context("Could not clean Codex background terminals")?;
+    Ok(output)
+}
+
+async fn interrupt_turn(client: &InProcessAppServerClient, thread_id: &str, turn_id: &str) {
+    // A turn can finish before the interrupt arrives. Keep the original error
+    // primary and clean the owned thread even if Codex rejects this interrupt.
+    let _ = client
+        .request_typed::<TurnInterruptResponse>(ClientRequest::TurnInterrupt {
+            request_id: RequestId::Integer(4),
+            params: TurnInterruptParams {
+                thread_id: thread_id.to_owned(),
+                turn_id: turn_id.to_owned(),
             },
         })
-        .await?;
-    let turn_id = response.turn.id;
+        .await;
+}
+
+async fn read_turn(
+    client: &mut InProcessAppServerClient,
+    thread_id: &str,
+    turn_id: &str,
+    mut model: String,
+    terminal: &mut bool,
+) -> Result<TurnOutput> {
     let mut usage = None;
     let mut answer = None;
     let mut unphased_answer = None;
@@ -243,8 +465,9 @@ async fn execute_turn(
             InProcessServerEvent::Lagged { skipped } => {
                 bail!("Codex event stream lost {skipped} events")
             }
-            InProcessServerEvent::ServerRequest(_) => {
-                bail!("Codex turn requires interactive input")
+            InProcessServerEvent::ServerRequest(request) => {
+                reject_interactive_request(client, *request).await?;
+                continue;
             }
         };
         match *notification {
@@ -275,6 +498,7 @@ async fn execute_turn(
             ServerNotification::TurnCompleted(event)
                 if event.thread_id == thread_id && event.turn.id == turn_id =>
             {
+                *terminal = true;
                 if event.turn.status != TurnStatus::Completed {
                     match event.turn.error {
                         Some(error) => bail!("Codex turn failed: {}", error.message),
@@ -285,7 +509,7 @@ async fn execute_turn(
                     .or(unphased_answer)
                     .context("Codex turn completed without an assistant message")?;
                 return Ok(TurnOutput {
-                    turn_id,
+                    turn_id: turn_id.to_owned(),
                     model,
                     item_id,
                     text,

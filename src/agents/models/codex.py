@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import time
 from collections.abc import AsyncIterator
 from dataclasses import fields
@@ -41,13 +42,24 @@ class CodexProvider(ModelProvider):
     Install the optional native package from `native/codex` in the same Python environment.
     """
 
-    def __init__(self, *, cwd: str | os.PathLike[str] | None = None) -> None:
-        """Set the working directory for Codex. Defaults to the current directory."""
+    def __init__(
+        self,
+        *,
+        cwd: str | os.PathLike[str] | None = None,
+        codex_executable: str | os.PathLike[str] | None = None,
+    ) -> None:
+        """Set the Codex working directory and the native executable for tool helpers.
+
+        The defaults are the current directory and the first `codex` executable on `PATH`.
+        """
         self._cwd = str(Path(cwd).resolve() if cwd is not None else Path.cwd())
+        self._codex_executable = (
+            Path(codex_executable).absolute() if codex_executable is not None else None
+        )
 
     def get_model(self, model_name: str | None) -> Model:
         """Resolve a Codex model name. With no name, Codex selects its default."""
-        return _CodexModel(model_name, self._cwd)
+        return _CodexModel(model_name, self._cwd, self._codex_executable)
 
 
 class _CodexTurn(TypedDict):
@@ -61,6 +73,32 @@ class _CodexTurn(TypedDict):
     output_tokens: int | None
     reasoning_output_tokens: int | None
     total_tokens: int | None
+
+
+def _resolve_codex_executable(configured: Path | None) -> str:
+    if configured is None:
+        candidate = shutil.which("codex")
+        if candidate is None:
+            raise UserError(
+                "CodexProvider needs a native Codex executable. Install Codex on PATH "
+                "or set codex_executable."
+            )
+        configured = Path(candidate)
+
+    path = configured.resolve()
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise UserError(f"Codex executable is missing or cannot be executed: {path}")
+    try:
+        with path.open("rb") as executable:
+            script = executable.read(2) == b"#!"
+    except OSError as exc:
+        raise UserError(f"Codex executable cannot be read: {path}") from exc
+    if script or path.suffix.lower() in {".bat", ".cmd", ".js", ".ps1"}:
+        raise UserError(
+            "Set codex_executable to the native Codex binary. "
+            "Launcher scripts cannot run Codex helpers."
+        )
+    return str(path)
 
 
 def _text_messages(input: str | list[TResponseInputItem]) -> list[tuple[str, str]]:
@@ -91,9 +129,10 @@ def _text_messages(input: str | list[TResponseInputItem]) -> list[tuple[str, str
 
 
 class _CodexModel(Model):
-    def __init__(self, name: str | None, cwd: str) -> None:
+    def __init__(self, name: str | None, cwd: str, codex_executable: Path | None) -> None:
         self._name = name
         self._cwd = cwd
+        self._codex_executable = codex_executable
 
     def get_default_model_settings(self) -> ModelSettings:
         return ModelSettings()
@@ -133,10 +172,16 @@ class _CodexModel(Model):
                 "Install the Codex extension from ./native/codex to use CodexProvider."
             ) from None
 
+        executable = _resolve_codex_executable(self._codex_executable)
         result = cast(
             _CodexTurn,
             await native.run_turn(
-                messages[-1][1], system_instructions, self._name, self._cwd, messages[:-1]
+                messages[-1][1],
+                system_instructions,
+                self._name,
+                self._cwd,
+                messages[:-1],
+                executable,
             ),
         )
         usage = (
