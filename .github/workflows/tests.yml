@@ -774,7 +774,8 @@ jobs:
           - "3.14"
     env:
       OPENAI_API_KEY: fake-for-tests
-      PYTEST_ADDOPTS: "-rA"
+      PYTEST_ADDOPTS: "-rap"
+      PYTEST_XDIST_AUTO_NUM_WORKERS: ${{ github.repository == 'openai/openai-agents-python' && '12' || '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -1000,7 +1001,7 @@ jobs:
         shard: [0, 1]
     env:
       OPENAI_API_KEY: fake-for-tests
-      PYTEST_ADDOPTS: "-rA"
+      PYTEST_ADDOPTS: "-rap"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
