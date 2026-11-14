@@ -383,15 +383,16 @@ def validate_transport(
         raise ValueError("Fresh WebSocket connections have not been retiring")
     for receipt in receipts:
         if peer_http_mode == "dual":
-            expected_version = (
-                "2" if engine == "v1" and not websocket and response_mode == "streaming" else "1.1"
-            )
+            observed_version = receipt.get("http_version")
+            allowed_versions = ("1.1", "2") if engine == "v1" and not websocket else ("1.1",)
+            if observed_version not in allowed_versions:
+                raise ValueError("Actual HTTP version is unsupported by the dual peer")
             connection = stats.get("tls_transports", {}).get(str(receipt.get("tls_connection_id")))
-            if not connection or receipt.get("http_version") != expected_version:
-                raise ValueError("Actual HTTP protocol differs from the dual peer schedule")
-            allowed_alpn = ("h2",) if expected_version == "2" else (None, "http/1.1")
+            if not connection:
+                raise ValueError("TLS connection receipt is missing")
+            allowed_alpn = ("h2",) if observed_version == "2" else (None, "http/1.1")
             if (
-                connection.get("http_version") != expected_version
+                connection.get("http_version") != observed_version
                 or receipt.get("tls_alpn_protocol") not in allowed_alpn
                 or connection.get("alpn_protocol") != receipt.get("tls_alpn_protocol")
             ):

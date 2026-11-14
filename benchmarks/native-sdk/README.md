@@ -270,7 +270,7 @@ cp /input/stable-packages.txt /input/sdk-packages.txt /input/peer-packages.txt /
   --samples 12 --iterations 100 --timeout 60 --cases oneshot_tool_output_16k_128
 ```
 
-The two outputs have been reporting separate v0 pairwise comparisons. They have not been forming a matched three-arm experiment or supplying a paired Auto-versus-buffered interval. Latency has been including waits for the peer; all-thread client process CPU has been excluding peer-process CPU. `full_owner_*` has been measuring an overlapping Adapter lifetime, including caller-owned Provider close when present, rather than an additional cost to add to call measurements. Omitted-Provider process caches have been remaining outside that close boundary. The dual peer has been checking actual HTTP/ALPN receipts: default WSS and buffered JSON have been using HTTP/1.1, while streaming native HTTP has been using H2. Existing output, tool-result, history and joined-peer cleanup checks have been remaining in force. No source patch or default transport change has been entering either SDK configuration.
+The two outputs have been reporting separate v0 pairwise comparisons. They have not been forming a matched three-arm experiment or supplying a paired Auto-versus-buffered interval. Latency has been including waits for the peer; all-thread client process CPU has been excluding peer-process CPU. `full_owner_*` has been measuring an overlapping Adapter lifetime, including caller-owned Provider close when present, rather than an additional cost to add to call measurements. Omitted-Provider process caches have been remaining outside that close boundary. The dual peer has been checking actual HTTP/ALPN receipts: WSS has been using HTTP/1.1, while native HTTP has been negotiating HTTP/1.1 or HTTP/2 independently of response mode. Existing output, tool-result, history and joined-peer cleanup checks have been remaining in force. No source patch or default transport change has been entering either SDK configuration.
 
 ### Fresh implicit tools and dense output
 
@@ -319,7 +319,7 @@ The existing estimator has been retaining matched block order, raw metric vector
 
 ## Optional HTTP/2 peer
 
-The default peer has been remaining aiohttp HTTP/1.1, including its WebSocket upgrade path. The explicit `--peer-http-mode dual` option has been selecting a TLS peer advertising both `h2` and `http/1.1`, using the same response, tool and history validation. This option has been requiring the existing default-host container setup. Streaming native HTTP arms have been requiring actual H2 receipts; explicit buffered native HTTP, v0 HTTP and native WebSocket arms have been requiring HTTP/1.1. Unsupported native wheels have been failing validation rather than silently qualifying an HTTP/1.1 fallback.
+The default peer has been remaining aiohttp HTTP/1.1, including its WebSocket upgrade path. The explicit `--peer-http-mode dual` option has been selecting a TLS peer advertising both `h2` and `http/1.1`, using the same response, tool and history validation. This option has been requiring the existing default-host container setup. Native HTTP arms have been accepting coherent HTTP/1.1 or HTTP/2 receipts according to the client's negotiated TLS/ALPN configuration, independently of streaming or buffered response mode. Stable v0 HTTP and native WebSocket arms have been remaining on HTTP/1.1. Every request has been requiring agreement with its TLS connection's HTTP version and ALPN, complete response bodies and matching connection request counts. An HTTP/2 claim has been requiring actual `2`/`h2` receipts; the dual server option alone has not been establishing that claim.
 
 The optional peer dependency has been remaining outside both SDK environments. Before measurement, install it only in the peer environment:
 
@@ -342,6 +342,21 @@ Inside that guide's existing owned container command, the following comparison h
   --server-python "$PEER_PY" --output-dir "$LAB/fresh-tools-h2" \
   --samples 5 --iterations 100 --timeout 60 --cases oneshot_tool_output_16k_128
 ```
+
+The following command has been comparing two native wheels through public HTTP calls. Each worker has been retaining one explicit `NativeProvider` across fresh `Agent.run` calls. The [second-wheel container setup](container-default-host/README.md#provision-a-reference-native-wheel) has been supplying both wheels, matching Python and dependencies, and the same local CA/default-host route. Saved worker receipts have been recording each arm's negotiated HTTP version and ALPN. This pair has not been forming a matched three-arm comparison with stable v0.
+
+```sh
+"$PEER_PY" -B "$BENCH/compare.py" \
+  --peer-http-mode dual --default-host-setup /run/sdk-benchmark/setup.json \
+  --reference-engine v1 --native-provider-mode caller-owned --native-transport http \
+  --reference-response-mode streaming --v1-response-mode streaming \
+  --v0-python "$REFERENCE_NATIVE_PY" --v1-python "$NATIVE_PY" \
+  --v0-version "$REFERENCE_NATIVE_VERSION" --v1-version "$NATIVE_VERSION" \
+  --server-python "$PEER_PY" --output-dir "$LAB/public-http-feature-pair" \
+  --samples 12 --iterations 100 --timeout 60 --cases oneshot_tool_output_16k_128
+```
+
+Setting both response-mode options to `buffered` has been selecting a separate JSON comparison with a fresh output directory. Response mode has been selecting SSE or JSON. Client/server TLS ALPN negotiation has been determining HTTP/1.1 or HTTP/2 for either response mode. `--native-transport http` has been passing `supports_websockets=False` for caller-owned Providers, including default-host streaming calls. The benchmark has been preserving the all-client process CPU and Adapter lifetime clocks described above.
 
 Each request receipt has been recording its HTTP version, negotiated ALPN and TLS connection ID. `server.tls_transports` has been recording the matching connection and request count. Repeated IDs across different operation IDs have been showing actual connection reuse; Provider lifetime alone has not been proving reuse. HTTP responses have been completing their final body send before their receipt ends. The peer has not been adding a delayed EOF after `response.completed`.
 
