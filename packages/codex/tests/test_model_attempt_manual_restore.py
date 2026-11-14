@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import _agents_codex.session as implementation
+from _agents_codex.state import SessionState
 from _agents_codex.usage import RunUsage, TokenUsage, _UsageCollector
 
 
@@ -122,8 +123,6 @@ class CapturedState:
     def from_json(cls, raw):
         return cls(json.loads(raw))
 
-    _from_native_capture = from_json
-
     def to_json(self):
         return json.dumps(self.value)
 
@@ -137,7 +136,7 @@ async def capture(
     live_snapshot=None,
     report_at_seal=True,
 ):
-    monkeypatch.setattr(implementation, "SessionState", CapturedState)
+    monkeypatch.setattr(SessionState, "_from_native_capture", CapturedState.from_json)
     monkeypatch.setattr(implementation, "_check_checkpoint", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         implementation, "_redact_checkpoint_executor_receipts", lambda payload: None
