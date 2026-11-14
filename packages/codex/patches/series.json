@@ -578,7 +578,7 @@
     },
     {
       "path": "sdk-fork-originals-lineage.patch",
-      "sha256": "3f315e7d82ebdc5e30cb9d336282876d05a410458dce6bdf7a6d5576fcf65411"
+      "sha256": "17e0a086b9a709c6563801c1175ec83e39ddf7505d98742b0932b12dff002348"
     },
     {
       "path": "sdk-cold-child-workspace-user-instructions.patch",
@@ -1229,6 +1229,10 @@
       "sha256": "603c562185ff239ac4b89d9b37a739e9eb4530af868b97a309f796a52dc8f4dc"
     },
     {
+      "path": "sdk-api-demand-text-coalescing.patch",
+      "sha256": "1b79a88ebc1410402b65558ccc541a3b3d9c4c1771525423c1d9db6fdea199e1"
+    },
+    {
       "path": "sdk-bind-declaration-output-strictness.patch",
       "sha256": "723046d8ae5c31b90e4f23f83ea0be45311fb60fd674f031764807fb58b2d85d"
     },
@@ -1271,7 +1275,11 @@
     {
       "path": "sdk-agent-resource-grants.patch",
       "sha256": "2b80df5fc246d5b832bac775e43621d4400d0e7f68f466b0ead29a5307c3c6a1"
+    },
+    {
+      "path": "sdk-managed-sandbox-provider-compaction.patch",
+      "sha256": "9ee0acecf2584d841d8175997e0fb9423c8cc0febcbb65358ed49b76e1e3d41f"
     }
   ],
-  "result_tree": "07b09ff28c9aee2bde803e035298fe7803c511da"
+  "result_tree": "1fd7bc856b958c79f7c996f8d2bf8afbbf4316f9"
 }

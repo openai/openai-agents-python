@@ -1,0 +1,198 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index af74cbdd8ac36f47fc1786fd70ac83174b579dfc..20837105fc3af8095d566e3f76711e32e52a975d 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1355,8 +1355,13 @@ impl ModelClient {
+             })
+             .transpose()?;
+         validate_programmatic_tool_catalog(&prompt.tools, hosted_prompt.is_some())?;
+-        let context_management =
+-            controls.context_management_for_model((!prompt_owns_model).then_some(model_info));
++        let implicit_compaction_unavailable = self.provider_history.is_some()
++            || model_info.use_responses_lite
++            || self.state.provider.info().is_amazon_bedrock();
++        let context_management = controls.context_management_for_model_with_default(
++            (!prompt_owns_model).then_some(model_info),
++            !implicit_compaction_unavailable,
++        );
+         if self.provider_history.is_some()
+             && context_management.as_ref().is_some_and(|items| {
+                 items.iter().any(|item| {
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index 36b053819ba7dc0349103dd72703f67240898e1e..c04233fc0a134f2bd4426a35daf7fd2ff35f898a 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -56,7 +56,9 @@ pub enum HostedToolChoice {
+ impl HostedToolChoice {
+     pub fn validate(&self) -> Result<(), String> {
+         if let Self::Mcp { server_label, name } = self
+-            && (server_label.as_ref().is_some_and(|label| label.trim().is_empty())
++            && (server_label
++                .as_ref()
++                .is_some_and(|label| label.trim().is_empty())
+                 || name.as_ref().is_some_and(|name| name.trim().is_empty())
+                 || (server_label.is_none() && name.is_some()))
+         {
+@@ -253,6 +255,11 @@ pub struct ModelRequestControls {
+     #[ts(optional = nullable, as = "Option<ProviderCompactionPolicy>")]
+     #[schemars(with = "Option<ProviderCompactionPolicy>")]
+     pub provider_compaction: Option<Option<ProviderCompactionPolicy>>,
++    /// Current SDK acquisition default; explicit provider controls retain precedence.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schemars(skip)]
++    #[ts(skip)]
++    pub sdk_default_provider_compaction: Option<bool>,
+     #[serde(
+         default,
+         skip_serializing_if = "Option::is_none",
+@@ -400,6 +407,7 @@ impl ModelRequestControls {
+     pub fn for_persistence(&self) -> Self {
+         let mut controls = self.clone();
+         controls.request_transport = None;
++        controls.sdk_default_provider_compaction = None;
+         controls
+     }
+
+@@ -414,6 +422,7 @@ impl ModelRequestControls {
+             && self.include.is_none()
+             && self.context_management.is_none()
+             && self.provider_compaction.is_none()
++            && self.sdk_default_provider_compaction.is_none()
+             && self.extra_body.is_none()
+             && self.reasoning_options.is_none()
+             && self.max_output_tokens.is_none()
+@@ -469,6 +478,9 @@ impl ModelRequestControls {
+         if patch.provider_compaction.is_some() {
+             self.provider_compaction = patch.provider_compaction;
+         }
++        if patch.sdk_default_provider_compaction.is_some() {
++            self.sdk_default_provider_compaction = patch.sdk_default_provider_compaction;
++        }
+         if patch.extra_body.is_some() {
+             self.extra_body = patch.extra_body.clone();
+         }
+@@ -584,9 +596,14 @@ impl ModelRequestControls {
+             }
+             if let Some(context) = options.get("context")
+                 && !context.is_null()
+-                && !matches!(context.as_str(), Some("auto" | "current_turn" | "all_turns"))
++                && !matches!(
++                    context.as_str(),
++                    Some("auto" | "current_turn" | "all_turns")
++                )
+             {
+-                return Err("reasoning context must be auto, current_turn, all_turns or null".into());
++                return Err(
++                    "reasoning context must be auto, current_turn, all_turns or null".into(),
++                );
+             }
+             if let Some(mode) = options.get("mode")
+                 && !mode.as_str().is_some_and(|value| !value.trim().is_empty())
+@@ -687,6 +704,14 @@ impl ModelRequestControls {
+     pub fn context_management_for_model(
+         &self,
+         model: Option<&crate::openai_models::ModelInfo>,
++    ) -> Option<Vec<serde_json::Value>> {
++        self.context_management_for_model_with_default(model, true)
++    }
++
++    pub fn context_management_for_model_with_default(
++        &self,
++        model: Option<&crate::openai_models::ModelInfo>,
++        allow_sdk_default: bool,
+     ) -> Option<Vec<serde_json::Value>> {
+         if let Some(context_management) = &self.context_management {
+             return context_management.clone();
+@@ -694,10 +719,20 @@ impl ModelRequestControls {
+         let context_window = model
+             .filter(|info| !info.used_fallback_model_metadata)
+             .and_then(crate::openai_models::ModelInfo::resolved_context_window);
+-        let threshold = self
+-            .provider_compaction
+-            .flatten()?
+-            .threshold(context_window);
++        let policy = match self.provider_compaction {
++            Some(policy) => policy?,
++            None if allow_sdk_default
++                && self.sdk_default_provider_compaction == Some(true)
++                && !model.is_some_and(|info| info.use_responses_lite) =>
++            {
++                ProviderCompactionPolicy::Dynamic {
++                    threshold_ratio: 0.9,
++                    fallback_threshold: 240_000,
++                }
++            }
++            None => return None,
++        };
++        let threshold = policy.threshold(context_window);
+         Some(vec![serde_json::json!({
+             "type": "compaction",
+             "compact_threshold": threshold,
+@@ -808,6 +843,61 @@ mod sdk_extension_tests {
+         assert_eq!(controls.context_management_for_model(None), None);
+     }
+
++    #[test]
++    fn sdk_default_compaction_preserves_explicit_disables_and_durable_shape() {
++        let controls: ModelRequestControls = serde_json::from_value(json!({
++            "sdk_default_provider_compaction": true,
++        }))
++        .unwrap();
++        assert!(!controls.is_empty());
++        assert!(!controls.has_wire_values());
++        assert_eq!(
++            controls.context_management_for_model(None),
++            Some(vec![
++                json!({"type":"compaction", "compact_threshold":240000})
++            ])
++        );
++        for patch in [
++            json!({"provider_compaction":null}),
++            json!({"context_management":null}),
++            json!({"context_management":[]}),
++        ] {
++            let mut selected = controls.clone();
++            selected.apply_patch(&serde_json::from_value(patch).unwrap());
++            let context = selected.context_management_for_model(None);
++            assert!(context.is_none() || context == Some(vec![]));
++        }
++        assert_eq!(
++            controls.context_management_for_model_with_default(None, false),
++            None
++        );
++        let mut explicit = controls.clone();
++        explicit.apply_patch(
++            &serde_json::from_value(json!({
++                "provider_compaction": {"type":"static", "threshold":1024},
++            }))
++            .unwrap(),
++        );
++        assert_eq!(
++            explicit.context_management_for_model_with_default(None, false),
++            Some(vec![json!({"type":"compaction", "compact_threshold":1024})]),
++        );
++        let mut disabled = controls.clone();
++        disabled.apply_patch(&ModelRequestControls {
++            sdk_default_provider_compaction: Some(false),
++            ..Default::default()
++        });
++        assert_eq!(disabled.context_management_for_model(None), None);
++        let persisted = controls.for_persistence();
++        assert!(persisted.is_empty());
++        assert!(
++            serde_json::to_value(persisted)
++                .unwrap()
++                .get("sdk_default_provider_compaction")
++                .is_none()
++        );
++    }
++
+     #[test]
+     fn extended_controls_preserve_omission_clears_and_values() {
+         let mut controls: ModelRequestControls = serde_json::from_value(json!({
+@@ -993,5 +1083,4 @@ mod explicit_prompt_cache_tests {
+         );
+         assert_eq!(controls.output_schema_strict, Some(true));
+     }
+-
+ }

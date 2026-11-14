@@ -1832,6 +1832,9 @@ impl EngineState {
                 .context("Codex shutdown incomplete: saved login refresh timed out")?;
         }
         self.interception.check_code_import_cleanup()?;
+        if let Some(store) = self.store.as_any().downcast_ref::<LocalThreadStore>() {
+            store.close_history_pool().await;
+        }
         if let Some(goals) = &self.goals {
             goals.state_db.close().await;
         } else if let Some(store) = self.store.as_any().downcast_ref::<LocalThreadStore>()

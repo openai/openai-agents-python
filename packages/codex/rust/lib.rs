@@ -746,6 +746,13 @@ impl NativeThread {
         Ok(true)
     }
 
+    fn _request_text_observation(&self) -> PyResult<()> {
+        if let Some(control) = self.native_interception()? {
+            control.text_demand.cancel();
+        }
+        Ok(())
+    }
+
     fn _revoke_native_interception(&self) -> PyResult<()> {
         if let Some(control) = self.native_interception()? {
             control.revoke();

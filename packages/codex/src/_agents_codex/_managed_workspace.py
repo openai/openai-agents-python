@@ -110,6 +110,7 @@ def _capture_retired_workspace(conversation: str, workspace: str) -> ManagedWork
 
 _WORKSPACE_INSTRUCTIONS_ATTRIBUTE = "_sdk_workspace_instructions"
 _SANDBOX_CAPABILITIES_ATTRIBUTE = "_sdk_sandbox_capabilities"
+_SANDBOX_DEFAULT_COMPACTION_ATTRIBUTE = "_sdk_sandbox_default_compaction"
 
 
 class _ManagedWorkspaceSource(AbstractAsyncContextManager["Environment[Any]"]):

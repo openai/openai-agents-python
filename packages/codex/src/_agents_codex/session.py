@@ -123,6 +123,7 @@ from ._lifecycle import (
 from ._managed_tool_stream import _ManagedToolPrefix, _ManagedToolStream
 from ._managed_workspace import (
     _SANDBOX_CAPABILITIES_ATTRIBUTE,
+    _SANDBOX_DEFAULT_COMPACTION_ATTRIBUTE,
     ManagedWorkspaceCheckpoint,
     _capture_retired_workspace,
     _ManagedWorkspaceSource,
@@ -2989,10 +2990,28 @@ def _capture_profile_runtimes(
     return captured, roster
 
 
+def _workspace_default_compaction(
+    environment: Environment[Any] | None,
+    agent: Agent[Any, Any],
+    *,
+    native_responses: bool,
+    inherited_provider: NativeProvider | None = None,
+) -> bool:
+    provider = agent.provider if agent.provider is not None else inherited_provider
+    return (
+        native_responses
+        and agent.realtime is None
+        and (provider is None or provider.model_backend is None)
+        and getattr(environment, _SANDBOX_DEFAULT_COMPACTION_ATTRIBUTE, False) is True
+    )
+
+
 def _complete_profile_mcp(
     profiles: tuple[_AgentProfile, ...],
     roster: list[dict[str, Any]],
     executor: Environment[Any] | None,
+    *,
+    native_responses: bool,
 ) -> None:
     graph_environments = any(profile.declaration.environment is not None for profile in profiles)
     for profile, row in zip(profiles, roster, strict=True):
@@ -3018,6 +3037,15 @@ def _complete_profile_mcp(
             if profile is not profiles[0] and declaration.environment is not None:
                 assert selected is not None
                 row["environment"] = selected._to_native()
+        if executor is not None or graph_environments:
+            row["model"]["request_controls"]["sdk_default_provider_compaction"] = (
+                _workspace_default_compaction(
+                    selected if isinstance(selected, Environment) else None,
+                    declaration,
+                    native_responses=native_responses,
+                    inherited_provider=profiles[0].declaration.provider,
+                )
+            )
         _, servers, _ = _split_tools(declaration.tools, declaration.programmatic_tool_calling)
         row["mcp_servers"] = json.loads(
             _mcp_config(
@@ -4007,6 +4035,7 @@ def _current_attempt_controls(
         "attempt_timeout_ms": profile.get("attempt_timeout_ms", root.get("attempt_timeout_ms")),
         # The active declaration owns routing, including clearing it.
         "request_transport": profile.get("request_transport"),
+        "sdk_default_provider_compaction": profile.get("sdk_default_provider_compaction", False),
     }
 
 
@@ -5045,7 +5074,24 @@ class Session(Generic[ContextT, OutputT]):
                 for profile in profiles
             ):
                 raise TypeError("Distinct Agent executors require captured sandbox source routing")
-            _complete_profile_mcp(profiles, profile_roster, executor)
+            _complete_profile_mcp(
+                profiles, profile_roster, executor, native_responses=codex_login is None
+            )
+            if executor is not None or profile_roster:
+                if restored_profile is not None:
+                    selected_row = next(
+                        row for row in profile_roster if row["id"] == restored_profile.profile.id
+                    )
+                    default_compaction = selected_row["model"]["request_controls"].get(
+                        "sdk_default_provider_compaction", False
+                    )
+                else:
+                    default_compaction = _workspace_default_compaction(
+                        executor, agent, native_responses=codex_login is None
+                    )
+                settings.setdefault("request_controls", {})["sdk_default_provider_compaction"] = (
+                    default_compaction
+                )
             has_host_mcp = any(
                 isinstance(server, StdioMCP) and server.location == "host"
                 for declarations in (
@@ -6104,6 +6150,7 @@ class Session(Generic[ContextT, OutputT]):
         self._engine = engine
         self._native = thread
         self._provider_history: ProviderHistory | None = None
+        self._text_observation_requested = False
         # Issued snapshots belong to this Session's current native thread.
         self._model_context_snapshots: weakref.WeakKeyDictionary[ModelContextSnapshot, str] = (
             weakref.WeakKeyDictionary()
@@ -6218,6 +6265,9 @@ class Session(Generic[ContextT, OutputT]):
         self._request_observation_routes: weakref.WeakValueDictionary[str, _Submission] = (
             weakref.WeakValueDictionary()
         )
+        self._observations._text_demand = weakref.WeakMethod(self._request_text_observation)
+        if observation_retention == "all" or include_raw_provider_events:
+            self._request_text_observation()
         self._observations._callback_check = weakref.WeakMethod(self._check_callback_operation)
         self._realtime: RealtimeSession | None = None
         # The sole native reader owns questions during opening publication.
@@ -6438,6 +6488,9 @@ class Session(Generic[ContextT, OutputT]):
                 "request_controls": {
                     "attempt_timeout_ms": controls.get("attempt_timeout_ms"),
                     "request_transport": controls.get("request_transport"),
+                    "sdk_default_provider_compaction": controls.get(
+                        "sdk_default_provider_compaction", False
+                    ),
                     "retry": None,
                 },
             }
@@ -7549,6 +7602,13 @@ class Session(Generic[ContextT, OutputT]):
         with _private_task(enqueue()) as (task, outcome):
             state.add_callback(task)
             await _join(task, outcome=outcome)
+
+    def _request_text_observation(self) -> None:
+        self._text_observation_requested = True
+        if not self._closed:
+            self._native._request_text_observation()
+        if self._repair_session is not None:
+            self._repair_session._request_text_observation()
 
     def _check_open(self) -> None:
         self._check_loop()
@@ -9924,6 +9984,8 @@ class Session(Generic[ContextT, OutputT]):
             )
             if self._model_backend is not None:
                 thread._enable_model_producer(True)
+            if self._text_observation_requested:
+                thread._request_text_observation()
             await change.validate_candidate(thread)
             if self._profiles:
                 graph = options["_agent_profiles"]
@@ -9972,6 +10034,8 @@ class Session(Generic[ContextT, OutputT]):
             change.release()
             await self._engine.close()
             self._engine = engine
+            if self._text_observation_requested:
+                thread._request_text_observation()
             self._native = thread
             if publish_profile_catalogs is not None:
                 publish_profile_catalogs()
@@ -13322,6 +13386,8 @@ class Session(Generic[ContextT, OutputT]):
         )
         assert isinstance(repair, Session)
         self._repair_session = repair
+        if self._text_observation_requested:
+            repair._request_text_observation()
         repair._trace_context = state.tracing.context if state.tracing is not None else None
         repair._context_transform_purpose = "output_repair"
         repair._observations.repair_parent = (self._observations, handle.submission_id)
@@ -18906,6 +18972,7 @@ class Session(Generic[ContextT, OutputT]):
     async def items(self, *, subagent_id: str | None = None) -> AsyncIterator[SessionItem]:
         """Iterate a snapshot of recorded items, including inherited child history."""
         self._check_open()
+        self._request_text_observation()
         history = json.loads(await self._native.read_thread_history(subagent_id))
         turns, items = project_history(history, self.id, subagent_id)
         if subagent_id is None:
@@ -18960,6 +19027,7 @@ class Session(Generic[ContextT, OutputT]):
     async def turns(self, *, subagent_id: str | None = None) -> AsyncIterator[RecordedTurn]:
         """Iterate a snapshot of recorded turns, including restored terminal outcomes."""
         self._check_open()
+        self._request_text_observation()
         history = json.loads(await self._native.read_thread_history(subagent_id))
         turns, _ = project_history(history, self.id, subagent_id)
         if subagent_id is None:

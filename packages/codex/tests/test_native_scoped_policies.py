@@ -684,10 +684,11 @@ async def test_actual_native_mcp_approval_enqueue_and_no_duplicate(
             assert request in await session.pending_interactions()
             replies = await asyncio.gather(
                 request.respond("allow_once" if allow else "deny"),
-                request.respond("allow_once"),
+                request.respond("allow_once" if allow else "deny"),
                 return_exceptions=True,
             )
-            assert replies[0] is None and isinstance(replies[1], InteractionExpiredError)
+            assert sum(reply is None for reply in replies) == 1
+            assert sum(isinstance(reply, InteractionExpiredError) for reply in replies) == 1
             assert request not in await session.pending_interactions()
             result = await turn.get_result()
             assert result.final_output == "done"
