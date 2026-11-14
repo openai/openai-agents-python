@@ -44,6 +44,10 @@ async def child(mode: str, url: str, path: Path, variant: str = "current") -> No
         raise
     assert process.returncode == 0, output.decode()
 
+    # Windows may reuse a PID after a subprocess has exited.
+    receipt = json.loads((path / f"{mode}-{variant}.receipt.json").read_text())
+    assert receipt == {"pid": process.pid, "factory_calls": int(mode == "write")}
+
 
 async def test_explicit_enrollment_restores_current_owner_without_factory_replay(
     responses, tmp_path
@@ -74,8 +78,6 @@ async def test_explicit_enrollment_restores_current_owner_without_factory_replay
         {"owner": "read", "value": "first"},
         {"owner": "again", "value": "second"},
     ]
-    receipts = [json.loads(p.read_text()) for p in tmp_path.glob("*.receipt.json")]
-    assert len(receipts) == 6 and len({receipt["pid"] for receipt in receipts}) == 6
 
 
 async def test_enrollment_refuses_opening_name_collision_before_capture(responses, tmp_path):
