@@ -898,7 +898,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1]
+        shard: [0, 1, 2, 3]
     env:
       OPENAI_API_KEY: fake-for-tests
       PYTEST_ADDOPTS: "-rA"
@@ -967,7 +967,7 @@ jobs:
           MACOS_TEST_SHARD: ${{ matrix.shard }}
         shell: bash
         run: |
-          SDK_TEST_SHARD_INDEX="$MACOS_TEST_SHARD" SDK_TEST_SHARD_COUNT=2 make tests-parallel
+          SDK_TEST_SHARD_INDEX="$MACOS_TEST_SHARD" SDK_TEST_SHARD_COUNT=4 make tests-parallel
           if [[ "$MACOS_TEST_SHARD" == 0 ]]; then
             make tests-serial
           fi

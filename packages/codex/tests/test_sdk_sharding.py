@@ -26,8 +26,8 @@ def _collect(nodes: list[_Node]) -> tuple[list[_Node], list[_Node]]:
     return selected, deselected
 
 
-def test_shards_partition_parallel_nodes_and_retain_serial_nodes(monkeypatch) -> None:
-    count = 2
+@pytest.mark.parametrize("count", [2, 4])
+def test_shards_partition_parallel_nodes_and_retain_serial_nodes(monkeypatch, count: int) -> None:
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     parallel = [_Node(f"test_example.py::test_case[{i}]") for i in range(80)]
     serial = [_Node(f"test_example.py::test_serial[{i}]", serial=True) for i in range(5)]
@@ -73,10 +73,11 @@ def test_invalid_shard_configuration_fails_before_collection(monkeypatch, index,
         _collect([_Node("example::case")])
 
 
-def test_actual_collection_hook_applies_the_partition(monkeypatch) -> None:
+@pytest.mark.parametrize("count", [2, 4])
+def test_actual_collection_hook_applies_the_partition(monkeypatch, count: int) -> None:
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("SDK_TEST_SHARD_INDEX", "0")
-    monkeypatch.setenv("SDK_TEST_SHARD_COUNT", "2")
+    monkeypatch.setenv("SDK_TEST_SHARD_COUNT", str(count))
     nodes = [_Node(f"example::case[{i}]") for i in range(80)]
     expected, _ = _collect(nodes)
     assert 0 < len(expected) < len(nodes)
@@ -93,7 +94,8 @@ def test_macos_shards_preserve_qualification_serial_scope_and_required_check() -
     source, gate = jobs["native-macos-sandbox-shards"], jobs["native-macos-sandbox"]
     assert source["needs"] == "native-macos"
     assert source["if"] == "${{ !inputs.native_only }}"
-    assert source["strategy"] == {"fail-fast": "false", "matrix": {"shard": ["0", "1"]}}
+    shards = ["0", "1", "2", "3"]
+    assert source["strategy"] == {"fail-fast": "false", "matrix": {"shard": shards}}
     assert "'macos-15'" in source["runs-on"]
     assert gate["needs"] == ["native-macos", "native-macos-sandbox-shards"]
     assert "name" not in gate
@@ -109,7 +111,8 @@ def test_macos_shards_preserve_qualification_serial_scope_and_required_check() -
     assert phase["env"]["MACOS_TEST_SHARD"] == "${{ matrix.shard }}"
     assert not any(key.startswith("SDK_TEST_SHARD") for key in source["env"] | phase["env"])
     assert phase["run"] == (
-        'SDK_TEST_SHARD_INDEX="$MACOS_TEST_SHARD" SDK_TEST_SHARD_COUNT=2 make tests-parallel\n'
+        'SDK_TEST_SHARD_INDEX="$MACOS_TEST_SHARD" '
+        f"SDK_TEST_SHARD_COUNT={len(shards)} make tests-parallel\n"
         'if [[ "$MACOS_TEST_SHARD" == 0 ]]; then\n'
         "  make tests-serial\n"
         "fi\n"
