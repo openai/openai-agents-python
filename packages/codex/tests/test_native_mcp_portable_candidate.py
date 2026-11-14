@@ -44,7 +44,17 @@ async def approval(turn: Any) -> ApprovalRequest:
     return request
 
 
+async def wait_for_candidate_boundary(source: Session[Any, Any]) -> None:
+    # The approval can arrive before Core records the completed model response.
+    status = await source.checkpoint_status(kind="manual_wait")
+    while status.status == "not_ready":
+        await asyncio.sleep(0.01)
+        status = await source.checkpoint_status(kind="manual_wait")
+    assert status.status == "ready", status.reasons
+
+
 async def candidate_capture(source: Session[Any, Any]) -> SessionState:
+    await wait_for_candidate_boundary(source)
     return SessionState.from_json((await source.suspend()).to_json())
 
 
@@ -382,6 +392,7 @@ async def test_portable_ordinary_mcp_candidate_peer_prefix_has_no_capture_author
             async with agent.session() as source:
                 turn = await source.submit("Read")
                 original = await approval(turn)
+                await wait_for_candidate_boundary(source)
                 assert await source._native._manual_ready()
                 assert peer.calls == []
                 await original.respond("allow_once")
