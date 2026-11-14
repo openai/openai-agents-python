@@ -16436,9 +16436,7 @@ class Session(Generic[ContextT, OutputT]):
                 if formatter is None:
                     return None
                 try:
-                    value = formatter(context)
-                    if inspect.isawaitable(value):
-                        value = await value
+                    value = await _call_callback(formatter, active, context)
                 except Exception:
                     if not active():
                         raise

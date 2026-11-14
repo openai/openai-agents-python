@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import pytest
 
@@ -66,6 +67,30 @@ async def test_native_unknown_tool_formatter(responses, mode):
         assert output == ""
     else:
         assert output == seen[0].default_message
+
+
+async def test_native_unknown_tool_sync_formatter_can_wait_for_the_session_loop(responses):
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    responses.respond(function_call("missing", {}, "sync-formatter"))
+    responses.respond(assistant_output("continued"))
+
+    async def format_on_loop():
+        assert threading.get_ident() == loop_thread
+        return "missing tool explained"
+
+    def format_error(_error):
+        assert threading.get_ident() != loop_thread
+        return asyncio.run_coroutine_threadsafe(format_on_loop(), loop).result(timeout=2)
+
+    agent = Agent(instructions="Choose an allowed tool.", provider=provider(responses))
+    result = await agent.run(
+        "begin",
+        tool_error_formatter=format_error,
+        tool_not_found_behavior="return_error_to_model",
+    )
+    assert result.final_output == "continued"
+    assert tool_output(responses.requests[1], "sync-formatter") == "missing tool explained"
 
 
 async def test_native_unknown_tool_formatter_cancellation_joins(responses):
