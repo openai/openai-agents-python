@@ -21,6 +21,7 @@ from agents import Agent, NativeError, NativeProvider, TurnStoppedError
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output
+from tests.test_buffered_responses import json_peer, json_response
 from tests.test_native_provider_websockets import WebSocketPeer
 from tests.test_sdk_session_transport import disconnected, http_peer
 
@@ -160,12 +161,9 @@ async def https_peer(
     issuer: str = "A",
     *,
     finite_http_response: bool = False,
-    alpn_protocols: tuple[str, ...] | None = None,
 ) -> AsyncIterator[HTTPSPeer]:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(files[f"server-{issuer}.pem"], files[f"server-{issuer}.key"])
-    if alpn_protocols is not None:
-        context.set_alpn_protocols(list(alpn_protocols))
     peer = HTTPSPeer(tls_context=context, finite_http_response=finite_http_response)
     app = web.Application()
     app.router.add_post("/v1/responses", peer.handle)
@@ -663,9 +661,12 @@ async def test_restored_buffered_session_keeps_http1_when_server_offers_http2(
     tls_files: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("CODEX_CA_CERTIFICATE", str(tls_files["ca-A.pem"]))
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(tls_files["server-A.pem"], tls_files["server-A.key"])
+    context.set_alpn_protocols(["h2", "http/1.1"])
     async with (
         timeout(40),
-        https_peer(tls_files, finite_http_response=True, alpn_protocols=("h2", "http/1.1")) as peer,
+        json_peer(ssl_context=context) as peer,
         NativeProvider(
             base_url=peer.url,
             api_key="synthetic-buffered-restore-key",
@@ -676,13 +677,13 @@ async def test_restored_buffered_session_keeps_http1_when_server_offers_http2(
         ) as provider,
     ):
         agent = Agent(model="gpt-5.2", instructions="Keep checkpoint history.", provider=provider)
-        peer.respond(assistant_output("before restore"))
+        peer.json_replies.append(json_response("before restore", "resp_source", "msg_source"))
         async with agent.session() as source:
             assert (await (await source.submit("original input")).get_result()).final_output == (
                 "before restore"
             )
             state = SessionState.from_json((await source.save_state()).to_json())
-        peer.respond(assistant_output("after restore"))
+        peer.json_replies.append(json_response("after restore", "resp_restored", "msg_restored"))
         async with agent.session(state=state) as restored:
             assert restored.id == state.source_session_id
             assert (await (await restored.submit("continued input")).get_result()).final_output == (

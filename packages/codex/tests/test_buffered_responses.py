@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
+from ssl import SSLContext
 from typing import Any, Literal
 
 import pytest
@@ -85,11 +86,13 @@ class JSONPeer(HTTPPeer):
 
 
 @asynccontextmanager
-async def json_peer() -> AsyncIterator[JSONPeer]:
+async def json_peer(*, ssl_context: SSLContext | None = None) -> AsyncIterator[JSONPeer]:
     peer = JSONPeer()
     app = web.Application()
     app.router.add_post("/v1/responses", peer.handle)
-    async with TestServer(app) as server:
+    server = TestServer(app)
+    await server.start_server(ssl=ssl_context)
+    async with server:
         peer.url = str(server.make_url("/v1"))
         yield peer
 
