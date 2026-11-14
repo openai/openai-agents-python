@@ -159,6 +159,7 @@ if TYPE_CHECKING:
     from .model_context import (
         HostedPromptReference as HostedPromptReference,
         HostedPromptSource as HostedPromptSource,
+        ModelCompletionContext as ModelCompletionContext,
         ModelContextSnapshot as ModelContextSnapshot,
         ModelRequestContext as ModelRequestContext,
     )
@@ -367,6 +368,7 @@ _MODULES = {
     "FinishToolBatch": ".completion",
     "ToolBatchCompletionContext": ".completion",
     "ToolBatchResult": ".completion",
+    "ModelCompletionContext": ".model_context",
     "ModelContextSnapshot": ".model_context",
     "ModelRequestContext": ".model_context",
     "HostedPromptReference": ".model_context",

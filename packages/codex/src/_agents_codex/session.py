@@ -252,7 +252,7 @@ from .mcp import (
     _tool_names as _tool_names,
     _transform_and_extract_result as _transform_and_extract_result,
 )
-from .model_context import ModelContextSnapshot, ModelRequestContext
+from .model_context import ModelCompletionContext, ModelContextSnapshot, ModelRequestContext
 from .models import ProviderHistory, _capture_model_override, _capture_provider_history
 from .native_agents import (
     _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
@@ -5411,6 +5411,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._decisions_provider = agent.decisions
                 session._profiles = profile_runtimes
                 session._agent_profile_fingerprint = profile_fingerprint
+                session._configure_model_completion(thread)
                 session._bindings = agent.tools
                 session._catalog_bindings[(None, catalog.generation)] = agent.tools
                 session._executor = executor
@@ -9733,6 +9734,7 @@ class Session(Generic[ContextT, OutputT]):
                     candidate=thread,
                 )
                 _check_mcp_receipt(receipt, self._mcp_tools, allowed_mcp, self._catalog.generation)
+            self._configure_model_completion(thread)
             if self._include_raw_provider_events:
                 thread._enable_raw_provider_events()
             # From this point, retirement cannot roll back. Keep the old reader
@@ -13039,6 +13041,7 @@ class Session(Generic[ContextT, OutputT]):
             model=(source_message or {}).get("model") or captured["model"],
             model_settings=settings,
             transform_context=source_agent.transform_context,
+            after_model=source_agent.after_model,
             before_compact=source_agent.before_compact,
             compaction=source_agent.compaction,
         )
@@ -14647,6 +14650,46 @@ class Session(Generic[ContextT, OutputT]):
                 with suppress(RuntimeError):
                     reject()
 
+    def _configure_model_completion(self, thread: Any) -> None:
+        profiles = [
+            profile_id
+            for profile_id, runtime in self._profiles.items()
+            if runtime.profile.declaration.after_model is not None
+        ]
+        root = not self._profiles and self._agent.after_model is not None
+        if root or profiles:
+            thread._configure_model_completion(root, profiles)
+
+    async def _after_model(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        def prepare(_active: Callable[[], bool]) -> tuple[Callable[..., Any], object]:
+            callback = self._agent_for_message(message).after_model
+            if callback is None:
+                raise NativeError("Missing exact captured model completion callback")
+            return callback, ModelCompletionContext(
+                context=self._context,
+                items=tuple(message["items"]),
+                usage=message["usage"],
+                session_id=self.id,
+                turn_id=message["turn_id"],
+                subagent_id=message.get("thread") if message.get("instance") else None,
+                response_id=message["response_id"],
+                model=message["model"],
+            )
+
+        def reply(value: Any) -> None:
+            if value is not None:
+                raise TypeError("after_model must return None")
+            self._native._reply_model_completion(
+                message["step_id"], message["thread"], message["instance"]
+            )
+
+        def reject() -> None:
+            self._native._reply_model_completion(
+                message["step_id"], message["thread"], message["instance"], error=True
+            )
+
+        await self._run_owned_context_callback(state, message, prepare, reply, reject)
+
     async def _admit_provider_response_span(
         self, state: _CallbackState, message: dict[str, Any]
     ) -> None:
@@ -16026,6 +16069,7 @@ class Session(Generic[ContextT, OutputT]):
         preparation_callbacks = {
             "_sdk_select_step": self._select_step,
             "_sdk_provider_response_span": self._admit_provider_response_span,
+            "_sdk_model_completion": self._after_model,
             "_sdk_handoff_input": self._prepare_handoff_input,
             "_sdk_transform_context": self._transform_context,
             "_sdk_before_compact": self._before_compact,

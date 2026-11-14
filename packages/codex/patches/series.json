@@ -1255,7 +1255,11 @@
     {
       "path": "sdk-managed-mcp-schema-budget.patch",
       "sha256": "49db34ae509b0a24d157a88b9882c5e227a497529d1af71573d4e11602cd29bf"
+    },
+    {
+      "path": "sdk-model-completion-admission.patch",
+      "sha256": "eb4e12279af139172a09a9491dffb76cc9893c42a7e1d993edca505be90161de"
     }
   ],
-  "result_tree": "b4e1874f83184b724c69bdf9ddcba31282208985"
+  "result_tree": "1b529b5ddd5e18646e9cd02fb72b5a0daae1f1c8"
 }

@@ -76,7 +76,7 @@ from .history import _InputStoragePolicy
 from .hosted_mcp import HostedMCP
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage, _native_input, _response_content
-from .model_context import HostedPromptSource, _ContextTransform
+from .model_context import HostedPromptSource, _AfterModel, _ContextTransform
 from .models import (
     ModelProvider,
     NativeModel,
@@ -961,6 +961,7 @@ class Agent(Generic[ContextT, OutputT]):
     ``tool_name_collision_policy="warn"`` keeps the last eager bare function or
     handoff with a given name. A handoff takes precedence over a function.
 
+    ``after_model`` awaits the accepted provider response before direct tool dispatch.
     ``transform_context`` runs before each model request, including children,
     output repair, and model-based compaction. Return replacement input items
     or None to keep the original input. The callback does not edit saved history.
@@ -1005,6 +1006,7 @@ class Agent(Generic[ContextT, OutputT]):
     output_type: OutputSpec[OutputT] | None
     programmatic_tool_calling: bool
     transform_context: _ContextTransform[ContextT] | None
+    after_model: _AfterModel[ContextT] | None
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
     decisions: DecisionProvider | None
@@ -1046,6 +1048,7 @@ class Agent(Generic[ContextT, OutputT]):
             | None = None,
             output_type: None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
+            after_model: _AfterModel[ContextT] | None = None,
             prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1070,6 +1073,7 @@ class Agent(Generic[ContextT, OutputT]):
             ]
             | None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
+            after_model: _AfterModel[ContextT] | None = None,
             prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1110,6 +1114,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1147,6 +1152,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1180,6 +1186,7 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1215,6 +1222,7 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1247,6 +1255,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: OutputSpec[OutputT] | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1273,6 +1282,8 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("programmatic_tool_calling must be a bool")
         if prepare_handoff_input is not None and not callable(prepare_handoff_input):
             raise TypeError("prepare_handoff_input must be callable or None")
+        if after_model is not None and not callable(after_model):
+            raise TypeError("after_model must be callable or None")
         if transform_context is not None and not callable(transform_context):
             raise TypeError("transform_context must be callable or None")
         if before_compact is not None and not callable(before_compact):
@@ -1331,6 +1342,7 @@ class Agent(Generic[ContextT, OutputT]):
             raise ValueError("tool_name_collision_policy must be error or warn")
         object.__setattr__(self, "tool_name_collision_policy", tool_name_collision_policy)
         object.__setattr__(self, "transform_context", transform_context)
+        object.__setattr__(self, "after_model", after_model)
         object.__setattr__(self, "prepare_handoff_input", prepare_handoff_input)
         object.__setattr__(self, "before_compact", before_compact)
         object.__setattr__(self, "before_complete", before_complete)
@@ -2992,6 +3004,7 @@ def _private_text_run_eligible(
         and context is None
         and not agent.programmatic_tool_calling
         and agent.transform_context is None
+        and agent.after_model is None
         and agent.before_compact is None
         and agent.compaction is None
         and agent.before_complete is None

@@ -2557,6 +2557,35 @@ impl TurnLifecycleContributor for Boundary {
 }
 
 impl ModelRequestContributor for Boundary {
+    fn observes_completed_model_response(
+        &self,
+        admission: &dyn codex_extension_api::ModelToolAdmission,
+    ) -> bool {
+        admission
+            .turn_store()
+            .get::<Arc<crate::python_tools::TurnAdmission>>()
+            .and_then(|owner| owner.callback_tools())
+            .is_some_and(|tools| tools.observes_completed_model_response(admission))
+    }
+
+    fn observe_completed_model_response<'a>(
+        &'a self,
+        input: codex_extension_api::SdkCompletedModelResponse<'a>,
+    ) -> futures_util::future::BoxFuture<'a, std::result::Result<(), String>> {
+        let tools = input
+            .admission
+            .turn_store()
+            .get::<Arc<crate::python_tools::TurnAdmission>>()
+            .and_then(|owner| owner.callback_tools());
+        Box::pin(async move {
+            let tools = tools.ok_or_else(|| "Missing SDK model completion owner".to_owned())?;
+            tools
+                .observe_completed_model_response(input)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
     fn admit_provider_response_span(
         &self,
         input: codex_extension_api::SdkProviderResponseSpanInput,

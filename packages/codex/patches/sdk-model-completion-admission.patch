@@ -1,0 +1,278 @@
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 93d09dab..0e3b0219 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -14374,6 +14374,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+         turn_store: Arc::new(codex_extension_api::ExtensionData::new(tc.sub_id.clone())),
+         tool_runtime: test_tool_runtime(Arc::clone(&sess), Arc::clone(&tc)),
+         cancellation_token: CancellationToken::new(),
++        model_completion_gate: None,
+     };
+ 
+     let output = handle_output_item_done(
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 8ae16617..ecc42764 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -5168,6 +5168,29 @@ async fn try_run_sampling_request(
+     let sample_cancel = cancellation_token.child_token();
+     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
+     let tool_cancellation = sample_cancel.child_token();
++    let observers: Vec<_> = prompt
++        .tool_admission
++        .as_ref()
++        .map(|admission| {
++            sess.services.extensions.model_request_contributors().iter()
++                .filter(|observer| observer.observes_completed_model_response(admission.as_ref()))
++                .cloned()
++                .collect()
++        })
++        .unwrap_or_default();
++    if !observers.is_empty()
++        && (step_context.settings.model_info.use_responses_lite
++            || step_context.tool_router.has_provider_programmatic_tool())
++    {
++        return Err(CodexErr::InvalidRequest(
++            "Model completion hooks require a provider response that can finish before local tool execution".into(),
++        ));
++    }
++    // Without a configured observer, preserve native streaming tool dispatch.
++    let completion_gate = (!observers.is_empty()).then(CancellationToken::new);
++    let mut completion_hook_accepted = false;
++    let mut completed_items = Vec::new();
++    let mut completed_items_bytes = 0;
+     let mut needs_follow_up = false;
+     let mut last_agent_message: Option<String> = None;
+     let mut active_item: Option<TurnItem> = None;
+@@ -5280,7 +5303,7 @@ async fn try_run_sampling_request(
+         // Admission is local to the provider request; nothing here executes its program.
+         let mut program_calls = HashMap::new();
+         let mut retained_program_calls = None;
+-        loop {
++        'provider: loop {
+             let handle_responses = trace_span!(
+                 parent: &receiving_span,
+                 "handle_responses",
+@@ -5492,6 +5515,18 @@ async fn try_run_sampling_request(
+                     {
+                         sess.send_event(&turn_context, event).await;
+                     }
++                    if completion_gate.is_some() {
++                        let item_bytes = serde_json::to_vec(&item)
++                            .map_err(|error| CodexErr::Fatal(error.to_string()))?
++                            .len();
++                        completed_items_bytes += item_bytes;
++                        if completed_items_bytes > 8 * 1024 * 1024 {
++                            break 'provider Err(CodexErr::InvalidRequest(
++                                "Model completion hook response exceeds its byte limit".into(),
++                            ));
++                        }
++                        completed_items.push(item.clone());
++                    }
+                     let previously_active_item = active_item.take();
+                     let previously_streamed_item = if active_item_is_streaming_to_client {
+                         previously_active_item
+@@ -5534,6 +5569,7 @@ async fn try_run_sampling_request(
+                         turn_store: Arc::clone(&turn_store),
+                         tool_runtime: tool_runtime.clone(),
+                         cancellation_token: tool_cancellation.child_token(),
++                        model_completion_gate: completion_gate.clone(),
+                     };
+ 
+                     let preempt_for_mailbox_mail = match &item {
+@@ -5827,6 +5863,31 @@ async fn try_run_sampling_request(
+                     usage_metadata,
+                     end_turn,
+                 } => {
++                    if completion_gate.is_some() {
++                        let admission = prompt.tool_admission.as_ref().expect("configured response observer");
++                        for observer in &observers {
++                            let result = observer.observe_completed_model_response(
++                                codex_extension_api::SdkCompletedModelResponse {
++                                    admission: admission.clone(),
++                                    response_id: &response_id,
++                                    model: &step_context.settings.model_info.slug,
++                                    items: &completed_items,
++                                    usage: token_usage.as_ref(),
++                                    cancellation: sample_cancel.clone(),
++                                },
++                            )
++                            .await;
++                            if sample_cancel.is_cancelled() {
++                                tool_cancellation.cancel();
++                                break 'provider Err(CodexErr::TurnAborted);
++                            }
++                            if let Err(error) = result {
++                                tool_cancellation.cancel();
++                                break 'provider Err(CodexErr::Fatal(error));
++                            }
++                        }
++                        completion_hook_accepted = true;
++                    }
+                     // The provider has completed; tool and approval settlement below
+                     // belong to their existing operation owners.
+                     if let Some(span) = provider_response_span {
+@@ -6160,6 +6221,22 @@ async fn try_run_sampling_request(
+     } else {
+         Ok(())
+     };
++    if let Some(gate) = completion_gate {
++        if completion_hook_accepted
++            && outcome.is_ok()
++            && history_acceptance.is_ok()
++            && deadline_cleanup_errors.is_empty()
++            && !deadline.expired()
++            && !cancellation_token.is_cancelled()
++        {
++            gate.cancel();
++        } else {
++            // No gated handler has been constructed. Do not create a synthetic
++            // result or replace the failure that retired this response.
++            tool_cancellation.cancel();
++            in_flight = FuturesOrdered::new();
++        }
++    }
+     let mut tool_cleanup = if !in_flight.is_empty() {
+         let _tool_blocking_timing_guard = turn_context.turn_timing_state.begin_tool_blocking();
+         let _tool_blocking_span = trace_span!(
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 18089a98..eef6b96b 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -252,6 +252,7 @@ pub(crate) struct HandleOutputCtx {
+     pub turn_store: Arc<ExtensionData>,
+     pub tool_runtime: ToolCallRuntime,
+     pub cancellation_token: CancellationToken,
++    pub model_completion_gate: Option<CancellationToken>,
+ }
+ 
+ pub(crate) async fn apply_turn_item_contributors(
+@@ -557,6 +558,7 @@ pub(crate) async fn handle_output_item_done(
+                         cancellation_token,
+                         provider_agent_metadata,
+                         provider_programmatic_call,
++                        ctx.model_completion_gate.clone(),
+                     ),
+             );
+ 
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+index 5c5ad4ea..f2017460 100644
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -311,6 +311,7 @@ fn output_context(session: Arc<Session>, turn_context: Arc<TurnContext>) -> Hand
+         turn_store: Arc::new(ExtensionData::new(turn_context.sub_id.clone())),
+         tool_runtime,
+         cancellation_token: CancellationToken::new(),
++        model_completion_gate: None,
+     }
+ }
+ 
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 175b5a38..9559d358 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -226,6 +226,7 @@ impl ToolCallRuntime {
+             cancellation_token,
+             provider_agent_metadata,
+             None,
++            None,
+         )
+     }
+ 
+@@ -235,6 +236,7 @@ impl ToolCallRuntime {
+         cancellation_token: CancellationToken,
+         provider_agent_metadata: Option<serde_json::Value>,
+         provider_programmatic_call: Option<super::program_callers::ProgrammaticCallReceipt>,
++        response_gate: Option<CancellationToken>,
+     ) -> impl std::future::Future<Output = Result<DirectToolResult, CodexErr>> {
+         self.observe_requested_handoff(&call.tool_name, &call.call_id);
+         let ignored = self.ignores_handoff(&call.tool_name, &call.call_id);
+@@ -267,14 +269,34 @@ impl ToolCallRuntime {
+                 post_tool_use_payload: None,
+                 pending_exec: None,
+             })))
++        } else if let Some(gate) = response_gate {
++            Either::Right(Either::Left(async move {
++                tokio::select! {
++                    biased;
++                    _ = cancellation_token.cancelled() => {
++                        return Err(FunctionCallError::RespondToModel(
++                            "Tool call cancelled before model completion".to_owned(),
++                        ));
++                    }
++                    _ = gate.cancelled() => {}
++                }
++                self.handle_tool_call_with_source(
++                    step_context,
++                    call,
++                    source,
++                    cancellation_token,
++                    dispatch_call_state,
++                )
++                .await
++            }))
+         } else {
+-            Either::Right(self.handle_tool_call_with_source(
++            Either::Right(Either::Right(self.handle_tool_call_with_source(
+                 step_context,
+                 call,
+                 source,
+                 cancellation_token,
+                 dispatch_call_state,
+-            ))
++            )))
+         };
+         async move {
+             let result = future.await;
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index ed2fa458..2fd63342 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -173,6 +173,7 @@ pub use model_request::ModelToolAdmission;
+ pub use model_request::ProviderRequestAccounting;
+ pub use model_request::ProviderResponseAnchor;
+ pub use model_request::ResponseEvent;
++pub use model_request::SdkCompletedModelResponse;
+ pub use model_request::SdkProviderResponseSpanAdmission;
+ pub use model_request::SdkProviderResponseSpanInput;
+ pub use model_request::SelectedStagedInput;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 9cb94c11..3088a840 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -293,6 +293,16 @@ pub struct SdkProviderResponseSpanAdmission {
+     pub span_id: Option<String>,
+ }
+ 
++/// One accepted response of the currently admitted model attempt.
++pub struct SdkCompletedModelResponse<'a> {
++    pub admission: Arc<dyn ModelToolAdmission>,
++    pub response_id: &'a str,
++    pub model: &'a str,
++    pub items: &'a [ResponseItem],
++    pub usage: Option<&'a codex_protocol::protocol::TokenUsage>,
++    pub cancellation: tokio_util::sync::CancellationToken,
++}
++
+ /// Contributes request-scoped preparation, compaction, and response interception.
+ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+     /// Await SDK ID allocation on the host's own loop, never in an OTel subscriber.
+@@ -305,6 +315,18 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+         Box::pin(async { Ok(None) })
+     }
+ 
++    /// Captured host policy may await model completion before direct tool effects.
++    fn observes_completed_model_response(&self, _admission: &dyn ModelToolAdmission) -> bool {
++        false
++    }
++
++    fn observe_completed_model_response<'a>(
++        &'a self,
++        _input: SdkCompletedModelResponse<'a>,
++    ) -> BoxFuture<'a, Result<(), String>> {
++        Box::pin(async { Ok(()) })
++    }
++
+     /// Reliable native bookkeeping only, never an application callback or passive observer.
+     /// Hosts mirror the exact turn snapshot before enqueueing its live notification.
+     fn model_attempt(&self, _input: ModelAttemptInput) -> Result<(), String> {
