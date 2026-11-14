@@ -3204,6 +3204,26 @@ impl ThreadState {
         question.grant.cancel_url_completion().await
     }
 
+    // Callers retain the question gate and the live-choice lock first.
+    fn has_mcp_choice_capacity(
+        &self,
+        choices: &[(codex_core::LiveMcpApprovalPolicy, bool)],
+        policy: &codex_core::LiveMcpApprovalPolicy,
+    ) -> bool {
+        if choices.iter().any(|(known, _)| known.matches(policy)) {
+            return true;
+        }
+        let restored = self
+            .restored_mcp_approvals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        choices.len() < 4096
+            && (choices.len() + restored.len() < 4096
+                || policy
+                    .portable_declaration()
+                    .is_some_and(|key| restored.contains_key(&key)))
+    }
+
     pub async fn can_remember_mcp_question(&self, id: &str) -> anyhow::Result<bool> {
         let _question_gate = self.child_question_gate.lock().await;
         if !self.child_question_pending(id).await {
@@ -3225,7 +3245,7 @@ impl ThreadState {
             .remembered_mcp_approvals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Ok(choices.len() < 4096 || choices.iter().any(|(known, _)| known.matches(&policy)))
+        Ok(self.has_mcp_choice_capacity(&choices, &policy))
     }
 
     pub async fn remembered_mcp_decision(&self, id: &str) -> anyhow::Result<Option<(bool, bool)>> {
@@ -3266,12 +3286,21 @@ impl ThreadState {
     }
 
     pub(crate) fn export_mcp_approval_choices(&self) -> HashMap<String, bool> {
-        self.remembered_mcp_approvals
+        let live = self
+            .remembered_mcp_approvals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Pending declarations stay inert until a current native approval matches
+        // their portable key. Re-saving does not need to consume that approval.
+        let mut choices = self
+            .restored_mcp_approvals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .filter_map(|(policy, choice)| policy.portable_declaration().map(|key| (key, *choice)))
-            .collect()
+            .clone();
+        choices.extend(live.iter().filter_map(|(policy, choice)| {
+            policy.portable_declaration().map(|key| (key, *choice))
+        }));
+        choices
     }
 
     pub(crate) fn restore_mcp_approval_choices(&self, choices: HashMap<String, bool>) -> anyhow::Result<()> {
@@ -3330,7 +3359,7 @@ impl ThreadState {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             ensure!(
-                choices.len() < 4096 || choices.iter().any(|(known, _)| known.matches(&policy)),
+                self.has_mcp_choice_capacity(&choices, &policy),
                 "Remembered MCP choice limit exceeded"
             );
             let portable_key = policy.portable_declaration();
