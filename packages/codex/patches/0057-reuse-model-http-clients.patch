@@ -116,7 +116,7 @@ index 58d43f7af9e4a3a29dd410436b5f3295249bd4ce..cf7ca828dd3a0be54ee54e671f1dff28
      #[expect(
          clippy::await_holding_invalid_type,
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index b3ae84d194ebd9316f091926ca830d37b2e6f031..30dc83d8a73edcf60f34c49722319761dd475b03 100644
+index b3ae84d194ebd9316f091926ca830d37b2e6f031..9e6536c072d1970feea07ece85e2fb63750e1fa6 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -272,6 +272,7 @@ pub struct ModelClient {
@@ -150,7 +150,24 @@ index b3ae84d194ebd9316f091926ca830d37b2e6f031..30dc83d8a73edcf60f34c49722319761
      pub(crate) fn with_executed_tool_calls(mut self, recorder: ExecutedToolCalls) -> Self {
          self.executed_tool_calls = Some(recorder);
          self
-@@ -1203,7 +1213,38 @@ impl ModelClient {
+@@ -1194,6 +1204,16 @@ impl ModelClient {
+         api_provider: &ApiProvider,
+         endpoint: &str,
+         redirect_policy: ClientRedirectPolicy,
++    ) -> Result<ReqwestTransport> {
++        self.build_api_transport_with_response_mode(false, api_provider, endpoint, redirect_policy)
++    }
++
++    fn build_api_transport_with_response_mode(
++        &self,
++        buffered_response: bool,
++        api_provider: &ApiProvider,
++        endpoint: &str,
++        redirect_policy: ClientRedirectPolicy,
+     ) -> Result<ReqwestTransport> {
+         let redirect_policy = if api_provider
+             .headers
+@@ -1203,7 +1223,39 @@ impl ModelClient {
          } else {
              redirect_policy
          };
@@ -177,10 +194,11 @@ index b3ae84d194ebd9316f091926ca830d37b2e6f031..30dc83d8a73edcf60f34c49722319761
 +        {
 +            return Ok(ReqwestTransport::from_http_client(client));
 +        }
-+        let create_client = if self
-+            .sdk_model_http_pool
-+            .as_ref()
-+            .is_some_and(|pool| pool.is_http1_only())
++        let create_client = if buffered_response
++            || self
++                .sdk_model_http_pool
++                .as_ref()
++                .is_some_and(|pool| pool.is_http1_only())
 +        {
 +            codex_login::default_client::create_http1_client_for_route
 +        } else {
@@ -190,6 +208,16 @@ index b3ae84d194ebd9316f091926ca830d37b2e6f031..30dc83d8a73edcf60f34c49722319761
              &self.http_client_factory,
              &api_provider.url_for_path(endpoint),
              ClientRouteClass::Api,
+@@ -1705,7 +1757,8 @@ impl ModelClientSession {
+                 .client
+                 .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
+             tracing::Span::current().record("api.path", "/responses");
+-            let transport = self.client.build_api_transport(
++            let transport = self.client.build_api_transport_with_response_mode(
++                prompt.prefer_buffered_response,
+                 &client_setup.api_provider,
+                 "/responses",
+                 client_setup.redirect_policy,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
 index 641e390371085f65819f721a102164d766d58e89..c232c57f8f7cf8db3b8f75e7656abde111ab848e 100644
 --- a/codex-rs/core/src/session/session.rs
