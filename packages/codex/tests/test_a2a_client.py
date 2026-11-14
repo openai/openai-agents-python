@@ -4,6 +4,7 @@ import asyncio
 import gzip
 import json
 import traceback
+from dataclasses import replace
 
 import pytest
 
@@ -588,7 +589,17 @@ async def test_nonstreaming_response_has_a_total_deadline(route):
     assert acquired == ([] if route == "card" else [True])
 
 
-async def test_explicit_stream_can_stay_open_past_the_request_deadline():
+async def test_explicit_stream_can_stay_open_past_the_request_deadline(monkeypatch):
+    original_client = a2a_client._BoundedClient
+
+    def make_client(limits, headers=None):
+        if headers is None:
+            # Discovery is setup; keep the short deadline on the streaming request.
+            limits = replace(limits, timeout=5)
+        return original_client(limits, headers=headers)
+
+    monkeypatch.setattr(a2a_client, "_BoundedClient", make_client)
+
     def app(url):
         async def rpc(request):
             body = await request.json()
