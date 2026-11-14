@@ -101,7 +101,7 @@ if TYPE_CHECKING:
     class _TracingOpeningOptions(TypedDict, total=False, closed=True):
         _tracing_context: str
 
-    from ._function_tools import Tool, _PythonTool
+    from ._function_tools import Tool, ToolCallInfo, _PythonTool
     from ._managed_workspace import ManagedWorkspaceCheckpoint
     from .canonical_storage import CustomStorage
     from .decision_handoff import DecisionHandoff
@@ -960,6 +960,15 @@ _OMITTED_INSTRUCTIONS = _OmittedInstructions()
 _OMITTED_TOOLS = _OmittedTools()
 
 
+@dataclass(frozen=True, slots=True)
+class AgentToolStreamEvent:
+    """A native observation with its configured child's Agent and parent tool call."""
+
+    event: Observation
+    agent: Agent[Any, Any]
+    tool_call: ToolCallInfo
+
+
 @dataclass(init=False, eq=False, repr=False)
 class Agent(Generic[ContextT, OutputT]):
     """Declare a native agent without starting a runtime or connection.
@@ -1532,16 +1541,28 @@ class Agent(Generic[ContextT, OutputT]):
         tool_description: str | None = None,
         *,
         custom_output_extractor: Callable[[Completed[OutputT]], str | Awaitable[str]] | None = None,
+        on_stream: Callable[[AgentToolStreamEvent], None | Awaitable[None]] | None = None,
+        on_stream_max_pending_events: int | None = 1024,
     ) -> _PythonTool[ContextT, object]:
         """Run this agent as a tool owned by the parent Session.
 
         The parent relays pending interactions and joins child cleanup.
         The parent can suspend a single configured child at a supported
         manual boundary after its other automatic callbacks have settled.
+        on_stream receives the child's native observations in order. The tool
+        joins its callback before returning. A slow callback that exceeds
+        on_stream_max_pending_events fails the tool. None removes this limit.
         """
         from ._agent_tool import _create_agent_tool
 
-        return _create_agent_tool(self, tool_name, tool_description, custom_output_extractor)
+        return _create_agent_tool(
+            self,
+            tool_name,
+            tool_description,
+            custom_output_extractor,
+            on_stream,
+            on_stream_max_pending_events,
+        )
 
     @overload
     def session(

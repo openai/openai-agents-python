@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from ._trace_context import TraceContext as TraceContext
     from .agent import (
         Agent as Agent,
+        AgentToolStreamEvent as AgentToolStreamEvent,
         CodexAccount as CodexAccount,
         CodexLogin as CodexLogin,
         HostedToolChoice as HostedToolChoice,
@@ -431,6 +432,7 @@ _MODULES = {
     "Handoff": ".handoffs",
     "HandoffInput": ".handoffs",
     "AgentLifecycleContext": ".agent_lifecycle",
+    "AgentToolStreamEvent": ".agent",
     "CodexAccount": ".agent",
     "CodexLogin": ".agent",
     "ModelSettings": ".agent",

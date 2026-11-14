@@ -73,7 +73,7 @@ from ._agent_profiles import (
     _python_tool_slot,
     _resolve_tool_name_collisions,
 )
-from ._agent_tool import _ConfiguredAgentTool
+from ._agent_tool import _ConfiguredAgentTool, _observed_agent_tool_result
 from ._callback_execution import (
     _call_application_callback,
     _call_callback as _call_callback,
@@ -17766,6 +17766,11 @@ class Session(Generic[ContextT, OutputT]):
                 raise InteractionExpiredError("Configured parent invocation is expired")
             return cast(ActionReply[Any], result)
 
+        observation_retention: Literal["bounded", "all"] = (
+            "all"
+            if declaration.observer is not None and declaration.max_pending_events is None
+            else "bounded"
+        )
         restored_child_json = (
             self._native._configured_continuation(request)
             if isinstance(state, _Submission) and state.restored_pending
@@ -17784,6 +17789,7 @@ class Session(Generic[ContextT, OutputT]):
                 environment=context._environment,
                 state=restored_child,
                 on_interaction=answer if handler is not None else None,
+                observation_retention=observation_retention,
             ) as child_session:
                 session = child_session
                 if not admitted():
@@ -17805,6 +17811,11 @@ class Session(Generic[ContextT, OutputT]):
                 self._configured_children.append(child)
                 relay: asyncio.Task[None] | None = None
                 try:
+                    if declaration.observer is not None:
+                        child_session._request_text_observation()
+                    initial_agent = (
+                        await child_session.get_active_agent() if declaration.observer else None
+                    )
                     turn = (
                         child_session.restored_turn
                         if restored_child is not None
@@ -17854,6 +17865,7 @@ class Session(Generic[ContextT, OutputT]):
                                 environment=context._environment,
                                 state=child.checkpoint,
                                 on_interaction=answer if handler is not None else None,
+                                observation_retention=observation_retention,
                             ) as reopened:
                                 reopened._bind_configured_usage(state.run_usage, child.checkpoint)
                                 child_session = reopened
@@ -17870,11 +17882,22 @@ class Session(Generic[ContextT, OutputT]):
                                 child.sealing = False
                                 reopened_turn = reopened.restored_turn
                                 assert reopened_turn is not None
+                                if declaration.observer is not None:
+                                    reopened._request_text_observation()
                                 recovered_relay = _create_task(relay_requests())
                                 child.recovery_ready.set_result(None)
                                 self._observations.notify()
                                 try:
-                                    return await reopened_turn.get_result()
+                                    return await _observed_agent_tool_result(
+                                        reopened,
+                                        reopened_turn,
+                                        declaration,
+                                        context,
+                                        admitted,
+                                        await reopened.get_active_agent()
+                                        if declaration.observer
+                                        else None,
+                                    )
                                 finally:
                                     recovered_relay.cancel()
                                     await asyncio.gather(recovered_relay, return_exceptions=True)
@@ -17888,7 +17911,9 @@ class Session(Generic[ContextT, OutputT]):
 
                     child.recover = recover_child
                     try:
-                        result = await turn.get_result()
+                        result = await _observed_agent_tool_result(
+                            child_session, turn, declaration, context, admitted, initial_agent
+                        )
                     except BaseException:
                         if not child.sealing and child.recovery is None:
                             raise
