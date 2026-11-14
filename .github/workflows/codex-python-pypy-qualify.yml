@@ -83,7 +83,7 @@ jobs:
           assert sys.implementation.name == 'pypy'
           assert sys.version_info[:3] == (3, 11, 17)
           PYTHON
-          env -u OPENAI_AGENTS_NATIVE_WHEEL .venv/bin/python -m hatchling build --target wheel --directory dist
+          env -u OPENAI_AGENTS_NATIVE_WHEEL .venv/bin/python -m hatchling build --target wheel --directory "$GITHUB_WORKSPACE/dist"
           .venv/bin/python -I - <<'PYTHON'
           import hashlib
           import json
