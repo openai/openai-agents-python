@@ -10389,7 +10389,9 @@ class Session(Generic[ContextT, OutputT]):
             if reader.done():
                 await reader
             if observation_reader is not None:
+                settled_error_checked = True
                 await observation_reader
+                settled_error_checked = False
             try:
                 result = await waiter
             except Exception as error:
