@@ -278,12 +278,21 @@ def test_runtime_dependencies_do_not_use_public_facades() -> None:
                     # DockerGateway checks concrete provisioning/lease identities.
                     # Native Core still owns command dispatch and model execution.
                     "agents.classic.sandbox.sandboxes.docker",
+                    "agents.classic.sandbox.sandboxes.unix_local",
                     "agents.classic.sandbox.session.sandbox_client",
                     "agents.classic.sandbox.session.sandbox_session",
                     "agents.classic.sandbox.session.events",
                     "agents.classic.sandbox.session.sinks",
                     "agents.classic.sandbox.types",
                     "agents.classic.sandbox.workspace_paths",
+                }:
+                    continue
+                # Profile workspaces use the shared sandbox declarations and local resource owner.
+                if relative.as_posix() == "_sandbox_profile_workspace" and target in {
+                    "agents.classic.sandbox.entries",
+                    "agents.classic.sandbox.manifest",
+                    "agents.classic.sandbox.sandboxes.unix_local",
+                    "agents.classic.sandbox.session.sandbox_session",
                 }:
                     continue
                 # Keep event envelopes, sinks and dispatcher identity shared with
