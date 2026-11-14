@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass as dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._function_tools import FunctionTool, _PythonTool
 from ._public import preserve_module_identity
 
@@ -16,7 +17,7 @@ ContextT = TypeVar("ContextT")
 OutputT = TypeVar("OutputT")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class HandoffInput(Generic[ContextT]):
     """Detached application presentation at the accepted native transfer boundary.
 
@@ -39,7 +40,7 @@ _PrepareHandoffInput = Callable[
 ]
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class Handoff(Generic[ContextT, OutputT]):
     """Callback-backed native transfer to a captured Agent.
 

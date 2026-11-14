@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass as dataclass, field
 from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, PlainValidator, StrictStr, TypeAdapter
@@ -14,12 +14,13 @@ from pydantic import BaseModel, ConfigDict, Field, PlainValidator, StrictStr, Ty
 from _agents_shared.patch_format import PatchFormat
 
 from ._compat import cancellation_requested
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._function_tools import FunctionTool, ToolContext, function_tool
 from ._public import preserve_module_identity as _preserve_module_identity
 from .tools import ToolOutput, _CapturedFunction
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ApplyPatchOperation:
     """One admitted operation, with application-owned path and diff semantics."""
 
@@ -30,7 +31,7 @@ class ApplyPatchOperation:
     ctx_wrapper: ToolContext[Any] | None = field(default=None, repr=False, compare=False)
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ApplyPatchResult:
     """The editor's completed or failed result and optional model-visible text."""
 
@@ -109,7 +110,7 @@ def _output(value: Any) -> ToolOutput:
         value = None
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _Dispatch:
     callbacks: dict[str, Callable[[ApplyPatchOperation], Any]] = field(repr=False)
 
@@ -137,7 +138,7 @@ def _capture_editor(editor: ApplyPatchEditor) -> _Dispatch:
     return _Dispatch(callbacks)
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class _ApplyPatchTool(FunctionTool[Any, ToolOutput, Any]):
     def __post_init__(self) -> None:
         super().__post_init__()

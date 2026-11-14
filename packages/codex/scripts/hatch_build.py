@@ -240,6 +240,29 @@ class NativeBuildHook(BuildHookInterface):
                     shutil.copytree(item, Path(self.root) / "src" / item.name, dirs_exist_ok=True)
             else:
                 build_data["force_include"][str(item)] = item.name
+        if (
+            version != "editable"
+            and sys.implementation.name == "cpython"
+            and sys.version_info[:2] in {(3, 12), (3, 13)}
+            and not sys.flags.optimize
+            and not sys._xoptions
+        ):
+            factories = stage / "dataclass-factories"
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-P",
+                    "-B",
+                    str(native / "scripts/build_dataclass_factories.py"),
+                    "--project",
+                    str(self.root),
+                    "--output",
+                    str(factories),
+                ],
+                check=True,
+            )
+            (archive,) = factories.glob("_dataclass_factories_3*.zip")
+            build_data["force_include"][str(archive)] = f"_agents_codex/{archive.name}"
         self.qualification = qualification
 
     def finalize(self, version, build_data, artifact_path):

@@ -43,6 +43,7 @@ from typing_extensions import (
     TypedDict as TypedDict,
 )
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._lifecycle import (
     _close_after_error as _close_after_error,
     _error_contexts as _error_contexts,
@@ -66,7 +67,7 @@ from ._trace_processor_worker import (
 )
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class OtelTlsConfig:
     """Native TLS certificate and private-key paths."""
 
@@ -75,7 +76,7 @@ class OtelTlsConfig:
     client_private_key: str | Path | None = field(default=None, repr=False)
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class OtlpGrpc:
     """An explicit native OTLP gRPC destination."""
 
@@ -84,7 +85,7 @@ class OtlpGrpc:
     tls: OtelTlsConfig | None = None
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class OtlpHttp:
     """An explicit native OTLP HTTP destination."""
 
@@ -97,7 +98,7 @@ class OtlpHttp:
 Exporter: TypeAlias = OtlpGrpc | OtlpHttp
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class ConsoleDiagnostics:
     """Local native diagnostic events as JSON lines on process stdout.
 
@@ -112,7 +113,7 @@ class ConsoleDiagnostics:
     include_fields: bool = False
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class TraceDeliveryConfig:
     """Native queue limits, batch scheduling, and Python callback budget."""
 
@@ -165,7 +166,7 @@ _processor_batch_size = 64
 _processor_callback_timeout: float | None = 1.0
 
 
-@dataclass
+@_sdk_dataclass
 class _NativeConfig:
     # Keep the native wire value out of task and diagnostic representations.
     encoded: str = field(repr=False)
@@ -484,7 +485,7 @@ async def _stop_processor_task(task: asyncio.Task[None]) -> None:
     await asyncio.wrap_future(stopped)
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class TraceExportCredentials:
     """Private per-trace header overrides, copied at construction.
 
@@ -504,7 +505,7 @@ class TraceExportCredentials:
             del headers, self
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class SpanContext:
     """Immutable native identity owning parent context while reachable.
 
@@ -548,7 +549,7 @@ class SpanContext:
             raise
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class TraceOptions:
     """Optional native operation policy. Omitted child policy inherits.
 
@@ -572,7 +573,7 @@ _tracing_disabled = False
 _sensitive_data_logging_enabled = True
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class TracingIdGenerator:
     """Synchronous ID policy for newly admitted SDK scopes.
 
@@ -1291,7 +1292,7 @@ class TraceProcessor(Protocol):
     def on_trace_event(self, event: TraceLifecycleEvent) -> Any: ...
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class FlushResult:
     status: Literal["success", "partial", "timeout", "failure"]
     dropped_records: int

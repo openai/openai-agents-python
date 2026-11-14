@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass as dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from typing_extensions import TypeVar
 
 from ._callback_execution import _call_callback
 from ._compat import cancel_once
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._function_tools import FunctionTool, ToolContext, _PythonTool, function_tool
 from ._lifecycle import _close_after_error
 from .agent import AgentToolStreamEvent
@@ -30,7 +31,7 @@ OutputT = TypeVar("OutputT")
 _logger = logging.getLogger("agents.agent")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _ConfiguredAgentTool:
     agent: Agent[Any, Any]
     extractor: Callable[[Completed[Any]], str | Awaitable[str]] | None

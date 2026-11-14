@@ -28,6 +28,7 @@ from typing_extensions import TypedDict as TypedDict
 from agents.config import JsonValue as JsonValue
 
 from . import _tool_response_types as _tool_response_types
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._tool_response_types import FunctionCallStatus as FunctionCallStatus
 
 if TYPE_CHECKING:
@@ -63,13 +64,13 @@ if TYPE_CHECKING:
 _wire_types = _tool_response_types
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class _Event:
     session_id: str
     sequence: int = 0
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class _SubmissionEvent(_Event):
     """An actual submission; parent_submission_id links only derived repair work."""
 
@@ -78,7 +79,7 @@ class _SubmissionEvent(_Event):
     parent_submission_id: str | None = None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class ModelRequestDispatching(_SubmissionEvent):
     """Resolved root sampling fields before entering a transport client API.
 
@@ -105,7 +106,7 @@ class ModelRequestDispatching(_SubmissionEvent):
     )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class ModelResponseLinked(_SubmissionEvent):
     """Best-effort link to one retained response occurrence, independent of provider ID.
 
@@ -119,14 +120,14 @@ class ModelResponseLinked(_SubmissionEvent):
     type: Literal["model_response_linked"] = field(default="model_response_linked", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class TurnStarted(_SubmissionEvent):
     """Native accepted this exact submission."""
 
     type: Literal["turn_started"] = field(default="turn_started", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class TurnFinished(_SubmissionEvent):
     """The submission and its owned callback cleanup have settled."""
 
@@ -135,7 +136,7 @@ class TurnFinished(_SubmissionEvent):
     type: Literal["turn_finished"] = field(default="turn_finished", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class OutputAccepted(_SubmissionEvent):
     """One successful logical root result after typed validation and owned cleanup.
 
@@ -147,7 +148,7 @@ class OutputAccepted(_SubmissionEvent):
     type: Literal["output_accepted"] = field(default="output_accepted", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class OutputTextDelta(_SubmissionEvent):
     """A native output-text delta with its original native item identity."""
 
@@ -156,7 +157,7 @@ class OutputTextDelta(_SubmissionEvent):
     type: Literal["output_text_delta"] = field(default="output_text_delta", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class ResponseFactReceived(_SubmissionEvent):
     """Private received facts; durable history remains available after failure.
 
@@ -167,7 +168,7 @@ class ResponseFactReceived(_SubmissionEvent):
     type: Literal["response_fact"] = field(default="response_fact", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class RawProviderEvent(_SubmissionEvent):
     """Provider JSON on the exact native turn observation stream."""
 
@@ -177,7 +178,7 @@ class RawProviderEvent(_SubmissionEvent):
     type: Literal["raw_provider_event"] = field(default="raw_provider_event", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class HostedToolCallSummary:
     """Identity and status of a hosted call, without provider payloads."""
 
@@ -197,7 +198,7 @@ class HostedToolCallSummary:
     status: str
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class ModelOutputItemCompleted(_SubmissionEvent):
     """A completed assistant message, provider reasoning summary, or hosted call.
 
@@ -231,7 +232,7 @@ class ModelOutputItemCompleted(_SubmissionEvent):
     )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class HostedToolCallProgress(_SubmissionEvent):
     """A provider lifecycle, code, or partial-image event.
 
@@ -248,7 +249,7 @@ class HostedToolCallProgress(_SubmissionEvent):
     )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class UsageUpdated(_SubmissionEvent):
     """A native token-count snapshot emitted while this submission was active.
 
@@ -260,7 +261,7 @@ class UsageUpdated(_SubmissionEvent):
     type: Literal["usage_updated"] = field(default="usage_updated", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class ApiRateLimitsUpdated(_SubmissionEvent):
     """Rate-limit fields reported on a provider response for this turn."""
 
@@ -268,7 +269,7 @@ class ApiRateLimitsUpdated(_SubmissionEvent):
     type: Literal["api_rate_limits_updated"] = field(default="api_rate_limits_updated", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class ContextCompacted(_SubmissionEvent):
     """Core completed this native context-compaction item."""
 
@@ -276,7 +277,7 @@ class ContextCompacted(_SubmissionEvent):
     type: Literal["context_compacted"] = field(default="context_compacted", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class AgentProfileChanged(_Event):
     """A committed change of captured Agent identity, in native commit order.
 
@@ -297,7 +298,7 @@ class AgentProfileChanged(_Event):
     type: Literal["agent_profile_changed"] = field(default="agent_profile_changed", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class ToolStarted(_SubmissionEvent):
     """A function was admitted, or native MCP handling began before any approval.
 
@@ -311,7 +312,7 @@ class ToolStarted(_SubmissionEvent):
     type: Literal["tool_started"] = field(default="tool_started", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class ToolFinished(_SubmissionEvent):
     """A function settled, or Core delivered an MCP end with its result status.
 
@@ -340,7 +341,7 @@ class _ExecutionItemReference(TypedDict):
     native_status: str | None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class ExecutionItemCompleted(_SubmissionEvent):
     """Core reported the end of a command, patch, or MCP call.
 
@@ -358,7 +359,7 @@ class ExecutionItemCompleted(_SubmissionEvent):
     )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class SubagentLifecycle(_Event):
     """A change in the native spawn graph, or a restored graph snapshot.
 
@@ -374,7 +375,7 @@ class SubagentLifecycle(_Event):
     type: Literal["subagent_lifecycle"] = field(default="subagent_lifecycle", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class SessionEnded(_Event):
     """No further observations will arrive; the Session context still owns cleanup."""
 
@@ -382,7 +383,7 @@ class SessionEnded(_Event):
     type: Literal["session_ended"] = field(default="session_ended", init=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class EventGap(_Event):
     """Global sequences first_sequence through sequence are no longer retained.
 

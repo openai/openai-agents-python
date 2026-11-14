@@ -24,6 +24,7 @@ from pydantic import (
     create_model as create_model,
 )
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._media import ImageDetail as ImageDetail, _capture_file, _capture_image, _capture_tool_part
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._tool_response_types import FunctionCallResponse as FunctionCallResponse
@@ -167,7 +168,7 @@ def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
     return capture(tools)
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ToolRef:
     """The native identity of one admitted tool; bare Python tools have no namespace."""
 
@@ -187,7 +188,7 @@ def _capture_tool_not_found_behavior(value: ToolNotFoundBehavior | None) -> bool
     return value == "raise_error"
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ToolCallInfo:
     """Observed identity, never authority to execute or answer a tool call.
 
@@ -213,14 +214,14 @@ class ToolCallInfo:
     nested_call_id: str | None = None
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ToolOutputText:
     """Text returned to the native model and history."""
 
     text: str
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ToolOutputImage:
     """A provider image reference. Core owns actual-model preparation."""
 
@@ -242,7 +243,7 @@ class ToolOutputImage:
         )
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class ToolOutputFile:
     """Exactly one provider file source, without host reads, fetch or upload."""
 
@@ -266,7 +267,7 @@ class ToolOutputFile:
         )
 
 
-@dataclass
+@_sdk_dataclass
 class ToolOutput:
     """A native tool response with optional SDK-only application data."""
 
@@ -427,7 +428,7 @@ def _snapshot_function_arguments(arguments: dict[str, Any], tool: ToolRef) -> Ma
         ) from error
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _CapturedFunction:
     """One immutable snapshot for schema publication and callback execution."""
 
@@ -521,7 +522,7 @@ class _CapturedFunction:
         return value, output, background
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _ToolCatalog:
     generation: int
     tools: tuple[_CapturedFunction | _CapturedManual, ...]
@@ -584,7 +585,7 @@ class _ToolCatalog:
         return json.dumps(specs)
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _MCPResourceRef:
     """Select a current ordinary server without granting any model tools."""
 
@@ -599,7 +600,7 @@ def _ordinary_default_slots(
     return [slot for slot, tool in enumerate(catalog.tools) if tool._ref in selection]
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _ToolUpdatePlan:
     bound_tools: tuple[_CapturedFunction | _CapturedManual, ...]
     bindings: tuple[Tool[Any], ...]

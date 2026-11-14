@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass as dataclass
 from typing import Any
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class RealtimeUsage:
     """Reported speech-model counters, separate from backend thread usage.
 
@@ -30,7 +31,7 @@ class RealtimeUsage:
     output_token_details: Mapping[str, Any] | None = None
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class RealtimeUsageAccounting:
     """Counts of accepted response completions and reports on one connection."""
 

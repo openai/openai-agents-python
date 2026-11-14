@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass as dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Annotated, Any
@@ -22,6 +22,7 @@ from _agents_shared.sandbox_memory_artifacts import (
     validate_rollout_id,
 )
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._hosted_projection import _HOSTED_RESPONSE_ITEM_FIELDS
 from ._public import preserve_module_identity as _preserve_module_identity
 
@@ -40,7 +41,7 @@ _MAX_ROLLOUT_BYTES = 4_000_000
 _MemoryText = Annotated[str, Field(max_length=65_536)]
 
 
-@dataclass(slots=True)
+@_sdk_dataclass(slots=True)
 class _MemoryPhaseScope:
     owner: _SandboxMemoryOwner | None
 
@@ -55,7 +56,7 @@ def _current_memory_owner() -> _SandboxMemoryOwner | None:
     return None if scope is None else scope.owner
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class SandboxMemoryOptions:
     """Configure the two native Agents that extract and consolidate memory.
 

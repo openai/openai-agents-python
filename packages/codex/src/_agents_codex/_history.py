@@ -13,6 +13,7 @@ if _TYPE_CHECKING:
         FunctionCallItem as FunctionCallItem,
         SessionItem as SessionItem,
     )
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._hosted_projection import project_hosted_response_item as project_hosted_response_item
 from ._projection import (
     EventProjector as EventProjector,
@@ -35,7 +36,7 @@ from .turn_receipt import _project_turn_receipt as _project_turn_receipt
 from .usage import _UsageCollector
 
 
-@dataclass
+@_sdk_dataclass
 class _HistoryItem:
     value: dict[str, Any]
     native: bool

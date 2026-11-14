@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass as dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity
 
 if TYPE_CHECKING:
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
 ContextT = TypeVar("ContextT")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class AgentLifecycleContext(Generic[ContextT]):
     """The live Agent owner at an awaited start, handoff, or accepted output."""
 

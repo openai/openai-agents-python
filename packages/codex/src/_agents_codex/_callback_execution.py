@@ -6,10 +6,11 @@ import asyncio
 import inspect
 from collections.abc import Callable
 from contextvars import copy_context
-from dataclasses import dataclass
+from dataclasses import dataclass as dataclass
 from typing import Any, cast
 
 from ._compat import cancel_once
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._lifecycle import _close_after_error, _join
 from .telemetry import _owned_span
 
@@ -20,7 +21,7 @@ class _FunctionBodyFailure(Exception):
         self.original = original
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _RecoverableFunctionCallback:
     callback: Callable[..., Any]
 

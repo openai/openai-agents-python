@@ -7,9 +7,10 @@ import json
 import os
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass as dataclass
 from typing import Any, cast
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._legacy_history import (
     check_legacy_history_size,
     decode_legacy_item,
@@ -20,7 +21,7 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from ._storage_driver import _StorageDriver
 
 
-@dataclass
+@_sdk_dataclass
 class _Lease:
     token: str
     pid: int

@@ -16,6 +16,7 @@ from typing import (
 if TYPE_CHECKING:
     from .decisions import DecisionInput, DecisionProvider
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 from .native_interception import StopTurn as StopTurn
 from .tools import ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput
@@ -25,7 +26,7 @@ OutputT = TypeVar("OutputT")
 _DecisionT = TypeVar("_DecisionT")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ContinueTurn:
     """Reject completion and continue the same turn with these instructions.
 
@@ -37,7 +38,7 @@ class ContinueTurn:
     instructions: str = field(repr=False)
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class CompletionContext(Generic[ContextT]):
     """Proposed native completion for an awaited ``before_complete`` callback.
 
@@ -147,7 +148,7 @@ _BeforeComplete: TypeAlias = Callable[
 ]
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ToolBatchResult:
     """The accepted output of a direct function call."""
 
@@ -156,7 +157,7 @@ class ToolBatchResult:
     output: ToolOutput = field(repr=False)
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ToolBatchCompletionContext(Generic[ContextT]):
     """Settled direct function results in their original model call order."""
 
@@ -168,7 +169,7 @@ class ToolBatchCompletionContext(Generic[ContextT]):
     model: str
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class FinishToolBatch(Generic[OutputT]):
     """Propose an application value as the turn's final output."""
 

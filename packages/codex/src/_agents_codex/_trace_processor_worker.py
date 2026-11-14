@@ -6,11 +6,12 @@ import asyncio
 from collections.abc import Callable as _Callable, Mapping, Sequence
 from concurrent.futures import Future
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass as dataclass, field
 from threading import Event, Lock
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_delivery import _trace_delivery_context, _TraceDeliveryOwner
 
@@ -23,13 +24,13 @@ _worker_lock = Lock()
 _MAX_PROCESSOR_WORKERS = 16
 
 
-@dataclass
+@_sdk_dataclass
 class _ProcessorDelivery:
     event: TraceLifecycleEvent
     result: Future[tuple[bool, float]] = field(default_factory=Future)
 
 
-@dataclass
+@_sdk_dataclass
 class _ProcessorBatch:
     deliveries: tuple[_ProcessorDelivery, ...]
     loss_epoch: int = 0

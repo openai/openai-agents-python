@@ -51,6 +51,7 @@ from ._callback_execution import (
     _FunctionBodyFailure,
     _RecoverableFunctionCallback,
 )
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext
 from .native_interception import Allow as Allow, Deny as Deny, ReplaceArguments as ReplaceArguments
@@ -155,18 +156,18 @@ class ToolInvocationContext(ToolInvocationInputContext[ContextT_co], Protocol[Co
     def effective_arguments(self) -> Mapping[str, Any]: ...
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _ApplicationToolInputContext(Generic[ContextT_co]):
     context: ContextT_co = field(repr=False)
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _ApplicationToolContext(_ApplicationToolInputContext[ContextT_co]):
     original_arguments: Mapping[str, Any] = field(repr=False)
     effective_arguments: Mapping[str, Any] = field(repr=False)
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ToolInputErrorContext(Generic[ContextT_co]):
     """Admitted invocation identity before validated arguments."""
 
@@ -179,7 +180,7 @@ class ToolInputErrorContext(Generic[ContextT_co]):
     realtime_usage_accounting: RealtimeUsageAccounting | None = field(default=None, kw_only=True)
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ToolContext(Generic[ContextT_co]):
     """Application context and the admitted native invocation's identity.
 
@@ -302,7 +303,7 @@ _UNSET_ERROR_FUNCTION = cast(
 )
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _RunErrorFormatterInheritance:
     allowed: bool
     has_function: bool
@@ -393,7 +394,7 @@ def _can_reparse_error_arguments(model: type[BaseModel]) -> bool:
     return True
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     """A function that runs a registered callback or takes its result from the app.
 

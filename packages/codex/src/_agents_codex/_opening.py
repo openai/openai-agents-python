@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass as dataclass, replace
 from typing import Generic, cast
 
 from . import tools as _declaration_types
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from .agent import (
     Agent,
     ContextT,
@@ -19,7 +20,7 @@ from .completion import _BeforeComplete
 from .schema import OutputSpec
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _OpeningContributions(Generic[ContextT]):
     """Selected typed defaults before the canonical Agent capture."""
 

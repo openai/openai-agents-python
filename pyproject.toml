@@ -230,6 +230,7 @@ exclude = ["*.so", "*.dylib", "*.pyd", "/src/agents/bin", "/src/agents/licenses"
 
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "packages/codex/scripts/hatch_build.py"
+require-runtime-dependencies = true
 
 # Maturin supplies the extension and audited native assets to the Hatch hook.
 # It reads the same SDK metadata; there is no second Python distribution.

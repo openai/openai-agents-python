@@ -7,10 +7,11 @@ import hashlib
 import hmac
 import json
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass as dataclass
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from .sandbox_memory import _MEMORY_OWNER_ATTRIBUTE, _SandboxMemoryOwner
 
 if TYPE_CHECKING:
@@ -28,7 +29,7 @@ def _association(conversation: str, workspace: str) -> str:
     return hashlib.sha256((conversation + "\0" + workspace).encode()).hexdigest()
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ManagedWorkspaceCheckpoint:
     """The checksum has been checking consistency, never authorizing external bytes."""
 

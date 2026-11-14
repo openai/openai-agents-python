@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass as dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from agents.config import JsonValue
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 from .completion import CompletionContext
 from .tools import ToolCallInfo
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
 ContextT = TypeVar("ContextT")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class GuardrailResult:
     """A tripwire verdict and application-local diagnostic information."""
 
@@ -33,7 +34,7 @@ class GuardrailResult:
             raise TypeError("tripwire_triggered must be a bool")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class InputGuardrail(Generic[ContextT]):
     """Initial-input checks with explicit native-child admission.
 
@@ -67,7 +68,7 @@ class InputGuardrail(Generic[ContextT]):
             raise TypeError("run_in_parallel must be a bool")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class OutputGuardrail(Generic[ContextT]):
     """A check of the converted final output, before native acceptance."""
 
@@ -88,7 +89,7 @@ def _validate_check(name: str, callback: Any) -> None:
         raise TypeError("Guardrail callback must be callable")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class GuardrailRecord:
     """One completed check on its actual run and source Agent."""
 

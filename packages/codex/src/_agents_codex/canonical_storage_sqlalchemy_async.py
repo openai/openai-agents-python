@@ -9,11 +9,12 @@ import os
 import threading
 import uuid
 from contextlib import AbstractAsyncContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass as dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast as typing_cast
 from weakref import WeakKeyDictionary
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._legacy_history import decode_legacy_item
 from ._lifecycle import _join
 from ._public import preserve_module_identity as _preserve_module_identity
@@ -29,7 +30,7 @@ _pool_locks: WeakKeyDictionary[StaticPool, asyncio.Lock] = WeakKeyDictionary()
 _pool_locks_guard = threading.Lock()
 
 
-@dataclass
+@_sdk_dataclass
 class _Lease:
     token: str
     stop: threading.Event

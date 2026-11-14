@@ -6,11 +6,12 @@ import inspect
 import logging
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass as dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
 from . import tools as _tool_types
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._function_tools import FunctionTool
 from .agent import Agent
 from .handoffs import Handoff
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
     from .realtime_agents import RealtimeHandoff
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _AgentProfile:
     id: str
     agent: Agent[Any, Any]

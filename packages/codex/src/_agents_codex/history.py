@@ -21,6 +21,7 @@ from typing import Any as Any, Literal as Literal, TypeAlias
 
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._stored_history import (
     StoredItem as StoredItem,
@@ -51,7 +52,7 @@ from .response_facts import (
 from .turn_receipt import TurnReceipt as TurnReceipt
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class CanonicalHistorySnapshot:
     """Copies of original JSON objects and their revision.
 
@@ -67,7 +68,7 @@ class CanonicalHistorySnapshot:
     items: tuple[dict[str, Any], ...]
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class CanonicalHistoryPop:
     """The removed original, the resulting revision and any model context rebuild."""
 

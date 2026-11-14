@@ -8,13 +8,14 @@ import math
 import random
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass as dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from time import monotonic
 from typing import Any, TextIO, cast
 from urllib.parse import urlsplit
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_delivery import _trace_credential_route, _trace_export_cancellation
 
@@ -40,7 +41,7 @@ def _span_id(value: str | None) -> str | None:
     return None if value is None else "span_" + value.rjust(24, "0")
 
 
-@dataclass
+@_sdk_dataclass
 class _TraceState:
     descriptor: dict[str, Any]
     active_spans: int = 0

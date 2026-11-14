@@ -15,12 +15,13 @@ if _TYPE_CHECKING:
         FunctionCallItem as FunctionCallItem,
         SessionItem as SessionItem,
     )
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 from .history import RecordedTurn as RecordedTurn
 from .shell import ShellOutput as ShellOutput
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class UncertainCall:
     """A recorded invocation for which local storage has no result receipt."""
 
@@ -43,7 +44,7 @@ class UncertainCall:
         )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class ReconciledCall:
     """An outcome that the application verified using its own records.
 

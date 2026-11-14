@@ -55,6 +55,7 @@ from typing_extensions import (
 )
 
 from . import tools as _tool_types
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._hosted_prompts import _capture_hosted_prompt_source, _hosted_prompt_controls
 from ._lifecycle import (
     _close_after_error as _close_after_error,
@@ -250,7 +251,7 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
     return _capture_model_settings(settings, ModelSettings)
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class CodexLogin:
     """Reuse an existing file-backed Codex login for a local native Session.
 
@@ -289,7 +290,7 @@ class CodexLogin:
             raise ValueError("account_id must be a non-empty string")
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class CodexAccount:
     """The saved plan type and optional workspace ID at Session opening."""
 
@@ -327,7 +328,7 @@ def _valid_siwc_bearer(token: str, client_id: str) -> bool:
     )
 
 
-@dataclass(frozen=True, kw_only=True, slots=True, repr=False)
+@_sdk_dataclass(frozen=True, kw_only=True, slots=True, repr=False)
 class SignInWithChatGPTCredentials:
     """The verified identity and its current bearer from one protected app record.
 
@@ -343,7 +344,7 @@ class SignInWithChatGPTCredentials:
     access_token: str
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class SignInWithChatGPT:
     """Use a registered integration's ChatGPT plan for native Responses.
 
@@ -421,7 +422,7 @@ class _ProviderOptions(dict[str, _ProviderValue]):
         return (type(self), (dict(self),))
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class NativeProvider:
     """A native Responses connection. Construction performs no I/O.
 
@@ -939,7 +940,7 @@ def _capture_run_audio_input(
     return parts
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _RunInputStoragePolicy:
     project: _InputStoragePolicy
     initial_messages: Sequence[InitialMessage] | None
@@ -966,7 +967,7 @@ _OMITTED_INSTRUCTIONS = _OmittedInstructions()
 _OMITTED_TOOLS = _OmittedTools()
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class AgentToolStreamEvent:
     """A native observation with its configured child's Agent and parent tool call."""
 
@@ -975,7 +976,7 @@ class AgentToolStreamEvent:
     tool_call: ToolCallInfo
 
 
-@dataclass(init=False, eq=False, repr=False)
+@_sdk_dataclass(init=False, eq=False, repr=False)
 class Agent(Generic[ContextT, OutputT]):
     """Declare a native agent without starting a runtime or connection.
 

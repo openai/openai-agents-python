@@ -7,12 +7,13 @@ from dataclasses import dataclass as dataclass, field
 from threading import RLock
 from typing import Any as Any, Literal as Literal
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 
 _MAX_SAFE_INTEGER = 2**53 - 1
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class RawProviderUsage:
     """Original usage from one accepted provider response."""
 
@@ -21,7 +22,7 @@ class RawProviderUsage:
     usage: dict[str, Any] = field(repr=False)
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class TokenUsage:
     """Native token counts. Cached and reasoning tokens are subsets, not additions."""
 
@@ -33,7 +34,7 @@ class TokenUsage:
     total_tokens: int
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class RunUsage(TokenUsage):
     """Measured owner-local run totals, separate from native thread/context estimates.
 
@@ -252,7 +253,7 @@ class _UsageCollector:
         return value
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class RunBudget:
     """Optional limits for the next root sampling admission in a direct native run.
 
@@ -321,7 +322,7 @@ class RunBudget:
             raise ValueError("RunBudget.missing_usage must be 'stop' or 'continue'")
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class TokenUsageInfo:
     """The native thread's cumulative usage and its most recent usage.
 

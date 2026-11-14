@@ -17,6 +17,7 @@ from typing import (
 )
 
 from ._compat import cancel_once as cancel_once
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._lifecycle import _join as _join
 from ._public import preserve_module_identity as _preserve_module_identity
 
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
     from .turn import Turn
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class StopTurn:
     """Stop the exact owning turn from an admitted before policy or step hook.
 
@@ -47,19 +48,19 @@ class StopTurn:
     reason: str = field(repr=False)
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class Allow:
     """Use the admitted input without modification."""
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class Deny:
     """Return a local function-tool failure without invoking the callback."""
 
     reason: str = field(repr=False)
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ReplaceArguments:
     """Use this input for the selected callback or an admitted native MCP call.
 
@@ -69,7 +70,7 @@ class ReplaceArguments:
     arguments: Any = field(repr=False)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class NativeToolCall:
     """Native call metadata supplied to collaboration approval before dispatch.
 
@@ -136,7 +137,7 @@ def _has_interceptors(session: Session[Any, Any], pending: Sequence[Agent[Any, A
     )
 
 
-@dataclass(eq=False, repr=False)
+@_sdk_dataclass(eq=False, repr=False)
 class _CellPolicyOwner:
     owner_id: int
     thread_id: str

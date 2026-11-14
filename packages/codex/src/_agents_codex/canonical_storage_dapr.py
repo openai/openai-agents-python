@@ -10,9 +10,10 @@ import os
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass as dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._lifecycle import _join
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._storage_driver import _StorageDriver
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
     from dapr.aio.clients import DaprClient
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _Record:
     owner: str | None
     lease_until: float
@@ -32,7 +33,7 @@ class _Record:
     payload: str | None
 
 
-@dataclass
+@_sdk_dataclass
 class _Lease:
     token: str
     stop: threading.Event
