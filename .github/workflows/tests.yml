@@ -184,7 +184,11 @@ jobs:
           CURRENT_HEAD_REF: ${{ github.head_ref || github.ref_name }}
           CURRENT_BASE_REF: ${{ github.base_ref || steps.producer-identity.outputs.base_ref || '' }}
           REQUIRE_WINDOWS: ${{ steps.release-windows.outputs.run }}
-          REUSE_ARM64: ${{ github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness' && !inputs.native_only }}
+          REUSE_ARM64: >-
+            ${{ !inputs.native_only &&
+            ((github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness') ||
+             (github.event_name == 'pull_request' && github.base_ref == 'feat/codex-harness' &&
+              github.event.pull_request.head.repo.full_name == github.repository)) }}
         run: |
           python -I -S - <<'PYTHON'
           import json
@@ -438,7 +442,9 @@ jobs:
                   selected[identity] = artifact
               # Preserve the chosen three-platform donor when its ARM64 snapshot
               # cannot pass the same publication bound. Never mix donor runs.
-              if not dependencies and os.environ.get('REUSE_ARM64') == 'true':
+              if (not dependencies and os.environ.get('REUSE_ARM64') == 'true'
+                      and run['path'] == '.github/workflows/tests.yml'
+                      and run['head_branch'] == 'feat/codex-harness'):
                   artifact = qualified_platform('linux-arm64', 'ubuntu-24.04-arm', 'Linux-ARM64')
                   if artifact is not None:
                       selected['Linux-ARM64'] = artifact
