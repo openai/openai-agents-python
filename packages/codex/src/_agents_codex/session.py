@@ -17746,8 +17746,9 @@ class Session(Generic[ContextT, OutputT]):
             (
                 self._writable_roots
                 if context._environment is self._executor
-                else context._environment.writable_roots
+                else _writable_roots(context._environment.writable_roots)
                 if context._environment is not None
+                and context._environment.writable_roots is not None
                 else None
             ),
             admitted,
