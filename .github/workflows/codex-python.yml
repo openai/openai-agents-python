@@ -44,7 +44,7 @@ permissions:
 jobs:
   build:
     name: Native snapshot (${{ inputs.runner }})
-    runs-on: >-
+    runs-on: &native_snapshot_runner >-
       ${{ fromJSON(
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64-xl"}' ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04-arm' && inputs.native_source_run == '' &&
@@ -86,7 +86,7 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
+    env: &native_snapshot_environment
       OPENAI_AGENTS_NATIVE_BUILD_IMAGE: *native_build_image
       CARGO_INCREMENTAL: "0"
       RUSTUP_TOOLCHAIN: 1.95.0
@@ -95,11 +95,13 @@ jobs:
       # PEP 517 frontends may copy only the wheel out of the backend directory.
       OPENAI_AGENTS_NATIVE_RECEIPT_DIR: ${{ github.workspace }}/dist
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - &native_snapshot_checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
-      - name: Reject unbound build inputs
+      - &native_snapshot_input_guard
+        name: Reject unbound build inputs
         run: |
           for config in .python-version uv.toml .venv; do
             if [[ -e "$config" || -L "$config" ]]; then
@@ -144,7 +146,8 @@ jobs:
                (github.event_name == 'pull_request' &&
                 github.event.pull_request.head.repo.full_name == github.repository &&
                 github.base_ref == 'feat/codex-harness')) && '14' || '3' }}
-      - name: Select shared Cargo directories
+      - &native_snapshot_cargo_directories
+        name: Select shared Cargo directories
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/agents-native-target" >> "$GITHUB_ENV"
@@ -198,11 +201,13 @@ jobs:
               echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=$COLD_PR_RUST_OPT_LEVEL"
             } >> "$GITHUB_ENV"
           fi
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - &native_snapshot_python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         if: env.OPENAI_AGENTS_NATIVE_BUILD_IMAGE == ''
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+      - &native_snapshot_uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
         with:
           enable-cache: false
       - name: Install a shared-library Python for the manylinux build
@@ -215,7 +220,8 @@ jobs:
           test -f "$libdir/libpython3.12.so"
           printf '%s\n' "$(dirname -- "$python")" >> "$GITHUB_PATH"
           printf 'UV_PYTHON=%s\nPYO3_PYTHON=%s\n' "$python" "$python" >> "$GITHUB_ENV"
-      - name: Install native build tools
+      - &native_snapshot_build_tools
+        name: Install native build tools
         if: inputs.native_source_run == ''
         uses: ./.github/actions/setup-native
         env:
@@ -226,7 +232,8 @@ jobs:
           rustc -vV
           rustc -vV | grep -Fx 'host: aarch64-unknown-linux-gnu'
           clang --version
-      - name: Prepare the source distribution
+      - &native_snapshot_sdist
+        name: Prepare the source distribution
         # Use one stable source path for Cargo, the wheel and the test executor.
         run: |
           uv build --sdist
@@ -281,8 +288,12 @@ jobs:
         if: inputs.native_source_run == ''
         run: uv build --wheel "$OPENAI_AGENTS_BUILD_SOURCE" --out-dir "$GITHUB_WORKSPACE/dist"
       - name: Test Windows project-search filename handling
-        if: runner.os == 'Windows' && inputs.native_source_run == ''
-        run: |
+        if: >-
+          runner.os == 'Windows' && inputs.native_source_run == '' &&
+          !(github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
+          inputs.native_source_run == '' && inputs.native_dependency_run == '' &&
+          github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness')
+        run: &windows_filename_command |
           python -I -S - <<'PYTHON'
           import os
           import subprocess
@@ -540,6 +551,33 @@ jobs:
           path: ${{ runner.temp }}/agents-native-target/cargo-timings/*.html
           if-no-files-found: ignore
           retention-days: 7
+
+  windows-filename:
+    name: Windows project-search filename regression
+    if: >-
+      github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
+      inputs.native_source_run == '' && inputs.native_dependency_run == '' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness'
+    runs-on: *native_snapshot_runner
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: bash
+    env: *native_snapshot_environment
+    steps:
+      - *native_snapshot_checkout
+      - *native_snapshot_input_guard
+      - *native_snapshot_cargo_directories
+      - *native_snapshot_python
+      - *native_snapshot_uv
+      - *native_snapshot_build_tools
+      - *native_snapshot_sdist
+      - name: Prepare the pinned Codex and RMCP source
+        run: &verify_filename_source python -I -S "$OPENAI_AGENTS_BUILD_SOURCE/packages/codex/scripts/prepare_codex.py"
+      - name: Test Windows project-search filename handling
+        run: *windows_filename_command
+      - name: Verify the prepared native source after testing
+        run: *verify_filename_source
 
   qualify-manual:
     needs: build
