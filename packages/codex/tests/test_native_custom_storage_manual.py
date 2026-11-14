@@ -29,6 +29,13 @@ def lookup_tool():
     return FunctionTool(name="lookup", description="Read", input_type=LookupArgs, output_type=str)
 
 
+def manual_store(database: Path):
+    # On Windows the state file still crosses processes; only the local test store changes.
+    if os.name != "posix":
+        return MemorySessionStore()
+    return SQLiteSessionStore(database)
+
+
 def provider_for(url: str):
     return NativeProvider(base_url=url, api_key="synthetic-manual-store", supports_websockets=False)
 
@@ -51,7 +58,7 @@ async def resume_child(url: str, state_path: str) -> None:
 
 @pytest.mark.parametrize("independent_process", [False, True])
 async def test_manual_custom_storage_round_trip(responses, tmp_path, independent_process):
-    backend = SQLiteSessionStore(tmp_path / "manual.sqlite")
+    backend = manual_store(tmp_path / "manual.sqlite")
     storage = CustomStorage(backend)
     lookup = lookup_tool()
     async with timeout(25), provider_for(responses.url) as provider:
@@ -124,7 +131,7 @@ async def test_manual_custom_storage_keeps_completed_sibling_once(responses, tmp
             tools=[record, lookup],
         )
         async with agent.session(
-            storage=CustomStorage(SQLiteSessionStore(tmp_path / "siblings.sqlite"))
+            storage=CustomStorage(manual_store(tmp_path / "siblings.sqlite"))
         ) as source:
             await source.submit("record and read")
             await entered.wait()

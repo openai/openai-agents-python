@@ -3004,6 +3004,8 @@ def _capture_profile_runtimes(
     *,
     run_error_formatter: bool = False,
 ) -> tuple[dict[str, _ProfileRuntime], list[dict[str, Any]]]:
+    if not profiles:
+        return {}, []
     from ._tool_catalog import _SCOPED_HOSTED_TYPES, _capture_hosted_tools
 
     hosted = [
