@@ -4,7 +4,14 @@ from hashlib import sha256
 
 import pytest
 
-from agents import Agent, HandoffInput, LocalStorage, NativeProvider, SessionState
+from agents import (
+    Agent,
+    HandoffInput,
+    LocalStorage,
+    NativeProvider,
+    SessionState,
+    nest_handoff_history,
+)
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     assistant_output,
@@ -14,7 +21,10 @@ from tests.native_fixtures import (
 
 
 @pytest.mark.parametrize("record", [False, True])
-async def test_handoff_can_add_an_application_assistant_text_record(responses, tmp_path, record):
+@pytest.mark.parametrize("nest", [False, True])
+async def test_handoff_can_add_an_application_assistant_text_record(
+    responses, tmp_path, record, nest
+):
     inserted = "INJECTED-BY-FILTER"
 
     def prepare(value: HandoffInput[None]) -> HandoffInput[None]:
@@ -24,7 +34,10 @@ async def test_handoff_can_add_an_application_assistant_text_record(responses, t
             "content": [{"type": "output_text", "text": inserted}],
         }
         generated = (*value.generated, addition)
-        return replace(value, generated=generated, recorded_generated=generated if record else None)
+        prepared = replace(
+            value, generated=generated, recorded_generated=generated if record else None
+        )
+        return nest_handoff_history(prepared) if nest else prepared
 
     responses.respond(
         assistant_output("companion kept"), function_call("transfer_to_destination", {}, "transfer")

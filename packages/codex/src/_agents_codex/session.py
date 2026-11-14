@@ -3483,8 +3483,6 @@ def _capture_opening_workspaces(
     *,
     has_persistent_or_provider_history: bool,
 ) -> dict[int, tuple[_OwnedProfileWorkspace, list[str]]]:
-    from ._sandbox_profile_workspace import _OwnedProfileWorkspace
-
     captured_workspaces: dict[int, tuple[_OwnedProfileWorkspace, list[str]]] = {}
     for profile in profiles:
         selected_source = (
@@ -3493,6 +3491,10 @@ def _capture_opening_workspaces(
             else profile.declaration.environment
         )
         workspace = getattr(selected_source, "_sdk_owned_profile_workspace", None)
+        if workspace is None:
+            continue
+        from ._sandbox_profile_workspace import _OwnedProfileWorkspace
+
         if isinstance(workspace, _OwnedProfileWorkspace):
             captured_workspaces.setdefault(id(workspace), (workspace, []))[1].append(profile.id)
     for workspace, profile_ids in captured_workspaces.values():
@@ -16854,11 +16856,13 @@ class Session(Generic[ContextT, OutputT]):
             groups: dict[str, Any] = {
                 name: getattr(result, name) for name in ("input", "previous", "generated")
             }
+            from .handoff_history import _capture_handoff_summaries, _handoff_generated_ids
+
             recorded = result.recorded_generated
             if recorded is not None:
                 positions = {id(item): index for index, item in enumerate(source_generated)}
                 context_ids = {id(item) for item in source_context}
-                generated_ids = {id(item) for item in result.generated}
+                generated_ids = _handoff_generated_ids(result)
                 selected: list[int] = []
                 appended: list[list[str]] = []
                 seen_additions: set[int] = set()
@@ -16899,8 +16903,6 @@ class Session(Generic[ContextT, OutputT]):
                 groups["recorded_generated_indices"] = selected
                 if appended:
                     groups["recorded_assistant_text"] = appended
-            from .handoff_history import _capture_handoff_summaries
-
             summaries = _capture_handoff_summaries(result)
             if summaries:
                 groups["summaries"] = summaries

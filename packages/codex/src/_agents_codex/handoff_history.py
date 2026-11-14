@@ -93,6 +93,8 @@ def _remove_all_tools(value: HandoffInput[_ContextT]) -> HandoffInput[_ContextT]
         generated=tuple(item for item in value.generated if item.get("type") not in _TOOL_ITEMS),
     )
     _bind_handoff_summaries(result, retained_summaries)
+    if nested := getattr(value, "_nested_recorded_generated", ()):
+        object.__setattr__(result, "_nested_recorded_generated", nested)
     return result
 
 
@@ -145,7 +147,19 @@ def _nest_handoff_history(
             items.append(_summary(pending, history_wrappers))
     result = replace(value, input=tuple(items), previous=(), generated=())
     _bind_handoff_summaries(result, summaries)
+    if value.recorded_generated is not None:
+        generated_ids = _handoff_generated_ids(value)
+        object.__setattr__(
+            result,
+            "_nested_recorded_generated",
+            tuple(item for item in value.recorded_generated if id(item) in generated_ids),
+        )
     return result
+
+
+def _handoff_generated_ids(value: HandoffInput[Any]) -> set[int]:
+    nested: tuple[_Item, ...] = getattr(value, "_nested_recorded_generated", ())
+    return {id(item) for item in (*value.generated, *nested)}
 
 
 def _forward(item: _Item, *, earlier: bool) -> bool:

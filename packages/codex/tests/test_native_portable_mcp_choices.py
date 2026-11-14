@@ -47,6 +47,17 @@ async def test_native_portable_remembered_choice_requires_verifier(responses, ap
             return True
 
         options = {"verify_remembered_approvals": verify} if trusted else {}
+        if trusted:
+            # A verified choice must survive a checkpoint before the MCP tool is used.
+            async with agent.session(state=saved, **options) as unused:
+                again = await unused.save_state()
+                assert again.remembered_mcp_approvals == saved.remembered_mcp_approvals
+            assert invoked == [saved.to_json()]
+            encoded_again = again.to_json()
+            saved = SessionState.from_json(
+                encoded_again, expected_sha256=sha256(encoded_again.encode()).hexdigest()
+            )
+            invoked.clear()
         async with agent.session(state=saved, **options) as restored:
             turn = await restored.submit("cold")
             outcome = await turn.wait_for_request_or_result()

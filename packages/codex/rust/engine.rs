@@ -3379,14 +3379,16 @@ impl ThreadState {
         // The Core grant checks the captured turn-state identity again at consumption.
         let accepted = question.grant.respond(response).await;
         if accepted && let Some((policy, approve, portable_key)) = remembered {
-            if let Some(key) = portable_key {
-                self.restored_mcp_approvals.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
-            }
             let mut choices = self
                 .remembered_mcp_approvals
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(key) = portable_key {
+                self.restored_mcp_approvals
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&key);
+            }
             if let Some((_, choice)) = choices.iter_mut().find(|(known, _)| known.matches(&policy))
             {
                 *choice = approve;

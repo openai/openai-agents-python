@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from _agents_codex import handoff_history as module
-from agents import HandoffInput, nest_handoff_history
+from agents import HandoffInput, nest_handoff_history, remove_all_tools
 
 ROOT = Path(__file__).parent
 WRAPPERS = ("<CONVERSATION HISTORY>", "</CONVERSATION HISTORY>")
@@ -204,3 +204,21 @@ def test_custom_mapper_does_not_promote_summary_text_into_protocol_items():
     assert seen == [summary]
     assert result.input == (summary,)
     assert all(item.get("type") != "function_call" for item in result.input)
+
+
+def test_nesting_preserves_only_recorded_items_from_generated():
+    source = {"role": "assistant", "content": "kept"}
+    unrelated = {"role": "assistant", "content": "unrelated"}
+    original = HandoffInput(
+        ({"role": "user", "content": "transfer"},),
+        (),
+        (source,),
+        target=object(),
+        recorded_generated=(source, unrelated),
+    )
+
+    result = nest_handoff_history(remove_all_tools(nest_handoff_history(original)))
+
+    assert result.generated == ()
+    assert result.recorded_generated is original.recorded_generated
+    assert module._handoff_generated_ids(result) == {id(source)}

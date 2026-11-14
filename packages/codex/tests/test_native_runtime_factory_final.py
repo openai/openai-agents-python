@@ -3,15 +3,6 @@ import json
 
 import pytest
 from pydantic import BaseModel
-from tests._asyncio import timeout
-from tests.native_fixtures import (
-    assistant_output,
-    function_call,
-    responses as responses,
-)
-from tests.test_native_configured_agent_tool import peer
-from tests.test_native_decision_handoff import Decisions
-from tests.test_native_mcp_tools import Peer
 
 from agents import (
     Agent,
@@ -26,6 +17,15 @@ from agents import (
 )
 from agents.session import Session
 from agents.state import LocalStorage
+from tests._asyncio import timeout
+from tests.native_fixtures import (
+    assistant_output,
+    function_call,
+    responses as responses,
+)
+from tests.test_native_configured_agent_tool import peer
+from tests.test_native_decision_handoff import Decisions
+from tests.test_native_mcp_tools import Peer
 
 
 @pytest.mark.parametrize(
