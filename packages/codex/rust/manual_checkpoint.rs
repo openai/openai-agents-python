@@ -1035,7 +1035,13 @@ fn validate_frame(
     if let Some(items) = frame.get("pending_input") {
         for item in items.as_array().context("Staged input must be an array")? {
             ensure!(
-                item.get("call_id")
+                (if item.get("type").and_then(Value::as_str)
+                    == Some("local_shell_call_output")
+                {
+                    item.get("id")
+                } else {
+                    item.get("call_id")
+                })
                     .and_then(Value::as_str)
                     .is_none_or(|id| !seen_calls.contains(id)),
                 "Staged input cannot reuse a call from the saved turn"

@@ -22,8 +22,14 @@ from agents import (
     Session,
     function_tool,
 )
+from agents.observation import OutputTextDelta
 from tests._asyncio import timeout
-from tests.native_fixtures import assistant_output, function_call, responses as responses
+from tests.native_fixtures import (
+    assistant_output,
+    function_call,
+    responses as responses,
+    text_response,
+)
 from tests.test_native_agent_observation import provider
 
 
@@ -440,3 +446,72 @@ async def test_recovered_output_preserves_only_current_native_repair_receipts(
             assert len(responses.requests) == 2 * (1 + max_retries)
         finally:
             await native.aclose()
+
+
+async def test_observe_native_stream_and_recover_its_final_output(responses):
+    invalid = '{"count":"invalid"}'
+    observed = asyncio.Event()
+    responses.delta_gate = observed
+    responses.respond(*text_response("msg_streamed_invalid", invalid))
+    received = []
+    native = provider(responses)
+    agent = Agent(
+        instructions="Return a record.",
+        provider=native,
+        output_type=PromptedOutput(Record, max_retries=0),
+    )
+
+    async def observe(event):
+        if isinstance(event, OutputTextDelta):
+            received.append(event.delta)
+            observed.set()
+
+    def recover(failure):
+        assert failure.kind == "invalid_output"
+        assert "".join(received) == invalid
+        return RecoverRun({"count": 3})
+
+    try:
+        async with timeout(8):
+            result = await agent.run(
+                "begin", on_event=observe, error_handler=recover, return_history=True
+            )
+        assert result.final_output == Record(count=3)
+        assert len(responses.requests) == 1
+        assert '{"count": 3}' in str(result.history)
+    finally:
+        observed.set()
+        await native.aclose()
+
+
+async def test_stream_observer_failure_remains_the_primary_error(responses):
+    responses.respond(*text_response("msg_observer_failure", '{"count":"invalid"}'))
+    native = provider(responses)
+    agent = Agent(
+        instructions="Return a record.",
+        provider=native,
+        output_type=PromptedOutput(Record, max_retries=0),
+    )
+    failure = ValueError("synthetic observer failure")
+    allow_observer = asyncio.Event()
+    recovered = []
+
+    async def observe(event):
+        if isinstance(event, OutputTextDelta):
+            asyncio.get_running_loop().call_later(0.15, allow_observer.set)
+            await allow_observer.wait()
+            raise failure
+
+    def recover(_failure):
+        recovered.append(True)
+        allow_observer.set()
+        return RecoverRun({"count": 3})
+
+    try:
+        async with timeout(8):
+            with pytest.raises(ValueError) as error:
+                await agent.run("begin", on_event=observe, error_handler=recover)
+        assert error.value is failure
+        assert not recovered
+    finally:
+        await native.aclose()

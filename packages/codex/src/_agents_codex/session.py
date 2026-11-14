@@ -10260,6 +10260,7 @@ class Session(Generic[ContextT, OutputT]):
         error_handler: _RunErrorHandler | None = None,
         error_input: UserInput | None = None,
         pause_manual: Sequence[FunctionTool[Any, Any, Any]] = (),
+        observation_reader: asyncio.Task[None] | None = None,
     ) -> Completed[OutputT]:
         """Own live replies and Session shutdown for a one-shot run."""
         failure: asyncio.Future[BaseException] = self._loop.create_future()
@@ -10379,11 +10380,16 @@ class Session(Generic[ContextT, OutputT]):
                 raise failure.result()
 
         try:
-            await asyncio.wait((waiter, reader, failure), return_when=asyncio.FIRST_COMPLETED)
+            tasks = (waiter, reader, failure)
+            if observation_reader is not None:
+                tasks = (*tasks, observation_reader)
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             if failure.done():
                 raise failure.result()
             if reader.done():
                 await reader
+            if observation_reader is not None:
+                await observation_reader
             try:
                 result = await waiter
             except Exception as error:
@@ -14191,6 +14197,10 @@ class Session(Generic[ContextT, OutputT]):
                     if not started:
                         return False
                 data = json.dumps(dict(event), allow_nan=False)
+                from ._model_provider_metadata import _capture_frame
+
+                if not isinstance(event, (_RawChatChunk, _ResponsesWebSocketFrame)):
+                    data = _capture_frame(data, event)
 
                 accepted = await native._push_model_producer_event(
                     request_id,
@@ -14287,6 +14297,9 @@ class Session(Generic[ContextT, OutputT]):
                 disable_provider_retries=message.get("disable_provider_retries") is True,
                 _report_usage=report_usage,
             )
+            from ._model_provider_metadata import _bind_input
+
+            _bind_input(request, message.get("provider_metadata"))
             if measurement_owner is not None:
 
                 def account_provider_request(operation: dict[str, Any]) -> str | None:

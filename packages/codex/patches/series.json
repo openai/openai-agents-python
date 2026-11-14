@@ -1239,7 +1239,15 @@
     {
       "path": "sdk-hosted-provider-request-detail.patch",
       "sha256": "1b315c5f6f0d7273fa9e181f3a8861418e4aec298c6d63c7d375b0da68fe8cca"
+    },
+    {
+      "path": "sdk-pending-input-result-families.patch",
+      "sha256": "c3a6572d583ba81d6a00d489018ea1c878d7e4c37ce836b8582d69903037bfb6"
+    },
+    {
+      "path": "sdk-model-provider-metadata.patch",
+      "sha256": "b03f42f6e08f4acee8ec64ca643f01ce126a6e8f8d434556db3fa6198bee890d"
     }
   ],
-  "result_tree": "30abc45c5742ba14094578ab34948fea376c01bd"
+  "result_tree": "28d15b62984fd07a8195f641b9f77953887dfc85"
 }

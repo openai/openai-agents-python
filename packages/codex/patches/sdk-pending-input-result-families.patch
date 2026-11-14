@@ -1,0 +1,403 @@
+diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
+index 6451a1e6..74e7289b 100644
+--- a/codex-rs/app-server/src/notification_media.rs
++++ b/codex-rs/app-server/src/notification_media.rs
+@@ -69,7 +69,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
+                 | ResponseItem::ItemReference { .. }
+                 | ResponseItem::Program { .. }
+                 | ResponseItem::ProgramOutput { .. }
+-                | ResponseItem::Other => {}
++                | ResponseItem::LocalShellCallOutput { .. }
++            | ResponseItem::Other => {}
+             }
+             ServerNotification::RawResponseItemCompleted(notification)
+         }
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index 7ca40966..19c55903 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -85,7 +85,8 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
+         | ResponseItem::ItemReference { .. }
+         | ResponseItem::Program { .. }
+         | ResponseItem::ProgramOutput { .. }
+-        | ResponseItem::Other => false,
++        | ResponseItem::LocalShellCallOutput { .. }
++            | ResponseItem::Other => false,
+     }) {
+         return Err(invalid_request(REMOTE_IMAGE_URL_ERROR));
+     }
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 89fecbf5..507edde0 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -133,6 +133,7 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
+             | ResponseItem::ItemReference { .. }
+             | ResponseItem::Program { .. }
+             | ResponseItem::ProgramOutput { .. }
++            | ResponseItem::LocalShellCallOutput { .. }
+             | ResponseItem::Other => false,
+         },
+         RolloutItem::RealtimeItem(_)
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index 5e36cddd..9caad4c5 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -214,6 +214,7 @@ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
+             | ResponseItem::ItemReference { .. }
+             | ResponseItem::Program { .. }
+             | ResponseItem::ProgramOutput { .. }
++            | ResponseItem::LocalShellCallOutput { .. }
+             | ResponseItem::Other => {}
+         }
+     }
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 44f6e48c..c504720e 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1211,6 +1211,7 @@ pub(crate) fn is_api_message(
+         | ResponseItem::ComputerCall { .. }
+         | ResponseItem::ApplyPatchCallOutput { .. }
+         | ResponseItem::ComputerCallOutput { .. }
++        | ResponseItem::LocalShellCallOutput { .. }
+         | ResponseItem::CustomToolCall { .. }
+         | ResponseItem::CustomToolCallOutput { .. }
+         | ResponseItem::LocalShellCall { .. }
+@@ -1402,6 +1403,8 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
+         ResponseItem::ToolSearchCall { arguments, .. } => json_content_bytes(arguments),
+         ResponseItem::ToolSearchOutput { tools, .. } => json_content_bytes(tools),
+         ResponseItem::LocalShellCall { action, .. } => json_content_bytes(action),
++        ResponseItem::LocalShellCallOutput { id, output, .. } =>
++            text_bytes(id).saturating_add(text_bytes(output)),
+         ResponseItem::WebSearchCall { action, .. } => {
+             action.as_ref().map(json_content_bytes).unwrap_or_default()
+         }
+@@ -1640,6 +1643,7 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
+         ResponseItem::AdditionalTools { .. }
+         | ResponseItem::ApplyPatchCallOutput { .. }
+         | ResponseItem::ComputerCallOutput { .. }
++        | ResponseItem::LocalShellCallOutput { .. }
+         | ResponseItem::FunctionCallOutput { .. }
+         | ResponseItem::ToolSearchOutput { .. }
+         | ResponseItem::CustomToolCallOutput { .. }
+diff --git a/codex-rs/core/src/context_manager/normalize.rs b/codex-rs/core/src/context_manager/normalize.rs
+index 253670d8..d2c46430 100644
+--- a/codex-rs/core/src/context_manager/normalize.rs
++++ b/codex-rs/core/src/context_manager/normalize.rs
+@@ -34,6 +34,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
+     items.retain(|entry| !matches!(&entry.item, ResponseItem::ComputerCall { call_id, .. } if !completed_computer_calls.contains(call_id)));
+
+     let mut function_output_ids = HashSet::new();
++    let mut local_shell_output_ids = HashSet::new();
+     let mut tool_search_output_ids = HashSet::new();
+     let mut custom_tool_output_ids = HashSet::new();
+     let mut mcp_approval_output_ids = HashSet::new();
+@@ -45,6 +46,9 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
+             } => {
+                 function_output_ids.insert(call_id.as_str());
+             }
++            ResponseItem::LocalShellCallOutput { id, .. } => {
++                local_shell_output_ids.insert(id.as_str());
++            }
+             ResponseItem::ToolSearchOutput {
+                 call_id: Some(call_id),
+                 ..
+@@ -144,7 +148,8 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
+                 id,
+                 call_id: Some(call_id),
+                 ..
+-            } if !function_output_ids.contains(call_id.as_str()) => {
++            } if !function_output_ids.contains(call_id.as_str())
++                && !local_shell_output_ids.contains(call_id.as_str()) => {
+                 error_or_panic(format!(
+                     "Local shell call output is missing for call id: {call_id}"
+                 ));
+@@ -165,6 +170,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
+     }
+     drop((
+         function_output_ids,
++        local_shell_output_ids,
+         tool_search_output_ids,
+         custom_tool_output_ids,
+         mcp_approval_output_ids,
+@@ -382,13 +388,18 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
+             ..
+         } => {
+             remove_first_matching(items, |i| {
+-                matches!(
+-                    i,
+-                    ResponseItem::FunctionCallOutput {
+-                        call_id: Some(existing),
+-                        ..
+-                    } if existing == call_id
+-                )
++                matches!(i, ResponseItem::FunctionCallOutput {
++                    call_id: Some(existing), ..
++                } if existing == call_id)
++                    || matches!(i, ResponseItem::LocalShellCallOutput { id, .. }
++                        if id == call_id)
++            });
++        }
++        ResponseItem::LocalShellCallOutput { id, .. } => {
++            remove_first_matching(items, |i| {
++                matches!(i, ResponseItem::LocalShellCall {
++                    call_id: Some(call_id), ..
++                } if call_id == id)
+             });
+         }
+         _ => {}
+diff --git a/codex-rs/core/src/image_preparation.rs b/codex-rs/core/src/image_preparation.rs
+index 0d021023..c4878a74 100644
+--- a/codex-rs/core/src/image_preparation.rs
++++ b/codex-rs/core/src/image_preparation.rs
+@@ -300,6 +300,7 @@ pub(crate) async fn prepare_response_items(
+             | ResponseItem::ItemReference { .. }
+             | ResponseItem::Program { .. }
+             | ResponseItem::ProgramOutput { .. }
++            | ResponseItem::LocalShellCallOutput { .. }
+             | ResponseItem::Other => None,
+         };
+         prepared_items.push(item);
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 6bdda489..29449a05 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -5471,6 +5471,7 @@ async fn try_run_sampling_request(
+                         | ResponseItem::ItemReference { .. }
+                         | ResponseItem::Program { .. }
+                         | ResponseItem::ProgramOutput { .. }
++                        | ResponseItem::LocalShellCallOutput { .. }
+                         | ResponseItem::Other => false,
+                     };
+
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index b6565e80..8663fb52 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -668,6 +668,7 @@ pub(crate) async fn handle_non_tool_response_item(
+         ResponseItem::ItemReference { .. } => "item_reference",
+         ResponseItem::Program { .. } => "program",
+         ResponseItem::ProgramOutput { .. } => "program_output",
++        ResponseItem::LocalShellCallOutput { .. } => "local_shell_call_output",
+         ResponseItem::Other => "other",
+     };
+     debug!(
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index c1d70c8a..671120ea 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -464,7 +464,8 @@ fn response_item_records_turn_ttft(item: &ResponseItem) -> bool {
+         | ResponseItem::ItemReference { .. }
+         | ResponseItem::Program { .. }
+         | ResponseItem::ProgramOutput { .. }
+-        | ResponseItem::Other => false,
++        | ResponseItem::LocalShellCallOutput { .. }
++            | ResponseItem::Other => false,
+     }
+ }
+
+diff --git a/codex-rs/ext/image-generation/src/tool.rs b/codex-rs/ext/image-generation/src/tool.rs
+index 87237b74..a1d292ea 100644
+--- a/codex-rs/ext/image-generation/src/tool.rs
++++ b/codex-rs/ext/image-generation/src/tool.rs
+@@ -542,6 +542,7 @@ fn recent_images(
+             | ResponseItem::ItemReference { .. }
+             | ResponseItem::Program { .. }
+             | ResponseItem::ProgramOutput { .. }
++            | ResponseItem::LocalShellCallOutput { .. }
+             | ResponseItem::Other => {}
+         }
+         for image in image_references {
+diff --git a/codex-rs/guardian-context/src/transcript.rs b/codex-rs/guardian-context/src/transcript.rs
+index b7429581..618fb885 100644
+--- a/codex-rs/guardian-context/src/transcript.rs
++++ b/codex-rs/guardian-context/src/transcript.rs
+@@ -280,6 +280,15 @@ pub fn collect_transcript(
+                 };
+                 (kind, text)
+             }
++            ResponseItem::LocalShellCallOutput { output, .. } => {
++                if !config.options.include_tool_outputs {
++                    continue;
++                }
++                (
++                    ConversationTranscriptEntryKind::ToolOutput("local shell result".to_string()),
++                    output.clone(),
++                )
++            }
+             ResponseItem::FunctionCallOutput {
+                 call_id: None,
+                 name: Some(name),
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index b4cb836e..e0d95711 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -536,6 +536,7 @@ pub fn client_tool_pair_part(item: &ResponseItem) -> Option<(&'static str, Optio
+             matches!(item, ResponseItem::ShellCall { .. }),
+         ),
+         ResponseItem::LocalShellCall { call_id, .. } => ("function", call_id.as_deref(), true),
++        ResponseItem::LocalShellCallOutput { id, .. } => ("function", Some(id.as_str()), false),
+         ResponseItem::FunctionCallOutput { call_id, .. } => ("function", call_id.as_deref(), false),
+         ResponseItem::ComputerCall { call_id, .. } => ("computer", Some(call_id.as_str()), true),
+         ResponseItem::ComputerCallOutput { call_id, .. } => {
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index 977f877d..9d597150 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -1437,6 +1437,7 @@ impl SessionTelemetry {
+             ResponseItem::ItemReference { .. } => "item_reference".into(),
+             ResponseItem::Program { .. } => "program".into(),
+             ResponseItem::ProgramOutput { .. } => "program_output".into(),
++            ResponseItem::LocalShellCallOutput { .. } => "local_shell_call_output".into(),
+             ResponseItem::Other => "other".into(),
+         }
+     }
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index 75968b41..25b78d31 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -1232,6 +1232,16 @@ pub enum ResponseItem {
+         #[ts(optional)]
+         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+     },
++    /// Historical Responses local-shell output. `id` references the provider call;
++    /// it is not a new SDK occurrence ID or an execution receipt.
++    LocalShellCallOutput {
++        id: String,
++        output: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        status: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
++    },
+     #[serde(deserialize_with = "deserialize_function_call")]
+     FunctionCall {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -1632,6 +1642,7 @@ impl ResponseItem {
+             Self::ConfigurationUpdate { .. }
+             | Self::CompactionTrigger { .. }
+             | Self::ItemReference { .. }
++            | Self::LocalShellCallOutput { .. }
+             | Self::Other => None,
+         }
+     }
+@@ -1671,6 +1682,7 @@ impl ResponseItem {
+             Self::ConfigurationUpdate { .. }
+             | Self::CompactionTrigger { .. }
+             | Self::ItemReference { .. }
++            | Self::LocalShellCallOutput { .. }
+             | Self::Other => {}
+         }
+     }
+@@ -1709,6 +1721,7 @@ impl ResponseItem {
+             Self::ConfigurationUpdate { .. }
+             | Self::CompactionTrigger { .. }
+             | Self::ItemReference { .. }
++            | Self::LocalShellCallOutput { .. }
+             | Self::Other => None,
+         }
+     }
+@@ -1758,6 +1771,10 @@ impl ResponseItem {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+             }
++            | Self::LocalShellCallOutput {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
+             | Self::FunctionCallOutput {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+@@ -1866,6 +1883,10 @@ impl ResponseItem {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+             }
++            | Self::LocalShellCallOutput {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
+             | Self::CustomToolCall {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+@@ -1984,6 +2005,10 @@ impl ResponseItem {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+             }
++            | Self::LocalShellCallOutput {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
+             | Self::CustomToolCall {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+@@ -5341,4 +5366,27 @@ mod computer_protocol_tests {
+             assert_eq!(serde_json::to_value(parsed).unwrap(), item);
+         }
+     }
++
++    #[test]
++    fn local_shell_output_keeps_provider_correlation_id() {
++        let wire = serde_json::json!({
++            "type": "local_shell_call_output",
++            "id": "historical-shell",
++            "output": "historical result",
++            "status": "completed"
++        });
++        let mut item: ResponseItem = serde_json::from_value(wire.clone()).unwrap();
++        assert!(matches!(item, ResponseItem::LocalShellCallOutput { .. }));
++        assert!(item.id().is_none());
++        assert!(item.id_prefix().is_none());
++        item.set_id(Some("invented-receipt".to_owned().into()));
++        assert_eq!(serde_json::to_value(item).unwrap(), wire);
++        for bad in [
++            serde_json::json!({"type": "local_shell_call_output", "output": "missing id"}),
++            serde_json::json!({"type": "local_shell_call_output", "id": "historical-shell", "output": 7}),
++        ] {
++            assert!(serde_json::from_value::<ResponseItem>(bad).is_err());
++        }
++    }
++
+ }
+diff --git a/codex-rs/rollout/src/persistence_metrics.rs b/codex-rs/rollout/src/persistence_metrics.rs
+index 86e6803c..7b60e6b8 100644
+--- a/codex-rs/rollout/src/persistence_metrics.rs
++++ b/codex-rs/rollout/src/persistence_metrics.rs
+@@ -351,6 +351,7 @@ fn response_item_type(item: &ResponseItemEnvelope) -> &'static str {
+         ResponseItem::ItemReference { .. } => "response.item_reference",
+         ResponseItem::Program { .. } => "response.program",
+         ResponseItem::ProgramOutput { .. } => "response.program_output",
++        ResponseItem::LocalShellCallOutput { .. } => "response.local_shell_call_output",
+         ResponseItem::Other => "response.other",
+     }
+ }
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index aaebb48c..83ba083a 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -89,6 +89,7 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {
+         | ResponseItem::FunctionCall { .. }
+         | ResponseItem::ToolSearchCall { .. }
+         | ResponseItem::FunctionCallOutput { .. }
++        | ResponseItem::LocalShellCallOutput { .. }
+         | ResponseItem::ToolSearchOutput { .. }
+         | ResponseItem::ApplyPatchCall { .. }
+         | ResponseItem::ComputerCall { .. }
+@@ -126,6 +127,7 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
+         | ResponseItem::FunctionCall { .. }
+         | ResponseItem::ToolSearchCall { .. }
+         | ResponseItem::FunctionCallOutput { .. }
++        | ResponseItem::LocalShellCallOutput { .. }
+         | ResponseItem::ToolSearchOutput { .. }
+         | ResponseItem::ApplyPatchCall { .. }
+         | ResponseItem::ComputerCall { .. }
+diff --git a/codex-rs/utils/audio/src/lib.rs b/codex-rs/utils/audio/src/lib.rs
+index 4eb8434a..09e04fd5 100644
+--- a/codex-rs/utils/audio/src/lib.rs
++++ b/codex-rs/utils/audio/src/lib.rs
+@@ -99,6 +99,7 @@ pub fn prepare_response_items(items: &mut [ResponseItem]) {
+             | ResponseItem::ItemReference { .. }
+             | ResponseItem::Program { .. }
+             | ResponseItem::ProgramOutput { .. }
++            | ResponseItem::LocalShellCallOutput { .. }
+             | ResponseItem::Other => {}
+         }
+     }

@@ -102,6 +102,7 @@ if TYPE_CHECKING:
     from .history import CanonicalHistorySnapshot
     from .input import UserInput
     from .native_agents import NativeAgents
+    from .observation import Observation
     from .prepared_request import _PrepareRequest
     from .realtime_agents import RealtimeAgentConfig, RealtimeHandoff
     from .recovery import ReconciledCall
@@ -1992,6 +1993,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         capture_error_details: bool = False,
         error_handler: _RunErrorHandler | None = None,
+        on_event: Callable[[Observation], None | Awaitable[None]] | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2031,6 +2033,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         capture_error_details: bool = False,
         error_handler: _RunErrorHandler | None = None,
+        on_event: Callable[[Observation], None | Awaitable[None]] | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2070,6 +2073,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         capture_error_details: bool = False,
         error_handler: _RunErrorHandler | None = None,
+        on_event: Callable[[Observation], None | Awaitable[None]] | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2113,6 +2117,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         capture_error_details: bool = False,
         error_handler: _RunErrorHandler | None = None,
+        on_event: Callable[[Observation], None | Awaitable[None]] | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2201,6 +2206,10 @@ class Agent(Generic[ContextT, OutputT]):
         Provider refusal, final output validation and the request budget are
         eligible. Output guardrails check the replacement before it is returned
         or saved. Uncertain cleanup prevents recovery.
+
+        on_event receives this run's native observations while it executes.
+        The SDK waits for each observer call. It delivers pending events before
+        returning the final result, including recovery after streamed output.
         """
         provider_history = _capture_provider_history(provider_history)
         if input_storage_policy is not None:
@@ -2211,6 +2220,8 @@ class Agent(Generic[ContextT, OutputT]):
             input = deepcopy(input)
         if error_handler is not None and not callable(error_handler):
             raise TypeError("error_handler must be callable or None")
+        if on_event is not None and not callable(on_event):
+            raise TypeError("on_event must be callable or None")
         capture_error_details = capture_error_details is True
         observe_failure = capture_error_details or error_handler is not None
         error_input = deepcopy(input) if observe_failure and input_storage_policy is None else None
@@ -2426,8 +2437,9 @@ class Agent(Generic[ContextT, OutputT]):
                 options["_atomic_first_turn"] = True
                 if (
                     not (
-                        return_history or return_raw_usage or return_items or capture_error_details
+                        return_history or return_raw_usage or return_items or observe_failure
                     )
+                    and on_event is None
                     and model_override is None
                     and not raise_on_unknown_tool
                     and _private_text_run_eligible(
@@ -2437,8 +2449,9 @@ class Agent(Generic[ContextT, OutputT]):
                     options["_private_text_run"] = True
                 if (
                     not (
-                        return_history or return_raw_usage or return_items or capture_error_details
+                        return_history or return_raw_usage or return_items or observe_failure
                     )
+                    and on_event is None
                     and model_override is None
                     and not raise_on_unknown_tool
                     and _completed_run_eligible(
@@ -2632,22 +2645,44 @@ class Agent(Generic[ContextT, OutputT]):
                         )
                 if observe_failure and input is not None and input_storage_policy is None:
                     session._remember_run_error_input(submission, error_input)
-                if session._interaction_handler is None and pause_manual:
-                    return await session._run_with_interactions(
-                        submission,
-                        on_interaction,
-                        return_state=return_state,
-                        return_history=return_history,
-                        return_raw_usage=return_raw_usage,
-                        return_items=return_items,
-                        capture_error_details=capture_error_details,
-                        error_handler=error_handler,
-                        error_input=error_input,
-                        pause_manual=pause_manual,
+
+                managed_interactions = session._interaction_handler is None and bool(pause_manual)
+                if on_event is not None:
+                    observer = on_event
+
+                    async def observe() -> None:
+                        async for event in submission.events():
+                            observed = observer(event)
+                            if observed is not None:
+                                await observed
+
+                    reader = asyncio.create_task(observe())
+                else:
+                    reader = None
+                try:
+                    if managed_interactions:
+                        return await session._run_with_interactions(
+                            submission,
+                            on_interaction,
+                            return_state=return_state,
+                            return_history=return_history,
+                            return_raw_usage=return_raw_usage,
+                            return_items=return_items,
+                            capture_error_details=capture_error_details,
+                            error_handler=error_handler,
+                            error_input=error_input,
+                            pause_manual=pause_manual,
+                            observation_reader=reader,
+                        )
+                    if reader is not None:
+                        await reader
+                    result = await session._one_shot_result(
+                        submission, error_handler, capture_error_details, error_input
                     )
-                result = await session._one_shot_result(
-                    submission, error_handler, capture_error_details, error_input
-                )
+                finally:
+                    if reader is not None and not reader.done():
+                        reader.cancel()
+                        await asyncio.gather(reader, return_exceptions=True)
                 if return_state:
                     result = replace(result, state=await session.save_state())
                 if return_history:
