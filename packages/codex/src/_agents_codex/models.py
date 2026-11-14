@@ -26,6 +26,16 @@ from ._hosted_agent_metadata import (
     get_hosted_agent_metadata as get_hosted_agent_metadata,
 )
 from ._media import _capture_video
+from ._model_provider_metadata import (
+    _capture_output,
+    _chat_call_metadata,
+    _chat_reasoning,
+    _fold_chat_reasoning,
+    _has_input,
+    _replay_input,
+    _retain_frame,
+    _retain_output,
+)
 from ._public import preserve_module_identity as _preserve_module_identity
 from .input import _capture_prompt_cache_breakpoint
 from .retry import RetryAdvice
@@ -340,12 +350,14 @@ class ModelResponse:
     ) -> str:
         usage: Any = None
         raw: Any = None
+        provider_metadata: Any = None
         rendered: str | None = None
         try:
             if not isinstance(self.response_id, str) or not self.response_id.strip():
                 raise ValueError("ModelResponse needs a nonempty response_id")
             usage = None
             usage = _capture_model_usage(self.usage)
+            provider_metadata = _capture_output(self)
             if capture_raw_provider_events:
                 raw = getattr(self, "_raw_chat_completion", None)
             try:
@@ -354,6 +366,11 @@ class ModelResponse:
                         "response_id": self.response_id,
                         "output": self.output,
                         "usage": usage,
+                        **(
+                            {"provider_metadata": provider_metadata}
+                            if provider_metadata is not None
+                            else {}
+                        ),
                         **({"raw_chat_completion": raw} if raw is not None else {}),
                         **(
                             {"original_usage": _capture_responses_usage(self)}
@@ -371,7 +388,7 @@ class ModelResponse:
             return rendered
         finally:
             # Invalid provider counters must not retain output through this frame.
-            del self, usage, raw, rendered
+            del self, usage, raw, rendered, provider_metadata
 
 
 def _capture_responses_usage(response: ModelResponse) -> dict[str, Any] | None:
@@ -697,6 +714,15 @@ class ChatCompletionsModel:
 
         return openai_retry_advice(request)
 
+    def _provider_scope(self) -> str:
+        return (
+            "litellm"
+            if isinstance(self, LitellmModel)
+            else "any_llm"
+            if isinstance(self, AnyLLMModel)
+            else "openai_chat_completions"
+        )
+
     def _parameters(
         self, request: ModelRequest, streaming: bool
     ) -> tuple[dict[str, Any], _PatchWire | None]:
@@ -721,18 +747,29 @@ class ChatCompletionsModel:
         output: Any = None
         output_format: Any = None
         part: Any = None
-        thinking: Any = None
         reasoning: Any = None
+        thinking: Any = None
         text: Any = None
         tool: Any = None
         tools: Any = None
         value: Any = None
         video: dict[str, Any] | None = None
+        pending_reasoning: dict[str, Any] | None = None
+        replay = None
+        input_index = None
         try:
             messages = []
             native_tools = list(request.body.get("tools") or [])
-            for item in request.body["input"]:
+            thinking = request.body.get("thinking")
+            replay_thinking = (
+                thinking.get("type") in ("enabled", "adaptive")
+                if isinstance(thinking, dict)
+                else (request.body.get("reasoning") or {}).get("effort") is not None
+            )
+            for input_index, item in enumerate(request.body["input"]):
                 kind = item.get("type")
+                if kind == "message" and item.get("role") != "assistant":
+                    pending_reasoning = None
                 if kind == "additional_tools":
                     native_tools.extend(item["tools"])
                     continue
@@ -799,6 +836,9 @@ class ChatCompletionsModel:
                         messages[-1]["content"] = [*(messages[-1].get("content") or []), *content]
                     else:
                         messages.append({"role": item["role"], "content": content})
+                    if pending_reasoning:
+                        messages[-1].update(pending_reasoning)
+                        pending_reasoning = None
                 elif kind in ("function_call", "apply_patch_call") or (
                     kind == "custom_tool_call" and item.get("name") == "apply_patch"
                 ):
@@ -824,6 +864,21 @@ class ChatCompletionsModel:
                             },
                         }
                     )
+                    if "gemini" in (self.model or request.body["model"]).lower():
+                        replay = _replay_input(
+                            request,
+                            input_index,
+                            item,
+                            self._provider_scope(),
+                            self.model or request.body["model"],
+                        )
+                        if replay and replay.get("thought_signature"):
+                            messages[-1]["tool_calls"][-1]["extra_content"] = {
+                                "google": {"thought_signature": replay["thought_signature"]}
+                            }
+                    if pending_reasoning:
+                        messages[-1].update(pending_reasoning)
+                        pending_reasoning = None
                 elif (
                     kind == "function_call_output"
                     or (
@@ -835,6 +890,7 @@ class ChatCompletionsModel:
                         and apply_patch_calls.get(item["call_id"]) == "editor"
                     )
                 ):
+                    pending_reasoning = None
                     if kind == "apply_patch_call_output":
                         output = json.dumps(
                             {"status": item.get("status"), "output": item.get("output")}
@@ -860,7 +916,33 @@ class ChatCompletionsModel:
                 elif kind == "configuration_update":
                     continue
                 elif kind == "reasoning":
-                    raise ValueError("Chat adapters do not support provider reasoning replay")
+                    replay = _replay_input(
+                        request,
+                        input_index,
+                        item,
+                        self._provider_scope(),
+                        self.model or request.body["model"],
+                    )
+                    if replay is None and not _has_input(request, input_index):
+                        raise ValueError(
+                            "Chat reasoning replay requires its settled provider receipt"
+                        )
+                    pending_reasoning = {}
+                    if replay:
+                        if "reasoning" in replay:
+                            pending_reasoning["reasoning"] = replay["reasoning"]
+                        target = (self.model or request.body["model"]).lower()
+                        if "deepseek" in target and "reasoning_content" in replay:
+                            pending_reasoning["reasoning_content"] = replay["reasoning_content"]
+                        if (
+                            isinstance(self, LitellmModel)
+                            and any(provider in target for provider in ("claude", "anthropic"))
+                            and replay_thinking
+                            and "thinking_blocks" in replay
+                        ):
+                            pending_reasoning["thinking_blocks"] = replay["thinking_blocks"]
+                    if pending_reasoning and messages and messages[-1].get("role") == "assistant":
+                        messages.append({"role": "assistant", "content": []})
                 else:
                     raise ValueError(
                         "ChatCompletionsModel received an unsupported native input item"
@@ -967,6 +1049,8 @@ class ChatCompletionsModel:
                     },
                 }
             reasoning = request.body.get("reasoning") or {}
+            if reasoning.keys() - {"effort", "summary"}:
+                raise ValueError("Extended reasoning options require a Responses model")
             if reasoning.get("effort") is not None:
                 options["reasoning_effort"] = reasoning["effort"]
             if "top_logprobs" in request.body or "message.output_text.logprobs" in (
@@ -1011,7 +1095,11 @@ class ChatCompletionsModel:
             if choice is not None and (type(choice) is not int or choice != 1):
                 raise ValueError("Chat adapters require exactly one choice")
             thinking = (options.get("extra_body") or {}).get("thinking")
-            if thinking is not None and thinking.get("type") != "disabled":
+            if (
+                thinking is not None
+                and not isinstance(self, LitellmModel)
+                and (not isinstance(thinking, dict) or thinking.get("type") != "disabled")
+            ):
                 raise ValueError("Chat adapters do not support configured provider thinking")
             return {
                 "model": self.model or request.body["model"],
@@ -1048,13 +1136,16 @@ class ChatCompletionsModel:
                 output,
                 output_format,
                 part,
-                thinking,
                 reasoning,
+                thinking,
                 text,
                 tool,
                 tools,
                 value,
                 video,
+                pending_reasoning,
+                replay,
+                input_index,
             )
 
     def _completed_response(
@@ -1073,6 +1164,7 @@ class ChatCompletionsModel:
         text_part: dict[str, Any] | None = None
         usage: Any = None
         value: Any = None
+        reasoning_data = reasoning_text = annotations = index = None
         try:
             value = response.model_dump() if hasattr(response, "model_dump") else response
             if not isinstance(value, dict):
@@ -1100,23 +1192,6 @@ class ChatCompletionsModel:
                     **message,
                     "refusal": "Response withheld by the provider's content filter.",
                 }
-            if message.get("refusal") is None:
-                if (
-                    message.get("reasoning_content") not in (None, "")
-                    or message.get("thinking_blocks")
-                    or message.get("reasoning")
-                ):
-                    raise ValueError("Chat adapters do not support provider reasoning replay")
-                for call in message.get("tool_calls") or []:
-                    provider_data = call.get("provider_specific_fields") or {}
-                    if (
-                        provider_data.get("thought_signature") is not None
-                        or ((call.get("extra_content") or {}).get("google") or {}).get(
-                            "thought_signature"
-                        )
-                        is not None
-                    ):
-                        raise ValueError("Chat adapters do not support provider reasoning replay")
             if (
                 choice.get("finish_reason") not in ("stop", "tool_calls")
                 and message.get("refusal") is None
@@ -1130,6 +1205,35 @@ class ChatCompletionsModel:
                 )
                 raise ValueError(f"ChatCompletionsModel cannot complete finish_reason={reason}")
             output = []
+            annotations = []
+            reasoning_data = _chat_reasoning(message) if message.get("refusal") is None else {}
+            if reasoning_data:
+                reasoning_text = (
+                    reasoning_data.get("reasoning_content")
+                    or "".join(
+                        block.get("thinking", "")
+                        for block in reasoning_data.get("thinking_blocks", [])
+                    )
+                    or (
+                        reasoning_data.get("reasoning")
+                        if isinstance(reasoning_data.get("reasoning"), str)
+                        else ""
+                    )
+                )
+                output.append(
+                    {
+                        "type": "reasoning",
+                        "id": "rs_" + uuid4().hex,
+                        "summary": [],
+                        **(
+                            {"content": [{"type": "reasoning_text", "text": reasoning_text}]}
+                            if reasoning_text
+                            else {}
+                        ),
+                    }
+                )
+            if reasoning_data:
+                annotations.append((0, reasoning_data))
             output_content = []
             if message.get("content") is not None:
                 text_part = {"type": "output_text", "text": message["content"]}
@@ -1142,6 +1246,11 @@ class ChatCompletionsModel:
             if output_content:
                 output.append({"type": "message", "role": "assistant", "content": output_content})
             for call in message.get("tool_calls") or []:
+                provider_data = _chat_call_metadata(call)
+                if provider_data and "gemini" not in (self.model or request.body["model"]).lower():
+                    raise ValueError("Chat tool signatures require a Gemini model")
+                if provider_data:
+                    annotations.append((len(output), provider_data))
                 if call.get("type") != "function":
                     raise ValueError("ChatCompletionsModel received an unsupported tool call")
                 if apply_patch_wire == "editor" and call["function"]["name"] == "apply_patch":
@@ -1165,7 +1274,16 @@ class ChatCompletionsModel:
                         "arguments": call["function"]["arguments"],
                     }
                 )
+            for index, _ in annotations:
+                output[index].setdefault("id", "item_chat_" + uuid4().hex)
             returned = ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
+            if annotations:
+                _retain_output(
+                    returned,
+                    self._provider_scope(),
+                    self.model or request.body["model"],
+                    annotations,
+                )
             if getattr(request, "_observe_raw_provider_events", False):
                 object.__setattr__(returned, "_raw_chat_completion", deepcopy(value))
             return returned
@@ -1187,12 +1305,18 @@ class ChatCompletionsModel:
                 text_part,
                 usage,
                 value,
+                reasoning_data,
+                reasoning_text,
+                annotations,
+                index,
             )
 
     async def _stream_response(self, request: ModelRequest) -> AsyncIterator[Mapping[str, Any]]:
         parameters = apply_patch_wire = chunks = iterator = chunk = raw = choice = delta = None
         retained = choices = probabilities = function = provider_data = ordered = measured = None
         function_piece = None
+        reasoning_fields: dict[str, Any] = {}
+        metadata_event = None
         completion_request = task = opening = index = None
         usage = result = output = item = fragment = call = close = closed = None
         text_parts: list[str] | None = None
@@ -1281,16 +1405,16 @@ class ChatCompletionsModel:
                         "refusal": delta.get("refusal"),
                         "tool_calls": delta.get("tool_calls"),
                         "logprobs": probabilities,
+                        **{
+                            key: delta[key]
+                            for key in ("reasoning_content", "reasoning", "thinking_blocks")
+                            if key in delta
+                        },
                     }
                     buffered_bytes += len(json.dumps(retained, ensure_ascii=False).encode("utf-8"))
                     if buffered_bytes > _MAX_CHAT_STREAM_BYTES:
                         raise ValueError("Chat stream exceeded its buffer limit")
-                    if (
-                        delta.get("reasoning_content") not in (None, "")
-                        or delta.get("thinking_blocks")
-                        or delta.get("reasoning")
-                    ):
-                        raise ValueError("Chat adapters do not support provider reasoning replay")
+                    _fold_chat_reasoning(reasoning_fields, delta)
                     if delta.get("content") is not None:
                         if not isinstance(delta["content"], str):
                             raise TypeError("Chat stream content must be a string")
@@ -1339,17 +1463,12 @@ class ChatCompletionsModel:
                             or fragment.get("type") not in (None, "function")
                         ):
                             raise ValueError("Chat stream received an unsupported tool call")
-                        provider_data = fragment.get("provider_specific_fields") or {}
+                        provider_data = _chat_call_metadata(fragment)
                         if (
-                            provider_data.get("thought_signature") is not None
-                            or ((fragment.get("extra_content") or {}).get("google") or {}).get(
-                                "thought_signature"
-                            )
-                            is not None
+                            provider_data
+                            and "gemini" not in (self.model or request.body["model"]).lower()
                         ):
-                            raise ValueError(
-                                "Chat adapters do not support provider reasoning replay"
-                            )
+                            raise ValueError("Chat tool signatures require a Gemini model")
                         call = calls.setdefault(
                             index,
                             {
@@ -1358,6 +1477,8 @@ class ChatCompletionsModel:
                                 "function": {"name": [], "arguments": []},
                             },
                         )
+                        if provider_data:
+                            call["extra_content"] = {"google": provider_data}
                         if fragment.get("id") is not None:
                             if call["id"] and call["id"] != fragment["id"]:
                                 raise ValueError("Chat stream changed a tool call ID")
@@ -1407,6 +1528,7 @@ class ChatCompletionsModel:
                                 if refusal_parts is None
                                 else "".join(refusal_parts),
                                 "tool_calls": ordered,
+                                **reasoning_fields,
                             },
                         }
                     ],
@@ -1416,14 +1538,17 @@ class ChatCompletionsModel:
             output = [
                 {
                     **item,
-                    "id": message_id if item["type"] == "message" else "item_chat_" + uuid4().hex,
+                    "id": item.get("id")
+                    or (message_id if item["type"] == "message" else "item_chat_" + uuid4().hex),
                 }
                 for item in result.output
             ]
             for index, item in enumerate(output):
-                yield _ChatStreamEvent(
+                metadata_event = _ChatStreamEvent(
                     {"type": "response.output_item.done", "output_index": index, "item": item}
                 )
+                _retain_frame(metadata_event, result, index)
+                yield metadata_event
             measured = result.usage
             yield _ChatStreamEvent(
                 {
@@ -1488,6 +1613,8 @@ class ChatCompletionsModel:
                 response_id,
                 finish_reason,
                 message_id,
+                reasoning_fields,
+                metadata_event,
             )
 
     async def _create(self, request: ModelRequest, **options: Any) -> Any:

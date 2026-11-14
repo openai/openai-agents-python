@@ -11,6 +11,8 @@ from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, PlainValidator, StrictStr, TypeAdapter
 
+from _agents_shared.patch_format import PatchFormat
+
 from ._compat import cancellation_requested
 from ._function_tools import FunctionTool, ToolContext, function_tool
 from ._public import preserve_module_identity as _preserve_module_identity
@@ -197,6 +199,56 @@ def apply_patch_tool(
         _bind=bind,
         needs_approval=needs_approval,
     )
+
+
+class _ScopedPatchEditor:
+    def __init__(self, patch_format: PatchFormat) -> None:
+        if not callable(getattr(patch_format, "apply_diff", None)):
+            raise TypeError("patch_format must define apply_diff")
+        self.patch_format = patch_format
+
+    async def apply(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
+        from _agents_shared.workspace_editor import WorkspaceEditor
+        from agents.classic.editor import ApplyPatchOperation as WorkspaceOperation
+
+        from .sandbox import _capability_workspace
+
+        context = operation.ctx_wrapper
+        source = None if context is None else context._sandbox_source
+        lease = getattr(source, "_sdk_patch_workspace", None)
+        if context is None or lease is None or lease[1] is not context._environment:
+            raise RuntimeError("Custom patch formats require the current sandbox environment")
+        resource, environment, user = lease
+        editor = WorkspaceEditor(
+            resource, user=user, workspace_scope=_capability_workspace(resource, environment)
+        )
+        requested = WorkspaceOperation(
+            type=operation.type,
+            path=operation.path,
+            diff=operation.diff,
+            move_to=operation.move_to,
+        )
+        normalized = editor.normalize_operation(requested)
+        resource.normalize_path(normalized.path, for_write=True)
+        if normalized.move_to is not None:
+            resource.normalize_path(normalized.move_to, for_write=True)
+        result = await editor.apply_operation(requested, patch_format=self.patch_format)
+        return ApplyPatchResult(status=result.status, output=result.output)
+
+    create_file = update_file = delete_file = apply
+
+
+def sandbox_apply_patch_tool(
+    patch_format: PatchFormat,
+    *,
+    needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
+) -> FunctionTool[Any, ToolOutput, Any]:
+    """Apply a custom diff format in the current native sandbox workspace.
+
+    Native Apply Patch owns tool admission and approval. The provider's
+    existing workspace policy resolves paths and enforces filesystem grants.
+    """
+    return apply_patch_tool(_ScopedPatchEditor(patch_format), needs_approval=needs_approval)
 
 
 def apply_patch_batch_tool(

@@ -3,7 +3,11 @@
 from collections.abc import Sequence as Sequence
 from typing import Literal as Literal
 
-from typing_extensions import Required as Required, TypedDict as TypedDict
+from typing_extensions import (
+    NotRequired as NotRequired,
+    Required as Required,
+    TypedDict as TypedDict,
+)
 
 from agents.config import FileSystemAccessMode as FileSystemAccessMode
 
@@ -25,6 +29,7 @@ class RuntimeStorageMount(TypedDict, closed=True):
 
 
 class RuntimeStdioCommand(TypedDict, closed=True):
+    require_process_identity: NotRequired[Literal[True]]
     program: str
     args: list[str]
     env: dict[str, str]

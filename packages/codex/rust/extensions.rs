@@ -111,11 +111,9 @@ pub fn build(
     managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
 ) -> Arc<ExtensionRegistry<Config>> {
     let mut builder = ExtensionRegistryBuilder::<Config>::with_event_sink(events);
-    if let Some(options) = project_search {
-        builder.tool_contributor(Arc::new(crate::canonical_rules::AccessContributor(
-            Arc::new(crate::project_search::Contributor(options)),
-        )));
-    }
+    builder.tool_contributor(Arc::new(crate::canonical_rules::AccessContributor(
+        Arc::new(crate::project_search::Contributor(project_search)),
+    )));
     let settlement = Arc::new(crate::turn_settlement::Contributor);
     builder.thread_lifecycle_contributor(settlement.clone());
     builder.turn_lifecycle_contributor(settlement);

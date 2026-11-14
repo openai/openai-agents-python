@@ -415,7 +415,7 @@ def _capture_voice_graph(
         session._input_guardrails,
         run_error_formatter=session._tool_error_formatter is not None,
     )
-    _complete_profile_mcp(profiles, roster, session._executor)
+    _complete_profile_mcp(profiles, roster, session._executor, native_responses=False)
     return runtimes, roster
 
 

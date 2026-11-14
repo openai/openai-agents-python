@@ -1231,7 +1231,59 @@
     {
       "path": "sdk-api-demand-text-coalescing.patch",
       "sha256": "1b79a88ebc1410402b65558ccc541a3b3d9c4c1771525423c1d9db6fdea199e1"
+    },
+    {
+      "path": "sdk-bind-declaration-output-strictness.patch",
+      "sha256": "723046d8ae5c31b90e4f23f83ea0be45311fb60fd674f031764807fb58b2d85d"
+    },
+    {
+      "path": "sdk-configured-agent-tool-origin.patch",
+      "sha256": "352ccf61873c818f61893f4430e5980d4d71d53ae752db0159332221df3679e9"
+    },
+    {
+      "path": "sdk-hosted-provider-request-detail.patch",
+      "sha256": "1b315c5f6f0d7273fa9e181f3a8861418e4aec298c6d63c7d375b0da68fe8cca"
+    },
+    {
+      "path": "sdk-pending-input-result-families.patch",
+      "sha256": "c3a6572d583ba81d6a00d489018ea1c878d7e4c37ce836b8582d69903037bfb6"
+    },
+    {
+      "path": "sdk-model-provider-metadata.patch",
+      "sha256": "b03f42f6e08f4acee8ec64ca643f01ce126a6e8f8d434556db3fa6198bee890d"
+    },
+    {
+      "path": "sdk-managed-mcp-strict-tool-schemas.patch",
+      "sha256": "ea86d5776211b53f5501b94108debe0c4014fddd93ad7cb32abd5072d879165c"
+    },
+    {
+      "path": "sdk-managed-mcp-schema-budget.patch",
+      "sha256": "49db34ae509b0a24d157a88b9882c5e227a497529d1af71573d4e11602cd29bf"
+    },
+    {
+      "path": "sdk-model-completion-admission.patch",
+      "sha256": "eb4e12279af139172a09a9491dffb76cc9893c42a7e1d993edca505be90161de"
+    },
+    {
+      "path": "sdk-caller-system-input-and-reasoning.patch",
+      "sha256": "cf1878b34256d82521c3815d3f1ea6fac45383829adf82685d49183c82a79166"
+    },
+    {
+      "path": "sdk-preserve-guardian-reasoning-default.patch",
+      "sha256": "5804027aa3c68bb2543631803a57d78a7d4a5a2b5b59356113cec9cff487ba89"
+    },
+    {
+      "path": "sdk-agent-resource-grants.patch",
+      "sha256": "2b80df5fc246d5b832bac775e43621d4400d0e7f68f466b0ead29a5307c3c6a1"
+    },
+    {
+      "path": "sdk-managed-sandbox-provider-compaction.patch",
+      "sha256": "9ee0acecf2584d841d8175997e0fb9423c8cc0febcbb65358ed49b76e1e3d41f"
+    },
+    {
+      "path": "sdk-interactive-environment-authority.patch",
+      "sha256": "8fd6f5d9b02da7ff5a5ec9d82f0926c7a47bc250242500b6d6c84f8c46fbe7bb"
     }
   ],
-  "result_tree": "eeee86425cb27a74adbd8cecaf44aa217f0575de"
+  "result_tree": "b798027efa6b6b28fbb26ae94eab555c2f3262f3"
 }

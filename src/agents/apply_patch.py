@@ -6,4 +6,5 @@ from _agents_codex.apply_patch import (
     ApplyPatchResult as ApplyPatchResult,
     apply_patch_batch_tool as apply_patch_batch_tool,
     apply_patch_tool as apply_patch_tool,
+    sandbox_apply_patch_tool as sandbox_apply_patch_tool,
 )

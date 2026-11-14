@@ -110,6 +110,7 @@ def _capture_retired_workspace(conversation: str, workspace: str) -> ManagedWork
 
 _WORKSPACE_INSTRUCTIONS_ATTRIBUTE = "_sdk_workspace_instructions"
 _SANDBOX_CAPABILITIES_ATTRIBUTE = "_sdk_sandbox_capabilities"
+_SANDBOX_DEFAULT_COMPACTION_ATTRIBUTE = "_sdk_sandbox_default_compaction"
 
 
 class _ManagedWorkspaceSource(AbstractAsyncContextManager["Environment[Any]"]):
@@ -146,6 +147,10 @@ class _ManagedWorkspaceSource(AbstractAsyncContextManager["Environment[Any]"]):
     @property
     def _sdk_sandbox_capabilities(self) -> Any:
         return getattr(self._source, _SANDBOX_CAPABILITIES_ATTRIBUTE, None)
+
+    @property
+    def _sdk_patch_workspace(self) -> Any:
+        return getattr(self._source, "_sdk_patch_workspace", None)
 
     @property
     def skill_tools(self) -> Any:

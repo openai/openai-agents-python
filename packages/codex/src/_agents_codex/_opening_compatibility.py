@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 from ._function_tools import FunctionTool, Tool
 from .canonical_storage import CustomStorage
 from .executor import Environment
-from .mcp import _MCP
+from .mcp import _MCP, HttpMCP
 from .native_agents import NativeAgents
 from .recovery import ReconciledCall
 from .state import LocalStorage
@@ -73,7 +73,12 @@ def _validate_custom_storage_capabilities(
         or goals
         or programmatic_tool_calling
         or checklist
-        or mcp_tools
+        or any(
+            not isinstance(server, HttpMCP)
+            or server.name == "codex_apps"
+            or any(server._effective_approval_mode(name) != "preapproved" for name in server.tools)
+            for server in mcp_tools
+        )
         or unsupported_environment
         or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
         or any(tool._bind is None or tool.needs_approval is not False for tool in tools)

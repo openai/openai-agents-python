@@ -429,17 +429,19 @@ def test_native_windows_build_supplies_checksum_verified_v8_binding(monkeypatch,
 
 
 @pytest.mark.parametrize(
-    ("platform", "configured_target", "host", "timings", "develop"),
+    ("platform", "configured_target", "host", "timings", "develop", "free_threaded"),
     [
-        ("win32", None, "x86_64-pc-windows-msvc", False, False),
-        ("win32", "aarch64-pc-windows-msvc", "aarch64-pc-windows-msvc", False, False),
-        ("linux", None, "x86_64-unknown-linux-gnu", True, False),
-        ("linux", None, "x86_64-unknown-linux-gnu", True, True),
-        ("darwin", None, "aarch64-apple-darwin", False, False),
+        ("win32", None, "x86_64-pc-windows-msvc", False, False, False),
+        ("win32", "aarch64-pc-windows-msvc", "aarch64-pc-windows-msvc", False, False, False),
+        ("linux", None, "x86_64-unknown-linux-gnu", True, False, False),
+        ("linux", None, "x86_64-unknown-linux-gnu", True, True, False),
+        ("linux", None, "x86_64-unknown-linux-gnu", False, False, True),
+        ("linux", None, "x86_64-unknown-linux-gnu", False, True, True),
+        ("darwin", None, "aarch64-apple-darwin", False, False, False),
     ],
 )
 def test_helpers_and_extension_share_the_selected_target_and_crt(
-    monkeypatch, tmp_path, platform, configured_target, host, timings, develop
+    monkeypatch, tmp_path, platform, configured_target, host, timings, develop, free_threaded
 ):
     run_cli = subprocess.run
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -471,6 +473,11 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
     )
     monkeypatch.setattr(build, "build_environment", lambda _root: environment.copy())
     monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(
+        build.sysconfig,
+        "get_config_var",
+        lambda name: int(free_threaded) if name == "Py_GIL_DISABLED" else None,
+    )
     mode_args = ["--develop"] if develop else ["--out", str(tmp_path / "dist")]
     monkeypatch.setattr(sys, "argv", ["build.py", "--release", *mode_args])
     monkeypatch.setattr(
@@ -518,6 +525,10 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
             assert not any(arg.startswith("--timings") for arg in command)
             assert "--release" in command and "--locked" in command
             extension_builds.append(command)
+            if free_threaded and not develop:
+                assert command[command.index("--interpreter") + 1] == sys.executable
+            else:
+                assert "--interpreter" not in command
             if platform == "win32":
                 assert command[command.index("--config") + 1] == str(
                     upstream / "codex-rs/.cargo/config.toml"

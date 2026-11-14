@@ -430,6 +430,7 @@ class SessionState(BaseModel):
     # SDK contract identity is checked before importing native state or grants.
     output_version: Literal[1] | None = None
     output_fingerprint: str | None = None
+    agent_environment_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     # Only a portable manual operation restriction. Resolve against the next
     # Session's actual opening declarations; this contains no binding or grant.
     operation_tools: list[ToolRef] | None = None

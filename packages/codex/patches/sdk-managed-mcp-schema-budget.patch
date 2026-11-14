@@ -1,0 +1,100 @@
+diff --git a/codex-rs/tools/src/json_schema/strict_mcp.rs b/codex-rs/tools/src/json_schema/strict_mcp.rs
+index 966a624bde4..008094af629 100644
+--- a/codex-rs/tools/src/json_schema/strict_mcp.rs
++++ b/codex-rs/tools/src/json_schema/strict_mcp.rs
+@@ -1,5 +1,6 @@
+ use serde_json::{Map, Value, json};
+ 
++use super::compaction::DEFAULT_COMPACT_TOOL_SCHEMA_BYTES;
+ use super::{JsonSchema, parse_tool_input_schema_without_compaction};
+ 
+ const MAX_STRICT_SCHEMA_BYTES: usize = 65_536;
+@@ -7,7 +8,10 @@ const MAX_SCHEMA_DEPTH: usize = 64;
+ 
+ /// Work on a copy of the raw server schema. A schema that needs an unsupported
+ /// conversion stays on the existing non-strict route.
+-pub(crate) fn strict_mcp_input_schema(input: &Map<String, Value>) -> Option<JsonSchema> {
++pub(crate) fn strict_mcp_input_schema(
++    input: &Map<String, Value>,
++    schema_max_bytes: Option<usize>,
++) -> Option<JsonSchema> {
+     let mut root = if input.is_empty() {
+         json!({ "type": "object", "additionalProperties": false, "properties": {} })
+     } else {
+@@ -25,7 +29,9 @@ pub(crate) fn strict_mcp_input_schema(input: &Map<String, Value>) -> Option<Json
+     {
+         return None;
+     }
+-    parse_tool_input_schema_without_compaction(&root).ok()
++    let parsed = parse_tool_input_schema_without_compaction(&root).ok()?;
++    let budget = schema_max_bytes.unwrap_or(DEFAULT_COMPACT_TOOL_SCHEMA_BYTES);
++    (serde_json::to_vec(&parsed).ok()?.len() <= budget).then_some(parsed)
+ }
+ 
+ fn convert_schema(value: &mut Value, root: &Value, depth: usize) -> bool {
+@@ -134,6 +140,18 @@ fn convert_schema(value: &mut Value, root: &Value, depth: usize) -> bool {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn retains_the_configured_and_default_normalized_size_budget() {
++        let raw =
++            json!({"properties":{"value":{"type":"string", "description":"x".repeat(6_000)}}});
++        let schema = raw.as_object().unwrap();
++        let converted = strict_mcp_input_schema(schema, Some(8_000)).unwrap();
++        let exact = serde_json::to_vec(&converted).unwrap().len();
++        assert!(strict_mcp_input_schema(schema, None).is_none());
++        assert!(strict_mcp_input_schema(schema, Some(exact - 1)).is_none());
++        assert!(strict_mcp_input_schema(schema, Some(exact)).is_some());
++    }
++
+     #[test]
+     fn makes_a_detached_copy_strict_and_preserves_open_objects_on_fallback() {
+         let raw = json!({
+@@ -141,7 +159,7 @@ mod tests {
+             "required":[],
+         });
+         let converted =
+-            serde_json::to_value(strict_mcp_input_schema(raw.as_object().unwrap()).unwrap())
++            serde_json::to_value(strict_mcp_input_schema(raw.as_object().unwrap(), None).unwrap())
+                 .unwrap();
+         assert_eq!(converted["required"], json!(["outer"]));
+         assert_eq!(converted["additionalProperties"], false);
+@@ -160,7 +178,7 @@ mod tests {
+             json!({"properties":{"nested":{"$ref":"https://invalid.example/schema"}}}),
+             json!({"properties":{"nested":{"type":"string","pattern":"^[a-z]+$"}}}),
+         ] {
+-            assert!(strict_mcp_input_schema(raw.as_object().unwrap()).is_none());
++            assert!(strict_mcp_input_schema(raw.as_object().unwrap(), None).is_none());
+         }
+     }
+ }
+diff --git a/codex-rs/tools/src/mcp_tool.rs b/codex-rs/tools/src/mcp_tool.rs
+index 6d2599702c9..388e602ab10 100644
+--- a/codex-rs/tools/src/mcp_tool.rs
++++ b/codex-rs/tools/src/mcp_tool.rs
+@@ -80,8 +80,9 @@ fn parse_mcp_tool_with_description_limit(
+ 
+ pub(crate) fn parse_strict_mcp_tool_schema(
+     tool: &rmcp::model::Tool,
++    schema_max_bytes: Option<usize>,
+ ) -> Option<crate::JsonSchema> {
+-    strict_mcp_input_schema(tool.input_schema.as_ref())
++    strict_mcp_input_schema(tool.input_schema.as_ref(), schema_max_bytes)
+ }
+ 
+ pub fn mcp_call_tool_result_output_schema(structured_content_schema: JsonValue) -> JsonValue {
+diff --git a/codex-rs/tools/src/responses_api.rs b/codex-rs/tools/src/responses_api.rs
+index 5d182de5111..af27b8215c2 100644
+--- a/codex-rs/tools/src/responses_api.rs
++++ b/codex-rs/tools/src/responses_api.rs
+@@ -171,7 +171,8 @@ pub fn mcp_tool_to_best_effort_strict_responses_api_tool(
+     schema_max_bytes: Option<usize>,
+ ) -> Result<ResponsesApiTool, serde_json::Error> {
+     let mut output = mcp_tool_to_responses_api_tool(tool_name, tool, schema_max_bytes)?;
+-    if let Some(schema) = parse_strict_mcp_tool_schema(tool) {
++    if let Some(mut schema) = parse_strict_mcp_tool_schema(tool, schema_max_bytes) {
++        schema.mcp_input_schema_max_bytes = schema_max_bytes;
+         output.strict = true;
+         output.parameters = schema;
+     }

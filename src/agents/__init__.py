@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from ._trace_context import TraceContext as TraceContext
     from .agent import (
         Agent as Agent,
+        AgentToolStreamEvent as AgentToolStreamEvent,
         CodexAccount as CodexAccount,
         CodexLogin as CodexLogin,
         HostedToolChoice as HostedToolChoice,
@@ -31,12 +32,14 @@ if TYPE_CHECKING:
         SignInWithChatGPT as SignInWithChatGPT,
         SignInWithChatGPTCredentials as SignInWithChatGPTCredentials,
     )
+    from .agent_lifecycle import AgentLifecycleContext as AgentLifecycleContext
     from .apply_patch import (
         ApplyPatchEditor as ApplyPatchEditor,
         ApplyPatchOperation as ApplyPatchOperation,
         ApplyPatchResult as ApplyPatchResult,
         apply_patch_batch_tool as apply_patch_batch_tool,
         apply_patch_tool as apply_patch_tool,
+        sandbox_apply_patch_tool as sandbox_apply_patch_tool,
     )
     from .canonical_storage import (
         AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore,
@@ -159,6 +162,7 @@ if TYPE_CHECKING:
     from .model_context import (
         HostedPromptReference as HostedPromptReference,
         HostedPromptSource as HostedPromptSource,
+        ModelCompletionContext as ModelCompletionContext,
         ModelContextSnapshot as ModelContextSnapshot,
         ModelRequestContext as ModelRequestContext,
     )
@@ -367,6 +371,7 @@ _MODULES = {
     "FinishToolBatch": ".completion",
     "ToolBatchCompletionContext": ".completion",
     "ToolBatchResult": ".completion",
+    "ModelCompletionContext": ".model_context",
     "ModelContextSnapshot": ".model_context",
     "ModelRequestContext": ".model_context",
     "HostedPromptReference": ".model_context",
@@ -426,6 +431,8 @@ _MODULES = {
     "Agent": ".agent",
     "Handoff": ".handoffs",
     "HandoffInput": ".handoffs",
+    "AgentLifecycleContext": ".agent_lifecycle",
+    "AgentToolStreamEvent": ".agent",
     "CodexAccount": ".agent",
     "CodexLogin": ".agent",
     "ModelSettings": ".agent",
@@ -509,6 +516,7 @@ _MODULES = {
     "ApplyPatchResult": ".apply_patch",
     "apply_patch_batch_tool": ".apply_patch",
     "apply_patch_tool": ".apply_patch",
+    "sandbox_apply_patch_tool": ".apply_patch",
     "Computer": ".computer",
     "ComputerProvider": ".computer",
     "ComputerSafetyError": ".computer",

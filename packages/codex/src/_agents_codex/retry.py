@@ -146,6 +146,11 @@ class RetryPolicyContext:
     stream: bool | None = field(default=None, kw_only=True)
     """Whether the failed request selected a streaming transport, when known."""
 
+    @property
+    def replay_safety(self) -> Literal["safe", "unsafe", "unknown"]:
+        """Provider replay classification for this captured attempt."""
+        return self.provider_advice.replay_safety if self.provider_advice is not None else "unknown"
+
 
 RetryPolicy = Callable[[RetryPolicyContext], bool | RetryDecision | Awaitable[bool | RetryDecision]]
 _RetryPolicyInvoker = Callable[[RetryPolicy, RetryPolicyContext], Awaitable[bool | RetryDecision]]

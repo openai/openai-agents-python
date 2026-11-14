@@ -1,14 +1,15 @@
 //! Captured Agent declarations; Core alone owns the committed active profile.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{Context, Result, ensure};
 use codex_core_api::{CodexThread, StartThreadOptions};
 use codex_extension_api::{
-    AgentProfile, AgentProfileActivation, AgentProfileBoundaryInput, AgentProfileModelSettings,
-    AgentProfileReceipt, CapturedAgentProfile, ExtensionData, ExtensionDataInit, ExtensionFuture,
-    ToolContributor, TurnLifecycleContributor,
+    AgentProfile, AgentProfileActivation, AgentProfileBoundaryInput, AgentProfileEnvironment,
+    AgentProfileExecutorTools, AgentProfileModelSettings, AgentProfileReceipt,
+    CapturedAgentProfile, ExtensionData, ExtensionDataInit, ExtensionFuture, ToolContributor,
+    TurnLifecycleContributor,
 };
 use codex_history::{ResponseItemEnvelope, RolloutItem};
 use codex_protocol::dynamic_tools::{DynamicToolFunctionSpec, DynamicToolSpec};
@@ -95,6 +96,11 @@ pub(crate) struct ProfileSpec {
     mcp_discovery_tools: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     mcp_tools: BTreeMap<String, McpToolDeclaration>,
+    /// Trusted opening-only executor declaration supplied by the SDK.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    environment: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    environment_tools: Option<HashSet<String>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -106,7 +112,9 @@ struct DecisionHandoffSpec {
 
 impl ProfileSpec {
     fn output_guidance(&self) -> Option<&String> {
-        self.wire_output_guidance.as_ref().or(self.runtime_output_guidance.as_ref())
+        self.wire_output_guidance
+            .as_ref()
+            .or(self.runtime_output_guidance.as_ref())
     }
 }
 
@@ -199,6 +207,199 @@ fn handoff_defaults(
 }
 
 struct OpeningFiles(Vec<InstructionFile>);
+
+/// Private ready executor selections supplied by the current host graph.
+#[derive(Clone)]
+pub(crate) struct ProfileEnvironments {
+    profiles: BTreeMap<String, AgentProfileEnvironment>,
+    _executor_owners: Vec<Arc<codex_exec_server::ScopedEnvironment>>,
+    pub(crate) digest: String,
+    pub(crate) strict: bool,
+}
+
+impl ProfileEnvironments {
+    fn selection(&self, profile_id: &str) -> Result<AgentProfileEnvironment> {
+        self.profiles
+            .get(profile_id)
+            .cloned()
+            .context("Agent has no admitted executor selection")
+    }
+}
+
+async fn environment_policy(
+    environment: &AgentProfileEnvironment,
+    config: &codex_core_api::Config,
+    manager: &codex_core_api::EnvironmentManager,
+) -> Result<Option<Value>> {
+    let Some(selection) = environment.0.as_ref() else {
+        ensure!(
+            !environment.requires_process_identity(),
+            "Process identity requires a current executor selection"
+        );
+        return Ok(None);
+    };
+    let local_network = crate::environment::local_session_network_policy(config);
+    let remote = manager
+        .get_environment(&selection.environment_id)
+        .context("selected executor was not registered")?
+        .is_remote();
+    let mut policy = codex_protocol::protocol::sdk_executor_policy_receipt(
+        selection,
+        remote,
+        local_network.as_ref(),
+    )
+    .context("Agent executor policy is unavailable")?;
+    // Routing IDs never authorize a restored executor; current launch options do.
+    policy
+        .as_object_mut()
+        .expect("executor policy object")
+        .remove("environment_id");
+    crate::environment::bind_process_identity_receipt(
+        manager,
+        selection,
+        environment.requires_process_identity(),
+        &mut policy,
+    )
+    .await?;
+    Ok(Some(policy))
+}
+
+pub(crate) async fn prepare_environments(
+    engine: &crate::engine::EngineState,
+    startup: &mut StartThreadOptions,
+) -> Result<()> {
+    let opening = startup.thread_extension_init.get::<OpeningProfiles>();
+    let has_profile_environments = opening.as_ref().is_some_and(|opening| {
+        opening
+            .roster
+            .iter()
+            .any(|profile| profile.environment.is_some() || profile.environment_tools.is_some())
+    });
+    let inherited_identity = engine.root_requires_process_identity()?;
+    if !has_profile_environments && !inherited_identity {
+        return Ok(());
+    }
+    let inherited = match startup.environments.as_deref().unwrap_or_default() {
+        [] => AgentProfileEnvironment(None, false),
+        [selection]
+            if matches!(
+                selection.config,
+                codex_protocol::protocol::EnvironmentConfigState::Ready(_)
+            ) =>
+        {
+            AgentProfileEnvironment(Some(selection.clone()), inherited_identity)
+        }
+        _ => anyhow::bail!("Agent environments require one ready default executor or no default"),
+    };
+    let manager = engine.manager.environment_manager();
+    if !has_profile_environments {
+        // A current explicit user requires a receipt even for an ordinary root.
+        // No profile or executor-tool override is introduced by this owner.
+        ensure!(
+            inherited.0.is_some(),
+            "Selected user requires a ready root executor"
+        );
+        let policy = environment_policy(&inherited, &startup.config, &manager).await?;
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&("root-process-identity-v1", policy))?)
+        );
+        let profiles = opening
+            .as_ref()
+            .into_iter()
+            .flat_map(|opening| &opening.roster)
+            .map(|profile| (profile.id.clone(), inherited.clone()))
+            .collect();
+        startup.thread_extension_init.insert(ProfileEnvironments {
+            profiles,
+            _executor_owners: Vec::new(),
+            digest,
+            strict: false,
+        });
+        return Ok(());
+    }
+    let opening = opening.context("Agent executor graph is unavailable")?;
+    ensure!(
+        engine.codex_account.is_none(),
+        "Agent environments require a host-owned executor configuration"
+    );
+    let mut bindings = BTreeMap::new();
+    for profile in &opening.roster {
+        if let Some(environment) = &profile.environment {
+            let options: crate::environment::EnvironmentOptions =
+                serde_json::from_value(environment.clone())
+                    .context("Invalid Agent executor options")?;
+            options.restrict_network_approval(&mut startup.config)?;
+            bindings.insert(profile.id.clone(), options);
+        }
+    }
+    let mut admitted = BTreeMap::new();
+    let mut executor_owners = Vec::new();
+    let mut policies = BTreeMap::new();
+    let mut has_strict = startup
+        .thread_extension_init
+        .get::<crate::environment::StrictExecutorWrites>()
+        .is_some();
+    let inherited_policy = environment_policy(&inherited, &startup.config, &manager).await?;
+    for profile in &opening.roster {
+        let tools = profile
+            .environment_tools
+            .as_ref()
+            .context("Agent requires its captured executor tool declaration")?;
+        ensure!(
+            tools.iter().all(|name| matches!(
+                name.as_str(),
+                "exec_command" | "write_stdin" | "apply_patch" | "project_glob" | "project_grep"
+            )),
+            "Invalid Agent executor tool declaration"
+        );
+        let mut tool_names: Vec<_> = tools.iter().collect();
+        tool_names.sort_unstable();
+        let environment = if let Some(options) = bindings.get(&profile.id) {
+            // Each runtime registration is fresh. Portable history selects the
+            // profile and cannot name, replace or reconnect an executor.
+            let id = format!(
+                "sdk-profile-{}",
+                codex_protocol::ThreadId::new().to_string().replace('-', "")
+            );
+            let (selection, owner) = options
+                .prepare_profile_selection(
+                    &id,
+                    &startup.config,
+                    &manager,
+                    engine.local_private_paths(),
+                )
+                .await?;
+            let strict = options.strict_writes();
+            executor_owners.extend(owner.map(Arc::new));
+            let environment =
+                AgentProfileEnvironment(Some(selection), options.requires_process_identity());
+            let policy = environment_policy(&environment, &startup.config, &manager).await?;
+            policies.insert(profile.id.clone(), (true, strict, policy, tool_names));
+            has_strict |= strict;
+            environment
+        } else {
+            ensure!(
+                inherited.0.is_some() || tools.is_empty(),
+                "Agent has executor tools without an executor"
+            );
+            policies.insert(
+                profile.id.clone(),
+                (false, false, inherited_policy.clone(), tool_names),
+            );
+            inherited.clone()
+        };
+        admitted.insert(profile.id.clone(), environment);
+    }
+    let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&policies)?));
+    startup.thread_extension_init.insert(ProfileEnvironments {
+        profiles: admitted,
+        _executor_owners: executor_owners,
+        digest,
+        strict: has_strict,
+    });
+    Ok(())
+}
 
 impl OpeningProfiles {
     /// A serialized source can only claim permissions the fresh graph
@@ -352,11 +553,9 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
             "Captured Agent cannot declare both plain and structured wire output"
         );
         ensure!(
-            profile
-                .output_guidance()
-                .is_none_or(|guidance| {
-                    !guidance.is_empty() && profile.wire_output_schema.is_none()
-                }),
+            profile.output_guidance().is_none_or(|guidance| {
+                !guidance.is_empty() && profile.wire_output_schema.is_none()
+            }),
             "Captured Agent prompted output requires text wire output and guidance"
         );
         let mut all_declarations = profile.tools.clone();
@@ -427,6 +626,8 @@ fn roster_fingerprint(roster: &[ProfileSpec], root_id: &str) -> Result<String> {
         .iter()
         .map(|profile| {
             let mut descriptor = serde_json::to_value(profile)?;
+            descriptor["tools"] =
+                serde_json::to_value(profile.tools.without_configured_agent_roles())?;
             descriptor["model"] = serde_json::to_value(profile.model.for_persistence())?;
             // Refreshed Session formatter policy; declared input callbacks remain pinned.
             descriptor
@@ -436,6 +637,11 @@ fn roster_fingerprint(roster: &[ProfileSpec], root_id: &str) -> Result<String> {
             // Endpoint credentials, process configuration and refreshed policies are not
             // declaration compatibility. Their fresh native owners remain authority.
             descriptor["mcp_servers"] = json!(profile.mcp_servers.keys().collect::<Vec<_>>());
+            let fields = descriptor
+                .as_object_mut()
+                .expect("Agent declaration object");
+            fields.remove("environment");
+            fields.remove("environment_tools");
             // Runtime-only policy reset; unchanged declaration compatibility.
             if let Some(controls) = descriptor
                 .pointer_mut("/model/request_controls")
@@ -694,6 +900,65 @@ pub(crate) fn operation_source(
     Ok(source)
 }
 
+/// Compares the stored canonical publication to freshly admitted grants.
+pub(crate) fn validate_restored_environment(
+    expected: Option<&str>,
+    history: &[RolloutItem],
+) -> Result<bool> {
+    let latest_profile = history.iter().rev().find_map(|item| match item {
+        RolloutItem::ResponseItem(envelope) => envelope
+            .metadata
+            .as_ref()
+            .filter(|metadata| metadata.sdk_agent_profile.is_some()),
+        _ => None,
+    });
+    let recorded = if let Some(profile) = latest_profile {
+        profile.sdk_agent_environment_policy.as_deref()
+    } else {
+        crate::application_instructions::recorded_environment_policy(history)?
+    };
+    let no_profile_or_sampling = latest_profile.is_none()
+        && recorded.is_none()
+        && !history.iter().any(|item| {
+            matches!(item,
+                RolloutItem::TurnContext(context) if context.sdk_receipt.is_some()
+            )
+        });
+    ensure!(
+        recorded == expected || no_profile_or_sampling,
+        "Restore requires the recorded Agent environment grants"
+    );
+    Ok(latest_profile.is_some() && recorded.is_some())
+}
+
+pub(crate) struct ExecutorResumeAdmission {
+    opening: Option<Arc<OpeningProfiles>>,
+    environment_policy: Option<String>,
+}
+
+impl ExecutorResumeAdmission {
+    pub(crate) fn from_startup(startup: &StartThreadOptions) -> Self {
+        Self {
+            opening: startup.thread_extension_init.get::<OpeningProfiles>(),
+            environment_policy: startup
+                .thread_extension_init
+                .get::<ProfileEnvironments>()
+                .map(|graph| graph.digest.clone()),
+        }
+    }
+
+    pub(crate) fn validate(&self, history: &[RolloutItem]) -> Result<()> {
+        if validate_restored_environment(self.environment_policy.as_deref(), history)? {
+            let opening = self
+                .opening
+                .as_deref()
+                .context("Restore requires the recorded Agent declarations")?;
+            restore_source(opening, history)?;
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn restore_source(
     opening: &OpeningProfiles,
     history: &[RolloutItem],
@@ -750,6 +1015,8 @@ struct PreparedProfile {
     plugins: codex_extension_api::SelectedPluginSnapshot,
     result_selection: crate::mcp_result_control::Selection,
     mcp_policy: crate::native_interception::ProfileMcpPolicy,
+    environment: Option<AgentProfileEnvironment>,
+    environment_tools: Option<AgentProfileExecutorTools>,
 }
 
 struct Reservation {
@@ -763,6 +1030,7 @@ struct Reservation {
 
 struct AgentProfiles {
     opening: Arc<OpeningProfiles>,
+    environment_policy_digest: Option<String>,
     thread: Weak<CodexThread>,
     tools: Arc<PythonTools>,
     profiles: BTreeMap<String, PreparedProfile>,
@@ -786,16 +1054,18 @@ pub(crate) struct PendingProviderKeys(pub BTreeMap<String, String>);
 pub(crate) struct ProfileProviders(BTreeMap<String, codex_core::SdkAgentProfileProvider>);
 
 pub(crate) async fn bind_profile_providers(startup: &mut StartThreadOptions) -> Result<()> {
-    let Some(keys) = startup.thread_extension_init.remove::<PendingProviderKeys>() else {
+    let Some(keys) = startup
+        .thread_extension_init
+        .remove::<PendingProviderKeys>()
+    else {
         return Ok(());
     };
     let mut providers = BTreeMap::new();
     for (id, key) in &keys.0 {
         ensure!(
-            id.strip_prefix("sdk_profile_")
-                .is_some_and(|index| {
-                    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
-                }),
+            id.strip_prefix("sdk_profile_").is_some_and(|index| {
+                !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+            }),
             "Invalid captured Agent provider route"
         );
         let info = startup
@@ -859,6 +1129,8 @@ async fn prepare_profile(
     default_model: &str,
     startup: bool,
     voice: bool,
+    environment: Option<AgentProfileEnvironment>,
+    environment_tools: Option<AgentProfileExecutorTools>,
 ) -> Result<PreparedProfile> {
     if model.model.is_empty() {
         model.model = default_model.to_owned();
@@ -867,7 +1139,11 @@ async fn prepare_profile(
         descriptor.selecting_steps,
         descriptor.transform_context,
         descriptor.before_compact,
-        descriptor.before_complete,
+        descriptor.before_complete
+            || crate::python_tools::agent_lifecycle::enabled(
+                thread.thread_extension_data(),
+                &descriptor.id,
+            ),
         descriptor.tool_batch_completion,
         descriptor.post_turn_compact,
     ];
@@ -904,7 +1180,7 @@ async fn prepare_profile(
         "discovery_servers": descriptor.mcp_discovery_tools,
     }))?;
     result_selection.validate(&servers)?;
-    let (mcp, plugins) = thread.prepare_agent_profile_mcp(servers).await?;
+    let (mcp, plugins) = prepare_profile_mcp(thread, servers, environment.as_ref()).await?;
     let mcp_policy = crate::native_interception::ProfileMcpPolicy::prepare(
         &mcp,
         &descriptor.mcp_tools,
@@ -918,6 +1194,26 @@ async fn prepare_profile(
         plugins,
         result_selection,
         mcp_policy,
+        environment,
+        environment_tools,
+    })
+}
+
+async fn prepare_profile_mcp(
+    thread: &CodexThread,
+    servers: HashMap<String, codex_config::McpServerConfig>,
+    environment: Option<&AgentProfileEnvironment>,
+) -> Result<(
+    Arc<codex_mcp::McpBinding>,
+    codex_extension_api::SelectedPluginSnapshot,
+)> {
+    Ok(match environment {
+        Some(environment) => {
+            thread
+                .prepare_agent_profile_mcp_in_environment(servers, environment)
+                .await?
+        }
+        None => thread.prepare_agent_profile_mcp(servers).await?,
     })
 }
 
@@ -949,6 +1245,29 @@ pub(crate) async fn admit_realtime_graph(
         .context("Voice update requires the native tool owner")?;
     let roster = decode_roster(roster_json)?;
     validate(&roster, root_id)?;
+    ensure!(
+        roster
+            .iter()
+            .all(|profile| profile.environment.is_none() && profile.environment_tools.is_none()),
+        "Voice Agent updates cannot attach a new executor to an existing Session"
+    );
+    let (environment, environment_tools) =
+        if let Some(source) = thread.captured_agent_profile().await? {
+            (
+                source
+                    .profile
+                    .data
+                    .get::<AgentProfileEnvironment>()
+                    .map(|env| (*env).clone()),
+                source
+                    .profile
+                    .data
+                    .get::<AgentProfileExecutorTools>()
+                    .map(|tools| (*tools).clone()),
+            )
+        } else {
+            (None, None)
+        };
     let mut prepared = current
         .as_ref()
         .map(|current| current.profiles.clone())
@@ -975,6 +1294,8 @@ pub(crate) async fn admit_realtime_graph(
                 &default_model,
                 false,
                 true,
+                environment.clone(),
+                environment_tools.clone(),
             )
             .await?,
         );
@@ -990,6 +1311,9 @@ pub(crate) async fn admit_realtime_graph(
     };
     let profiles = Arc::new(AgentProfiles {
         opening,
+        environment_policy_digest: current
+            .as_ref()
+            .and_then(|current| current.environment_policy_digest.clone()),
         thread: Arc::downgrade(thread),
         tools,
         profiles: prepared,
@@ -1139,11 +1463,18 @@ impl AgentProfiles {
             &prepared.declaration.instructions,
             files,
         )?;
-        envelope
-            .metadata
-            .get_or_insert_with(Default::default)
-            .sdk_agent_graph = Some(self.opening.fingerprint.clone());
+        let metadata = envelope.metadata.get_or_insert_with(Default::default);
+        metadata.sdk_agent_graph = Some(self.opening.fingerprint.clone());
+        metadata.sdk_agent_environment_policy = self.environment_policy_digest.clone();
         let mut data = ExtensionDataInit::new();
+        data.insert(codex_extension_api::AgentProfileOutputStrict(
+            prepared
+                .declaration
+                .model
+                .request_controls
+                .output_schema_strict
+                .unwrap_or(true),
+        ));
         insert_profile_provider(thread, &prepared.declaration, &mut data)?;
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
@@ -1191,6 +1522,12 @@ impl AgentProfiles {
         });
         data.insert(prepared.result_selection.clone());
         data.insert(prepared.mcp_policy.clone());
+        if let Some(environment) = &prepared.environment {
+            data.insert(environment.clone());
+        }
+        if let Some(tools) = &prepared.environment_tools {
+            data.insert(tools.clone());
+        }
         Ok(Arc::new(AgentProfile {
             profile_id: id.to_owned(),
             model: prepared.model.clone(),
@@ -1353,6 +1690,7 @@ pub(crate) async fn configure(
         request_controls: settings.request_controls.clone(),
         invocation_timeout_ms: settings.invocation_timeout_ms,
     });
+    let environments = thread.thread_extension_data().get::<ProfileEnvironments>();
     let mut profiles = BTreeMap::new();
     for descriptor in &opening.roster {
         let model = if descriptor.id == opening.root_id {
@@ -1374,12 +1712,23 @@ pub(crate) async fn configure(
                 &opening_model.model,
                 !restored && descriptor.id == opening.root_id,
                 false,
+                environments
+                    .as_ref()
+                    .map(|env| env.selection(&descriptor.id))
+                    .transpose()?,
+                descriptor
+                    .environment_tools
+                    .clone()
+                    .map(|allowed| AgentProfileExecutorTools { allowed }),
             )
             .await?,
         );
     }
     let profiles = Arc::new(AgentProfiles {
         opening,
+        environment_policy_digest: environments
+            .as_ref()
+            .map(|environment| environment.digest.clone()),
         thread: Arc::downgrade(thread),
         tools,
         profiles,
@@ -1407,6 +1756,14 @@ pub(crate) async fn configure(
         catalog.handoff_defaults = handoff_defaults(&prepared.declaration, default_handoffs)?;
         let generation = catalog.generation.id;
         let mut data = ExtensionDataInit::new();
+        data.insert(codex_extension_api::AgentProfileOutputStrict(
+            prepared
+                .declaration
+                .model
+                .request_controls
+                .output_schema_strict
+                .unwrap_or(true),
+        ));
         insert_profile_provider(thread, &prepared.declaration, &mut data)?;
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
@@ -1451,6 +1808,12 @@ pub(crate) async fn configure(
                 })
                 .collect(),
         });
+        if let Some(environment) = &prepared.environment {
+            data.insert(environment.clone());
+        }
+        if let Some(tools) = &prepared.environment_tools {
+            data.insert(tools.clone());
+        }
         let mut model = receipt.model;
         // Startup has already rebound these runtime controls against the current declaration.
         // The restored profile must retain them when an idle update copies its model.
@@ -1601,10 +1964,9 @@ pub(crate) async fn update_active(
         .context("Managed Agent update has no captured instructions")?;
     let (text, files) = instructions.unwrap_or((&accepted.text, accepted.files.clone()));
     let (mut envelope, accepted) = crate::application_instructions::prepare(thread, text, files)?;
-    envelope
-        .metadata
-        .get_or_insert_with(Default::default)
-        .sdk_agent_graph = Some(profiles.opening.fingerprint.clone());
+    let metadata = envelope.metadata.get_or_insert_with(Default::default);
+    metadata.sdk_agent_graph = Some(profiles.opening.fingerprint.clone());
+    metadata.sdk_agent_environment_policy = profiles.environment_policy_digest.clone();
     target.application_instructions = envelope;
     target
         .data
@@ -1631,9 +1993,13 @@ async fn bind_accepted_mcp(
     generation: u64,
 ) -> Result<()> {
     let current = thread.config().await;
-    let (mcp, plugins) = thread
-        .prepare_agent_profile_mcp(current.mcp_servers.get().clone())
-        .await?;
+    let environment = target.data.get::<AgentProfileEnvironment>();
+    let (mcp, plugins) = prepare_profile_mcp(
+        thread,
+        current.mcp_servers.get().clone(),
+        environment.as_deref(),
+    )
+    .await?;
     let policy =
         crate::native_interception::ProfileMcpPolicy::prepare(&mcp, declarations, generation)?;
     let mut selection = thread
@@ -1810,6 +2176,38 @@ pub(crate) async fn activate(
         .thread
         .activate_agent_profile(Some(expected), candidate)
         .await?)
+}
+
+pub(crate) fn validate_lifecycle_handoff(
+    input: &codex_extension_api::AgentLifecycleInput<'_>,
+) -> Result<()> {
+    let Some(target) = input.target_profile_id else {
+        return Ok(());
+    };
+    let source = input
+        .source
+        .context("Lifecycle handoff has no admitted source")?;
+    let profiles = input
+        .thread_store
+        .get::<Arc<AgentProfiles>>()
+        .context("Lifecycle handoff has no captured graph")?;
+    let declaration = &profiles
+        .profiles
+        .get(&source.receipt.profile_id)
+        .context("Lifecycle source is outside the graph")?
+        .declaration;
+    ensure!(
+        declaration
+            .handoffs
+            .values()
+            .any(|candidate| candidate == target)
+            || declaration
+                .decision_handoffs
+                .values()
+                .any(|entry| entry.targets.iter().any(|candidate| candidate == target)),
+        "Lifecycle handoff target is outside its source declaration"
+    );
+    Ok(())
 }
 
 pub(crate) struct Contributor;

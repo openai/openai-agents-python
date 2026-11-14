@@ -1,0 +1,26 @@
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index ec5a5ab1..4465dfc3 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -1123,6 +1123,21 @@ impl UnifiedExecProcessManager {
+                 .processes
+                 .get(&process_id)
+                 .ok_or(UnifiedExecError::UnknownProcessId { process_id })?;
++            // SDK profile terminals remain within the environment captured for this step.
++            // Reject before output diagnostics, approval, polling, or stdin can touch the process.
++            if context
++                .step_context
++                .extension_data
++                .get::<codex_extension_api::AgentProfileEnvironment>()
++                .is_some()
++                && !context
++                    .step_context
++                    .environments
++                    .turn_environments()
++                    .any(|environment| environment.selection.environment_id == entry.environment_id)
++            {
++                return Err(UnifiedExecError::UnknownProcessId { process_id });
++            }
+             if crate::tools::builtin_result_policy::controlled(
+                 &context.step_context.turn.extension_data,
+                 &context.call_id,

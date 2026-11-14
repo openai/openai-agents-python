@@ -1,0 +1,1009 @@
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index d143339f..050b8a33 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -103,6 +103,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
+         tool_admission: Some(crate::model_request::tool_admission_for_step(
+             sess.thread_id.to_string(),
+             Arc::clone(step_context),
++            Vec::new(),
+         )),
+         sampling_stop: crate::model_request::turn_sampling_stop(&turn_context.extension_data),
+         prepared_request_admission: None,
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index ac4cd0f5..63292815 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -145,6 +145,8 @@ struct StepToolAdmission {
+     thread_id: String,
+     turn_store: Arc<ExtensionData>,
+     router: Option<Arc<ToolRouter>>,
++    provider_output_metadata: codex_extension_api::CapturedModelProviderOutput,
++    provider_input_metadata: Vec<codex_history::ResponseItemEnvelope>,
+ }
+ impl std::fmt::Debug for StepToolAdmission {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+@@ -176,6 +178,14 @@ impl ModelToolAdmission for StepToolAdmission {
+     fn model_attempt(&self) -> Option<Arc<dyn codex_extension_api::ModelAttemptAdmission>> {
+         self.attempt.clone()
+     }
++    fn provider_output_metadata(
++        &self,
++    ) -> Option<&codex_extension_api::CapturedModelProviderOutput> {
++        Some(&self.provider_output_metadata)
++    }
++    fn provider_input_metadata(&self) -> &[codex_history::ResponseItemEnvelope] {
++        &self.provider_input_metadata
++    }
+     fn admits(&self, item: &ResponseItem) -> bool {
+         self.router
+             .as_ref()
+@@ -218,6 +228,8 @@ pub(crate) fn tool_admission(
+     router: Arc<ToolRouter>,
+ ) -> Arc<dyn ModelToolAdmission> {
+     Arc::new(StepToolAdmission {
++        provider_output_metadata: Default::default(),
++        provider_input_metadata: Vec::new(),
+         root_turn_id: None,
+         thread_id,
+         turn_store,
+@@ -231,12 +243,15 @@ pub(crate) fn tool_admission(
+ pub(crate) fn tool_admission_for_step(
+     thread_id: String,
+     step: Arc<crate::session::step_context::StepContext>,
++    provider_input_metadata: Vec<codex_history::ResponseItemEnvelope>,
+ ) -> Arc<dyn ModelToolAdmission> {
+     let attempt = step
+         .extension_data
+         .get::<codex_extension_api::CapturedModelAttempt>()
+         .map(|captured| captured.0.clone());
+     Arc::new(StepToolAdmission {
++        provider_output_metadata: Default::default(),
++        provider_input_metadata,
+         root_turn_id: step.turn.turn_metadata_state.root_turn_id(),
+         attempt,
+         thread_id,
+@@ -252,6 +267,8 @@ pub(crate) fn compaction_source_admission(
+     step: Arc<crate::session::step_context::StepContext>,
+ ) -> Arc<dyn ModelToolAdmission> {
+     Arc::new(StepToolAdmission {
++        provider_output_metadata: Default::default(),
++        provider_input_metadata: Vec::new(),
+         root_turn_id: step.turn.turn_metadata_state.root_turn_id(),
+         attempt: None,
+         thread_id,
+diff --git a/codex-rs/core/src/model_request_tests.rs b/codex-rs/core/src/model_request_tests.rs
+index d725ded5..e55dd3ca 100644
+--- a/codex-rs/core/src/model_request_tests.rs
++++ b/codex-rs/core/src/model_request_tests.rs
+@@ -322,7 +322,7 @@ async fn native_admission_retains_actual_step_and_compaction_source_never_admits
+         .await
+         .unwrap();
+     second.extension_data.insert(Source("b"));
+-    let sampled = tool_admission_for_step("root".into(), Arc::clone(&first));
++    let sampled = tool_admission_for_step("root".into(), Arc::clone(&first), Vec::new());
+     let summary = compaction_source_admission("root".into(), Arc::clone(&first));
+     drop(first);
+     assert_eq!(
+diff --git a/codex-rs/core/src/realtime_conversation/tool_task.rs b/codex-rs/core/src/realtime_conversation/tool_task.rs
+index dedb090c..179f614b 100644
+--- a/codex-rs/core/src/realtime_conversation/tool_task.rs
++++ b/codex-rs/core/src/realtime_conversation/tool_task.rs
+@@ -812,6 +812,7 @@ impl RealtimeToolCall {
+         let admission = crate::model_request::tool_admission_for_step(
+             session.thread_id.to_string(),
+             Arc::clone(&step),
++            Vec::new(),
+         );
+         if !admission.admits(&item) {
+             return Err(CodexErr::InvalidRequest(
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 20462b70..7a1e6265 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -14375,7 +14375,10 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+         cancellation_token: CancellationToken::new(),
+     };
+
+-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, None, /*held_response*/ None)
++    let output = handle_output_item_done(
++        &mut ctx, item, /*previously_active_item*/ None, None, /*held_response*/ None,
++        /*provider_metadata*/ None,
++    )
+         .await
+         .expect("tool call should be handled");
+
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 6bdda489..68ff6c52 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -43,9 +43,9 @@ use crate::session::step_context::StepContext;
+ use crate::session::turn_context::TurnContext;
+ use crate::skills::emit_explicit_skill_invocations;
+ use crate::stream_events_utils::HandleOutputCtx;
++use crate::stream_events_utils::HeldResponseItem;
+ use crate::stream_events_utils::InFlightFuture;
+ use crate::stream_events_utils::TurnItemContributorPolicy;
+-use crate::stream_events_utils::HeldResponseItem;
+ use crate::stream_events_utils::finalize_non_tool_response_item;
+ use crate::stream_events_utils::handle_non_tool_response_item;
+ use crate::stream_events_utils::handle_output_item_done;
+@@ -197,7 +197,11 @@ pub(crate) async fn run_turn(
+         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+     select_sdk_profile_client(
+         &sess,
+-        turn_context.next_step_settings.load().agent_profile.as_deref(),
++        turn_context
++            .next_step_settings
++            .load()
++            .agent_profile
++            .as_deref(),
+         &mut client_session,
+     );
+     let initial_window = if initial_step.is_some() {
+@@ -907,7 +911,9 @@ pub(crate) async fn run_turn(
+                             .await;
+                         let feedback = match decision {
+                             Ok(Ok(codex_extension_api::TurnCompletionDecision::Accept)) => continue,
+-                            Ok(Ok(codex_extension_api::TurnCompletionDecision::Continue(feedback))) => feedback,
++                            Ok(Ok(codex_extension_api::TurnCompletionDecision::Continue(
++                                feedback,
++                            ))) => feedback,
+                             Ok(Ok(codex_extension_api::TurnCompletionDecision::Withhold)) => {
+                                 client_session.discard_unaccepted_response();
+                                 sess.state.lock().await.acknowledged_provider_window = None;
+@@ -916,22 +922,20 @@ pub(crate) async fn run_turn(
+                                 ));
+                             }
+                             Ok(Err(error)) => {
+-                                publish_held_response_items(
+-                                    &sess, &step_context, held_response,
+-                                )
++                                publish_held_response_items(&sess, &step_context, held_response)
+                                 .await?;
+                                 return Err(CodexErr::InvalidRequest(error));
+                             }
+                             Err(_) => {
+-                                publish_held_response_items(
+-                                    &sess, &step_context, held_response,
+-                                )
++                                publish_held_response_items(&sess, &step_context, held_response)
+                                 .await?;
+                                 return Err(CodexErr::TurnAborted);
+                             }
+                         };
+                         publish_held_response_items(
+-                            &sess, &step_context, std::mem::take(&mut held_response),
++                            &sess,
++                            &step_context,
++                            std::mem::take(&mut held_response),
+                         )
+                         .await?;
+                         if cancellation_token.is_cancelled() {
+@@ -2104,9 +2108,11 @@ async fn run_auto_compact(
+         return Ok(());
+     }
+     let previous_window = if matches!(phase, CompactionPhase::MidTurn)
+-        && sess.services.thread_extension_data.get::<
+-            codex_protocol::agent_profile::AgentProfileHandoffInputCapture,
+-        >().is_some()
++        && sess
++            .services
++            .thread_extension_data
++            .get::<codex_protocol::agent_profile::AgentProfileHandoffInputCapture>()
++            .is_some()
+     {
+         Some(sess.current_window().await.2)
+     } else {
+@@ -2137,9 +2143,8 @@ async fn run_auto_compact(
+             return Err(CodexErr::TurnAborted);
+         }
+
+-        let compaction_client = sess.model_client_for_profile(
+-            step_context.settings.agent_profile.as_deref(),
+-        );
++        let compaction_client =
++            sess.model_client_for_profile(step_context.settings.agent_profile.as_deref());
+         match compaction_client.remote_compaction_support() {
+             RemoteCompactionSupport::V2 => {
+                 emit_compact_metric(
+@@ -2180,7 +2185,10 @@ async fn run_auto_compact(
+     }
+     if let Some(previous) = previous_window
+         && sess.current_window().await.2 != previous
+-        && sess.rebase_handoff_input_frontier(&turn_context).await.is_err()
++        && sess
++            .rebase_handoff_input_frontier(&turn_context)
++            .await
++            .is_err()
+     {
+         super::agent_profile::forget_handoff_sampling_frontier(&turn_context.extension_data);
+     }
+@@ -2473,12 +2481,18 @@ async fn run_sampling_request(
+             prompt.canonical_history_input = canonical.map(Arc::new);
+             {
+                 let history = sess.clone_history().await;
+-                if history.model_items().iter().any(|envelope| envelope.metadata.as_ref()
+-                    .is_some_and(|metadata| metadata.prompt_cache.is_some()))
+-                {
++                if history.model_items().iter().any(|envelope| {
++                    envelope
++                        .metadata
++                        .as_ref()
++                        .is_some_and(|metadata| metadata.prompt_cache.is_some())
++                }) {
+                     prompt.prompt_cache_annotations = history
+                         .for_prompt_annotated(&step_context.settings.model_info.input_modalities)
+-                        .into_iter().filter_map(|envelope| envelope.metadata.and_then(|metadata| metadata.prompt_cache))
++                        .into_iter()
++                        .filter_map(|envelope| {
++                            envelope.metadata.and_then(|metadata| metadata.prompt_cache)
++                        })
+                         .collect();
+                 }
+             }
+@@ -2509,6 +2523,7 @@ async fn run_sampling_request(
+             prompt.tool_admission = Some(crate::model_request::tool_admission_for_step(
+                 sess.thread_id.to_string(),
+                 Arc::clone(&step_context),
++                Vec::new(),
+             ));
+             prompt.sampling_stop =
+                 crate::model_request::turn_sampling_stop(&step_context.turn.extension_data);
+@@ -2531,8 +2546,14 @@ async fn run_sampling_request(
+             }
+             // Missing old grouping receipts disable only opted-in handoff preparation.
+             // Ordinary transfers continue under their existing native authority.
+-            if sess.record_handoff_input_frontier(&turn_context).await.is_err() {
+-                super::agent_profile::forget_handoff_sampling_frontier(&turn_context.extension_data);
++            if sess
++                .record_handoff_input_frontier(&turn_context)
++                .await
++                .is_err()
++            {
++                super::agent_profile::forget_handoff_sampling_frontier(
++                    &turn_context.extension_data,
++                );
+             }
+             let handoff_prompt = step_context
+                 .settings
+@@ -2618,6 +2639,29 @@ async fn run_sampling_request(
+             let admission = crate::model_request::tool_admission_for_step(
+                 sess.thread_id.to_string(),
+                 step_context.clone(),
++                {
++                    let history = sess.clone_history().await;
++                    if history.model_items().iter().any(|envelope| {
++                        envelope
++                            .metadata
++                            .as_ref()
++                            .is_some_and(|metadata| metadata.sdk_model_provider_metadata.is_some())
++                    }) {
++                        history
++                            .for_prompt_annotated(
++                                &step_context.settings.model_info.input_modalities,
++                            )
++                            .into_iter()
++                            .filter(|envelope| {
++                                envelope.metadata.as_ref().is_some_and(|metadata| {
++                                    metadata.sdk_model_provider_metadata.is_some()
++                                })
++                            })
++                            .collect()
++                    } else {
++                        Vec::new()
++                    }
++                },
+             );
+             prompt.tool_admission = Some(admission.clone());
+             prompt.sampling_stop = Some(attempt.sampling_stop());
+@@ -2671,7 +2715,8 @@ async fn run_sampling_request(
+                     }
+                     sampling_prompt.to_mut().prepared_request_admission = Some(output.admission);
+                 }
+-                if let Some(guidance) = step_context
++                if let Some(guidance) =
++                    step_context
+                     .settings
+                     .agent_profile
+                     .as_ref()
+@@ -2700,7 +2745,9 @@ async fn run_sampling_request(
+                         sampling_prompt.to_mut().input.push(ResponseItem::Message {
+                             id: Some(ResponseItemId::with_suffix("msg", id)),
+                             role: "developer".into(),
+-                            content: vec![ContentItem::InputText { text: guidance.0.clone() }],
++                            content: vec![ContentItem::InputText {
++                                text: guidance.0.clone(),
++                            }],
+                             phase: None,
+                             internal_chat_message_metadata_passthrough: None,
+                         });
+@@ -3126,7 +3173,7 @@ async fn admit_sdk_provider_response_span(
+         return Ok(None);
+     };
+     let admission =
+-        crate::model_request::tool_admission_for_step(sess.thread_id.to_string(), step.clone());
++        crate::model_request::tool_admission_for_step(sess.thread_id.to_string(), step.clone(), Vec::new());
+     let mut selected = None;
+     for contributor in sess.services.extensions.model_request_contributors() {
+         if cancellation.is_cancelled() {
+@@ -4498,6 +4545,7 @@ async fn handle_assistant_item_done_in_plan_mode(
+     state: &mut PlanModeStreamState,
+     previously_active_item: Option<&TurnItem>,
+     last_agent_message: &mut Option<String>,
++    provider_metadata: Option<&codex_history::ModelProviderMetadata>,
+ ) -> bool {
+     let turn_context = &step_context.turn;
+     if let ResponseItem::Message { role, .. } = item
+@@ -4533,7 +4581,12 @@ async fn handle_assistant_item_done_in_plan_mode(
+             step_context,
+             item,
+             finalized_facts.as_ref(),
+-            /*metadata*/ None,
++            provider_metadata
++                .cloned()
++                .map(|metadata| codex_history::CodexHarnessMetadata {
++                    sdk_model_provider_metadata: Some(metadata),
++                    ..Default::default()
++                }),
+         )
+         .await;
+         if let Some(agent_message) = final_last_agent_message {
+@@ -4673,7 +4726,11 @@ fn sdk_request_may_have_provider_effects(
+         .as_ref()
+         .is_some_and(Option::is_some)
+         || prompt.canonical_history_input.is_some()
+-        || prompt.request_controls.request_transport.as_ref().and_then(Option::as_ref)
++        || prompt
++            .request_controls
++            .request_transport
++            .as_ref()
++            .and_then(Option::as_ref)
+             .and_then(|transport| transport.mode.flatten())
+             == Some(codex_protocol::model_request_transport::RequestTransportMode::Websocket)
+         || prompt.tools.iter().chain(visible_tools.iter()).any(|tool| {
+@@ -4714,8 +4771,11 @@ fn sdk_cold_recovery_classifies_provider_effect_capabilities() {
+         codex_tools::ToolSpec::ProviderOnly(
+             codex_tools::ProviderToolDefinition::new(
+                 serde_json::json!({"type":"programmatic_tool_calling"})
+-                    .as_object().unwrap().clone(),
+-            ).unwrap(),
++                    .as_object()
++                    .unwrap()
++                    .clone(),
++            )
++            .unwrap(),
+         ),
+     ];
+     for tool in hosted {
+@@ -5097,7 +5157,12 @@ async fn try_run_sampling_request(
+     let mut held_response = Vec::new();
+     let hold_assistant_completion = !client_session.has_provider_history()
+         && turn_context.mode() != ModeKind::Plan
+-        && sess.services.extensions.turn_lifecycle_contributors().iter().any(|contributor| {
++        && sess
++            .services
++            .extensions
++            .turn_lifecycle_contributors()
++            .iter()
++            .any(|contributor| {
+             contributor.hold_assistant_completion(
+                 &sess.services.thread_extension_data,
+                 &step_context.extension_data,
+@@ -5160,10 +5225,7 @@ async fn try_run_sampling_request(
+         }
+         let stream_request_span = trace_span!("stream_request");
+         if let Some(parent) = provider_response_span {
+-            codex_otel::set_parent_from_context(
+-                &stream_request_span,
+-                parent.context(),
+-            );
++            codex_otel::set_parent_from_context(&stream_request_span, parent.context());
+         }
+         let request = client_session
+             .stream(
+@@ -5196,7 +5258,8 @@ async fn try_run_sampling_request(
+         let mut response_fact_budget =
+             codex_protocol::response_facts::ResponseFactBudget::default();
+         let mut response_fact_response_id: Option<String> = None;
+-        let mut pending_provider_agent: Option<codex_protocol::response_facts::ResponseFactRecord> = None;
++        let mut pending_provider_agent: Option<codex_protocol::response_facts::ResponseFactRecord> =
++            None;
+         // Admission is local to the provider request; nothing here executes its program.
+         let mut program_calls = HashMap::new();
+         let mut retained_program_calls = None;
+@@ -5333,6 +5396,22 @@ async fn try_run_sampling_request(
+                     }
+                 }
+                 ResponseEvent::OutputItemDone(mut item) => {
++                    let provider_metadata = if let Some(metadata) = prompt
++                        .tool_admission
++                        .as_ref()
++                        .and_then(|admission| admission.provider_output_metadata())
++                    {
++                        match metadata.take_for(&item) {
++                            Ok(metadata) => metadata,
++                            Err(error) => {
++                                tool_cancellation.cancel();
++                                drop(stream);
++                                break Err(CodexErr::InvalidRequest(error));
++                            }
++                        }
++                    } else {
++                        None
++                    };
+                     let provider_agent_metadata = pending_provider_agent.take().and_then(|record| {
+                         match record.received.fact {
+                             codex_protocol::response_facts::ResponseFact::HostedAgentAttribution {item_fingerprint, agent_name, phase}
+@@ -5344,7 +5423,10 @@ async fn try_run_sampling_request(
+                             _ => None,
+                         }
+                     });
+-                    if matches!(item, ResponseItem::Program { .. } | ResponseItem::ProgramOutput { .. }) {
++                    if matches!(
++                        item,
++                        ResponseItem::Program { .. } | ResponseItem::ProgramOutput { .. }
++                    ) {
+                         admit_hosted_program_item(
+                             prompt,
+                             &mut program_calls,
+@@ -5422,6 +5504,7 @@ async fn try_run_sampling_request(
+                             state,
+                             previously_streamed_item.as_ref(),
+                             &mut last_agent_message,
++                            provider_metadata.as_ref(),
+                         )
+                         .await
+                     {
+@@ -5475,15 +5558,16 @@ async fn try_run_sampling_request(
+                     };
+
+                     let direct_call = item.clone();
+-                    let output_result =
+-                        match handle_output_item_done(
++                    let output_result = match handle_output_item_done(
+                             &mut ctx,
+                             item,
+                             previously_streamed_item,
+                             provider_agent_metadata,
+                             (hold_assistant_completion
+-                                && (assistant_response_item(&direct_call) || !held_response.is_empty()))
++                            && (assistant_response_item(&direct_call)
++                                || !held_response.is_empty()))
+                             .then_some(&mut held_response),
++                        provider_metadata,
+                         )
+                             .instrument(handle_responses)
+                             .await
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index b6565e80..18ccd11c 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -386,6 +386,7 @@ fn observe_hosted_shell_pair(store: &ExtensionData, item: &ResponseItem, passive
+ pub(crate) struct HeldResponseItem {
+     item: ResponseItem,
+     finalized: Option<FinalizedTurnItem>,
++    metadata: Option<CodexHarnessMetadata>,
+ }
+
+ async fn publish_passive_response_item(
+@@ -394,6 +395,7 @@ async fn publish_passive_response_item(
+     item: &ResponseItem,
+     finalized: Option<FinalizedTurnItem>,
+     started: bool,
++    metadata: Option<CodexHarnessMetadata>,
+ ) {
+     let facts = finalized.as_ref().map(|item| item.facts.clone());
+     if let Some(finalized) = finalized {
+@@ -404,9 +406,7 @@ async fn publish_passive_response_item(
+         sess.emit_turn_item_completed(&step.turn, finalized.turn_item)
+             .await;
+     }
+-    record_completed_response_item_with_finalized_facts(
+-        sess, step, item, facts.as_ref(), /*metadata*/ None,
+-    )
++    record_completed_response_item_with_finalized_facts(sess, step, item, facts.as_ref(), metadata)
+     .await;
+ }
+
+@@ -418,13 +418,21 @@ pub(crate) async fn publish_held_response_items(
+     if held.is_empty() {
+         return Ok(());
+     }
+-    for HeldResponseItem { item, mut finalized } in held {
++    for HeldResponseItem {
++        item,
++        mut finalized,
++        metadata,
++    } in held
++    {
+         // The stream already deferred mailbox input when it observed the message.
+         // Repeating the operation after a follow-up has admitted mail would move it again.
+         if let Some(finalized) = finalized.as_mut() {
+             finalized.facts.defers_mailbox_delivery_to_next_turn = false;
+         }
+-        publish_passive_response_item(sess, step, &item, finalized, /*started*/ false).await;
++        publish_passive_response_item(
++            sess, step, &item, finalized, /*started*/ false, metadata,
++        )
++        .await;
+     }
+     sess.ensure_rollout_durable().await
+ }
+@@ -436,7 +444,12 @@ pub(crate) async fn handle_output_item_done(
+     previously_active_item: Option<TurnItem>,
+     provider_agent_metadata: Option<serde_json::Value>,
+     mut held_response: Option<&mut Vec<HeldResponseItem>>,
++    provider_metadata: Option<codex_history::ModelProviderMetadata>,
+ ) -> Result<OutputItemResult> {
++    let mut metadata = provider_metadata.map(|metadata| CodexHarnessMetadata {
++        sdk_model_provider_metadata: Some(metadata),
++        ..Default::default()
++    });
+     let mut output = OutputItemResult::default();
+     ctx.tool_runtime.observe_requested_item(&item);
+
+@@ -479,8 +492,10 @@ pub(crate) async fn handle_output_item_done(
+     }
+     // Application calls and their model-facing errors require a continuation.
+     // Settle the preceding passive items before recording or dispatching the call.
+-    if matches!(routed, Ok(Some(_)) | Err(FunctionCallError::RespondToModel(_)))
+-        && let Some(held) = held_response.as_mut()
++    if matches!(
++        routed,
++        Ok(Some(_)) | Err(FunctionCallError::RespondToModel(_))
++    ) && let Some(held) = held_response.as_mut()
+     {
+         publish_held_response_items(&ctx.sess, &ctx.step_context, std::mem::take(*held)).await?;
+     }
+@@ -517,12 +532,11 @@ pub(crate) async fn handle_output_item_done(
+                 .tool_router
+                 .tool_runtime(&call.tool_name)
+                 .and_then(|tool| tool.managed_agent_tool_origin());
+-            let metadata = (application_tool.is_some() || managed_agent_tool.is_some())
+-                .then(|| CodexHarnessMetadata {
+-                    sdk_application_tool: application_tool.map(str::to_owned),
+-                    sdk_managed_agent_tool: managed_agent_tool,
+-                    ..Default::default()
+-                });
++            if application_tool.is_some() || managed_agent_tool.is_some() {
++                let metadata = metadata.get_or_insert_with(Default::default);
++                metadata.sdk_application_tool = application_tool.map(str::to_owned);
++                metadata.sdk_managed_agent_tool = managed_agent_tool;
++            }
+             record_completed_response_item(
+                 ctx.sess.as_ref(),
+                 ctx.step_context.as_ref(),
+@@ -566,17 +580,23 @@ pub(crate) async fn handle_output_item_done(
+                 .as_ref()
+                 .and_then(|item| item.facts.last_agent_message.clone());
+             if let Some(held) = held_response {
+-                if finalized.as_ref().is_some_and(|item| {
+-                    item.facts.defers_mailbox_delivery_to_next_turn
+-                }) {
++                if finalized
++                    .as_ref()
++                    .is_some_and(|item| item.facts.defers_mailbox_delivery_to_next_turn)
++                {
+                     ctx.sess
+                         .input_queue
+                         .defer_mailbox_delivery_to_next_turn(
+-                            &ctx.sess.active_turn, &ctx.step_context.turn.sub_id,
++                            &ctx.sess.active_turn,
++                            &ctx.step_context.turn.sub_id,
+                         )
+                         .await;
+                 }
+-                held.push(HeldResponseItem { item, finalized });
++                held.push(HeldResponseItem {
++                    item,
++                    finalized,
++                    metadata,
++                });
+             } else {
+                 publish_passive_response_item(
+                     &ctx.sess,
+@@ -584,6 +604,7 @@ pub(crate) async fn handle_output_item_done(
+                     &item,
+                     finalized,
+                     previously_active_item.is_some(),
++                    metadata,
+                 )
+                 .await;
+             }
+@@ -605,7 +626,7 @@ pub(crate) async fn handle_output_item_done(
+                 ctx.sess.as_ref(),
+                 ctx.step_context.as_ref(),
+                 &item,
+-                /*metadata*/ None,
++                metadata,
+             )
+             .await;
+             if let Some(response_item) = response_input_to_response_item(&response) {
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+index 41adb276..5c5ad4ea 100644
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -323,7 +323,10 @@ async fn handle_output_item_done_returns_contributed_last_agent_message() {
+     let mut ctx = output_context(Arc::new(session), Arc::new(turn_context));
+     let item = assistant_output_text("original assistant text");
+
+-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, None, /*held_response*/ None)
++    let output = handle_output_item_done(
++        &mut ctx, item, /*previously_active_item*/ None, None, /*held_response*/ None,
++        /*provider_metadata*/ None,
++    )
+         .await
+         .expect("assistant message should complete");
+
+@@ -356,7 +359,10 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+             "arguments": arguments.to_string(),
+         }))
+         .expect("direct input");
+-        let result = handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, None, /*held_response*/ None)
++        let result = handle_output_item_done(
++            &mut ctx, call, /*previously_active_item*/ None, None,
++            /*held_response*/ None, /*provider_metadata*/ None,
++        )
+             .await
+             .expect("direct call should be handled");
+         assert!(result.needs_follow_up);
+@@ -415,7 +421,10 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+         }))
+         .expect("direct input");
+         pending.push(
+-            handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, None, /*held_response*/ None)
++            handle_output_item_done(
++                &mut ctx, call, /*previously_active_item*/ None, None,
++                /*held_response*/ None, /*provider_metadata*/ None,
++            )
+                 .await
+                 .expect("direct call should be handled")
+                 .tool_future
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index d89a92cd..4ce22f25 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -219,3 +219,8 @@ pub struct SdkApplicationInstructions {
+     pub developer_sha256: String,
+     pub files: Vec<serde_json::Value>,
+ }
++
++mod model_provider_metadata;
++pub use model_provider_metadata::{
++    CapturedModelProviderOutput, ModelOutputProviderMetadata, ModelProviderMetadataBudget,
++};
+diff --git a/codex-rs/ext/extension-api/src/model_provider_metadata.rs b/codex-rs/ext/extension-api/src/model_provider_metadata.rs
+new file mode 100644
+index 00000000..f02202ea
+--- /dev/null
++++ b/codex-rs/ext/extension-api/src/model_provider_metadata.rs
+@@ -0,0 +1,272 @@
++//! Exact model-output occurrences and private current-input replay data.
++
++use codex_history::ModelProviderMetadata;
++use codex_protocol::models::ResponseItem;
++use serde::{Deserialize, Serialize};
++use std::{
++    collections::BTreeMap,
++    io::Write,
++    sync::{Arc, Mutex},
++};
++
++const MAX_ITEMS: usize = 4096;
++const MAX_BYTES: usize = 8 * 1024 * 1024;
++
++#[derive(Deserialize, Serialize)]
++#[serde(deny_unknown_fields)]
++pub struct ModelOutputProviderMetadata {
++    pub output_index: usize,
++    pub metadata: ModelProviderMetadata,
++}
++
++/// One authenticated producer response on the existing native step owner.
++#[derive(Clone, Default)]
++pub struct CapturedModelProviderOutput(Arc<Mutex<OutputState>>);
++#[derive(Default)]
++struct OutputState {
++    expected_count: Option<usize>,
++    seen: usize,
++    bytes: usize,
++    metadata: BTreeMap<usize, (ResponseItem, ModelProviderMetadata)>,
++}
++
++struct ByteBudget(usize);
++impl Write for ByteBudget {
++    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
++        self.0 = self.0.checked_sub(bytes.len()).ok_or_else(|| {
++            std::io::Error::other("Model provider metadata exceeds the response byte limit")
++        })?;
++        Ok(bytes.len())
++    }
++    fn flush(&mut self) -> std::io::Result<()> {
++        Ok(())
++    }
++}
++
++/// Bounded private replay projection before allocating its serialized rows.
++pub struct ModelProviderMetadataBudget {
++    bytes: ByteBudget,
++    items: usize,
++}
++impl Default for ModelProviderMetadataBudget {
++    fn default() -> Self {
++        Self {
++            bytes: ByteBudget(MAX_BYTES - 2),
++            items: 0,
++        }
++    }
++}
++impl ModelProviderMetadataBudget {
++    pub fn charge<T: Serialize>(&mut self, value: &T) -> Result<(), String> {
++        if self.items >= MAX_ITEMS {
++            return Err("Model provider replay metadata exceeds its item limit".into());
++        }
++        serde_json::to_writer(&mut self.bytes, value).map_err(|error| error.to_string())?;
++        self.bytes
++            .write_all(b",")
++            .map_err(|error| error.to_string())?;
++        self.items += 1;
++        Ok(())
++    }
++}
++
++impl CapturedModelProviderOutput {
++    pub fn capture(
++        &self,
++        output: Vec<ResponseItem>,
++        annotations: Vec<ModelOutputProviderMetadata>,
++    ) -> Result<(), String> {
++        if output.len() > MAX_ITEMS || annotations.len() > MAX_ITEMS {
++            return Err("Model provider metadata exceeds the response item limit".into());
++        }
++        let mut budget = ByteBudget(MAX_BYTES);
++        serde_json::to_writer(&mut budget, &output).map_err(|error| error.to_string())?;
++        serde_json::to_writer(&mut budget, &annotations).map_err(|error| error.to_string())?;
++        let mut metadata = vec![None; output.len()];
++        for annotation in annotations {
++            if annotation.metadata.provider.trim().is_empty()
++                || annotation.metadata.model.trim().is_empty()
++            {
++                return Err("Model provider metadata requires its provider and model scope".into());
++            }
++            let slot = metadata
++                .get_mut(annotation.output_index)
++                .ok_or("Model provider metadata has no matching output occurrence")?;
++            if slot.is_some() {
++                return Err("Duplicate model provider output occurrence".into());
++            }
++            *slot = Some(annotation.metadata);
++        }
++        let mut state = self
++            .0
++            .lock()
++            .map_err(|_| "Model provider metadata poisoned")?;
++        if state.expected_count.is_some() || state.seen != 0 || !state.metadata.is_empty() {
++            return Err("Model provider metadata response already captured".into());
++        }
++        state.expected_count = Some(output.len());
++        state.bytes = MAX_BYTES - budget.0;
++        state.metadata = output
++            .into_iter()
++            .zip(metadata)
++            .enumerate()
++            .filter_map(|(index, (item, metadata))| {
++                metadata.map(|metadata| (index, (item, metadata)))
++            })
++            .collect();
++        Ok(())
++    }
++
++    pub fn append_stream_output(
++        &self,
++        index: usize,
++        item: ResponseItem,
++        metadata: ModelProviderMetadata,
++    ) -> Result<(), String> {
++        if index >= MAX_ITEMS
++            || metadata.provider.trim().is_empty()
++            || metadata.model.trim().is_empty()
++        {
++            return Err("Invalid model provider stream metadata occurrence".into());
++        }
++        let mut state = self
++            .0
++            .lock()
++            .map_err(|_| "Model provider metadata poisoned")?;
++        if state.expected_count.is_some()
++            || index < state.seen
++            || state.metadata.contains_key(&index)
++        {
++            return Err("Model provider stream metadata occurrence already settled".into());
++        }
++        let mut budget = ByteBudget(MAX_BYTES - state.bytes);
++        serde_json::to_writer(&mut budget, &(&item, &metadata))
++            .map_err(|error| error.to_string())?;
++        state.bytes = MAX_BYTES - budget.0;
++        state.metadata.insert(index, (item, metadata));
++        Ok(())
++    }
++
++    pub fn take_for(&self, item: &ResponseItem) -> Result<Option<ModelProviderMetadata>, String> {
++        let mut state = self
++            .0
++            .lock()
++            .map_err(|_| "Model provider metadata poisoned")?;
++        let index = state.seen;
++        if state.expected_count.is_some_and(|count| index >= count) {
++            return Err("Model provider metadata has an extra output occurrence".into());
++        }
++        if let Some((expected, _)) = state.metadata.get(&index) {
++            if expected != item {
++                return Err("Model provider metadata does not match its output occurrence".into());
++            }
++        }
++        state.seen = index
++            .checked_add(1)
++            .ok_or("Model provider metadata occurrence overflow")?;
++        Ok(state.metadata.remove(&index).map(|(_, metadata)| metadata))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    fn item(text: &str) -> ResponseItem {
++        serde_json::from_value(json!({"type":"message", "role":"assistant",
++            "content":[{"type":"output_text", "text":text}]}))
++        .unwrap()
++    }
++    fn annotation(index: usize, value: &str) -> ModelOutputProviderMetadata {
++        ModelOutputProviderMetadata {
++            output_index: index,
++            metadata: ModelProviderMetadata {
++                provider: "fixture.metadata".into(),
++                model: "fixture".into(),
++                value: serde_json::from_value(json!({"fixture":{"continuation":value}})).unwrap(),
++            },
++        }
++    }
++    #[test]
++    fn duplicate_items_keep_their_ordered_metadata_and_no_global_identity() {
++        let state = CapturedModelProviderOutput::default();
++        let repeated = item("same");
++        state
++            .capture(
++                vec![repeated.clone(), repeated.clone(), repeated.clone()],
++                vec![annotation(0, "first"), annotation(2, "third")],
++            )
++            .unwrap();
++        assert_eq!(
++            state.take_for(&repeated).unwrap().unwrap().value["fixture"]["continuation"],
++            "first"
++        );
++        assert!(state.take_for(&repeated).unwrap().is_none());
++        assert_eq!(
++            state.take_for(&repeated).unwrap().unwrap().value["fixture"]["continuation"],
++            "third"
++        );
++        assert!(state.take_for(&repeated).is_err());
++        assert!(
++            CapturedModelProviderOutput::default()
++                .take_for(&repeated)
++                .unwrap()
++                .is_none()
++        );
++    }
++    #[test]
++    fn mismatch_does_not_consume_another_occurrences_metadata() {
++        let state = CapturedModelProviderOutput::default();
++        state
++            .capture(vec![item("first")], vec![annotation(0, "owned")])
++            .unwrap();
++        assert!(state.take_for(&item("other")).is_err());
++        assert!(state.take_for(&item("first")).unwrap().is_some());
++    }
++    #[test]
++    fn invalid_batches_leave_the_capture_unpublished() {
++        for annotations in [
++            vec![annotation(1, "out-of-range")],
++            vec![annotation(0, "first"), annotation(0, "duplicate")],
++        ] {
++            let state = CapturedModelProviderOutput::default();
++            assert!(state.capture(vec![item("first")], annotations).is_err());
++            assert!(state.take_for(&item("first")).unwrap().is_none());
++        }
++    }
++    #[test]
++    fn stream_annotations_keep_prefix_occurrences_and_the_original_owner() {
++        let state = CapturedModelProviderOutput::default();
++        assert!(state.take_for(&item("prefix")).unwrap().is_none());
++        let shared = state.clone();
++        shared
++            .append_stream_output(1, item("tool"), annotation(1, "owned").metadata)
++            .unwrap();
++        assert!(state.take_for(&item("tool")).unwrap().is_some());
++        assert!(
++            shared
++                .append_stream_output(1, item("tool"), annotation(1, "late").metadata)
++                .is_err()
++        );
++        assert!(
++            CapturedModelProviderOutput::default()
++                .take_for(&item("tool"))
++                .unwrap()
++                .is_none()
++        );
++    }
++    #[test]
++    fn oversized_metadata_is_rejected_before_retention() {
++        let state = CapturedModelProviderOutput::default();
++        assert!(
++            state
++                .capture(
++                    vec![item("first")],
++                    vec![annotation(0, &"x".repeat(MAX_BYTES))]
++                )
++                .is_err()
++        );
++        assert!(state.take_for(&item("first")).unwrap().is_none());
++    }
++}
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index f737617a..7cbba8de 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -452,6 +452,14 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
+     fn model_attempt(&self) -> Option<Arc<dyn ModelAttemptAdmission>> {
+         None
+     }
++    /// Producer data for this exact request; no mutable current-owner lookup.
++    fn provider_output_metadata(&self) -> Option<&crate::CapturedModelProviderOutput> {
++        None
++    }
++    /// Captured model-window data; never a provider request field.
++    fn provider_input_metadata(&self) -> &[codex_history::ResponseItemEnvelope] {
++        &[]
++    }
+     /// Whether the exact selected runtime accepts this model item's payload kind.
+     fn admits(&self, item: &ResponseItem) -> bool;
+     /// Record an SDK-admitted MCP argument policy against this exact request.
+diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
+index 3d6b45a0..0d7ce9d2 100644
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -66,6 +66,21 @@ pub struct ManagedAgentToolOrigin {
+     pub role: String,
+ }
+
++/// Model-owned continuation data, outside provider content and execution authority.
++#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema)]
++#[serde(deny_unknown_fields)]
++pub struct ModelProviderMetadata {
++    pub provider: String,
++    pub model: String,
++    pub value: serde_json::Map<String, serde_json::Value>,
++}
++impl std::fmt::Debug for ModelProviderMetadata {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("ModelProviderMetadata")
++            .finish_non_exhaustive()
++    }
++}
++
+ /// Metadata owned by the Codex harness and persisted with a response item.
+ ///
+ #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+@@ -94,6 +109,10 @@ pub struct CodexHarnessMetadata {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub sdk_agent_profile: Option<serde_json::Value>,
+
++    /// Accepted model-provider data for this exact occurrence; never a routing grant.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub sdk_model_provider_metadata: Option<ModelProviderMetadata>,
++
+     /// Application tool routed by Core before dispatch; never sent to the provider.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub sdk_application_tool: Option<String>,

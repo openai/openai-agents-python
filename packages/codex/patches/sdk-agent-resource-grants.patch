@@ -1,0 +1,2093 @@
+diff --git a/codex-rs/cli/tests/exec_server.rs b/codex-rs/cli/tests/exec_server.rs
+index 36c16bb56522fc228cdebed0c0eb1ba919bf922c..3de013a37f970fd4dff542cb5f8e7f229973532e 100644
+--- a/codex-rs/cli/tests/exec_server.rs
++++ b/codex-rs/cli/tests/exec_server.rs
+@@ -264,6 +264,7 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
+         executor_version: "1.2.3-alpha.4".to_string(),
+         // The build identity belongs to the spawned CLI, not this test process.
+         provider_id: environment_info.provider_id.clone(),
++        process_identity: environment_info.process_identity.clone(),
+         prepend_path_dirs: environment_info.prepend_path_dirs.clone(),
+         ..EnvironmentInfo::local()
+     };
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index c8fe96e401973e8453879dd8371b45c164056fd8..f61696f2b5233a4041f6d9f219d0505b13e2eef4 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1440,6 +1440,20 @@ impl CodexThread {
+         self.session.prepare_agent_profile_mcp(servers).await
+     }
+
++    /// Prepare a profile's MCP catalog on the host-admitted destination executor.
++    pub async fn prepare_agent_profile_mcp_in_environment(
++        &self,
++        servers: std::collections::HashMap<String, codex_config::McpServerConfig>,
++        environment: &codex_extension_api::AgentProfileEnvironment,
++    ) -> CodexResult<(
++        Arc<codex_mcp::McpBinding>,
++        codex_extension_api::SelectedPluginSnapshot,
++    )> {
++        self.session
++            .prepare_agent_profile_mcp_in_environment(servers, Some(environment))
++            .await
++    }
++
+     /// The committed native receipt; observation buffers never provide this authority.
+     pub async fn agent_profile_receipt(
+         &self,
+diff --git a/codex-rs/core/src/environment_selection.rs b/codex-rs/core/src/environment_selection.rs
+index 2fa0a6429f6477415d6cd095fb3a14dc73577982..70a023727fe0709fb09fdd3ea56a0f5cda98dbe1 100644
+--- a/codex-rs/core/src/environment_selection.rs
++++ b/codex-rs/core/src/environment_selection.rs
+@@ -919,6 +919,49 @@ impl ThreadEnvironments {
+         self.resolve_snapshot(self.snapshot_now())
+     }
+
++    /// Prepare a profile's owner-configured attachment without publishing it to live work.
++    pub(crate) async fn snapshot_for_profile(
++        &self,
++        selection: &TurnEnvironmentSelection,
++    ) -> CodexResult<TurnEnvironmentSnapshot> {
++        let manager = self.environment_manager();
++        validate_environment_ids_and_cwds(&manager, std::slice::from_ref(selection))?;
++        if !matches!(selection.config, EnvironmentConfigState::Ready(_)) {
++            return Err(CodexErr::InvalidRequest(
++                "Agent environment requires a ready owner configuration".into(),
++            ));
++        }
++        let environment = manager
++            .get_environment(&selection.environment_id)
++            .ok_or_else(|| CodexErr::InvalidRequest("Agent executor is unavailable".into()))?;
++        let selected = Self::start_environment(
++            selection.clone(),
++            EnvironmentConfigOrigin::Owner,
++            environment,
++            None,
++            None,
++            &self.local_shell,
++            &self.shell_snapshot,
++        );
++        let starting = StartingTurnEnvironment {
++            selection: selected.selection,
++            config_origin: selected.config_origin,
++            resolution: selected.resolution,
++            environment: selected.environment,
++            owner_config_result: selected.owner_config_result,
++        };
++        let ready = starting.resolution.clone().await;
++        let snapshot = TurnEnvironmentSnapshot {
++            environments: vec![TurnEnvironmentState::from_resolution(starting, Some(ready))],
++        };
++        if snapshot.primary().is_none() {
++            return Err(CodexErr::InvalidRequest(
++                "Agent executor failed to start".into(),
++            ));
++        }
++        Ok(snapshot)
++    }
++
+     /// Copies the current selection without waiting for any executor to connect.
+     pub(crate) fn snapshot_now(&self) -> TurnEnvironmentSnapshot {
+         // Keep the startup results, but not the senders that would keep removed Pending work alive.
+@@ -1607,6 +1650,34 @@ url = "ws://127.0.0.1:8765"
+         assert_eq!(resolved.snapshot().await.to_selections(), vec![first]);
+     }
+
++    #[tokio::test]
++    async fn preparing_an_agent_environment_keeps_the_live_selection() {
++        let cwd = AbsolutePathBuf::current_dir().expect("cwd");
++        let initial = TurnEnvironmentSelection {
++            environment_id: "local".to_string(),
++            cwd: PathUri::from_abs_path(&cwd),
++            workspace_roots: Vec::new(),
++            config: EnvironmentConfigState::FromThread,
++        };
++        let environments = resolve_turn_environments(
++            Arc::new(EnvironmentManager::default_for_tests()),
++            std::slice::from_ref(&initial),
++        )
++        .await;
++        let destination = TurnEnvironmentSelection {
++            cwd: PathUri::from_abs_path(&cwd.join("destination")),
++            config: EnvironmentConfigState::Ready(test_environment_config()),
++            ..initial.clone()
++        };
++        let prepared = environments
++            .snapshot_for_profile(&destination)
++            .await
++            .unwrap();
++        assert_eq!(prepared.primary().unwrap().selection, destination);
++        assert_eq!(environments.selections(), vec![initial.clone()]);
++        assert!(environments.snapshot_for_profile(&initial).await.is_err());
++    }
++
+     #[tokio::test]
+     async fn resolved_environment_selections_use_first_selection_as_primary() {
+         let cwd = AbsolutePathBuf::current_dir().expect("cwd");
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index 3efebeb99261bb298e291027bc3886dbc985e13b..96b28aa09dbd1b9455447119d401649a02cd3955 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -1,19 +1,20 @@
+ //! Atomic, host-admitted Agent selection at actual sampling boundaries.
+
++use super::environment::{ensure_configs_stay_owner_provided, validate_environment_configs};
+ use super::session::Session;
+ use super::step_activation::check_legacy_turn_safety;
+ use super::step_settings::ResolvedStepSettings;
+ use super::turn_context::TurnContext;
+ use codex_async_utils::OrCancelExt;
+ use codex_extension_api::{
+-    AgentProfile, AgentProfileBoundaryInput, AgentProfileModelSettings, AgentProfileReceipt,
+-    CapturedAgentProfile,
++    AgentProfile, AgentProfileBoundaryInput, AgentProfileEnvironment, AgentProfileModelSettings,
++    AgentProfileReceipt, CapturedAgentProfile,
+ };
+ use codex_history::{ResponseItemEnvelope, RolloutItem};
+ use codex_protocol::error::{CodexErr, Result as CodexResult};
+ use codex_protocol::models::ResponseItem;
+ use codex_protocol::protocol::{
+-    AgentProfileChangedEvent, Event, EventMsg, ThreadSettingsAppliedEvent,
++    AgentProfileChangedEvent, EnvironmentConfigState, Event, EventMsg, ThreadSettingsAppliedEvent,
+ };
+ use serde::{Deserialize, Serialize};
+ use std::sync::Arc;
+@@ -48,13 +49,10 @@ pub(super) fn handoff_presentation_is_live(profile: &AgentProfile) -> bool {
+ }
+
+ pub(super) fn handoff_presentation_anchor(profile: &AgentProfile) -> ResponseItem {
+-    profile
+-        .data
+-        .get::<HandoffPresentationAnchor>()
+-        .map_or_else(
+-            || profile.application_instructions.item.clone(),
+-            |anchor| anchor.0.clone(),
+-        )
++    profile.data.get::<HandoffPresentationAnchor>().map_or_else(
++        || profile.application_instructions.item.clone(),
++        |anchor| anchor.0.clone(),
++    )
+ }
+
+ struct TaskFence {
+@@ -67,6 +65,87 @@ fn invalid(message: impl Into<String>) -> CodexErr {
+     CodexErr::InvalidRequest(message.into())
+ }
+
++#[derive(Default)]
++struct AgentLifecycleStarted(tokio::sync::Mutex<Option<Option<AgentProfileReceipt>>>);
++
++impl Session {
++    pub(crate) async fn start_agent_activity(
++        &self,
++        context: &Arc<TurnContext>,
++        cancellation: &CancellationToken,
++    ) -> CodexResult<()> {
++        {
++            let active = self.active_turn.lock().or_cancel(cancellation).await?;
++            if !active
++                .as_ref()
++                .and_then(|turn| turn.task.as_ref())
++                .is_some_and(|task| {
++                    task.kind == crate::state::TaskKind::Regular
++                        && Arc::ptr_eq(&task.turn_context, context)
++                        && !task.cancellation_token.is_cancelled()
++                })
++            {
++                return Ok(());
++            }
++        }
++        let selected = context.next_step_settings.load_full();
++        let source = selected.agent_profile.as_deref();
++        let receipt = source.map(|profile| profile.receipt.clone());
++        let owner = context
++            .extension_data
++            .get_or_init(AgentLifecycleStarted::default);
++        // Serialize only this turn's notification, without holding history or profile locks.
++        let mut started = owner.0.lock().or_cancel(cancellation).await?;
++        if started.as_ref() == Some(&receipt) {
++            return Ok(());
++        }
++        self.notify_agent_activity(context, source, None, cancellation)
++            .await?;
++        if context
++            .next_step_settings
++            .load_full()
++            .agent_profile
++            .as_ref()
++            .map(|current| &current.receipt)
++            != receipt.as_ref()
++        {
++            return Err(invalid("Agent lifecycle source changed during start"));
++        }
++        if cancellation.is_cancelled() {
++            return Err(CodexErr::TurnAborted);
++        }
++        *started = Some(receipt);
++        Ok(())
++    }
++
++    async fn notify_agent_activity(
++        &self,
++        context: &Arc<TurnContext>,
++        source: Option<&CapturedAgentProfile>,
++        target_profile_id: Option<&str>,
++        cancellation: &CancellationToken,
++    ) -> CodexResult<()> {
++        for contributor in self.services.extensions.turn_lifecycle_contributors() {
++            let result = contributor
++                .before_agent_lifecycle(codex_extension_api::AgentLifecycleInput {
++                    turn_id: &context.sub_id,
++                    cancellation,
++                    source,
++                    target_profile_id,
++                    session_store: &self.services.session_extension_data,
++                    thread_store: &self.services.thread_extension_data,
++                    turn_store: &context.extension_data,
++                })
++                .await;
++            if cancellation.is_cancelled() {
++                return Err(CodexErr::TurnAborted);
++            }
++            result.map_err(invalid)?;
++        }
++        Ok(())
++    }
++}
++
+ fn restored_profile_identity(
+     settings: &codex_extension_api::AgentProfileModelSettings,
+ ) -> codex_extension_api::AgentProfileModelSettings {
+@@ -189,12 +268,12 @@ fn persisted_profile(items: &[RolloutItem]) -> CodexResult<Option<RestoredProfil
+                 && checkpoint.window_id.is_some())
+             {
+                 if let Some(replacement) = checkpoint.replacement_history.as_ref()
+-                && let Some(profile) = latest.as_mut()
+-                && let Some(anchor) = profile.presentation_anchor
+-                && !retains_publication(replacement, anchor)
+-            {
+-                profile.record.presentation = None;
+-                profile.presentation_anchor = None;
++                    && let Some(profile) = latest.as_mut()
++                    && let Some(anchor) = profile.presentation_anchor
++                    && !retains_publication(replacement, anchor)
++                {
++                    profile.record.presentation = None;
++                    profile.presentation_anchor = None;
+                 }
+             }
+             continue;
+@@ -256,7 +335,8 @@ fn persisted_profile(items: &[RolloutItem]) -> CodexResult<Option<RestoredProfil
+         }
+         if let Some(previous) = &latest {
+             if record.epoch
+-                != previous.record
++                != previous
++                    .record
+                     .epoch
+                     .checked_add(1)
+                     .ok_or_else(|| invalid("Agent profile epoch exhausted"))?
+@@ -266,7 +346,11 @@ fn persisted_profile(items: &[RolloutItem]) -> CodexResult<Option<RestoredProfil
+         } else if record.epoch != 0 {
+             return Err(invalid("Persisted Agent profile has no initial receipt"));
+         }
+-        latest = Some(RestoredProfile { envelope, record, presentation_anchor });
++        latest = Some(RestoredProfile {
++            envelope,
++            record,
++            presentation_anchor,
++        });
+     }
+     Ok(latest)
+ }
+@@ -432,18 +516,47 @@ impl Session {
+                 "Accepted handoff belongs to another native profile source",
+             ));
+         }
+-        context.extension_data.remove::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>();
+-        context.extension_data.remove::<codex_protocol::agent_profile::AgentProfileHandoffInputRequest>();
+-        let preparation = self.services.thread_extension_data
++        context
++            .extension_data
++            .remove::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>();
++        context
++            .extension_data
++            .remove::<codex_protocol::agent_profile::AgentProfileHandoffInputRequest>();
++        let preparation = self
++            .services
++            .thread_extension_data
+             .remove::<codex_protocol::agent_profile::AgentProfileHandoffInputRequest>()
+-            .filter(|request| request.turn_id == context.sub_id
+-                && Some(&request.handoff.source) == receipt);
++            .filter(|request| {
++                request.turn_id == context.sub_id && Some(&request.handoff.source) == receipt
++            });
+         if let Some(request) = &preparation {
+             if accepted_handoff.is_some_and(|accepted| accepted != &request.handoff)
+-                || (accepted_handoff.is_none() && !request.restored) {
+-                return Err(invalid("Handoff preparation belongs to another accepted call"));
++                || (accepted_handoff.is_none() && !request.restored)
++            {
++                return Err(invalid(
++                    "Handoff preparation belongs to another accepted call",
++                ));
+             }
+-            let prepared = self.prepare_handoff_input(context, current.agent_profile.as_ref(), &request.handoff).await?;
++        }
++        if let Some(handoff) =
++            accepted_handoff.or_else(|| preparation.as_ref().map(|request| &request.handoff))
++        {
++            let source = current
++                .agent_profile
++                .as_ref()
++                .ok_or_else(|| invalid("Agent lifecycle handoff has no admitted source"))?;
++            self.notify_agent_activity(
++                context,
++                Some(source),
++                Some(&handoff.target_profile_id),
++                cancellation,
++            )
++            .await?;
++        }
++        if let Some(request) = &preparation {
++            let prepared = self
++                .prepare_handoff_input(context, current.agent_profile.as_ref(), &request.handoff)
++                .await?;
+             context.extension_data.insert(prepared);
+             context.extension_data.insert(request.as_ref().clone());
+         }
+@@ -472,12 +585,31 @@ impl Session {
+         let Some(candidate) = candidate else {
+             return Ok(None);
+         };
++        if accepted_handoff.is_none() && preparation.is_none() {
++            let source = current
++                .agent_profile
++                .as_deref()
++                .ok_or_else(|| invalid("Agent lifecycle transition has no admitted source"))?;
++            if candidate.expected != source.receipt {
++                return Err(invalid("Agent lifecycle transition has another source"));
++            }
++            self.notify_agent_activity(
++                context,
++                Some(source),
++                Some(&candidate.target.profile_id),
++                cancellation,
++            )
++            .await?;
++        }
++
+         if let Some(presentation) = candidate
+             .target
+             .data
+             .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>(
+         ) {
+-            if accepted_handoff.or_else(|| preparation.as_ref().map(|request| &request.handoff)) != Some(&presentation.handoff) {
++            if accepted_handoff.or_else(|| preparation.as_ref().map(|request| &request.handoff))
++                != Some(&presentation.handoff)
++            {
+                 return Err(invalid(
+                     "Handoff presentation requires this accepted transfer",
+                 ));
+@@ -615,6 +747,25 @@ impl Session {
+             }
+             None => {}
+         }
++        let environment = target.data.get::<AgentProfileEnvironment>();
++        let selected_environments = environment
++            .as_ref()
++            .map(|environment| environment.0.as_slice());
++        if let Some(selections) = selected_environments {
++            if selections
++                .iter()
++                .any(|selection| !matches!(selection.config, EnvironmentConfigState::Ready(_)))
++            {
++                return Err(invalid(
++                    "Agent environment requires a ready owner configuration",
++                ));
++            }
++            crate::environment_selection::validate_environment_ids_and_cwds(
++                &self.services.turn_environments.environment_manager(),
++                selections,
++            )?;
++            validate_environment_configs(selections).map_err(|error| invalid(error.to_string()))?;
++        }
+         let (mut configuration, restored) = {
+             let state = self.state.lock().await;
+             if !Arc::ptr_eq(
+@@ -631,11 +782,15 @@ impl Session {
+                     "Agent activation source changed during preparation",
+                 ));
+             }
++            let current_environments = self.services.turn_environments.selections();
++            let proposed = selected_environments.unwrap_or(&current_environments);
++            ensure_configs_stay_owner_provided(&current_environments, proposed)
++                .map_err(|error| invalid(error.to_string()))?;
+             self.validate_active_step_settings(
+                 &context,
+                 &destination,
+                 &state.session_configuration,
+-                &self.services.turn_environments.selections(),
++                proposed,
+             )
+             .map_err(|error| invalid(error.to_string()))?;
+             if task_fence.is_some() {
+@@ -649,6 +804,9 @@ impl Session {
+             }
+             (state.session_configuration.clone(), expected.is_none())
+         };
++        if let Some(selections) = selected_environments {
++            configuration.environments = selections.to_vec();
++        }
+         let live = self
+             .live_thread()
+             .ok_or_else(|| invalid("Agent profiles require retained native history"))?;
+@@ -658,7 +816,12 @@ impl Session {
+             .map_err(|_| persistence_failure())?;
+         let previous = persisted_profile(&saved.items)?;
+         if restored {
+-            if let Some(RestoredProfile { envelope, record, presentation_anchor }) = previous {
++            if let Some(RestoredProfile {
++                envelope,
++                record,
++                presentation_anchor,
++            }) = previous
++            {
+                 if record.profile_id != target.profile_id
+                     || restored_profile_identity(&record.model)
+                         != restored_profile_identity(&target.model)
+@@ -745,6 +908,12 @@ impl Session {
+                 // Core already restored the effective settings, including explicit idle overrides.
+                 let mut state = self.state.lock().await;
+                 state.session_configuration.agent_profile = Some(profile);
++                if let Some(selections) = selected_environments {
++                    state.session_configuration.environments = configuration.environments;
++                    self.services
++                        .turn_environments
++                        .update_selections(selections);
++                }
+                 return Ok(receipt);
+             }
+         } else if previous
+@@ -791,7 +960,9 @@ impl Session {
+                     .data
+                     .insert(HandoffPresentationAnchor::new(anchor));
+             } else {
+-                return Err(invalid("Handoff presentation differs from committed destination"));
++                return Err(invalid(
++                    "Handoff presentation differs from committed destination",
++                ));
+             }
+         }
+         self.validate_handoff_input_retention(
+@@ -876,7 +1047,7 @@ impl Session {
+                 &context,
+                 &destination,
+                 &state.session_configuration,
+-                &self.services.turn_environments.selections(),
++                selected_environments.unwrap_or(&self.services.turn_environments.selections()),
+             )
+             .is_err()
+         {
+@@ -889,6 +1060,12 @@ impl Session {
+         );
+         state.session_configuration.agent_profile = configuration.agent_profile;
+         state.session_configuration.step_settings = configuration.step_settings;
++        if let Some(selections) = selected_environments {
++            state.session_configuration.environments = configuration.environments;
++            self.services
++                .turn_environments
++                .update_selections(selections);
++        }
+         if task_fence.is_some() {
+             context.next_step_settings.store(Arc::new(destination));
+         }
+@@ -918,7 +1095,6 @@ impl Session {
+     }
+ }
+
+-
+ #[derive(Clone, Serialize, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ struct HandoffInputFrontiers {
+@@ -934,7 +1110,9 @@ pub(crate) fn forget_handoff_sampling_frontier(store: &codex_extension_api::Exte
+     store.remove::<HandoffInputFrontierOwner>();
+ }
+
+-pub(crate) fn handoff_sampling_frontier(store: &codex_extension_api::ExtensionData) -> Option<serde_json::Value> {
++pub(crate) fn handoff_sampling_frontier(
++    store: &codex_extension_api::ExtensionData,
++) -> Option<serde_json::Value> {
+     let owner = store.get::<HandoffInputFrontierOwner>()?;
+     let frontier = owner.0.lock().ok()?.clone()?;
+     serde_json::to_value(frontier).ok()
+@@ -947,36 +1125,57 @@ fn handoff_prefix_digest(items: &[&ResponseItem]) -> CodexResult<String> {
+ }
+
+ impl Session {
+-    pub(crate) async fn record_handoff_input_frontier(&self, context: &Arc<TurnContext>) -> CodexResult<()> {
++    pub(crate) async fn record_handoff_input_frontier(
++        &self,
++        context: &Arc<TurnContext>,
++    ) -> CodexResult<()> {
+         self.capture_handoff_input_frontier(context, false).await
+     }
+
+-    pub(super) async fn rebase_handoff_input_frontier(&self, context: &Arc<TurnContext>) -> CodexResult<()> {
++    pub(super) async fn rebase_handoff_input_frontier(
++        &self,
++        context: &Arc<TurnContext>,
++    ) -> CodexResult<()> {
+         self.capture_handoff_input_frontier(context, true).await
+     }
+
+     async fn capture_handoff_input_frontier(
+-        &self, context: &Arc<TurnContext>, rebased: bool,
++        &self,
++        context: &Arc<TurnContext>,
++        rebased: bool,
+     ) -> CodexResult<()> {
+-        if self.services.thread_extension_data.get::<
+-            codex_protocol::agent_profile::AgentProfileHandoffInputCapture,
+-        >().is_none() { return Ok(()); }
++        if self
++            .services
++            .thread_extension_data
++            .get::<codex_protocol::agent_profile::AgentProfileHandoffInputCapture>()
++            .is_none()
++        {
++            return Ok(());
++        }
+         let history = self.clone_history().await;
+         crate::prepared_request::check_handoff_budget(history.raw_items()).map_err(invalid)?;
+         let items: Vec<_> = history.raw_items().collect();
+-        let owner = context.extension_data.get_or_init(HandoffInputFrontierOwner::default);
++        let owner = context
++            .extension_data
++            .get_or_init(HandoffInputFrontierOwner::default);
+         let sample_sha256 = handoff_prefix_digest(&items)?;
+         let (root_count, root_sha256) = if rebased {
+             // The committed replacement is the only remaining input prefix.
+             (items.len(), sample_sha256.clone())
+         } else {
+-            let prior = owner.0.lock().map_err(|_| invalid("Handoff frontier owner poisoned"))?.clone();
++            let prior = owner
++                .0
++                .lock()
++                .map_err(|_| invalid("Handoff frontier owner poisoned"))?
++                .clone();
+             let prior = match prior {
+                 Some(prior) => Some(prior),
+                 None => self.restored_handoff_input_frontier(context).await?,
+             };
+             if let Some(prior) = prior {
+-                if prior.root_count > items.len() || handoff_prefix_digest(&items[..prior.root_count])? != prior.root_sha256 {
++                if prior.root_count > items.len()
++                    || handoff_prefix_digest(&items[..prior.root_count])? != prior.root_sha256
++                {
+                     return Err(invalid("Handoff original input prefix changed"));
+                 }
+                 (prior.root_count, prior.root_sha256)
+@@ -984,59 +1183,117 @@ impl Session {
+                 (items.len(), sample_sha256.clone())
+             }
+         };
+-        let frontier = HandoffInputFrontiers { root_count, root_sha256,
+-            sample_count:items.len(), sample_sha256 };
+-        *owner.0.lock().map_err(|_| invalid("Handoff frontier owner poisoned"))? = Some(frontier);
++        let frontier = HandoffInputFrontiers {
++            root_count,
++            root_sha256,
++            sample_count: items.len(),
++            sample_sha256,
++        };
++        *owner
++            .0
++            .lock()
++            .map_err(|_| invalid("Handoff frontier owner poisoned"))? = Some(frontier);
+         Ok(())
+     }
+
+     async fn restored_handoff_input_frontier(
+-        &self, context: &Arc<TurnContext>,
++        &self,
++        context: &Arc<TurnContext>,
+     ) -> CodexResult<Option<HandoffInputFrontiers>> {
+-        let saved = self.live_thread().ok_or_else(|| invalid("Handoff input requires retained history"))?
+-            .load_history(true).await.map_err(|_| persistence_failure())?;
++        let saved = self
++            .live_thread()
++            .ok_or_else(|| invalid("Handoff input requires retained history"))?
++            .load_history(true)
++            .await
++            .map_err(|_| persistence_failure())?;
+         let receipt = saved.items.iter().rev().find_map(|row| match row {
+-            RolloutItem::TurnContext(row) if row.turn_id.as_deref() == Some(context.sub_id.as_str()) => row.sdk_receipt.as_ref(),
++            RolloutItem::TurnContext(row)
++                if row.turn_id.as_deref() == Some(context.sub_id.as_str()) =>
++            {
++                row.sdk_receipt.as_ref()
++            }
+             _ => None,
+         });
+-        receipt.map(|receipt| serde_json::from_value(receipt.get("handoff_input_frontiers")
+-            .ok_or_else(|| invalid("Restored handoff input lacks original native frontiers"))?.clone())
+-            .map_err(|_| invalid("Invalid restored handoff input frontiers"))).transpose()
++        receipt
++            .map(|receipt| {
++                serde_json::from_value(
++                    receipt
++                        .get("handoff_input_frontiers")
++                        .ok_or_else(|| {
++                            invalid("Restored handoff input lacks original native frontiers")
++                        })?
++                        .clone(),
++                )
++                .map_err(|_| invalid("Invalid restored handoff input frontiers"))
++            })
++            .transpose()
+     }
+
+     async fn prepare_handoff_input(
+-        &self, context: &Arc<TurnContext>,
++        &self,
++        context: &Arc<TurnContext>,
+         source: Option<&Arc<codex_extension_api::CapturedAgentProfile>>,
+         handoff: &codex_protocol::agent_profile::AgentProfileHandoff,
+     ) -> CodexResult<codex_protocol::agent_profile::AgentProfileHandoffPresentation> {
+         use codex_protocol::agent_profile::AgentProfileHandoffPresentation;
+         self.validate_handoff_input_retention(true)?;
+-        if self.services.model_client.provider_history_selection().is_some() {
+-            return Err(invalid("Handoff preparation does not support provider-owned opaque history"));
++        if self
++            .services
++            .model_client
++            .provider_history_selection()
++            .is_some()
++        {
++            return Err(invalid(
++                "Handoff preparation does not support provider-owned opaque history",
++            ));
+         }
+-        if self.services.extensions.model_request_contributors().iter()
+-            .any(|contributor| contributor.prepares_request(&context.extension_data)) {
+-            return Err(invalid("Handoff preparation cannot combine with prepare_request"));
++        if self
++            .services
++            .extensions
++            .model_request_contributors()
++            .iter()
++            .any(|contributor| contributor.prepares_request(&context.extension_data))
++        {
++            return Err(invalid(
++                "Handoff preparation cannot combine with prepare_request",
++            ));
+         }
+-        if source.is_some_and(|source| source.profile.data.get::<
+-            crate::realtime_conversation::VoiceProfileScope,
+-        >().is_some()) {
++        if source.is_some_and(|source| {
++            source
++                .profile
++                .data
++                .get::<crate::realtime_conversation::VoiceProfileScope>()
++                .is_some()
++        }) {
+             return Err(invalid("Handoff preparation does not support Realtime"));
+         }
+-        let retained = context.extension_data.get::<HandoffInputFrontierOwner>()
+-            .map(|owner| owner.0.lock().map_err(|_| invalid("Handoff frontier owner poisoned"))
+-                .map(|frontier| frontier.clone())).transpose()?.flatten();
++        let retained = context
++            .extension_data
++            .get::<HandoffInputFrontierOwner>()
++            .map(|owner| {
++                owner
++                    .0
++                    .lock()
++                    .map_err(|_| invalid("Handoff frontier owner poisoned"))
++                    .map(|frontier| frontier.clone())
++            })
++            .transpose()?
++            .flatten();
+         let frontier = match retained {
+             Some(frontier) => frontier,
+-            None => self.restored_handoff_input_frontier(context).await?
++            None => self
++                .restored_handoff_input_frontier(context)
++                .await?
+                 .ok_or_else(|| invalid("Accepted handoff lacks native input frontiers"))?,
+         };
+         let history = self.clone_history().await;
+         crate::prepared_request::check_handoff_budget(history.raw_items()).map_err(invalid)?;
+         let items: Vec<_> = history.raw_items().collect();
+-        if frontier.root_count > frontier.sample_count || frontier.sample_count > items.len()
++        if frontier.root_count > frontier.sample_count
++            || frontier.sample_count > items.len()
+             || handoff_prefix_digest(&items[..frontier.root_count])? != frontier.root_sha256
+-            || handoff_prefix_digest(&items[..frontier.sample_count])? != frontier.sample_sha256 {
++            || handoff_prefix_digest(&items[..frontier.sample_count])? != frontier.sample_sha256
++        {
+             return Err(invalid("Accepted handoff input frontiers changed"));
+         }
+         let approved: std::collections::HashSet<_> = items
+@@ -1062,27 +1319,52 @@ impl Session {
+             {
+                 let publication = handoff_presentation_anchor(&source.profile);
+                 let publication = &publication;
+-                let anchors: Vec<_> = items.iter().enumerate().filter_map(|(index,item)|
+-                    (item.id() == publication.id()).then_some(index)).collect();
+-                if anchors.len() != 1 || *items[anchors[0]] != *publication || anchors[0] >= frontier.sample_count {
++                let anchors: Vec<_> = items
++                    .iter()
++                    .enumerate()
++                    .filter_map(|(index, item)| (item.id() == publication.id()).then_some(index))
++                    .collect();
++                if anchors.len() != 1
++                    || *items[anchors[0]] != *publication
++                    || anchors[0] >= frontier.sample_count
++                {
+                     return Err(invalid("Source handoff publication is missing or changed"));
+                 }
+                 let anchor = anchors[0] + 1;
+                 input = presentation.input.clone();
+                 if anchor > frontier.root_count {
+-                    previous = presentation.previous.iter().chain(&presentation.generated).cloned().collect();
++                    previous = presentation
++                        .previous
++                        .iter()
++                        .chain(&presentation.generated)
++                        .cloned()
++                        .collect();
+                     previous.extend(values(&items[anchor..frontier.sample_count])?);
+                 } else {
+-                    input.extend(presentation.previous.iter().chain(&presentation.generated).cloned());
++                    input.extend(
++                        presentation
++                            .previous
++                            .iter()
++                            .chain(&presentation.generated)
++                            .cloned(),
++                    );
+                     input.extend(values(&items[anchor..frontier.root_count])?);
+                 }
+             }
+         }
+         let presentation = AgentProfileHandoffPresentation {
+-            handoff:handoff.clone(), destination:AgentProfileReceipt {
+-                profile_id:handoff.target_profile_id.clone(),
+-                epoch:handoff.source.epoch.checked_add(1).ok_or_else(|| invalid("Agent profile epoch exhausted"))?,
+-            }, input, previous, generated:values(&items[frontier.sample_count..])?,
++            handoff: handoff.clone(),
++            destination: AgentProfileReceipt {
++                profile_id: handoff.target_profile_id.clone(),
++                epoch: handoff
++                    .source
++                    .epoch
++                    .checked_add(1)
++                    .ok_or_else(|| invalid("Agent profile epoch exhausted"))?,
++            },
++            input,
++            previous,
++            generated: values(&items[frontier.sample_count..])?,
+         };
+         crate::prepared_request::validate_handoff_presentation(&presentation).map_err(invalid)?;
+         Ok(presentation)
+@@ -1243,11 +1525,17 @@ mod tests {
+         updated.push(envelope(&destination, 2, Some(presentation.clone())));
+         let updated_profile = persisted_profile(&updated).unwrap().unwrap();
+         assert_eq!(updated_profile.record.epoch, 2);
+-        assert_eq!(updated_profile.record.presentation, Some(presentation.clone()));
++        assert_eq!(
++            updated_profile.record.presentation,
++            Some(presentation.clone())
++        );
+         let RolloutItem::ResponseItem(first_publication) = &history[2] else {
+             panic!("expected the original destination publication");
+         };
+-        assert_eq!(updated_profile.presentation_anchor, Some(&first_publication.item));
++        assert_eq!(
++            updated_profile.presentation_anchor,
++            Some(&first_publication.item)
++        );
+
+         let mut injected = presentation.clone();
+         injected.input.clear();
+@@ -1761,6 +2049,153 @@ for line in sys.stdin:
+         );
+     }
+
++    #[tokio::test]
++    async fn agent_profile_environment_switch_and_restore_share_the_profile_fence() {
++        let (mut session, context) = make_session_and_context().await;
++        attach_thread_persistence(&mut session).await;
++        let workspace = tempfile::tempdir().unwrap();
++        let root = codex_utils_absolute_path::AbsolutePathBuf::try_from(workspace.path()).unwrap();
++        let initial = session.services.turn_environments.selections()[0].clone();
++        let mut config = session
++            .state
++            .lock()
++            .await
++            .session_configuration
++            .inferred_environment_config();
++        let destination = codex_utils_path_uri::PathUri::from_abs_path(&root);
++        config.workspace_roots = vec![destination.clone()];
++        let selection = codex_protocol::protocol::TurnEnvironmentSelection {
++            environment_id: initial.environment_id.clone(),
++            cwd: destination.clone(),
++            workspace_roots: vec![destination.clone()],
++            config: EnvironmentConfigState::Ready(config),
++        };
++        let a = session
++            .activate_agent_profile(None, profile(&context, "a", "resource-a"))
++            .await
++            .unwrap();
++        let mut b = profile(&context, "b", "resource-b").as_ref().clone();
++        b.data
++            .insert(AgentProfileEnvironment(Some(selection.clone()), true));
++        let b = Arc::new(b);
++        let mut unavailable = b.as_ref().clone();
++        let mut invalid_selection = selection.clone();
++        invalid_selection.environment_id = "unregistered-profile-environment".into();
++        unavailable
++            .data
++            .insert(AgentProfileEnvironment(Some(invalid_selection), true));
++        assert!(
++            session
++                .activate_agent_profile(Some(a.clone()), Arc::new(unavailable))
++                .await
++                .is_err()
++        );
++        assert_eq!(
++            session.agent_profile_receipt().await.unwrap(),
++            Some(a.clone())
++        );
++        assert_eq!(
++            session.services.turn_environments.selections(),
++            vec![initial.clone()]
++        );
++
++        let b_receipt = session
++            .activate_agent_profile(Some(a), Arc::clone(&b))
++            .await
++            .unwrap();
++        let snapshot = session.services.turn_environments.snapshot().await;
++        assert_eq!(snapshot.primary().unwrap().selection.cwd, destination);
++        assert_eq!(
++            session.configured_environment_selections().await,
++            vec![selection.clone()]
++        );
++        assert!(
++            session
++                .state
++                .lock()
++                .await
++                .session_configuration
++                .agent_profile
++                .as_ref()
++                .unwrap()
++                .profile
++                .data
++                .get::<AgentProfileEnvironment>()
++                .unwrap()
++                .requires_process_identity()
++        );
++        assert_eq!(
++            session.agent_profile_receipt().await.unwrap(),
++            Some(b_receipt.clone())
++        );
++
++        // Reopening a bound Agent reselects from the current host graph. History
++        // supplies the Agent receipt and never provides the environment grant.
++        {
++            let mut state = session.state.lock().await;
++            state.session_configuration.agent_profile = None;
++            state.session_configuration.environments = vec![initial.clone()];
++        }
++        session
++            .services
++            .turn_environments
++            .update_selections(&[initial]);
++        assert_eq!(
++            session.activate_agent_profile(None, b).await.unwrap(),
++            b_receipt
++        );
++        assert_eq!(
++            session.configured_environment_selections().await,
++            vec![selection]
++        );
++        assert!(
++            session
++                .state
++                .lock()
++                .await
++                .session_configuration
++                .agent_profile
++                .as_ref()
++                .unwrap()
++                .profile
++                .data
++                .get::<AgentProfileEnvironment>()
++                .unwrap()
++                .requires_process_identity()
++        );
++        assert_eq!(
++            session
++                .services
++                .turn_environments
++                .snapshot()
++                .await
++                .primary()
++                .unwrap()
++                .selection
++                .cwd,
++            destination
++        );
++
++        let mut model_only = profile(&context, "model-only", "no-workspace")
++            .as_ref()
++            .clone();
++        model_only.data.insert(AgentProfileEnvironment(None, false));
++        session
++            .activate_agent_profile(Some(b_receipt), Arc::new(model_only))
++            .await
++            .unwrap();
++        assert!(session.configured_environment_selections().await.is_empty());
++        assert!(
++            session
++                .services
++                .turn_environments
++                .snapshot()
++                .await
++                .primary()
++                .is_none()
++        );
++    }
++
+     #[tokio::test]
+     async fn agent_profile_restore_checks_model_and_exact_instruction_publication() {
+         let (mut session, context) = make_session_and_context().await;
+diff --git a/codex-rs/core/src/session/mcp_runtime.rs b/codex-rs/core/src/session/mcp_runtime.rs
+index d2f3f192b4fcd1f59e65f8314542ab280c589a3a..a1b91031498f90a91c6b9ebf0320de50cf0b232d 100644
+--- a/codex-rs/core/src/session/mcp_runtime.rs
++++ b/codex-rs/core/src/session/mcp_runtime.rs
+@@ -113,15 +113,40 @@ impl Session {
+     ) -> CodexResult<(
+         Arc<codex_mcp::McpBinding>,
+         codex_extension_api::SelectedPluginSnapshot,
++    )> {
++        self.prepare_agent_profile_mcp_in_environment(servers, None)
++            .await
++    }
++
++    pub(crate) async fn prepare_agent_profile_mcp_in_environment(
++        self: &Arc<Self>,
++        servers: std::collections::HashMap<String, codex_config::McpServerConfig>,
++        environment: Option<&codex_extension_api::AgentProfileEnvironment>,
++    ) -> CodexResult<(
++        Arc<codex_mcp::McpBinding>,
++        codex_extension_api::SelectedPluginSnapshot,
+     )> {
+         self.check_agent_profile_admission()?;
++        if let Some(selection) = environment.and_then(|environment| environment.0.as_ref()) {
++            super::environment::validate_environment_configs(std::slice::from_ref(selection))
++                .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
++        }
+         let _refresh = self
+             .mcp_refresh
+             .acquire()
+             .await
+             .map_err(|_| CodexErr::TurnAborted)?;
+         self.check_agent_profile_admission()?;
+-        let environments = self.services.turn_environments.snapshot().await;
++        let environments = match environment.map(|environment| environment.0.as_ref()) {
++            Some(Some(selection)) => {
++                self.services
++                    .turn_environments
++                    .snapshot_for_profile(selection)
++                    .await?
++            }
++            Some(None) => crate::environment_selection::TurnEnvironmentSnapshot::default(),
++            None => self.services.turn_environments.snapshot().await,
++        };
+         let auth = self.services.auth_manager.auth().await;
+         let mut desired = self.latest_mcp_desired_state(auth, environments).await;
+         let mut config = desired.config.as_ref().clone();
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index ef3d477d0dae7e566275f12b8335dfc9f69f070b..e9bad71a39aa3a24fdbfe3499ddc994a62799ede 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -241,8 +241,8 @@ mod extension_interruption;
+ pub(crate) mod extension_metrics;
+ mod guardian_checkpoint;
+ mod handlers;
+-mod inject;
+ pub(crate) mod initial_turn;
++mod inject;
+ mod original_history_lookup;
+ mod original_history_read;
+ mod reasoning_effort;
+@@ -262,10 +262,10 @@ pub(crate) mod multi_agents;
+ mod plugin_selection;
+ mod realtime_history;
+ mod retained_context;
+-pub(crate) mod sdk_produced_items;
+ mod review;
+ mod rollout_budget;
+ mod rollout_reconstruction;
++pub(crate) mod sdk_produced_items;
+ pub(crate) mod sdk_raw_usage;
+ #[allow(clippy::module_inception)]
+ pub(crate) mod session;
+@@ -694,7 +694,9 @@ impl Session {
+         let provider_history = config.sdk_provider_history.take();
+         let configured_provider_history_reference = config.sdk_provider_history_reference.take();
+         if let Some(selection) = &provider_history {
+-            selection.validate_shape().map_err(CodexErr::InvalidRequest)?;
++            selection
++                .validate_shape()
++                .map_err(CodexErr::InvalidRequest)?;
+         }
+         if session_source.is_non_root_agent()
+             && client_mcp_extensions.contains("openai/sdk-child-prompts")
+@@ -864,12 +866,20 @@ impl Session {
+         let provider_history = match (provider_history, saved_provider_history) {
+             (Some(selection), reference) => {
+                 if let Some(saved) = &reference {
+-                    saved.validate_rebind(&selection).map_err(CodexErr::InvalidRequest)?;
++                    saved
++                        .validate_rebind(&selection)
++                        .map_err(CodexErr::InvalidRequest)?;
+                 }
+-                Some(crate::client::provider_history::Start { selection, reference })
++                Some(crate::client::provider_history::Start {
++                    selection,
++                    reference,
++                })
++            }
++            (None, Some(_)) => {
++                return Err(CodexErr::InvalidRequest(
++                    "Restored provider history requires a current declaration".into(),
++                ));
+             }
+-            (None, Some(_)) => return Err(CodexErr::InvalidRequest(
+-                "Restored provider history requires a current declaration".into())),
+             (None, None) => None,
+         };
+         let persisted_collaboration_mode = match &conversation_history {
+@@ -1770,16 +1780,14 @@ impl Session {
+     }
+
+     pub(crate) fn startup_control(&self) -> Arc<ThreadStartupControl> {
+-        self.services
+-            .thread_extension_data
+-            .get_or_init(|| {
+-                let admission = self.services.local_agent_runtime.shutdown.child();
+-                ThreadStartupControl {
+-                    mailbox_admission: admission.child(),
+-                    admission,
+-                    committed_shutdown: Default::default(),
+-                }
+-            })
++        self.services.thread_extension_data.get_or_init(|| {
++            let admission = self.services.local_agent_runtime.shutdown.child();
++            ThreadStartupControl {
++                mailbox_admission: admission.child(),
++                admission,
++                committed_shutdown: Default::default(),
++            }
++        })
+     }
+
+     pub(crate) fn startup_admission(&self) -> codex_extension_api::TurnStartupGate {
+@@ -2264,7 +2272,9 @@ impl Session {
+     pub(crate) async fn thread_settings_snapshot(&self) -> ThreadSettingsSnapshot {
+         let mut snapshot = {
+             let state = self.state.lock().await;
+-            state.session_configuration.thread_settings_snapshot(&state.session_configuration.environments)
++            state
++                .session_configuration
++                .thread_settings_snapshot(&state.session_configuration.environments)
+         };
+         snapshot.provider_history = self.services.model_client.provider_history_reference();
+         snapshot
+@@ -3725,13 +3735,22 @@ impl Session {
+
+         let root = &self.services.model_client;
+         let provider = profile.and_then(|profile| {
+-            profile.profile.data.get::<crate::client::SdkAgentProfileProvider>()
++            profile
++                .profile
++                .data
++                .get::<crate::client::SdkAgentProfileProvider>()
+         });
+-        let Some(provider) = provider else { return root.clone(); };
+-        let clients = self.services.thread_extension_data.get_or_init(|| {
+-            ProfileClients(std::sync::Mutex::new(HashMap::new()))
+-        });
+-        clients.0.lock().expect("profile model clients poisoned")
++        let Some(provider) = provider else {
++            return root.clone();
++        };
++        let clients = self
++            .services
++            .thread_extension_data
++            .get_or_init(|| ProfileClients(std::sync::Mutex::new(HashMap::new())));
++        clients
++            .0
++            .lock()
++            .expect("profile model clients poisoned")
+             .entry(Arc::clone(&provider.id))
+             .or_insert_with(|| root.for_sdk_profile(&provider))
+             .clone()
+@@ -3864,7 +3883,9 @@ impl Session {
+         user_image_content_indices: &mut HashMap<usize, usize>,
+     ) -> ResponseItem {
+         self.response_item_from_user_input_with_content_positions(
+-            input, user_image_content_indices, &mut HashMap::new(),
++            input,
++            user_image_content_indices,
++            &mut HashMap::new(),
+         )
+     }
+
+@@ -3874,12 +3895,13 @@ impl Session {
+         user_image_content_indices: &mut HashMap<usize, usize>,
+         user_content_indices: &mut HashMap<usize, usize>,
+     ) -> ResponseItem {
+-        let mut item = ResponseItem::from(ResponseInputItem::from_user_input_with_content_positions(
+-            input,
+-            LocalImagePreparation::Defer,
+-            user_image_content_indices,
+-            user_content_indices,
+-        ));
++        let mut item =
++            ResponseItem::from(ResponseInputItem::from_user_input_with_content_positions(
++                input,
++                LocalImagePreparation::Defer,
++                user_image_content_indices,
++                user_content_indices,
++            ));
+         if let ResponseItem::Message {
+             content,
+             internal_chat_message_metadata_passthrough,
+@@ -4221,6 +4243,8 @@ impl Session {
+         required_servers: &[String],
+         required_plugins: &HashSet<String>,
+     ) -> CodexResult<Arc<StepContext>> {
++        self.start_agent_activity(&turn_context, cancellation_token)
++            .await?;
+         let step_context = self
+             .capture_step_context_inner(
+                 turn_context,
+@@ -4254,6 +4278,8 @@ impl Session {
+         let preparation =
+             codex_extension_api::StagedInputPreparation::new(turn_context.sub_id.clone());
+         let _end = EndPreparation(preparation.clone());
++        self.start_agent_activity(&turn_context, cancellation_token)
++            .await?;
+         let step = self
+             .capture_step_context_inner(
+                 turn_context,
+@@ -4316,8 +4342,16 @@ impl Session {
+         source: crate::realtime_conversation::RealtimeToolExecutionSource,
+         cancellation: &CancellationToken,
+     ) -> CodexResult<Arc<StepContext>> {
+-        self.capture_step_context_inner(context, cancellation, &[], &HashSet::new(), false, Some(source), None)
+-            .await
++        self.capture_step_context_inner(
++            context,
++            cancellation,
++            &[],
++            &HashSet::new(),
++            false,
++            Some(source),
++            None,
++        )
++        .await
+     }
+
+     #[tracing::instrument(name = "step_context.capture", level = "info", skip_all)]
+@@ -4517,14 +4551,13 @@ impl Session {
+                                 ),
+                             ))))
+                         } else {
+-                            self
+-                                .mcp_runtime_for_step(
+-                                    turn_context.as_ref(),
+-                                    &selected_capability_roots,
+-                                    required_servers,
+-                                    required_plugins,
+-                                )
+-                                .await
++                            self.mcp_runtime_for_step(
++                                turn_context.as_ref(),
++                                &selected_capability_roots,
++                                required_servers,
++                                required_plugins,
++                            )
++                            .await
+                         }
+                     }),
+                     turn::prepare_tool_recommendations(self.as_ref(), turn_context.as_ref()),
+@@ -4797,14 +4830,15 @@ impl Session {
+         world_state_baseline: WorldStateSnapshot,
+         metadata: CompactedHistoryMetadata,
+     ) {
+-        let _ = self.replace_compacted_history_with_output(
+-            items,
+-            reference_context_item,
+-            world_state_baseline,
+-            metadata,
+-            /*completed_output*/ None,
+-        )
+-        .await;
++        let _ = self
++            .replace_compacted_history_with_output(
++                items,
++                reference_context_item,
++                world_state_baseline,
++                metadata,
++                /*completed_output*/ None,
++            )
++            .await;
+     }
+
+     pub(crate) async fn replace_compacted_history_with_output(
+@@ -4816,8 +4850,12 @@ impl Session {
+         completed_output: Option<CompletedCompactionOutput<'_>>,
+     ) -> CodexResult<()> {
+         let source_step_context = completed_output.as_ref().map(|output| output.source);
+-        let registered_turn = completed_output.as_ref().map(|output| output.registered_turn);
+-        let cancellation_token = completed_output.as_ref().map(|output| output.cancellation_token);
++        let registered_turn = completed_output
++            .as_ref()
++            .map(|output| output.registered_turn);
++        let cancellation_token = completed_output
++            .as_ref()
++            .map(|output| output.cancellation_token);
+         let (mut output, image_preparations) = if let Some(CompletedCompactionOutput {
+             source,
+             items: output,
+@@ -4881,13 +4919,21 @@ impl Session {
+             let settings_guard = thread_settings::acquire_persistence_lock(self).await;
+             let active_turn = match registered_turn {
+                 Some(turn)
+-                    if turn.extension_data.get::<crate::tasks::RegisteredCompactionOwner>().is_some() =>
++                    if turn
++                        .extension_data
++                        .get::<crate::tasks::RegisteredCompactionOwner>()
++                        .is_some() =>
+                 {
+                     Some(self.active_turn.lock().await)
+                 }
+                 _ => None,
+             };
+-            (finalization_guard, settings_guard, active_turn, self.state.lock().await)
++            (
++                finalization_guard,
++                settings_guard,
++                active_turn,
++                self.state.lock().await,
++            )
+         };
+         let (finalization_guard, settings_guard, active_turn, state) = match cancellation_token {
+             Some(token) => tokio::select! {
+@@ -4962,8 +5008,12 @@ impl Session {
+                     &mut output,
+                     source.settings.model_info.truncation_policy.into(),
+                 );
+-                history.replace_compacted(items.clone(), metadata.reviewer_compaction_hash.as_deref());
+-                (history.guardian_history_checkpoint(), history.retained_context().clone())
++                history
++                    .replace_compacted(items.clone(), metadata.reviewer_compaction_hash.as_deref());
++                (
++                    history.guardian_history_checkpoint(),
++                    history.retained_context().clone(),
++                )
+             } else {
+                 state.replace_annotated_history(
+                     std::mem::take(&mut items),
+@@ -4973,30 +5023,38 @@ impl Session {
+                     },
+                 );
+                 state.reasoning_effort_pin = ReasoningEffortPin::Compacted;
+-                state.history.set_world_state_baseline(world_state_baseline.clone());
+-                (state.history.guardian_history_checkpoint(), state.history.retained_context().clone())
++                state
++                    .history
++                    .set_world_state_baseline(world_state_baseline.clone());
++                (
++                    state.history.guardian_history_checkpoint(),
++                    state.history.retained_context().clone(),
++                )
+             };
+-            (CompactedItem {
+-                sdk_originals: Some(
+-                    codex_history::sdk_originals::SdkOriginalHistoryCheckpoint::preserve(),
+-                ),
+-                message: metadata.message,
+-                replacement_history: Some(replacement_history),
+-                guardian_history,
+-                retained_context: Some(retained_context),
+-                mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
+-                window_number: Some(window_number),
+-                first_window_id: Some(window_ids.first_window_id.to_string()),
+-                previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
+-                window_id: Some(window_ids.window_id.to_string()),
+-                compaction_response_id: metadata.compaction_response_id,
+-                latest_token_usage_record: state.latest_token_usage_record.clone(),
+-                resume_metadata: Some(CompactionResumeMetadata {
+-                    multi_agent_version: self.multi_agent_version(),
+-                    last_started_turn_id: state.last_started_turn_id.clone(),
+-                    previous_turn_settings: state.previous_turn_settings(),
+-                }),
+-            }, window_ids)
++            (
++                CompactedItem {
++                    sdk_originals: Some(
++                        codex_history::sdk_originals::SdkOriginalHistoryCheckpoint::preserve(),
++                    ),
++                    message: metadata.message,
++                    replacement_history: Some(replacement_history),
++                    guardian_history,
++                    retained_context: Some(retained_context),
++                    mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
++                    window_number: Some(window_number),
++                    first_window_id: Some(window_ids.first_window_id.to_string()),
++                    previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
++                    window_id: Some(window_ids.window_id.to_string()),
++                    compaction_response_id: metadata.compaction_response_id,
++                    latest_token_usage_record: state.latest_token_usage_record.clone(),
++                    resume_metadata: Some(CompactionResumeMetadata {
++                        multi_agent_version: self.multi_agent_version(),
++                        last_started_turn_id: state.last_started_turn_id.clone(),
++                        previous_turn_settings: state.previous_turn_settings(),
++                    }),
++                },
++                window_ids,
++            )
+         };
+
+         let mut rollout_items: Vec<RolloutItem> = output
+@@ -5052,7 +5110,8 @@ impl Session {
+                 );
+                 state.reasoning_effort_pin = ReasoningEffortPin::Compacted;
+                 state.history.set_world_state_baseline(world_state_baseline);
+-                turn.extension_data.insert(crate::tasks::CommittedCompactionCheckpoint);
++                turn.extension_data
++                    .insert(crate::tasks::CommittedCompactionCheckpoint);
+             }
+             for image in image_preparations {
+                 self.services
+@@ -6140,17 +6199,27 @@ impl Session {
+         });
+         if !metadata.prompt_cache_breakpoints.is_empty() {
+             Self::assign_missing_response_item_id(&mut response_item);
+-            let breakpoints = metadata.prompt_cache_breakpoints.iter().map(|marker| {
+-                user_content_indices.get(&marker.input_index)
+-                    .map(|index| (*index, marker.breakpoint))
+-            }).collect::<Option<Vec<_>>>();
++            let breakpoints = metadata
++                .prompt_cache_breakpoints
++                .iter()
++                .map(|marker| {
++                    user_content_indices
++                        .get(&marker.input_index)
++                        .map(|index| (*index, marker.breakpoint))
++                })
++                .collect::<Option<Vec<_>>>();
+             if let (Some(breakpoints), Some(id), ResponseItem::Message { content, .. }) =
+                 (breakpoints, response_item.id(), &response_item)
+-                && let Ok(Some(annotation)) = codex_protocol::prompt_cache::PromptCacheAnnotation::bind(
+-                    id.to_string(), content, &breakpoints,
+-                )
++                && let Ok(Some(annotation)) =
++                    codex_protocol::prompt_cache::PromptCacheAnnotation::bind(
++                        id.to_string(),
++                        content,
++                        &breakpoints,
++                    )
+             {
+-                history_metadata.get_or_insert_with(CodexHarnessMetadata::default).prompt_cache = Some(annotation);
++                history_metadata
++                    .get_or_insert_with(CodexHarnessMetadata::default)
++                    .prompt_cache = Some(annotation);
+             }
+         }
+         let (prepared_items, image_preparations) = self
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 10b0893f82dd6a921687bc6613980882da35248a..6accf96b88bcdede20d889a6eb7fe3bfe21523ec 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -150,6 +150,20 @@ pub(crate) async fn build_tool_router(
+     let mut resolved_forced_tool = None;
+     let mut forced_identity_seen = false;
+     let mut resolved_policy = tool_policy.as_ref().clone();
++    if let Some(executor) = step_store
++        .get::<codex_extension_api::AgentProfileExecutorTools>()
++        .or_else(|| {
++            session
++                .services
++                .thread_extension_data
++                .get::<codex_extension_api::AgentProfileExecutorTools>()
++        })
++    {
++        // Named Agent environment grants can only narrow the host's thread ceiling.
++        // SDKs declaring a profile graph always provide that explicit ceiling.
++        let allowed = resolved_policy.allowed_tools.get_or_insert_with(Vec::new);
++        allowed.retain(|tool| executor.permits(tool));
++    }
+     if let Some(selectors) = &resolved_policy.allowed_mcp_tools {
+         let named_ceiling = resolved_policy.allowed_tools.clone();
+         if let Some(allowed) = &mut resolved_policy.allowed_tools {
+@@ -582,10 +596,9 @@ pub(crate) fn finalize_tool_router(
+ // MCP's wire type is shared, but its authority is captured per server.
+ fn hosted_tool_policy_name(spec: &ToolSpec) -> ToolName {
+     match spec {
+-        ToolSpec::Mcp(config) => ToolName::new(
+-            Some("hosted_mcp".into()),
+-            config.server_label.clone(),
+-        ),
++        ToolSpec::Mcp(config) => {
++            ToolName::new(Some("hosted_mcp".into()), config.server_label.clone())
++        }
+         _ => ToolName::plain(spec.name()),
+     }
+ }
+@@ -730,7 +743,7 @@ fn finalize_selected_tool_router(
+                     | ToolSpec::ProviderToolSearch(_)
+                     | ToolSpec::ProviderOnly(_)
+                     | ToolSpec::ApplyPatch {}
+-            | ToolSpec::Computer { .. }
++                    | ToolSpec::Computer { .. }
+                     | ToolSpec::ComputerUsePreview { .. }
+                     | ToolSpec::WebSearch { .. } => continue,
+                 };
+@@ -1816,7 +1829,9 @@ fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mu
+     for spec in dynamic_tools {
+         match spec {
+             DynamicToolSpec::ApplyPatch => {
+-                registry.register_external(Arc::new(super::handlers::application_apply_patch::ApplicationApplyPatchHandler::new()));
++                registry.register_external(Arc::new(
++                    super::handlers::application_apply_patch::ApplicationApplyPatchHandler::new(),
++                ));
+             }
+             // The SDK attaches scoped executors through ToolContributor.
+             DynamicToolSpec::ToolSearch(_)
+diff --git a/codex-rs/exec-server-protocol/src/protocol.rs b/codex-rs/exec-server-protocol/src/protocol.rs
+index 23dd3bcdd258999bb929ed9b21dff31ab371612b..8396c963a12aba9e491e2408e74161b6df6897d5 100644
+--- a/codex-rs/exec-server-protocol/src/protocol.rs
++++ b/codex-rs/exec-server-protocol/src/protocol.rs
+@@ -101,11 +101,30 @@ pub struct InitializeResponse {
+     pub environment_info: Option<EnvironmentInfo>,
+ }
+
++/// Observed process credentials, never a request to impersonate another user.
++/// The current transport owner remains authority; this is not an attestation.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(
++    tag = "type",
++    rename_all = "snake_case",
++    rename_all_fields = "camelCase"
++)]
++pub enum ExecutorProcessIdentity {
++    Unix {
++        effective_uid: u32,
++        effective_gid: u32,
++        supplementary_gids: Vec<u32>,
++    },
++}
++
+ /// Information about an execution/filesystem environment.
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct EnvironmentInfo {
+     pub shell: ShellInfo,
++    /// Kernel-reported executor identity; absent for legacy and unsupported executors.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub process_identity: Option<ExecutorProcessIdentity>,
+     /// Executor release version for version-based compatibility decisions.
+     /// `0.0.0` when unknown, including responses from legacy executors.
+     #[serde(default = "unknown_executor_version")]
+@@ -297,6 +316,7 @@ impl EnvironmentInfo {
+         Self {
+             shell: codex_shell_command::shell_detect::default_user_shell().into(),
+             executor_version: unknown_executor_version(),
++            process_identity: None,
+             provider_id: None,
+             cwd: cwd.and_then(|cwd| PathUri::from_host_native_path(cwd).ok()),
+             user_home_dir: PathUri::from_host_native_path("~").ok(),
+@@ -1481,6 +1501,7 @@ mod tests {
+                     path: "/bin/zsh".to_string(),
+                 },
+                 executor_version: "0.0.0".to_string(),
++                process_identity: None,
+                 provider_id: None,
+                 cwd: None,
+                 user_home_dir: None,
+@@ -2053,3 +2074,45 @@ mod tests {
+         );
+     }
+ }
++
++#[cfg(test)]
++mod process_identity_tests {
++    use super::*;
++
++    #[test]
++    fn observed_identity_round_trips_without_becoming_a_launch_request() {
++        let mut info = EnvironmentInfo::local();
++        info.process_identity = Some(ExecutorProcessIdentity::Unix {
++            effective_uid: 1234,
++            effective_gid: 2345,
++            supplementary_gids: vec![2345, 3456],
++        });
++        let value = serde_json::to_value(&info).expect("metadata serialization");
++        assert_eq!(
++            value["processIdentity"],
++            serde_json::json!({
++                "type": "unix", "effectiveUid": 1234, "effectiveGid": 2345,
++                "supplementaryGids": [2345, 3456],
++            })
++        );
++        assert_eq!(
++            serde_json::from_value::<EnvironmentInfo>(value).expect("metadata decoding"),
++            info
++        );
++    }
++
++    #[test]
++    fn unknown_legacy_identity_is_absent_instead_of_asserting_root() {
++        let info: EnvironmentInfo = serde_json::from_value(serde_json::json!({
++            "shell": {"name":"sh", "path":"/bin/sh"},
++        }))
++        .expect("legacy metadata");
++        assert_eq!(info.process_identity, None);
++        assert!(
++            serde_json::to_value(info)
++                .expect("metadata serialization")
++                .get("processIdentity")
++                .is_none()
++        );
++    }
++}
+diff --git a/codex-rs/exec-server/Cargo.toml b/codex-rs/exec-server/Cargo.toml
+index 710f34405873bdbef74f8e32242be5b659d9339c..80b1e5a4d1fdbfae9e7dd6397ec8a711e93c2601 100644
+--- a/codex-rs/exec-server/Cargo.toml
++++ b/codex-rs/exec-server/Cargo.toml
+@@ -76,7 +76,7 @@ uuid = { workspace = true, features = ["v4"] }
+ [target.'cfg(unix)'.dependencies]
+ codex-uds = { workspace = true }
+ libc = { workspace = true }
+-rustix = { workspace = true, features = ["fs"] }
++rustix = { workspace = true, features = ["fs", "process"] }
+ tempfile = { workspace = true }
+
+ [target.'cfg(windows)'.dependencies]
+diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
+index 41f692fb2357b3c8ebf0405fa87f4b72be519c59..37d6418abb8acfa8dd1d2714e46f75ea5e0d31a1 100644
+--- a/codex-rs/exec-server/src/environment.rs
++++ b/codex-rs/exec-server/src/environment.rs
+@@ -5,6 +5,7 @@ use std::collections::HashSet;
+ use std::sync::Arc;
+ use std::sync::Mutex;
+ use std::sync::RwLock;
++use std::sync::Weak;
+
+ use arc_swap::ArcSwapOption;
+ use codex_config::ScopedSkillsConfig;
+@@ -92,11 +93,43 @@ pub enum EnvironmentConnectionState {
+ pub struct EnvironmentManager {
+     default_environment: Option<String>,
+     pub(super) environments: RwLock<HashMap<String, Arc<Environment>>>,
++    scoped_environments: RwLock<HashMap<String, Weak<Environment>>>,
+     local_environment: Option<Arc<Environment>>,
+     local_runtime_paths: Option<ExecServerRuntimeOptions>,
+     http_client_factory: HttpClientFactory,
+ }
+
++/// Owner of a named executor that is never selected by default.
++#[derive(Debug)]
++pub struct ScopedEnvironment {
++    manager: Weak<EnvironmentManager>,
++    id: String,
++    environment: Arc<Environment>,
++}
++
++impl ScopedEnvironment {
++    pub fn environment(&self) -> &Environment {
++        &self.environment
++    }
++}
++
++impl Drop for ScopedEnvironment {
++    fn drop(&mut self) {
++        if let Some(manager) = self.manager.upgrade() {
++            let mut scoped = manager
++                .scoped_environments
++                .write()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            if scoped
++                .get(&self.id)
++                .is_some_and(|entry| entry.as_ptr() == Arc::as_ptr(&self.environment))
++            {
++                scoped.remove(&self.id);
++            }
++        }
++    }
++}
++
+ /// Information supplied by the environment owner when an environment is ready.
+ #[derive(Clone, Debug, Default, Eq, PartialEq)]
+ pub struct EnvironmentReadyInfo {
+@@ -143,6 +176,7 @@ impl EnvironmentManager {
+                 LOCAL_ENVIRONMENT_ID.to_string(),
+                 Arc::new(Environment::default_for_tests()),
+             )])),
++            scoped_environments: RwLock::default(),
+             local_environment: Some(Arc::new(Environment::default_for_tests())),
+             local_runtime_paths: None,
+             // Test-only construction has no application config from which to resolve proxy policy.
+@@ -155,6 +189,7 @@ impl EnvironmentManager {
+         Self {
+             default_environment: None,
+             environments: RwLock::new(HashMap::new()),
++            scoped_environments: RwLock::default(),
+             local_environment: None,
+             local_runtime_paths: None,
+             http_client_factory,
+@@ -253,6 +288,7 @@ impl EnvironmentManager {
+         let manager = Self {
+             default_environment: Some(REMOTE_ENVIRONMENT_ID.to_string()),
+             environments: RwLock::new(HashMap::new()),
++            scoped_environments: RwLock::default(),
+             local_environment: None,
+             local_runtime_paths,
+             http_client_factory,
+@@ -369,6 +405,7 @@ impl EnvironmentManager {
+         Ok(Self {
+             default_environment,
+             environments: RwLock::new(environment_map),
++            scoped_environments: RwLock::default(),
+             local_environment,
+             local_runtime_paths,
+             http_client_factory,
+@@ -412,13 +449,107 @@ impl EnvironmentManager {
+         self.local_environment.as_ref().map(Arc::clone)
+     }
+
+-    /// Returns a named environment instance.
++    /// Returns a named environment instance, including a live explicit scope.
+     pub fn get_environment(&self, environment_id: &str) -> Option<Arc<Environment>> {
+-        self.environments
++        if let Some(environment) = self
++            .environments
+             .read()
+             .unwrap_or_else(std::sync::PoisonError::into_inner)
+             .get(environment_id)
+             .cloned()
++        {
++            return Some(environment);
++        }
++        self.scoped_environments
++            .read()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .get(environment_id)
++            .and_then(Weak::upgrade)
++    }
++
++    /// Registers a host-owned local executor without selecting it by default.
++    pub fn register_scoped_local_environment(
++        self: &Arc<Self>,
++        environment_id: String,
++        runtime: ExecServerRuntimeOptions,
++    ) -> Result<ScopedEnvironment, ExecServerError> {
++        self.register_scoped(
++            environment_id,
++            Environment::local(runtime, self.http_client_factory.clone()),
++        )
++    }
++
++    /// Registers an explicitly selected remote WebSocket executor for one owner.
++    pub fn register_scoped_environment(
++        self: &Arc<Self>,
++        environment_id: String,
++        options: RemoteEnvironmentOptions,
++    ) -> Result<ScopedEnvironment, ExecServerError> {
++        self.register_scoped_transport(environment_id, options.into_transport_params()?)
++    }
++
++    /// Registers an explicitly selected stdio executor for one owner.
++    pub fn register_scoped_stdio_environment(
++        self: &Arc<Self>,
++        environment_id: String,
++        command: StdioExecServerCommand,
++        initialize_timeout: Option<std::time::Duration>,
++    ) -> Result<ScopedEnvironment, ExecServerError> {
++        self.register_scoped_transport(
++            environment_id,
++            ExecServerTransportParams::StdioCommand {
++                command,
++                initialize_timeout: initialize_timeout
++                    .unwrap_or(crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT),
++            },
++        )
++    }
++
++    fn register_scoped_transport(
++        self: &Arc<Self>,
++        id: String,
++        transport: ExecServerTransportParams,
++    ) -> Result<ScopedEnvironment, ExecServerError> {
++        self.register_scoped(
++            id,
++            Environment::remote_with_transport(
++                transport,
++                self.local_runtime_paths.clone(),
++                self.http_client_factory.clone(),
++                ScopedSkillsConfig::default(),
++            ),
++        )
++    }
++
++    fn register_scoped(
++        self: &Arc<Self>,
++        id: String,
++        environment: Environment,
++    ) -> Result<ScopedEnvironment, ExecServerError> {
++        validate_environment_id(&id)?;
++        let environment = Arc::new(environment);
++        {
++            let configured = self
++                .environments
++                .read()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            let mut scoped = self
++                .scoped_environments
++                .write()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            if configured.contains_key(&id) || scoped.contains_key(&id) {
++                return Err(ExecServerError::Protocol(
++                    "scoped executor identity is already registered".to_owned(),
++                ));
++            }
++            scoped.insert(id.clone(), Arc::downgrade(&environment));
++        }
++        environment.start_connecting();
++        Ok(ScopedEnvironment {
++            manager: Arc::downgrade(self),
++            id,
++            environment,
++        })
+     }
+
+     /// Records a Ready or Failed provisioning result for an environment.
+@@ -442,6 +573,9 @@ impl EnvironmentManager {
+             .environments
+             .write()
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if self.has_scoped_environment(&environment_id) {
++            return Ok(None);
++        }
+         if let Some(environment) = environments.get(&environment_id).cloned() {
+             if environment.provisioning_status_tx.is_none() {
+                 return Ok(None);
+@@ -566,6 +700,11 @@ impl EnvironmentManager {
+             .environments
+             .write()
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if self.has_scoped_environment(&environment_id) {
++            return Err(ExecServerError::Protocol(
++                "scoped executor identity is already registered".to_owned(),
++            ));
++        }
+         if let Some(environment) = environments.get(&environment_id) {
+             if environment.provisioning_status_tx.is_none() {
+                 return Err(ExecServerError::ProvisioningModeConflict { environment_id });
+@@ -599,6 +738,14 @@ impl EnvironmentManager {
+         Ok(environment)
+     }
+
++    // Configured writers hold the registry lock before checking the scoped map.
++    fn has_scoped_environment(&self, id: &str) -> bool {
++        self.scoped_environments
++            .read()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .contains_key(id)
++    }
++
+     fn insert_environment(
+         &self,
+         environment_id: String,
+@@ -609,6 +756,11 @@ impl EnvironmentManager {
+                 .environments
+                 .write()
+                 .unwrap_or_else(std::sync::PoisonError::into_inner);
++            if self.has_scoped_environment(&environment_id) {
++                return Err(ExecServerError::Protocol(
++                    "scoped executor identity is already registered".to_owned(),
++                ));
++            }
+             environments.insert(environment_id, Arc::clone(&environment))
+         };
+         drop(replaced);
+@@ -1941,6 +2093,45 @@ mod tests {
+         assert!(status.warnings[0].contains("environment `stdio` is unavailable"));
+     }
+
++    #[tokio::test]
++    async fn scoped_environment_never_enters_defaults_and_retires_by_identity() {
++        let manager = Arc::new(EnvironmentManager::default_for_tests());
++        let listener = TcpListener::bind("127.0.0.1:0")
++            .await
++            .expect("executor listener");
++        let url = format!("ws://{}", listener.local_addr().expect("executor address"));
++        let id = "sdk-profile-test";
++        let attach = || {
++            manager.register_scoped_environment(
++                id.to_owned(),
++                RemoteEnvironmentOptions {
++                    exec_server_url: url.clone(),
++                    connect_timeout: None,
++                    http_headers: HashMap::new(),
++                },
++            )
++        };
++        let scope = attach().expect("first scoped registration");
++        let retained = manager.get_environment(id).expect("live scoped executor");
++        assert_eq!(
++            manager.default_environment_ids(),
++            vec![LOCAL_ENVIRONMENT_ID]
++        );
++        assert!(attach().is_err());
++        assert!(
++            manager
++                .upsert_environment(id.to_owned(), url.clone(), None)
++                .is_err()
++        );
++        drop(scope);
++        assert!(manager.get_environment(id).is_none());
++        let next = attach().expect("scope can register again after retirement");
++        let current = manager.get_environment(id).expect("fresh scoped executor");
++        assert!(!Arc::ptr_eq(&retained, &current));
++        drop(next);
++        assert!(manager.get_environment(id).is_none());
++    }
++
+     #[tokio::test]
+     async fn replacing_environment_stops_its_startup_task() {
+         let first_listener = TcpListener::bind("127.0.0.1:0")
+diff --git a/codex-rs/exec-server/src/environment/accepted.rs b/codex-rs/exec-server/src/environment/accepted.rs
+index a3772a24860ac4ad9378179200824a9fa7067e6b..855abba800f6f8296b41f20c8a1a5adb28e95159 100644
+--- a/codex-rs/exec-server/src/environment/accepted.rs
++++ b/codex-rs/exec-server/src/environment/accepted.rs
+@@ -37,6 +37,7 @@ impl EnvironmentManager {
+         Ok(Self {
+             default_environment: Some(environment_id.clone()),
+             environments: RwLock::new(HashMap::from([(environment_id, environment)])),
++            scoped_environments: RwLock::default(),
+             local_environment: None,
+             local_runtime_paths: None,
+             http_client_factory,
+diff --git a/codex-rs/exec-server/src/lib.rs b/codex-rs/exec-server/src/lib.rs
+index c87d8ee33f41cece2eb493696e7babcf470ea3cb..4877812c4c07de5024a934d045faa4934843fbb8 100644
+--- a/codex-rs/exec-server/src/lib.rs
++++ b/codex-rs/exec-server/src/lib.rs
+@@ -126,6 +126,7 @@ pub use environment::LOCAL_ENVIRONMENT_ID;
+ pub use environment::MAX_SELECTED_CAPABILITY_ROOTS;
+ pub use environment::REMOTE_ENVIRONMENT_ID;
+ pub use environment::RemoteEnvironmentOptions;
++pub use environment::ScopedEnvironment;
+ pub use environment_bootstrap::PreparedEnvironmentManager;
+ pub use environment_provider::DefaultEnvironmentProvider;
+ pub use environment_provider::EnvironmentProvider;
+diff --git a/codex-rs/exec-server/src/server/build_identity.rs b/codex-rs/exec-server/src/server/build_identity.rs
+index 691b592535e6362da9219398b8b6b8ea0ba16303..5166fa82a4e8569bd2f76603994451b5c3a1593e 100644
+--- a/codex-rs/exec-server/src/server/build_identity.rs
++++ b/codex-rs/exec-server/src/server/build_identity.rs
+@@ -16,6 +16,53 @@ pub(super) static PROVIDER_ID: LazyLock<Option<String>> = LazyLock::new(|| {
+ pub(super) fn local_environment_info() -> EnvironmentInfo {
+     EnvironmentInfo {
+         provider_id: PROVIDER_ID.clone(),
++        process_identity: current_process_identity(),
+         ..super::release_version::local_environment_info()
+     }
+ }
++
++#[cfg(unix)]
++fn current_process_identity() -> Option<codex_exec_server_protocol::ExecutorProcessIdentity> {
++    let mut supplementary_gids = rustix::process::getgroups()
++        .ok()?
++        .into_iter()
++        .map(|gid| gid.as_raw())
++        .collect::<Vec<_>>();
++    supplementary_gids.sort_unstable();
++    supplementary_gids.dedup();
++    Some(codex_exec_server_protocol::ExecutorProcessIdentity::Unix {
++        effective_uid: rustix::process::geteuid().as_raw(),
++        effective_gid: rustix::process::getegid().as_raw(),
++        supplementary_gids,
++    })
++}
++
++#[cfg(not(unix))]
++fn current_process_identity() -> Option<codex_exec_server_protocol::ExecutorProcessIdentity> {
++    None
++}
++
++#[cfg(all(test, unix))]
++mod process_identity_tests {
++    #[test]
++    fn environment_metadata_reports_current_effective_credentials() {
++        let identity = super::local_environment_info()
++            .process_identity
++            .expect("Unix identity");
++        let codex_exec_server_protocol::ExecutorProcessIdentity::Unix {
++            effective_uid,
++            effective_gid,
++            supplementary_gids,
++        } = identity;
++        assert_eq!(effective_uid, rustix::process::geteuid().as_raw());
++        assert_eq!(effective_gid, rustix::process::getegid().as_raw());
++        let mut expected = rustix::process::getgroups()
++            .expect("current groups")
++            .into_iter()
++            .map(|gid| gid.as_raw())
++            .collect::<Vec<_>>();
++        expected.sort_unstable();
++        expected.dedup();
++        assert_eq!(supplementary_gids, expected);
++    }
++}
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 7378e5bb33de632df175c8620a5218903822573d..1338ff8b265977773f8c936c63768008b1c4c5e6 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -63,10 +63,13 @@ pub use tool_lifecycle::is_reserved_mcp_request_metadata_key;
+ pub use turn_input::InitialTurnInput;
+ pub use turn_input::TurnInputContext;
+ pub use turn_input::TurnInputEnvironment;
++pub use turn_lifecycle::AgentLifecycleInput;
+ pub use turn_lifecycle::AgentProfile;
+ pub use turn_lifecycle::AgentProfileActivation;
+ pub use turn_lifecycle::AgentProfileBoundaryInput;
+ pub use turn_lifecycle::AgentProfileDecisionHandoffTools;
++pub use turn_lifecycle::AgentProfileEnvironment;
++pub use turn_lifecycle::AgentProfileExecutorTools;
+ pub use turn_lifecycle::AgentProfileHandoffTools;
+ pub use turn_lifecycle::AgentProfileInstructions;
+ pub use turn_lifecycle::AgentProfileModelSettings;
+@@ -271,6 +274,15 @@ pub trait TurnLifecycleContributor: Send + Sync {
+         Box::pin(std::future::ready(Ok(None)))
+     }
+
++    /// Acknowledge an Agent start or accepted outgoing handoff before dependent work.
++    /// Errors fail the turn. Replies never select a profile or grant authority.
++    fn before_agent_lifecycle<'a>(
++        &'a self,
++        _input: AgentLifecycleInput<'a>,
++    ) -> ExtensionFuture<'a, Result<(), String>> {
++        Box::pin(std::future::ready(Ok(())))
++    }
++
+     /// Request an admitted Agent transition before real sampling, never during speculative capture.
+     fn before_step_agent_activation<'a>(
+         &'a self,
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 8b8d866311d6fb1aee42d3f8e689663077d53ae2..1e66a00403c72da4e0fad5a0510c194983780e93 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -304,6 +304,40 @@ impl std::fmt::Debug for AgentProfile {
+     }
+ }
+
++/// Trusted environment selection provided by the current host Agent graph.
++/// Portable history only records the profile identity, never this attachment.
++#[derive(Clone, Debug)]
++pub struct AgentProfileEnvironment(
++    pub Option<codex_protocol::protocol::TurnEnvironmentSelection>,
++    /// Comparison requirement from the current private executor launch.
++    /// Never a selected user or an instruction from portable history.
++    pub bool,
++);
++
++impl AgentProfileEnvironment {
++    pub fn requires_process_identity(&self) -> bool {
++        self.1
++    }
++}
++
++/// Exact executor tools admitted by the current host Agent's Environment.
++/// The thread-level tool policy remains a ceiling.
++#[derive(Clone, Debug, Default)]
++pub struct AgentProfileExecutorTools {
++    pub allowed: std::collections::HashSet<String>,
++}
++
++impl AgentProfileExecutorTools {
++    pub fn permits(&self, tool: &codex_tools::ToolName) -> bool {
++        !tool.is_default_namespace()
++            || !matches!(
++                tool.name.as_str(),
++                "exec_command" | "write_stdin" | "apply_patch" | "project_glob" | "project_grep"
++            )
++            || self.allowed.contains(tool.name.as_str())
++    }
++}
++
+ /// One committed native profile, shared by current and future step captures.
+ #[derive(Clone, Debug)]
+ pub struct CapturedAgentProfile {
+@@ -317,6 +351,19 @@ pub struct AgentProfileActivation {
+     pub target: std::sync::Arc<AgentProfile>,
+ }
+
++/// An admitted Agent owner before real work or its accepted outgoing transfer.
++/// A successful reply acknowledges only the callback; it cannot select a target.
++pub struct AgentLifecycleInput<'a> {
++    pub turn_id: &'a str,
++    pub cancellation: &'a CancellationToken,
++    pub source: Option<&'a CapturedAgentProfile>,
++    /// None starts the current owner; Some notifies its admitted outgoing transition.
++    pub target_profile_id: Option<&'a str>,
++    pub session_store: &'a ExtensionData,
++    pub thread_store: &'a ExtensionData,
++    pub turn_store: &'a ExtensionData,
++}
++
+ /// Supplied only at a real sampling boundary after the preceding tool batch settles.
+ pub struct AgentProfileBoundaryInput<'a> {
+     /// Canonical accepted result of the first requested handoff in provider order.
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 2fd63342ec02df04ffc2f2797479c3ed3bf0a3f3..60e73ef24ec878eb111cc8228fa2199561c95fda 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -51,10 +51,13 @@ pub use codex_tools::TurnItemEmissionFuture;
+ pub use codex_tools::TurnItemEmitter;
+ pub use codex_tools::parse_tool_input_schema;
+ pub use codex_tools::parse_tool_input_schema_without_compaction;
++pub use contributors::AgentLifecycleInput;
+ pub use contributors::AgentProfile;
+ pub use contributors::AgentProfileActivation;
+ pub use contributors::AgentProfileBoundaryInput;
+ pub use contributors::AgentProfileDecisionHandoffTools;
++pub use contributors::AgentProfileEnvironment;
++pub use contributors::AgentProfileExecutorTools;
+ pub use contributors::AgentProfileHandoffTools;
+ pub use contributors::AgentProfileInstructions;
+ pub use contributors::AgentProfileModelSettings;
+diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
+index 0d7ce9d2c32a5357a649dae9a4d366f31425fdbe..3ebd6a1e67263beb38bfaf619031d75a50de545a 100644
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -104,6 +104,9 @@ pub struct CodexHarnessMetadata {
+     /// Host graph declaration fingerprint; never an authority or a serialized graph.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub sdk_agent_graph: Option<String>,
++    /// Fingerprint of executor grants accepted by the SDK at Agent publication.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub sdk_agent_environment_policy: Option<String>,
+
+     /// Native Agent profile/model receipt accompanying an accepted instruction envelope.
+     #[serde(default, skip_serializing_if = "Option::is_none")]

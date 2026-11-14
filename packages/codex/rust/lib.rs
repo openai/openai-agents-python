@@ -977,6 +977,41 @@ impl NativeThread {
         })
     }
 
+    fn _configure_model_completion(&self, root: bool, profiles: Vec<String>) -> PyResult<()> {
+        let inner = self.current()?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Missing SDK model completion owner"))?;
+        tools
+            .configure_model_completion(root, profiles)
+            .map_err(py_error)
+    }
+
+    #[pyo3(signature = (id, thread=None, instance=None, *, error=false))]
+    fn _reply_model_completion(
+        &self,
+        id: u64,
+        thread: Option<&str>,
+        instance: Option<&str>,
+        error: bool,
+    ) -> PyResult<bool> {
+        let Some(tools) = self.live()?.and_then(|inner| {
+            inner
+                .thread
+                .thread_extension_data()
+                .get::<python_tools::PythonTools>()
+        }) else {
+            return Ok(false);
+        };
+        tools
+            .reply_model_completion(id, thread, instance, error)
+            .map_err(py_error)?;
+        Ok(true)
+    }
+
     fn _enable_raw_provider_events(&self) -> PyResult<()> {
         let inner = self.current()?;
         let _operation = inner.engine.operation(false).map_err(py_error)?;
@@ -2814,6 +2849,25 @@ impl NativeThread {
             .reply_provider_response_span(id, data_json, error, thread, instance)
             .map_err(py_error)?;
         Ok(true)
+    }
+
+    #[pyo3(signature = (id, thread=None, instance=None, *, error=false))]
+    fn _reply_agent_lifecycle(
+        &self,
+        id: u64,
+        thread: Option<&str>,
+        instance: Option<&str>,
+        error: bool,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Agent lifecycle requires current tools"))?;
+        tools
+            .reply_agent_lifecycle(id, error, thread, instance)
+            .map_err(py_error)
     }
 
     #[pyo3(signature = (id, data, thread=None, instance=None))]

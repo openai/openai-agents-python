@@ -9,6 +9,7 @@ from _agents_codex.model_context import (
     HostedPromptReference as HostedPromptReference,
     HostedPromptSource as HostedPromptSource,
     Literal as Literal,
+    ModelCompletionContext as ModelCompletionContext,
     ModelContextSnapshot as ModelContextSnapshot,
     ModelRequestContext as ModelRequestContext,
     Sequence as Sequence,

@@ -122,14 +122,14 @@ class RecordedResponse(TypedDict):
 
 
 class RecordedRequestUsage(TokenUsage):
-    """One settled SDK-managed model attempt, in native owner order.
+    """One SDK-managed model attempt or hosted request, in native owner order.
 
     Zero fields with token_usage_known=False are accounting placeholders, not
     received provider measurements. Retries hidden inside an external library
     have no separate native identity and are not synthesized here.
     """
 
-    scope: Literal["sdk_model_attempt"]
+    scope: Literal["sdk_model_attempt", "provider_request"]
     thread_id: str
     turn_id: str
     owner_attempt_id: str

@@ -48,7 +48,11 @@ from typing import (
 )
 from urllib.parse import urlsplit as urlsplit
 
-from typing_extensions import Required as _Required, TypedDict as TypedDict, TypeVar as TypeVar
+from typing_extensions import (
+    Required as _Required,
+    TypedDict as TypedDict,
+    TypeVar as TypeVar,
+)
 
 from ._hosted_prompts import _capture_hosted_prompt_source, _hosted_prompt_controls
 from ._lifecycle import (
@@ -66,7 +70,11 @@ from ._model_settings import (
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._tool_errors import ToolErrorFormatter as ToolErrorFormatter
-from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
+from ._trace_context import (
+    TraceContext as TraceContext,
+    _trace_context as _trace_context,
+)
+from .agent_lifecycle import _AgentLifecycleCallback
 from .compaction import ResponsesCompaction, _BeforeCompact
 from .completion import _BeforeComplete, _ToolBatchCompletion
 from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
@@ -76,7 +84,7 @@ from .history import _InputStoragePolicy
 from .hosted_mcp import HostedMCP
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage, _native_input, _response_content
-from .model_context import HostedPromptSource, _ContextTransform
+from .model_context import HostedPromptSource, _AfterModel, _ContextTransform
 from .models import (
     ModelProvider,
     NativeModel,
@@ -93,7 +101,7 @@ if TYPE_CHECKING:
     class _TracingOpeningOptions(TypedDict, total=False, closed=True):
         _tracing_context: str
 
-    from ._function_tools import Tool, _PythonTool
+    from ._function_tools import Tool, ToolCallInfo, _PythonTool
     from ._managed_workspace import ManagedWorkspaceCheckpoint
     from .canonical_storage import CustomStorage
     from .decision_handoff import DecisionHandoff
@@ -102,6 +110,7 @@ if TYPE_CHECKING:
     from .history import CanonicalHistorySnapshot
     from .input import UserInput
     from .native_agents import NativeAgents
+    from .observation import Observation
     from .prepared_request import _PrepareRequest
     from .realtime_agents import RealtimeAgentConfig, RealtimeHandoff
     from .recovery import ReconciledCall
@@ -202,6 +211,8 @@ class ModelSettings(TypedDict, total=False, closed=True):
 
     reasoning_effort: str
     reasoning_summary: str
+    # Additional fields of the standard Responses reasoning object.
+    reasoning_options: Mapping[str, Any] | None
     service_tier: str | None
     tool_choice: Literal["auto", "none", "required"] | ToolRef | HostedToolChoice | None
     input_modalities: Sequence[Literal["text", "image", "audio"]] | None
@@ -373,9 +384,16 @@ class SignInWithChatGPT:
                 and credentials.subject.strip()
                 and _valid_siwc_bearer(credentials.access_token, credentials.client_id)
             ):
-                identity = (credentials.issuer, credentials.client_id, credentials.subject)
+                identity = (
+                    credentials.issuer,
+                    credentials.client_id,
+                    credentials.subject,
+                )
                 binding = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-                return credentials.access_token, _SIWC_VERIFIED_PROVIDER_PREFIX + binding
+                return (
+                    credentials.access_token,
+                    _SIWC_VERIFIED_PROVIDER_PREFIX + binding,
+                )
             del credentials
             failure = ValueError(
                 "Provide verified Sign in with ChatGPT credentials with an active access token"
@@ -721,7 +739,12 @@ class NativeProvider:
             result["query_params"] = dict(query)
         if any(
             value is not None
-            for value in (self.headers, self.env_headers, self.organization, self.project)
+            for value in (
+                self.headers,
+                self.env_headers,
+                self.organization,
+                self.project,
+            )
         ):
             result["http_headers"] = dict(headers)
         return result
@@ -937,6 +960,15 @@ _OMITTED_INSTRUCTIONS = _OmittedInstructions()
 _OMITTED_TOOLS = _OmittedTools()
 
 
+@dataclass(frozen=True, slots=True)
+class AgentToolStreamEvent:
+    """A native observation with its configured child's Agent and parent tool call."""
+
+    event: Observation
+    agent: Agent[Any, Any]
+    tool_call: ToolCallInfo
+
+
 @dataclass(init=False, eq=False, repr=False)
 class Agent(Generic[ContextT, OutputT]):
     """Declare a native agent without starting a runtime or connection.
@@ -960,6 +992,7 @@ class Agent(Generic[ContextT, OutputT]):
     ``tool_name_collision_policy="warn"`` keeps the last eager bare function or
     handoff with a given name. A handoff takes precedence over a function.
 
+    ``after_model`` awaits the accepted provider response before direct tool dispatch.
     ``transform_context`` runs before each model request, including children,
     output repair, and model-based compaction. Return replacement input items
     or None to keep the original input. The callback does not edit saved history.
@@ -1004,6 +1037,7 @@ class Agent(Generic[ContextT, OutputT]):
     output_type: OutputSpec[OutputT] | None
     programmatic_tool_calling: bool
     transform_context: _ContextTransform[ContextT] | None
+    after_model: _AfterModel[ContextT] | None
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
     decisions: DecisionProvider | None
@@ -1015,6 +1049,8 @@ class Agent(Generic[ContextT, OutputT]):
     compaction: ResponsesCompaction[ContextT] | None
     prepare_handoff_input: _PrepareHandoffInput[ContextT] | None
     tool_name_collision_policy: Literal["error", "warn"]
+    environment: EnvironmentSource[ContextT] | None
+    on_lifecycle: _AgentLifecycleCallback[ContextT] | None = field(default=None, kw_only=True)
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -1045,6 +1081,7 @@ class Agent(Generic[ContextT, OutputT]):
             | None = None,
             output_type: None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
+            after_model: _AfterModel[ContextT] | None = None,
             prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1069,6 +1106,7 @@ class Agent(Generic[ContextT, OutputT]):
             ]
             | None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
+            after_model: _AfterModel[ContextT] | None = None,
             prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1109,6 +1147,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1119,6 +1158,8 @@ class Agent(Generic[ContextT, OutputT]):
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
+        environment: EnvironmentSource[ContextT] | None = None,
+        on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -1146,6 +1187,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1155,6 +1197,8 @@ class Agent(Generic[ContextT, OutputT]):
         realtime: RealtimeAgentConfig | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
+        environment: EnvironmentSource[ContextT] | None = None,
+        on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -1179,6 +1223,7 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1189,6 +1234,8 @@ class Agent(Generic[ContextT, OutputT]):
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
+        environment: EnvironmentSource[ContextT] | None = None,
+        on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -1214,6 +1261,7 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1223,6 +1271,8 @@ class Agent(Generic[ContextT, OutputT]):
         realtime: RealtimeAgentConfig | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
+        environment: EnvironmentSource[ContextT] | None = None,
+        on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
     ) -> None: ...
 
     def __init__(
@@ -1246,6 +1296,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: OutputSpec[OutputT] | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1256,6 +1307,8 @@ class Agent(Generic[ContextT, OutputT]):
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
+        environment: EnvironmentSource[ContextT] | None = None,
+        on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
     ) -> None:
         if isinstance(instructions, _OmittedInstructions):
             instructions = None
@@ -1270,8 +1323,12 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("name must be a string or None")
         if not isinstance(programmatic_tool_calling, bool):
             raise TypeError("programmatic_tool_calling must be a bool")
+        if on_lifecycle is not None and not callable(on_lifecycle):
+            raise TypeError("on_lifecycle must be callable or None")
         if prepare_handoff_input is not None and not callable(prepare_handoff_input):
             raise TypeError("prepare_handoff_input must be callable or None")
+        if after_model is not None and not callable(after_model):
+            raise TypeError("after_model must be callable or None")
         if transform_context is not None and not callable(transform_context):
             raise TypeError("transform_context must be callable or None")
         if before_compact is not None and not callable(before_compact):
@@ -1322,15 +1379,20 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(self, "decisions", decisions)
         object.__setattr__(self, "provider", provider)
         object.__setattr__(
-            self, "model_settings", MappingProxyType(_copy_model_settings(model_settings))
+            self,
+            "model_settings",
+            MappingProxyType(_copy_model_settings(model_settings)),
         )
         object.__setattr__(self, "output_type", output_type)
         object.__setattr__(self, "programmatic_tool_calling", programmatic_tool_calling)
         if tool_name_collision_policy not in ("error", "warn"):
             raise ValueError("tool_name_collision_policy must be error or warn")
         object.__setattr__(self, "tool_name_collision_policy", tool_name_collision_policy)
+        object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "transform_context", transform_context)
+        object.__setattr__(self, "after_model", after_model)
         object.__setattr__(self, "prepare_handoff_input", prepare_handoff_input)
+        object.__setattr__(self, "on_lifecycle", on_lifecycle)
         object.__setattr__(self, "before_compact", before_compact)
         object.__setattr__(self, "before_complete", before_complete)
         object.__setattr__(self, "tool_batch_completion", tool_batch_completion)
@@ -1479,16 +1541,28 @@ class Agent(Generic[ContextT, OutputT]):
         tool_description: str | None = None,
         *,
         custom_output_extractor: Callable[[Completed[OutputT]], str | Awaitable[str]] | None = None,
+        on_stream: Callable[[AgentToolStreamEvent], None | Awaitable[None]] | None = None,
+        on_stream_max_pending_events: int | None = 1024,
     ) -> _PythonTool[ContextT, object]:
         """Run this agent as a tool owned by the parent Session.
 
         The parent relays pending interactions and joins child cleanup.
         The parent can suspend a single configured child at a supported
         manual boundary after its other automatic callbacks have settled.
+        on_stream receives the child's native observations in order. The tool
+        joins its callback before returning. A slow callback that exceeds
+        on_stream_max_pending_events fails the tool. None removes this limit.
         """
         from ._agent_tool import _create_agent_tool
 
-        return _create_agent_tool(self, tool_name, tool_description, custom_output_extractor)
+        return _create_agent_tool(
+            self,
+            tool_name,
+            tool_description,
+            custom_output_extractor,
+            on_stream,
+            on_stream_max_pending_events,
+        )
 
     @overload
     def session(
@@ -1992,6 +2066,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         capture_error_details: bool = False,
         error_handler: _RunErrorHandler | None = None,
+        on_event: Callable[[Observation], None | Awaitable[None]] | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2031,6 +2106,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         capture_error_details: bool = False,
         error_handler: _RunErrorHandler | None = None,
+        on_event: Callable[[Observation], None | Awaitable[None]] | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2070,6 +2146,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         capture_error_details: bool = False,
         error_handler: _RunErrorHandler | None = None,
+        on_event: Callable[[Observation], None | Awaitable[None]] | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2113,6 +2190,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         capture_error_details: bool = False,
         error_handler: _RunErrorHandler | None = None,
+        on_event: Callable[[Observation], None | Awaitable[None]] | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2201,6 +2279,10 @@ class Agent(Generic[ContextT, OutputT]):
         Provider refusal, final output validation and the request budget are
         eligible. Output guardrails check the replacement before it is returned
         or saved. Uncertain cleanup prevents recovery.
+
+        on_event receives this run's native observations while it executes.
+        The SDK waits for each observer call. It delivers pending events before
+        returning the final result, including recovery after streamed output.
         """
         provider_history = _capture_provider_history(provider_history)
         if input_storage_policy is not None:
@@ -2211,6 +2293,8 @@ class Agent(Generic[ContextT, OutputT]):
             input = deepcopy(input)
         if error_handler is not None and not callable(error_handler):
             raise TypeError("error_handler must be callable or None")
+        if on_event is not None and not callable(on_event):
+            raise TypeError("on_event must be callable or None")
         capture_error_details = capture_error_details is True
         observe_failure = capture_error_details or error_handler is not None
         error_input = deepcopy(input) if observe_failure and input_storage_policy is None else None
@@ -2425,9 +2509,8 @@ class Agent(Generic[ContextT, OutputT]):
                 session_factory = self._session_context
                 options["_atomic_first_turn"] = True
                 if (
-                    not (
-                        return_history or return_raw_usage or return_items or capture_error_details
-                    )
+                    not (return_history or return_raw_usage or return_items or observe_failure)
+                    and on_event is None
                     and model_override is None
                     and not raise_on_unknown_tool
                     and _private_text_run_eligible(
@@ -2436,9 +2519,8 @@ class Agent(Generic[ContextT, OutputT]):
                 ):
                     options["_private_text_run"] = True
                 if (
-                    not (
-                        return_history or return_raw_usage or return_items or capture_error_details
-                    )
+                    not (return_history or return_raw_usage or return_items or observe_failure)
+                    and on_event is None
                     and model_override is None
                     and not raise_on_unknown_tool
                     and _completed_run_eligible(
@@ -2630,26 +2712,51 @@ class Agent(Generic[ContextT, OutputT]):
                         submission = cast("Turn[OutputT]", session._last_turn)
                     else:
                         submission = await session.submit(
-                            input, tools=tools, before_step=before_step, **submit_options
+                            input,
+                            tools=tools,
+                            before_step=before_step,
+                            **submit_options,
                         )
                 if observe_failure and input is not None and input_storage_policy is None:
                     session._remember_run_error_input(submission, error_input)
-                if session._interaction_handler is None and pause_manual:
-                    return await session._run_with_interactions(
-                        submission,
-                        on_interaction,
-                        return_state=return_state,
-                        return_history=return_history,
-                        return_raw_usage=return_raw_usage,
-                        return_items=return_items,
-                        capture_error_details=capture_error_details,
-                        error_handler=error_handler,
-                        error_input=error_input,
-                        pause_manual=pause_manual,
+
+                managed_interactions = session._interaction_handler is None and bool(pause_manual)
+                if on_event is not None:
+                    observer = on_event
+
+                    async def observe() -> None:
+                        async for event in submission.events():
+                            observed = observer(event)
+                            if observed is not None:
+                                await observed
+
+                    reader = asyncio.create_task(observe())
+                else:
+                    reader = None
+                try:
+                    if managed_interactions:
+                        return await session._run_with_interactions(
+                            submission,
+                            on_interaction,
+                            return_state=return_state,
+                            return_history=return_history,
+                            return_raw_usage=return_raw_usage,
+                            return_items=return_items,
+                            capture_error_details=capture_error_details,
+                            error_handler=error_handler,
+                            error_input=error_input,
+                            pause_manual=pause_manual,
+                            observation_reader=reader,
+                        )
+                    if reader is not None:
+                        await reader
+                    result = await session._one_shot_result(
+                        submission, error_handler, capture_error_details, error_input
                     )
-                result = await session._one_shot_result(
-                    submission, error_handler, capture_error_details, error_input
-                )
+                finally:
+                    if reader is not None and not reader.done():
+                        reader.cancel()
+                        await asyncio.gather(reader, return_exceptions=True)
                 if return_state:
                     result = replace(result, state=await session.save_state())
                 if return_history:
@@ -2959,6 +3066,7 @@ def _private_text_run_eligible(
         and context is None
         and not agent.programmatic_tool_calling
         and agent.transform_context is None
+        and agent.after_model is None
         and agent.before_compact is None
         and agent.compaction is None
         and agent.before_complete is None

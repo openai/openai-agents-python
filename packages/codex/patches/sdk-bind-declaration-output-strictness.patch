@@ -1,0 +1,60 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 6bdda489dda5bf0ac69809efcf0785dc076db012..ef6d044b1c09ef9fa7d86b2ed150628352361849 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2489,6 +2489,16 @@ async fn run_sampling_request(
+                     .output_schema_strict
+                     .unwrap_or(prompt.output_schema_strict);
+             }
++            // Bind schema and strictness to the same admitted output owner.
++            // The private value does not change the persisted model identity.
++            if output_control.as_deref().is_some_and(|control| {
++                control.thread_id == sess.thread_id.to_string() && !control.preserve_turn_output
++            }) && let Some(strict) = step_context.settings.agent_profile.as_ref().and_then(
++                |profile| profile.profile.data.get::<codex_extension_api::AgentProfileOutputStrict>(),
++            ) {
++                prompt.output_schema_strict = strict.0;
++                prompt.request_controls.output_schema_strict = Some(strict.0);
++            }
+             if prompt.tool_choice == codex_protocol::config_types::ToolChoice::Required
+                 && tool_choice_reset_applies(&step_context.settings, &turn_context.extension_data)
+             {
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 5f1153aff174686bdd5f0d4d60a60b5463981d2f..7378e5bb33de632df175c8620a5218903822573d 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -73,6 +73,7 @@ pub use turn_lifecycle::AgentProfileModelSettings;
+ pub use turn_lifecycle::AgentProfileOutputControl;
+ pub use turn_lifecycle::AgentProfileOutputGuidance;
+ pub use turn_lifecycle::AgentProfileOutputSchema;
++pub use turn_lifecycle::AgentProfileOutputStrict;
+ pub use turn_lifecycle::AgentProfileReceipt;
+ pub use turn_lifecycle::CapturedAgentProfile;
+ pub use turn_lifecycle::HeldToolCompletionResults;
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 9b3b013013ff4ffde04a4b24df38ab12bff857f8..8b8d866311d6fb1aee42d3f8e689663077d53ae2 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -271,6 +271,10 @@ impl AgentProfileModelSettings {
+ #[derive(Clone, Debug)]
+ pub struct AgentProfileOutputSchema(pub Option<serde_json::Value>);
+
++/// In-process wire strictness from the exact admitted SDK declaration.
++#[derive(Clone, Debug)]
++pub struct AgentProfileOutputStrict(pub bool);
++
+ /// Per-sampling output instructions owned by the active SDK profile.
+ #[derive(Clone, Debug)]
+ pub struct AgentProfileOutputGuidance(pub String);
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index d89a92cd472d6b951901e59bf93cc0975c034c4a..c602057ba66bfa410991b280dc2d7f48cf4b31f6 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -61,6 +61,7 @@ pub use contributors::AgentProfileModelSettings;
+ pub use contributors::AgentProfileOutputControl;
+ pub use contributors::AgentProfileOutputGuidance;
+ pub use contributors::AgentProfileOutputSchema;
++pub use contributors::AgentProfileOutputStrict;
+ pub use contributors::AgentProfileReceipt;
+ pub use contributors::ApprovalDecision;
+ pub use contributors::ApprovalDecisionInput;

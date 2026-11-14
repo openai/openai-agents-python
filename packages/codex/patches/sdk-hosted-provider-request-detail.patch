@@ -1,0 +1,182 @@
+diff --git a/codex-rs/core/src/session/model_attempts.rs b/codex-rs/core/src/session/model_attempts.rs
+index 826624202d5cb177de1c79b52783ca75bbee8e59..65376281c29fe82fe5e22eb497733007942a0901 100644
+--- a/codex-rs/core/src/session/model_attempts.rs
++++ b/codex-rs/core/src/session/model_attempts.rs
+@@ -1,7 +1,9 @@
+ //! Logical-generation identity and accounting in the existing native turn store.
+ //! No transport or retry executor lives here; the sampling loop owns both.
+ use codex_extension_api::{ModelAttemptAdmission, ProviderRequestAccounting, TurnSamplingStop};
+-use codex_protocol::model_retry::{ModelAttemptSnapshot, ModelProducerFailure, ModelRetryBackoff};
++use codex_protocol::model_retry::{
++    ModelAttemptSnapshot, ModelProducerFailure, ModelProviderRequestUsage, ModelRetryBackoff,
++};
+ use codex_protocol::protocol::TokenUsage;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{Arc, Mutex, Weak};
+@@ -16,7 +18,8 @@ struct LedgerState {
+     snapshot: ModelAttemptSnapshot,
+     current: Option<Weak<Attempt>>,
+     last_settled: Option<String>,
+-    open_provider_request: Option<String>,
++    open_provider_request: Option<ModelProviderRequestUsage>,
++    provider_request_usage: Vec<ModelProviderRequestUsage>,
+ }
+ 
+ #[derive(Debug)]
+@@ -281,6 +284,21 @@ impl ModelAttemptAdmission for Attempt {
+     fn snapshot(&self) -> Result<ModelAttemptSnapshot, String> {
+         Ok(self.ledger.snapshot())
+     }
++    fn take_provider_request_usage(&self) -> Option<Vec<ModelProviderRequestUsage>> {
++        let mut state = self
++            .ledger
++            .0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        debug_assert_eq!(state.last_settled.as_deref(), Some(self.id.as_str()));
++        let measurement = self
++            .measurement
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        measurement
++            .provider_managed
++            .then(|| std::mem::take(&mut state.provider_request_usage))
++    }
+     fn observe_request(
+         &self,
+         transport: &str,
+@@ -379,13 +397,24 @@ impl ModelAttemptAdmission for Attempt {
+                     let lineage = uuid::Uuid::new_v4().to_string();
+                     // A replacement abandons the preceding incomplete physical
+                     // request. Its counted request remains missing usage.
+-                    state.open_provider_request = Some(lineage.clone());
++                    let request = ModelProviderRequestUsage {
++                        request_id: lineage.clone(),
++                        request_ordinal: requests,
++                        token_usage: None,
++                    };
++                    state.provider_request_usage.push(request.clone());
++                    state.open_provider_request = Some(request);
+                     usage.requests = requests;
+                     usage.requests_without_token_usage = missing;
+                     Ok(Some(lineage))
+                 }
+                 ProviderRequestAccounting::Dispatch { lineage } if measurement.provider_managed => {
+-                    if state.open_provider_request.as_deref() != Some(lineage.as_str()) {
++                    if state
++                        .open_provider_request
++                        .as_ref()
++                        .map(|request| &request.request_id)
++                        != Some(&lineage)
++                    {
+                         return Err("Native provider request owner mismatch".into());
+                     }
+                     self.mark_provider_effect();
+@@ -395,15 +424,31 @@ impl ModelAttemptAdmission for Attempt {
+                     lineage,
+                     usage: measured,
+                 } if measurement.provider_managed => {
+-                    if state.open_provider_request.as_deref() != Some(lineage.as_str()) {
++                    if state
++                        .open_provider_request
++                        .as_ref()
++                        .map(|request| &request.request_id)
++                        != Some(&lineage)
++                    {
+                         return Err("Native provider request owner mismatch".into());
+                     }
+-                    if let Some(measured) = measured {
+-                        validate_usage(&measured)?;
+-                        usage.token_usage = add_usage(&usage.token_usage, &measured)?;
++                    if let Some(measured) = &measured {
++                        validate_usage(measured)?;
++                        usage.token_usage = add_usage(&usage.token_usage, measured)?;
+                         usage.requests_without_token_usage -= 1;
+                     }
+-                    state.open_provider_request = None;
++                    let mut request = state.open_provider_request.take().expect("matched lineage");
++                    if measured.is_some() {
++                        request.token_usage = measured;
++                        if let Some(pending) = state.provider_request_usage.last_mut()
++                            && pending.request_id == lineage
++                        {
++                            *pending = request;
++                        } else {
++                            // A later logical attempt can settle the original request.
++                            state.provider_request_usage.push(request);
++                        }
++                    }
+                     Ok(None)
+                 }
+                 _ => Err("Native model attempt has no managed provider transport".into()),
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index d397fb886415ff1d429816a58202da68de13f228..bb0632a70f0435d80d5ad0595fbd8411f0cf8ca4 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3100,6 +3100,13 @@ async fn publish_model_attempt(
+                 attempt_id: attempt.id().to_owned(),
+                 phase,
+                 snapshot,
++                provider_requests: if phase
++                    == codex_protocol::model_retry::ModelAttemptPhase::Finished
++                {
++                    attempt.take_provider_request_usage()
++                } else {
++                    None
++                },
+             },
+         }),
+     )
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 793c6cd207178d32d11ba7c823746fde7bcc4b3a..bbfc36ba4ce0d89e083c9632702a3095c7f68257 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -550,6 +550,12 @@ pub trait ModelAttemptAdmission: Send + Sync + std::fmt::Debug {
+     fn cancellation(&self) -> tokio_util::sync::CancellationToken;
+     fn sampling_stop(&self) -> Arc<TurnSamplingStop>;
+     fn snapshot(&self) -> Result<codex_protocol::model_retry::ModelAttemptSnapshot, String>;
++    /// Drain observation-only transport receipts after the sampler joins.
++    fn take_provider_request_usage(
++        &self,
++    ) -> Option<Vec<codex_protocol::model_retry::ModelProviderRequestUsage>> {
++        None
++    }
+     /// Only trusted request construction supplies these small native request facts.
+     fn observe_request(
+         &self,
+diff --git a/codex-rs/protocol/src/model_retry.rs b/codex-rs/protocol/src/model_retry.rs
+index a59b24739892ef714cd8f6ce4131551e81027a24..f7bdb5b542b6144b20d14a715e501cef83ea2788 100644
+--- a/codex-rs/protocol/src/model_retry.rs
++++ b/codex-rs/protocol/src/model_retry.rs
+@@ -171,6 +171,16 @@ pub struct ModelRetryContext {
+     pub usage: Option<TokenUsage>,
+ }
+ 
++/// A transport-admitted request, updated only by its matching terminal response.
++#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ModelProviderRequestUsage {
++    pub request_id: String,
++    #[ts(type = "number")]
++    pub request_ordinal: u64,
++    pub token_usage: Option<TokenUsage>,
++}
++
+ /// Cumulative native facts for one exact turn. Explicit host reports stay separate.
+ /// Live events, final results and checkpoints carry the same authoritative totals.
+ #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 14b4f94dd84cb8909cf361231b2d8c2b06c166c3..edb2de8cf1826014399cac545bc6d24151482198 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -2851,6 +2851,10 @@ pub struct ModelAttemptFact {
+     pub phase: crate::model_retry::ModelAttemptPhase,
+     #[serde(flatten)]
+     pub snapshot: crate::model_retry::ModelAttemptSnapshot,
++    /// Physical requests admitted or settled since the preceding finished fact.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub provider_requests: Option<Vec<crate::model_retry::ModelProviderRequestUsage>>,
+ }
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]

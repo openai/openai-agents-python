@@ -63,6 +63,23 @@ class ModelRequestContext(Generic[ContextT]):
     purpose: Literal["turn", "compaction", "output_repair"]
 
 
+@dataclass(frozen=True)
+class ModelCompletionContext(Generic[ContextT]):
+    """The accepted response of one native model request, before direct tool execution."""
+
+    context: ContextT = field(repr=False)
+    items: tuple[dict[str, Any], ...] = field(repr=False)
+    usage: dict[str, Any] | None = field(repr=False)
+    session_id: str
+    turn_id: str
+    subagent_id: str | None
+    response_id: str
+    model: str
+
+
+_AfterModel: TypeAlias = Callable[[ModelCompletionContext[ContextT]], None | Awaitable[None]]
+
+
 class _PromptIdentity(TypedDict):
     id: str
 

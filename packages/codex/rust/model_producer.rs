@@ -30,6 +30,7 @@ pub(super) enum Delivery {
         observe_raw_chat: bool,
         observe_raw_responses_websocket: bool,
         chat_stream: bool,
+        provider_metadata: Option<codex_extension_api::CapturedModelProviderOutput>,
     },
 }
 impl Delivery {
@@ -51,6 +52,8 @@ pub(super) struct ModelReply {
     original_usage: Option<OriginalResponsesUsage>,
     #[serde(default)]
     raw_chat_completion: Option<serde_json::Map<String, Value>>,
+    #[serde(default)]
+    provider_metadata: Vec<codex_extension_api::ModelOutputProviderMetadata>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,7 +78,55 @@ pub(super) struct Ticket {
     tools: Arc<PythonTools>,
     receipt: Arc<TurnAdmission>,
     generation: Arc<Generation>,
+    provider_metadata: Option<codex_extension_api::CapturedModelProviderOutput>,
 }
+fn model_provider_metadata_item_matches(captured: &ResponseItem, wire: &Value) -> bool {
+    let Ok(wire) = serde_json::from_value::<ResponseItem>(wire.clone()) else {
+        return false;
+    };
+    if captured == &wire {
+        return true;
+    }
+    if !captured.has_same_tool_result_metadata(&wire) {
+        return false;
+    }
+    let mut projected = captured.clone();
+    // Core removes this field before sending to a non-OpenAI provider. Keep every
+    // model-visible identity and payload field in the exact occurrence check.
+    projected.clear_internal_chat_message_metadata_passthrough();
+    projected == wire
+}
+
+fn capture_stream_metadata(
+    data: &str,
+    controller: Option<&codex_extension_api::CapturedModelProviderOutput>,
+) -> std::result::Result<Option<String>, ()> {
+    const FIELD: &str = "__sdk_model_provider_metadata";
+    if !data.contains(FIELD) {
+        return Ok(None);
+    }
+    if data.len() > 16 * 1024 * 1024 {
+        return Err(());
+    }
+    let mut frame: Value = serde_json::from_str(data).map_err(|_| ())?;
+    let Some(annotation) = frame.as_object_mut().and_then(|frame| frame.remove(FIELD)) else {
+        return Ok(None);
+    };
+    let annotation: codex_extension_api::ModelOutputProviderMetadata =
+        serde_json::from_value(annotation).map_err(|_| ())?;
+    if frame.get("type").and_then(Value::as_str) != Some("response.output_item.done")
+        || frame.get("output_index").and_then(Value::as_u64) != Some(annotation.output_index as u64)
+    {
+        return Err(());
+    }
+    let item = serde_json::from_value(frame.get("item").cloned().ok_or(())?).map_err(|_| ())?;
+    controller
+        .ok_or(())?
+        .append_stream_output(annotation.output_index, item, annotation.metadata)
+        .map_err(|_| ())?;
+    serde_json::to_string(&frame).map(Some).map_err(|_| ())
+}
+
 impl State {
     pub(super) fn enabled_for_retry(&self) -> bool {
         self.enabled && !self.retired
@@ -244,7 +295,8 @@ impl PythonTools {
             return false;
         }
         let Some(PreparationReply::ModelProducer {
-            reply: delivery, ..
+            reply: delivery,
+            ticket,
         }) = slot.reply.as_mut()
         else {
             return false;
@@ -265,6 +317,7 @@ impl PythonTools {
                 observe_raw_chat: observe_raw && chat_stream,
                 observe_raw_responses_websocket: observe_raw && responses_websocket_stream,
                 chat_stream,
+                provider_metadata: ticket.provider_metadata.clone(),
             },
         ) else {
             unreachable!()
@@ -303,6 +356,7 @@ impl PythonTools {
                         projection,
                         observe_raw_chat,
                         observe_raw_responses_websocket,
+                        provider_metadata,
                         ..
                     },
                 ..
@@ -321,27 +375,35 @@ impl PythonTools {
                     ResponsesEventTransport, SdkRawProviderEvent, SdkRawProviderSource,
                 };
                 let (source, transport) = if raw_chat_chunk {
-                    (SdkRawProviderSource::ChatCompletions, ResponsesEventTransport::Json)
+                    (
+                        SdkRawProviderSource::ChatCompletions,
+                        ResponsesEventTransport::Json,
+                    )
                 } else {
-                    (SdkRawProviderSource::Responses, ResponsesEventTransport::Websocket)
+                    (
+                        SdkRawProviderSource::Responses,
+                        ResponsesEventTransport::Websocket,
+                    )
                 };
                 let Ok(payload) = serde_json::from_str::<serde_json::Map<String, Value>>(data)
                 else {
                     return false;
                 };
                 (
-                    vec![ResponseEvent::RawProvider(
-                        SdkRawProviderEvent {
-                            source,
-                            transport,
-                            payload: Value::Object(payload),
-                        },
-                    )],
+                    vec![ResponseEvent::RawProvider(SdkRawProviderEvent {
+                        source,
+                        transport,
+                        payload: Value::Object(payload),
+                    })],
                     true,
                 )
             } else {
+                let Ok(clean) = capture_stream_metadata(data, provider_metadata.as_ref()) else {
+                    return false;
+                };
                 let had_usage = projection.completed_usage().is_some();
-                let (projected, continue_stream) = projection.push(data);
+                let (projected, continue_stream) =
+                    projection.push(clean.as_deref().unwrap_or(data));
                 // Retirement can discard the reply before the iterator settles.
                 if !had_usage
                     && let (Some(attempt), Some(usage)) = (attempt, projection.completed_usage())
@@ -512,6 +574,7 @@ impl ModelResponseInterceptor for Producer {
                     .map_err(|_| FAILURE)?,
                 tools: tools.clone(),
                 receipt: receipt.clone(),
+                provider_metadata: admission.provider_output_metadata().cloned(),
             });
             if !ticket.valid(
                 &tools
@@ -529,6 +592,69 @@ impl ModelResponseInterceptor for Producer {
             let id = tools.family.next_invocation.fetch_add(1, Ordering::Relaxed);
             let (reply, receive) = oneshot::channel();
             let mut event = json!({"id":receipt.turn_id,"msg":{"type":"_sdk_model_produce","turn_id":receipt.turn_id,"thread":admission.thread_id(),"instance":tools.instance,"request_id":id,"generation":ticket.generation.id,"model":model,"data":request}});
+            {
+                let message = &mut event["msg"];
+                let retained = admission.provider_input_metadata();
+                if !retained.is_empty() {
+                    #[derive(serde::Serialize)]
+                    struct InputMetadata<'a> {
+                        input_index: usize,
+                        item: &'a Value,
+                        metadata: &'a codex_history::ModelProviderMetadata,
+                    }
+                    let mut provider_metadata = Vec::new();
+                    let mut budget = codex_extension_api::ModelProviderMetadataBudget::default();
+                    let mut by_id = std::collections::HashMap::new();
+                    for envelope in retained {
+                        if let Some(id) = envelope.item.id() {
+                            by_id
+                                .entry(id.as_str())
+                                .or_insert_with(Vec::new)
+                                .push(envelope);
+                        }
+                    }
+                    if let Some(input) = message["data"]["input"].as_array() {
+                        let mut counts = std::collections::HashMap::new();
+                        for item in input {
+                            if let Some(id) = item.get("id").and_then(Value::as_str) {
+                                *counts.entry(id).or_insert(0usize) += 1;
+                            }
+                        }
+                        for (input_index, item) in input.iter().enumerate() {
+                            let Some(id) = item.get("id").and_then(Value::as_str) else {
+                                continue;
+                            };
+                            let Some(matching) = by_id.get(id) else {
+                                continue;
+                            };
+                            if matching.len() != 1 || counts.get(id) != Some(&1) {
+                                return Err(FAILURE.into());
+                            }
+                            let captured = matching[0];
+                            if !model_provider_metadata_item_matches(&captured.item, item) {
+                                continue;
+                            }
+                            if let Some(metadata) = captured
+                                .metadata
+                                .as_ref()
+                                .and_then(|metadata| metadata.sdk_model_provider_metadata.as_ref())
+                            {
+                                let row = InputMetadata {
+                                    input_index,
+                                    item,
+                                    metadata,
+                                };
+                                budget.charge(&row).map_err(|_| FAILURE)?;
+                                provider_metadata
+                                    .push(serde_json::to_value(row).map_err(|_| FAILURE)?);
+                            }
+                        }
+                    }
+                    if !provider_metadata.is_empty() {
+                        message["provider_metadata"] = json!(provider_metadata);
+                    }
+                }
+            }
             if let Some(transport) = admission.request_transport() {
                 event["msg"]["request_transport"] = json!(transport);
             }
@@ -627,6 +753,15 @@ impl ModelResponseInterceptor for Producer {
                         if id != reply.response_id {
                             return Err(FAILURE.into());
                         }
+                    }
+                    if !reply.provider_metadata.is_empty() {
+                        let output = serde_json::from_value(Value::Array(reply.output.clone()))
+                            .map_err(|_| FAILURE)?;
+                        admission
+                            .provider_output_metadata()
+                            .ok_or(FAILURE)?
+                            .capture(output, reply.provider_metadata)
+                            .map_err(|_| FAILURE)?;
                     }
                     let mut events = codex_extension_api::completed_model_response(
                         reply.response_id,

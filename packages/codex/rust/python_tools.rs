@@ -1,3 +1,6 @@
+#[path = "agent_lifecycle.rs"]
+pub(crate) mod agent_lifecycle;
+
 #[path = "handoff_inputs.rs"]
 pub(crate) mod handoff_inputs;
 
@@ -98,6 +101,17 @@ pub(crate) struct FinishToolSlots(pub(crate) Vec<usize>);
 pub(crate) struct InputErrorToolSlots(pub(crate) Vec<usize>);
 
 impl Generation {
+    pub(crate) fn configured_agent_origin(
+        &self,
+        slot: usize,
+    ) -> Option<codex_history::ManagedAgentToolOrigin> {
+        let role = self.specs.configured_agent_role(slot)?;
+        Some(codex_history::ManagedAgentToolOrigin {
+            name: self.entries.get(slot)?.name.name.clone(),
+            role: role.to_owned(),
+        })
+    }
+
     fn default_names(&self, defaults: Option<&[usize]>) -> Result<Option<Vec<ToolName>>> {
         defaults
             .map(|slots| {
@@ -272,7 +286,9 @@ pub(crate) enum ToolCompletionReply {
 }
 
 enum PreparationReply {
+    AgentLifecycle(oneshot::Sender<std::result::Result<(), ()>>),
     HandoffInput(oneshot::Sender<std::result::Result<handoff_inputs::Groups, ()>>),
+    ModelCompletion(oneshot::Sender<std::result::Result<(), ()>>),
     ProviderResponseSpan(
         oneshot::Sender<
             std::result::Result<Option<codex_extension_api::SdkProviderResponseSpanAdmission>, ()>,
@@ -301,7 +317,8 @@ enum PreparationReply {
     CompactionPolicy(oneshot::Sender<std::result::Result<Option<bool>, ()>>),
     ManagedAgentResult(oneshot::Sender<std::result::Result<Option<String>, ()>>),
     Completion {
-        reply: oneshot::Sender<std::result::Result<codex_extension_api::TurnCompletionDecision, ()>>,
+        reply:
+            oneshot::Sender<std::result::Result<codex_extension_api::TurnCompletionDecision, ()>>,
         stop: crate::native_interception::CapturedTurnStop,
     },
 }
@@ -310,6 +327,8 @@ impl PreparationReply {
     fn is_closed(&self) -> bool {
         match self {
             Self::HandoffInput(reply) => reply.is_closed(),
+            Self::ModelCompletion(reply) => reply.is_closed(),
+            Self::AgentLifecycle(reply) => reply.is_closed(),
             Self::ProviderResponseSpan(reply) => reply.is_closed(),
             Self::ModelRetry(reply) => reply.is_closed(),
             Self::PreparedRequest { ticket, reply } => reply.is_closed() || !ticket.admits(),
@@ -408,6 +427,7 @@ enum QueuedRequest {
 // Those remain scoped to the individual thread's PythonTools.
 struct PythonFamily {
     sandbox_operations: OnceLock<Arc<tokio::sync::Semaphore>>,
+    model_completion: OnceLock<(bool, HashSet<String>)>,
     members: RwLock<HashMap<String, Weak<PythonTools>>>,
     // This lock also serializes the turn-receipt installation against an
     // all-scope interrupt. No native await is allowed while holding it.
@@ -445,6 +465,7 @@ impl Default for PythonFamily {
         let (requests, receiver) = mpsc::unbounded_channel();
         Self {
             sandbox_operations: OnceLock::new(),
+            model_completion: OnceLock::new(),
             members: RwLock::new(HashMap::new()),
             graph: Mutex::new(GraphInterruption::default()),
             graph_changed: watch::channel(()).0,
@@ -2751,6 +2772,104 @@ impl PythonTools {
             .map_err(|_| anyhow::anyhow!("Model attempt reader closed"))
     }
 
+    pub(crate) fn configure_model_completion(
+        &self,
+        root: bool,
+        profiles: Vec<String>,
+    ) -> Result<()> {
+        self.family
+            .model_completion
+            .set((root, profiles.into_iter().collect()))
+            .map_err(|_| anyhow::anyhow!("SDK model completion already configured"))
+    }
+
+    pub(crate) fn observes_completed_model_response(
+        &self,
+        admission: &dyn codex_extension_api::ModelToolAdmission,
+    ) -> bool {
+        let Some((root, profiles)) = self.family.model_completion.get() else {
+            return false;
+        };
+        match self.source_profile(admission.step_store()) {
+            Ok(Some(profile)) => profiles.contains(&profile.profile_id),
+            Ok(None) => *root,
+            // Fail closed in the awaited exchange for a stale declaration.
+            Err(_) => true,
+        }
+    }
+
+    pub(crate) async fn observe_completed_model_response(
+        self: &Arc<Self>,
+        input: codex_extension_api::SdkCompletedModelResponse<'_>,
+    ) -> Result<()> {
+        let owner = input
+            .admission
+            .turn_store()
+            .get::<Arc<TurnAdmission>>()
+            .context("Missing SDK model completion owner")?;
+        let source = self.source_metadata(input.admission.step_store())?;
+        let turn = owner.turn_id.clone();
+        self.exchange_preparation(
+            Arc::clone(owner.as_ref()),
+            input.admission.model_attempt(),
+            Some(input.cancellation),
+            [
+                "Expired SDK model completion owner",
+                "SDK model completion reader closed",
+                "SDK model completion cancelled",
+            ],
+            PreparationReply::ModelCompletion,
+            |id| {
+                let mut msg = source;
+                msg.insert("type".into(), json!("_sdk_model_completion"));
+                msg.insert("step_id".into(), json!(id));
+                msg.insert("thread".into(), json!(input.admission.thread_id()));
+                msg.insert("instance".into(), json!(self.instance));
+                msg.insert("turn_id".into(), json!(turn));
+                msg.insert("response_id".into(), json!(input.response_id));
+                msg.insert("model".into(), json!(input.model));
+                msg.insert("items".into(), json!(input.items));
+                msg.insert("usage".into(), json!(input.usage));
+                let mut event = json!({"id":turn,"msg":msg});
+                if let Some(instance) = &self.instance {
+                    event["subagent_id"] = json!(input.admission.thread_id());
+                    event["subagent_incarnation"] = json!(instance);
+                }
+                event
+            },
+            |reply| reply.map_err(|_| anyhow::anyhow!("SDK model completion callback failed")),
+        )
+        .await
+    }
+
+    pub(crate) fn reply_model_completion(
+        self: &Arc<Self>,
+        id: u64,
+        thread: Option<&str>,
+        instance: Option<&str>,
+        error: bool,
+    ) -> Result<()> {
+        let owner = self.step_owner(thread, instance)?;
+        let mut replies = owner
+            .preparation_replies
+            .lock()
+            .expect("Python preparation replies poisoned");
+        let slot = replies
+            .as_mut()
+            .and_then(|pending| pending.get_mut(&id))
+            .context("Expired SDK model completion reply")?;
+        ensure!(
+            !slot.is_closed() && matches!(slot.reply, Some(PreparationReply::ModelCompletion(_))),
+            "Expired SDK model completion reply"
+        );
+        let Some(PreparationReply::ModelCompletion(reply)) = slot.reply.take() else {
+            unreachable!()
+        };
+        reply
+            .send(if error { Err(()) } else { Ok(()) })
+            .map_err(|_| anyhow::anyhow!("Expired SDK model completion reply"))
+    }
+
     pub(crate) async fn admit_provider_response_span(
         self: &Arc<Self>,
         input: codex_extension_api::SdkProviderResponseSpanInput,
@@ -4279,12 +4398,26 @@ impl PythonTools {
         item: &ResponseItem,
         model: Option<&str>,
         continuation: Value,
+        source: Option<&codex_extension_api::CapturedAgentProfile>,
     ) -> Result<oneshot::Receiver<ToolReply>> {
         ensure!(
             continuation["kind"] == "configured-child-v1" && continuation["state"].is_object(),
             "Invalid configured continuation"
         );
-        let generation = self.snapshot();
+        let generation = if let Some(source) = source {
+            let catalog = source
+                .profile
+                .data
+                .get::<ProfileCatalog>()
+                .context("Configured continuation Agent catalog is absent")?;
+            ensure!(
+                self.admits_generation(&catalog.generation),
+                "Configured continuation Agent catalog expired"
+            );
+            catalog.generation.clone()
+        } else {
+            self.snapshot()
+        };
         let (name, call_id, arguments) = crate::manual_checkpoint::manual_request(item)?;
         let slot = generation
             .entries
@@ -4294,7 +4427,11 @@ impl PythonTools {
                 !entry.manual
                     && entry.name.clone().with_default_namespace()
                         == name.clone().with_default_namespace()
-                    && matches!(generation.specs[slot], DynamicToolSpec::Function(_))
+                    && generation.specs.configured_agent_role(slot).is_some()
+                    && generation
+                        .specs
+                        .caller_limits(slot)
+                        .is_none_or(|limits| limits.contains(codex_tools::ToolExposures::DIRECT))
             })
             .context("Current configured continuation function is absent")?;
         // The host intersects this fresh opening ceiling with current Environment tools.
@@ -4308,11 +4445,14 @@ impl PythonTools {
             .cloned()
             .map(ToolName::with_default_namespace)
             .filter(|name| {
-                defaults.as_ref().is_none_or(|names| {
-                    names
-                        .iter()
-                        .any(|selected| selected.clone().with_default_namespace() == *name)
-                })
+                // Managed reentry has no live step receipt from which to
+                // inherit executor grants. Rebind only its application tool.
+                source.is_none()
+                    && defaults.as_ref().is_none_or(|names| {
+                        names
+                            .iter()
+                            .any(|selected| selected.clone().with_default_namespace() == *name)
+                    })
             })
             .collect::<HashSet<_>>();
         drop(defaults);
@@ -4327,13 +4467,12 @@ impl PythonTools {
             &ToolCallSource::Direct,
             model,
             true,
-            None,
+            source.map(|source| &source.receipt),
             None,
             None,
             Some(&builtin_tools),
-
-                    None,
-)?;
+            None,
+        )?;
         // Opening has not published the Thread or started its Python reader yet.
         self.pending
             .lock()
@@ -4412,9 +4551,8 @@ impl PythonTools {
             None,
             None,
             None,
-
-                    None,
-)
+            None,
+        )
         .map(|(_, _, receiver)| receiver)
     }
 
@@ -4788,10 +4926,8 @@ impl PythonTools {
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         self.enqueue_profile(
             thread, generation, slot, turn, call, arguments, None, source, model, reentry, None,
-            media, None, None,
-
-                    None,
-)
+            media, None, None, None,
+        )
     }
 
     fn enqueue_profile(
@@ -5381,6 +5517,21 @@ fn terminal_tool_call(item: &ResponseItem) -> Option<(&str, &str, Option<&str>)>
 }
 
 impl TurnLifecycleContributor for PythonContributor {
+    fn before_agent_lifecycle<'a>(
+        &'a self,
+        input: codex_extension_api::AgentLifecycleInput<'a>,
+    ) -> ExtensionFuture<'a, std::result::Result<(), String>> {
+        Box::pin(async move {
+            let Some(tools) = input.thread_store.get::<PythonTools>() else {
+                return Ok(());
+            };
+            tools
+                .agent_lifecycle(input)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
     fn hold_tool_completion(&self, input: codex_extension_api::ToolCompletionInput<'_>) -> bool {
         let Some(tools) = input.thread_store.get::<PythonTools>() else {
             return false;
@@ -5883,10 +6034,9 @@ impl TurnLifecycleContributor for PythonContributor {
                     .held_tool_outputs
                     .unpublished_progress
                     .lock()
-                    .expect("unpublished tool progress poisoned") =
-                    Some(Arc::new(move || {
-                        manual_progress.send_modify(|version| *version = version.wrapping_add(1));
-                    }));
+                    .expect("unpublished tool progress poisoned") = Some(Arc::new(move || {
+                    manual_progress.send_modify(|version| *version = version.wrapping_add(1));
+                }));
                 crate::native_interception::attach_sdk_admission(input.turn_store, &receipt);
                 input.turn_store.insert(receipt.clone());
                 if let Some(previous) = admission.replace(receipt) {
@@ -6915,6 +7065,10 @@ impl ToolContributor for PythonContributor {
                         .profile
                         .data
                         .get::<codex_extension_api::AgentProfileHandoffTools>();
+                    let executor = source
+                        .profile
+                        .data
+                        .get::<codex_extension_api::AgentProfileExecutorTools>();
                     let native = handoffs
                         .as_ref()
                         .into_iter()
@@ -6926,7 +7080,13 @@ impl ToolContributor for PythonContributor {
                                 .tools()
                                 .iter()
                                 .map(|tool| tool.canonical_tool_name()),
-                        );
+                        )
+                        .chain(executor.as_ref().into_iter().flat_map(|tools| {
+                            tools
+                                .allowed
+                                .iter()
+                                .map(|name| ToolName::plain(name.clone()))
+                        }));
                     Some(merge_profile_native_defaults(
                         self.code_mode_enabled,
                         ordinary,
@@ -7100,6 +7260,10 @@ impl PythonExecutor {
 }
 
 impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
+    fn configured_agent_tool_role(&self) -> Option<&str> {
+        self.generation.specs.configured_agent_role(self.slot)
+    }
+
     fn on_result_accepted(
         &self,
         _: &str,
@@ -7245,9 +7409,8 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 self.builtin_tools
                     .as_ref()
                     .and_then(|receipt| receipt.names()),
-
-                    call.conversation_history.provider_agent_metadata().cloned(),
-);
+                call.conversation_history.provider_agent_metadata().cloned(),
+            );
             let (key, invocation, receiver) = match pending {
                 Ok(pending) => pending,
                 Err(error) => {
@@ -10034,19 +10197,46 @@ pub(crate) mod managed_tests {
     #[tokio::test]
     async fn handoff_reply_wrong_kind_preserves_the_original_preparation() {
         let tools = sdk();
-        tools.family.members.write().unwrap()
+        tools
+            .family
+            .members
+            .write()
+            .unwrap()
             .insert("thread".into(), Arc::downgrade(&tools));
         let id = tools.family.next_invocation.fetch_add(1, Ordering::Relaxed);
         let mut request = json!({"id":"turn", "msg":{"thread":"thread"}});
         let callback = tools.preparation_callback(id, &mut request);
         let receipt = callback.receipt.clone();
         let (reply, mut receive) = oneshot::channel::<Option<ModelContextUpdate>>();
-        tools.preparation_replies.lock().unwrap().as_mut().unwrap().insert(id,
-            PreparationSlot {turn:"turn".into(), reply:Some(PreparationReply::Context(reply)), callback});
+        tools
+            .preparation_replies
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .insert(
+                id,
+                PreparationSlot {
+                    turn: "turn".into(),
+                    reply: Some(PreparationReply::Context(reply)),
+                    callback,
+                },
+            );
         assert!(tools.callback_operation("thread", &receipt, "enter"));
-        assert!(tools.reply_handoff_input(id, Some(r#"{"input":[],"previous":[],"generated":[]}"#),
-            Some("thread"), None).is_err());
-        assert!(matches!(receive.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        assert!(
+            tools
+                .reply_handoff_input(
+                    id,
+                    Some(r#"{"input":[],"previous":[],"generated":[]}"#),
+                    Some("thread"),
+                    None
+                )
+                .is_err()
+        );
+        assert!(matches!(
+            receive.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
         let PreparationReply::Context(original) = tools.take_preparation(id).unwrap() else {
             panic!("The original callback kind changed");
         };

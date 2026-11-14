@@ -10,7 +10,7 @@ import shutil
 import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Any, TypeVar, cast
@@ -105,6 +105,7 @@ from agents.classic.sandbox.session.sinks import (
 from ._function_tools import FunctionTool
 from ._managed_workspace import (
     _SANDBOX_CAPABILITIES_ATTRIBUTE,
+    _SANDBOX_DEFAULT_COMPACTION_ATTRIBUTE,
     _SANDBOX_EVENTS_ATTRIBUTE,
     _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
     ManagedWorkspaceCheckpoint as ManagedWorkspaceCheckpoint,
@@ -387,6 +388,7 @@ def _current_docker_executable() -> str:
 @dataclass(frozen=True, kw_only=True)
 class _DockerStdioEnvironment(Environment[object]):
     _argv: tuple[str, ...] = field(repr=False)
+    _require_process_identity: bool = field(default=False, repr=False)
 
     def _validate_remote_url(self) -> None:
         if not self.url.startswith("docker://") or self.headers:
@@ -400,6 +402,8 @@ class _DockerStdioEnvironment(Environment[object]):
             "env": {},
             "cwd": None,
         }
+        if self._require_process_identity:
+            result["stdio_command"]["require_process_identity"] = True
         return result
 
 
@@ -415,7 +419,9 @@ class DockerGateway:
     This helper
     ignores ambient Docker configuration and opens no listener or host mount.
     The selected image must supply a compatible exec-server at exec_server_path.
-    Its image-configured process user applies; capability_user is metadata only.
+    An explicit run_as selects the entire executor process user without changing
+    volume ownership. Without it, the image-configured process user applies.
+    capability_user: plugin metadata, independent of process identity.
     Borrowed, resumed, snapshot-created, and custom-authenticated clients require
     an explicit application gateway instead.
     """
@@ -423,10 +429,20 @@ class DockerGateway:
     client: BaseSandboxClient[Any] = field(repr=False)
     exec_server_path: str = "/usr/local/bin/exec-server"
     tools: tuple[ExecutorToolName, ...] = ()
+    run_as: str | None = None
 
     def __post_init__(self) -> None:
         from agents.classic.sandbox.sandboxes.docker import DockerSandboxClient
 
+        if self.run_as is not None and (
+            not isinstance(self.run_as, str)
+            or len(self.run_as) > 256
+            or re.fullmatch(
+                r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-]*)?", self.run_as
+            )
+            is None
+        ):
+            raise ValueError("Docker run_as must be a container user or user:group")
         if not isinstance(self.client, DockerSandboxClient):
             raise TypeError("DockerGateway requires the current DockerSandboxClient")
         api = self.client.docker_client.api
@@ -526,6 +542,7 @@ class DockerGateway:
                 "unix://" + socket,
                 "exec",
                 "--interactive",
+                *(("--user=" + self.run_as,) if self.run_as is not None else ()),
                 "--workdir=" + root,
                 cid,
                 self.exec_server_path,
@@ -537,6 +554,7 @@ class DockerGateway:
                 writable_roots=writes,
                 tools=self.tools,
                 _argv=argv,
+                _require_process_identity=self.run_as is not None,
             )
 
 
@@ -556,7 +574,7 @@ def sandbox_environment(
     managed_workspace: bool = False,
     authorized_resume_checkpoint: ManagedWorkspaceCheckpoint | None = None,
     memory: SandboxMemoryOptions | None = None,
-    capabilities: Sequence[SandboxCapability] = (),
+    capabilities: Sequence[SandboxCapability] | None = None,
     capability_user: User | None = None,
 ) -> SandboxEnvironmentSource[_ContextT]:
     """Own a provider-selected sandbox and its native gateway for one native Session.
@@ -646,7 +664,7 @@ def sandbox_environment(
     ):
         raise ValueError("Eager skills require a new sandbox resource")
     skill_lease = None if captured_skills is None else _SkillLease(captured_skills)
-    captured_capabilities = _capture_capabilities(capabilities)
+    captured_capabilities = _capture_capabilities(() if capabilities is None else capabilities)
     captured_user = None if capability_user is None else capability_user.model_copy(deep=True)
     captured_manifest = _manifest(manifest)
     for capability in captured_capabilities:
@@ -793,6 +811,10 @@ def sandbox_environment(
             ):
                 await skill_lease.materialize_eager(selected)
             environment = await owners.enter_async_context(connect(selected))
+            environment = copy(environment)
+            object.__setattr__(
+                environment, _SANDBOX_DEFAULT_COMPACTION_ATTRIBUTE, capabilities is None
+            )
             observer = None
             try:
                 instructions = _render_workspace_instructions(selected.state.manifest, environment)
@@ -834,6 +856,11 @@ def sandbox_environment(
                         _SandboxContributions(tools, captured_capabilities),
                     )
                 setattr(source_manager, _WORKSPACE_INSTRUCTIONS_ATTRIBUTE, instructions)
+                cast(Any, source_manager)._sdk_patch_workspace = (
+                    selected,
+                    environment,
+                    captured_user,
+                )
                 if create_memory is not None:
                     setattr(source_manager, _MEMORY_OWNER_ATTRIBUTE, create_memory(selected))
                 observer = (
@@ -847,6 +874,7 @@ def sandbox_environment(
                         setattr(managed_source, _SANDBOX_EVENTS_ATTRIBUTE, observer)
                 yield environment
             finally:
+                cast(Any, source_manager)._sdk_patch_workspace = None
                 if observer is not None:
                     observer.active = False
                 if skill_lease is not None:

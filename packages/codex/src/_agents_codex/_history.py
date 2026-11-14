@@ -244,10 +244,6 @@ def _received_usage(raw: dict[str, Any] | None) -> ReceivedTokenUsage | None:
 def _request_usage_entries(
     facts: list[dict[str, Any]], owners: dict[str | None, _UsageCollector]
 ) -> tuple[list[RecordedRequestUsage], bool]:
-    if any(owner._managed_model_owner is not None for owner in owners.values()):
-        # Only cumulative physical totals are retained. Logical events cannot
-        # establish the number or attribution of individual provider requests.
-        return [], False
     entries: list[RecordedRequestUsage] = []
     totals: dict[str, tuple[int, dict[str, int], int]] = {}
     seen: dict[tuple[str, int], tuple[str, dict[str, Any]]] = {}
@@ -260,6 +256,7 @@ def _request_usage_entries(
         "reasoning_output_tokens",
         "total_tokens",
     )
+    managed: dict[str, dict[str, int]] = {}
     for payload in facts:
         fact = payload["data"]
         if fact["phase"] != "finished":
@@ -271,6 +268,61 @@ def _request_usage_entries(
         ):
             return [], False
         owner, attempt = cast(str, owner), cast(str, attempt)
+        if fact.get("provider_managed") is True:
+            requests = fact.get("provider_requests")
+            if not isinstance(requests, list):
+                return [], False
+            positions = managed.setdefault(owner, {})
+            for request in requests:
+                if not isinstance(request, dict):
+                    return [], False
+                request_id = request.get("request_id")
+                ordinal = request.get("request_ordinal")
+                measured = request.get("token_usage")
+                if not isinstance(request_id, str) or not request_id or type(ordinal) is not int:
+                    return [], False
+                tokens = dict.fromkeys(fields, 0) if measured is None else measured
+                if not isinstance(tokens, dict) or any(
+                    type(tokens.get(key)) is not int or tokens[key] < 0 for key in fields
+                ):
+                    return [], False
+                entry: RecordedRequestUsage = {
+                    "scope": "provider_request",
+                    "thread_id": payload["thread"],
+                    "turn_id": payload["turn_id"],
+                    "owner_attempt_id": owner,
+                    "attempt_id": request_id,
+                    "request_ordinal": ordinal,
+                    "token_usage_known": measured is not None,
+                    "input_tokens": tokens["input_tokens"],
+                    "input_tokens_details": {
+                        "cached_tokens": tokens["cached_input_tokens"],
+                        "cache_write_tokens": tokens["cache_write_input_tokens"],
+                    },
+                    "output_tokens": tokens["output_tokens"],
+                    "output_tokens_details": {
+                        "reasoning_tokens": tokens["reasoning_output_tokens"]
+                    },
+                    "total_tokens": tokens["total_tokens"],
+                }
+                index = positions.get(request_id)
+                if index is None:
+                    if ordinal != len(positions) + 1:
+                        return [], False
+                    positions[request_id] = len(entries)
+                    entries.append(entry)
+                    continue
+                previous_entry = entries[index]
+                if any(
+                    previous_entry[key] != entry[key]
+                    for key in ("request_ordinal", "thread_id", "turn_id")
+                ):
+                    return [], False
+                if entry["token_usage_known"]:
+                    if previous_entry["token_usage_known"] and previous_entry != entry:
+                        return [], False
+                    entries[index] = entry
+            continue
         usage = fact["usage"]
         ordinal, missing, tokens = (
             usage["requests"],
@@ -318,7 +370,30 @@ def _request_usage_entries(
     complete = True
     for owner, measured in owners.items():
         snapshot = measured.snapshot()
-        count, tokens, missing = totals.get(cast(str, owner), (0, dict.fromkeys(fields, 0), 0))
+        if measured._managed_model_owner is not None:
+            owner_positions = managed.get(cast(str, owner))
+            if owner_positions is None:
+                complete = False
+                continue
+            physical = [entries[index] for index in owner_positions.values()]
+            count = len(physical)
+            missing = sum(not entry["token_usage_known"] for entry in physical)
+            tokens = {
+                "input_tokens": sum(entry["input_tokens"] for entry in physical),
+                "cached_input_tokens": sum(
+                    entry["input_tokens_details"]["cached_tokens"] for entry in physical
+                ),
+                "cache_write_input_tokens": sum(
+                    entry["input_tokens_details"].get("cache_write_tokens", 0) for entry in physical
+                ),
+                "output_tokens": sum(entry["output_tokens"] for entry in physical),
+                "reasoning_output_tokens": sum(
+                    entry["output_tokens_details"]["reasoning_tokens"] for entry in physical
+                ),
+                "total_tokens": sum(entry["total_tokens"] for entry in physical),
+            }
+        else:
+            count, tokens, missing = totals.get(cast(str, owner), (0, dict.fromkeys(fields, 0), 0))
         complete = complete and (
             count == snapshot.requests
             and missing == snapshot.missing_usage_requests

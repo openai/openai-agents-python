@@ -58,6 +58,8 @@ pub struct Checkpoint {
     // unknown fields there. Compare the complete saved value to trusted specs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     managed_tool_specs: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_environment_policy_digest: Option<String>,
 }
 
 /// Rebind the accepted active catalog to current declarations before allocation.
@@ -660,6 +662,11 @@ async fn export_inner(
         descendants,
         interrupted_thread_ids,
         managed_tool_specs,
+        agent_environment_policy_digest: state
+            .thread
+            .thread_extension_data()
+            .get::<crate::agent_profiles::ProfileEnvironments>()
+            .map(|environments| environments.digest.clone()),
     })?)
 }
 
@@ -1144,6 +1151,17 @@ pub async fn restore(
             post_turn_compact,
         )?;
     }
+    crate::agent_profiles::prepare_environments(engine, &mut startup).await?;
+    let environments = startup
+        .thread_extension_init
+        .get::<crate::agent_profiles::ProfileEnvironments>();
+    ensure!(
+        checkpoint.agent_environment_policy_digest.as_deref()
+            == environments
+                .as_ref()
+                .map(|environment| environment.digest.as_str()),
+        "Restore requires the recorded Agent environment grants"
+    );
     if startup
         .thread_extension_init
         .get::<crate::native_agents::Policy>()

@@ -195,3 +195,38 @@ async def test_docker_gateway_rejects_custom_request_scope(configured_client, mo
     with pytest.raises(ValueError, match="authentication scope"):
         await DockerGateway(configured_client)._preflight()
     assert calls == []
+
+
+@pytest.mark.parametrize("user", ["", " root", "root ", "--privileged", "root\n", "a/b", "a" * 257])
+def test_selected_process_user_rejects_ambiguous_current_declarations(configured_client, user):
+    with pytest.raises(ValueError, match="container user"):
+        DockerGateway(configured_client, run_as=user)
+
+
+@pytest.mark.parametrize("user", ["root", "nobody", "1000:1000", "worker:users"])
+def test_selected_process_user_is_an_immutable_current_gateway_option(configured_client, user):
+    gateway = DockerGateway(configured_client, run_as=user)
+    assert gateway.run_as == user
+
+
+def test_private_selected_user_receipt_does_not_create_a_public_environment_label():
+    from _agents_codex.sandbox import _DockerStdioEnvironment
+
+    selected = _DockerStdioEnvironment(
+        url="docker://current/container",
+        cwd="/workspace",
+        _argv=("docker", "exec", "--user=1000:1000", "current", "server", "stdio"),
+        _require_process_identity=True,
+    )
+    native = selected._to_native()
+    command = native.get("stdio_command")
+    assert command is not None
+    assert command.get("require_process_identity") is True
+    assert "--user=1000:1000" in command["args"]
+    assert selected.env is None
+    default = _DockerStdioEnvironment(
+        url="docker://current/container",
+        cwd="/workspace",
+        _argv=("docker", "exec"),
+    )
+    assert "require_process_identity" not in default._to_native()["stdio_command"]

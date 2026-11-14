@@ -93,6 +93,11 @@ pub(crate) const SIWC_PROVIDER_PREFIX: &str = "native_agent_siwc_";
 const SIWC_VERIFIED_PROVIDER_PREFIX: &str = "native_agent_siwc_verified_";
 
 impl EngineState {
+    pub(crate) fn root_requires_process_identity(&self) -> anyhow::Result<bool> {
+        Ok(crate::config::environment(&self.runtime_json)?
+            .is_some_and(|environment| environment.requires_process_identity()))
+    }
+
     pub(crate) fn owns_runtime_services(&self) -> bool {
         self.runtime_parent.is_none()
     }
@@ -872,6 +877,7 @@ impl EngineState {
         if let Some(profiles) = agent_profiles {
             crate::agent_profiles::install_opening(&mut startup, profiles, profile_files)?;
         }
+        crate::agent_profiles::prepare_environments(self, &mut startup).await?;
         if let Some(specs) = python_specs {
             ensure!(
                 (resume.is_some() || matches!(startup.initial_history, InitialHistory::New))
@@ -1015,8 +1021,23 @@ impl EngineState {
                 .await
                 .insert(id.expect("reserved scope identity"));
         }
+        let resume_admission = if let InitialHistory::Resumed(history) = &startup.initial_history {
+            let id = history.conversation_id;
+            let admission = crate::agent_profiles::ExecutorResumeAdmission::from_startup(&startup);
+            if let Some(store) = &self.local_checklist_store {
+                Some(store.stage_agent_resume(id, admission))
+            } else {
+                // CanonicalStore has already acquired its writer while reading
+                // this snapshot. The acquired store supplies native resume.
+                admission.validate(&history.history)?;
+                None
+            }
+        } else {
+            None
+        };
         let extension_events = self.extension_events.subscribe();
         let new_thread = self.manager.start_thread(startup).await?;
+        drop(resume_admission);
         let native = self
             .wrap(new_thread, instructions, extension_events)
             .await?;
@@ -1188,7 +1209,24 @@ impl EngineState {
         };
         startup.initial_history = self.history(&state.id.to_string()).await?;
         if let Some(profiles) = agent_profiles {
+            let fingerprint = profiles.fingerprint.clone();
             crate::agent_profiles::install_opening(&mut startup, profiles, profile_files)?;
+            let store = state.thread.thread_extension_data();
+            let previous = store.get::<crate::agent_profiles::OpeningProfiles>();
+            let current_environments = store.get::<crate::agent_profiles::ProfileEnvironments>();
+            if let Some(current) = current_environments.filter(|_| settings.is_some()) {
+                ensure!(
+                    previous
+                        .as_ref()
+                        .is_some_and(|old| old.fingerprint == fingerprint),
+                    "Compaction requires the current Agent executor graph"
+                );
+                startup.thread_extension_init.insert((*current).clone());
+            } else {
+                crate::agent_profiles::prepare_environments(self, &mut startup).await?;
+            }
+        } else {
+            crate::agent_profiles::prepare_environments(self, &mut startup).await?;
         }
         crate::python_tools::PythonTools::install(
             &mut startup,
@@ -1464,7 +1502,9 @@ impl EngineState {
                     .thread_extension_data()
                     .get::<Arc<crate::agent_profiles::ProfileProviders>>()
                 {
-                    startup.thread_extension_init.insert(providers.as_ref().clone());
+                    startup
+                        .thread_extension_init
+                        .insert(providers.as_ref().clone());
                 }
                 source_code = crate::checkpoint::code_state_for_thread(self, id).await?;
                 ensure!(
@@ -1583,6 +1623,7 @@ impl EngineState {
             if let Some(profiles) = agent_profiles {
                 crate::agent_profiles::install_opening(&mut startup, profiles, profile_files)?;
             }
+            crate::agent_profiles::prepare_environments(self, &mut startup).await?;
             crate::python_tools::PythonTools::install(
                 &mut startup,
                 specs,
@@ -2127,6 +2168,7 @@ impl EngineState {
             !self.closed.load(Ordering::Acquire),
             "Codex engine is closed"
         );
+        let agent_lifecycle = options.agent_lifecycle.clone();
         let finish_slots = options.terminal_tool_slots.clone();
         let input_error_slots = options.input_error_tool_slots.clone();
         let (mut startup, instructions) = options
@@ -2145,6 +2187,11 @@ impl EngineState {
         startup
             .thread_extension_init
             .insert(crate::python_tools::InputErrorToolSlots(input_error_slots));
+        startup
+            .thread_extension_init
+            .insert(crate::python_tools::agent_lifecycle::Bindings(
+                agent_lifecycle,
+            ));
         self.apply_deferred_environment(&mut startup)?;
         crate::agent_profiles::bind_profile_providers(&mut startup).await?;
         if startup.environments.is_none()
