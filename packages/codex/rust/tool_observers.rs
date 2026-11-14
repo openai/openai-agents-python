@@ -41,10 +41,25 @@ impl codex_extension_api::RecordedToolOutputObserver for Observer {
         })
     }
     fn on_handler_output(&self, output: &dyn ToolOutput) {
-        if self.deferred {
-            if let Some(output) = output.as_any().and_then(|output| output.downcast_ref::<ReplyOutput<PythonOutput>>()) {
-                self.started.store(output.lifecycle_started, Ordering::Release);
-            }
+        if !self.deferred {
+            return;
+        }
+        let Some(output) = output.as_any() else { return };
+        let started = output
+            .downcast_ref::<ReplyOutput<PythonOutput>>()
+            .map(|reply| reply.lifecycle_started)
+            .or_else(|| {
+                output
+                    .downcast_ref::<ReplyOutput<codex_tools::ApplicationShellOutput>>()
+                    .map(|reply| reply.lifecycle_started)
+            })
+            .or_else(|| {
+                output
+                    .downcast_ref::<ReplyOutput<codex_tools::ApplyPatchToolOutput>>()
+                    .map(|reply| reply.lifecycle_started)
+            });
+        if let Some(started) = started {
+            self.started.store(started, Ordering::Release);
         }
     }
     fn on_output<'a>(

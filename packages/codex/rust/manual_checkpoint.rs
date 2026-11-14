@@ -2123,9 +2123,15 @@ fn completed_ready_outputs(
                 call_id: Some(id), ..
             }
             | ResponseItem::CustomToolCallOutput { call_id: id, .. }
+            | ResponseItem::ApplyPatchCallOutput { call_id: id, .. }
                 if completed.contains(&id) =>
             {
                 Some(id)
+            }
+            ResponseItem::ShellCallOutput { provider_fields, .. } => {
+                crate::local_reconciliation::shell_call_id(&provider_fields)
+                    .filter(|id| completed.contains(*id))
+                    .cloned()
             }
             _ => None,
         })
@@ -2605,6 +2611,8 @@ pub(crate) async fn capture(
         pending.iter().all(|key| key.turn == turn),
         "Manual calls span different turns"
     );
+    // The mutation owner retains the exact live pending declarations through suspension.
+    let pending_apply_patch_calls = tools.pending_apply_patch_calls(&pending)?;
     let store = OrdinaryManualStore::from_thread(thread)?;
     // Capture the accepted catalog before suspension revokes all live getters.
     let managed_specs = match crate::agent_profiles::active_specs(&thread.thread).await? {
@@ -2634,7 +2642,10 @@ pub(crate) async fn capture(
     // it must not inherit a store still intercepting cancellation receipts.
     let outcome: Result<_> = async {
         crate::checkpoint::retire_manual_descendants(thread).await?;
-        Ok(thread.thread.suspend_manual_turn_and_shutdown().await?)
+        Ok(thread
+            .thread
+            .suspend_manual_turn_and_shutdown(turn.clone(), pending_apply_patch_calls)
+            .await?)
     }
     .await;
     let suspended_turn = match &outcome {
@@ -2830,7 +2841,12 @@ fn finish_fresh_capture(
             ResponseItem::FunctionCallOutput {
                 call_id: Some(id), ..
             }
-            | ResponseItem::CustomToolCallOutput { call_id: id, .. } => id,
+            | ResponseItem::CustomToolCallOutput { call_id: id, .. }
+            | ResponseItem::ApplyPatchCallOutput { call_id: id, .. } => id,
+            ResponseItem::ShellCallOutput { provider_fields, .. } => {
+                crate::local_reconciliation::shell_call_id(provider_fields)
+                    .context("Unpublished Shell output lacks identity")?
+            }
             _ => anyhow::bail!("Invalid unpublished Core output"),
         };
         // A completed write or a terminal candidate takes precedence over its
@@ -2842,14 +2858,17 @@ fn finish_fresh_capture(
             calls.iter().any(|(call, _)| call == id) && !pending.iter().any(|key| key.call == *id),
             "Unpublished Core output has no settled call owner"
         );
-        if let Some(outcomes) = tool_outcomes.as_mut() {
-            ensure!(
-                outcomes.call_ids.contains(id),
-                "Unpublished Core output has no sampled call"
-            );
-            outcomes.record(id, succeeded);
-        } else {
-            anyhow::bail!("Unpublished Core output has no sampled batch");
+        // Shell receipts retain their typed result without inventing terminal-outcome data.
+        if !matches!(output.item, ResponseItem::ShellCallOutput { .. }) {
+            if let Some(outcomes) = tool_outcomes.as_mut() {
+                ensure!(
+                    outcomes.call_ids.contains(id),
+                    "Unpublished Core output has no sampled call"
+                );
+                outcomes.record(id, succeeded);
+            } else {
+                anyhow::bail!("Unpublished Core output has no sampled batch");
+            }
         }
         unpublished_ids.insert(id.clone());
         outputs.insert(id.clone(), output);

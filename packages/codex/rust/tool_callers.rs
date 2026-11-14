@@ -147,8 +147,17 @@ impl<'de> Deserialize<'de> for ToolDeclarations {
             if let Some(managed) = managed_approval {
                 let managed = bool::deserialize(managed).map_err(D::Error::custom)?;
                 if managed {
-                    if !matches!(spec, DynamicToolSpec::Function(_) | DynamicToolSpec::Namespace(_)) {
-                        return Err(D::Error::custom("Managed approval requires a captured function"));
+                    if !matches!(
+                        spec,
+                        DynamicToolSpec::Function(_)
+                            | DynamicToolSpec::Namespace(_)
+                            | DynamicToolSpec::Custom(_)
+                            | DynamicToolSpec::ApplyPatch
+                            | DynamicToolSpec::Shell(_)
+                    ) {
+                        return Err(D::Error::custom(
+                            "Managed approval requires a captured application tool",
+                        ));
                     }
                     result.managed_approvals.insert(result.specs.len());
                 }
@@ -316,5 +325,43 @@ mod managed_approval_declaration_tests {
         assert_eq!(serde_json::to_value(declarations.without_configured_agent_roles()).unwrap(),
                    serde_json::to_value(&plain).unwrap());
         assert_eq!(serde_json::to_value(&declarations).unwrap()[0]["_sdkManagedApproval"], true);
+    }
+
+    #[test]
+    fn typed_application_approvals_are_preserved_as_slot_metadata() {
+        let specifications = [
+            serde_json::json!({
+                "type": "custom", "name": "transform", "description": "Transform.",
+                "format": {"type": "text"}, "inputField": "source",
+                "inputSchema": {"type": "object"}
+            }),
+            serde_json::json!({"type": "applyPatch"}),
+            serde_json::json!({"type": "shell"}),
+        ];
+        for mut specification in specifications {
+            specification["_sdkManagedApproval"] = Value::Bool(true);
+            let declarations: ToolDeclarations =
+                serde_json::from_value(Value::Array(vec![specification])).unwrap();
+            assert!(declarations.managed_approval(0));
+            assert!(
+                serde_json::to_value(&declarations[0])
+                    .unwrap()
+                    .get("_sdkManagedApproval")
+                    .is_none()
+            );
+            let mut selected = ToolDeclarations::default();
+            selected.append_captured(&declarations, 0);
+            assert!(selected.managed_approval(0));
+        }
+    }
+
+    #[test]
+    fn managed_approval_rejects_unsupported_tool_and_non_boolean_metadata() {
+        let unsupported = serde_json::json!([{
+            "type": "computer", "toolType": "computer", "_sdkManagedApproval": true
+        }]);
+        assert!(serde_json::from_value::<ToolDeclarations>(unsupported).is_err());
+        let non_boolean = serde_json::json!([{"type": "shell", "_sdkManagedApproval": "true"}]);
+        assert!(serde_json::from_value::<ToolDeclarations>(non_boolean).is_err());
     }
 }

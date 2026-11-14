@@ -131,9 +131,13 @@ async fn automatic_reply_waits_for_actual_core_result(
         // Receive both notices so A is a live manual grant and B has a live
         // SDK sender. The SDK's successful send is deliberately before Core
         // can commit a terminal outcome.
+        let mut turn = None;
         for _ in 0..2 {
             let request = super::managed_tests::next_callback_request(&tools).await;
             let key: PendingKey = serde_json::from_value(request["msg"].clone()).unwrap();
+            if key.call == "call-A" {
+                turn = Some(key.turn.clone());
+            }
             if key.call == "call-B" {
                 let sender = tools.take_reply(&state.id.to_string(), &key).unwrap().unwrap();
                 let response: DynamicToolResponse = serde_json::from_value(json!({
@@ -146,7 +150,7 @@ async fn automatic_reply_waits_for_actual_core_result(
         if let Some(portable) = force_timeout {
             let started = std::time::Instant::now();
             let outcome = if portable {
-                state.thread.suspend_manual_turn_and_shutdown().await
+                state.thread.suspend_manual_turn_and_shutdown(turn.unwrap(), Vec::new()).await
             } else {
                 state.thread.suspend_turn_and_shutdown().await
             };

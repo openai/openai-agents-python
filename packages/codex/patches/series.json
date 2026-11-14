@@ -1483,7 +1483,11 @@
     {
       "path": "sdk-portable-manual-suspension-join-budget.patch",
       "sha256": "4a1e5412aa6129140e7055461edbe5fb6251e1f61e20e26b8ab92b482796dcf1"
+    },
+    {
+      "path": "sdk-portable-pending-apply-patch.patch",
+      "sha256": "dfb4bc07da2315cedaf2388ea1145bef72b8bed3f8e3044ddc53c663f62af0a5"
     }
   ],
-  "result_tree": "a8a945fd58ad3569ca748a4d0a8a0ca62a21c484"
+  "result_tree": "08393cca1794260ff7fd1691c7066b878f64020d"
 }
