@@ -54,6 +54,7 @@ from typing_extensions import (
     TypeVar as TypeVar,
 )
 
+from . import tools as _tool_types
 from ._hosted_prompts import _capture_hosted_prompt_source, _hosted_prompt_controls
 from ._lifecycle import (
     _close_after_error as _close_after_error,
@@ -81,7 +82,6 @@ from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .guardrails import InputGuardrail, OutputGuardrail
 from .handoffs import _PrepareHandoffInput
 from .history import _InputStoragePolicy
-from .hosted_mcp import HostedMCP
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage, _native_input, _response_content
 from .model_context import HostedPromptSource, _AfterModel, _ContextTransform
@@ -93,7 +93,11 @@ from .models import (
     _capture_provider_history,
 )
 from .retry import ModelRetrySettings as ModelRetrySettings
-from .tools import ToolNotFoundBehavior, ToolRef, _capture_tool_not_found_behavior
+from .tools import (
+    ToolNotFoundBehavior,
+    ToolRef,
+    _capture_tool_not_found_behavior,
+)
 from .usage import RunBudget
 
 if TYPE_CHECKING:
@@ -1350,19 +1354,25 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("model must be a string or None")
         if provider is not None and not isinstance(provider, NativeProvider):
             raise TypeError("provider must be a NativeProvider or None")
-        from .decision_handoff import DecisionHandoff
-        from .handoffs import Handoff
-        from .realtime_agents import RealtimeAgentConfig, RealtimeHandoff
-
         captured_handoffs = tuple(handoffs or ())
-        if any(
-            not isinstance(target, (Agent, Handoff, RealtimeHandoff, DecisionHandoff))
-            and not callable(target)
-            for target in captured_handoffs
-        ):
-            raise TypeError("handoffs must contain native Agents or synchronous target resolvers")
-        if realtime is not None and not isinstance(realtime, RealtimeAgentConfig):
-            raise TypeError("realtime must be RealtimeAgentConfig or None")
+        if captured_handoffs:
+            from .decision_handoff import DecisionHandoff
+            from .handoffs import Handoff
+            from .realtime_agents import RealtimeHandoff
+
+            if any(
+                not isinstance(target, (Agent, Handoff, RealtimeHandoff, DecisionHandoff))
+                and not callable(target)
+                for target in captured_handoffs
+            ):
+                raise TypeError(
+                    "handoffs must contain native Agents or synchronous target resolvers"
+                )
+        if realtime is not None:
+            from .realtime_agents import RealtimeAgentConfig
+
+            if not isinstance(realtime, RealtimeAgentConfig):
+                raise TypeError("realtime must be RealtimeAgentConfig or None")
         object.__setattr__(self, "realtime", realtime._capture() if realtime is not None else None)
         object.__setattr__(self, "hosted_prompt", captured_prompt)
         object.__setattr__(self, "_hosted_tools_provided", tools is not None)
@@ -1573,7 +1583,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
-        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
+        restored_hosted_mcp: Sequence[_tool_types.HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1610,7 +1620,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: object = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
-        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
+        restored_hosted_mcp: Sequence[_tool_types.HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1647,7 +1657,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: ContextT,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
-        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
+        restored_hosted_mcp: Sequence[_tool_types.HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1684,7 +1694,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: SessionContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
-        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
+        restored_hosted_mcp: Sequence[_tool_types.HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1912,7 +1922,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: SessionContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
-        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
+        restored_hosted_mcp: Sequence[_tool_types.HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         resume_budget: RunBudget | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
@@ -2063,7 +2073,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
-        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
+        restored_hosted_mcp: Sequence[_tool_types.HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2103,7 +2113,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
-        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
+        restored_hosted_mcp: Sequence[_tool_types.HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2143,7 +2153,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
-        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
+        restored_hosted_mcp: Sequence[_tool_types.HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2187,7 +2197,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
-        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
+        restored_hosted_mcp: Sequence[_tool_types.HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2322,7 +2332,7 @@ class Agent(Generic[ContextT, OutputT]):
         raw_usage_token = None
         produced_items_token = None
         try:
-            from .manual import _CapturedApproval
+            from ._function_tools import FunctionTool
             from .prepared_request import _check_output, _check_profile, _check_tools
             from .schema import PromptedOutput, _prepare_spec
             from .session import (
@@ -2334,8 +2344,7 @@ class Agent(Generic[ContextT, OutputT]):
                 _raw_usage_restore,
                 _split_tools,
             )
-            from .state import SessionState
-            from .tools import _HOSTED_TOOLS, WebSearch, _CapturedFunction
+            from .tools import _CapturedFunction
 
             model_override = _capture_model_override(model_override)
             raise_on_unknown_tool = _capture_tool_not_found_behavior(tool_not_found_behavior)
@@ -2366,8 +2375,11 @@ class Agent(Generic[ContextT, OutputT]):
                 raise TypeError("on_interaction must be callable")
             if not isinstance(return_state, bool):
                 raise TypeError("return_state must be a bool")
-            if state is not None and not isinstance(state, SessionState):
-                raise TypeError("state must be a SessionState")
+            if state is not None:
+                from .state import SessionState
+
+                if not isinstance(state, SessionState):
+                    raise TypeError("state must be a SessionState")
             resume_manual = state is not None and state.native_continuation is not None
             if resume_manual and state is not None:
                 if model_override is not None:
@@ -2407,7 +2419,10 @@ class Agent(Generic[ContextT, OutputT]):
                     tools is None
                     or tool in tools
                     or tool.ref in tools
-                    or any(isinstance(item, HostedMCP) and item._binding is tool for item in tools)
+                    or any(
+                        isinstance(item, _tool_types.HostedMCP) and item._binding is tool
+                        for item in tools
+                    )
                 )
             )
             if (
@@ -2668,12 +2683,18 @@ class Agent(Generic[ContextT, OutputT]):
                         or session._storage is not None
                         or selected_mcp
                         or any(
-                            isinstance(tool, (_CapturedFunction, _CapturedApproval))
+                            (
+                                type(tool) is _CapturedFunction
+                                or isinstance(
+                                    tool, (_CapturedFunction, _tool_types._CapturedApproval)
+                                )
+                            )
                             and tool._requires_live_manual_session
                             for tool in session._bound_tools
                         )
                         or any(
-                            isinstance(tool, (WebSearch, *_HOSTED_TOOLS)) for tool in opening.tools
+                            type(tool) is not FunctionTool and _unsupported_manual_tool(tool)
+                            for tool in opening.tools
                         )
                     ):
                         raise InteractionRequired(
@@ -2799,7 +2820,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
-        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
+        restored_hosted_mcp: Sequence[_tool_types.HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2838,7 +2859,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
-        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
+        restored_hosted_mcp: Sequence[_tool_types.HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2877,7 +2898,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
-        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
+        restored_hosted_mcp: Sequence[_tool_types.HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2920,7 +2941,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
-        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
+        restored_hosted_mcp: Sequence[_tool_types.HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -3081,3 +3102,9 @@ def _private_text_run_eligible(
         and parent_trace is None
         and trace_options is None
     )
+
+
+def _unsupported_manual_tool(tool: object) -> bool:
+    from ._tool_catalog import _HOSTED_TOOLS, WebSearch
+
+    return isinstance(tool, (WebSearch, *_HOSTED_TOOLS))

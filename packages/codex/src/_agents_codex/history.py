@@ -21,7 +21,6 @@ from typing import Any as Any, Literal as Literal, TypeAlias
 
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
 
-from ._events import Failure as Failure, TokenUsage as TokenUsage
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._stored_history import (
     StoredItem as StoredItem,
@@ -34,6 +33,7 @@ from ._stored_history import (
     StoredTurn as StoredTurn,
     StoredTurnPage as StoredTurnPage,
 )
+from ._tool_response_types import Failure as Failure, TokenUsage as TokenUsage
 from .input import UserInput
 from .response_facts import (
     CaptureTruncatedFact as CaptureTruncatedFact,

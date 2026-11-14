@@ -21,6 +21,18 @@ from ._public import (
     preserve_module_identity as _preserve_module_identity,
     type_alias_constructor as _type_alias_constructor,
 )
+from ._tool_response_types import (
+    Failure as Failure,
+    FunctionCallResponse as FunctionCallResponse,
+    FunctionCallStatus as FunctionCallStatus,
+    InputTokensDetails as InputTokensDetails,
+    NativeInputAudio as NativeInputAudio,
+    NativeInputFile as NativeInputFile,
+    NativeInputImage as NativeInputImage,
+    NativeInputText as NativeInputText,
+    OutputTokensDetails as OutputTokensDetails,
+    TokenUsage as TokenUsage,
+)
 from .input import InputAudio as _InputAudio, InputVideo as _InputVideo
 from .subagents import Subagent as Subagent
 
@@ -36,30 +48,6 @@ class NativeEvent(TypedDict):
     error_affects_turn_status: NotRequired[bool]
     subagent_id: NotRequired[str]
     subagent_instance_id: NotRequired[int]
-
-
-class InputTokensDetails(TypedDict):
-    cached_tokens: int
-    # Omitted when unavailable in the source record; an explicit zero is known.
-    cache_write_tokens: NotRequired[int]
-
-
-class OutputTokensDetails(TypedDict):
-    reasoning_tokens: int
-
-
-class TokenUsage(TypedDict):
-    input_tokens: int
-    input_tokens_details: InputTokensDetails
-    output_tokens: int
-    output_tokens_details: OutputTokensDetails
-    total_tokens: int
-
-
-class Failure(TypedDict):
-    code: str
-    message: str | None
-    http_status_code: NotRequired[int]
 
 
 class TurnSnapshot(TypedDict):
@@ -290,36 +278,6 @@ class PermissionsResponse(TypedDict):
     strict_auto_review: NotRequired[bool]
 
 
-class NativeInputText(TypedDict):
-    type: Literal["inputText"]
-    text: str
-
-
-class NativeInputImage(TypedDict):
-    type: Literal["inputImage"]
-    imageUrl: NotRequired[str]
-    fileId: NotRequired[str]
-    detail: NotRequired[Literal["auto", "low", "high", "original"] | None]
-
-
-class NativeInputFile(TypedDict):
-    type: Literal["inputFile"]
-    file_id: NotRequired[str]
-    file_data: NotRequired[str]
-    file_url: NotRequired[str]
-    filename: NotRequired[str]
-
-
-class NativeInputAudio(TypedDict):
-    type: Literal["inputAudio"]
-    audioUrl: str
-
-
-class FunctionCallResponse(TypedDict):
-    contentItems: list[NativeInputText | NativeInputImage | NativeInputFile | NativeInputAudio]
-    success: bool
-
-
 class SessionSnapshot(TypedDict):
     """Observed local session, without hosted agent/environment/vault fields."""
 
@@ -510,9 +468,6 @@ class SummaryText(TypedDict):
 
 OutputItemStatus = _PublicTypeAliasType(
     "OutputItemStatus", Literal["in_progress", "completed", "incomplete"]
-)
-FunctionCallStatus = _PublicTypeAliasType(
-    "FunctionCallStatus", Literal["in_progress", "completed", "failed", "incomplete"]
 )
 
 

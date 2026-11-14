@@ -66,6 +66,10 @@ from pydantic import (
     ValidationError,
 )
 
+import agents as _declaration_types
+import agents as _state_types
+
+from . import _tool_response_types as _wire_types, tools as _tool_types
 from ._agent_profiles import (
     _AgentProfile,
     _capture_agent_graph,
@@ -87,28 +91,28 @@ from ._environment_lifetime import (
     _EnvironmentLease as _EnvironmentLease,
     _release_environment as _release_environment,
 )
-from ._events import (
-    CodeInterpreterCallItem,
-    FileSearchCallItem,
-    HostedMcpCallItem,
-    ImageGenerationCallItem,
-    McpListToolsItem,
-    MessageItem,
-    ProgramCallItem,
-    ProgramOutputItem,
-    ReasoningItem,
-    SessionItem as SessionItem,
-    ShellCallItem,
-    ShellCallOutputItem,
-    WebSearchCallItem,
-)
+
+if TYPE_CHECKING:
+    from ._events import (
+        CodeInterpreterCallItem as CodeInterpreterCallItem,
+        FileSearchCallItem as FileSearchCallItem,
+        HostedMcpCallItem as HostedMcpCallItem,
+        ImageGenerationCallItem as ImageGenerationCallItem,
+        McpListToolsItem as McpListToolsItem,
+        MessageItem as MessageItem,
+        ProgramCallItem as ProgramCallItem,
+        ProgramOutputItem as ProgramOutputItem,
+        ReasoningItem as ReasoningItem,
+        SessionItem as SessionItem,
+        ShellCallItem as ShellCallItem,
+        ShellCallOutputItem as ShellCallOutputItem,
+        WebSearchCallItem as WebSearchCallItem,
+    )
 from ._function_tools import (
     FunctionTool as FunctionTool,
-    Tool as Tool,
     ToolContext as ToolContext,
     ToolInputErrorContext as ToolInputErrorContext,
     ToolTimeoutError as ToolTimeoutError,
-    _ClientToolSearch,
 )
 from ._history import project_history as project_history
 from ._hosted_prompts import _capture_hosted_prompt_reference, _hosted_prompt_controls
@@ -234,64 +238,12 @@ from .history import (
     _InputStoragePolicy,
 )
 from .input import UserInput as UserInput, _native_input as _native_input
-from .manual import (
-    _DEFAULT_APPROVAL_REASON as _DEFAULT_APPROVAL_REASON,
-    _FORM_MODES as _FORM_MODES,
-    _URL_ACCEPT as _URL_ACCEPT,
-    ActionReply as ActionReply,
-    ActionRequested as ActionRequested,
-    ApprovalDecision as ApprovalDecision,
-    ApprovalRequest,
-    ApprovalRequested as ApprovalRequested,
-    ElicitationRequest as ElicitationRequest,
-    FormRequest as FormRequest,
-    Interaction as Interaction,
-    UrlRequest as UrlRequest,
-    VerificationRequest as VerificationRequest,
-    _CapturedApproval as _CapturedApproval,
-    _CapturedManual as _CapturedManual,
-    _DefaultApprovalReason as _DefaultApprovalReason,
-    _is_json_value as _is_json_value,
-    _NativeQuestion as _NativeQuestion,
-    _PreparedManualResult as _PreparedManualResult,
-    _publish_question as _publish_question,
-    _question as _question,
-)
-from .mcp import (
-    _MCP as _MCP,
-    ChatGPTAppsMCP as ChatGPTAppsMCP,
-    HostedVerificationMCP as HostedVerificationMCP,
-    HttpMCP as HttpMCP,
-    MCPDiscoveryContext as MCPDiscoveryContext,
-    MCPGetPromptResult as MCPGetPromptResult,
-    MCPListResourcesResult as MCPListResourcesResult,
-    MCPListResourceTemplatesResult as MCPListResourceTemplatesResult,
-    MCPMetadataContext as MCPMetadataContext,
-    MCPPrompt as MCPPrompt,
-    MCPReadResourceResult as MCPReadResourceResult,
-    MCPResultContext as MCPResultContext,
-    MCPToolDefinition as MCPToolDefinition,
-    StdioMCP as StdioMCP,
-    _ready as _ready,
-    _result_policies as _result_policies,
-    _tool_names as _tool_names,
-    _transform_and_extract_result as _transform_and_extract_result,
-)
 from .model_context import (
     ModelCompletionContext,
     ModelContextSnapshot,
     ModelRequestContext,
 )
 from .models import ProviderHistory, _capture_model_override, _capture_provider_history
-from .native_agents import (
-    _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
-    ChildInvocation as ChildInvocation,
-    ChildStepContext as ChildStepContext,
-    NativeAgents as NativeAgents,
-    NativeRoleToolInvocation,
-    NativeRoleToolResult,
-    _native_agent_options,
-)
 from .native_interception import (
     Allow as Allow,
     Deny as Deny,
@@ -356,21 +308,6 @@ from .schema import (
     _PreparedOutput as _PreparedOutput,
 )
 from .shell import _CapturedShell
-from .state import (
-    ApplicationToolOutput as ApplicationToolOutput,
-    ChecklistState as ChecklistState,
-    CheckpointStatus as CheckpointStatus,
-    LocalStorage as LocalStorage,
-    NativeGoal as NativeGoal,
-    SessionState as SessionState,
-    _GuardrailCheckpointRecord,
-    _ManualContinuation,
-    _RememberedApproval,
-    _RequestRunBudgetCheckpoint,
-    _saved_thread_settings,
-    _TokenRunBudgetCheckpoint,
-)
-from .subagents import Subagent as Subagent, _subagent as _subagent
 from .telemetry import (
     SpanContext as SpanContext,
     TraceOptions as TraceOptions,
@@ -384,22 +321,15 @@ from .telemetry import (
     _owned_span as _owned_span,
 )
 from .tools import (
-    _HOSTED_TOOLS,
-    Checklist as Checklist,
-    NativeGoals as NativeGoals,
     ToolCallInfo as ToolCallInfo,
     ToolNotFoundBehavior,
     ToolOutput as ToolOutput,
     ToolRef as ToolRef,
-    ToolSearch,
-    WebSearch as WebSearch,
     _capture_application_data,
-    _capture_hosted_tools,
     _capture_tool_not_found_behavior,
     _capture_tools as _capture_tools,
-    _capture_web_search_config as _capture_web_search_config,
+    _capture_web_search_config,
     _CapturedFunction as _CapturedFunction,
-    _hosted_tool_name,
     _MCPResourceRef as _MCPResourceRef,
     _ordinary_default_slots as _ordinary_default_slots,
     _plan_tool_update,
@@ -437,8 +367,15 @@ from .usage import (
 if TYPE_CHECKING:
     from ._sandbox_events import _OperationObserver
     from .hosted_mcp import HostedMCP
+    from .manual import Interaction as Interaction, _InteractionHandler as _InteractionHandler
     from .realtime import RealtimeConfig, RealtimeSession, _RealtimePolicySource
     from .realtime_usage import RealtimeUsage, RealtimeUsageAccounting
+    from .state import (
+        _ManualContinuation,
+        _RememberedApproval,
+        _RequestRunBudgetCheckpoint,
+        _TokenRunBudgetCheckpoint,
+    )
     from .turn import ChildTurn
 
 _MutationResultT = TypeVar("_MutationResultT")
@@ -581,11 +518,13 @@ def _output_model_settings(
 
 
 def _manual_restore_model_settings(
-    state: SessionState, *, authorized_model: str | None, trusted_default: str | None
+    state: _state_types.SessionState, *, authorized_model: str | None, trusted_default: str | None
 ) -> tuple[str, dict[str, Any]]:
     """Read only accepted model fields; connection and tool authority stay current."""
     metadata = state.root_metadata
     model = metadata.get("model") if metadata is not None else None
+    from .state import _saved_thread_settings
+
     captured = _saved_thread_settings(state.history, state.source_session_id)
     if not isinstance(captured, dict):
         raise ValueError("Manual checkpoint has invalid accepted model settings")
@@ -886,7 +825,11 @@ class Capabilities:
             )
         if feature == "function_policy":
             if any(
-                isinstance(tool, (_CapturedFunction, _CapturedApproval)) for tool in s._bound_tools
+                (
+                    type(tool) is _CapturedFunction
+                    or isinstance(tool, (_CapturedFunction, _tool_types._CapturedApproval))
+                )
+                for tool in s._bound_tools
             ):
                 return FeatureSupport(
                     "supported",
@@ -964,7 +907,10 @@ class Capabilities:
         assert feature == "checklist" and s._opening_agent is not None
         tools = s._opening_agent.tools
         opening = tools
-        if any(isinstance(tool, Checklist) for tool in opening):
+        if any(
+            type(tool) is not FunctionTool and (isinstance(tool, _tool_types.Checklist))
+            for tool in opening
+        ):
             return FeatureSupport(
                 "supported",
                 "update_plan was granted at this opening",
@@ -1066,6 +1012,8 @@ class _RunBudget:
     pending_estimates: list[TokenUsage] = field(default_factory=list)
 
     def checkpoint(self) -> _RequestRunBudgetCheckpoint | _TokenRunBudgetCheckpoint:
+        from .state import _RequestRunBudgetCheckpoint, _TokenRunBudgetCheckpoint
+
         limits = self.limits
         if limits.max_estimated_cost_micros is not None:
             raise CapabilityError("Estimated-cost run budgets do not support portable checkpoints")
@@ -1092,6 +1040,8 @@ class _RunBudget:
     ) -> _RunBudget | None:
         if saved is None:
             return None
+        from .state import _RequestRunBudgetCheckpoint, _TokenRunBudgetCheckpoint
+
         mismatch = (
             "Restoring a request budget requires the original request-only ceiling"
             if isinstance(saved, _RequestRunBudgetCheckpoint)
@@ -1234,7 +1184,7 @@ class InteractionRequired(NativeError):
     Save a receipt, not this exception or its traceback.
     """
 
-    state: SessionState | None = None
+    state: _state_types.SessionState | None = None
 
 
 class _ManualBoundaryLost(RuntimeError):
@@ -1253,7 +1203,7 @@ class ManagedAgentToolOrigin:
 class ProducedItem:
     """One accepted assistant or tool item and its producing Agent."""
 
-    item: SessionItem
+    item: _wire_types._events.SessionItem
     agent: Agent[Any, Any]
     handoff_target: Agent[Any, Any] | None = None
     tool_origin: ManagedAgentToolOrigin | None = None
@@ -1339,7 +1289,7 @@ class Completed(Generic[OutputT, TurnT]):
     turn: TurnT
     final_output: OutputT
     thread_usage: TokenUsageInfo | None = None
-    state: SessionState | None = field(default=None, repr=False)
+    state: _state_types.SessionState | None = field(default=None, repr=False)
     repair_attempts: tuple[RecordedTurn, ...] = ()
     tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
     tool_batch_call_ids: tuple[str, ...] = field(default=(), kw_only=True)
@@ -1353,7 +1303,7 @@ class Completed(Generic[OutputT, TurnT]):
         object.__setattr__(self, "run_usage", cast("Turn[Any] | ChildTurn", self.turn).run_usage)
 
     @property
-    def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:
+    def application_tool_outputs(self) -> tuple[_state_types.ApplicationToolOutput, ...]:
         """Detached application data from accepted tool results on this turn."""
         return cast("Turn[Any] | ChildTurn", self.turn).application_tool_outputs
 
@@ -1396,7 +1346,7 @@ class _NativeCallback:
 class _ChildCallbacks:
     """Application callbacks for one native child incarnation and turn."""
 
-    handle: ChildInvocation
+    handle: _tool_types.ChildInvocation
     root_turn_id: str | None = None
     run_usage: _UsageCollector = field(default_factory=_UsageCollector)
     model_run_usage: _UsageCollector = field(default_factory=_UsageCollector, repr=False)
@@ -1408,7 +1358,7 @@ class _ChildCallbacks:
     function_admission: asyncio.Semaphore | None = None
     tool_completion: _ToolCompletionProposal | None = field(default=None, repr=False)
     terminal_observations: dict[str, ToolStarted] = field(default_factory=dict, repr=False)
-    pending_application_outputs: dict[str, ApplicationToolOutput] = field(
+    pending_application_outputs: dict[str, _state_types.ApplicationToolOutput] = field(
         default_factory=dict, repr=False
     )
     completion_continuations: int = 0
@@ -1420,7 +1370,7 @@ class _ChildCallbacks:
     calls: set[str] = field(default_factory=set)
     mcp_names: dict[tuple[str, str], ToolRef] = field(default_factory=dict, repr=False)
     mcp_call_names: dict[str, ToolRef] = field(default_factory=dict, repr=False)
-    step_mcp: tuple[_MCP[Any], ...] | None = field(default=None, repr=False)
+    step_mcp: tuple[_tool_types._MCP[Any], ...] | None = field(default=None, repr=False)
     terminal: asyncio.Future[Any] = field(default_factory=_future)
     observed: asyncio.Future[Any] = field(default_factory=_future)
     failure: asyncio.Future[Any] = field(default_factory=_future)
@@ -1431,7 +1381,7 @@ class _ChildCallbacks:
     stopping: bool = False
     policy_stop: Literal["requested", "expired"] | None = None
     cleanup_error: BaseException | None = None
-    questions: dict[int, _NativeQuestion] = field(default_factory=dict)
+    questions: dict[int, _tool_types._NativeQuestion] = field(default_factory=dict)
     manual_inputs: dict[int, Any] = field(default_factory=dict)
     step_index: int = 0
     # Retain observed calls only to retire the owning turn on rejection.
@@ -1458,7 +1408,6 @@ class _ChildCallbacks:
 
 
 _CallbackState = _Submission | _ChildCallbacks
-_InteractionHandler = Callable[[Interaction], ActionReply[Any] | Awaitable[ActionReply[Any]]]
 
 
 @dataclass(eq=False)
@@ -1468,7 +1417,7 @@ class _ConfiguredChild:
     admitted: Callable[[], bool]
     active: bool = True
     callback_task: asyncio.Task[Any] | None = None
-    checkpoint: SessionState | None = None
+    checkpoint: _state_types.SessionState | None = None
     recover: Callable[[], Coroutine[Any, Any, Any]] | None = None
     recovery: asyncio.Task[Any] | None = None
     recovery_ready: asyncio.Future[None] | None = None
@@ -1512,18 +1461,18 @@ class _BeforeStep(Protocol[_SelectionContextT_contra]):
     ) -> (
         Sequence[
             ToolRef
-            | Tool[_SelectionContextT_contra]
+            | _declaration_types.Tool[_SelectionContextT_contra]
             | Environment[_SelectionContextT_contra]
-            | NativeAgents[_SelectionContextT_contra]
+            | _tool_types.NativeAgents[_SelectionContextT_contra]
         ]
         | None
         | StopTurn
         | Awaitable[
             Sequence[
                 ToolRef
-                | Tool[_SelectionContextT_contra]
+                | _declaration_types.Tool[_SelectionContextT_contra]
                 | Environment[_SelectionContextT_contra]
-                | NativeAgents[_SelectionContextT_contra]
+                | _tool_types.NativeAgents[_SelectionContextT_contra]
             ]
             | None
             | StopTurn
@@ -1566,10 +1515,10 @@ class _RestoreDeclaration:
     max_function_concurrency: int | None
     observation_retention: Literal["bounded", "all"]
     resume_budget: RunBudget | None
-    state: SessionState = field(init=False)
+    state: _state_types.SessionState = field(init=False)
     owner: asyncio.Task[Any] | None = None
     sealed_checkpoint: str | None = None
-    verify_remembered_approvals: Callable[[SessionState], bool] | None = None
+    verify_remembered_approvals: Callable[[_state_types.SessionState], bool] | None = None
 
 
 _restore_declaration: ContextVar[_RestoreDeclaration | None] = ContextVar(
@@ -1577,10 +1526,10 @@ _restore_declaration: ContextVar[_RestoreDeclaration | None] = ContextVar(
 )
 
 _raw_usage_restore: ContextVar[
-    tuple[Agent[Any, Any], SessionState, asyncio.Task[Any] | None] | None
+    tuple[Agent[Any, Any], _state_types.SessionState, asyncio.Task[Any] | None] | None
 ] = ContextVar("native_raw_usage_restore", default=None)
 _produced_items_restore: ContextVar[
-    tuple[Agent[Any, Any], SessionState, asyncio.Task[Any] | None] | None
+    tuple[Agent[Any, Any], _state_types.SessionState, asyncio.Task[Any] | None] | None
 ] = ContextVar("native_produced_items_restore", default=None)
 
 
@@ -1729,18 +1678,20 @@ def _project_progress(
                         turn_id=turn_id,
                         submission_id=submission_id,
                         item=cast(
-                            MessageItem
-                            | ReasoningItem
-                            | WebSearchCallItem
-                            | McpListToolsItem
-                            | HostedMcpCallItem
-                            | ProgramCallItem
-                            | ProgramOutputItem
-                            | FileSearchCallItem
-                            | CodeInterpreterCallItem
-                            | ShellCallItem
-                            | ShellCallOutputItem
-                            | ImageGenerationCallItem,
+                            (
+                                "_wire_types._events.MessageItem | "
+                                "_wire_types._events.ReasoningItem | "
+                                "_wire_types._events.WebSearchCallItem | "
+                                "_wire_types._events.McpListToolsItem | "
+                                "_wire_types._events.HostedMcpCallItem | "
+                                "_wire_types._events.ProgramCallItem | "
+                                "_wire_types._events.ProgramOutputItem | "
+                                "_wire_types._events.FileSearchCallItem | "
+                                "_wire_types._events.CodeInterpreterCallItem | "
+                                "_wire_types._events.ShellCallItem | "
+                                "_wire_types._events.ShellCallOutputItem | "
+                                "_wire_types._events.ImageGenerationCallItem"
+                            ),
                             item,
                         ),
                     )
@@ -2134,28 +2085,42 @@ _PROJECT_GUIDANCE_TOOL_NAMES = ("read_text_file", "view_image")
 
 
 def _fixed_tool_refs(
-    tools: Sequence[Tool[Any]],
+    tools: Sequence[_declaration_types.Tool[Any]],
     programmatic_tool_calling: bool,
     environment: Environment[Any] | None,
-    native_agents: NativeAgents[Any] | None,
+    native_agents: _tool_types.NativeAgents[Any] | None,
     *,
     project_guidance: bool = False,
 ) -> set[ToolRef]:
     """Derive selectors only from native grants captured for this opening."""
+    if (
+        not programmatic_tool_calling
+        and environment is None
+        and native_agents is None
+        and not project_guidance
+        and all(type(tool) is FunctionTool for tool in tools)
+    ):
+        return set()
+    from ._tool_catalog import (
+        _HOSTED_TOOLS,
+        _hosted_tool_name,
+    )
 
     fixed: set[ToolRef] = set()
     for tool in tools:
-        if isinstance(tool, Checklist):
+        if type(tool) is not FunctionTool and (isinstance(tool, _tool_types.Checklist)):
             fixed.add(ToolRef("update_plan", "functions"))
-        elif isinstance(tool, NativeGoals):
+        elif type(tool) is not FunctionTool and (isinstance(tool, _tool_types.NativeGoals)):
             fixed.update(
                 ToolRef(n, "functions") for n in ("create_goal", "get_goal", "update_goal")
             )
-        elif isinstance(tool, ToolSearch) and tool._manual is not None:
+        elif (
+            type(tool) is not FunctionTool and (isinstance(tool, _tool_types.ToolSearch))
+        ) and tool._manual is not None:
             continue
         elif isinstance(tool, _HOSTED_TOOLS):
             fixed.add(ToolRef(_hosted_tool_name(tool), "functions"))
-        elif isinstance(tool, WebSearch):
+        elif type(tool) is not FunctionTool and (isinstance(tool, _tool_types.WebSearch)):
             fixed.add(
                 ToolRef("run", "web")
                 if tool.route == "standalone"
@@ -2187,7 +2152,7 @@ def _handoff_default_names(
     return [name for name in handoffs or () if name in selected]
 
 
-def _mcp_profile_declarations(servers: Sequence[_MCP[Any]]) -> dict[str, Any]:
+def _mcp_profile_declarations(servers: Sequence[_tool_types._MCP[Any]]) -> dict[str, Any]:
     declarations: dict[str, Any] = {}
     for server in servers:
         declaration = declarations.setdefault(
@@ -2203,32 +2168,53 @@ def _mcp_profile_declarations(servers: Sequence[_MCP[Any]]) -> dict[str, Any]:
 
 def _split_tools(
     tools: Sequence[
-        ToolRef | _MCPResourceRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]
+        ToolRef
+        | _MCPResourceRef
+        | _declaration_types.Tool[ContextT]
+        | Environment[ContextT]
+        | _tool_types.NativeAgents[ContextT]
     ],
     programmatic_tool_calling: bool = False,
     *,
-    available: Sequence[Tool[ContextT]] | None = None,
+    available: Sequence[_declaration_types.Tool[ContextT]] | None = None,
     environment: Environment[Any] | None = None,
-    native_agents: NativeAgents[Any] | None = None,
-    ceiling: Sequence[Tool[ContextT]] | None = None,
+    native_agents: _tool_types.NativeAgents[Any] | None = None,
+    ceiling: Sequence[_declaration_types.Tool[ContextT]] | None = None,
     rebind: bool = False,
     handoffs: Mapping[str, str] | None = None,
     project_guidance: bool = False,
 ) -> tuple[
     tuple[FunctionTool[Any, Any, Any], ...],
-    tuple[_MCP[Any], ...],
-    NativeAgents[Any] | None,
+    tuple[_tool_types._MCP[Any], ...],
+    _tool_types.NativeAgents[Any] | None,
 ]:
-    from .hosted_mcp import HostedMCP
-
     def bindings(values: Any) -> Any:
-        return tuple(item._binding if isinstance(item, HostedMCP) else item for item in values)
+        return tuple(
+            item._binding
+            if type(item) not in (FunctionTool, ToolRef) and isinstance(item, _tool_types.HostedMCP)
+            else item
+            for item in values
+        )
 
     tools = bindings(tools)
     available = bindings(available) if available is not None else None
     ceiling = bindings(ceiling) if ceiling is not None else None
     opening = ceiling if ceiling is not None else tools if available is None else available
-    admitted: dict[ToolRef, FunctionTool[Any, Any, Any] | HttpMCP[Any] | StdioMCP[Any]] = {}
+    ordinary_opening = all(type(item) is FunctionTool for item in opening)
+    if not ordinary_opening:
+        from ._tool_catalog import (
+            _HOSTED_TOOLS,
+            Checklist,
+            NativeGoals,
+            ToolSearch,
+            WebSearch,
+            _ClientToolSearch,
+            _hosted_tool_name,
+        )
+
+    admitted: dict[
+        ToolRef, FunctionTool[Any, Any, Any] | _tool_types.HttpMCP[Any] | _tool_types.StdioMCP[Any]
+    ] = {}
     mcp_raw_names: dict[ToolRef, str] = {}
     mcp_pairs: set[tuple[str, str]] = set()
     fixed: set[ToolRef] = set()
@@ -2252,11 +2238,17 @@ def _split_tools(
                 admitted[declaration.ref] = current
             elif isinstance(declaration, ToolSearch) and declaration._manual is not None:
                 admitted[declaration.ref] = declaration._manual
-            elif isinstance(declaration, (StdioMCP, HttpMCP)):
+            elif type(declaration) is not FunctionTool and isinstance(
+                declaration, (_tool_types.StdioMCP, _tool_types.HttpMCP)
+            ):
                 current_server = next(
                     item
                     for item in available
-                    if isinstance(item, (StdioMCP, HttpMCP)) and item.name == declaration.name
+                    if (
+                        type(item) is not FunctionTool
+                        and isinstance(item, (_tool_types.StdioMCP, _tool_types.HttpMCP))
+                    )
+                    and item.name == declaration.name
                 )
                 for raw in declaration.tools:
                     ref = declaration.tool(raw)
@@ -2264,28 +2256,36 @@ def _split_tools(
                     mcp_raw_names[ref] = raw
                     mcp_pairs.add((declaration.name, raw))
     python_tools: list[FunctionTool[Any, Any, Any]] = []
-    mcp_tools: dict[str, _MCP[Any]] = {}
-    has_checklist = any(isinstance(item, Checklist) for item in opening)
-    has_goals = any(isinstance(item, NativeGoals) for item in opening)
+    mcp_tools: dict[str, _tool_types._MCP[Any]] = {}
+    has_checklist = not ordinary_opening and any(isinstance(item, Checklist) for item in opening)
+    has_goals = not ordinary_opening and any(isinstance(item, NativeGoals) for item in opening)
     has_native_agents = native_agents is not None or any(
-        isinstance(item, NativeAgents) for item in opening
+        (type(item) is not FunctionTool and isinstance(item, _tool_types.NativeAgents))
+        for item in opening
     )
-    if sum(isinstance(item, WebSearch) for item in opening) > 1:
+    if not ordinary_opening and sum(isinstance(item, WebSearch) for item in opening) > 1:
         raise ValueError("Declare WebSearch only once per Session")
-    for hosted_type in _HOSTED_TOOLS:
-        if sum(isinstance(item, hosted_type) for item in opening) > 1:
-            raise ValueError(f"Declare {hosted_type.__name__} only once per Session")
-    hosted_names = {_hosted_tool_name(item) for item in opening if isinstance(item, _HOSTED_TOOLS)}
+    hosted_names = set()
+    if not ordinary_opening:
+        for hosted_type in _HOSTED_TOOLS:
+            if sum(isinstance(item, hosted_type) for item in opening) > 1:
+                raise ValueError(f"Declare {hosted_type.__name__} only once per Session")
+        hosted_names = {
+            _hosted_tool_name(item) for item in opening if isinstance(item, _HOSTED_TOOLS)
+        }
     for item in tools:
         tool = item
-        if available is not None and isinstance(tool, (Environment, NativeAgents)):
+        if available is not None and (
+            type(tool) not in (FunctionTool, ToolRef)
+            and isinstance(tool, (Environment, _tool_types.NativeAgents))
+        ):
             if tool is not environment and tool is not native_agents:
                 raise CapabilityError("Operation tools must use captured opening bindings")
             refs = _fixed_tool_refs(
                 (),
                 False,
                 tool if isinstance(tool, Environment) else None,
-                tool if isinstance(tool, NativeAgents) else None,
+                tool if (isinstance(tool, _tool_types.NativeAgents)) else None,
                 project_guidance=project_guidance and isinstance(tool, Environment),
             )
             if retained.intersection(refs):
@@ -2297,15 +2297,21 @@ def _split_tools(
                 (
                     item
                     for item in (() if available is None else available)
-                    if isinstance(item, (HttpMCP, StdioMCP))
-                    and type(item) in (HttpMCP, StdioMCP)
+                    if (
+                        type(item) is not FunctionTool
+                        and isinstance(item, (_tool_types.HttpMCP, _tool_types.StdioMCP))
+                    )
+                    and type(item) in (_tool_types.HttpMCP, _tool_types.StdioMCP)
                     and item.name == tool.name
                 ),
                 None,
             )
             if resource_server is None or not any(
-                isinstance(item, (HttpMCP, StdioMCP))
-                and type(item) in (HttpMCP, StdioMCP)
+                (
+                    type(item) is not FunctionTool
+                    and isinstance(item, (_tool_types.HttpMCP, _tool_types.StdioMCP))
+                )
+                and type(item) in (_tool_types.HttpMCP, _tool_types.StdioMCP)
                 and item.name == tool.name
                 for item in opening
             ):
@@ -2321,7 +2327,7 @@ def _split_tools(
                 declaration = next(
                     item
                     for item in opening
-                    if isinstance(item, _MCP)
+                    if (type(item) is not FunctionTool and isinstance(item, _tool_types._MCP))
                     and item.name == identity[0]
                     and identity[1] in item.tools
                 )
@@ -2342,9 +2348,12 @@ def _split_tools(
                 raw = mcp_raw_names[tool]
                 tool = replace(resolved, tools=(raw,))
         elif available is not None:
-            if isinstance(tool, (HostedVerificationMCP, ChatGPTAppsMCP)) and not any(
-                tool is original for original in (*opening, *available)
-            ):
+            if (
+                type(tool) not in (FunctionTool, ToolRef)
+                and isinstance(
+                    tool, (_tool_types.HostedVerificationMCP, _tool_types.ChatGPTAppsMCP)
+                )
+            ) and not any(tool is original for original in (*opening, *available)):
                 raise ValueError("Apps registration is fixed; use a separate Session")
             if not rebind and not any(tool is original for original in (*opening, *available)):
                 raise CapabilityError("Operation tools must use captured opening bindings")
@@ -2353,36 +2362,49 @@ def _split_tools(
                     raise CapabilityError(
                         "Replacement tool names must have been allowed when the Session opened"
                     )
-            elif isinstance(tool, (HttpMCP, StdioMCP)):
+            elif isinstance(tool, (_tool_types.HttpMCP, _tool_types.StdioMCP)):
                 if not any(
-                    isinstance(item, (HttpMCP, StdioMCP)) and item.name == tool.name
+                    (
+                        type(item) is not FunctionTool
+                        and isinstance(item, (_tool_types.HttpMCP, _tool_types.StdioMCP))
+                    )
+                    and item.name == tool.name
                     for item in opening
                 ) or any((tool.name, raw) not in mcp_pairs for raw in tool.tools):
                     raise CapabilityError(
                         "Replacement MCP names must have been allowed when the Session opened"
                     )
                 if (
-                    isinstance(tool, StdioMCP)
+                    (isinstance(tool, _tool_types.StdioMCP))
                     and tool.location == "host"
                     and not any(
-                        isinstance(item, StdioMCP) and item.location == "host" for item in opening
+                        (type(item) is not FunctionTool and isinstance(item, _tool_types.StdioMCP))
+                        and item.location == "host"
+                        for item in opening
                     )
                 ):
                     raise CapabilityError("Host stdio MCP must be declared when the Session opens")
-            if not rebind or not isinstance(tool, (FunctionTool, HttpMCP, StdioMCP)):
+            if not rebind or not (
+                type(tool) is FunctionTool
+                or isinstance(tool, (FunctionTool, _tool_types.HttpMCP, _tool_types.StdioMCP))
+            ):
                 if not any(tool is original for original in (*opening, *available)):
                     raise CapabilityError("Operation tools must use captured opening bindings")
                 if isinstance(tool, FunctionTool):
                     tool = admitted[tool.ref]
-                elif isinstance(tool, (HttpMCP, StdioMCP)):
+                elif isinstance(tool, (_tool_types.HttpMCP, _tool_types.StdioMCP)):
                     # An opening object is a selector, never authority to restore
                     # its old endpoint or credentials after an acknowledged update.
                     resolved = next(
                         item
                         for item in available
-                        if isinstance(item, (HttpMCP, StdioMCP)) and item.name == tool.name
+                        if (
+                            type(item) is not FunctionTool
+                            and isinstance(item, (_tool_types.HttpMCP, _tool_types.StdioMCP))
+                        )
+                        and item.name == tool.name
                     )
-                    assert isinstance(resolved, (HttpMCP, StdioMCP))
+                    assert isinstance(resolved, (_tool_types.HttpMCP, _tool_types.StdioMCP))
                     tool = replace(resolved, tools=tool.tools)
         python_tool = _python_tool_slot(tool)
         if python_tool is not None:
@@ -2415,7 +2437,9 @@ def _split_tools(
             if available is not None and any(previous.ref == tool.ref for previous in python_tools):
                 raise CapabilityError("Operation tools must select distinct captured slots")
             python_tools.append(tool)
-        elif isinstance(tool, (StdioMCP, HttpMCP)):
+        elif type(tool) not in (FunctionTool, ToolRef) and isinstance(
+            tool, (_tool_types.StdioMCP, _tool_types.HttpMCP)
+        ):
             previous = mcp_tools.get(tool.name)
             if previous is not None:
                 if available is None or replace(tool, tools=previous.tools) != previous:
@@ -2424,21 +2448,23 @@ def _split_tools(
                     raise CapabilityError("Operation tools must select distinct MCP leaves")
                 tool = replace(tool, tools=(*previous.tools, *tool.tools))
             mcp_tools[tool.name] = tool
-        elif isinstance(tool, NativeAgents):
+        elif type(tool) not in (FunctionTool, ToolRef) and isinstance(
+            tool, _tool_types.NativeAgents
+        ):
             if native_agents is not None:
                 raise ValueError("A Session supports exactly one NativeAgents declaration")
             native_agents = tool
         elif isinstance(tool, (Checklist, NativeGoals, WebSearch, *_HOSTED_TOOLS)):
             if (
                 available is None
-                and isinstance(tool, WebSearch)
-                and tool.route == "standalone"
+                and isinstance(tool, _tool_types.WebSearch)
+                and (tool.route == "standalone")
                 and (
                     tool.allowed_domains is not None
                     or tool.blocked_domains is not None
                     or tool.location is not None
-                    or tool.search_content_types is not None
-                    or tool.image_settings is not None
+                    or (tool.search_content_types is not None)
+                    or (tool.image_settings is not None)
                 )
             ):
                 raise ValueError(
@@ -2462,20 +2488,20 @@ def _split_tools(
 class _OpeningTools:
     """One classified opening declaration, before context binding."""
 
-    available: Sequence[Tool[Any]]
+    available: Sequence[_declaration_types.Tool[Any]]
     python: tuple[FunctionTool[Any, Any, Any], ...]
-    mcp: tuple[_MCP[Any], ...]
-    native_agents: NativeAgents[Any] | None
+    mcp: tuple[_tool_types._MCP[Any], ...]
+    native_agents: _tool_types.NativeAgents[Any] | None
 
     @classmethod
     def capture(
-        cls, available: Sequence[Tool[Any]], programmatic_tool_calling: bool
+        cls, available: Sequence[_declaration_types.Tool[Any]], programmatic_tool_calling: bool
     ) -> _OpeningTools:
         python, mcp, native_agents = _split_tools(available, programmatic_tool_calling)
         return cls(available, python, mcp, native_agents)
 
     def validate_collisions(self, *, project_guidance: bool = False) -> list[dict[str, str]]:
-        mcp_names = _tool_names(self.mcp)
+        mcp_names = _tool_types._tool_names(self.mcp)
         _check_namespaced_tool_collisions(
             self.python,
             mcp_names,
@@ -2492,7 +2518,7 @@ class _OpeningTools:
 def _bind_sandbox_opening_tools(
     agent: Agent[Any, Any],
     context: Any,
-    saved: SessionState | None,
+    saved: _state_types.SessionState | None,
     *,
     project_guidance: bool,
 ) -> tuple[_ToolCatalog, tuple[FunctionTool[Any, Any, Any], ...], list[dict[str, str]]]:
@@ -2575,7 +2601,7 @@ def _apply_sandbox_contributions(
 
 
 def _check_native_agents_provider(
-    native_agents: NativeAgents[Any] | None, provider: NativeProvider | None
+    native_agents: _tool_types.NativeAgents[Any] | None, provider: NativeProvider | None
 ) -> None:
     if native_agents is not None and provider is not None and provider.response_mode == "buffered":
         raise CapabilityError("Buffered Responses do not support native child agents")
@@ -2598,7 +2624,7 @@ def _check_environment_python_tool_collisions(
 
 
 def _check_native_agents_environment(
-    native_agents: NativeAgents[Any] | None, executor: Environment[Any] | None
+    native_agents: _tool_types.NativeAgents[Any] | None, executor: Environment[Any] | None
 ) -> None:
     if native_agents is None:
         return
@@ -2613,11 +2639,11 @@ def _check_native_agents_environment(
 def _selected_tool_refs(
     selection: Sequence[Any],
     python: Sequence[FunctionTool[Any, Any, Any]],
-    mcp: Sequence[_MCP[Any]],
+    mcp: Sequence[_tool_types._MCP[Any]],
     *,
     programmatic_tool_calling: bool,
     environment: Environment[Any] | None,
-    native_agents: NativeAgents[Any] | None,
+    native_agents: _tool_types.NativeAgents[Any] | None,
     project_guidance: bool = False,
 ) -> tuple[ToolRef, ...]:
     """Normalize admitted declarations through the same identities as dispatch."""
@@ -2743,10 +2769,10 @@ def _native_session_config(
     *,
     executor: Environment[Any] | None,
     provider_config: dict[str, Any],
-    native_agents: NativeAgents[Any] | None,
+    native_agents: _tool_types.NativeAgents[Any] | None,
     deferred_schemas: bool,
     allowed_tools: Sequence[FunctionTool[Any, Any, Any]],
-    web_search: WebSearch | None,
+    web_search: _tool_types.WebSearch | None,
     web_search_config: dict[str, Any],
     guidance_config: dict[str, Any],
     checklist: bool,
@@ -2974,11 +3000,13 @@ def _capture_profile_runtimes(
                 # Fingerprinting uses admitted MCP identities, not credentials.
                 # Connection configs are completed only after environment entry.
                 "mcp_servers": {server.name: {} for server in mcp},
-                "mcp_result_tools": json.loads(_result_policies(mcp, 0))["servers"],
-                "mcp_metadata_tools": json.loads(_result_policies(mcp, 0))["metadata_servers"],
+                "mcp_result_tools": json.loads(_tool_types._result_policies(mcp, 0))["servers"],
+                "mcp_metadata_tools": json.loads(_tool_types._result_policies(mcp, 0))[
+                    "metadata_servers"
+                ],
                 **(
                     {
-                        "mcp_discovery_tools": json.loads(_result_policies(mcp, 0))[
+                        "mcp_discovery_tools": json.loads(_tool_types._result_policies(mcp, 0))[
                             "discovery_servers"
                         ]
                     }
@@ -3123,10 +3151,10 @@ def _install_profile_options(
             {"name": tool.name, "namespace": tool.ref.namespace or "functions"}
             for tool in functions
         )
-        grants.extend(_tool_names(servers))
+        grants.extend(_tool_types._tool_names(servers))
         raw_grants = options["tool_policy"]["allowed_mcp_tools"]
         for server in servers:
-            for raw, ref in zip(server.tools, _tool_names((server,)), strict=True):
+            for raw, ref in zip(server.tools, _tool_types._tool_names((server,)), strict=True):
                 if not any(grant[:2] == [server.name, raw] for grant in raw_grants):
                     raw_grants.append([server.name, raw, ref])
         grants.extend({"name": name, "namespace": "functions"} for name in profile.handoffs)
@@ -3136,7 +3164,7 @@ def _install_profile_options(
 
 
 def _capture_restored_hosted_mcp(
-    state: SessionState | None,
+    state: _state_types.SessionState | None,
     tools: Sequence[HostedMCP[Any]] | None,
 ) -> tuple[HostedMCP[Any], ...] | None:
     if tools is None:
@@ -3148,8 +3176,8 @@ def _capture_restored_hosted_mcp(
 
 
 def _check_restored_hosted_mcp(
-    saved: SessionState,
-    available: Sequence[Tool[Any]],
+    saved: _state_types.SessionState,
+    available: Sequence[_declaration_types.Tool[Any]],
     authorized: Sequence[HostedMCP[Any]] | None,
     selection: _RestoreDeclaration | None = None,
 ) -> None:
@@ -3174,21 +3202,21 @@ def _check_restored_hosted_mcp(
 
 
 def _restore_operation_tools(
-    saved: SessionState,
+    saved: _state_types.SessionState,
     catalog: _ToolCatalog,
-    available: Sequence[Tool[Any]],
-    current_available: Sequence[Tool[Any]] | None,
+    available: Sequence[_declaration_types.Tool[Any]],
+    current_available: Sequence[_declaration_types.Tool[Any]] | None,
     *,
     programmatic_tool_calling: bool,
     environment: Environment[Any] | None,
-    native_agents: NativeAgents | None,
+    native_agents: _tool_types.NativeAgents | None,
     handoffs: Mapping[str, str] | None,
     project_guidance: bool = False,
 ) -> tuple[
     tuple[int, ...],
     tuple[ToolRef, ...],
-    tuple[_MCP[Any], ...],
-    tuple[Tool[Any], ...],
+    tuple[_tool_types._MCP[Any], ...],
+    tuple[_declaration_types.Tool[Any], ...],
 ]:
     """Reconstruct one saved ceiling from its fresh, proven source declaration."""
     from .hosted_mcp import HostedMCP
@@ -3221,7 +3249,7 @@ def _restore_operation_tools(
         and any(tool is selected_tool for selected_tool in selected)
         or isinstance(tool, HostedMCP)
         and any(tool._binding is selected_tool for selected_tool in selected)
-        or isinstance(tool, _MCP)
+        or (type(tool) is not FunctionTool and isinstance(tool, _tool_types._MCP))
         and any(tool.name == server.name for server in mcp)
     )
     current_selected = selected
@@ -3287,7 +3315,7 @@ def _restore_profile_sources(
     native: Any,
     profiles: Mapping[str, _ProfileRuntime],
     roster: Sequence[Mapping[str, Any]],
-    saved: SessionState | None,
+    saved: _state_types.SessionState | None,
     context: Any,
 ) -> tuple[_ProfileRuntime | None, _ProfileRuntime | None, dict[str, Any] | None]:
     """Prove current callback ownership and original operation scope before IO."""
@@ -3322,7 +3350,7 @@ def _restore_operation_origin(
     native: Any,
     profiles: Mapping[str, _ProfileRuntime],
     roster: Sequence[Mapping[str, Any]],
-    saved: SessionState,
+    saved: _state_types.SessionState,
     context: Any,
 ) -> tuple[_ProfileRuntime | None, dict[str, Any] | None]:
     continuation = saved.native_continuation
@@ -3360,7 +3388,7 @@ def _restore_operation_origin(
 
 def _check_restored_tool_context(
     tools: Sequence[FunctionTool[Any, Any, Any]],
-    mcp: Sequence[_MCP[Any]],
+    mcp: Sequence[_tool_types._MCP[Any]],
     selected: Sequence[ToolRef] | None,
     context: Any,
 ) -> None:
@@ -3373,8 +3401,12 @@ def _check_restored_tool_context(
             server._check_context(context)
 
 
-def _has_deferred_tools(tools: Sequence[Tool[Any]]) -> bool:
-    return any(isinstance(tool, (FunctionTool, _MCP)) and tool.defer_loading for tool in tools)
+def _has_deferred_tools(tools: Sequence[_declaration_types.Tool[Any]]) -> bool:
+    return any(
+        (type(tool) is FunctionTool or isinstance(tool, (FunctionTool, _tool_types._MCP)))
+        and tool.defer_loading
+        for tool in tools
+    )
 
 
 def _direct_tool_namespaces(
@@ -3390,9 +3422,9 @@ def _direct_tool_namespaces(
 def _check_namespaced_tool_collisions(
     tools: Sequence[FunctionTool[Any, Any, Any]],
     mcp_names: Sequence[dict[str, str]],
-    available: Sequence[Tool[Any]],
+    available: Sequence[_declaration_types.Tool[Any]],
     *,
-    native_agents: NativeAgents[Any] | None = None,
+    native_agents: _tool_types.NativeAgents[Any] | None = None,
     project_guidance: bool = False,
 ) -> None:
     python_refs = {tool.ref for tool in tools}
@@ -3406,14 +3438,16 @@ def _check_namespaced_tool_collisions(
         raise ValueError("A selected MCP tool shares a ToolRef with another Session capability")
 
 
-def _same_opening_tools(left: Sequence[Tool[Any]], right: Sequence[Tool[Any]]) -> bool:
+def _same_opening_tools(
+    left: Sequence[_declaration_types.Tool[Any]], right: Sequence[_declaration_types.Tool[Any]]
+) -> bool:
     return len(left) == len(right) and all(a is b for a, b in zip(left, right, strict=True))
 
 
 def _mcp_config(
-    servers: tuple[_MCP[Any], ...],
+    servers: tuple[_tool_types._MCP[Any], ...],
     environment: Environment[Any] | None,
-    available: tuple[_MCP[Any], ...],
+    available: tuple[_tool_types._MCP[Any], ...],
     *,
     programmatic_tool_calling: bool,
 ) -> str:
@@ -3435,15 +3469,15 @@ def _mcp_config(
 
 def _check_mcp_receipt(
     raw: str,
-    servers: tuple[_MCP[Any], ...],
-    available: tuple[_MCP[Any], ...],
+    servers: tuple[_tool_types._MCP[Any], ...],
+    available: tuple[_tool_types._MCP[Any], ...],
     generation: int,
 ) -> None:
     try:
         receipt = json.loads(raw)
     except (TypeError, ValueError):
         raise NativeError("Invalid native MCP publication receipt") from None
-    if not _ready(receipt, servers, available):
+    if not _tool_types._ready(receipt, servers, available):
         result = receipt.get("result") if isinstance(receipt, dict) else None
         reports = result.get("servers") if isinstance(result, dict) else None
         if isinstance(reports, dict):
@@ -3472,7 +3506,9 @@ def _check_mcp_receipt(
         raise NativeError("Native MCP publication generation did not match")
 
 
-def _check_checkpoint(state: SessionState, instructions: str, *, graph: bool = False) -> None:
+def _check_checkpoint(
+    state: _state_types.SessionState, instructions: str, *, graph: bool = False
+) -> None:
     """Accept idle or settled manual native state without rewriting history."""
     for unsupported, component in (
         (state.managed_tool_specs is None, "missing native tool declarations"),
@@ -3487,18 +3523,22 @@ def _check_checkpoint(state: SessionState, instructions: str, *, graph: bool = F
 
 
 def _prepare_open_state(
-    state: SessionState | ManagedWorkspaceCheckpoint | None,
+    state: _state_types.SessionState | ManagedWorkspaceCheckpoint | None,
     environment: object,
     *,
     include_raw_provider_events: bool,
     include_request_attempts: bool,
     resume_budget: RunBudget | None,
-) -> tuple[SessionState | None, _ManagedWorkspaceSource | None]:
+) -> tuple[_state_types.SessionState | None, _ManagedWorkspaceSource | None]:
     if not isinstance(include_raw_provider_events, bool):
         raise TypeError("include_raw_provider_events must be a bool")
     if not isinstance(include_request_attempts, bool):
         raise TypeError("include_request_attempts must be a bool")
     managed_source = environment if isinstance(environment, _ManagedWorkspaceSource) else None
+    if state is None and resume_budget is None:
+        return None, managed_source
+    from .state import SessionState
+
     if isinstance(state, ManagedWorkspaceCheckpoint):
         if managed_source is None:
             raise ValueError("Managed checkpoint requires a current managed sandbox source")
@@ -3513,7 +3553,7 @@ def _prepare_open_state(
 
 
 def _capture_opening_checkpoint(
-    state: SessionState,
+    state: _state_types.SessionState,
     *,
     resume_budget: RunBudget | None,
     auth: CodexLogin | SignInWithChatGPT | None,
@@ -3521,7 +3561,7 @@ def _capture_opening_checkpoint(
     graph: bool,
     has_output_override: bool,
 ) -> tuple[
-    SessionState,
+    _state_types.SessionState,
     _RunBudget | None,
     str | None,
     str,
@@ -3529,6 +3569,8 @@ def _capture_opening_checkpoint(
     tuple[ToolRef, ...] | None,
     tuple[str, ...],
 ]:
+    from .state import SessionState
+
     if not isinstance(state, SessionState):
         raise TypeError("state must be a SessionState")
     # Capture caller-owned data before the first await. The native
@@ -3572,7 +3614,7 @@ def _without_untrusted_memory_admission(
 
 
 def _prepare_native_checkpoint(
-    saved: SessionState, *, has_output_override: bool
+    saved: _state_types.SessionState, *, has_output_override: bool
 ) -> tuple[str, bool, tuple[ToolRef, ...] | None, tuple[str, ...]]:
     restored_override = False
     restored_defaults: tuple[ToolRef, ...] | None = None
@@ -3630,7 +3672,7 @@ def _prepare_native_checkpoint(
 
 
 def _checkpoint_plan_provider(
-    saved: SessionState, auth: CodexLogin | SignInWithChatGPT | None
+    saved: _state_types.SessionState, auth: CodexLogin | SignInWithChatGPT | None
 ) -> str | None:
     saved_provider = (saved.root_metadata or {}).get("model_provider")
     saved_plan_provider = (
@@ -3645,7 +3687,9 @@ def _checkpoint_plan_provider(
     return saved_plan_provider
 
 
-def _check_restored_output_contract(saved: SessionState, output: _PreparedOutput) -> None:
+def _check_restored_output_contract(
+    saved: _state_types.SessionState, output: _PreparedOutput
+) -> None:
     """Validate the captured operation decoder before runtime resources open."""
     if saved.native_continuation is not None:
         expected_schema = output.schema if output.mode == "native" else None
@@ -3676,7 +3720,9 @@ def _capture_project_guidance(
     )
 
 
-def _check_restored_environment(saved: SessionState, executor: Environment[Any] | None) -> None:
+def _check_restored_environment(
+    saved: _state_types.SessionState, executor: Environment[Any] | None
+) -> None:
     try:
         if saved.executor_read_only != (executor is not None and executor.read_only):
             raise ValueError("Checkpoint and Environment must agree on read-only execution")
@@ -3704,7 +3750,7 @@ def _configure_project_search(
 def _configure_native_agents(
     runtime: dict[str, Any],
     config: dict[str, Any],
-    native_agents: NativeAgents | None,
+    native_agents: _tool_types.NativeAgents | None,
     instructions: str,
     *,
     project_guidance: bool,
@@ -3750,7 +3796,7 @@ def _optional_path_string(value: str | Path | None) -> str | None:
 
 def _configure_storage_runtime(
     runtime: dict[str, Any],
-    storage: LocalStorage | CustomStorage | None,
+    storage: _state_types.LocalStorage | CustomStorage | None,
     resume: str | None,
     goals: bool,
 ) -> None:
@@ -3767,26 +3813,31 @@ def _configure_storage_runtime(
 
 
 def _validate_siwc_opening_tools(
-    tools: Sequence[Tool[Any]],
+    tools: Sequence[_declaration_types.Tool[Any]],
     *,
     programmatic_tool_calling: bool,
     deferred_schemas: bool,
     has_other_agents: bool,
 ) -> None:
+    from ._tool_catalog import _HOSTED_TOOLS, WebSearch
+
     if programmatic_tool_calling or deferred_schemas:
         raise ValueError("Sign in with ChatGPT requires directly exposed tools")
     if has_other_agents:
         raise ValueError("Sign in with ChatGPT requires a single Agent")
     if any(
-        isinstance(
-            tool,
-            (
-                *_HOSTED_TOOLS,
-                _ComputerTool,
-                WebSearch,
-                ChatGPTAppsMCP,
-                HostedVerificationMCP,
-            ),
+        (
+            type(tool) is not FunctionTool
+            and isinstance(
+                tool,
+                (
+                    *_HOSTED_TOOLS,
+                    _ComputerTool,
+                    WebSearch,
+                    _tool_types.ChatGPTAppsMCP,
+                    _tool_types.HostedVerificationMCP,
+                ),
+            )
         )
         for tool in tools
     ):
@@ -3796,14 +3847,16 @@ def _validate_siwc_opening_tools(
 
 
 async def _verify_remembered_approvals(
-    saved: SessionState | None,
-    verifier: Callable[[SessionState], bool | Awaitable[bool]] | None,
+    saved: _state_types.SessionState | None,
+    verifier: Callable[[_state_types.SessionState], bool | Awaitable[bool]] | None,
 ) -> Sequence[_RememberedApproval]:
     try:
         if verifier is not None and not callable(verifier):
             raise TypeError("verify_remembered_approvals must be callable")
         if saved is None or not saved.remembered_approvals or verifier is None:
             return ()
+        from .state import SessionState
+
         detached = SessionState.from_json(saved.to_json())
         if await _call_callback(verifier, lambda: True, detached) is not True:
             return ()
@@ -3880,7 +3933,7 @@ def _private_default_opening_candidates(
     *,
     atomic_first_turn: bool,
     private_text_run: bool,
-    tools: Sequence[Tool[Any]],
+    tools: Sequence[_declaration_types.Tool[Any]],
     native_specs: str,
 ) -> tuple[bool, bool]:
     """Capture default-provider candidates before narrowing atomic opening intent."""
@@ -3929,12 +3982,12 @@ def _supports_atomic_first_turn(
     *,
     output_mode: str,
     programmatic_tool_calling: bool,
-    tools: Sequence[Tool[Any]],
+    tools: Sequence[_declaration_types.Tool[Any]],
     initial_messages_json: str | None,
     selected: object | None,
     profiles: tuple[_AgentProfile, ...],
-    state: SessionState | None,
-    storage: LocalStorage | CustomStorage | None,
+    state: _state_types.SessionState | None,
+    storage: _state_types.LocalStorage | CustomStorage | None,
     resume: str | None,
     environment: object | None,
     input_guardrails: Sequence[InputGuardrail[Any]],
@@ -3981,11 +4034,16 @@ class _OriginalToolArgumentsError(ValueError):
 
 
 def _capture_opening_hosted_tools(
-    available: Sequence[Tool[Any]],
+    available: Sequence[_declaration_types.Tool[Any]],
     profiles: Sequence[_AgentProfile],
     tools: Sequence[FunctionTool[Any, Any, Any]],
     codex_login: CodexLogin | None,
 ) -> list[dict[str, Any]]:
+    if all(type(tool) is FunctionTool for tool in available) and all(
+        type(tool) is FunctionTool for profile in profiles for tool in profile.declaration.tools
+    ):
+        return []
+    from ._tool_catalog import _capture_hosted_tools, _ClientToolSearch
     from .hosted_mcp import HostedMCP
 
     profile_mcp = (
@@ -4217,7 +4275,7 @@ def _opening_response_policy(
     return hold_assistant_completion
 
 
-def _opening_history_ttl(storage: LocalStorage | CustomStorage | None) -> int | None:
+def _opening_history_ttl(storage: _state_types.LocalStorage | CustomStorage | None) -> int | None:
     from .canonical_storage_encrypt import EncryptedSessionStore
 
     if isinstance(storage, CustomStorage) and isinstance(storage.backend, EncryptedSessionStore):
@@ -4243,7 +4301,7 @@ def _opening_restored_output_contract(
     restored_output_type: OutputSpec[Any] | None,
     selected: _RestoreDeclaration | None,
     restored_profile: _ProfileRuntime | None,
-    saved: SessionState | None,
+    saved: _state_types.SessionState | None,
     *,
     manual_restore: bool,
     restored_default: str | None,
@@ -4366,7 +4424,7 @@ def _prepare_opening_model_settings(
 
 
 def _capture_opening_model(
-    state: SessionState | None,
+    state: _state_types.SessionState | None,
     model: str | None,
     model_settings: ModelSettings | None,
 ) -> tuple[str | None, str | None]:
@@ -4450,17 +4508,17 @@ def _configure_session_features(
 
 def _opening_tool_policy(
     *,
-    allowed_mcp: Sequence[_MCP[Any]],
+    allowed_mcp: Sequence[_tool_types._MCP[Any]],
     allowed_tools: Sequence[FunctionTool[Any, Any, Any]],
     mcp_names: list[dict[str, str]],
     hosted_tools: list[dict[str, Any]],
-    web_search: WebSearch | None,
+    web_search: _tool_types.WebSearch | None,
     deferred_schemas: bool,
-    available: Sequence[Tool[Any]],
+    available: Sequence[_declaration_types.Tool[Any]],
     checklist: bool,
     guidance_tools: list[dict[str, str]],
     goals: bool,
-    native_agents: NativeAgents[Any] | None,
+    native_agents: _tool_types.NativeAgents[Any] | None,
     executor: Environment[Any] | None,
     inherited_executor_tools: tuple[str, ...] | None,
     programmatic_tool_calling: bool,
@@ -4469,7 +4527,7 @@ def _opening_tool_policy(
         "allowed_mcp_tools": [
             [server.name, raw, ref]
             for server in allowed_mcp
-            for raw, ref in zip(server.tools, _tool_names((server,)), strict=True)
+            for raw, ref in zip(server.tools, _tool_types._tool_names((server,)), strict=True)
         ],
         "allowed_tools": [
             {
@@ -4498,7 +4556,11 @@ def _opening_tool_policy(
         )
         + (
             [{"name": "tool_search", "namespace": "functions"}]
-            if deferred_schemas and not any(isinstance(tool, ToolSearch) for tool in available)
+            if deferred_schemas
+            and not any(
+                type(tool) is not FunctionTool and (isinstance(tool, _tool_types.ToolSearch))
+                for tool in available
+            )
             else []
         )
         + ([{"name": "update_plan", "namespace": "functions"}] if checklist else [])
@@ -4561,10 +4623,10 @@ def _capture_opening_guardrails(
 def _validate_opening_environment(
     executor: Environment[Any] | None,
     allowed_tools: Sequence[FunctionTool[Any, Any, Any]],
-    saved: SessionState | None,
-    native_agents: NativeAgents[Any] | None,
+    saved: _state_types.SessionState | None,
+    native_agents: _tool_types.NativeAgents[Any] | None,
     restored_defaults: Sequence[ToolRef | _MCPResourceRef] | None,
-    restored_available: Sequence[Tool[Any]],
+    restored_available: Sequence[_declaration_types.Tool[Any]],
     restored_handoffs: Mapping[str, str] | None,
     *,
     project_guidance: bool,
@@ -4621,7 +4683,7 @@ def _check_seatbelt_proxy_settings() -> None:
 
 
 def _selected_opening_declaration(
-    agent: Agent[Any, Any], state: SessionState | None
+    agent: Agent[Any, Any], state: _state_types.SessionState | None
 ) -> _RestoreDeclaration | None:
     selected = _restore_declaration.get()
     if (
@@ -4649,20 +4711,21 @@ class Session(Generic[ContextT, OutputT]):
         agent: Agent[ContextT, OutputT],
         *,
         context: ContextT | None = None,
-        state: SessionState | ManagedWorkspaceCheckpoint | None = None,
-        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        state: _state_types.SessionState | ManagedWorkspaceCheckpoint | None = None,
+        verify_remembered_approvals: Callable[[_state_types.SessionState], bool | Awaitable[bool]]
+        | None = None,
         restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         resume_budget: RunBudget | None = None,
         initial_messages_json: str | None = None,
-        storage: LocalStorage | CustomStorage | None = None,
+        storage: _state_types.LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         provider_history: ProviderHistory | None = None,
-        tool_selection: Sequence[Tool[ContextT]] | None = None,
+        tool_selection: Sequence[_declaration_types.Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
@@ -4794,7 +4857,7 @@ class Session(Generic[ContextT, OutputT]):
             if not isinstance(programmatic_tool_calling, bool):
                 raise TypeError("programmatic_tool_calling must be a bool")
             checkpoint = None
-            approval_checkpoint: SessionState | None = None
+            approval_checkpoint: _state_types.SessionState | None = None
             manual_restore = False
             continuation = None
             restored_budget = None
@@ -4825,11 +4888,14 @@ class Session(Generic[ContextT, OutputT]):
                 approval_checkpoint = saved
                 manual_restore = saved.native_continuation is not None
                 continuation = saved.native_continuation
-            if isinstance(storage, LocalStorage) and programmatic_tool_calling:
-                raise ValueError(
-                    "LocalStorage does not support code mode: nested tool identities "
-                    "do not yet have durable intent and result receipts"
-                )
+            if storage is not None:
+                from .state import LocalStorage
+
+                if isinstance(storage, LocalStorage) and programmatic_tool_calling:
+                    raise ValueError(
+                        "LocalStorage does not support code mode: nested tool identities "
+                        "do not yet have durable intent and result receipts"
+                    )
             opening_tools = _OpeningTools.capture(agent.tools, programmatic_tool_calling)
             tools, mcp_tools, native_agents = (
                 opening_tools.python,
@@ -4844,8 +4910,14 @@ class Session(Generic[ContextT, OutputT]):
                 )
             _check_native_agents_provider(native_agents, agent.provider)
             available = agent.tools
-            checklist = any(isinstance(tool, Checklist) for tool in available)
-            goals = any(isinstance(tool, NativeGoals) for tool in available)
+            checklist = any(
+                type(tool) is not FunctionTool and (isinstance(tool, _tool_types.Checklist))
+                for tool in available
+            )
+            goals = any(
+                type(tool) is not FunctionTool and (isinstance(tool, _tool_types.NativeGoals))
+                for tool in available
+            )
             _validate_custom_storage_capabilities(
                 storage,
                 native_agents=native_agents,
@@ -4860,7 +4932,14 @@ class Session(Generic[ContextT, OutputT]):
             if goals and storage is None:
                 raise ValueError("NativeGoals requires an explicit LocalStorage profile")
             hosted_tools = _capture_opening_hosted_tools(available, profiles, tools, codex_login)
-            web_search = next((tool for tool in available if isinstance(tool, WebSearch)), None)
+            web_search = next(
+                (
+                    tool
+                    for tool in available
+                    if type(tool) is not FunctionTool and (isinstance(tool, _tool_types.WebSearch))
+                ),
+                None,
+            )
             # Capture the controls before opening can await. Later selections only select the grant.
             web_search_config = _capture_web_search_config(web_search)
             allowed_tools, allowed_mcp = tools, mcp_tools
@@ -5147,7 +5226,8 @@ class Session(Generic[ContextT, OutputT]):
                     default_compaction
                 )
             has_host_mcp = any(
-                isinstance(server, StdioMCP) and server.location == "host"
+                (type(server) is not FunctionTool and isinstance(server, _tool_types.StdioMCP))
+                and server.location == "host"
                 for declarations in (
                     allowed_mcp,
                     *(profile.declaration.tools for profile in profiles),
@@ -5317,11 +5397,19 @@ class Session(Generic[ContextT, OutputT]):
                     captured_api_key=_captured_api_key,
                 )
                 hosted_verification = next(
-                    (server for server in allowed_mcp if type(server) is HostedVerificationMCP),
+                    (
+                        server
+                        for server in allowed_mcp
+                        if type(server) is _tool_types.HostedVerificationMCP
+                    ),
                     None,
                 )
                 chatgpt_apps = next(
-                    (server for server in allowed_mcp if type(server) is ChatGPTAppsMCP),
+                    (
+                        server
+                        for server in allowed_mcp
+                        if type(server) is _tool_types.ChatGPTAppsMCP
+                    ),
                     None,
                 )
                 if hosted_verification is not None and chatgpt_apps is not None:
@@ -5406,7 +5494,7 @@ class Session(Generic[ContextT, OutputT]):
                         continuation,
                         run_formatter=tool_error_formatter is not None,
                     ),
-                    **_native_agent_options(native_agents),
+                    **_tool_types._native_agent_options(native_agents),
                     "tool_policy": _opening_tool_policy(
                         allowed_mcp=allowed_mcp,
                         allowed_tools=allowed_tools,
@@ -5889,6 +5977,8 @@ class Session(Generic[ContextT, OutputT]):
     async def _reconcile_local_history(self, reconciliation: Sequence[ReconciledCall]) -> None:
         # The writer is held. Read the saved graph, including
         # cold descendants, before publishing current tools.
+        from .state import LocalStorage
+
         descendants = json.loads(await self._publish_startup(self._native.call("list_subagents")))
         if any(child["runtime_loaded"] for child in descendants):
             raise RuntimeError("Native local history has a live descendant writer")
@@ -5901,7 +5991,7 @@ class Session(Generic[ContextT, OutputT]):
             str,
             tuple[
                 list[RecordedTurn],
-                list[SessionItem],
+                list[_wire_types._events.SessionItem],
                 list[UncertainCall],
                 set[tuple[str, str]],
             ],
@@ -5962,7 +6052,7 @@ class Session(Generic[ContextT, OutputT]):
             projected[thread_id] = turns, items, calls, shell_receipts
 
         recorded: dict[str, list[RecordedTurn]] = {}
-        recorded_items: list[SessionItem] = []
+        recorded_items: list[_wire_types._events.SessionItem] = []
         unknown: list[UncertainCall] = []
         prior: set[tuple[str, str, str]] = set()
         for thread_id, (turns, items, calls, shell_receipts) in projected.items():
@@ -6118,7 +6208,7 @@ class Session(Generic[ContextT, OutputT]):
         thread: Any,
         home: TemporaryDirectory[str] | None,
         catalog: _ToolCatalog,
-        mcp_tools: tuple[_MCP[Any], ...],
+        mcp_tools: tuple[_tool_types._MCP[Any], ...],
         context: ContextT | None,
         output: _PreparedOutput,
         instructions: str,
@@ -6140,7 +6230,7 @@ class Session(Generic[ContextT, OutputT]):
         self._provider_lease: Any = None
         self._profile_provider_leases: dict[int, Any] = {}
         self._profile_provider_keys: dict[int, str] = {}
-        self._storage: LocalStorage | CustomStorage | None = None
+        self._storage: _state_types.LocalStorage | CustomStorage | None = None
         self._history_ttl_seconds: int | None = None
         self._environment_lease: _EnvironmentLease | None = None
         self._sandbox_events: _OperationObserver | None = None
@@ -6166,7 +6256,9 @@ class Session(Generic[ContextT, OutputT]):
         self._profile_catalogs: dict[tuple[str | None, int], _ToolCatalog] = {
             (None, catalog.generation): catalog
         }
-        self._catalog_bindings: dict[tuple[str | None, int], Sequence[Tool[Any]]] = {}
+        self._catalog_bindings: dict[
+            tuple[str | None, int], Sequence[_declaration_types.Tool[Any]]
+        ] = {}
         self._computer_resources = _ComputerResources()
         self._context_transform_purpose: Literal["turn", "output_repair"] = "turn"
         self._model_backend: Any = None
@@ -6200,26 +6292,26 @@ class Session(Generic[ContextT, OutputT]):
         # MCP publication keeps this exact captured tuple; rebinding an idle
         # Python catalog creates another. No second set of bindings is made.
         self._bound_tools = catalog.tools
-        self._bindings: Sequence[Tool[ContextT]] = ()
+        self._bindings: Sequence[_declaration_types.Tool[ContextT]] = ()
         self._mcp_tools = mcp_tools
         self._hosted_verification = next(
             (
                 server
                 for server in mcp_tools
-                if type(server) in (HostedVerificationMCP, ChatGPTAppsMCP)
+                if type(server) in (_tool_types.HostedVerificationMCP, _tool_types.ChatGPTAppsMCP)
             ),
             None,
         )
         self._chatgpt_apps = next(
-            (server for server in mcp_tools if type(server) is ChatGPTAppsMCP), None
+            (server for server in mcp_tools if type(server) is _tool_types.ChatGPTAppsMCP), None
         )
         self._default_tools: (
             tuple[
                 ToolRef
                 | _MCPResourceRef
-                | Tool[ContextT]
+                | _declaration_types.Tool[ContextT]
                 | Environment[ContextT]
-                | NativeAgents[ContextT],
+                | _tool_types.NativeAgents[ContextT],
                 ...,
             ]
             | None
@@ -6228,7 +6320,7 @@ class Session(Generic[ContextT, OutputT]):
         self._project_guidance = False
         self._writable_roots: tuple[str, ...] | None = None
         self._executor_termination_attempted = False
-        self._native_agents: NativeAgents[Any] | None = None
+        self._native_agents: _tool_types.NativeAgents[Any] | None = None
         self._managed_tool_streams: dict[str, _ManagedToolStream] = {}
         self._interception: _NativeInterception | None = None
         self._input_guardrails: tuple[InputGuardrail[Any], ...] = ()
@@ -6239,7 +6331,7 @@ class Session(Generic[ContextT, OutputT]):
         self._id: str = thread.id
         self._owner = object()
         self._loop = asyncio.get_running_loop()
-        self._url_completions: dict[tuple[str, str], ElicitationRequest] = {}
+        self._url_completions: dict[tuple[str, str], _tool_types.ElicitationRequest] = {}
         self._url_completion_lock = asyncio.Lock()
         self._active: _Submission | None = None
         self._configured_usage_parent: _UsageCollector | None = None
@@ -6249,10 +6341,10 @@ class Session(Generic[ContextT, OutputT]):
         self._last_turn: Turn[Any] | None = None
         self._repair_turns: list[RecordedTurn] = []
         self._repair_receipts_incomplete = False
-        self._repair_items: list[SessionItem] = []
-        self._application_tool_outputs: list[ApplicationToolOutput] = []
+        self._repair_items: list[_wire_types._events.SessionItem] = []
+        self._application_tool_outputs: list[_state_types.ApplicationToolOutput] = []
         self._restored_turn: Turn[OutputT] | None = None
-        self._staged_restore_checkpoint: SessionState | None = None
+        self._staged_restore_checkpoint: _state_types.SessionState | None = None
         self._child_callbacks: dict[tuple[str, str, str], _ChildCallbacks] = {}
         self._configured_children: list[_ConfiguredChild] = []
         self._configured_environment_source: tuple[Environment[Any], object] | None = None
@@ -6263,7 +6355,7 @@ class Session(Generic[ContextT, OutputT]):
         self._mutation_cancellable = False
         self._update_generation = 0
         self._checkpoint_task: asyncio.Future[None] | None = None
-        self._configured_capture: asyncio.Task[SessionState] | None = None
+        self._configured_capture: asyncio.Task[_state_types.SessionState] | None = None
         self._stored_fork: Any = None
         self._stored_fork_receipt: asyncio.Future[None] | None = None
         self._sealed_checkpoint: str | None = None
@@ -6281,7 +6373,7 @@ class Session(Generic[ContextT, OutputT]):
         self._close_task: asyncio.Task[None] | None = None
         self._stored_close_action: Any | None = None
         self._scope_close_task: asyncio.Task[None] | None = None
-        self._interaction_handler: _InteractionHandler | None = None
+        self._interaction_handler: _tool_types._InteractionHandler | None = None
         self._interaction_error: BaseException | None = None
         self._sync_cleanup_owner = _sync_run.get()
         self._sync_cleanup_deferred = False
@@ -6334,7 +6426,7 @@ class Session(Generic[ContextT, OutputT]):
             server._has_result_callback or server.request_metadata is not None
             for server in self._mcp_tools
         ) or any(
-            isinstance(tool, _MCP)
+            (type(tool) is not FunctionTool and isinstance(tool, _tool_types._MCP))
             and (tool._has_result_callback or tool.request_metadata is not None)
             for agent in (*configured, *pending)
             for tool in agent.tools
@@ -6425,10 +6517,10 @@ class Session(Generic[ContextT, OutputT]):
 
     async def _restore_opening_checkpoint(
         self,
-        saved: SessionState,
+        saved: _state_types.SessionState,
         catalog: _ToolCatalog,
-        restored_available: Sequence[Tool[Any]],
-        restored_mcp: Sequence[_MCP[Any]],
+        restored_available: Sequence[_declaration_types.Tool[Any]],
+        restored_mcp: Sequence[_tool_types._MCP[Any]],
         *,
         manual_restore: bool,
         restored_defaults: tuple[ToolRef | _MCPResourceRef, ...] | None,
@@ -6503,8 +6595,8 @@ class Session(Generic[ContextT, OutputT]):
         instructions: str,
         instruction_receipts: Sequence[Mapping[str, Any]],
         mcp_config: str,
-        mcp_tools: tuple[_MCP[Any], ...],
-        allowed_mcp: tuple[_MCP[Any], ...],
+        mcp_tools: tuple[_tool_types._MCP[Any], ...],
+        allowed_mcp: tuple[_tool_types._MCP[Any], ...],
         generation: int,
         profile_roster: list[dict[str, Any]],
         restored_profile_id: str | None = None,
@@ -6591,7 +6683,9 @@ class Session(Generic[ContextT, OutputT]):
                 raise NativeError("Native instruction update acknowledgement did not match")
         if allowed_mcp:
             receipt = await self._publish_startup(
-                thread._replace_mcp_servers(mcp_config, _result_policies(mcp_tools, generation))
+                thread._replace_mcp_servers(
+                    mcp_config, _tool_types._result_policies(mcp_tools, generation)
+                )
             )
             _check_mcp_receipt(receipt, mcp_tools, allowed_mcp, generation)
         if profile_roster:
@@ -6671,7 +6765,7 @@ class Session(Generic[ContextT, OutputT]):
         Agent[Any, Any],
         dict[str, Any] | None,
         _ToolCatalog,
-        Sequence[Tool[Any]],
+        Sequence[_declaration_types.Tool[Any]],
         str,
     ]:
         if snapshot is None:
@@ -6846,6 +6940,8 @@ class Session(Generic[ContextT, OutputT]):
             profile = None if record.agent is root else profiles.get(id(record.agent))
             if profile is None and record.agent is not root:
                 raise NativeError("Guardrail checkpoint has no captured source Agent")
+            from .state import _GuardrailCheckpointRecord
+
             captured = _GuardrailCheckpointRecord(
                 kind=record.kind,
                 name=record.name,
@@ -6859,7 +6955,7 @@ class Session(Generic[ContextT, OutputT]):
             durable = captured.model_dump(mode="json", exclude={"output_info"})
             try:
                 info = record.result.output_info
-                if _is_json_value(info):
+                if _tool_types._is_json_value(info):
                     durable["output_info"] = json.loads(json.dumps(info, allow_nan=False))
             except Exception:
                 # Live diagnostics stay untouched; unsupported host values are local-only.
@@ -6867,7 +6963,7 @@ class Session(Generic[ContextT, OutputT]):
             records.append(durable)
         return records
 
-    def _restore_guardrail_records(self, saved: SessionState) -> list[GuardrailRecord]:
+    def _restore_guardrail_records(self, saved: _state_types.SessionState) -> list[GuardrailRecord]:
         records = []
         for record in saved.guardrail_results:
             if record.agent_profile is None:
@@ -6941,7 +7037,9 @@ class Session(Generic[ContextT, OutputT]):
             raise NativeError("Native request has an unknown captured Agent profile")
         return runtime
 
-    def _bindings_for_message(self, message: Mapping[str, Any]) -> Sequence[Tool[Any]]:
+    def _bindings_for_message(
+        self, message: Mapping[str, Any]
+    ) -> Sequence[_declaration_types.Tool[Any]]:
         declaration = self._agent_for_message(message)
         generation = message.get("generation")
         if type(generation) is int:
@@ -6999,7 +7097,7 @@ class Session(Generic[ContextT, OutputT]):
         profile_catalogs: dict[tuple[str | None, int], _ToolCatalog] = {
             (key, value.catalog.generation): value.catalog for key, value in profiles.items()
         }
-        catalog_bindings: dict[tuple[str | None, int], Sequence[Tool[Any]]] = {
+        catalog_bindings: dict[tuple[str | None, int], Sequence[_declaration_types.Tool[Any]]] = {
             (key, value.catalog.generation): value.profile.declaration.tools
             for key, value in profiles.items()
         }
@@ -7054,8 +7152,8 @@ class Session(Generic[ContextT, OutputT]):
         return self._opening_agent
 
     def _select_voice_tools(
-        self, tools: Sequence[Tool[Any] | ToolRef]
-    ) -> tuple[Tool[Any] | ToolRef, ...]:
+        self, tools: Sequence[_declaration_types.Tool[Any] | ToolRef]
+    ) -> tuple[_declaration_types.Tool[Any] | ToolRef, ...]:
         self._check_open()
         source = self._effective_agent()
         current, _, _ = _split_tools(
@@ -7078,7 +7176,7 @@ class Session(Generic[ContextT, OutputT]):
         self,
         state: _Submission,
         source: Agent[Any, Any],
-        bindings: Sequence[Tool[Any]],
+        bindings: Sequence[_declaration_types.Tool[Any]],
         handoffs: Mapping[str, str] | None = None,
     ) -> set[ToolRef] | None:
         if not self._profiles or state.operation_refs is None:
@@ -7100,7 +7198,7 @@ class Session(Generic[ContextT, OutputT]):
                 continue
             if isinstance(tool, (FunctionTool, HostedMCP)):
                 allowed.add(tool.ref)
-            elif isinstance(tool, _MCP):
+            elif isinstance(tool, _tool_types._MCP):
                 allowed.update(tool.tool(raw) for raw in tool.tools)
         return {
             ToolRef(ref.name, ref.namespace or "functions")
@@ -7302,7 +7400,7 @@ class Session(Generic[ContextT, OutputT]):
             _include_execution_details=include_execution_details,
         )
 
-    async def respond(self, reply: ActionReply[Any]) -> None:
+    async def respond(self, reply: _tool_types.ActionReply[Any]) -> None:
         """Deliver a prepared reply to its exact still-live request in this Session.
 
         Preparing a reply does not reserve its request. Another responder can
@@ -7310,7 +7408,7 @@ class Session(Generic[ContextT, OutputT]):
         """
         self._check_open()
         self._check_callback_operation("respond to its own Session")
-        if not isinstance(reply, ActionReply):
+        if not (isinstance(reply, _tool_types.ActionReply)):
             raise TypeError("respond requires a live request.reply(value)")
         request = reply._request
         if request._session() is not self:
@@ -7319,30 +7417,30 @@ class Session(Generic[ContextT, OutputT]):
                 await child.session.respond(reply)
                 return
             raise InteractionExpiredError("Reply belongs to a different Session")
-        if isinstance(request, UrlRequest):
-            if reply._value is _URL_ACCEPT:
+        if isinstance(request, _tool_types.UrlRequest):
+            if reply._value is _tool_types._URL_ACCEPT:
                 await request.accept_url()
             elif reply._value is None:
                 await request.decline()
             else:
                 raise TypeError("URL requests accept consent or decline, not form values")
-        elif isinstance(request, FormRequest):
+        elif isinstance(request, _tool_types.FormRequest):
             if reply._value is None:
                 await request.decline()
             else:
                 # reply() captured and validated detached JSON; enqueue rechecks authority.
                 await request._enqueue_form(reply._value)
-        elif isinstance(request, VerificationRequest) and reply._value is None:
+        elif (isinstance(request, _tool_types.VerificationRequest)) and reply._value is None:
             await request.decline()
         else:
             await request.respond(reply._value)
 
-    async def pending_interactions(self) -> tuple[Interaction, ...]:
+    async def pending_interactions(self) -> tuple[_tool_types.Interaction, ...]:
         """Read fresh, still-live requests from this Session and its children."""
         self._check_open()
         self._check_callback_operation("read interactions from its own Session")
         seen: set[int] = set()
-        requests: list[Interaction] = []
+        requests: list[_tool_types.Interaction] = []
         while (request := self._manual_request(None, seen)) is not None:
             seen.add(request._invocation)
             requests.append(request)
@@ -7395,8 +7493,10 @@ class Session(Generic[ContextT, OutputT]):
             else None
         )
 
-    async def _configured_requests(self, turn: Turn[Any] | None = None) -> list[Interaction]:
-        requests: list[Interaction] = []
+    async def _configured_requests(
+        self, turn: Turn[Any] | None = None
+    ) -> list[_tool_types.Interaction]:
+        requests: list[_tool_types.Interaction] = []
         for child in tuple(self._configured_children):
             owner = child.owner
             if turn is not None and (
@@ -7417,7 +7517,7 @@ class Session(Generic[ContextT, OutputT]):
                 requests.extend(captured)
         return requests
 
-    def _pending_questions(self) -> Iterator[_NativeQuestion]:
+    def _pending_questions(self) -> Iterator[_tool_types._NativeQuestion]:
         for state in (self._active, *self._child_callbacks.values()):
             if (
                 state is not None
@@ -7426,7 +7526,7 @@ class Session(Generic[ContextT, OutputT]):
                 and not state.terminal.done()
             ):
                 for question in state.questions.values():
-                    if isinstance(question, VerificationRequest) and (
+                    if (isinstance(question, _tool_types.VerificationRequest)) and (
                         question._registration is not self._hosted_verification
                         or question.subagent_id is None
                         and not self._native._check_elicitation_pending(
@@ -7436,7 +7536,7 @@ class Session(Generic[ContextT, OutputT]):
                         continue
                     yield question
 
-    def interactions(self) -> AsyncIterator[Interaction]:
+    def interactions(self) -> AsyncIterator[_tool_types.Interaction]:
         """Yield each still-pending native request once for this reader.
 
         Requests come from the live registry, independently of event retention.
@@ -7446,7 +7546,7 @@ class Session(Generic[ContextT, OutputT]):
         self._check_callback_operation("read interactions from its own Session")
         return self._interactions()
 
-    async def _interactions(self) -> AsyncIterator[Interaction]:
+    async def _interactions(self) -> AsyncIterator[_tool_types.Interaction]:
         seen: set[int] = set()
         seen_questions: set[int] = set()
         seen_configured: set[tuple[str, int]] = set()
@@ -7464,12 +7564,14 @@ class Session(Generic[ContextT, OutputT]):
                 pending = next((key for key in questions if key not in seen_questions), None)
                 if pending is not None:
                     seen_questions.add(pending)
-                    yield cast(Interaction, questions[pending])
+                    yield cast(_tool_types.Interaction, questions[pending])
                 else:
                     configured = {
                         (
                             item.session_id,
-                            item._invocation if isinstance(item, ActionRequested) else id(item),
+                            item._invocation
+                            if (isinstance(item, _tool_types.ActionRequested))
+                            else id(item),
                         ): item
                         for item in await self._configured_requests()
                     }
@@ -7485,7 +7587,9 @@ class Session(Generic[ContextT, OutputT]):
                     else:
                         await signal.wait()
 
-    async def _wait_url_completion(self, question: ElicitationRequest, timeout: float) -> None:
+    async def _wait_url_completion(
+        self, question: _tool_types.ElicitationRequest, timeout: float
+    ) -> None:
         self._check_loop()
         if self._closing or self._closed or self._broken or self._sealed_checkpoint is not None:
             raise InteractionExpiredError("URL request is expired")
@@ -7512,7 +7616,7 @@ class Session(Generic[ContextT, OutputT]):
         if not completed:
             raise InteractionExpiredError("URL request is expired")
 
-    async def _cancel_url_completion(self, question: ElicitationRequest) -> None:
+    async def _cancel_url_completion(self, question: _tool_types.ElicitationRequest) -> None:
         if question.subagent_id is not None:
             await self._native._cancel_child_url_completion(question._message["_sdk_question_id"])
         else:
@@ -7529,7 +7633,9 @@ class Session(Generic[ContextT, OutputT]):
                 ),
             )
 
-    def _settle_url_completion(self, question: ElicitationRequest, completed: bool) -> None:
+    def _settle_url_completion(
+        self, question: _tool_types.ElicitationRequest, completed: bool
+    ) -> None:
         question._release_tracing()
         key = (question._message["server_name"], question._message["id"])
         if self._url_completions.get(key) is question:
@@ -7544,7 +7650,7 @@ class Session(Generic[ContextT, OutputT]):
             self._observations.notify()
 
     async def _probe_child_url_completion(
-        self, question: ElicitationRequest, *, retire: bool = False
+        self, question: _tool_types.ElicitationRequest, *, retire: bool = False
     ) -> bool | None:
         # Serialize native receipt consumption with publishing its Python result.
         async with self._url_completion_lock:
@@ -7572,7 +7678,7 @@ class Session(Generic[ContextT, OutputT]):
             else:
                 self._settle_url_completion(question, False)
 
-    def _check_question(self, question: _NativeQuestion) -> _CallbackState:
+    def _check_question(self, question: _tool_types._NativeQuestion) -> _CallbackState:
         self._check_loop()
         if (
             self._closing
@@ -7609,7 +7715,7 @@ class Session(Generic[ContextT, OutputT]):
             or state.questions.get(id(question)) is not question
         ):
             raise InteractionExpiredError("Native request is expired or already answered")
-        if isinstance(question, VerificationRequest) and (
+        if (isinstance(question, _tool_types.VerificationRequest)) and (
             question._registration is not self._hosted_verification
             or question.subagent_id is None
             and not self._native._check_elicitation_pending(
@@ -7621,7 +7727,7 @@ class Session(Generic[ContextT, OutputT]):
         return state
 
     async def _respond_question(
-        self, question: _NativeQuestion, operation: str, encoded: str
+        self, question: _tool_types._NativeQuestion, operation: str, encoded: str
     ) -> None:
         state = self._check_question(question)
         if question._message.get("_sdk_question_id") is not None:
@@ -7830,7 +7936,12 @@ class Session(Generic[ContextT, OutputT]):
         input: UserInput,
         *,
         output_type: None = None,
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
+        tools: Sequence[
+            ToolRef
+            | _declaration_types.Tool[ContextT]
+            | Environment[ContextT]
+            | _tool_types.NativeAgents[ContextT]
+        ]
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue"] = "reject",
@@ -7851,7 +7962,12 @@ class Session(Generic[ContextT, OutputT]):
         input: UserInput,
         *,
         output_type: OutputSpec[_TurnT],
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
+        tools: Sequence[
+            ToolRef
+            | _declaration_types.Tool[ContextT]
+            | Environment[ContextT]
+            | _tool_types.NativeAgents[ContextT]
+        ]
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue"] = "reject",
@@ -7891,7 +8007,12 @@ class Session(Generic[ContextT, OutputT]):
         input: UserInput,
         *,
         output_type: OutputSpec[Any] | None = None,
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
+        tools: Sequence[
+            ToolRef
+            | _declaration_types.Tool[ContextT]
+            | Environment[ContextT]
+            | _tool_types.NativeAgents[ContextT]
+        ]
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue", "steer"] = "reject",
@@ -8176,7 +8297,7 @@ class Session(Generic[ContextT, OutputT]):
                 return SteeringReceipt(self.id, expected_turn_id, handle.submission_id, input_id)
             return None
 
-    async def _start_child(self, child: Subagent, input: UserInput) -> Turn[str]:
+    async def _start_child(self, child: _declaration_types.Subagent, input: UserInput) -> Turn[str]:
         if child._session is not self:
             raise ValueError("Subagent belongs to another Session")
         if child.status != "active" or child._instance_id is None or child._incarnation is None:
@@ -8289,7 +8410,7 @@ class Session(Generic[ContextT, OutputT]):
         seen: set[int],
         *,
         _call_id: str | None = None,
-    ) -> ActionRequested[Any, Any] | None:
+    ) -> _tool_types.ActionRequested[Any, Any] | None:
         state: _CallbackState | None = self._active
         if self._closing:
             seen.clear()
@@ -8353,7 +8474,10 @@ class Session(Generic[ContextT, OutputT]):
                 catalog = self._catalog_for_message(message, marker["generation"])
                 entry = catalog.tools[marker["slot"]]
                 if (
-                    not isinstance(entry, _CapturedManual)
+                    not (
+                        type(entry) is not _CapturedFunction
+                        and isinstance(entry, _tool_types._CapturedManual)
+                    )
                     or entry.name != message["tool"]
                     or entry._ref.namespace != message.get("namespace")
                 ):
@@ -8361,7 +8485,9 @@ class Session(Generic[ContextT, OutputT]):
                 if not self._native._check_manual_tool(grant):
                     state.manual_inputs.pop(invocation, None)
                     continue
-                if self._fail_unhandled_questions and not isinstance(entry, _CapturedApproval):
+                if self._fail_unhandled_questions and not (
+                    isinstance(entry, _tool_types._CapturedApproval)
+                ):
                     state.failure.set_result(
                         InteractionRequired(
                             "Manual tools require on_interaction or Agent.session()"
@@ -8377,7 +8503,7 @@ class Session(Generic[ContextT, OutputT]):
                 ):
                     tracing_context = state.tracing.context
                 new_input = invocation not in state.manual_inputs
-                if new_input and not isinstance(entry, _CapturedApproval):
+                if new_input and not (isinstance(entry, _tool_types._CapturedApproval)):
                     with (
                         _clear_current(),
                         _owned_span("manual input validation", "validation", tracing_context),
@@ -8395,7 +8521,7 @@ class Session(Generic[ContextT, OutputT]):
                 # its own value and we check the native grant on every exposure.
                 arguments = deepcopy(
                     state.manual_inputs.get(invocation)
-                    if isinstance(entry, _CapturedApproval)
+                    if (isinstance(entry, _tool_types._CapturedApproval))
                     else state.manual_inputs[invocation]
                 )
                 if (
@@ -8421,13 +8547,13 @@ class Session(Generic[ContextT, OutputT]):
                 if (
                     message.get("_sdk_restored_approval")
                     and message.get("_sdk_approval_required")
-                    and not isinstance(entry, _CapturedApproval)
+                    and not (isinstance(entry, _tool_types._CapturedApproval))
                 ):
                     raise NativeError(
                         "Saved managed approval requires an approval-enabled callback"
                     )
-                if isinstance(entry, _CapturedApproval):
-                    assert isinstance(request, ApprovalRequested)
+                if isinstance(entry, _tool_types._CapturedApproval):
+                    assert isinstance(request, _tool_types.ApprovalRequested)
                     if message.get("_sdk_restored_approval") and not message.get(
                         "_sdk_approval_required"
                     ):
@@ -8488,7 +8614,7 @@ class Session(Generic[ContextT, OutputT]):
             return False
         (question,) = state.questions.values()
         return (
-            isinstance(question, ApprovalRequest)
+            (isinstance(question, _tool_types.ApprovalRequest))
             and question.subagent_id is None
             and question.submission_id == state.handle.submission_id
             and question.turn_id == state.handle.turn_id
@@ -8576,7 +8702,7 @@ class Session(Generic[ContextT, OutputT]):
                 await asyncio.gather(changed, finished, return_exceptions=True)
         return False
 
-    def _manual_catalog(self, request: ActionRequested[Any, Any]) -> _ToolCatalog:
+    def _manual_catalog(self, request: _tool_types.ActionRequested[Any, Any]) -> _ToolCatalog:
         """Resolve a live request through its original native source capture."""
         for invocation, _, raw in self._native._pending_manual_tools():
             if invocation != request._invocation:
@@ -8586,7 +8712,10 @@ class Session(Generic[ContextT, OutputT]):
             catalog = self._catalog_for_message(message, marker["generation"])
             if marker["slot"] == request._slot:
                 entry = catalog.tools[request._slot]
-                if isinstance(entry, _CapturedManual) and entry.declaration is request._declaration:
+                if (
+                    type(entry) is not _CapturedFunction
+                    and isinstance(entry, _tool_types._CapturedManual)
+                ) and entry.declaration is request._declaration:
                     return catalog
             break
         raise InteractionExpiredError("Manual tool reply belongs to an expired declaration")
@@ -8693,8 +8822,8 @@ class Session(Generic[ContextT, OutputT]):
     async def _prepare_managed_approval(
         self,
         state: _CallbackState,
-        entry: _CapturedApproval,
-        request: ApprovalRequested[Any],
+        entry: _tool_types._CapturedApproval,
+        request: _tool_types.ApprovalRequested[Any],
         message: dict[str, Any],
     ) -> None:
         scope = _Invocation(self)
@@ -8896,7 +9025,7 @@ class Session(Generic[ContextT, OutputT]):
                         )
                     ] = (
                         restored_decision.approve,
-                        _DEFAULT_APPROVAL_REASON
+                        _tool_types._DEFAULT_APPROVAL_REASON
                         if restored_decision.reason is None
                         else restored_decision.reason,
                     )
@@ -8974,7 +9103,7 @@ class Session(Generic[ContextT, OutputT]):
         ).hexdigest()
 
     @staticmethod
-    def _approval_signature(entry: _CapturedApproval) -> str:
+    def _approval_signature(entry: _tool_types._CapturedApproval) -> str:
         declaration = entry.declaration
         return hashlib.sha256(
             json.dumps(
@@ -9010,7 +9139,10 @@ class Session(Generic[ContextT, OutputT]):
         for profile_id, catalog in catalogs:
             for entry in catalog.tools:
                 if (
-                    not isinstance(entry, _CapturedApproval)
+                    not (
+                        type(entry) is not _CapturedFunction
+                        and isinstance(entry, _tool_types._CapturedApproval)
+                    )
                     or entry.declaration.approval_key is None
                 ):
                     continue
@@ -9034,7 +9166,10 @@ class Session(Generic[ContextT, OutputT]):
             catalog = self._approval_catalog(profile_id)
             for slot, entry in enumerate(catalog.tools):
                 if (
-                    isinstance(entry, _CapturedApproval)
+                    (
+                        type(entry) is not _CapturedFunction
+                        and isinstance(entry, _tool_types._CapturedApproval)
+                    )
                     and entry.declaration.approval_key == record.key
                     and self._approval_signature(entry) == record.signature
                 ):
@@ -9044,10 +9179,10 @@ class Session(Generic[ContextT, OutputT]):
 
     async def _decide_approval(
         self,
-        request: ApprovalRequested[Any],
+        request: _tool_types.ApprovalRequested[Any],
         approve: bool,
         *,
-        reason: str = _DEFAULT_APPROVAL_REASON,
+        reason: str = _tool_types._DEFAULT_APPROVAL_REASON,
         always: bool = False,
     ) -> None:
         self._check_loop()
@@ -9080,15 +9215,19 @@ class Session(Generic[ContextT, OutputT]):
             entry = self._profile_catalogs[(key[0], request._approval_generation)].tools[
                 request._slot
             ]
-            assert isinstance(entry, _CapturedApproval)
+            assert type(entry) is not _CapturedFunction and isinstance(
+                entry, _tool_types._CapturedApproval
+            )
             assert entry.declaration.approval_key is not None
+            from .state import _RememberedApproval
+
             record = _RememberedApproval(
                 profile_id=key[0],
                 profile=self._approval_profile(key[0]),
                 key=entry.declaration.approval_key,
                 signature=self._approval_signature(entry),
                 approve=approve,
-                reason=None if isinstance(reason, _DefaultApprovalReason) else reason,
+                reason=None if (isinstance(reason, _tool_types._DefaultApprovalReason)) else reason,
             )
         if approve:
             approved = self._approval_ready.get(request._invocation)
@@ -9108,7 +9247,7 @@ class Session(Generic[ContextT, OutputT]):
         else:
             reply_reason = reason
             if (
-                isinstance(reason, _DefaultApprovalReason)
+                (isinstance(reason, _tool_types._DefaultApprovalReason))
                 and self._realtime is not None
                 and self._realtime._config.tool_error_formatter is not None
                 and self._active is not None
@@ -9144,11 +9283,11 @@ class Session(Generic[ContextT, OutputT]):
 
     async def _respond(
         self,
-        request: ActionRequested[Any, Any],
+        request: _tool_types.ActionRequested[Any, Any],
         result: Any = None,
         *,
         expected_json: str | None = None,
-        prepared: _PreparedManualResult | None = None,
+        prepared: _tool_types._PreparedManualResult | None = None,
         _approval_rejection: bool = False,
         _background: bool = False,
     ) -> Turn[Any]:
@@ -9167,7 +9306,7 @@ class Session(Generic[ContextT, OutputT]):
         if (
             invocation is not None
             and invocation.active
-            and not isinstance(request, ApprovalRequested)
+            and not (isinstance(request, _tool_types.ApprovalRequested))
         ):
             raise RuntimeError("A callback must return its reply; it cannot respond directly")
         state: _CallbackState | None = (
@@ -9196,7 +9335,13 @@ class Session(Generic[ContextT, OutputT]):
                 "Manual tool reply is foreign, expired or already delivered"
             )
         entry = self._manual_catalog(request).tools[request._slot]
-        if not isinstance(entry, _CapturedManual) or entry.declaration is not request._declaration:
+        if (
+            not (
+                type(entry) is not _CapturedFunction
+                and isinstance(entry, _tool_types._CapturedManual)
+            )
+            or entry.declaration is not request._declaration
+        ):
             raise InteractionExpiredError("Manual tool reply belongs to a different declaration")
         if prepared is not None and (
             prepared.declaration is not entry.declaration or prepared.call_id != request.call_id
@@ -9234,7 +9379,10 @@ class Session(Generic[ContextT, OutputT]):
                 raise InteractionExpiredError("Manual child tool reply is expired")
             entry = self._manual_catalog(request).tools[request._slot]
             if (
-                not isinstance(entry, _CapturedManual)
+                not (
+                    type(entry) is not _CapturedFunction
+                    and isinstance(entry, _tool_types._CapturedManual)
+                )
                 or entry.declaration is not request._declaration
             ):
                 raise InteractionExpiredError(
@@ -9244,8 +9392,11 @@ class Session(Generic[ContextT, OutputT]):
         else:
             assert state.handle is not None
             handle = state.handle
-        if isinstance(request, ApprovalRequested) and not _approval_rejection:
-            if not isinstance(result, ApprovalDecision):
+        if (isinstance(request, _tool_types.ApprovalRequested)) and not _approval_rejection:
+            if not (
+                type(result) is not _CapturedFunction
+                and isinstance(result, _tool_types.ApprovalDecision)
+            ):
                 raise TypeError("A managed function reply requires an approval decision")
             await self._decide_approval(
                 request, result.approve, reason=result.reason, always=result.always
@@ -9254,7 +9405,7 @@ class Session(Generic[ContextT, OutputT]):
         scope = _Invocation(self)
         token = _invocation.set(scope)
         output: str | None = None
-        application_output: ApplicationToolOutput | None = None
+        application_output: _state_types.ApplicationToolOutput | None = None
         try:
             application_data = None
             if _approval_rejection:
@@ -9278,6 +9429,8 @@ class Session(Generic[ContextT, OutputT]):
                 output = prepared.output
                 application_data = prepared.application_data
             if application_data is not None:
+                from .state import ApplicationToolOutput
+
                 application_output = ApplicationToolOutput(
                     submission_id=handle.submission_id,
                     turn_id=request.turn_id,
@@ -9380,7 +9533,7 @@ class Session(Generic[ContextT, OutputT]):
         finally:
             submission.changed.set()
 
-    async def list_mcp_prompts(self, server: str) -> list[MCPPrompt]:
+    async def list_mcp_prompts(self, server: str) -> list[_tool_types.MCPPrompt]:
         """Return all prompts from a selected ordinary MCP server while idle.
 
         Native pagination either completes or raises without returning a partial
@@ -9392,11 +9545,13 @@ class Session(Generic[ContextT, OutputT]):
         Missing prompt capability returns an empty list. Results never enter
         model context. Lifetime and cleanup rules match ``read_mcp_resource``.
         """
-        return cast(list[MCPPrompt], await self._mcp_request("list_mcp_prompts", server, {}))
+        return cast(
+            list[_tool_types.MCPPrompt], await self._mcp_request("list_mcp_prompts", server, {})
+        )
 
     async def get_mcp_prompt(
         self, server: str, name: str, arguments: Mapping[str, str] | None = None
-    ) -> MCPGetPromptResult:
+    ) -> _tool_types.MCPGetPromptResult:
         """Get caller-owned prompt messages without submitting model work.
 
         Arguments are copied before activation; omitted arguments and
@@ -9410,13 +9565,13 @@ class Session(Generic[ContextT, OutputT]):
         if arguments is not None:
             params["arguments"] = dict(arguments)
         return cast(
-            MCPGetPromptResult,
+            _tool_types.MCPGetPromptResult,
             await self._mcp_request("get_mcp_prompt", server, params),
         )
 
     async def list_mcp_resources(
         self, server: str, cursor: str | None = None
-    ) -> MCPListResourcesResult:
+    ) -> _tool_types.MCPListResourcesResult:
         """Read one resource page from a selected HttpMCP or StdioMCP while idle.
 
         Pass the returned ``nextCursor`` to request another page. A server that
@@ -9426,13 +9581,13 @@ class Session(Generic[ContextT, OutputT]):
         """
         params = {} if cursor is None else {"cursor": cursor}
         return cast(
-            MCPListResourcesResult,
+            _tool_types.MCPListResourcesResult,
             await self._mcp_request("list_mcp_resources", server, params),
         )
 
     async def list_mcp_resource_templates(
         self, server: str, cursor: str | None = None
-    ) -> MCPListResourceTemplatesResult:
+    ) -> _tool_types.MCPListResourceTemplatesResult:
         """Read one template page while idle, leaving continuation to the caller.
 
         A server without the resources capability returns an empty list.
@@ -9441,11 +9596,11 @@ class Session(Generic[ContextT, OutputT]):
         """
         params = {} if cursor is None else {"cursor": cursor}
         return cast(
-            MCPListResourceTemplatesResult,
+            _tool_types.MCPListResourceTemplatesResult,
             await self._mcp_request("list_mcp_resource_templates", server, params),
         )
 
-    async def read_mcp_resource(self, server: str, uri: str) -> MCPReadResourceResult:
+    async def read_mcp_resource(self, server: str, uri: str) -> _tool_types.MCPReadResourceResult:
         """Read URI contents from a selected HttpMCP or StdioMCP while idle.
 
         Return the transport result, including text, base64 blobs and metadata.
@@ -9455,7 +9610,7 @@ class Session(Generic[ContextT, OutputT]):
         can retire the Session; open a new Session before doing further work.
         """
         return cast(
-            MCPReadResourceResult,
+            _tool_types.MCPReadResourceResult,
             await self._mcp_request("read_mcp_resource", server, {"uri": uri}),
         )
 
@@ -9477,7 +9632,7 @@ class Session(Generic[ContextT, OutputT]):
             (
                 item
                 for item in selected_mcp
-                if type(item) in (HttpMCP, StdioMCP) and item.name == server
+                if type(item) in (_tool_types.HttpMCP, _tool_types.StdioMCP) and item.name == server
             ),
             None,
         )
@@ -9577,7 +9732,7 @@ class Session(Generic[ContextT, OutputT]):
         self,
         lease: _EnvironmentLease | None,
         *,
-        state: SessionState | ManagedWorkspaceCheckpoint | None,
+        state: _state_types.SessionState | ManagedWorkspaceCheckpoint | None,
         resume: str | None,
     ) -> None:
         self._environment_lease = lease
@@ -9710,7 +9865,7 @@ class Session(Generic[ContextT, OutputT]):
         )
 
     def _start_raw_usage_on_restore(
-        self, agent: Agent[Any, Any] | None, state: SessionState | None
+        self, agent: Agent[Any, Any] | None, state: _state_types.SessionState | None
     ) -> None:
         capture = _raw_usage_restore.get()
         if (
@@ -10066,7 +10221,7 @@ class Session(Generic[ContextT, OutputT]):
                             allowed_mcp,
                             programmatic_tool_calling=self._effective_agent().programmatic_tool_calling,
                         ),
-                        _result_policies(self._mcp_tools, self._catalog.generation),
+                        _tool_types._result_policies(self._mcp_tools, self._catalog.generation),
                     ),
                     candidate=thread,
                 )
@@ -10115,10 +10270,10 @@ class Session(Generic[ContextT, OutputT]):
 
     async def _answer_interaction(
         self,
-        event: Interaction,
+        event: _tool_types.Interaction,
         owner: _CallbackState,
         tracing_owner: SpanContext | None,
-        handler: _InteractionHandler,
+        handler: _tool_types._InteractionHandler,
         *,
         stopping: Callable[[], bool],
         failure: asyncio.Future[BaseException] | None = None,
@@ -10139,11 +10294,11 @@ class Session(Generic[ContextT, OutputT]):
                 and not owner.terminal.done()
                 and (
                     self._native._check_manual_tool(event._grant)
-                    if isinstance(event, ActionRequested)
+                    if (isinstance(event, _tool_types.ActionRequested))
                     else owner.questions.get(id(event)) is event
                 )
             )
-            if allowed and isinstance(event, VerificationRequest):
+            if allowed and (isinstance(event, _tool_types.VerificationRequest)):
                 allowed = event._registration is self._hosted_verification and (
                     event.subagent_id is not None
                     or self._native._check_elicitation_pending(
@@ -10161,7 +10316,9 @@ class Session(Generic[ContextT, OutputT]):
                 assert handler is not None
                 if not admitted():
                     return
-                if event.subagent_id is not None and not isinstance(event, ActionRequested):
+                if event.subagent_id is not None and not (
+                    isinstance(event, _tool_types.ActionRequested)
+                ):
                     if (
                         not await self._native._child_question_pending(
                             event._message["_sdk_question_id"]
@@ -10172,7 +10329,7 @@ class Session(Generic[ContextT, OutputT]):
                 scope = _Invocation(self)
                 token = _invocation.set(scope)
                 try:
-                    if isinstance(event, VerificationRequest):
+                    if isinstance(event, _tool_types.VerificationRequest):
                         provider_failed = False
                         answer = None
                         try:
@@ -10191,7 +10348,13 @@ class Session(Generic[ContextT, OutputT]):
                     scope.active = False
                     if skipped:
                         return
-                    if not isinstance(answer, ActionReply) or answer._request is not event:
+                    if (
+                        not (
+                            type(answer) is not _CapturedFunction
+                            and isinstance(answer, _tool_types.ActionReply)
+                        )
+                        or answer._request is not event
+                    ):
                         raise TypeError(
                             "on_interaction must return a reply to the interaction it received"
                         )
@@ -10204,7 +10367,7 @@ class Session(Generic[ContextT, OutputT]):
                         # A native child may retire during accepted delivery.
                         if not isinstance(owner, _ChildCallbacks):
                             raise
-                        if isinstance(event, ActionRequested):
+                        if isinstance(event, _tool_types.ActionRequested):
                             if self._native._check_manual_tool(event._grant):
                                 raise
                         elif await self._native._child_question_pending(
@@ -10232,7 +10395,7 @@ class Session(Generic[ContextT, OutputT]):
         async def invoke() -> None:
             context = (
                 event._tracing_context
-                if isinstance(event, ActionRequested)
+                if (isinstance(event, _tool_types.ActionRequested))
                 else tracing_owner._handle
                 if tracing_owner is not None
                 else None
@@ -10267,7 +10430,7 @@ class Session(Generic[ContextT, OutputT]):
                 state.failure.set_result(error)
         self._observations.notify()
 
-    def _dispatch_interaction(self, event: Interaction, owner: _CallbackState) -> None:
+    def _dispatch_interaction(self, event: _tool_types.Interaction, owner: _CallbackState) -> None:
         handler = self._interaction_handler
         if (
             handler is None
@@ -10277,7 +10440,7 @@ class Session(Generic[ContextT, OutputT]):
             or owner.terminal.done()
         ):
             return
-        tracing = event._tracing if isinstance(event, _NativeQuestion) else None
+        tracing = event._tracing if (isinstance(event, _tool_types._NativeQuestion)) else None
         task = _create_task(
             self._answer_interaction(
                 event,
@@ -10290,9 +10453,9 @@ class Session(Generic[ContextT, OutputT]):
         )
         owner.add_callback(task)
 
-    def _start_interaction_handler(self, handler: _InteractionHandler) -> None:
+    def _start_interaction_handler(self, handler: _tool_types._InteractionHandler) -> None:
         """Capture the handler and visit already-issued restored requests once."""
-        pending: list[tuple[Interaction, _CallbackState]] = []
+        pending: list[tuple[_tool_types.Interaction, _CallbackState]] = []
         for owner in (self._active, *self._child_callbacks.values()):
             if owner is None or owner.handle is None:
                 continue
@@ -10301,7 +10464,8 @@ class Session(Generic[ContextT, OutputT]):
                 seen.add(request._invocation)
                 pending.append((request, owner))
             pending.extend(
-                (cast(Interaction, question), owner) for question in owner.questions.values()
+                (cast(_tool_types.Interaction, question), owner)
+                for question in owner.questions.values()
             )
         self._interaction_handler = handler
         for event, owner in pending:
@@ -10591,7 +10755,7 @@ class Session(Generic[ContextT, OutputT]):
     async def _run_with_interactions(
         self,
         submission: Turn[OutputT],
-        handler: _InteractionHandler | None,
+        handler: _tool_types._InteractionHandler | None,
         *,
         return_state: bool = False,
         return_history: bool = False,
@@ -10632,7 +10796,15 @@ class Session(Generic[ContextT, OutputT]):
                         owner.handle.submission_id != event.submission_id
                         and not (
                             isinstance(owner, _Submission)
-                            and isinstance(event, (ElicitationRequest, VerificationRequest))
+                            and (
+                                isinstance(
+                                    event,
+                                    (
+                                        _tool_types.ElicitationRequest,
+                                        _tool_types.VerificationRequest,
+                                    ),
+                                )
+                            )
                             and event.submission_id is None
                             and owner.questions.get(id(event)) is event
                         )
@@ -10643,7 +10815,7 @@ class Session(Generic[ContextT, OutputT]):
                     continue
                 if handler is None:
                     if (
-                        not isinstance(event, ActionRequested)
+                        not (isinstance(event, _tool_types.ActionRequested))
                         or event.subagent_id is not None
                         or not any(tool.match(event) is not None for tool in pause_manual)
                     ):
@@ -10686,7 +10858,9 @@ class Session(Generic[ContextT, OutputT]):
                             raise
                         continue
                     return
-                tracing_owner = event._tracing if isinstance(event, _NativeQuestion) else None
+                tracing_owner = (
+                    event._tracing if (isinstance(event, _tool_types._NativeQuestion)) else None
+                )
                 task = asyncio.create_task(
                     self._answer_interaction(
                         event,
@@ -10780,9 +10954,9 @@ class Session(Generic[ContextT, OutputT]):
         tools: Sequence[
             ToolRef
             | _MCPResourceRef
-            | Tool[ContextT]
+            | _declaration_types.Tool[ContextT]
             | Environment[ContextT]
-            | NativeAgents[ContextT]
+            | _tool_types.NativeAgents[ContextT]
         ]
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
@@ -10886,7 +11060,7 @@ class Session(Generic[ContextT, OutputT]):
                         for tool in self._bindings
                         if isinstance(tool, (FunctionTool, HostedMCP))
                         and tool.ref in chosen
-                        or isinstance(tool, _MCP)
+                        or (type(tool) is not FunctionTool and isinstance(tool, _tool_types._MCP))
                         and tool.name in server_names
                     )
                 if prepare_request is not None and before_step is None:
@@ -11098,7 +11272,12 @@ class Session(Generic[ContextT, OutputT]):
     async def update(
         self,
         *,
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
+        tools: Sequence[
+            ToolRef
+            | _declaration_types.Tool[ContextT]
+            | Environment[ContextT]
+            | _tool_types.NativeAgents[ContextT]
+        ]
         | None = None,
         model: None = None,
         model_settings: None = None,
@@ -11112,7 +11291,12 @@ class Session(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         instructions: str | None = None,
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
+        tools: Sequence[
+            ToolRef
+            | _declaration_types.Tool[ContextT]
+            | Environment[ContextT]
+            | _tool_types.NativeAgents[ContextT]
+        ]
         | None = None,
     ) -> None:
         """Update one idle category: tools, model/settings, or instructions.
@@ -11210,7 +11394,14 @@ class Session(Generic[ContextT, OutputT]):
         self,
         settings: dict[str, Any],
         instructions: str | None,
-        tools: tuple[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents, ...] | None,
+        tools: tuple[
+            ToolRef
+            | _declaration_types.Tool[ContextT]
+            | Environment[ContextT]
+            | _tool_types.NativeAgents,
+            ...,
+        ]
+        | None,
     ) -> None:
         if tools is not None:
             if instructions is not None or settings:
@@ -11461,8 +11652,8 @@ class Session(Generic[ContextT, OutputT]):
     async def _replace_tools(
         self,
         candidate: _ToolCatalog,
-        mcp_tools: tuple[_MCP[Any], ...],
-        allowed_mcp: tuple[_MCP[Any], ...],
+        mcp_tools: tuple[_tool_types._MCP[Any], ...],
+        allowed_mcp: tuple[_tool_types._MCP[Any], ...],
         specs: str,
         *,
         default_slots: list[int] | None = None,
@@ -11501,7 +11692,7 @@ class Session(Generic[ContextT, OutputT]):
                                 allowed_mcp,
                                 programmatic_tool_calling=self._effective_agent().programmatic_tool_calling,
                             ),
-                            _result_policies(mcp_tools, candidate.generation),
+                            _tool_types._result_policies(mcp_tools, candidate.generation),
                         )
                     )
                 except BaseException as error:
@@ -11606,9 +11797,19 @@ class Session(Generic[ContextT, OutputT]):
             # An admitted opening leaf can be absent from a narrowed current descriptor.
             # Capture the effective MCP roster published for this generation.
             self._catalog_bindings[(profile_id, candidate.generation)] = (
-                *(binding for binding in self._bindings if not isinstance(binding, _MCP)),
-                *cast(tuple[HttpMCP[Any] | StdioMCP[Any], ...], mcp_tools),
-                *(binding for binding in self._bindings if isinstance(binding, _MCP)),
+                *(
+                    binding
+                    for binding in self._bindings
+                    if not (
+                        type(binding) is not FunctionTool and isinstance(binding, _tool_types._MCP)
+                    )
+                ),
+                *cast(tuple[_tool_types.HttpMCP[Any] | _tool_types.StdioMCP[Any], ...], mcp_tools),
+                *(
+                    binding
+                    for binding in self._bindings
+                    if (type(binding) is not FunctionTool and isinstance(binding, _tool_types._MCP))
+                ),
             )
             self._mcp_tools = mcp_tools
             self._start_readers()
@@ -11756,7 +11957,7 @@ class Session(Generic[ContextT, OutputT]):
                 if submission._result is not None and submission._result.done():
                     return await self._wait(submission)
                 seen: set[int] = set()
-                requests: list[Interaction] = []
+                requests: list[_tool_types.Interaction] = []
                 state = self._owned_submission(submission)
                 owner = state.handle if state is not None else None
                 owner_id = owner.submission_id if owner is not None else submission.submission_id
@@ -11776,7 +11977,7 @@ class Session(Generic[ContextT, OutputT]):
                     ):
                         continue
                     requests.extend(
-                        cast(Interaction, question)
+                        cast(_tool_types.Interaction, question)
                         for question in question_owner.questions.values()
                         if question.submission_id == owner_id
                     )
@@ -11908,7 +12109,7 @@ class Session(Generic[ContextT, OutputT]):
         # A successful join can see a done task before its done callback runs.
         finished(pending)
 
-    async def _try_cancel_child(self, child: Subagent, turn: Turn[str]) -> bool:
+    async def _try_cancel_child(self, child: _declaration_types.Subagent, turn: Turn[str]) -> bool:
         self._check_owner(turn)
         self._check_open()
         self._check_callback_operation("interrupt a child of its own Session")
@@ -13542,7 +13743,7 @@ class Session(Generic[ContextT, OutputT]):
             self._observations.finish("failed")
 
     @staticmethod
-    def _configured_checkpoint_usage(saved: SessionState) -> RunUsage:
+    def _configured_checkpoint_usage(saved: _state_types.SessionState) -> RunUsage:
         total = saved.run_usage or RunUsage(0, 0, 0, 0, 0, 0, 0, 0)
         if saved.native_continuation is None:
             return total
@@ -13556,6 +13757,8 @@ class Session(Generic[ContextT, OutputT]):
             assert captured is not None
             if captured.get("kind") != "configured-child-v1":
                 raise ValueError("Unsupported configured child continuation")
+            from .state import SessionState
+
             child = SessionState.from_json(json.dumps(captured["state"]))
             accounted = (
                 RunUsage(**captured["usage_in_parent"]) if "usage_in_parent" in captured else None
@@ -13566,7 +13769,7 @@ class Session(Generic[ContextT, OutputT]):
         return total
 
     def _bind_configured_usage(
-        self, parent: _UsageCollector, restored: SessionState | None = None
+        self, parent: _UsageCollector, restored: _state_types.SessionState | None = None
     ) -> None:
         if (
             self._configured_usage_parent is not None
@@ -13611,7 +13814,7 @@ class Session(Generic[ContextT, OutputT]):
                 _project_request(self._observations, event, route_id, captured.turn_id)
 
     def _observe_progress(
-        self, event: dict[str, Any], handle: Turn[Any] | ChildInvocation, thread_id: str
+        self, event: dict[str, Any], handle: Turn[Any] | _tool_types.ChildInvocation, thread_id: str
     ) -> None:
         assert handle.turn_id is not None
         _project_progress(
@@ -13723,7 +13926,7 @@ class Session(Generic[ContextT, OutputT]):
             selected = (
                 {"name": identity.name, "namespace": identity.namespace}
                 if identity
-                else _tool_names((server,))[server.tools.index(invocation["tool"])]
+                else _tool_types._tool_names((server,))[server.tools.index(invocation["tool"])]
             )
             if kind == "mcp_tool_call_begin":
                 if isinstance(state, _Submission):
@@ -13776,7 +13979,7 @@ class Session(Generic[ContextT, OutputT]):
         state = self._child_callbacks.get(key)
         if state is None:
             state = _ChildCallbacks(
-                ChildInvocation(self.id, child_id, instance, turn_id),
+                _tool_types.ChildInvocation(self.id, child_id, instance, turn_id),
                 observation_after=self._observations.sequence,
             )
             if turn_id not in self._managed_tool_streams:
@@ -13948,11 +14151,15 @@ class Session(Generic[ContextT, OutputT]):
             self._finish_failed_observations()
 
     async def _expire_child_question(
-        self, state: _ChildCallbacks, question: _NativeQuestion
+        self, state: _ChildCallbacks, question: _tool_types._NativeQuestion
     ) -> None:
         # This worker belongs to the existing child callback owner. Native state
         # remains authoritative if expiry races a response or this observation.
-        completion = question._url_completion if isinstance(question, ElicitationRequest) else None
+        completion = (
+            question._url_completion
+            if (isinstance(question, _tool_types.ElicitationRequest))
+            else None
+        )
         try:
             while (
                 (
@@ -13965,7 +14172,7 @@ class Session(Generic[ContextT, OutputT]):
                 and not self._closing
             ):
                 if completion is not None and not completion.done():
-                    assert isinstance(question, ElicitationRequest)
+                    assert isinstance(question, _tool_types.ElicitationRequest)
                     status = await self._probe_child_url_completion(question)
                     if status is not None:
                         return
@@ -13983,7 +14190,7 @@ class Session(Generic[ContextT, OutputT]):
             state.questions.pop(id(question), None)
             question._release_tracing()
             if completion is not None and not completion.done():
-                assert isinstance(question, ElicitationRequest)
+                assert isinstance(question, _tool_types.ElicitationRequest)
                 await self._probe_child_url_completion(question, retire=True)
             self._observations.notify()
 
@@ -14008,7 +14215,7 @@ class Session(Generic[ContextT, OutputT]):
             )
         )
 
-    def _bind_native_agents(self, declaration: NativeAgents[Any] | None) -> None:
+    def _bind_native_agents(self, declaration: _tool_types.NativeAgents[Any] | None) -> None:
         self._native_agents = declaration
         if declaration is not None and any(
             tool.on_stream is not None for tool in declaration.managed_tools
@@ -14086,7 +14293,7 @@ class Session(Generic[ContextT, OutputT]):
             or parent.failure.done()
         ):
             return
-        invocation: NativeRoleToolInvocation = {
+        invocation: _tool_types.NativeRoleToolInvocation = {
             "tool_name": tool.name,
             "role": tool.role,
             "input": message["input"],
@@ -14139,7 +14346,7 @@ class Session(Generic[ContextT, OutputT]):
 
         stream = _ManagedToolStream(
             invocation,
-            ChildInvocation(self.id, child_id, instance, child_turn).submission_id,
+            _tool_types.ChildInvocation(self.id, child_id, instance, child_turn).submission_id,
             observe,
             tool.on_stream_max_pending_events,
             overflow,
@@ -14243,7 +14450,7 @@ class Session(Generic[ContextT, OutputT]):
                     },
                 )
                 completion = message["tool_completion"]
-                result: NativeRoleToolResult = {
+                result: _tool_types.NativeRoleToolResult = {
                     "role": tool.role,
                     "thread_id": message["child_thread_id"],
                     "turn_id": message["child_turn_id"],
@@ -14437,8 +14644,8 @@ class Session(Generic[ContextT, OutputT]):
                     raise InteractionRequired(
                         "Native interaction needs on_interaction or Agent.session()"
                     )
-                question = _question(self, message, state.handle)
-                _publish_question(self, state, question)
+                question = _tool_types._question(self, message, state.handle)
+                _tool_types._publish_question(self, state, question)
                 state.add_callback(
                     asyncio.create_task(self._expire_child_question(state, question))
                 )
@@ -14974,7 +15181,10 @@ class Session(Generic[ContextT, OutputT]):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> Any:
-        if args and isinstance(args[0], (Turn, CompletionContext, ToolContext, ChildStepContext)):
+        if args and (
+            isinstance(args[0], (Turn, CompletionContext, ToolContext))
+            or isinstance(args[0], _tool_types.ChildStepContext)
+        ):
             provider = getattr(self, "_decisions_provider", None)
             if getattr(self, "_profiles", None) or message.get("profile_id") in getattr(
                 self, "_voice_profiles", {}
@@ -15542,7 +15752,11 @@ class Session(Generic[ContextT, OutputT]):
         tools = [*self._bindings]
         for runtime in self._profiles.values():
             tools.extend(runtime.profile.declaration.tools)
-        return any(isinstance(tool, _MCP) and tool.tool_filter is not None for tool in tools)
+        return any(
+            (type(tool) is not FunctionTool and isinstance(tool, _tool_types._MCP))
+            and tool.tool_filter is not None
+            for tool in tools
+        )
 
     def _has_child_input_guardrails(self) -> bool:
         checks = [*self._input_guardrails, *self._effective_agent().input_guardrails]
@@ -15599,7 +15813,7 @@ class Session(Generic[ContextT, OutputT]):
                     message,
                     guardrail.child_callback,
                     active,
-                    ChildStepContext(
+                    _tool_types.ChildStepContext(
                         context=self._context, child=state.handle, step_index=step_index
                     ),
                     agent,
@@ -15837,7 +16051,14 @@ class Session(Generic[ContextT, OutputT]):
             else:
                 catalog = self._catalog_for_message(message, message["generation"])
                 entry = catalog.tools[message["slot"]]
-                declared = entry.declaration if isinstance(entry, _CapturedManual) else entry
+                declared = (
+                    entry.declaration
+                    if (
+                        type(entry) is not _CapturedFunction
+                        and isinstance(entry, _tool_types._CapturedManual)
+                    )
+                    else entry
+                )
                 if (
                     not declared.finish_turn
                     or entry.name != message["name"]
@@ -16171,8 +16392,8 @@ class Session(Generic[ContextT, OutputT]):
             declaration_names = {
                 ToolRef(**ref): (server.name, raw)
                 for server in source_bindings
-                if isinstance(server, _MCP)
-                for raw, ref in zip(server.tools, _tool_names((server,)), strict=True)
+                if (type(server) is not FunctionTool and isinstance(server, _tool_types._MCP))
+                for raw, ref in zip(server.tools, _tool_types._tool_names((server,)), strict=True)
             }
 
             def resolve(ref: ToolRef) -> ToolRef:
@@ -16225,13 +16446,13 @@ class Session(Generic[ContextT, OutputT]):
                 budget.check()
             if callback is not None:
                 if child:
-                    assert isinstance(state.handle, ChildInvocation)
+                    assert isinstance(state.handle, _tool_types.ChildInvocation)
                     selection = await self._call_decision_callback(
                         state,
                         message,
                         callback,
                         active,
-                        ChildStepContext(
+                        _tool_types.ChildStepContext(
                             context=self._context, child=state.handle, step_index=index
                         ),
                     )
@@ -16350,7 +16571,7 @@ class Session(Generic[ContextT, OutputT]):
                 enabled = tool.is_enabled
                 if callable(enabled):
                     step_context = (
-                        ChildStepContext(
+                        _tool_types.ChildStepContext(
                             context=self._context, child=state.handle, step_index=index
                         )
                         if isinstance(state, _ChildCallbacks)
@@ -16373,7 +16594,8 @@ class Session(Generic[ContextT, OutputT]):
             filters = {
                 server.name: server
                 for server in source_bindings
-                if isinstance(server, _MCP) and server.tool_filter is not None
+                if (type(server) is not FunctionTool and isinstance(server, _tool_types._MCP))
+                and server.tool_filter is not None
             }
             for row in message.get("mcp_names", ()):
                 server = filters.get(row["server"])
@@ -16389,7 +16611,7 @@ class Session(Generic[ContextT, OutputT]):
                     or not isinstance(definition.get("inputSchema"), dict)
                 ):
                     raise CapabilityError("MCP discovery lacks its captured raw definition")
-                discovery = MCPDiscoveryContext(
+                discovery = _tool_types.MCPDiscoveryContext(
                     context=self._context,
                     submission=state.handle,
                     agent=guardrail_agent,
@@ -16398,14 +16620,16 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 discovery_filter = server.tool_filter
                 assert discovery_filter is not None
-                captured_definition = cast(MCPToolDefinition, deepcopy(definition))
+                captured_definition = cast(_tool_types.MCPToolDefinition, deepcopy(definition))
                 filter_tool = partial(discovery_filter, discovery, captured_definition)
                 keep = await self._call_decision_callback(
                     state,
                     message,
                     lambda _step, filter_tool=filter_tool: filter_tool(),
                     active,
-                    ChildStepContext(context=self._context, child=state.handle, step_index=index)
+                    _tool_types.ChildStepContext(
+                        context=self._context, child=state.handle, step_index=index
+                    )
                     if isinstance(state, _ChildCallbacks)
                     else self.active_turn or state.handle,
                 )
@@ -16427,7 +16651,11 @@ class Session(Generic[ContextT, OutputT]):
                     (
                         isinstance(tool, FunctionTool)
                         and tool._bind is None
-                        or isinstance(tool, ToolSearch)
+                        or type(tool) is not FunctionTool
+                        and (
+                            type(tool) is not FunctionTool
+                            and isinstance(tool, _tool_types.ToolSearch)
+                        )
                         and tool._manual is not None
                     )
                     and ToolRef(tool.ref.name, "functions") in refs
@@ -16445,7 +16673,10 @@ class Session(Generic[ContextT, OutputT]):
             if (
                 refs
                 and search in candidates
-                and not any(isinstance(tool, ToolSearch) for tool in source_bindings)
+                and not any(
+                    type(tool) is not FunctionTool and (isinstance(tool, _tool_types.ToolSearch))
+                    for tool in source_bindings
+                )
             ):
                 refs.add(search)
             selected = refs & candidates
@@ -16461,7 +16692,7 @@ class Session(Generic[ContextT, OutputT]):
                     ),
                 )
                 for server in source_bindings
-                if isinstance(server, _MCP)
+                if (type(server) is not FunctionTool and isinstance(server, _tool_types._MCP))
             )
             selected_json = _native_tool_refs(tuple(selected))
         except BaseException as error:
@@ -16873,14 +17104,14 @@ class Session(Generic[ContextT, OutputT]):
                     and message.get("type") == "elicitation_request"
                     and not message.get("turn_id", message.get("turnId"))
                     and message["request"].get("mode")
-                    in _FORM_MODES | {"url", "openai/userVerification"}
+                    in _tool_types._FORM_MODES | {"url", "openai/userVerification"}
                 ):
                     if (
                         not self._closing
                         and message.get("type") == "elicitation_request"
                         and not message.get("turn_id", message.get("turnId"))
                         and message["request"].get("mode")
-                        in _FORM_MODES | {"url", "openai/userVerification"}
+                        in _tool_types._FORM_MODES | {"url", "openai/userVerification"}
                     ):
                         # No turn owns an idle background question. Resolve
                         # its native token; never manufacture a public grant.
@@ -16971,7 +17202,7 @@ class Session(Generic[ContextT, OutputT]):
                         question
                         for question in state.questions.values()
                         if not self._closing
-                        and isinstance(question, ElicitationRequest)
+                        and (isinstance(question, _tool_types.ElicitationRequest))
                         and question.submission_id is None
                         and question._message["request"].get("mode") == "url"
                     ]
@@ -17117,7 +17348,7 @@ class Session(Generic[ContextT, OutputT]):
                         kind == "elicitation_request"
                         and not turn_id
                         and message["request"].get("mode")
-                        in _FORM_MODES | {"openai/userVerification"}
+                        in _tool_types._FORM_MODES | {"openai/userVerification"}
                         and message["server_name"] not in state.mcp_calls.values()
                     ):
                         # Server-origin forms have no turn ID. Do not give an
@@ -17141,11 +17372,11 @@ class Session(Generic[ContextT, OutputT]):
                                 "Native interaction needs on_interaction or Agent.session()"
                             )
                         assert state.handle is not None
-                        question = _question(self, message, state.handle)
+                        question = _tool_types._question(self, message, state.handle)
                     except InteractionRequired as error:
                         state.failure.set_result(error)
                     else:
-                        _publish_question(self, state, question)
+                        _tool_types._publish_question(self, state, question)
                 elif (
                     kind
                     in {
@@ -17574,7 +17805,7 @@ class Session(Generic[ContextT, OutputT]):
                 (
                     s
                     for s in self._bindings_for_message(notice)
-                    if isinstance(s, _MCP)
+                    if (type(s) is not FunctionTool and isinstance(s, _tool_types._MCP))
                     and s.name == notice["server_name"]
                     and notice["tool_name"] in s.tools
                 ),
@@ -17598,10 +17829,10 @@ class Session(Generic[ContextT, OutputT]):
             if not admitted():
                 return
             ref = ToolRef(notice["callable_name"], notice["callable_namespace"])
-            application_output: ApplicationToolOutput | None = None
+            application_output: _state_types.ApplicationToolOutput | None = None
             if metadata:
                 assert callback is not None
-                context: Any = MCPMetadataContext(
+                context: Any = _tool_types.MCPMetadataContext(
                     self._context,
                     state.handle,
                     ToolCallInfo(
@@ -17643,10 +17874,10 @@ class Session(Generic[ContextT, OutputT]):
                 if value is not None and not isinstance(value, Mapping):
                     raise TypeError("MCP request_metadata must return an object or None")
                 value = None if value is None else dict(value)
-                if not _is_json_value(value):
+                if not _tool_types._is_json_value(value):
                     raise TypeError("MCP request_metadata must contain JSON values and string keys")
             else:
-                context = MCPResultContext(
+                context = _tool_types.MCPResultContext(
                     self._context,
                     state.handle,
                     notice["call_id"],
@@ -17677,10 +17908,12 @@ class Session(Generic[ContextT, OutputT]):
                             "content": [{"type": "text", "text": formatted}],
                             "isError": True,
                         }
-                value, application_data = await _transform_and_extract_result(
+                value, application_data = await _tool_types._transform_and_extract_result(
                     callback, extractor, context, original_result, admitted
                 )
                 if application_data is not None:
+                    from .state import ApplicationToolOutput
+
                     application_output = ApplicationToolOutput(
                         submission_id=state.handle.submission_id,
                         turn_id=notice["turn_id"],
@@ -17787,14 +18020,14 @@ class Session(Generic[ContextT, OutputT]):
         invocation.configured_opening = configured_opening
         handler = self._interaction_handler
 
-        async def answer(event: Interaction) -> ActionReply[Any]:
+        async def answer(event: _tool_types.Interaction) -> _tool_types.ActionReply[Any]:
             if not admitted():
                 raise InteractionExpiredError("Configured parent invocation is expired")
             assert handler is not None
             result = await _call_callback(handler, admitted, event)
             if not admitted():
                 raise InteractionExpiredError("Configured parent invocation is expired")
-            return cast(ActionReply[Any], result)
+            return cast(_tool_types.ActionReply[Any], result)
 
         observation_retention: Literal["bounded", "all"] = (
             "all"
@@ -17811,6 +18044,8 @@ class Session(Generic[ContextT, OutputT]):
             captured = json.loads(restored_child_json)
             if captured.get("kind") != "configured-child-v1":
                 raise NativeError("Unsupported configured child continuation")
+            from .state import SessionState
+
             restored_child = SessionState.from_json(json.dumps(captured["state"]))
         session: Session[Any, Any] | None = None
         try:
@@ -18016,7 +18251,7 @@ class Session(Generic[ContextT, OutputT]):
         state: _CallbackState,
         reply: str,
         *,
-        application_output: ApplicationToolOutput | None = None,
+        application_output: _state_types.ApplicationToolOutput | None = None,
     ) -> bool:
         # Keep the writer's result observable when its callback is cancelled.
         response = (
@@ -18097,8 +18332,12 @@ class Session(Generic[ContextT, OutputT]):
                 raise NativeError("Native tool request belongs to a different thread")
             catalog = self._catalog_for_message(message, marker["generation"])
             entry = catalog.tools[marker["slot"]]
-            managed_approval = isinstance(entry, _CapturedApproval)
-            if isinstance(entry, _CapturedApproval):
+            managed_approval = type(entry) is not _CapturedFunction and isinstance(
+                entry, _tool_types._CapturedApproval
+            )
+            if type(entry) is not _CapturedFunction and isinstance(
+                entry, _tool_types._CapturedApproval
+            ):
                 entry = entry.function
             if not isinstance(entry, _CapturedFunction):
                 raise NativeError("Native callback does not match a function declaration")
@@ -18120,7 +18359,10 @@ class Session(Generic[ContextT, OutputT]):
                     for candidate in catalog.tools
                     for function in (
                         candidate.function
-                        if isinstance(candidate, _CapturedApproval)
+                        if (
+                            type(candidate) is not _CapturedFunction
+                            and isinstance(candidate, _tool_types._CapturedApproval)
+                        )
                         else candidate,
                     )
                     if isinstance(function, _CapturedFunction)
@@ -18478,9 +18720,12 @@ class Session(Generic[ContextT, OutputT]):
                         entered_media_owner._tool_body_ended()
 
             try:
-                from ._hosted_mcp_binding import _CapturedHostedMCPApproval
+                if type(entry) is not _CapturedFunction:
+                    from ._hosted_mcp_binding import _CapturedHostedMCPApproval
 
-                if isinstance(entry, _CapturedHostedMCPApproval):
+                if type(entry) is not _CapturedFunction and isinstance(
+                    entry, _CapturedHostedMCPApproval
+                ):
                     assert context is not None
                     value = await self._call_decision_callback(
                         state,
@@ -18678,17 +18923,18 @@ class Session(Generic[ContextT, OutputT]):
                 failure_output = ToolOutput.error(text)
             if not self._admit_tool(state, request):
                 return
-            from .decision_handoff import (
-                _CapturedDecisionHandoff,
-                _DecisionHandoffSelection,
-            )
-
             handoff_target_profile_id = None
-            if failure_output is None and isinstance(entry, _CapturedDecisionHandoff):
-                if not isinstance(value, _DecisionHandoffSelection):
-                    raise ValueError("Decision handoff selection failed")
-                handoff_target_profile_id = value.target_profile_id
-                value = None
+            if failure_output is None and type(entry) is not _CapturedFunction:
+                from .decision_handoff import (
+                    _CapturedDecisionHandoff,
+                    _DecisionHandoffSelection,
+                )
+
+                if isinstance(entry, _CapturedDecisionHandoff):
+                    if not isinstance(value, _DecisionHandoffSelection):
+                        raise ValueError("Decision handoff selection failed")
+                    handoff_target_profile_id = value.target_profile_id
+                    value = None
             output: ToolOutput | None = failure_output
             background = False
             if failure_output is None:
@@ -18766,6 +19012,8 @@ class Session(Generic[ContextT, OutputT]):
             if started is not None:
                 application_data = _capture_application_data(output.application_data)
                 if application_data is not None:
+                    from .state import ApplicationToolOutput
+
                     application_output = ApplicationToolOutput(
                         submission_id=started.submission_id,
                         turn_id=started.turn_id,
@@ -18857,6 +19105,8 @@ class Session(Generic[ContextT, OutputT]):
         History only: no descendant or native VM cloning. Subsequent opening
         through the same LocalStorage and current Agent; no portable conversion.
         """
+        from .state import LocalStorage
+
         self._check_callback_operation("fork stored history of its own Session")
         if self._provider_history is not None:
             raise RuntimeError("Fork is unavailable for provider-managed history")
@@ -19067,7 +19317,9 @@ class Session(Generic[ContextT, OutputT]):
         value = await self._native._stored_history(_stored_search_request(limit, cursor, text))
         return cast(StoredMatchPage, json.loads(value))
 
-    async def items(self, *, subagent_id: str | None = None) -> AsyncIterator[SessionItem]:
+    async def items(
+        self, *, subagent_id: str | None = None
+    ) -> AsyncIterator[_wire_types._events.SessionItem]:
         """Iterate a snapshot of recorded items, including inherited child history."""
         self._check_open()
         self._request_text_observation()
@@ -19080,7 +19332,7 @@ class Session(Generic[ContextT, OutputT]):
                 for turn in self._repair_turns
                 if "parent_turn_id" in turn and turn["parent_turn_id"] in original_ids
             }
-            by_parent: dict[str, list[SessionItem]] = {}
+            by_parent: dict[str, list[_wire_types._events.SessionItem]] = {}
             for item in self._repair_items:
                 parent = repair_parents.get(item["turn_id"])
                 if parent is not None:
@@ -19088,7 +19340,7 @@ class Session(Generic[ContextT, OutputT]):
             # Leave all native first-seen order intact, including items whose
             # turn has no projected terminal. Insert receipts at their owner.
             last_item = {item["turn_id"]: index for index, item in enumerate(items)}
-            merged: list[SessionItem] = []
+            merged: list[_wire_types._events.SessionItem] = []
             for index, item in enumerate(items):
                 merged.append(item)
                 if last_item[item["turn_id"]] == index:
@@ -19101,8 +19353,10 @@ class Session(Generic[ContextT, OutputT]):
         for item in items:
             yield item
 
-    async def subagents(self) -> AsyncIterator[Subagent]:
+    async def subagents(self) -> AsyncIterator[_declaration_types.Subagent]:
         """Iterate current descendant records without resuming native work."""
+        from .subagents import _subagent
+
         self._check_open()
         data = json.loads(await self._native.call("list_subagents"))
         data.sort(key=lambda child: (child["opened_at"], child["id"]))
@@ -19141,7 +19395,9 @@ class Session(Generic[ContextT, OutputT]):
         for turn in turns:
             yield turn
 
-    async def checklist(self, *, subagent_id: str | None = None) -> ChecklistState | None:
+    async def checklist(
+        self, *, subagent_id: str | None = None
+    ) -> _state_types.ChecklistState | None:
         """Read the root or native descendant's latest checklist, or None before an update.
 
         Reads never grant permission to update the list. Restored data is
@@ -19150,9 +19406,13 @@ class Session(Generic[ContextT, OutputT]):
         """
         self._check_open()
         value = await self._native.read_checklist(subagent_id)
-        return None if value == "null" else ChecklistState.model_validate_json(value)
+        if value == "null":
+            return None
+        from .state import ChecklistState
 
-    async def goal(self) -> NativeGoal | None:
+        return ChecklistState.model_validate_json(value)
+
+    async def goal(self) -> _state_types.NativeGoal | None:
         """Read actual Core goal data on a local Session opened with NativeGoals.
 
         Core owns its status, token and time accounting. Reads do not resume
@@ -19160,11 +19420,11 @@ class Session(Generic[ContextT, OutputT]):
         """
         self._check_open()
         value = await self._native.read_goal()
-        return cast(NativeGoal | None, json.loads(value))
+        return cast("_state_types.NativeGoal | None", json.loads(value))
 
     async def set_paused_goal(
         self, objective: str, *, token_budget: int | None = None
-    ) -> NativeGoal:
+    ) -> _state_types.NativeGoal:
         """Create or update the idle root's goal without starting a model request.
 
         Open the Session with LocalStorage and include NativeGoals in its opening
@@ -19175,13 +19435,15 @@ class Session(Generic[ContextT, OutputT]):
         stays unchanged. The instruction may already be recorded in history.
         Cancellation waits for the write to settle. A committed goal stays saved.
         """
+        from .state import LocalStorage
+
         self._check_idle_update()
         if not isinstance(self._storage, LocalStorage):
             raise CapabilityError("Setting a paused goal requires LocalStorage")
 
-        async def write() -> NativeGoal:
+        async def write() -> _state_types.NativeGoal:
             value = await self._native.set_paused_goal(objective, token_budget=token_budget)
-            return cast(NativeGoal, json.loads(value))
+            return cast("_state_types.NativeGoal", json.loads(value))
 
         return await self._join_mutation(asyncio.create_task(write()))
 
@@ -19257,7 +19519,7 @@ class Session(Generic[ContextT, OutputT]):
         managed.capture_task = asyncio.create_task(retire())
         return await asyncio.shield(managed.capture_task)
 
-    async def save_state(self) -> SessionState:
+    async def save_state(self) -> _state_types.SessionState:
         """Snapshot an idle session without retiring it.
 
         Active turns and manual requests must finish before a snapshot. Use
@@ -19271,7 +19533,7 @@ class Session(Generic[ContextT, OutputT]):
         """
         return await self._save_state()
 
-    async def _save_state(self, *, probe: bool = False) -> SessionState:
+    async def _save_state(self, *, probe: bool = False) -> _state_types.SessionState:
         self._check_open()
         self._check_portable_capture(allow_idle_storage=True)
         self._check_callback_operation("save its own Session")
@@ -19281,7 +19543,7 @@ class Session(Generic[ContextT, OutputT]):
             )
         return await self._checkpoint(None, probe=probe)
 
-    async def fork(self) -> SessionState:
+    async def fork(self) -> _state_types.SessionState:
         """Copy an idle native conversation for an independently owned Session.
 
         Open the result with Agent.session(state=...). The source remains
@@ -19300,13 +19562,17 @@ class Session(Generic[ContextT, OutputT]):
             raise RuntimeError("fork requires an idle Session")
         return await self._checkpoint(None, fork=True)
 
-    async def checkpoint_status(self, *, kind: Literal["idle", "manual_wait"]) -> CheckpointStatus:
+    async def checkpoint_status(
+        self, *, kind: Literal["idle", "manual_wait"]
+    ) -> _state_types.CheckpointStatus:
         """Check actual capture admission without reserving a checkpoint.
 
         idle validates the same native copy that save_state validates.
         manual_wait probes settled manual admission without sealing or waiting
         for active automatic work. A later save_state or suspend checks again.
         """
+        from .state import CheckpointStatus
+
         self._check_loop()
         self._check_callback_operation("inspect checkpoints of its own Session")
         if kind not in ("idle", "manual_wait"):
@@ -19330,7 +19596,7 @@ class Session(Generic[ContextT, OutputT]):
             return CheckpointStatus("not_ready", (str(error),))
         return CheckpointStatus("ready", ())
 
-    async def suspend(self) -> SessionState:
+    async def suspend(self) -> _state_types.SessionState:
         """Stop and export a pending manual-tool boundary for a new Session.
 
         Wait for the pending request's sample and callbacks to settle, then
@@ -19342,13 +19608,17 @@ class Session(Generic[ContextT, OutputT]):
         Settled native stored values and terminal cell observations are retained.
         Active code cells and root before_step callbacks cannot be captured.
         """
+        from .state import SessionState
+
         self._check_loop()
         self._check_callback_operation("suspend its own Session")
         if self._sealed_checkpoint is not None:
             return SessionState._from_native_capture(self._sealed_checkpoint)
         return await self._suspend()
 
-    async def _suspend(self, *, before_seal: Callable[[], None] | None = None) -> SessionState:
+    async def _suspend(
+        self, *, before_seal: Callable[[], None] | None = None
+    ) -> _state_types.SessionState:
         try:
             ready = await self._wait_suspend_ready()
         except _ManualBoundaryLost:
@@ -19413,9 +19683,11 @@ class Session(Generic[ContextT, OutputT]):
         ready: _SuspendBoundary | None,
         *,
         before_seal: Callable[[], None] | None = None,
-    ) -> SessionState:
+    ) -> _state_types.SessionState:
+        from .state import SessionState
+
         if self._configured_capture is not None:
-            return cast(SessionState, await _join(self._configured_capture))
+            return cast("_state_types.SessionState", await _join(self._configured_capture))
         if self._sealed_checkpoint is not None:
             return SessionState._from_native_capture(self._sealed_checkpoint)
         self._check_portable_capture()
@@ -19432,7 +19704,7 @@ class Session(Generic[ContextT, OutputT]):
             raise _ManualBoundaryLost("The active submission changed before checkpoint sealing")
         if child is not None:
 
-            async def capture_configured() -> SessionState:
+            async def capture_configured() -> _state_types.SessionState:
                 if child.checkpoint is None:
                     child.sealing = True
                     try:
@@ -19478,7 +19750,7 @@ class Session(Generic[ContextT, OutputT]):
             capture = _create_task(capture_configured())
             self._configured_capture = capture
             try:
-                return cast(SessionState, await _join(capture))
+                return cast("_state_types.SessionState", await _join(capture))
             finally:
                 self._configured_capture = None
         return await self._checkpoint(active, before_seal=before_seal)
@@ -19522,7 +19794,13 @@ class Session(Generic[ContextT, OutputT]):
         from ._hosted_mcp_binding import _CapturedHostedMCPManual
 
         if any(
-            isinstance(tool, (_CapturedFunction, _CapturedApproval, _CapturedHostedMCPManual))
+            (
+                type(tool) is _CapturedFunction
+                or isinstance(
+                    tool,
+                    (_CapturedFunction, _tool_types._CapturedApproval, _CapturedHostedMCPManual),
+                )
+            )
             and tool._requires_live_manual_session
             for tool in self._catalog.tools
         ):
@@ -19556,7 +19834,9 @@ class Session(Generic[ContextT, OutputT]):
         fork: bool = False,
         probe: bool = False,
         managed_retire: bool = False,
-    ) -> SessionState:
+    ) -> _state_types.SessionState:
+        from .state import SessionState
+
         while True:
             self._check_checkpoint_admission(active)
             continuations = tuple(
@@ -19598,6 +19878,8 @@ class Session(Generic[ContextT, OutputT]):
         probe: bool = False,
         managed_retire: bool = False,
     ) -> str:
+        from .state import SessionState, _ManualContinuation
+
         drain_budget_usage = (
             active is not None
             and active.budget is not None
@@ -19614,7 +19896,7 @@ class Session(Generic[ContextT, OutputT]):
                 project_guidance=self._project_guidance,
             ).isdisjoint(active.operation_refs)
             or any(
-                isinstance(server, StdioMCP) and server.location == "environment"
+                (isinstance(server, _tool_types.StdioMCP)) and server.location == "environment"
                 for server in active.operation_mcp or ()
             )
         )
@@ -19852,7 +20134,8 @@ class Session(Generic[ContextT, OutputT]):
                 resource_servers = [
                     server.name
                     for server in mcp
-                    if type(server) in (HttpMCP, StdioMCP) and not server.tools
+                    if type(server) in (_tool_types.HttpMCP, _tool_types.StdioMCP)
+                    and not server.tools
                 ]
                 if resource_servers:
                     payload["agent_options"]["_sdk_default_mcp_resources"] = resource_servers
@@ -20358,3 +20641,96 @@ def get_cleanup(
 
 _protect_mcp_methods(Session, lambda owner: (owner._opening_agent, *owner._opening_agent.tools))
 _preserve_module_identity(globals(), "agents.session")
+
+
+_COMPATIBILITY_OWNERS = {
+    "CodeInterpreterCallItem": "_events",
+    "FileSearchCallItem": "_events",
+    "HostedMcpCallItem": "_events",
+    "ImageGenerationCallItem": "_events",
+    "McpListToolsItem": "_events",
+    "MessageItem": "_events",
+    "ProgramCallItem": "_events",
+    "ProgramOutputItem": "_events",
+    "ReasoningItem": "_events",
+    "SessionItem": "_events",
+    "ShellCallItem": "_events",
+    "ShellCallOutputItem": "_events",
+    "WebSearchCallItem": "_events",
+    "Subagent": "subagents",
+    "_subagent": "subagents",
+    "Tool": "_function_tools",
+    "_ClientToolSearch": "_function_tools",
+    "_DEFAULT_APPROVAL_REASON": "tools",
+    "_FORM_MODES": "manual",
+    "_URL_ACCEPT": "manual",
+    "ActionReply": "manual",
+    "ActionRequested": "manual",
+    "ApprovalDecision": "manual",
+    "ApprovalRequest": "manual",
+    "ApprovalRequested": "manual",
+    "ElicitationRequest": "manual",
+    "FormRequest": "manual",
+    "Interaction": "manual",
+    "UrlRequest": "manual",
+    "VerificationRequest": "manual",
+    "_CapturedApproval": "manual",
+    "_CapturedManual": "manual",
+    "_DefaultApprovalReason": "tools",
+    "_is_json_value": "manual",
+    "_NativeQuestion": "manual",
+    "_PreparedManualResult": "manual",
+    "_publish_question": "manual",
+    "_question": "manual",
+    "_MCP": "mcp",
+    "ChatGPTAppsMCP": "mcp",
+    "HostedVerificationMCP": "mcp",
+    "HttpMCP": "mcp",
+    "MCPDiscoveryContext": "mcp",
+    "MCPGetPromptResult": "mcp",
+    "MCPListResourcesResult": "mcp",
+    "MCPListResourceTemplatesResult": "mcp",
+    "MCPMetadataContext": "mcp",
+    "MCPPrompt": "mcp",
+    "MCPReadResourceResult": "mcp",
+    "MCPResultContext": "mcp",
+    "MCPToolDefinition": "mcp",
+    "StdioMCP": "mcp",
+    "_ready": "mcp",
+    "_result_policies": "mcp",
+    "_tool_names": "mcp",
+    "_transform_and_extract_result": "mcp",
+    "_COLLABORATION_TOOLS": "native_agents",
+    "ChildInvocation": "native_agents",
+    "ChildStepContext": "native_agents",
+    "NativeAgents": "native_agents",
+    "NativeRoleToolInvocation": "native_agents",
+    "NativeRoleToolResult": "native_agents",
+    "_native_agent_options": "native_agents",
+    "_HOSTED_TOOLS": "tools",
+    "Checklist": "tools",
+    "NativeGoals": "tools",
+    "ToolSearch": "tools",
+    "WebSearch": "tools",
+    "_capture_hosted_tools": "tools",
+    "_capture_web_search_config": "tools",
+    "_hosted_tool_name": "tools",
+    "_InteractionHandler": "manual",
+}
+
+
+def __getattr__(name: str) -> Any:
+    module = _COMPATIBILITY_OWNERS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    implementation = import_module("." + module, __package__)
+    globals().update(
+        {
+            key: getattr(implementation, key)
+            for key, owner in _COMPATIBILITY_OWNERS.items()
+            if owner == module
+        }
+    )
+    return globals()[name]

@@ -6,7 +6,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Generic, cast
 
-from ._function_tools import Tool
+import agents as _declaration_types
+
 from .agent import (
     Agent,
     ContextT,
@@ -23,7 +24,7 @@ from .schema import OutputSpec
 class _OpeningContributions(Generic[ContextT]):
     """Selected typed defaults before the canonical Agent capture."""
 
-    tools: Sequence[Tool[ContextT]] | None
+    tools: Sequence[_declaration_types.Tool[ContextT]] | None
     before_complete: _BeforeComplete[ContextT] | None
 
 
@@ -43,7 +44,7 @@ def _capture_opening_agent(
     provider: NativeProvider | None,
     model: str | None,
     model_settings: ModelSettings | None,
-    tool_selection: Sequence[Tool[ContextT]] | None,
+    tool_selection: Sequence[_declaration_types.Tool[ContextT]] | None,
 ) -> Agent[ContextT, OutputT]:
     """Detach declaration defaults before native opening can suspend."""
     captured_settings = _copy_model_settings(agent.model_settings)

@@ -6,7 +6,7 @@ import asyncio as asyncio
 import base64 as base64
 import json as json
 import re as re
-from collections.abc import Iterator as Iterator, Mapping as Mapping
+from collections.abc import Awaitable, Callable, Iterator as Iterator, Mapping as Mapping
 from copy import deepcopy as deepcopy
 from dataclasses import dataclass as dataclass, field as field
 from datetime import date as date, datetime as datetime
@@ -37,6 +37,12 @@ from pydantic import (
 from ._lifecycle import _join
 from ._mcp_errors import _protect_mcp_methods
 from ._public import preserve_module_identity as _preserve_module_identity
+from .tools import (
+    _DEFAULT_APPROVAL_REASON as _DEFAULT_APPROVAL_REASON,
+    InputT as InputT,
+    ResultT as ResultT,
+    _DefaultApprovalReason as _DefaultApprovalReason,
+)
 
 if TYPE_CHECKING:
     from jsonschema.protocols import Validator
@@ -259,10 +265,6 @@ def _is_json_value(value: Any) -> bool:
     return False
 
 
-InputT = TypeVar("InputT", bound=BaseModel)
-ResultT = TypeVar("ResultT")
-
-
 @dataclass(frozen=True, slots=True, init=False)
 class ActionReply(Generic[ResultT]):
     """A bound answer for Session.respond or an on_interaction handler.
@@ -331,13 +333,6 @@ class ActionRequested(Generic[InputT, ResultT]):
                 "Manual tool reply is foreign, expired or already delivered"
             )
         await session._respond(self, value)
-
-
-class _DefaultApprovalReason(str):
-    """Preserve omission while retaining the existing string default."""
-
-
-_DEFAULT_APPROVAL_REASON = _DefaultApprovalReason("Tool execution was rejected")
 
 
 @dataclass(frozen=True)
@@ -1131,6 +1126,9 @@ for _request_type in (
     VerificationRequest,
 ):
     _protect_mcp_methods(_request_type, _request_mcp)
+
+
+_InteractionHandler = Callable[[Interaction], ActionReply[Any] | Awaitable[ActionReply[Any]]]
 
 
 _preserve_module_identity(globals(), "agents.manual")

@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING as _TYPE_CHECKING
+
+import agents as _agents
+from _agents_codex import _tool_response_types as _wire, tools as _tools
 from _agents_codex.session import (
     _CODEX_RESPONSES_BASE_URL as _CODEX_RESPONSES_BASE_URL,
-    _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
-    _FORM_MODES as _FORM_MODES,
     _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST as _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST,
-    _MCP as _MCP,
     _NATIVE_HOME_CLOSE_TIMEOUT as _NATIVE_HOME_CLOSE_TIMEOUT,
-    _URL_ACCEPT as _URL_ACCEPT,
     AbstractAsyncContextManager as AbstractAsyncContextManager,
-    ActionReply as ActionReply,
-    ActionRequested as ActionRequested,
     Agent as Agent,
     AgentProfileChanged as AgentProfileChanged,
     Allow as Allow,
@@ -24,11 +22,6 @@ from _agents_codex.session import (
     Callable as Callable,
     Capabilities as Capabilities,
     CapabilityError as CapabilityError,
-    ChatGPTAppsMCP as ChatGPTAppsMCP,
-    Checklist as Checklist,
-    ChecklistState as ChecklistState,
-    CheckpointStatus as CheckpointStatus,
-    ChildInvocation as ChildInvocation,
     CodexAccount as CodexAccount,
     Completed as Completed,
     ContextCompacted as ContextCompacted,
@@ -37,7 +30,6 @@ from _agents_codex.session import (
     Coroutine as Coroutine,
     CustomStorage as CustomStorage,
     Deny as Deny,
-    ElicitationRequest as ElicitationRequest,
     Environment as Environment,
     EnvironmentSource as EnvironmentSource,
     EventStream as EventStream,
@@ -48,24 +40,16 @@ from _agents_codex.session import (
     FunctionTool as FunctionTool,
     Future as Future,
     Generic as Generic,
-    HostedVerificationMCP as HostedVerificationMCP,
-    HttpMCP as HttpMCP,
-    Interaction as Interaction,
     InteractionExpiredError as InteractionExpiredError,
     InteractionRequired as InteractionRequired,
     Iterator as Iterator,
     Literal as Literal,
     LocalRecoveryRequired as LocalRecoveryRequired,
-    LocalStorage as LocalStorage,
     ManagedAgentToolOrigin as ManagedAgentToolOrigin,
     Mapping as Mapping,
     MappingProxyType as MappingProxyType,
-    MCPResultContext as MCPResultContext,
     ModelSettings as ModelSettings,
-    NativeAgents as NativeAgents,
     NativeError as NativeError,
-    NativeGoal as NativeGoal,
-    NativeGoals as NativeGoals,
     NativeProvider as NativeProvider,
     OutputSpec as OutputSpec,
     OutputT as OutputT,
@@ -88,19 +72,14 @@ from _agents_codex.session import (
     Sequence as Sequence,
     Session as Session,
     SessionBusyError as SessionBusyError,
-    SessionItem as SessionItem,
-    SessionState as SessionState,
     SessionStoreCleanup as SessionStoreCleanup,
     SpanContext as SpanContext,
     StaleTurnError as StaleTurnError,
-    StdioMCP as StdioMCP,
     SteeringReceipt as SteeringReceipt,
     StopTurn as StopTurn,
-    Subagent as Subagent,
     SubagentLifecycle as SubagentLifecycle,
     TemporaryDirectory as TemporaryDirectory,
     TokenUsageInfo as TokenUsageInfo,
-    Tool as Tool,
     ToolCallInfo as ToolCallInfo,
     ToolContext as ToolContext,
     ToolFinished as ToolFinished,
@@ -120,8 +99,6 @@ from _agents_codex.session import (
     UncertainCall as UncertainCall,
     UsageUpdated as UsageUpdated,
     UserInput as UserInput,
-    VerificationRequest as VerificationRequest,
-    WebSearch as WebSearch,
     _activate as _activate,
     _api_rate_limits as _api_rate_limits,
     _BeforeStep as _BeforeStep,
@@ -131,7 +108,6 @@ from _agents_codex.session import (
     _capture as _capture,
     _capture_tools as _capture_tools,
     _CapturedFunction as _CapturedFunction,
-    _CapturedManual as _CapturedManual,
     _CapturedTrace as _CapturedTrace,
     _capturing_callback as _capturing_callback,
     _CellPolicyOwner as _CellPolicyOwner,
@@ -154,7 +130,6 @@ from _agents_codex.session import (
     _fixed_tool_refs as _fixed_tool_refs,
     _future as _future,
     _has_interceptors as _has_interceptors,
-    _InteractionHandler as _InteractionHandler,
     _Invocation as _Invocation,
     _invocation as _invocation,
     _join as _join,
@@ -171,23 +146,18 @@ from _agents_codex.session import (
     _native_trace_context as _native_trace_context,
     _NativeCompletionError as _NativeCompletionError,
     _NativeInterception as _NativeInterception,
-    _NativeQuestion as _NativeQuestion,
     _ObservationBuffer as _ObservationBuffer,
     _OpeningOwner as _OpeningOwner,
     _owned_span as _owned_span,
     _prepare_spec as _prepare_spec,
-    _PreparedManualResult as _PreparedManualResult,
     _PreparedOutput as _PreparedOutput,
     _PrepareRequest as _PrepareRequest,
     _private_task as _private_task,
-    _question as _question,
-    _ready as _ready,
     _redact_checkpoint_executor_receipts as _redact_checkpoint_executor_receipts,
     _release_environment as _release_environment,
     _request_observation as _request_observation,
     _restore_declaration as _restore_declaration,
     _RestoreDeclaration as _RestoreDeclaration,
-    _result_policies as _result_policies,
     _ResultT as _ResultT,
     _retain_cleanup_error as _retain_cleanup_error,
     _root_turn as _root_turn,
@@ -195,11 +165,9 @@ from _agents_codex.session import (
     _selected_tool_refs as _selected_tool_refs,
     _SelectionContextT_contra as _SelectionContextT_contra,
     _split_tools as _split_tools,
-    _subagent as _subagent,
     _Submission as _Submission,
     _SyncRun as _SyncRun,
     _token_usage_info as _token_usage_info,
-    _tool_names as _tool_names,
     _ToolCatalog as _ToolCatalog,
     _trace_context as _trace_context,
     _TurnT as _TurnT,
@@ -232,4 +200,107 @@ from _agents_codex.session import (
     sys as sys,
     uuid4 as uuid4,
     weakref as weakref,
+)
+
+from .state import (
+    ChecklistState as ChecklistState,
+    CheckpointStatus as CheckpointStatus,
+    LocalStorage as LocalStorage,
+    NativeGoal as NativeGoal,
+    SessionState as SessionState,
+)
+
+# Class annotations resolve in this public module's namespace.
+_declaration_types = _agents
+_state_types = _agents
+_tool_types = _tools
+_wire_types = _wire
+
+if _TYPE_CHECKING:
+    from _agents_codex.session import (
+        _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
+        _FORM_MODES as _FORM_MODES,
+        _MCP as _MCP,
+        _URL_ACCEPT as _URL_ACCEPT,
+        ActionReply as ActionReply,
+        ActionRequested as ActionRequested,
+        ChatGPTAppsMCP as ChatGPTAppsMCP,
+        Checklist as Checklist,
+        ChildInvocation as ChildInvocation,
+        ElicitationRequest as ElicitationRequest,
+        HostedVerificationMCP as HostedVerificationMCP,
+        HttpMCP as HttpMCP,
+        Interaction as Interaction,
+        MCPResultContext as MCPResultContext,
+        NativeAgents as NativeAgents,
+        NativeGoals as NativeGoals,
+        SessionItem as SessionItem,
+        StdioMCP as StdioMCP,
+        Subagent as Subagent,
+        Tool as Tool,
+        VerificationRequest as VerificationRequest,
+        WebSearch as WebSearch,
+        _CapturedManual as _CapturedManual,
+        _InteractionHandler as _InteractionHandler,
+        _NativeQuestion as _NativeQuestion,
+        _PreparedManualResult as _PreparedManualResult,
+        _question as _question,
+        _ready as _ready,
+        _result_policies as _result_policies,
+        _subagent as _subagent,
+        _tool_names as _tool_names,
+    )
+
+_OPTIONAL_EXPORTS = (
+    "SessionItem",
+    "Subagent",
+    "_subagent",
+    "_COLLABORATION_TOOLS",
+    "_FORM_MODES",
+    "_MCP",
+    "_URL_ACCEPT",
+    "ActionReply",
+    "ActionRequested",
+    "ChatGPTAppsMCP",
+    "Checklist",
+    "ChildInvocation",
+    "ElicitationRequest",
+    "HostedVerificationMCP",
+    "HttpMCP",
+    "Interaction",
+    "MCPResultContext",
+    "NativeAgents",
+    "NativeGoals",
+    "StdioMCP",
+    "Tool",
+    "VerificationRequest",
+    "WebSearch",
+    "_CapturedManual",
+    "_InteractionHandler",
+    "_NativeQuestion",
+    "_PreparedManualResult",
+    "_question",
+    "_ready",
+    "_result_policies",
+    "_tool_names",
+)
+
+
+def __getattr__(name: str) -> Any:
+    if name not in _OPTIONAL_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    implementation = import_module("_agents_codex.session")
+    value = getattr(implementation, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_OPTIONAL_EXPORTS))
+
+
+__all__ = tuple(name for name in globals() if not name.startswith("_")) + tuple(
+    name for name in _OPTIONAL_EXPORTS if not name.startswith("_")
 )

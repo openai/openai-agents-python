@@ -2,11 +2,17 @@
 
 import json as json
 from dataclasses import asdict, dataclass as dataclass
-from typing import Any as Any, cast as cast
+from typing import TYPE_CHECKING as _TYPE_CHECKING, Any as Any, cast as cast
 
 from pydantic import JsonValue as JsonValue
 
-from ._events import FunctionCallItem as FunctionCallItem, SessionItem as SessionItem
+from . import _tool_response_types as _wire_types
+
+if _TYPE_CHECKING:
+    from ._events import (
+        FunctionCallItem as FunctionCallItem,
+        SessionItem as SessionItem,
+    )
 from ._hosted_projection import project_hosted_response_item as project_hosted_response_item
 from ._projection import (
     EventProjector as EventProjector,
@@ -410,7 +416,7 @@ def project_history(
     uncertain_calls: list[UncertainCall] | None = None,
     item_record_indexes: dict[int, int] | None = None,
     tool_success_by_record: dict[int, bool] | None = None,
-) -> tuple[list[RecordedTurn], list[SessionItem]]:
+) -> "tuple[list[RecordedTurn], list[_wire_types._events.SessionItem]]":
     """Prefer native item events over raw records, retaining first-seen order."""
     projector = EventProjector(session_id, source_id=subagent_id)
     turns: dict[str, RecordedTurn] = {}
@@ -866,13 +872,20 @@ def project_history(
             uncertain_calls.append(
                 _uncertain_call(
                     subagent_id if subagent_id is not None else session_id,
-                    cast(FunctionCallItem, item),
+                    cast("_wire_types._events.FunctionCallItem", item),
                     original_input=occurrence.original_input,
                 )
             )
     return list(turns.values()), cast(
-        list[SessionItem], [item.value for item in items if not item.user_alias]
+        "list[_wire_types._events.SessionItem]",
+        [item.value for item in items if not item.user_alias],
     )
 
 
 _preserve_module_identity(globals(), "agents._history")
+
+
+def __getattr__(name: str):
+    if name not in ("FunctionCallItem", "SessionItem"):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(_wire_types._events, name)

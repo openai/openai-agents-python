@@ -6,6 +6,7 @@ durable log. Use Turn.get_result and canonical history for authoritative results
 
 from __future__ import annotations
 
+from _agents_codex import _tool_response_types as _wire_types
 from _agents_codex.observation import (
     TYPE_CHECKING as TYPE_CHECKING,
     AgentProfileChanged as AgentProfileChanged,
@@ -17,7 +18,6 @@ from _agents_codex.observation import (
     ContextCompacted as ContextCompacted,
     EventGap as EventGap,
     EventStream as EventStream,
-    ExecutionItem as ExecutionItem,
     ExecutionItemCompleted as ExecutionItemCompleted,
     FunctionCallStatus as FunctionCallStatus,
     HostedToolCallProgress as HostedToolCallProgress,
@@ -86,3 +86,19 @@ __all__ = [
     "ToolStarted",
     "UsageUpdated",
 ]
+
+
+if TYPE_CHECKING:
+    from _agents_codex.observation import ExecutionItem as ExecutionItem
+
+
+def __getattr__(name: str) -> Any:
+    if name != "ExecutionItem":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = _wire_types._events.ExecutionItem
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | {"ExecutionItem"})
