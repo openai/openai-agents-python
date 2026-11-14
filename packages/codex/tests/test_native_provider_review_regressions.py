@@ -127,6 +127,7 @@ async def test_sampling_hosted_prompt_mismatches_remain_rejected(declared, purpo
             "step_id": 1,
             "thread": "thread",
             "instance": None,
+            "items": [],
             "purpose": purpose,
             "hosted_prompt": not declared,
         },

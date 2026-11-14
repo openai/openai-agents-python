@@ -21,11 +21,19 @@ from agents import (
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
+from tests.native_storage_fixtures import MemorySessionStore
 from tests.test_native_manual_tools import LookupArgs, next_request
 
 
 def lookup_tool():
     return FunctionTool(name="lookup", description="Read", input_type=LookupArgs, output_type=str)
+
+
+def manual_store(database: Path):
+    # On Windows the state file still crosses processes; only the local test store changes.
+    if os.name != "posix":
+        return MemorySessionStore()
+    return SQLiteSessionStore(database)
 
 
 def provider_for(url: str):
@@ -50,7 +58,7 @@ async def resume_child(url: str, state_path: str) -> None:
 
 @pytest.mark.parametrize("independent_process", [False, True])
 async def test_manual_custom_storage_round_trip(responses, tmp_path, independent_process):
-    backend = SQLiteSessionStore(tmp_path / "manual.sqlite")
+    backend = manual_store(tmp_path / "manual.sqlite")
     storage = CustomStorage(backend)
     lookup = lookup_tool()
     async with timeout(25), provider_for(responses.url) as provider:
@@ -123,7 +131,7 @@ async def test_manual_custom_storage_keeps_completed_sibling_once(responses, tmp
             tools=[record, lookup],
         )
         async with agent.session(
-            storage=CustomStorage(SQLiteSessionStore(tmp_path / "siblings.sqlite"))
+            storage=CustomStorage(manual_store(tmp_path / "siblings.sqlite"))
         ) as source:
             await source.submit("record and read")
             await entered.wait()
@@ -153,9 +161,7 @@ async def test_manual_custom_storage_keeps_completed_sibling_once(responses, tmp
 
 
 @pytest.mark.parametrize("invalid", ["frame", "version"])
-async def test_custom_manual_restore_rejects_invalid_state_before_sampling(
-    responses, tmp_path, invalid
-):
+async def test_custom_manual_restore_rejects_invalid_state_before_sampling(responses, invalid):
     lookup = lookup_tool()
     responses.respond(function_call("lookup", {"key": "A"}, "manual-A"))
     responses.respond(assistant_output("done"))
@@ -163,9 +169,7 @@ async def test_custom_manual_restore_rejects_invalid_state_before_sampling(
         agent = Agent(
             instructions="Read exactly once.", model="gpt-5.5", provider=provider, tools=[lookup]
         )
-        async with agent.session(
-            storage=CustomStorage(SQLiteSessionStore(tmp_path / "tamper.sqlite"))
-        ) as source:
+        async with agent.session(storage=CustomStorage(MemorySessionStore())) as source:
             await source.submit("read")
             await next_request(source.interactions(), lookup)
             good = await source.suspend()
@@ -189,8 +193,8 @@ async def test_custom_manual_restore_rejects_invalid_state_before_sampling(
     assert len(responses.requests) == 2
 
 
-async def test_manual_custom_storage_refuses_lost_writer_before_capture(responses, tmp_path):
-    class ReplacedOwnerStore(SQLiteSessionStore):
+async def test_manual_custom_storage_refuses_lost_writer_before_capture(responses):
+    class ReplacedOwnerStore(MemorySessionStore):
         armed = False
         successor = None
 
@@ -201,7 +205,7 @@ async def test_manual_custom_storage_refuses_lost_writer_before_capture(response
                 self.successor = super().acquire(session_id)
             return super().flush(session_id, token)
 
-    backend = ReplacedOwnerStore(tmp_path / "fenced.sqlite")
+    backend = ReplacedOwnerStore()
     lookup = lookup_tool()
     responses.respond(function_call("lookup", {"key": "A"}, "manual-A"))
     async with timeout(20), provider_for(responses.url) as provider:

@@ -195,6 +195,7 @@ async def test_different_update_policy_rejects_before_any_native_publication():
         _update_generation=0,
         _check_idle_update=lambda: None,
         _opening_agent=agent,
+        _profiles={},
         _refresh_profile_bindings=refresh_profile,
         _effective_agent=lambda: agent,
         _join_mutation=lambda pending: pending,

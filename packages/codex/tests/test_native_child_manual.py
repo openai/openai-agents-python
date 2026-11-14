@@ -179,7 +179,7 @@ async def test_child_manual_reply_before_turn_observation(tmp_path, monkeypatch,
                     # Hold teardown at its first real effect: the lease is
                     # revoked while the separately owned reply is awaiting
                     # native ownership. Its grant has not been retired yet.
-                    lease.interrupted = True
+                    lease._interrupted = True
                     assert session._native._check_manual_tool(alpha._grant)
                     release.set()
                     release_lookup.set()

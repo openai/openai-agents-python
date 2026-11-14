@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -60,6 +61,7 @@ async def test_borrowed_file_description_changes_only_the_current_native_guidanc
                     url=peer.url,
                     headers={"Authorization": "Bearer " + peer.token},
                     cwd=str(root),
+                    write_policy="legacy" if sys.platform == "win32" else "strict",
                     tools=(),
                 )
                 await peer.wait_disconnected()
