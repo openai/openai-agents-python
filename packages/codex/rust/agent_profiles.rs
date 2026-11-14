@@ -1130,6 +1130,16 @@ fn restored_envelope<'a>(
     .map_err(|_| anyhow::anyhow!("Invalid restored Agent receipt"))?;
     receipt.validate_presentation()?;
     ensure!(
+        opening.admits_recorded_profile_graph(
+            &AgentProfileReceipt {
+                profile_id: receipt.profile_id.clone(),
+                epoch: receipt.epoch,
+            },
+            metadata.sdk_agent_graph.as_deref(),
+        )?,
+        "Restored Agent receipt belongs to a different declaration phase"
+    );
+    ensure!(
         opening
             .roster
             .iter()
@@ -1193,7 +1203,7 @@ pub(crate) fn operation_source(
         };
         if profile_receipt(value)? == source {
             ensure!(
-                opening.admits_recorded_graph(metadata.sdk_agent_graph.as_deref())?,
+                opening.admits_recorded_profile_graph(&source, metadata.sdk_agent_graph.as_deref())?,
                 "Original operation belongs to a different Agent graph"
             );
             ensure!(
@@ -3741,6 +3751,16 @@ struct RuntimePromotions {
 }
 
 impl OpeningProfiles {
+    pub(crate) fn admits_recorded_profile_graph(
+        &self, profile: &AgentProfileReceipt, fingerprint: Option<&str>,
+    ) -> Result<bool> {
+        if let Some(enrollment) = &self.runtime_enrollment {
+            return enrollment.admits_profile_graph(self, profile, fingerprint.unwrap_or(""));
+        }
+        Ok(self.roster.iter().any(|item| item.id == profile.profile_id)
+            && self.admits_recorded_graph(fingerprint)?)
+    }
+
     fn admits_recorded_graph(&self, fingerprint: Option<&str>) -> Result<bool> {
         let historical = match &self.runtime_enrollment {
             Some(enrollment) => enrollment.admits_graph(self, fingerprint.unwrap_or(""))?,

@@ -21,6 +21,8 @@ struct Promoted {
     tool_name: String,
     profile_id: String,
     fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    creation_graph: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -150,6 +152,7 @@ impl Enrollment {
                 tool_name: origins[0].1.clone(),
                 profile_id: id.into(),
                 fingerprint: declaration_fingerprint(declaration)?,
+                creation_graph: Some(registry.opening.fingerprint.clone()),
             });
         }
         if !result
@@ -181,6 +184,7 @@ impl Enrollment {
         let mut promoted = HashSet::new();
         let mut names = HashSet::new();
         for enrolled in &self.promoted {
+            self.creation_graph(enrolled)?;
             ensure!(
                 enrolled.source_id == self.root_id,
                 "Runtime enrollment requires the original root factory"
@@ -282,6 +286,53 @@ impl Enrollment {
             );
         }
         Ok(())
+    }
+
+    fn creation_graph<'a>(&'a self, enrolled: &'a Promoted) -> Result<&'a str> {
+        let candidates = self
+            .graphs
+            .iter()
+            .filter(|graph| {
+                graph.ids.contains(&enrolled.source_id)
+                    && !graph.ids.contains(&enrolled.profile_id)
+                    && enrolled
+                        .creation_graph
+                        .as_ref()
+                        .is_none_or(|expected| expected == &graph.fingerprint)
+            })
+            .collect::<Vec<_>>();
+        ensure!(
+            candidates.len() == 1,
+            "Runtime target has no unique native creation graph"
+        );
+        Ok(&candidates[0].fingerprint)
+    }
+
+    pub(super) fn admits_profile_graph(
+        &self,
+        opening: &OpeningProfiles,
+        profile: &AgentProfileReceipt,
+        fingerprint: &str,
+    ) -> Result<bool> {
+        self.validate(opening)?;
+        let Some(graph) = self
+            .graphs
+            .iter()
+            .find(|graph| graph.fingerprint == fingerprint)
+        else {
+            return Ok(false);
+        };
+        if graph.ids.contains(&profile.profile_id) {
+            return Ok(true);
+        }
+        let Some(enrolled) = self
+            .promoted
+            .iter()
+            .find(|item| item.profile_id == profile.profile_id)
+        else {
+            return Ok(false);
+        };
+        Ok(self.creation_graph(enrolled)? == fingerprint)
     }
 
     pub(super) fn admits_graph(

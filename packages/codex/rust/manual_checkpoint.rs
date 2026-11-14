@@ -419,7 +419,7 @@ pub(crate) fn validate_for_opening(
                 .as_ref()
                 .context("Pending call has no captured Agent source")?;
             ensure!(
-                *graph == opening.fingerprint,
+                opening.admits_recorded_profile_graph(receipt, Some(graph))?,
                 "Pending call belongs to a different Agent graph"
             );
             if let Some(previous) = &source {
@@ -444,7 +444,7 @@ pub(crate) fn validate_for_opening(
         source.context("Missing pending Agent source")?
     };
     ensure!(
-        active == &source && *graph == opening.fingerprint,
+        active == &source && opening.admits_recorded_profile_graph(active, Some(graph))?,
         "Pending calls differ from the active Agent source"
     );
     opening.validate_pending_source(&source)?;
@@ -460,7 +460,8 @@ pub(crate) fn validate_for_opening(
             .get(&handoff.call_id)
             .context("Handoff has no original call source")?;
         ensure!(
-            original == &handoff.source && graph == &opening.fingerprint,
+            original == &handoff.source
+                && opening.admits_recorded_profile_graph(original, Some(graph))?,
             "Handoff differs from its original call source or admitted graph"
         );
         // A canonical target receipt proves that this handoff already applied.
@@ -475,7 +476,7 @@ pub(crate) fn validate_for_opening(
             ensure!(
                 next.profile_id == handoff.target_profile_id
                     && handoff.source.epoch.checked_add(1) == Some(next.epoch)
-                    && *next_graph == opening.fingerprint,
+                    && opening.admits_recorded_profile_graph(next, Some(next_graph))?,
                 "Handoff does not match its next accepted Agent transition"
             );
             continue;
