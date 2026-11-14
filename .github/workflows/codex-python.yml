@@ -47,7 +47,11 @@ jobs:
     runs-on: >-
       ${{ fromJSON(
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64-xl"}' ||
-        github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04-arm' && inputs.native_source_run == '' && github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness' &&
+        github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04-arm' && inputs.native_source_run == '' &&
+          ((github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness') ||
+           (github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            github.base_ref == 'feat/codex-harness')) &&
           '{"group":"codex-runners","labels":"codex-linux-arm64"}' ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
           (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
@@ -135,7 +139,11 @@ jobs:
           echo "CARGO_BUILD_JOBS=$ARM_CARGO_BUILD_JOBS" >> "$GITHUB_ENV"
         env:
           ARM_CARGO_BUILD_JOBS: >-
-            ${{ github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04-arm' && inputs.native_source_run == '' && github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness' && '14' || '3' }}
+            ${{ github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04-arm' && inputs.native_source_run == '' &&
+              ((github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness') ||
+               (github.event_name == 'pull_request' &&
+                github.event.pull_request.head.repo.full_name == github.repository &&
+                github.base_ref == 'feat/codex-harness')) && '14' || '3' }}
       - name: Select shared Cargo directories
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
