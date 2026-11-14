@@ -233,6 +233,12 @@ def _capture_model_settings(
             }[key]
             if value not in allowed:
                 raise ValueError(f"Unsupported {key}")
+        elif key == "reasoning_options":
+            if not isinstance(value, Mapping) or any(not isinstance(k, str) for k in value):
+                raise TypeError("reasoning_options must be a JSON object")
+            if value.keys() & {"effort", "summary"}:
+                raise ValueError("Use reasoning_effort and reasoning_summary for those fields")
+            captured[key] = json.loads(json.dumps(dict(value), allow_nan=False))
         elif key == "request_transport":
             if value not in ("auto", "http", "websocket"):
                 raise ValueError("request_transport must select auto, http, or websocket")

@@ -1042,6 +1042,8 @@ class ChatCompletionsModel:
                     },
                 }
             reasoning = request.body.get("reasoning") or {}
+            if reasoning.keys() - {"effort", "summary"}:
+                raise ValueError("Extended reasoning options require a Responses model")
             if reasoning.get("effort") is not None:
                 options["reasoning_effort"] = reasoning["effort"]
             if "top_logprobs" in request.body or "message.output_text.logprobs" in (

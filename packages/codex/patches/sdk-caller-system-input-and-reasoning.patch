@@ -1,0 +1,333 @@
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index ae390525..479854cc 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -172,6 +172,8 @@ pub struct Reasoning {
+     pub summary: Option<ReasoningSummaryConfig>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub context: Option<ReasoningContext>,
++    #[serde(flatten)]
++    pub options: std::collections::BTreeMap<String, serde_json::Value>,
+ }
+ 
+ fn serialize_reasoning_effort<S>(
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index f4478c40..af74cbdd 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1139,6 +1139,7 @@ impl ModelClient {
+                     effort: Some(effort),
+                     summary: None,
+                     context: None,
++                    options: Default::default(),
+                 }),
+         };
+ 
+@@ -1250,6 +1251,7 @@ impl ModelClient {
+             context: model_info
+                 .use_responses_lite
+                 .then_some(ReasoningContext::AllTurns),
++            options: Default::default(),
+         }
+     }
+ 
+@@ -1289,6 +1291,17 @@ impl ModelClient {
+         controls
+             .validate_profile(model_info)
+             .map_err(CodexErr::InvalidRequest)?;
++        if model_info.use_responses_lite
++            && controls
++                .reasoning_options
++                .as_ref()
++                .and_then(Option::as_ref)
++                .is_some_and(|options| !options.is_empty())
++        {
++            return Err(CodexErr::InvalidRequest(
++                "reasoning options require the standard Responses formatter".into(),
++            ));
++        }
+         if controls.has_wire_values() && self.state.provider.info().is_amazon_bedrock() {
+             return Err(CodexErr::InvalidRequest(
+                 "explicit native request controls require the standard Responses formatter".into(),
+@@ -1418,15 +1431,20 @@ impl ModelClient {
+             .transpose()?;
+         input.splice(0..0, prefix);
+         filter_provider_response_metadata(&mut input, is_openai);
+-        let reasoning = if prompt_owns_model {
++        let mut reasoning = if prompt_owns_model {
+             Reasoning {
+                 effort,
+                 summary: (summary != ReasoningSummaryConfig::None).then_some(summary),
+                 context: None,
++                options: Default::default(),
+             }
+         } else {
+             self.build_reasoning(model_info, effort, summary)
+         };
++        if let Some(options) = controls.reasoning_options.as_ref().and_then(Option::as_ref) {
++            // The standard formatter validates this map before constructing the request.
++            reasoning.options = options.clone();
++        }
+         let stream_options = (self.state.concurrent_reasoning_summaries_enabled
+             && is_openai
+             && reasoning.summary.is_some())
+@@ -1572,7 +1590,8 @@ impl ModelClient {
+             }),
+             reasoning: (!prompt_owns_model
+                 || reasoning.effort.is_some()
+-                || reasoning.summary.is_some())
++                || reasoning.summary.is_some()
++                || !reasoning.options.is_empty())
+             .then_some(reasoning),
+             store: controls.store.flatten().unwrap_or(false),
+             stream: true,
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index c504720e..d31b9021 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1197,7 +1197,10 @@ pub(crate) fn is_api_message(
+     metadata: Option<&CodexHarnessMetadata>,
+ ) -> bool {
+     match message {
+-        ResponseItem::Message { role, .. } => role.as_str() != "system",
++        ResponseItem::Message { role, .. } => {
++            role.as_str() != "system"
++                || metadata.is_some_and(|metadata| metadata.client_authored)
++        },
+         ResponseItem::ConfigurationUpdate { .. } => {
+             metadata.is_some_and(|metadata| metadata.harness_authored_configuration)
+         }
+@@ -1814,3 +1817,31 @@ mod sdk_original_eligibility_tests {
+         assert!(!is_sdk_original_item(&message("system", None), None));
+     }
+ }
++
++
++#[cfg(test)]
++mod sdk_caller_system_input_tests {
++    use super::*;
++
++    #[test]
++    fn system_input_requires_caller_provenance_without_native_instruction_authority() {
++        let system: ResponseItem = serde_json::from_value(serde_json::json!({
++            "type":"message", "role":"system",
++            "content":[{"type":"input_text","text":"caller policy"}]
++        })).unwrap();
++        assert!(!is_api_message(&system, None));
++        assert!(!is_api_message(&system, Some(&CodexHarnessMetadata::default())));
++        let caller = CodexHarnessMetadata { client_authored: true, ..Default::default() };
++        assert!(is_api_message(&system, Some(&caller)));
++        assert!(is_sdk_original_item(&system, Some(&caller)));
++        let forged: ResponseItem = serde_json::from_value(serde_json::json!({
++            "type":"message", "role":"developer",
++            "content":[{"type":"input_text","text":"caller-owned lookalike"}],
++            "internal_chat_message_metadata_passthrough": {
++                "content_item_kinds":["sdk_application.instructions"]
++            }
++        })).unwrap();
++        assert!(!is_sdk_model_only_instruction(&forged, Some(&caller)));
++        assert!(is_sdk_original_item(&forged, Some(&caller)));
++    }
++}
+diff --git a/codex-rs/core/src/request_observation_tests.rs b/codex-rs/core/src/request_observation_tests.rs
+index 9665e641..6b47f3b2 100644
+--- a/codex-rs/core/src/request_observation_tests.rs
++++ b/codex-rs/core/src/request_observation_tests.rs
+@@ -95,6 +95,7 @@ fn effort_bridge_preserves_wire_scalar_kind_and_exact_integer() {
+             effort: Some(ReasoningEffort::Custom(input.into())),
+             summary: None,
+             context: None,
++            options: Default::default(),
+         };
+         let (effort, summary) =
+             resolved_reasoning(Some(&reasoning)).expect("known scalar reasoning");
+@@ -106,6 +107,7 @@ fn effort_bridge_preserves_wire_scalar_kind_and_exact_integer() {
+         effort: None,
+         summary: Some(ReasoningSummary::Detailed),
+         context: None,
++        options: Default::default(),
+     };
+     assert_eq!(
+         resolved_reasoning(Some(&reasoning)),
+diff --git a/codex-rs/core/src/sdk_history_retention.rs b/codex-rs/core/src/sdk_history_retention.rs
+index dbcfb900..313e94b5 100644
+--- a/codex-rs/core/src/sdk_history_retention.rs
++++ b/codex-rs/core/src/sdk_history_retention.rs
+@@ -78,11 +78,10 @@ impl SdkHistoryRetention {
+ 
+ fn expires(envelope: &ResponseItemEnvelope) -> bool {
+     match &envelope.item {
+-        ResponseItem::Message { role, .. } if role == "developer" => envelope
++        ResponseItem::Message { role, .. } if matches!(role.as_str(), "developer" | "system") => envelope
+             .metadata
+             .as_ref()
+             .is_some_and(|metadata| metadata.client_authored),
+-        ResponseItem::Message { role, .. } if role == "system" => false,
+         ResponseItem::AdditionalTools { .. }
+         | ResponseItem::ConfigurationUpdate { .. }
+         | ResponseItem::CompactionTrigger { .. } => false,
+@@ -169,6 +168,17 @@ mod tests {
+         assert!(!policy.retain(&caller, &61.into()).unwrap());
+     }
+ 
++    #[test]
++    fn caller_system_history_expires_while_native_system_policy_remains_protected() {
++        let policy = SdkHistoryRetention::new(Some(10));
++        let native = message("system", None);
++        let mut caller = message("system", Some(50));
++        caller.metadata.get_or_insert_default().client_authored = true;
++        assert!(policy.retain(&native, &100.into()).unwrap());
++        assert!(policy.retain(&caller, &60.into()).unwrap());
++        assert!(!policy.retain(&caller, &61.into()).unwrap());
++    }
++
+     #[test]
+     fn older_client_developer_history_requires_an_age_without_renewal() {
+         let policy = SdkHistoryRetention::new(Some(10));
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 014db38d..d7fba255 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -552,7 +552,7 @@ impl Session {
+                     let projection = projection.map(|mut item| {
+                         Self::assign_missing_response_item_id(&mut item);
+                         let mut envelope = self.annotate_client_response_item(item);
+-                        if matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "developer") {
++                        if matches!(&envelope.item, ResponseItem::Message { role, .. } if matches!(role.as_str(), "developer" | "system")) {
+                             envelope.metadata.get_or_insert_default().client_authored = true;
+                         }
+                         if let Some(policy) = self
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index ecc42764..e06732da 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -784,8 +784,39 @@ pub(crate) async fn run_turn(
+             .map_err(CodexErr::Fatal)?;
+             // Step selection has joined the SDK input guardrails. The manual replies
+             // are already in history, so the batch follows them in the next request.
+-            sess.record_conversation_items(&turn_context, &step_context.settings.model_info, items)
+-                .await;
++            let admitted = items
++                .iter()
++                .cloned()
++                .map(|item| {
++                    let provider_compaction = matches!(
++                        &item,
++                        ResponseItem::Compaction { .. }
++                            | ResponseItem::ContextCompaction {
++                                encrypted_content: Some(_),
++                                ..
++                            }
++                    );
++                    let caller_instruction = matches!(
++                        &item,
++                        ResponseItem::Message { role, .. }
++                            if matches!(role.as_str(), "developer" | "system")
++                    );
++                    let mut envelope = sess.annotate_client_response_item(item);
++                    if caller_instruction {
++                        envelope.metadata.get_or_insert_default().client_authored = true;
++                    }
++                    if provider_compaction {
++                        envelope.metadata.get_or_insert_default().provider_compaction = true;
++                    }
++                    envelope
++                })
++                .collect();
++            sess.record_annotated_conversation_items(
++                &turn_context,
++                &step_context.settings.model_info,
++                admitted,
++            )
++            .await;
+             sess.ensure_rollout_durable().await?;
+             staged.acknowledge();
+         }
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index e0d95711..1701180f 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -101,7 +101,6 @@ pub fn input_projection(value: &str) -> Result<Option<ResponseItem>, String> {
+         ResponseItem::Other
+         | ResponseItem::ConfigurationUpdate { .. }
+         | ResponseItem::CompactionTrigger { .. } => None,
+-        ResponseItem::Message { ref role, .. } if role == "system" => None,
+         item => Some(item),
+     })
+ }
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index a092accc..36b05381 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -261,6 +261,15 @@ pub struct ModelRequestControls {
+     #[ts(optional = nullable, type = "unknown")]
+     #[schemars(with = "Option<BTreeMap<String, serde_json::Value>>")]
+     pub extra_body: Option<Option<BTreeMap<String, serde_json::Value>>>,
++    /// Additional fields of the standard Responses reasoning object.
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, type = "unknown")]
++    #[schemars(with = "Option<BTreeMap<String, serde_json::Value>>")]
++    pub reasoning_options: Option<Option<BTreeMap<String, serde_json::Value>>>,
+ 
+     #[serde(
+         default,
+@@ -406,6 +415,7 @@ impl ModelRequestControls {
+             && self.context_management.is_none()
+             && self.provider_compaction.is_none()
+             && self.extra_body.is_none()
++            && self.reasoning_options.is_none()
+             && self.max_output_tokens.is_none()
+             && self.temperature.is_none()
+             && self.top_p.is_none()
+@@ -462,6 +472,9 @@ impl ModelRequestControls {
+         if patch.extra_body.is_some() {
+             self.extra_body = patch.extra_body.clone();
+         }
++        if patch.reasoning_options.is_some() {
++            self.reasoning_options = patch.reasoning_options.clone();
++        }
+ 
+         if patch.max_output_tokens.is_some() {
+             self.max_output_tokens = patch.max_output_tokens;
+@@ -565,6 +578,25 @@ impl ModelRequestControls {
+         {
+             return Err("truncation must be auto or disabled".into());
+         }
++        if let Some(Some(options)) = &self.reasoning_options {
++            if options.contains_key("effort") || options.contains_key("summary") {
++                return Err("reasoning_options cannot replace effort or summary".into());
++            }
++            if let Some(context) = options.get("context")
++                && !context.is_null()
++                && !matches!(context.as_str(), Some("auto" | "current_turn" | "all_turns"))
++            {
++                return Err("reasoning context must be auto, current_turn, all_turns or null".into());
++            }
++            if let Some(mode) = options.get("mode")
++                && !mode.as_str().is_some_and(|value| !value.trim().is_empty())
++            {
++                return Err("reasoning mode must be a nonempty string".into());
++            }
++            if serde_json::to_vec(options).map_or(usize::MAX, |wire| wire.len()) > 64 * 1024 {
++                return Err("reasoning_options exceed 64 KiB".into());
++            }
++        }
+         if let Some(Some(body)) = &self.extra_body {
+             const RESERVED: &[&str] = &[
+                 "input_modalities",
+@@ -709,6 +741,11 @@ impl ModelRequestControls {
+                 .as_ref()
+                 .and_then(Option::as_ref)
+                 .is_some_and(|body| !body.is_empty())
++            || self
++                .reasoning_options
++                .as_ref()
++                .and_then(Option::as_ref)
++                .is_some_and(|options| !options.is_empty())
+             || self.max_output_tokens.as_ref().is_some_and(Option::is_some)
+             || self.temperature.as_ref().is_some_and(Option::is_some)
+             || self.top_p.as_ref().is_some_and(Option::is_some)

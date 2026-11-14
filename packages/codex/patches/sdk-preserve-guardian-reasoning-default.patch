@@ -1,0 +1,12 @@
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+index 38cf223d..505c2a84 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+@@ -236,6 +236,7 @@ impl LunaSampler {
+                 effort: Some(request.reasoning_effort.clone()),
+                 summary: None,
+                 context: Some(ReasoningContext::AllTurns),
++                options: Default::default(),
+             }),
+             store: false,
+             stream: true,

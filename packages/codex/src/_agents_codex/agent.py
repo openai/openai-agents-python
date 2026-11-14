@@ -203,6 +203,8 @@ class ModelSettings(TypedDict, total=False, closed=True):
 
     reasoning_effort: str
     reasoning_summary: str
+    # Additional fields of the standard Responses reasoning object.
+    reasoning_options: Mapping[str, Any] | None
     service_tier: str | None
     tool_choice: Literal["auto", "none", "required"] | ToolRef | HostedToolChoice | None
     input_modalities: Sequence[Literal["text", "image", "audio"]] | None
@@ -2448,9 +2450,7 @@ class Agent(Generic[ContextT, OutputT]):
                 session_factory = self._session_context
                 options["_atomic_first_turn"] = True
                 if (
-                    not (
-                        return_history or return_raw_usage or return_items or observe_failure
-                    )
+                    not (return_history or return_raw_usage or return_items or observe_failure)
                     and on_event is None
                     and model_override is None
                     and not raise_on_unknown_tool
@@ -2460,9 +2460,7 @@ class Agent(Generic[ContextT, OutputT]):
                 ):
                     options["_private_text_run"] = True
                 if (
-                    not (
-                        return_history or return_raw_usage or return_items or observe_failure
-                    )
+                    not (return_history or return_raw_usage or return_items or observe_failure)
                     and on_event is None
                     and model_override is None
                     and not raise_on_unknown_tool

@@ -1259,7 +1259,15 @@
     {
       "path": "sdk-model-completion-admission.patch",
       "sha256": "eb4e12279af139172a09a9491dffb76cc9893c42a7e1d993edca505be90161de"
+    },
+    {
+      "path": "sdk-caller-system-input-and-reasoning.patch",
+      "sha256": "cf1878b34256d82521c3815d3f1ea6fac45383829adf82685d49183c82a79166"
+    },
+    {
+      "path": "sdk-preserve-guardian-reasoning-default.patch",
+      "sha256": "5804027aa3c68bb2543631803a57d78a7d4a5a2b5b59356113cec9cff487ba89"
     }
   ],
-  "result_tree": "1b529b5ddd5e18646e9cd02fb72b5a0daae1f1c8"
+  "result_tree": "a83ae4c38c7e0012bab4d86bed56c9c39c035d86"
 }

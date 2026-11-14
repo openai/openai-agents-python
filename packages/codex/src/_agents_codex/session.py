@@ -472,6 +472,7 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
         "truncation",
         "include",
         "context_management",
+        "reasoning_options",
         "provider_compaction",
         "extra_body",
         "request_transport",
@@ -609,6 +610,7 @@ def _manual_restore_model_settings(
             "truncation",
             "include",
             "context_management",
+            "reasoning_options",
             "provider_compaction",
             "extra_body",
         }
