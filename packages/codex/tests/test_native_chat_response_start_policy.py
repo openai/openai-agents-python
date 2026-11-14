@@ -8,7 +8,6 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
-from tests._asyncio import timeout
 
 from agents import (
     Agent,
@@ -19,6 +18,7 @@ from agents import (
     RetryDecision,
     SessionState,
 )
+from tests._asyncio import timeout
 
 
 @pytest.mark.asyncio

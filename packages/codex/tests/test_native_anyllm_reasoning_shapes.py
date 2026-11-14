@@ -97,9 +97,8 @@ def test_anyllm_invalid_nesting_releases_provider_payload_from_traceback(contain
     while traceback is not None:
         frame = traceback.tb_frame
         if Path(frame.f_code.co_filename).name == "_model_provider_metadata.py":
-            assert (
-                not {"message", "reasoning", "value", "part", "parts", "text"}
-                & set(frame.f_locals)
+            assert not {"message", "reasoning", "value", "part", "parts", "text"} & set(
+                frame.f_locals
             )
             assert "synthetic-private-reasoning-canary" not in repr(frame.f_locals)
         traceback = traceback.tb_next
