@@ -554,7 +554,7 @@
     },
     {
       "path": "sdk-bounded-original-history-reads.patch",
-      "sha256": "9c2091df8d9532c8d9f201172cee0440cdde554e811b0f2c15525128e92dabbb"
+      "sha256": "467aa9ba3bfc9260587123c2fbf199ca3295de630afe33b93da45cb16c124b5c"
     },
     {
       "path": "sdk-terminal-candidate-admission.patch",
@@ -1074,7 +1074,7 @@
     },
     {
       "path": "sdk-provider-history-output-references.patch",
-      "sha256": "176905297a6285c529cbf074c7b9da5412a14d5a710bf3d37975e061664c128a"
+      "sha256": "5e71690f4035d05ad2e741d7c9d16769e809baf9bdc7ef33bcc3f50b0e15c73a"
     },
     {
       "path": "sdk-provider-programmatic-callers.patch",
@@ -1285,5 +1285,5 @@
       "sha256": "8fd6f5d9b02da7ff5a5ec9d82f0926c7a47bc250242500b6d6c84f8c46fbe7bb"
     }
   ],
-  "result_tree": "a1a2d2e04de6ddb6cd519fd090943b628772ac2b"
+  "result_tree": "4db49902827a55b8260428446083ecc50275b5b5"
 }

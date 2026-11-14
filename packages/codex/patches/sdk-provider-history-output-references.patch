@@ -1,5 +1,5 @@
 diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
-index 495692e3..ae390525 100644
+index 495692e32b2bdcf6863ba6649c1e309666b1df9b..ae3905259926b71b1c27a97c122460aec0e8bc02 100644
 --- a/codex-rs/codex-api/src/common.rs
 +++ b/codex-rs/codex-api/src/common.rs
 @@ -349,10 +349,10 @@ where
@@ -16,7 +16,7 @@ index 495692e3..ae390525 100644
      map.end()
  }
 diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
-index a4fea21c..744d582a 100644
+index a4fea21c738037be46b870ea44e15625808167f9..744d582a05930333e6b23db3e94de4423bcfe54a 100644
 --- a/codex-rs/codex-api/src/endpoint/responses.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses.rs
 @@ -69,7 +69,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
@@ -71,7 +71,7 @@ index a4fea21c..744d582a 100644
      }
  
 diff --git a/codex-rs/codex-api/src/request_input.rs b/codex-rs/codex-api/src/request_input.rs
-index e61dbab9..29923ad6 100644
+index e61dbab90a95c2adc89b1a52445158794cf8841f..29923ad6d55bcad8c7cdba5aa918264c493f35a1 100644
 --- a/codex-rs/codex-api/src/request_input.rs
 +++ b/codex-rs/codex-api/src/request_input.rs
 @@ -219,4 +219,23 @@ mod tests {
@@ -99,7 +99,7 @@ index e61dbab9..29923ad6 100644
 +    }
  }
 diff --git a/codex-rs/codex-api/tests/provider_history.rs b/codex-rs/codex-api/tests/provider_history.rs
-index 10f575ef..0a8afd6a 100644
+index 10f575ef901e4cc981f971c6e1c8e46d445847cd..0a8afd6a02b983f6242f4e1e74530346f4900d78 100644
 --- a/codex-rs/codex-api/tests/provider_history.rs
 +++ b/codex-rs/codex-api/tests/provider_history.rs
 @@ -35,6 +35,7 @@ fn history_selection_projects_one_wire_member_without_changing_storage() {
@@ -187,10 +187,51 @@ index 10f575ef..0a8afd6a 100644
 +    }
 +}
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index f92ae078..366b5c7a 100644
+index 3878106f57433ec799f9816d78514dc19ef00eec..f933f642ce3978637ddea3711fed170a8d53a422 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -3107,15 +3107,20 @@ impl ModelClientSession {
+@@ -759,10 +759,29 @@ impl ModelClient {
+         }
+         self.provider_history
+             .as_ref()
+-            .map(|_| provider_history::canonical_input_projection(input, Vec::new(), 0))
++            .map(|cursor| {
++                provider_history::canonical_input_projection(
++                    input,
++                    Vec::new(),
++                    0,
++                    Some(&cursor.text_receipt),
++                )
++            })
+             .transpose()
+     }
+ 
++    pub(crate) fn observe_provider_history_envelope(
++        &self,
++        budget: &mut provider_history::HistoryBudget,
++        envelope: &codex_history::ResponseItemEnvelope,
++    ) -> Result<()> {
++        if let Some(cursor) = &self.provider_history {
++            cursor.text_receipt.observe_envelope(budget, envelope)
++        } else {
++            budget.observe(envelope)
++        }
++    }
++
+     pub(crate) fn provider_history_selection(
+         &self,
+     ) -> Option<codex_protocol::provider_history::ProviderHistorySelection> {
+@@ -1359,6 +1378,9 @@ impl ModelClient {
+                     &prompt.input,
+                     indices,
+                     prefix.len(),
++                    self.provider_history
++                        .as_deref()
++                        .map(|cursor| &cursor.text_receipt),
+                 )
+             })
+             .transpose()?;
+@@ -3128,15 +3150,20 @@ impl ModelClientSession {
                      cursor.bind_websocket(connection)?;
                  }
                  if !warmup
@@ -215,10 +256,324 @@ index f92ae078..366b5c7a 100644
                  let connection = self.websocket_session.connection.as_ref().ok_or_else(|| {
                      self.client.state.provider.map_api_error(ApiError::Stream(
 diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
-index 4aaa1e19..48d54c0d 100644
+index 4aaa1e19af03c7b51ebfab8c8fa5da838c7751d9..26d2c01d7604b02c5457f511c23119982a69b518 100644
 --- a/codex-rs/core/src/client/provider_history.rs
 +++ b/codex-rs/core/src/client/provider_history.rs
-@@ -535,18 +535,30 @@ impl Cursor {
+@@ -121,15 +121,187 @@ impl HistoryBudget {
+     }
+ }
+ 
+-fn check_items<'a>(items: impl ExactSizeIterator<Item = &'a ResponseItem>) -> Result<HistoryBudget> {
++// One bounded body per live Cursor; these values never enter persisted history.
++#[derive(Default)]
++pub(super) struct TextReceiptCache(OnceLock<TextReceipt>);
++
++struct TextReceipt {
++    text: Box<str>,
++    json_text_delta: usize,
++    id: Option<codex_protocol::ResponseItemId>,
++    phase: Option<codex_protocol::models::MessagePhase>,
++    digest: OnceLock<[u8; 32]>,
++}
++
++impl std::fmt::Debug for TextReceiptCache {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("TextReceiptCache").finish_non_exhaustive()
++    }
++}
++
++// Keep all current fields and their stock serialization, replacing only text.
++#[derive(serde::Serialize)]
++struct TextShell<'a> {
++    #[serde(rename = "type")]
++    kind: &'static str,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    id: Option<&'a codex_protocol::ResponseItemId>,
++    role: &'a str,
++    content: [codex_protocol::models::ContentItem; 1],
++    #[serde(skip_serializing_if = "Option::is_none")]
++    phase: Option<&'a codex_protocol::models::MessagePhase>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    internal_chat_message_metadata_passthrough:
++        Option<&'a codex_protocol::models::InternalChatMessageMetadataPassthrough>,
++}
++
++#[derive(serde::Serialize)]
++struct EnvelopeShell<'a> {
++    item: TextShell<'a>,
++    metadata: &'a Option<codex_history::CodexHarnessMetadata>,
++}
++
++fn text_shell(item: &ResponseItem) -> Option<(&str, TextShell<'_>)> {
++    use codex_protocol::models::ContentItem;
++    let ResponseItem::Message {
++        id,
++        role,
++        content,
++        phase,
++        internal_chat_message_metadata_passthrough,
++    } = item
++    else {
++        return None;
++    };
++    let [ContentItem::InputText { text }] = content.as_slice() else {
++        return None;
++    };
++    if role != "user"
++        || !(64 * 1024..=1024 * 1024).contains(&text.len())
++        || internal_chat_message_metadata_passthrough
++            .as_ref()
++            .and_then(|metadata| metadata.executed_tool_calls.as_ref())
++            .is_some_and(|calls| !calls.is_empty())
++    {
++        return None;
++    }
++    Some((
++        text,
++        TextShell {
++            kind: "message",
++            id: id.as_ref(),
++            role,
++            content: [ContentItem::InputText {
++                text: String::new(),
++            }],
++            phase: phase.as_ref(),
++            internal_chat_message_metadata_passthrough: internal_chat_message_metadata_passthrough
++                .as_ref(),
++        },
++    ))
++}
++
++impl TextReceiptCache {
++    fn observe<T: serde::Serialize>(
++        &self,
++        budget: &mut HistoryBudget,
++        key: &TextShell<'_>,
++        original: &T,
++        shell: &impl serde::Serialize,
++        text: &str,
++    ) -> Result<()> {
++        if let Some(receipt) = self.0.get().filter(|receipt| receipt.text.as_ref() == text) {
++            budget.observe(shell)?;
++            budget.bytes_left = budget
++                .bytes_left
++                .checked_sub(receipt.json_text_delta)
++                .ok_or_else(history_limit)?;
++            return Ok(());
++        }
++        let before = budget.bytes_left;
++        budget.observe(original)?;
++        // Publish only after this exact value fits the caller's remaining budget.
++        if self.0.get().is_none() {
++            let mut shell_budget = HistoryBudget::default();
++            if shell_budget.observe(shell).is_ok()
++                && let Some(delta) = (before - budget.bytes_left)
++                    .checked_sub(MAX_HISTORY_BYTES - shell_budget.bytes_left)
++            {
++                let _ = self.0.set(TextReceipt {
++                    text: text.into(),
++                    json_text_delta: delta,
++                    id: key.id.cloned(),
++                    phase: key.phase.cloned(),
++                    digest: OnceLock::new(),
++                });
++            }
++        }
++        Ok(())
++    }
++
++    fn observe_item(&self, budget: &mut HistoryBudget, item: &ResponseItem) -> Result<()> {
++        let Some((text, shell)) = text_shell(item) else {
++            return budget.observe(item);
++        };
++        self.observe(budget, &shell, item, &shell, text)
++    }
++
++    pub(super) fn observe_envelope(
++        &self,
++        budget: &mut HistoryBudget,
++        envelope: &codex_history::ResponseItemEnvelope,
++    ) -> Result<()> {
++        let Some((text, item)) = text_shell(&envelope.item) else {
++            return budget.observe(envelope);
++        };
++        let shell = EnvelopeShell {
++            item,
++            metadata: &envelope.metadata,
++        };
++        self.observe(budget, &shell.item, envelope, &shell, text)
++    }
++
++    fn matching(&self, item: &ResponseItem) -> Option<&TextReceipt> {
++        let (text, shell) = text_shell(item)?;
++        self.0.get().filter(|receipt| {
++            receipt.text.as_ref() == text
++                && receipt.id.as_ref() == shell.id
++                && receipt.phase.as_ref() == shell.phase
++        })
++    }
++}
++
++fn check_items<'a>(
++    items: impl ExactSizeIterator<Item = &'a ResponseItem>,
++    receipt: Option<&TextReceiptCache>,
++) -> Result<HistoryBudget> {
+     HistoryBudget::check_count(items.len())?;
+     let mut budget = HistoryBudget::default();
+     for item in items {
+-        budget.observe(item)?;
++        if let Some(receipt) = receipt {
++            receipt.observe_item(&mut budget, item)?;
++        } else {
++            budget.observe(item)?;
++        }
+     }
+     Ok(budget)
+ }
+ 
++fn item_digest_with_receipt(
++    item: &ResponseItem,
++    receipt: Option<&TextReceiptCache>,
++) -> Result<[u8; 32]> {
++    let cached = receipt.and_then(|receipt| receipt.matching(item));
++    if let Some(digest) = cached.and_then(|cached| cached.digest.get()) {
++        return Ok(*digest);
++    }
++    let digest = item_digest_after_budget_check(item)?;
++    if let Some(cached) = cached {
++        let _ = cached.digest.set(digest);
++    }
++    Ok(digest)
++}
++
+ #[derive(Debug)]
+ struct Pending {
+     canonical_input: ProviderHistoryInputBoundary,
+@@ -159,6 +331,7 @@ pub(crate) struct McpRewriteAdmission(pub(crate) std::sync::Arc<Cursor>);
+ 
+ #[derive(Debug)]
+ pub(crate) struct Cursor {
++    pub(super) text_receipt: TextReceiptCache,
+     state: StdMutex<State>,
+     session: OnceLock<Weak<crate::session::session::Session>>,
+ }
+@@ -178,6 +351,11 @@ fn route(base: &str) -> Result<String> {
+ 
+ fn item_digest(item: &ResponseItem) -> Result<[u8; 32]> {
+     HistoryBudget::default().observe(item)?;
++    item_digest_after_budget_check(item)
++}
++
++// The caller must have successfully observed this exact, unchanged item.
++fn item_digest_after_budget_check(item: &ResponseItem) -> Result<[u8; 32]> {
+     let mut plain = item.clone();
+     plain.clear_internal_chat_message_metadata_passthrough();
+     let mut results = Vec::new();
+@@ -278,13 +456,45 @@ fn hex(digest: impl AsRef<[u8]>) -> String {
+         .collect()
+ }
+ 
++struct InputDigests {
++    full: String,
++    prefix: Option<String>,
++    tail: Vec<String>,
++}
++
++fn input_digests_after_budget_check<'a>(
++    items: impl IntoIterator<Item = &'a ResponseItem>,
++    prefix_len: Option<usize>,
++    receipt: Option<&TextReceiptCache>,
++) -> Result<InputDigests> {
++    let mut digest = Sha256::new();
++    digest.update(b"sdk-provider-history-input-v1\0");
++    let mut prefix = (prefix_len == Some(0)).then(|| hex(digest.clone().finalize()));
++    let mut tail = Vec::new();
++    for (index, item) in items.into_iter().enumerate() {
++        let item_hash = item_digest_with_receipt(item, receipt)?;
++        digest.update(item_hash);
++        if prefix_len == Some(index + 1) {
++            prefix = Some(hex(digest.clone().finalize()));
++        }
++        if prefix_len.is_some_and(|len| index >= len) {
++            tail.push(hex(item_hash));
++        }
++    }
++    Ok(InputDigests {
++        full: hex(digest.finalize()),
++        prefix,
++        tail,
++    })
++}
++
+ fn input_digest<'a>(items: impl IntoIterator<Item = &'a ResponseItem>) -> Result<String> {
+     let mut digest = Sha256::new();
+     let mut budget = HistoryBudget::default();
+     digest.update(b"sdk-provider-history-input-v1\0");
+     for item in items {
+         budget.observe(item)?;
+-        digest.update(item_digest(item)?);
++        digest.update(item_digest_after_budget_check(item)?);
+     }
+     Ok(hex(digest.finalize()))
+ }
+@@ -298,14 +508,18 @@ pub(crate) fn canonical_input_boundary(
+     })
+ }
+ 
+-pub(crate) fn canonical_input_projection(
++pub(super) fn canonical_input_projection(
+     items: &[ResponseItem],
+     wire_input_indices: Vec<usize>,
+     prefix_len: usize,
++    receipt: Option<&TextReceiptCache>,
+ ) -> Result<codex_api::ProviderHistoryInputProjection> {
+-    let budget = check_items(items.iter())?;
++    let budget = check_items(items.iter(), receipt)?;
+     let (retained_item_count, retained_json_bytes) = budget.retained();
+-    let hashes = items.iter().map(item_digest).collect::<Result<Vec<_>>>()?;
++    let hashes = items
++        .iter()
++        .map(|item| item_digest_with_receipt(item, receipt))
++        .collect::<Result<Vec<_>>>()?;
+     Ok(codex_api::ProviderHistoryInputProjection {
+         retained_item_count,
+         retained_json_bytes,
+@@ -325,18 +539,22 @@ pub(crate) fn canonical_input_projection(
+     })
+ }
+ 
+-pub(crate) fn sampling_input_projection(
++pub(super) fn sampling_input_projection(
+     captured: Option<&codex_api::ProviderHistoryInputProjection>,
+     items: &[ResponseItem],
+     wire_input_indices: Vec<usize>,
+     prefix_len: usize,
++    receipt: Option<&TextReceiptCache>,
+ ) -> Result<codex_api::ProviderHistoryInputProjection> {
+-    check_items(items.iter())?;
+     let Some(captured) = captured else {
+-        return canonical_input_projection(items, wire_input_indices, prefix_len);
++        return canonical_input_projection(items, wire_input_indices, prefix_len, receipt);
+     };
++    check_items(items.iter(), receipt)?;
+     let mut projection = captured.clone();
+-    projection.sampling_item_sha256 = items.iter().map(item_digest).collect::<Result<Vec<_>>>()?;
++    projection.sampling_item_sha256 = items
++        .iter()
++        .map(|item| item_digest_with_receipt(item, receipt))
++        .collect::<Result<Vec<_>>>()?;
+     projection.wire_input_indices = wire_input_indices;
+     projection.prefix_len = prefix_len;
+     projection.delivered_input_indices.clear();
+@@ -506,6 +724,7 @@ pub(crate) fn definitive_pre_stream_rejection(error: &codex_api::ApiError) -> bo
+ impl Cursor {
+     pub(crate) fn new(start: Start) -> Self {
+         Self {
++            text_receipt: TextReceiptCache::default(),
+             state: StdMutex::new(State {
+                 reference: start.reference.unwrap_or(ProviderHistoryReference {
+                     selection: start.selection,
+@@ -535,18 +754,30 @@ impl Cursor {
      pub(crate) fn needs_live_websocket(&self) -> bool {
          let state = self.state.lock().unwrap();
          state.reference.stored_response == Some(false)
@@ -254,16 +609,18 @@ index 4aaa1e19..48d54c0d 100644
          {
              return Err(invalid("Unstored provider history requires its live WebSocket connection"));
          }
-@@ -577,7 +589,7 @@ impl Cursor {
+@@ -576,8 +807,8 @@ impl Cursor {
+         attempt: Option<std::sync::Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
          history_transport: HistoryTransport<'_>,
      ) -> Result<Option<codex_api::CacheAnnotatedInput<Vec<ResponseItem>>>> {
-         check_items(request.input.iter())?;
+-        check_items(request.input.iter())?;
 -        let canonical_input = request
++        check_items(request.input.iter(), Some(&self.text_receipt))?;
 +        let mut canonical_input = request
              .request_controls
              .canonical_history_input
              .take()
-@@ -615,18 +627,41 @@ impl Cursor {
+@@ -615,18 +846,46 @@ impl Cursor {
                  ));
              }
              if state.reference.stored_response == Some(false)
@@ -305,11 +662,49 @@ index 4aaa1e19..48d54c0d 100644
 +            }
 +        }
 +        let mut full_len = request.input.len();
-+        let mut full_digest = input_digest(request.input.as_ref())?;
++        let wire_digests = input_digests_after_budget_check(
++            request.input.as_ref(),
++            saved.window.as_ref().map(|window| window.input_len),
++            Some(&self.text_receipt),
++        )?;
++        let mut full_digest = wire_digests.full;
          let unsent = if let Some(window) = &saved.window {
              let canonical = if let Some(canonical) = canonical_window(window) {
                  if canonical_input.prefix_len + canonical_input.wire_input_indices.len() != full_len
-@@ -732,19 +767,51 @@ impl Cursor {
+@@ -648,24 +907,17 @@ impl Cursor {
+             } else {
+                 None
+             };
+-            let unchanged_wire_prefix = request
+-                .input
+-                .get(..window.input_len)
+-                .map(input_digest)
+-                .transpose()?
+-                .is_some_and(|digest| digest == window.input_sha256);
++            let unchanged_wire_prefix = wire_digests
++                .prefix
++                .as_ref()
++                .is_some_and(|digest| *digest == window.input_sha256);
+             let wire_unsent = (|| -> Result<Vec<usize>> {
+-                let prefix = request
+-                    .input
+-                    .get(..window.input_len)
++                let prefix = wire_digests
++                    .prefix
++                    .as_deref()
+                     .ok_or_else(|| invalid("Provider history lost acknowledged input"))?;
+-                let tail = request.input[window.input_len..]
+-                    .iter()
+-                    .map(item_digest)
+-                    .map(|digest| digest.map(hex))
+-                    .collect::<Result<Vec<_>>>()?;
+                 window
+-                    .unsent_input_indices(full_len, &input_digest(prefix)?, &tail)
++                    .unsent_input_indices(full_len, prefix, &wire_digests.tail)
+                     .map_err(CodexErr::InvalidRequest)
+             })();
+             if unchanged_wire_prefix && wire_unsent.is_ok() {
+@@ -732,19 +984,56 @@ impl Cursor {
          if needs_read
              && !matches!(
                  saved.selection,
@@ -353,17 +748,22 @@ index 4aaa1e19..48d54c0d 100644
 +                    .map(|id| ResponseItem::ItemReference { id: id.clone() }),
 +            );
 +            items.extend(request.input.iter().cloned());
-+            let budget = check_items(items.iter())?;
++            let budget = check_items(items.iter(), Some(&self.text_receipt))?;
 +            request.input = request.input.with_items(items);
 +            canonical_input.prefix_len += imported_items.len();
 +            full_len = request.input.len();
-+            full_digest = input_digest(request.input.as_ref())?;
++            full_digest = input_digests_after_budget_check(
++                request.input.as_ref(),
++                None,
++                Some(&self.text_receipt),
++            )?
++            .full;
 +            Some(budget)
 +        };
          {
              let mut state = self.state.lock().unwrap();
              if state.reference.pending {
-@@ -766,7 +833,7 @@ impl Cursor {
+@@ -766,7 +1055,7 @@ impl Cursor {
                  mcp_rewrites: Vec::new(),
                  attempt: attempt.as_ref().map(std::sync::Arc::downgrade),
                  stored: request.store,
@@ -372,7 +772,16 @@ index 4aaa1e19..48d54c0d 100644
                  scope,
              });
          }
-@@ -990,7 +1057,7 @@ impl Cursor {
+@@ -789,7 +1078,7 @@ impl Cursor {
+         current: &[&ResponseItem],
+         items: &[&ResponseItem],
+     ) -> Result<()> {
+-        check_items(items.iter().copied())?;
++        check_items(items.iter().copied(), None)?;
+         let state = self.state.lock().unwrap();
+         let refused = || invalid("Cannot replace acknowledged provider history input or output");
+         if state.reference.pending {
+@@ -990,7 +1279,7 @@ impl Cursor {
                  .pending
                  .take()
                  .ok_or_else(|| invalid("Provider history has no admitted dispatch"))?;
@@ -381,8 +790,357 @@ index 4aaa1e19..48d54c0d 100644
                  &mut state.reference.selection
              {
                  *id = Some(response.response_id);
+@@ -1041,6 +1330,191 @@ fn self_error(error: codex_api::ApiError) -> CodexErr {
+ mod tests {
+     use super::*;
+ 
++    fn receipt_message(text: &str) -> ResponseItem {
++        serde_json::from_value(serde_json::json!({
++            "type": "message", "id": "msg_receipt", "role": "user",
++            "content": [{"type": "input_text", "text": text}]
++        }))
++        .unwrap()
++    }
++
++    #[test]
++    fn text_receipt_matches_stock_message_envelope_and_digest_with_current_metadata() {
++        for unit in ["a", "é\"\\\n\t\0\u{2028}", "\0\r\n\u{8}\u{c}"] {
++            let text = unit.repeat((64 * 1024_usize).div_ceil(unit.len()));
++            let cache = TextReceiptCache::default();
++            let original = receipt_message(&text);
++            let mut stamped = original.clone();
++            stamped.set_turn_id_if_missing("turn_receipt");
++            stamped.set_create_time_if_missing(serde_json::Number::from_f64(-0.0).unwrap());
++            if let ResponseItem::Message {
++                internal_chat_message_metadata_passthrough: Some(metadata),
++                ..
++            } = &mut stamped
++            {
++                metadata.cell_id = Some("quoted\"cell".into());
++                metadata.executed_tool_calls = Some(Vec::new());
++                metadata.tool_calls_complete = Some(true);
++            }
++            let expected_digest = item_digest_after_budget_check(&original).unwrap();
++            for item in [&original, &stamped, &original] {
++                let envelope = codex_history::ResponseItemEnvelope {
++                    item: item.clone(),
++                    metadata: Some(codex_history::CodexHarnessMetadata::default()),
++                };
++                let mut stock = HistoryBudget::default();
++                let mut observed = HistoryBudget::default();
++                stock.observe(&envelope).unwrap();
++                cache.observe_envelope(&mut observed, &envelope).unwrap();
++                assert_eq!(observed.retained(), stock.retained());
++                let mut stock = HistoryBudget::default();
++                let mut observed = HistoryBudget::default();
++                stock.observe(item).unwrap();
++                cache.observe_item(&mut observed, item).unwrap();
++                assert_eq!(observed.retained(), stock.retained());
++                let (_, shell) = text_shell(item).unwrap();
++                let mut empty = item.clone();
++                if let ResponseItem::Message { content, .. } = &mut empty {
++                    let [codex_protocol::models::ContentItem::InputText { text }] =
++                        content.as_mut_slice()
++                    else {
++                        panic!("fixture text")
++                    };
++                    text.clear();
++                }
++                assert_eq!(
++                    serde_json::to_vec(&shell).unwrap(),
++                    serde_json::to_vec(&empty).unwrap()
++                );
++                let empty_envelope = codex_history::ResponseItemEnvelope {
++                    item: empty,
++                    metadata: envelope.metadata.clone(),
++                };
++                assert_eq!(
++                    serde_json::to_vec(&EnvelopeShell {
++                        item: shell,
++                        metadata: &envelope.metadata
++                    })
++                    .unwrap(),
++                    serde_json::to_vec(&empty_envelope).unwrap(),
++                );
++                assert_eq!(
++                    item_digest_with_receipt(item, Some(&cache)).unwrap(),
++                    expected_digest
++                );
++                assert_eq!(
++                    item_digest_with_receipt(item, Some(&cache)).unwrap(),
++                    item_digest_after_budget_check(item).unwrap()
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn text_receipt_keeps_exact_limits_and_never_publishes_failed_admission() {
++        let item = receipt_message(&"a".repeat(64 * 1024));
++        let cache = TextReceiptCache::default();
++        let size = serde_json::to_vec(&item).unwrap().len();
++        for (items, remaining) in [(MAX_HISTORY_ITEMS, MAX_HISTORY_BYTES), (0, size - 1)] {
++            let mut stock = HistoryBudget {
++                items,
++                bytes_left: remaining,
++            };
++            let mut observed = stock.clone();
++            assert_eq!(
++                cache
++                    .observe_item(&mut observed, &item)
++                    .unwrap_err()
++                    .to_string(),
++                stock.observe(&item).unwrap_err().to_string()
++            );
++            assert!(cache.0.get().is_none());
++        }
++        let mut exact = HistoryBudget {
++            items: 0,
++            bytes_left: size,
++        };
++        cache.observe_item(&mut exact, &item).unwrap();
++        assert_eq!(exact.bytes_left, 0);
++        let mut changed = item.clone();
++        changed.set_turn_id_if_missing(&"escaped\"turn".repeat(100));
++        let size = serde_json::to_vec(&changed).unwrap().len();
++        for remaining in [size - 1, size] {
++            let mut stock = HistoryBudget {
++                items: 0,
++                bytes_left: remaining,
++            };
++            let mut observed = stock.clone();
++            match stock.observe(&changed) {
++                Ok(()) => {
++                    cache.observe_item(&mut observed, &changed).unwrap();
++                    assert_eq!(observed.retained(), stock.retained());
++                }
++                Err(error) => assert_eq!(
++                    cache
++                        .observe_item(&mut observed, &changed)
++                        .unwrap_err()
++                        .to_string(),
++                    error.to_string()
++                ),
++            }
++        }
++        let oversized = receipt_message(&"x".repeat(MAX_HISTORY_BYTES));
++        let empty = TextReceiptCache::default();
++        assert!(
++            empty
++                .observe_item(&mut HistoryBudget::default(), &oversized)
++                .is_err()
++        );
++        assert!(empty.0.get().is_none());
++    }
++
++    #[test]
++    fn text_receipt_falls_back_for_changed_identity_content_and_executed_calls() {
++        let item = receipt_message(&"a".repeat(64 * 1024));
++        let cache = TextReceiptCache::default();
++        cache
++            .observe_item(&mut HistoryBudget::default(), &item)
++            .unwrap();
++        let digest = item_digest_with_receipt(&item, Some(&cache)).unwrap();
++        let mut changed_id = item.clone();
++        changed_id.set_id(Some(codex_protocol::ResponseItemId::from_server(
++            "other".into(),
++        )));
++        let mut changed_phase = item.clone();
++        if let ResponseItem::Message { phase, .. } = &mut changed_phase {
++            *phase = Some(codex_protocol::models::MessagePhase::Commentary);
++        }
++        let changed_text = receipt_message(&"b".repeat(64 * 1024));
++        let mut executed = item.clone();
++        executed.set_turn_id_if_missing("turn_executed");
++        if let ResponseItem::Message {
++            internal_chat_message_metadata_passthrough: Some(metadata),
++            ..
++        } = &mut executed
++        {
++            metadata.executed_tool_calls = Some(vec![codex_protocol::models::ExecutedToolCall::new(
++                "effect".into(),
++                serde_json::json!({"arg": "value"}),
++            )]);
++        }
++        assert!(text_shell(&executed).is_none());
++        for changed in [&changed_id, &changed_phase, &changed_text, &executed] {
++            let mut stock = HistoryBudget::default();
++            let mut observed = HistoryBudget::default();
++            stock.observe(changed).unwrap();
++            cache.observe_item(&mut observed, changed).unwrap();
++            assert_eq!(observed.retained(), stock.retained());
++            assert_eq!(
++                item_digest_with_receipt(changed, Some(&cache)).unwrap(),
++                item_digest_after_budget_check(changed).unwrap()
++            );
++        }
++        assert_eq!(cache.0.get().unwrap().text.as_ref(), "a".repeat(64 * 1024));
++        assert_eq!(*cache.0.get().unwrap().digest.get().unwrap(), digest);
++        assert!(TextReceiptCache::default().0.get().is_none());
++    }
++
+     fn call(kind: &str, input: &str) -> ResponseItem {
+         serde_json::from_value(serde_json::json!({
+             "type": kind, "id": "provider-initial", "name": "effect", "call_id": "call", "arguments": input,
+@@ -1085,10 +1559,85 @@ mod tests {
+         .unwrap()
+     }
+ 
++    // Independent reference for the pre-change item traversal and digest format.
++    fn separate_input_digest<'a>(
++        items: impl IntoIterator<Item = &'a ResponseItem>,
++    ) -> Result<String> {
++        let mut digest = Sha256::new();
++        let mut budget = HistoryBudget::default();
++        digest.update(b"sdk-provider-history-input-v1\0");
++        for item in items {
++            budget.observe(item)?;
++            digest.update(item_digest(item)?);
++        }
++        Ok(hex(digest.finalize()))
++    }
++
++    #[test]
++    fn one_pass_input_digests_match_separate_unicode_and_boundary_passes() {
++        let samples = [
++            Vec::new(),
++            vec![input_message("msg_unicode", "é🦀\n\"\\")],
++            vec![
++                input_message("msg_first", "first"),
++                call("function_call", r#"{"b":"é","a":1}"#),
++                call("custom_tool_call", " raw\ntext "),
++            ],
++        ];
++        for items in samples {
++            let serialized = serde_json::to_vec(&items).unwrap();
++            for prefix_len in [
++                None,
++                Some(0),
++                Some(items.len() / 2),
++                Some(items.len()),
++                Some(items.len() + 1),
++            ] {
++                check_items(items.iter(), None).unwrap();
++                let actual = input_digests_after_budget_check(&items, prefix_len, None).unwrap();
++                assert_eq!(actual.full, separate_input_digest(&items).unwrap());
++                let expected_prefix = prefix_len
++                    .and_then(|len| items.get(..len))
++                    .map(separate_input_digest)
++                    .transpose()
++                    .unwrap();
++                assert_eq!(actual.prefix, expected_prefix);
++                let expected_tail = prefix_len
++                    .and_then(|len| items.get(len..))
++                    .unwrap_or(&[])
++                    .iter()
++                    .map(|item| hex(item_digest(item).unwrap()))
++                    .collect::<Vec<_>>();
++                assert_eq!(actual.tail, expected_tail);
++                assert_eq!(serde_json::to_vec(&items).unwrap(), serialized);
++            }
++        }
++    }
++
++    #[test]
++    fn one_pass_input_digests_preserve_budget_error_before_invalid_prefix() {
++        let item = input_message("msg_budget", &"é".repeat(MAX_HISTORY_BYTES / 2));
++        let expected = separate_input_digest([&item]).unwrap_err().to_string();
++        let items = [item];
++        let actual = check_items(items.iter(), None)
++            .and_then(|_| input_digests_after_budget_check(&items, Some(2), None));
++        assert_eq!(actual.err().unwrap().to_string(), expected);
++        let small = input_message("msg_count", "small");
++        let expected = separate_input_digest(std::iter::repeat_n(&small, MAX_HISTORY_ITEMS + 1))
++            .unwrap_err()
++            .to_string();
++        assert_eq!(
++            input_digest(std::iter::repeat_n(&small, MAX_HISTORY_ITEMS + 1))
++                .unwrap_err()
++                .to_string(),
++            expected
++        );
++    }
++
+     #[test]
+     fn sampling_append_and_same_identity_replacement_keep_canonical_boundary() {
+         let original = vec![input_message("msg_original", "original")];
+-        let captured = canonical_input_projection(&original, vec![], 0).unwrap();
++        let captured = canonical_input_projection(&original, vec![], 0, None).unwrap();
+         for sample in [
+             vec![
+                 original[0].clone(),
+@@ -1096,9 +1645,14 @@ mod tests {
+             ],
+             vec![input_message("msg_original", "replacement")],
+         ] {
+-            let projected =
+-                sampling_input_projection(Some(&captured), &sample, (0..sample.len()).collect(), 0)
+-                    .unwrap();
++            let projected = sampling_input_projection(
++                Some(&captured),
++                &sample,
++                (0..sample.len()).collect(),
++                0,
++                None,
++            )
++            .unwrap();
+             let (boundary, tail) = delivered_boundary(&projected).unwrap();
+             assert_eq!(boundary, captured.boundary);
+             assert!(tail.is_none());
+@@ -1113,9 +1667,10 @@ mod tests {
+             input_message("msg_b", "b"),
+             input_message("msg_c", "c"),
+         ];
+-        let captured = canonical_input_projection(&original, vec![], 0).unwrap();
++        let captured = canonical_input_projection(&original, vec![], 0, None).unwrap();
+         let sample = vec![original[0].clone(), original[2].clone()];
+-        let projected = sampling_input_projection(Some(&captured), &sample, vec![0, 1], 0).unwrap();
++        let projected =
++            sampling_input_projection(Some(&captured), &sample, vec![0, 1], 0, None).unwrap();
+         let (boundary, mut tail) = delivered_boundary(&projected).unwrap();
+         assert_eq!(boundary.input_len, 1);
+         let output = input_message("msg_output", "output");
+@@ -1181,7 +1736,7 @@ mod tests {
+         .unwrap();
+         let other = input_message("msg_other", "other");
+         let original = vec![same.clone(), other.clone(), same.clone()];
+-        let captured = canonical_input_projection(&original, vec![], 0).unwrap();
++        let captured = canonical_input_projection(&original, vec![], 0, None).unwrap();
+         let sample = vec![
+             input_message("msg_new", "new"),
+             same.clone(),
+@@ -1189,9 +1744,12 @@ mod tests {
+             other.clone(),
+         ];
+         let projected =
+-            sampling_input_projection(Some(&captured), &sample, vec![0, 1, 2, 3], 0).unwrap();
++            sampling_input_projection(Some(&captured), &sample, vec![0, 1, 2, 3], 0, None).unwrap();
+         assert_eq!(projected.delivered_input_indices, vec![0, 1, 2]);
+-        assert!(sampling_input_projection(Some(&captured), &[same, other], vec![0, 1], 0).is_err());
++        assert!(
++            sampling_input_projection(Some(&captured), &[same, other], vec![0, 1], 0, None)
++                .is_err()
++        );
+     }
+ 
+     #[test]
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 5b5d5ebd20d390f909ea456e23ae66ed20796a40..8fa6cbf6cbe7d1dd73b97f880ea359241872e04c 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1135,7 +1135,9 @@ async fn check_provider_history_budget<T: serde::Serialize>(
+         let history = sess.clone_history().await;
+         HistoryBudget::check_count(history.raw_items().len().saturating_add(input.len()))?;
+         for item in history.annotated_items() {
+-            budget.observe(item)?;
++            sess.services
++                .model_client
++                .observe_provider_history_envelope(&mut budget, item)?;
+         }
+         for item in input {
+             budget.observe(item)?;
 diff --git a/codex-rs/core/tests/provider_history.rs b/codex-rs/core/tests/provider_history.rs
-index 2851adb8..54cf0ce4 100644
+index 2851adb87495857c66907ad4c02d213520c3d771..54cf0ce4ad94e307cdefe1b3ad068239d8e636dd 100644
 --- a/codex-rs/core/tests/provider_history.rs
 +++ b/codex-rs/core/tests/provider_history.rs
 @@ -44,8 +44,10 @@ async fn websocket_history_advances_on_the_same_socket_with_only_new_input() ->
@@ -522,7 +1280,7 @@ index 2851adb8..54cf0ce4 100644
      let result = test
          .thread_manager
 diff --git a/codex-rs/protocol/src/provider_history.rs b/codex-rs/protocol/src/provider_history.rs
-index d71f6fdb..32a61dd9 100644
+index d71f6fdbc82bcae523e252d6a70d5fd73d919397..32a61dd90b12d8b2a96e16d8d242cf3cb9184bb9 100644
 --- a/codex-rs/protocol/src/provider_history.rs
 +++ b/codex-rs/protocol/src/provider_history.rs
 @@ -16,6 +16,10 @@ pub enum ProviderHistorySelection {
@@ -582,7 +1340,7 @@ index d71f6fdb..32a61dd9 100644
  
  /// Canonical input before trusted request-only rows are inserted.
 diff --git a/codex-rs/protocol/tests/provider_history.rs b/codex-rs/protocol/tests/provider_history.rs
-index 7c049077..95bdd27c 100644
+index 7c049077832ffabc1c4fe58a0d5ac5f6bddca975..95bdd27c044542f4adbcd645c485a9a7a1af943b 100644
 --- a/codex-rs/protocol/tests/provider_history.rs
 +++ b/codex-rs/protocol/tests/provider_history.rs
 @@ -20,7 +20,8 @@ fn selection_preserves_opaque_ids_and_rejects_conflicting_shapes() {
