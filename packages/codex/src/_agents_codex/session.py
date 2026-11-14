@@ -20506,6 +20506,9 @@ class Session(Generic[ContextT, OutputT]):
                         should_cancel = not state.stopping and (
                             state.handle is None or not state.failure.done()
                         )
+                        # Retire an in-flight restored reply even if its native
+                        # terminal event arrived before Session close.
+                        state.retire_manual = state.retire_manual or state.restored_pending
                         state.stopping = True
                         stop = state.manual_recovery_stop
                         if stop is not None and not stop.done():

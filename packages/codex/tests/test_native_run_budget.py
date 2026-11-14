@@ -992,6 +992,10 @@ async def test_restored_reply_budget_stop_joins_recovery_receipt(
                 assert isinstance(failure, NativeError) and failure.code == "run_budget_exceeded"
                 # Let the Turn's failure waiter enter cleanup with the receipt held.
                 await asyncio.sleep(0)
+                # Exercise close after Core's terminal event while Python still
+                # holds the admission receipt.
+                if interrupt == "close":
+                    await asyncio.shield(active.terminal)
                 if interrupt is not None:
                     stopping = asyncio.create_task(
                         turn.cancel(mode="force") if interrupt == "force" else restored.aclose()
