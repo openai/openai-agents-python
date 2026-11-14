@@ -666,10 +666,11 @@ class ProviderModeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 instances.append(self)
 
-        for mode, request_transport in (
-            ("caller-owned", None),
-            ("omitted", None),
-            ("omitted", "http"),
+        for mode, request_transport, response_mode in (
+            ("caller-owned", None, "streaming"),
+            ("caller-owned", None, "buffered"),
+            ("omitted", None, "streaming"),
+            ("omitted", "http", "streaming"),
         ):
             with self.subTest(mode=mode, request_transport=request_transport):
                 provider = SimpleNamespace(__aenter__=mock.AsyncMock(), __aexit__=mock.AsyncMock())
@@ -698,7 +699,9 @@ class ProviderModeTests(unittest.IsolatedAsyncioTestCase):
                         if mode == "omitted"
                         else {}
                     )
-                    async with adapter_type("unused", default_host=True, **options) as adapter:
+                    async with adapter_type(
+                        "unused", default_host=True, response_mode=response_mode, **options
+                    ) as adapter:
                         self.assertEqual((await adapter.run("first"))["text"], "first")
                         self.assertEqual((await adapter.run("second"))["text"], "second")
                 agent = instances[-1]
@@ -720,7 +723,14 @@ class ProviderModeTests(unittest.IsolatedAsyncioTestCase):
                         async with adapter.conversation():
                             self.fail("A retained Session has been opening")
                 else:
-                    constructor.assert_called_once_with(api_key="synthetic-benchmark-key")
+                    provider_options = (
+                        {"response_mode": "buffered", "supports_websockets": False}
+                        if response_mode == "buffered"
+                        else {}
+                    )
+                    constructor.assert_called_once_with(
+                        api_key="synthetic-benchmark-key", **provider_options
+                    )
                     self.assertIs(agent.provider, provider)
                     provider.__aenter__.assert_awaited_once()
                     provider.__aexit__.assert_awaited_once()
@@ -898,18 +908,80 @@ class InstrumentationTests(unittest.TestCase):
 
 
 class DefaultHostTransportTests(unittest.TestCase):
+    def test_buffered_controller_requires_caller_owned_final_fresh_calls(self):
+        class Admitted(RuntimeError):
+            pass
+
+        previous = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+        with tempfile.TemporaryDirectory() as directory:
+            setup = Path(directory) / "setup.json"
+            setup.write_text("{}")
+            common = [
+                "compare.py",
+                "--v0-python",
+                "/unused/v0",
+                "--v1-python",
+                "/unused/v1",
+                "--v0-version",
+                "0.24.0",
+                "--v1-version",
+                "native",
+                "--server-python",
+                "/unused/peer",
+                "--default-host-setup",
+                str(setup),
+                "--v1-response-mode",
+                "buffered",
+                "--samples",
+                "1",
+            ]
+            for mode, case, admitted in (
+                ("caller-owned", "oneshot_tool_output_16k_128", True),
+                ("omitted", "oneshot_tool_output_16k_128", False),
+                ("caller-owned", "oneshot_tool_output_16k_128_active", False),
+                ("caller-owned", "conversation_text", False),
+            ):
+                argv = common + [
+                    "--native-provider-mode",
+                    mode,
+                    "--cases",
+                    case,
+                    "--output-dir",
+                    str(Path(directory) / f"{mode}-{case}"),
+                ]
+                with (
+                    self.subTest(mode=mode, case=case),
+                    mock.patch.dict(os.environ, {}, clear=True),
+                    mock.patch.object(sys, "argv", argv),
+                    mock.patch.object(sys, "stderr", io.StringIO()),
+                    mock.patch.object(compare.subprocess, "Popen", side_effect=Admitted) as child,
+                ):
+                    if admitted:
+                        with self.assertRaises(Admitted):
+                            compare.main()
+                        child.assert_called_once()
+                    else:
+                        with self.assertRaises(SystemExit) as error:
+                            compare.main()
+                        self.assertEqual(error.exception.code, 2)
+                        child.assert_not_called()
+
     def test_fresh_tool_cases_reach_peer_launch_before_any_sdk_import(self):
         class Admitted(RuntimeError):
             pass
 
         original_exists = Path.exists
-        for case in (
-            "oneshot_tool",
-            "oneshot_tool_output_16k_1",
-            "oneshot_tool_output_16k_16",
-            "oneshot_tool_output_16k_128",
-            "oneshot_tool_output_16k_128_active",
-        ):
+        for case, response_mode in [
+            (name, "streaming")
+            for name in (
+                "oneshot_tool",
+                "oneshot_tool_output_16k_1",
+                "oneshot_tool_output_16k_16",
+                "oneshot_tool_output_16k_128",
+                "oneshot_tool_output_16k_128_active",
+            )
+        ] + [("oneshot_tool_output_16k_128", "buffered")]:
             with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
                 setup = Path(directory) / "setup.json"
                 setup.write_text(
@@ -929,9 +1001,11 @@ class DefaultHostTransportTests(unittest.TestCase):
                     "--case",
                     case,
                     "--native-provider-mode",
-                    "omitted",
+                    "caller-owned" if response_mode == "buffered" else "omitted",
+                    "--response-mode",
+                    response_mode,
                     "--native-transport",
-                    "websocket",
+                    "http" if response_mode == "buffered" else "websocket",
                     "--default-host-setup",
                     str(setup),
                     "--output",
@@ -1304,6 +1378,41 @@ class DualHTTPQualificationTests(unittest.TestCase):
                         response_body_complete=True,
                     )
         return value
+
+    def test_buffered_dual_peer_uses_complete_http1_json_receipts(self):
+        value = self.dual_records()
+        buffered_rows(value["oneshot_text"]["v1"])
+        for result in value["oneshot_text"]["v1"]:
+            connection = result["server"]["tls_transports"]["1"]
+            connection.update(http_version="1.1", alpn_protocol=None)
+            for receipt in result["server"]["receipts"]:
+                receipt.update(http_version="1.1", tls_alpn_protocol=None)
+        summary = compare.summarize(
+            value,
+            expected_versions=VERSIONS,
+            default_host=True,
+            peer_http_mode="dual",
+            v1_response_mode="buffered",
+        )
+        self.assertEqual(summary["oneshot_text"]["v1_response_mode"], "buffered")
+        for field, invalid in (
+            ("http_version", "2"),
+            ("tls_alpn_protocol", "h2"),
+            ("response_body_complete", False),
+            ("stream", True),
+        ):
+            target = value["oneshot_text"]["v1"][0]["server"]["receipts"][0]
+            previous = target[field]
+            target[field] = invalid
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                compare.summarize(
+                    value,
+                    expected_versions=VERSIONS,
+                    default_host=True,
+                    peer_http_mode="dual",
+                    v1_response_mode="buffered",
+                )
+            target[field] = previous
 
     def test_dual_protocol_schedule_survives_summary(self):
         summary = compare.summarize(

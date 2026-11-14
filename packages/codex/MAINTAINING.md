@@ -115,7 +115,7 @@ The **Tests** workflow checks each pull request's merge commit and runs on pushe
 
 Each selected platform publishes a `native-snapshot-<OS>-<ARCH>-<input-hash>` artifact. Qualification repacks the current Python SDK around the verified native payload, then publishes `native-<OS>-<ARCH>`. Installed-package, IPC, executable-symbol and receipt checks apply by platform.
 
-Preview code changes build Linux ARM64 on `ubuntu-24.04-arm`. Pull request and merge queue qualification start after the ARM64 producer succeeds. Preview push qualification also waits for the Linux x86_64, macOS, and Windows producers so the push can supply reusable artifacts. Linux ARM64 builds from source and qualifies the installed wheel with a local Session on CPython 3.10 and 3.14. Its `native-Linux-ARM64` artifact includes both Session test reports.
+Preview code changes build Linux ARM64 on `ubuntu-24.04-arm`. Pull request and merge queue qualification start after the ARM64 producer succeeds. Preview push qualification also waits for the Linux x86_64, macOS, and Windows producers so the push can supply reusable artifacts. Official preview pushes have been reusing Linux ARM64 only when the same selected donor has been passing the existing source, publication and qualification checks for ARM64; otherwise ARM64 has been building from source while the other selected snapshots have been remaining reusable. Linux ARM64 qualifies the installed wheel with a local Session on CPython 3.10 and 3.14. Its `native-Linux-ARM64` artifact includes both Session test reports.
 
 #### Check donor eligibility
 
@@ -132,7 +132,7 @@ Tests searches artifacts by the exact native input hash, so later docs-only runs
 
 If no eligible snapshot exists, Tests checks the latest 20 successful push runs per source for reusable Rust dependencies, then starts a fresh build immediately. Incomplete source-history reads and corrupted downloads fail visibly. A copied snapshot must pass the same source, publication and qualification checks.
 
-In this repository's CI, macOS snapshot reuse, SDK qualification and SDK tests use the ARM64 `macos-15` runner. Cold native builds and dependency-only reuse use `macos-15-xlarge`.
+In this repository's CI, macOS snapshot reuse, SDK qualification and SDK tests have been using the ARM64 `macos-15` runner. Official `feat/codex-harness` pushes have been using `macos-26-xlarge` when rebuilding the native payload. Same-repository harness pull requests have been using that runner for builds without snapshot or dependency reuse. Other macOS native builds have been using `macos-15-xlarge`.
 
 Artifact-control Python commands isolate startup from unbound checkout imports. Native CI rejects tracked Python bytecode/cache paths and root `.python-version`, `uv.toml` or `.venv` overrides before setting up uv; keep build settings in `pyproject.toml`.
 

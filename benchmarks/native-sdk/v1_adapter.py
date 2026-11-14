@@ -53,7 +53,11 @@ class Adapter:
         if response_mode == "buffered" and stream:
             raise ValueError("Buffered benchmarks require final-result workloads")
         # Omit the new keyword by default so older native SDK wheels still work.
-        provider_options = {"response_mode": "buffered"} if response_mode == "buffered" else {}
+        provider_options = (
+            {"response_mode": "buffered", "supports_websockets": False}
+            if response_mode == "buffered"
+            else {}
+        )
         self.stream = stream
         self.tool_calls = 0
         self._pending = {}
