@@ -1176,3 +1176,43 @@ def test_manual_native_entrypoint_uses_the_existing_qualified_package_pipeline(
         }
         for name in ("native-linux", "native-windows", "native-macos"):
             assert not _condition(suite["jobs"][name]["if"], conditions)
+
+
+@pytest.mark.parametrize(
+    ("event", "ref", "repo", "source", "dependencies", "parallel"),
+    [
+        ("push", "feat/codex-harness", "same", "", "", True),
+        ("push", "main", "same", "", "", False),
+        ("push", "feat/codex-harness", "fork", "", "", False),
+        ("pull_request", "feat/codex-harness", "same", "", "", False),
+        ("merge_group", "feat/codex-harness", "same", "", "", False),
+        ("workflow_dispatch", "feat/codex-harness", "same", "", "", False),
+        ("push", "feat/codex-harness", "same", "123", "", False),
+        ("push", "feat/codex-harness", "same", "", "123", False),
+    ],
+)
+def test_windows_filename_sibling_preserves_inline_fallbacks(
+    event, ref, repo, source, dependencies, parallel
+):
+    values = {
+        "github.repository": "openai/openai-agents-python" if repo == "same" else "fork/repo",
+        "github.event_name": event,
+        "github.ref": f"refs/heads/{ref}",
+        "inputs.runner": "windows-latest",
+        "inputs.native_source_run": source,
+        "inputs.native_dependency_run": dependencies,
+    }
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/codex-python.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    sibling = workflow["jobs"]["windows-filename"]
+    filename = next(
+        step
+        for step in _steps()
+        if step.get("name") == "Test Windows project-search filename handling"
+    )
+    assert _condition(sibling["if"], values) is parallel
+    assert _condition(filename["if"].replace("runner.os", "'Windows'"), values) is (
+        not source and not parallel
+    )
+    assert sibling["steps"][-2]["run"] == filename["run"]
