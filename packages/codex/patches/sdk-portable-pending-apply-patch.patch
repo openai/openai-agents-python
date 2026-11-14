@@ -1,0 +1,332 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index b2f321536b6c1d28a7bf74e4ca105fbd2f952792..f672aa828192269218bd23eb4887872e627d56bc 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1,5 +1,8 @@
+ #[derive(Debug)]
+-pub(crate) struct PortableManualSuspension;
++pub(crate) struct PortableManualSuspension {
++    pub(crate) turn_id: String,
++    pub(crate) pending_apply_patch_calls: Vec<String>,
++}
+ 
+ use crate::WithTurnExtensionData;
+ use crate::agent::AgentStatus;
+@@ -635,18 +638,26 @@ impl CodexThread {
+     /// Callers must not transfer ownership until suspension succeeds, which
+     /// requires stopping execution, flushing history, and closing its writer.
+     pub async fn suspend_turn_and_shutdown(&self) -> CodexResult<SuspendTurnOutcome> {
+-        self.suspend_turn_and_shutdown_inner(false).await
++        self.suspend_turn_and_shutdown_inner(None).await
+     }
+ 
+     /// Suspend an SDK-admitted ordinary manual checkpoint with a joined persistence owner.
+     #[doc(hidden)]
+-    pub async fn suspend_manual_turn_and_shutdown(&self) -> CodexResult<SuspendTurnOutcome> {
+-        self.suspend_turn_and_shutdown_inner(true).await
++    pub async fn suspend_manual_turn_and_shutdown(
++        &self,
++        turn_id: String,
++        pending_apply_patch_calls: Vec<String>,
++    ) -> CodexResult<SuspendTurnOutcome> {
++        self.suspend_turn_and_shutdown_inner(Some(PortableManualSuspension {
++            turn_id,
++            pending_apply_patch_calls,
++        }))
++        .await
+     }
+ 
+     async fn suspend_turn_and_shutdown_inner(
+         &self,
+-        portable_manual: bool,
++        portable_manual: Option<PortableManualSuspension>,
+     ) -> CodexResult<SuspendTurnOutcome> {
+         if self.session_source.is_non_root_agent() {
+             return Err(CodexErr::UnsupportedOperation(
+@@ -663,9 +674,9 @@ impl CodexThread {
+                 trace_policy: None,
+                 id: new_submission_id(),
+                 op: Op::SuspendTurnAndShutdown { reply },
+-                turn_extension_init: portable_manual.then(|| {
++                turn_extension_init: portable_manual.map(|suspension| {
+                     let mut init = codex_extension_api::ExtensionDataInit::new();
+-                    init.insert(PortableManualSuspension);
++                    init.insert(suspension);
+                     init
+                 }),
+                 trace: current_span_w3c_trace_context(),
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index 370ba0be30005948286285a32dd4229074049464..0c7ecb80fa77885aac87f15bb3cc78e576110a1a 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -987,8 +987,8 @@ pub(super) async fn submission_loop(
+                     false
+                 }
+                 Op::SuspendTurnAndShutdown { reply } => {
+-                    let portable_manual = sub.turn_extension_init.as_ref().is_some_and(|init| {
+-                        init.get::<crate::codex_thread::PortableManualSuspension>().is_some()
++                    let portable_manual = sub.turn_extension_init.as_ref().and_then(|init| {
++                        init.get::<crate::codex_thread::PortableManualSuspension>()
+                     });
+                     let result = super::turn_suspension::suspend_turn_and_shutdown(
+                         &sess, sub.id.clone(), portable_manual,
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 6db6605ae5addcd740093e2ca82e755eb9d56295..344b20fc7605f200672ff885ad382a7707950716 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -62,6 +62,7 @@ use crate::tools::ToolRouter;
+ use crate::tools::context::SharedTurnDiffTracker;
+ use crate::tools::parallel::DirectToolResult;
+ use crate::tools::parallel::ToolCallRuntime;
++use crate::tools::parallel::unpublished_tool_output_id;
+ use crate::tools::registry::ToolArgumentDiffConsumer;
+ use crate::tools::router::ToolSuggestCandidates;
+ use crate::tools::router::ToolSuggestPresentation;
+@@ -4935,7 +4936,8 @@ async fn drain_in_flight(
+     let turn_context = &step_context.turn;
+     while let Some(res) = in_flight.next().await {
+         match res {
+-            Ok(result) => {
++            Ok(None) => continue,
++            Ok(Some(result)) => {
+                 let retained = check_provider_history_budget(&sess, &[] as &[TurnInput]).await;
+                 sess.services
+                     .model_client
+@@ -4977,11 +4979,8 @@ async fn drain_in_flight(
+                                 )
+                             })
+                     });
+-                let unpublished_id = match &result.envelope.item {
+-                    ResponseItem::FunctionCallOutput { call_id, .. } => call_id.clone(),
+-                    ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.clone()),
+-                    _ => None,
+-                };
++                let unpublished_id = unpublished_tool_output_id(&result.envelope.item)
++                    .map(str::to_owned);
+                 let outcome = if held {
+                     turn_context
+                         .extension_data
+@@ -5009,12 +5008,8 @@ async fn drain_in_flight(
+                         .unpublished_outputs
+                         .lock()
+                         .expect("unpublished tool outputs poisoned")
+-                        .retain(|(envelope, _)| match &envelope.item {
+-                            ResponseItem::FunctionCallOutput { call_id, .. } => {
+-                                call_id.as_ref() != Some(&id)
+-                            }
+-                            ResponseItem::CustomToolCallOutput { call_id, .. } => call_id != &id,
+-                            _ => true,
++                        .retain(|(envelope, _)| {
++                            unpublished_tool_output_id(&envelope.item) != Some(id.as_str())
+                         });
+                 }
+                 // End observation can fail after canonical publication. Retire
+diff --git a/codex-rs/core/src/session/turn_suspension.rs b/codex-rs/core/src/session/turn_suspension.rs
+index edc18a8819b504941aa7b62ca912418737f5f629..0d2c776b57c8f5a898075e64f636624274cb7e01 100644
+--- a/codex-rs/core/src/session/turn_suspension.rs
++++ b/codex-rs/core/src/session/turn_suspension.rs
+@@ -1,5 +1,6 @@
+ use super::handlers;
+ use super::session::Session;
++use crate::codex_thread::PortableManualSuspension;
+ use crate::state::TaskKind;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::error::Result as CodexResult;
+@@ -17,8 +18,9 @@ const PORTABLE_MANUAL_SUSPENSION_TIMEOUT: Duration = Duration::from_secs(2);
+ pub(super) async fn suspend_turn_and_shutdown(
+     session: &Arc<Session>,
+     submission_id: String,
+-    portable_manual: bool,
++    manual: Option<Arc<PortableManualSuspension>>,
+ ) -> CodexResult<SuspendTurnOutcome> {
++    let portable_manual = manual.is_some();
+     {
+         let active = session.active_turn.lock().await;
+         let Some(task) = active.as_ref().and_then(|turn| turn.task.as_ref()) else {
+@@ -63,6 +65,9 @@ pub(super) async fn suspend_turn_and_shutdown(
+         if task.kind != TaskKind::Regular {
+             return Ok(SuspendTurnOutcome::UnsupportedTask);
+         }
++        if manual.as_ref().is_some_and(|manual| manual.turn_id != task.turn_context.sub_id) {
++            return Ok(SuspendTurnOutcome::NotActive);
++        }
+         active.take().ok_or_else(|| {
+             CodexErr::Fatal("accepted root turn suspension had no running turn".to_string())
+         })?
+@@ -77,8 +82,10 @@ pub(super) async fn suspend_turn_and_shutdown(
+     let suspension = task.turn_context
+         .extension_data
+         .get_or_init(codex_extension_api::HeldToolCompletionResults::default);
+-    if portable_manual {
+-        suspension.portable_suspension.get_or_init(|| ());
++    if let Some(manual) = manual {
++        suspension
++            .portable_suspension
++            .get_or_init(|| manual.pending_apply_patch_calls.clone());
+     }
+     suspension.suspension_drained.store(false, std::sync::atomic::Ordering::Release);
+     suspension.suspension_token_count.store(false, std::sync::atomic::Ordering::Release);
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index b4cb21ebe9eb01496ab43875f0bced18d55f9d05..fb00acd1e43d436fc2110edee9c2109b6f24ed06 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -275,7 +275,7 @@ async fn record_stage1_output_usage_for_memory_citation(
+ /// queuing any tool execution futures. This records items immediately so
+ /// history and rollout stay in sync even if the turn is later cancelled.
+ pub(crate) type InFlightFuture<'f> =
+-    Pin<Box<dyn Future<Output = Result<DirectToolResult>> + Send + 'f>>;
++    Pin<Box<dyn Future<Output = Result<Option<DirectToolResult>>> + Send + 'f>>;
+ 
+ #[derive(Default)]
+ pub(crate) struct OutputItemResult {
+diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
+index 2b274e851749b42271920aada73b7317c40fbaff..7488fa639be36d316f80011ed0f3d917ec6fd92d 100644
+--- a/codex-rs/core/src/tools/context.rs
++++ b/codex-rs/core/src/tools/context.rs
+@@ -51,6 +51,7 @@ pub(crate) struct ToolCallState {
+         OnceLock<super::program_callers::ProgrammaticCallReceipt>,
+     pub(crate) provider_agent_metadata: OnceLock<serde_json::Value>,
+     pub(crate) terminal_outcome_reached: AtomicBool,
++    pub(crate) parked_manual_apply_patch: AtomicBool,
+     pub(crate) output_observers: OnceLock<Vec<Arc<dyn codex_extension_api::RecordedToolOutputObserver>>>,
+     pub(crate) dispatch_started_at: OnceLock<std::time::Instant>,
+     pub(crate) builtin_sandbox_operation: OnceLock<codex_extension_api::BuiltinSandboxOperation>,
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index e22a037880c101bfc5745ee76339824da0906e7d..b4bb9161c8119feb52f7b8b94f60a98f16eec64e 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -213,22 +213,11 @@ impl ToolCallRuntime {
+         call: ToolCall,
+         cancellation_token: CancellationToken,
+     ) -> impl std::future::Future<Output = Result<DirectToolResult, CodexErr>> {
+-        self.handle_tool_call_with_provider_metadata(call, cancellation_token, None)
+-    }
+-
+-    pub(crate) fn handle_tool_call_with_provider_metadata(
+-        self,
+-        call: ToolCall,
+-        cancellation_token: CancellationToken,
+-        provider_agent_metadata: Option<serde_json::Value>,
+-    ) -> impl std::future::Future<Output = Result<DirectToolResult, CodexErr>> {
+-        self.handle_tool_call_with_provider_admission(
+-            call,
+-            cancellation_token,
+-            provider_agent_metadata,
+-            None,
+-            None,
+-        )
++        async move {
++            self.handle_tool_call_with_provider_admission(call, cancellation_token, None, None, None)
++                .await?
++                .ok_or_else(|| CodexErr::Fatal("Direct tool call lost its result".into()))
++        }
+     }
+ 
+     pub(crate) fn handle_tool_call_with_provider_admission(
+@@ -238,7 +227,7 @@ impl ToolCallRuntime {
+         provider_agent_metadata: Option<serde_json::Value>,
+         provider_programmatic_call: Option<super::program_callers::ProgrammaticCallReceipt>,
+         response_gate: Option<CancellationToken>,
+-    ) -> impl std::future::Future<Output = Result<DirectToolResult, CodexErr>> {
++    ) -> impl std::future::Future<Output = Result<Option<DirectToolResult>, CodexErr>> {
+         self.observe_requested_handoff(&call.tool_name, &call.call_id);
+         let ignored = self.ignores_handoff(&call.tool_name, &call.call_id);
+         let handoff_selection = Arc::clone(&self.handoff_selection);
+@@ -302,6 +291,9 @@ impl ToolCallRuntime {
+         };
+         async move {
+             let result = future.await;
++            if call_state.parked_manual_apply_patch.load(Ordering::Acquire) {
++                return Ok(None);
++            }
+             let mut recorded_call =
+                 recorded_call.filter(|(_, recording)| recording.strong_count() > 0);
+             let (mut response, pending_exec, succeeded) = match result {
+@@ -403,13 +395,7 @@ impl ToolCallRuntime {
+             }
+             recorder.attach_direct_call_to_output(&mut response.item, recorded_call);
+             if pending_exec.is_none()
+-                && matches!(
+-                    &response.item,
+-                    ResponseItem::FunctionCallOutput {
+-                        call_id: Some(_),
+-                        ..
+-                    } | ResponseItem::CustomToolCallOutput { .. }
+-                )
++                && unpublished_tool_output_id(&response.item).is_some()
+                 && let Some(owner) = retained_step_context
+                     .turn
+                     .extension_data
+@@ -431,12 +417,12 @@ impl ToolCallRuntime {
+                     progress();
+                 }
+             }
+-            Ok(DirectToolResult {
++            Ok(Some(DirectToolResult {
+                 observers: call_state.output_observers.get().cloned().unwrap_or_default(),
+                 succeeded,
+                 envelope: response,
+                 pending_exec,
+-            })
++            }))
+         }
+     }
+ 
+@@ -655,6 +641,23 @@ impl ToolCallRuntime {
+                         match dispatch_handle.await {
+                             Ok(result) => result,
+                             Err(err) if err.is_cancelled() => {
++                                if matches!(call.payload, ToolPayload::ApplyPatch { .. })
++                                    && matches!(abort_source, ToolCallSource::Direct)
++                                    && !call_state.terminal_outcome_reached.load(Ordering::Acquire)
++                                    && abort_step.turn.extension_data
++                                        .get::<codex_extension_api::HeldToolCompletionResults>()
++                                        .is_some_and(|owner| {
++                                            owner.suspending.load(Ordering::Acquire)
++                                                && owner.portable_suspension.get().is_some_and(
++                                                    |calls| calls.contains(&call.call_id),
++                                                )
++                                        })
++                                {
++                                    // The SDK still owns the grant and dispatch has joined.
++                                    // Leave the request pending for restoration without a receipt.
++                                    call_state.parked_manual_apply_patch.store(true, Ordering::Release);
++                                    return Err(FunctionCallError::Fatal("Pending manual patch parked".into()));
++                                }
+                                 if matches!(call.payload, ToolPayload::Computer { .. } | ToolPayload::ApplyPatch { .. }) {
+                                     return Err(FunctionCallError::Fatal("computer call cancelled".into()));
+                                 }
+@@ -699,6 +702,18 @@ impl ToolCallRuntime {
+     }
+ }
+ 
++pub(crate) fn unpublished_tool_output_id(item: &ResponseItem) -> Option<&str> {
++    match item {
++        ResponseItem::FunctionCallOutput { call_id, .. } => call_id.as_deref(),
++        ResponseItem::CustomToolCallOutput { call_id, .. }
++        | ResponseItem::ApplyPatchCallOutput { call_id, .. } => Some(call_id),
++        ResponseItem::ShellCallOutput { provider_fields, .. } => {
++            provider_fields.get("call_id")?.as_str()
++        }
++        _ => None,
++    }
++}
++
+ async fn admit_tool_span(
+     session: &Session,
+     step: &Arc<StepContext>,
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 4db0da62ccde5d4a28ec800f1fead09485bcfd7f..9c9550dbc42122fddca6aa18dfa9d1a6a072fa3b 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -212,8 +212,8 @@ pub struct HeldToolCompletionResults {
+         Vec<std::sync::Arc<dyn super::RecordedToolOutputObserver>>,
+     )>>,
+     pub suspending: std::sync::atomic::AtomicBool,
+-    /// Opt in only through the SDK portable-manual suspension submission.
+-    pub portable_suspension: std::sync::OnceLock<()>,
++    /// The SDK's exact pending ApplyPatch call IDs for the portable suspension of this turn.
++    pub portable_suspension: std::sync::OnceLock<Vec<String>>,
+     /// The sampler has joined owned request/tool cleanup for this exact suspension.
+     /// The task wrapper clears this proof unless cancellation returns the expected result.
+     pub suspension_drained: std::sync::atomic::AtomicBool,

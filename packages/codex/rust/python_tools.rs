@@ -106,8 +106,18 @@ pub(crate) struct InputErrorToolSlots(pub(crate) Vec<usize>);
 
 impl Generation {
     fn managed_lifecycle_start(&self, name: &ToolName) -> bool {
-        self.entries.iter().enumerate().any(|(slot, entry)| entry.name.clone().with_default_namespace() == name.clone().with_default_namespace() && (!entry.manual || self.specs.managed_approval(slot))
-            && matches!(entry.spec, ToolSpec::Function(_) | ToolSpec::Freeform(_) | ToolSpec::Namespace(_)))
+        let name = name.clone().with_default_namespace();
+        self.entries.iter().enumerate().any(|(slot, entry)| {
+            if entry.name.clone().with_default_namespace() != name {
+                return false;
+            }
+            self.specs.managed_approval(slot)
+                || (!entry.manual
+                    && matches!(
+                        entry.spec,
+                        ToolSpec::Function(_) | ToolSpec::Freeform(_) | ToolSpec::Namespace(_)
+                    ))
+        })
     }
 
     pub(crate) fn configured_agent_origin(
@@ -5267,8 +5277,13 @@ impl PythonTools {
                         ResponseItem::FunctionCallOutput {
                             call_id: Some(id), ..
                         }
-                        | ResponseItem::CustomToolCallOutput { call_id: id, .. } => {
+                        | ResponseItem::CustomToolCallOutput { call_id: id, .. }
+                        | ResponseItem::ApplyPatchCallOutput { call_id: id, .. } => {
                             completed.contains(id)
+                        }
+                        ResponseItem::ShellCallOutput { provider_fields, .. } => {
+                            crate::local_reconciliation::shell_call_id(provider_fields)
+                                .is_some_and(|id| completed.contains(id))
                         }
                         _ => false,
                     })
@@ -5276,6 +5291,35 @@ impl PythonTools {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    pub(crate) fn pending_apply_patch_calls(&self, keys: &[PendingKey]) -> Result<Vec<String>> {
+        let pending = self.pending.lock().expect("Python replies poisoned");
+        let mut calls = Vec::new();
+        for key in keys {
+            let call = pending
+                .get(key)
+                .context("Manual call is no longer pending")?;
+            if !matches!(call.original_payload, Some(ToolPayload::ApplyPatch { .. })) {
+                continue;
+            }
+            let request = call
+                .manual_request
+                .as_ref()
+                .context("Application patch approval is no longer pending")?;
+            ensure!(
+                call.phase == Phase::Admitted
+                    && !call.retired
+                    && call.approval_request.is_none()
+                    && !call.sender.is_closed()
+                    && request["msg"]["_sdk_approval_required"] == true
+                    && request["msg"]["_sdk_code_origin"].is_null(),
+                "Application patch approval is no longer admitted"
+            );
+            calls.push(key.call.clone());
+        }
+        calls.sort();
+        Ok(calls)
     }
 
     pub(crate) fn pending_manual_keys(&self, owner: &str) -> Result<Vec<PendingKey>> {
@@ -8153,12 +8197,15 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 }
             }
             if let ToolPayload::ApplyPatch { arguments } = &call.payload {
-                return Ok(
-                    Box::new(codex_tools::ApplyPatchToolOutput::from_dynamic_response(
+                return Ok(Box::new(ReplyOutput {
+                    output: codex_tools::ApplyPatchToolOutput::from_dynamic_response(
                         arguments,
                         response.response,
-                    )?) as Box<dyn ToolOutput>,
-                );
+                    )?,
+                    lifecycle_started,
+                    start_response: true,
+                    acceptance: None,
+                }) as Box<dyn ToolOutput>);
             }
             if matches!(call.payload, ToolPayload::HostedMcpApproval { .. }) {
                 let output = hosted_mcp_output(response.response).map_err(|_| {

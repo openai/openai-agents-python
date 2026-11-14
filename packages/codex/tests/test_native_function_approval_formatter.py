@@ -241,6 +241,7 @@ async def test_typed_managed_denial_formats_without_effects(responses, kind):
     effects = []
     editor = Editor()
     seen = []
+    observations = []
 
     def execute(context, call):
         effects.append(call)
@@ -272,13 +273,15 @@ async def test_typed_managed_denial_formats_without_effects(responses, kind):
             model="gpt-5",
             tools=[tool],
             provider=provider(responses),
-        ).session(tool_error_formatter=formatter) as session,
+        ).session(tool_error_formatter=formatter, on_tool_lifecycle=observations.append) as session,
     ):
         turn = await session.submit("begin")
         request = await next_request(session.interactions(), tool)
+        assert observations == []
         await request.reject()
         assert (await turn.get_result()).final_output == "done"
     assert len(seen) == 1 and effects == [] and editor.operations == []
+    assert observations == []
     outputs = [
         item for item in responses.requests[1]["input"] if item["type"] == kind + "_call_output"
     ]
@@ -289,6 +292,64 @@ async def test_typed_managed_denial_formats_without_effects(responses, kind):
         ]
     else:
         assert outputs[0]["status"] == "failed" and outputs[0]["output"] == "typed denial"
+
+
+@pytest.mark.parametrize("kind", ["shell", "apply_patch"])
+async def test_approved_typed_tool_delivers_lifecycle_around_effects(responses, kind):
+    from agents import ShellOutput, apply_patch_tool, shell_tool
+    from tests.test_native_application_shell import shell_call
+    from tests.test_native_apply_patch import Editor, patch_call
+
+    seen = []
+
+    class ObservedEditor(Editor):
+        def delete_file(self, operation):
+            assert seen == ["start"]
+            seen.append("body")
+            return super().delete_file(operation)
+
+    def execute(_context, _call):
+        assert seen == ["start"]
+        seen.append("body")
+        return ShellOutput(output=[])
+
+    if kind == "shell":
+        tool = shell_tool(execute, needs_approval=True)
+        frame = shell_call()
+        call_id = "shell-local"
+    else:
+        tool = apply_patch_tool(ObservedEditor(), needs_approval=True)
+        frame = patch_call({"type": "delete_file", "path": "owned"})
+        call_id = "native-patch"
+
+    def observe(event):
+        assert event.call_id == call_id
+        seen.append(event.kind)
+
+    responses.respond(frame)
+    responses.respond(assistant_output("done"))
+    agent = Agent(
+        instructions="Use the typed tool.",
+        model="gpt-5",
+        tools=[tool],
+        provider=provider(responses),
+    )
+    async with timeout(20), agent.session(on_tool_lifecycle=observe) as session:
+        turn = await session.submit("begin")
+        request = await next_request(session.interactions(), tool)
+        assert seen == []
+        await request.approve()
+        assert (await turn.get_result()).final_output == "done"
+    assert seen == ["start", "body", "end"]
+    outputs = [
+        item for item in responses.requests[1]["input"] if item["type"] == kind + "_call_output"
+    ]
+    assert len(outputs) == 1 and outputs[0]["call_id"] == call_id
+    if kind == "shell":
+        assert outputs[0]["output"] == []
+    else:
+        assert outputs[0]["status"] == "completed"
+        assert outputs[0]["output"] == "exact editor output"
 
 
 async def test_custom_text_managed_denial_preserves_raw_input_and_typed_output(responses):
