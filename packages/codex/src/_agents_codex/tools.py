@@ -580,8 +580,10 @@ class _ToolCatalog:
 
                 if isinstance(tool, _CapturedApproval):
                     function = tool.function
-                    # Application binding metadata never reaches the provider tool schema.
-                    spec["_sdkManagedApproval"] = True
+                    # Only function/custom calls use managed lifecycle observations.
+                    # Native Shell/Patch approvals retain their own typed protocol paths.
+                    if spec["type"] in {"function", "namespace", "custom"}:
+                        spec["_sdkManagedApproval"] = True
             if isinstance(function, _CapturedFunction) and function.configured_agent is not None:
                 spec["configuredAgentRole"] = function.configured_agent.agent.name or function.name
             specs.append(spec)

@@ -11,6 +11,7 @@ from tests.native_storage_fixtures import MemorySessionStore
 def owner(storage):
     return SimpleNamespace(
         _realtime=None,
+        _has_distinct_profile_sources=False,
         _active=None,
         _queued_roots=[],
         _storage=storage,

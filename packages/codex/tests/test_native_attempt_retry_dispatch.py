@@ -193,6 +193,7 @@ async def test_different_update_policy_rejects_before_any_native_publication():
 
     owner = SimpleNamespace(
         _update_generation=0,
+        _profiles={},
         _check_idle_update=lambda: None,
         _opening_agent=agent,
         _refresh_profile_bindings=refresh_profile,

@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, cast
 from . import tools as _tool_types
 from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._function_tools import FunctionTool
-from ._tool_catalog import _SCOPED_HOSTED_TYPES
 from .agent import Agent
 from .handoffs import Handoff
 from .schema import OutputSpec, _prepare_spec
@@ -35,6 +34,12 @@ class _AgentProfile:
     decision_handoffs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     native_provider_id: str | None = None
     opening_tools: tuple[_tool_types.Tool[Any], ...] = ()
+
+
+def _is_scoped_hosted_tool(tool: object) -> bool:
+    from ._tool_catalog import _SCOPED_HOSTED_TYPES
+
+    return isinstance(tool, _SCOPED_HOSTED_TYPES)
 
 
 def _handoff_name(agent: Agent[Any, Any]) -> str:
@@ -130,7 +135,7 @@ def _capture_agent_graph(
             type(tool) is FunctionTool
             or isinstance(tool, (FunctionTool, _tool_types._MCP, _tool_types.HostedMCP))
             or opening.realtime is None
-            and isinstance(tool, _SCOPED_HOSTED_TYPES)
+            and _is_scoped_hosted_tool(tool)
         )
     )
     # Names locate current reachable declarations; native graph validation proves identity.
@@ -306,7 +311,7 @@ def _capture_agent_graph(
                     type(tool) is FunctionTool
                     or isinstance(tool, (FunctionTool, _tool_types._MCP, _tool_types.HostedMCP))
                     or opening.realtime is None
-                    and isinstance(tool, _SCOPED_HOSTED_TYPES)
+                    and _is_scoped_hosted_tool(tool)
                 )
             )
             != runtime_tools

@@ -25,7 +25,8 @@ async def child(mode: str, url: str, path: Path, variant: str = "current") -> No
     environment["PYTHONPATH"] = os.pathsep.join(path for path in sys.path if path)
     process = await asyncio.create_subprocess_exec(
         sys.executable,
-        str(Path(__file__).with_name("runtime_handoff_enrollment_process.py")),
+        "-m",
+        "tests.runtime_handoff_enrollment_process",
         mode,
         url,
         str(path),

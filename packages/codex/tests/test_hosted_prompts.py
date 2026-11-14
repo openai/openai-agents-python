@@ -224,6 +224,7 @@ async def test_prompt_composition_keeps_sync_callbacks_in_the_owned_worker(mode,
         _context_transform_purpose="turn",
         _native=native,
         _agent_for_message=lambda message: agent,
+        _original_agent_for_message=lambda message: agent,
         _run_owned_context_callback=own,
     )
     state = SimpleNamespace(stopping=False, failure=asyncio.get_running_loop().create_future())

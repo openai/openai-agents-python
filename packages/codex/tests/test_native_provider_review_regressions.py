@@ -129,6 +129,7 @@ async def test_sampling_hosted_prompt_mismatches_remain_rejected(declared, purpo
             "instance": None,
             "purpose": purpose,
             "hosted_prompt": not declared,
+            "items": [],
         },
     )
     assert state.failure.done()

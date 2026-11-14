@@ -147,7 +147,12 @@ impl<'de> Deserialize<'de> for ToolDeclarations {
             if let Some(managed) = managed_approval {
                 let managed = bool::deserialize(managed).map_err(D::Error::custom)?;
                 if managed {
-                    if !matches!(spec, DynamicToolSpec::Function(_) | DynamicToolSpec::Namespace(_)) {
+                    if !matches!(
+                        spec,
+                        DynamicToolSpec::Function(_)
+                            | DynamicToolSpec::Custom(_)
+                            | DynamicToolSpec::Namespace(_)
+                    ) {
                         return Err(D::Error::custom("Managed approval requires a captured function"));
                     }
                     result.managed_approvals.insert(result.specs.len());
@@ -295,6 +300,56 @@ mod programmatic_declaration_tests {
 #[cfg(test)]
 mod managed_approval_declaration_tests {
     use super::*;
+    #[test]
+    fn managed_custom_approval_retains_only_application_binding_metadata() {
+        let spec = serde_json::json!({
+            "type":"custom", "name":"raw", "description":"Raw input.",
+            "format":{"type":"text"}, "inputField":"source",
+            "inputSchema":{"type":"object","properties":{"source":{"type":"string"}},"required":["source"]}
+        });
+        let plain: ToolDeclarations = serde_json::from_value(serde_json::json!([spec])).unwrap();
+        let mut marked = spec;
+        marked["_sdkManagedApproval"] = serde_json::json!(true);
+        let declarations: ToolDeclarations =
+            serde_json::from_value(serde_json::json!([marked])).unwrap();
+        assert!(declarations.managed_approval(0));
+        assert!(!plain.managed_approval(0));
+        assert!(
+            serde_json::to_value(&declarations[0])
+                .unwrap()
+                .get("_sdkManagedApproval")
+                .is_none()
+        );
+        let mut appended = ToolDeclarations::default();
+        appended.append_captured(&declarations, 0);
+        assert!(appended.managed_approval(0));
+        assert_eq!(
+            serde_json::to_value(&appended).unwrap()[0]["_sdkManagedApproval"],
+            true
+        );
+        assert_eq!(
+            serde_json::to_value(declarations.without_configured_agent_roles()).unwrap(),
+            serde_json::to_value(&plain).unwrap()
+        );
+    }
+
+    #[test]
+    fn native_tool_declarations_cannot_claim_function_lifecycle_approval() {
+        for spec in [
+            serde_json::json!({"type":"shell"}),
+            serde_json::json!({"type":"applyPatch"}),
+        ] {
+            let plain: ToolDeclarations =
+                serde_json::from_value(serde_json::json!([spec])).unwrap();
+            assert!(!plain.managed_approval(0));
+            let mut marked = spec;
+            marked["_sdkManagedApproval"] = serde_json::json!(true);
+            assert!(
+                serde_json::from_value::<ToolDeclarations>(serde_json::json!([marked])).is_err()
+            );
+        }
+    }
+
     #[test]
     fn managed_approval_is_captured_separately_from_protocol_specs() {
         let value = serde_json::json!([{
