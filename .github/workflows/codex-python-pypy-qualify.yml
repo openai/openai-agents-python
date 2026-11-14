@@ -4,6 +4,8 @@ on:
   push:
     branches: [feat/codex-harness]
     paths: [.github/workflows/codex-python-pypy-qualify.yml]
+  pull_request:
+    paths: [.github/workflows/codex-python-pypy-qualify.yml]
   workflow_dispatch:
 
 permissions:
@@ -13,7 +15,9 @@ jobs:
   pypy311-linux-x64:
     if: >-
       github.repository == 'openai/openai-agents-python' &&
-      github.ref == 'refs/heads/feat/codex-harness'
+      (github.ref == 'refs/heads/feat/codex-harness' ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     defaults:
@@ -30,7 +34,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: pypy3.11-v8.0.1
