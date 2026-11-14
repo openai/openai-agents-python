@@ -1020,6 +1020,7 @@ class Agent(Generic[ContextT, OutputT]):
     compaction: ResponsesCompaction[ContextT] | None
     prepare_handoff_input: _PrepareHandoffInput[ContextT] | None
     tool_name_collision_policy: Literal["error", "warn"]
+    environment: EnvironmentSource[ContextT] | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -1127,6 +1128,7 @@ class Agent(Generic[ContextT, OutputT]):
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
+        environment: EnvironmentSource[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -1164,6 +1166,7 @@ class Agent(Generic[ContextT, OutputT]):
         realtime: RealtimeAgentConfig | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
+        environment: EnvironmentSource[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -1199,6 +1202,7 @@ class Agent(Generic[ContextT, OutputT]):
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
+        environment: EnvironmentSource[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -1234,6 +1238,7 @@ class Agent(Generic[ContextT, OutputT]):
         realtime: RealtimeAgentConfig | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
+        environment: EnvironmentSource[ContextT] | None = None,
     ) -> None: ...
 
     def __init__(
@@ -1268,6 +1273,7 @@ class Agent(Generic[ContextT, OutputT]):
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
+        environment: EnvironmentSource[ContextT] | None = None,
     ) -> None:
         if isinstance(instructions, _OmittedInstructions):
             instructions = None
@@ -1343,6 +1349,7 @@ class Agent(Generic[ContextT, OutputT]):
         if tool_name_collision_policy not in ("error", "warn"):
             raise ValueError("tool_name_collision_policy must be error or warn")
         object.__setattr__(self, "tool_name_collision_policy", tool_name_collision_policy)
+        object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "transform_context", transform_context)
         object.__setattr__(self, "after_model", after_model)
         object.__setattr__(self, "prepare_handoff_input", prepare_handoff_input)

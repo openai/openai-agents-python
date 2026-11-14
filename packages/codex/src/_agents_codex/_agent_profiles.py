@@ -184,6 +184,7 @@ def _capture_agent_graph(
             prepare_handoff_input=source.prepare_handoff_input,
             before_compact=source.before_compact,
             compaction=source.compaction,
+            environment=source.environment,
             before_complete=source.before_complete,
             tool_batch_completion=source.tool_batch_completion,
             input_guardrails=source.input_guardrails,

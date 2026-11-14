@@ -2350,6 +2350,14 @@ impl ThreadLifecycleContributor<Config> for Boundary {
                 control.enable_profile_policies();
             }
             if let Some(step) = input.spawning_step_store {
+                if let Some(environment) =
+                    step.get::<codex_extension_api::AgentProfileEnvironment>()
+                {
+                    input.thread_store.insert((*environment).clone());
+                }
+                if let Some(tools) = step.get::<codex_extension_api::AgentProfileExecutorTools>() {
+                    input.thread_store.insert((*tools).clone());
+                }
                 match capture_mcp_source(Some(step)) {
                     Ok(Some(source)) => {
                         input.thread_store.insert((*source).clone());
@@ -2369,7 +2377,12 @@ impl ThreadLifecycleContributor<Config> for Boundary {
                 control.revoke();
             }
             let _ = control.creation_tracing.set(creation_tracing);
-            if input.thread_store.get::<StrictExecutorWrites>().is_some() {
+            if input.thread_store.get::<StrictExecutorWrites>().is_some()
+                || input
+                    .thread_store
+                    .get::<crate::agent_profiles::ProfileEnvironments>()
+                    .is_some_and(|environments| environments.strict)
+            {
                 let _ = control.strict_executor_writes.set(());
             }
             let _ = control

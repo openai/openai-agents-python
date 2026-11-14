@@ -424,7 +424,8 @@ class _MCP(Generic[ContextT_contra]):
         if self.tool_filter is not None and not callable(self.tool_filter):
             raise TypeError("MCP tool_filter must be callable")
         if self.name == "codex_apps" and (
-            self.tool_filter is not None or self.cache_tools_list is not None
+            self.tool_filter is not None
+            or self.cache_tools_list is not None
             or self.strict_tool_schemas
         ):
             raise ValueError("MCP discovery requires an ordinary StdioMCP or HttpMCP declaration")

@@ -1317,7 +1317,20 @@ pub struct LocalChecklistStore {
     // exclusion; this gate only closes the append/shutdown race in this wrapper.
     writers: Mutex<HashMap<ThreadId, ChecklistWriter>>,
     resume_model: OnceLock<(ThreadId, Option<String>)>,
+    agent_resume:
+        Arc<std::sync::Mutex<HashMap<ThreadId, crate::agent_profiles::ExecutorResumeAdmission>>>,
     durability_failure: std::sync::atomic::AtomicBool,
+}
+
+pub(crate) struct AgentResumeLease {
+    id: ThreadId,
+    store: Arc<std::sync::Mutex<HashMap<ThreadId, crate::agent_profiles::ExecutorResumeAdmission>>>,
+}
+
+impl Drop for AgentResumeLease {
+    fn drop(&mut self) {
+        self.store.lock().expect("agent resume").remove(&self.id);
+    }
 }
 
 #[derive(Default)]
@@ -2029,7 +2042,23 @@ impl LocalChecklistStore {
             writers: Mutex::new(HashMap::new()),
             managed_calls: Arc::new(ManagedCalls::default()),
             resume_model: OnceLock::new(),
+            agent_resume: Arc::default(),
             durability_failure: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn stage_agent_resume(
+        &self,
+        id: ThreadId,
+        expected: crate::agent_profiles::ExecutorResumeAdmission,
+    ) -> AgentResumeLease {
+        self.agent_resume
+            .lock()
+            .expect("agent resume")
+            .insert(id, expected);
+        AgentResumeLease {
+            id,
+            store: Arc::clone(&self.agent_resume),
         }
     }
 
@@ -3027,6 +3056,22 @@ impl ThreadStore for LocalChecklistStore {
                 return Ok(replay);
             }
             let mut history = self.inner.resume_thread(params).await?;
+            let agent_resume = self.agent_resume.lock().expect("agent resume").remove(&id);
+            if let Some(expected) = agent_resume {
+                // Read the complete rollout under the native writer. Model
+                // context can omit a pre-compaction profile publication.
+                let validated = async {
+                    let path = self.inner.live_rollout_path(id).await?;
+                    let complete = Self::read_recovery_rollout(id, &path).await?;
+                    expected.validate(&complete).map_err(checklist_error)?;
+                    Ok::<_, ThreadStoreError>(())
+                }
+                .await;
+                if let Err(error) = validated {
+                    self.inner.shutdown_thread(id).await?;
+                    return Err(error);
+                }
+            }
             if let Some((expected_id, expected_model)) = self.resume_model.get()
                 && *expected_id == id
             {

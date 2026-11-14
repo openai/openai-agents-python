@@ -2940,13 +2940,35 @@ def _complete_profile_mcp(
     roster: list[dict[str, Any]],
     executor: Environment[Any] | None,
 ) -> None:
+    graph_environments = any(profile.declaration.environment is not None for profile in profiles)
     for profile, row in zip(profiles, roster, strict=True):
         declaration = profile.declaration
+        selected = (
+            executor
+            if profile is profiles[0] or declaration.environment is None
+            else declaration.environment
+        )
+        if graph_environments:
+            if selected is not None and not isinstance(selected, Environment):
+                raise TypeError("Per-Agent Environment sources require joined graph acquisition")
+            if selected is not None and any(
+                callback is not None
+                for callback in (
+                    selected.approval,
+                    selected.transform_arguments,
+                    selected.transform_result,
+                )
+            ):
+                raise ValueError("Per-Agent executor callbacks require captured profile routing")
+            row["environment_tools"] = list(selected.tools) if selected is not None else []
+            if profile is not profiles[0] and declaration.environment is not None:
+                assert selected is not None
+                row["environment"] = selected._to_native()
         _, servers, _ = _split_tools(declaration.tools, declaration.programmatic_tool_calling)
         row["mcp_servers"] = json.loads(
             _mcp_config(
                 servers,
-                executor,
+                selected,
                 servers,
                 programmatic_tool_calling=declaration.programmatic_tool_calling,
             )
@@ -2983,6 +3005,16 @@ def _install_profile_options(
     for flag in ("transform_context", "before_compact", "before_complete", "tool_batch_completion"):
         options[f"_{flag}"] = any(row.get(flag, False) for row in roster)
     grants = options["tool_policy"]["allowed_tools"]
+    for row in roster:
+        grants.extend(
+            {"name": name, "namespace": "functions"} for name in row.get("environment_tools", ())
+        )
+        if row.get("environment") is not None:
+            options["tool_policy"].update(
+                require_managed_sandbox=True,
+                require_unified_exec=True,
+                expose_additional_permissions=False,
+            )
     for profile in profiles:
         functions, servers, _ = _split_tools(
             profile.declaration.tools,
@@ -4493,6 +4525,7 @@ class Session(Generic[ContextT, OutputT]):
         _prompt_cache_key: str | None = None,
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
+        environment = agent.environment if environment is None else environment
         authenticated_memory_history = isinstance(state, ManagedWorkspaceCheckpoint)
         provider_history = _capture_provider_history(provider_history)
         state, managed_source = _prepare_open_state(
@@ -4917,6 +4950,11 @@ class Session(Generic[ContextT, OutputT]):
                 startup_allowed_mcp,
                 programmatic_tool_calling=programmatic_tool_calling,
             )
+            if lease is not None and any(
+                profile is not profiles[0] and profile.declaration.environment is not None
+                for profile in profiles
+            ):
+                raise TypeError("Distinct Agent executors require captured sandbox source routing")
             _complete_profile_mcp(profiles, profile_roster, executor)
             has_host_mcp = any(
                 isinstance(server, StdioMCP) and server.location == "host"
@@ -4938,6 +4976,8 @@ class Session(Generic[ContextT, OutputT]):
                     "the tools provided to complete the user's request accurately."
                 ),
             }
+            if any(row.get("environment") is not None for row in profile_roster):
+                runtime["sandbox_mode"] = "read-only"
             if discover_agents_md:
                 runtime["_sdk_discover_agents_md"] = True
             if project_guidance:
@@ -4990,8 +5030,16 @@ class Session(Generic[ContextT, OutputT]):
                         else "codex-code-mode-host"
                     )
                 )
-            if (executor is not None and executor._is_local) or has_host_mcp:
-                # Provision the helper for an explicit local executor or host MCP.
+            if (
+                (executor is not None and executor._is_local)
+                or any(
+                    isinstance(profile.declaration.environment, Environment)
+                    and profile.declaration.environment._is_local
+                    for profile in profiles
+                )
+                or has_host_mcp
+            ):
+                # A named local destination uses its own restricted native registration.
                 helpers = _package_files("agents") / "bin"
                 runtime["codex_self_exe"] = str(
                     helpers
@@ -5071,6 +5119,8 @@ class Session(Generic[ContextT, OutputT]):
                     programmatic_tool_calling=programmatic_tool_calling,
                 )
 
+                if any(row.get("environment") is not None for row in profile_roster):
+                    config["sandbox_mode"] = "read-only"
                 _configure_session_features(
                     config,
                     uses_siwc=uses_siwc,

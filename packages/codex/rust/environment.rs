@@ -92,22 +92,18 @@ pub async fn for_unattached_threads(
             Some("no local executor is registered".to_owned()),
         ));
     }
-    let mut paths = ExecServerRuntimeOptions::from_optional_paths(
-        config.codex_self_exe.clone(),
-        config.codex_linux_sandbox_exe.clone(),
-    )?;
-    paths.private_read_deny = private_read_deny;
     let paths = if sdk_local {
-        let paths = paths.with_join_unreturned_local_exec_on_interrupt();
-        #[cfg(target_os = "macos")]
-        let paths = {
-            let mut paths = paths.with_restricted_macos_process_sandbox();
-            paths.local_macos_deny_paths = local_macos_deny_paths;
-            paths
-        };
-        paths
+        restricted_local_runtime(
+            config,
+            private_read_deny,
+            #[cfg(target_os = "macos")]
+            local_macos_deny_paths,
+        )?
     } else {
-        paths
+        ExecServerRuntimeOptions::from_optional_paths(
+            config.codex_self_exe.clone(),
+            config.codex_linux_sandbox_exe.clone(),
+        )?
     };
     // The SDK owns its explicit execution selection. Reserve host MCP capacity
     // without reading ambient Noise or user environment configuration.
@@ -151,6 +147,8 @@ pub struct EnvironmentOptions {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StdioCommandOptions {
+    #[serde(default)]
+    require_process_identity: bool,
     program: String,
     args: Vec<String>,
     #[serde(default)]
@@ -424,7 +422,26 @@ fn check_local_read_file_aliases(
     Ok(())
 }
 
+enum RemoteTransport {
+    Stdio(StdioExecServerCommand, Option<Duration>),
+    WebSocket(RemoteEnvironmentOptions),
+}
+
+fn environment_registration_error(error: codex_exec_server::ExecServerError) -> anyhow::Error {
+    anyhow::anyhow!(
+        "invalid remote executor connection settings: {}",
+        startup_cause(&error)
+    )
+}
+
 impl EnvironmentOptions {
+    /// Current private stdio launch declaration, never restored data.
+    pub(crate) fn requires_process_identity(&self) -> bool {
+        self.stdio_command
+            .as_ref()
+            .is_some_and(|command| command.require_process_identity)
+    }
+
     /// Check application-owned read grants before providers or helpers start.
     pub(crate) fn validate_read_grants(
         &self,
@@ -769,16 +786,50 @@ impl EnvironmentOptions {
     }
 
     fn register(&self, manager: &EnvironmentManager) -> Result<Arc<Environment>> {
+        let transport = self.remote_transport()?;
+        match transport {
+            RemoteTransport::Stdio(command, timeout) => {
+                manager.upsert_stdio_environment(REMOTE_ENVIRONMENT_ID.to_owned(), command, timeout)
+            }
+            RemoteTransport::WebSocket(options) => manager.upsert_environment_with_options(
+                REMOTE_ENVIRONMENT_ID.to_owned(),
+                options,
+                Default::default(),
+            ),
+        }
+        .map_err(environment_registration_error)?;
+        manager
+            .get_environment(REMOTE_ENVIRONMENT_ID)
+            .context("remote environment was not registered")
+    }
+
+    fn register_scoped(
+        &self,
+        manager: &Arc<EnvironmentManager>,
+        id: &str,
+    ) -> Result<codex_exec_server::ScopedEnvironment> {
+        match self.remote_transport()? {
+            RemoteTransport::Stdio(command, timeout) => {
+                manager.register_scoped_stdio_environment(id.to_owned(), command, timeout)
+            }
+            RemoteTransport::WebSocket(options) => {
+                manager.register_scoped_environment(id.to_owned(), options)
+            }
+        }
+        .map_err(environment_registration_error)
+    }
+
+    fn remote_transport(&self) -> Result<RemoteTransport> {
         ensure!(
             !self.local,
-            "a deferred executor requires a remote connection"
+            "a remote executor requires a remote connection"
         );
         let timeout = self
             .connect_timeout
             .map(Duration::try_from_secs_f64)
             .transpose()
             .map_err(|_| anyhow::anyhow!("invalid remote executor connect timeout"))?;
-        let registration = if let Some(command) = &self.stdio_command {
+        if let Some(command) = &self.stdio_command {
             ensure!(
                 self.headers.is_empty(),
                 "stdio executor cannot send HTTP headers"
@@ -789,8 +840,7 @@ impl EnvironmentOptions {
                     .is_some_and(|url| url.starts_with("docker://")),
                 "stdio executor requires a current SDK Docker source"
             );
-            manager.upsert_stdio_environment(
-                REMOTE_ENVIRONMENT_ID.to_owned(),
+            Ok(RemoteTransport::Stdio(
                 StdioExecServerCommand {
                     program: command.program.clone(),
                     args: command.args.clone(),
@@ -798,27 +848,14 @@ impl EnvironmentOptions {
                     cwd: command.cwd.clone(),
                 },
                 timeout,
-            )
+            ))
         } else {
-            manager.upsert_environment_with_options(
-                REMOTE_ENVIRONMENT_ID.to_owned(),
-                RemoteEnvironmentOptions {
-                    exec_server_url: self.url.clone().context("remote executor requires a URL")?,
-                    http_headers: self.headers.clone(),
-                    connect_timeout: timeout,
-                },
-                Default::default(),
-            )
-        };
-        registration.map_err(|error| {
-            anyhow::anyhow!(
-                "invalid remote executor connection settings: {}",
-                startup_cause(&error)
-            )
-        })?;
-        Ok(manager
-            .get_environment(REMOTE_ENVIRONMENT_ID)
-            .context("remote environment was not registered")?)
+            Ok(RemoteTransport::WebSocket(RemoteEnvironmentOptions {
+                exec_server_url: self.url.clone().context("remote executor requires a URL")?,
+                http_headers: self.headers.clone(),
+                connect_timeout: timeout,
+            }))
+        }
     }
 
     async fn profile(
@@ -881,10 +918,21 @@ impl EnvironmentOptions {
         manager: &EnvironmentManager,
         private_paths: LocalPrivatePaths<'_>,
     ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
+        self.selection_at(self.id(), config, manager, private_paths)
+            .await
+    }
+
+    async fn selection_at(
+        &self,
+        environment_id: &str,
+        config: &Config,
+        manager: &EnvironmentManager,
+        private_paths: LocalPrivatePaths<'_>,
+    ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
         self.validate_read_grants(config, private_paths)?;
         self.check_config(config)?;
         let environment = manager
-            .get_environment(self.id())
+            .get_environment(environment_id)
             .context("selected executor was not registered")?;
         let needs_info = !self.env.is_empty()
             || self.strict_writes()
@@ -924,7 +972,9 @@ impl EnvironmentOptions {
             }
             configured => configured,
         };
-        let selected_capability_roots = self.capability_roots().unwrap_or_default();
+        let selected_capability_roots =
+            capability_roots(environment_id, self.capability_directories.as_deref())
+                .unwrap_or_default();
         let workspace_roots = vec![workspace_root];
         let mut shell_environment_policy = if self.trusted_workspace_write {
             ShellEnvironmentPolicy {
@@ -961,7 +1011,7 @@ impl EnvironmentOptions {
         }
         shell_environment_policy.set_sdk_environment_overrides(overrides);
         let selection = TurnEnvironmentSelection {
-            environment_id: self.id().to_owned(),
+            environment_id: environment_id.to_owned(),
             workspace_roots: workspace_roots.clone(),
             cwd: self.cwd.clone(),
             // Owner configuration prevents executor-advertised roots from being added.
@@ -984,6 +1034,71 @@ impl EnvironmentOptions {
             }),
         };
         Ok((selection, writes))
+    }
+
+    /// Prepares a trusted profile executor before committing its Core selection.
+    pub(crate) async fn prepare_profile_selection(
+        &self,
+        profile_environment_id: &str,
+        config: &Config,
+        manager: &Arc<EnvironmentManager>,
+        private_paths: LocalPrivatePaths<'_>,
+    ) -> Result<(
+        TurnEnvironmentSelection,
+        Option<codex_exec_server::ScopedEnvironment>,
+    )> {
+        self.validate_read_grants(config, private_paths)?;
+        self.check_config(config)?;
+        ensure!(
+            valid_profile_environment_id(profile_environment_id),
+            "invalid Agent profile executor identity"
+        );
+        let owner = if self.local {
+            ensure!(
+                self.url.is_none()
+                    && self.stdio_command.is_none()
+                    && self.headers.is_empty()
+                    && self.connect_timeout.is_none(),
+                "a local executor does not accept connection settings"
+            );
+            ensure!(
+                self.network.is_none() && !self.trusted_workspace_write,
+                "Agent profile cannot replace the Session's local proxy or trusted write policy"
+            );
+            manager
+                .register_scoped_local_environment(
+                    profile_environment_id.to_owned(),
+                    restricted_local_runtime(
+                        config,
+                        None,
+                        #[cfg(target_os = "macos")]
+                        Vec::new(),
+                    )?,
+                )
+                .map_err(remote_startup_error)?
+        } else {
+            self.register_scoped(manager, profile_environment_id)?
+        };
+        owner
+            .environment()
+            .wait_until_ready()
+            .await
+            .map_err(remote_startup_error)?;
+        let (selection, _) = self
+            .selection_at(profile_environment_id, config, manager, private_paths)
+            .await?;
+        if self.local {
+            let EnvironmentConfigState::Ready(profile) = &selection.config else {
+                anyhow::bail!("Agent profile executor did not provide ready permissions");
+            };
+            probe_local_sandbox(
+                owner.environment(),
+                &selection.cwd,
+                profile.permission_profile.permission_profile().clone(),
+            )
+            .await?;
+        }
+        Ok((selection, Some(owner)))
     }
 
     pub(crate) fn configure_local_proxy(
@@ -1051,6 +1166,26 @@ fn local_proxy_spec(
     .context("could not configure the local executor network proxy")
 }
 
+fn restricted_local_runtime(
+    config: &Config,
+    private_read_deny: Option<AbsolutePathBuf>,
+    #[cfg(target_os = "macos")] local_macos_deny_paths: Vec<AbsolutePathBuf>,
+) -> Result<ExecServerRuntimeOptions> {
+    check_local_helpers(config)?;
+    let mut paths = ExecServerRuntimeOptions::from_optional_paths(
+        config.codex_self_exe.clone(),
+        config.codex_linux_sandbox_exe.clone(),
+    )?
+    .with_join_unreturned_local_exec_on_interrupt();
+    paths.private_read_deny = private_read_deny;
+    #[cfg(target_os = "macos")]
+    {
+        paths = paths.with_restricted_macos_process_sandbox();
+        paths.local_macos_deny_paths = local_macos_deny_paths;
+    }
+    Ok(paths)
+}
+
 pub(crate) fn local_session_network_policy(config: &Config) -> Option<EnvironmentNetworkPolicy> {
     config
         .permissions
@@ -1068,6 +1203,14 @@ pub(crate) fn workspace_profile(roots: &[PathUri]) -> PermissionProfile {
         true,
     )
     .materialize_project_roots_with_path_uris(roots)
+}
+
+fn valid_profile_environment_id(id: &str) -> bool {
+    id.strip_prefix("sdk-profile-").is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix.len() <= 32
+            && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 fn check_rule_directories(config: &Config) -> Result<()> {
@@ -1117,6 +1260,38 @@ fn check_writable_config(config: &Config, local_session_proxy: bool) -> Result<(
                 .enabled(codex_core_api::Feature::RequestPermissionsTool),
         "strict executor write policy requires the standard sandbox with escalation and permission requests disabled"
     );
+    Ok(())
+}
+
+/// Bind observed credentials only under the current private launch declaration.
+pub(crate) async fn bind_process_identity_receipt(
+    manager: &EnvironmentManager,
+    selection: &TurnEnvironmentSelection,
+    compare_identity: bool,
+    policy: &mut Value,
+) -> Result<()> {
+    if !compare_identity {
+        return Ok(());
+    }
+    let environment = manager
+        .get_environment(&selection.environment_id)
+        .context("Selected user executor is unavailable")?;
+    let info = executor_info(&environment).await?;
+    append_process_identity_receipt(policy, &info)
+}
+
+fn append_process_identity_receipt(policy: &mut Value, info: &EnvironmentInfo) -> Result<()> {
+    let identity = info
+        .process_identity
+        .as_ref()
+        .context("Selected Docker user requires current executor process identity")?;
+    policy
+        .as_object_mut()
+        .context("Selected user executor policy is unavailable")?
+        .insert(
+            "process_identity".to_owned(),
+            serde_json::to_value(identity)?,
+        );
     Ok(())
 }
 
@@ -1847,16 +2022,16 @@ pub(crate) async fn replace_writable_roots(
         !current.read_only || writable_roots.is_empty(),
         "read-only execution does not accept writable_roots"
     );
+    let environment = manager
+        .get_environment(&selection.environment_id)
+        .context("selected executor was not registered")?;
     // The SDK installs its local proxy after rejecting an ambient controller at selection.
-    let local = selection.environment_id == LOCAL_ENVIRONMENT_ID;
+    let local = !environment.is_remote();
     check_writable_config(config, local)?;
     let mut selection = selection.clone();
     let EnvironmentConfigState::Ready(settings) = &mut selection.config else {
         anyhow::bail!("writable_roots requires a ready Session Environment")
     };
-    let environment = manager
-        .get_environment(&selection.environment_id)
-        .context("selected executor was not registered")?;
     let info = executor_info(&environment).await?;
     let platform = Platform::from_platform_os(info.platform_os.as_deref());
     let (profile, workspace_root, writes) = strict_write_profile(
@@ -2697,5 +2872,43 @@ mod tests {
                 "decoder error should identify {field}: {error}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod selected_process_identity_tests {
+    use super::*;
+
+    fn observed(uid: u32) -> EnvironmentInfo {
+        serde_json::from_value(serde_json::json!({
+            "shell": {"name":"sh", "path":"/bin/sh"},
+            "processIdentity": {"type":"unix", "effectiveUid":uid,
+                "effectiveGid":1000, "supplementaryGids":[1000]},
+        }))
+        .expect("current executor metadata")
+    }
+
+    #[test]
+    fn selected_user_does_not_infer_root_from_legacy_metadata() {
+        let info: EnvironmentInfo = serde_json::from_value(serde_json::json!({
+            "shell": {"name":"sh", "path":"/bin/sh"},
+        }))
+        .expect("legacy metadata");
+        let mut policy = serde_json::json!({"cwd":"/workspace"});
+        let original = policy.clone();
+        assert!(append_process_identity_receipt(&mut policy, &info).is_err());
+        assert_eq!(policy, original);
+    }
+
+    #[test]
+    fn selected_user_policy_distinguishes_actual_effective_credentials() {
+        let mut unprivileged = serde_json::json!({"cwd":"/workspace"});
+        let mut root = unprivileged.clone();
+        append_process_identity_receipt(&mut unprivileged, &observed(1000)).expect("user policy");
+        append_process_identity_receipt(&mut root, &observed(0)).expect("root policy");
+        assert_ne!(
+            serde_json::to_vec(&unprivileged).expect("policy serialization"),
+            serde_json::to_vec(&root).expect("policy serialization")
+        );
     }
 }

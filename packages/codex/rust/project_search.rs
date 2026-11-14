@@ -1,7 +1,9 @@
 //! Bounded structured search through the selected executor's filesystem authority.
 use std::sync::Arc;
 
-use codex_extension_api::{ExtensionData, ToolContributor};
+use codex_extension_api::{
+    AgentProfileEnvironment, AgentProfileExecutorTools, ExtensionData, ToolContributor,
+};
 use codex_file_system::{EnvironmentAccess, ReadFileOptions, WalkEntryKind, WalkOptions};
 use codex_tools::{
     FunctionCallError, JsonToolOutput, ResponsesApiTool, ToolCall, ToolExecutor,
@@ -41,7 +43,7 @@ impl SearchTool {
     }
 }
 
-pub struct Contributor(pub Options);
+pub struct Contributor(pub Option<Options>);
 impl ToolContributor for Contributor {
     fn tools(
         &self,
@@ -49,12 +51,46 @@ impl ToolContributor for Contributor {
         _: &ExtensionData,
     ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
         self.0
-            .tools
             .iter()
+            .flat_map(|options| {
+                options.tools.iter().map(|tool| {
+                    Arc::new(Search {
+                        root: options.root.clone(),
+                        tool: *tool,
+                    }) as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>
+                })
+            })
+            .collect()
+    }
+
+    fn tools_for_step(
+        &self,
+        session: &ExtensionData,
+        thread: &ExtensionData,
+        step: &ExtensionData,
+    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
+        let Some(environment) = step
+            .get::<AgentProfileEnvironment>()
+            .or_else(|| thread.get::<AgentProfileEnvironment>())
+        else {
+            return self.tools(session, thread);
+        };
+        let Some(selection) = environment.0.as_ref() else {
+            return Vec::new();
+        };
+        let Some(tools) = step
+            .get::<AgentProfileExecutorTools>()
+            .or_else(|| thread.get::<AgentProfileExecutorTools>())
+        else {
+            return Vec::new();
+        };
+        [SearchTool::ProjectGlob, SearchTool::ProjectGrep]
+            .into_iter()
+            .filter(|tool| tools.allowed.contains(tool.name()))
             .map(|tool| {
                 Arc::new(Search {
-                    root: self.0.root.clone(),
-                    tool: *tool,
+                    root: selection.cwd.clone(),
+                    tool,
                 }) as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>
             })
             .collect()

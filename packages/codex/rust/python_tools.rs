@@ -313,7 +313,8 @@ enum PreparationReply {
     CompactionPolicy(oneshot::Sender<std::result::Result<Option<bool>, ()>>),
     ManagedAgentResult(oneshot::Sender<std::result::Result<Option<String>, ()>>),
     Completion {
-        reply: oneshot::Sender<std::result::Result<codex_extension_api::TurnCompletionDecision, ()>>,
+        reply:
+            oneshot::Sender<std::result::Result<codex_extension_api::TurnCompletionDecision, ()>>,
         stop: crate::native_interception::CapturedTurnStop,
     },
 }
@@ -4444,9 +4445,8 @@ impl PythonTools {
             None,
             None,
             Some(&builtin_tools),
-
-                    None,
-)?;
+            None,
+        )?;
         // Opening has not published the Thread or started its Python reader yet.
         self.pending
             .lock()
@@ -4525,9 +4525,8 @@ impl PythonTools {
             None,
             None,
             None,
-
-                    None,
-)
+            None,
+        )
         .map(|(_, _, receiver)| receiver)
     }
 
@@ -4901,10 +4900,8 @@ impl PythonTools {
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         self.enqueue_profile(
             thread, generation, slot, turn, call, arguments, None, source, model, reentry, None,
-            media, None, None,
-
-                    None,
-)
+            media, None, None, None,
+        )
     }
 
     fn enqueue_profile(
@@ -5996,10 +5993,9 @@ impl TurnLifecycleContributor for PythonContributor {
                     .held_tool_outputs
                     .unpublished_progress
                     .lock()
-                    .expect("unpublished tool progress poisoned") =
-                    Some(Arc::new(move || {
-                        manual_progress.send_modify(|version| *version = version.wrapping_add(1));
-                    }));
+                    .expect("unpublished tool progress poisoned") = Some(Arc::new(move || {
+                    manual_progress.send_modify(|version| *version = version.wrapping_add(1));
+                }));
                 crate::native_interception::attach_sdk_admission(input.turn_store, &receipt);
                 input.turn_store.insert(receipt.clone());
                 if let Some(previous) = admission.replace(receipt) {
@@ -7028,6 +7024,10 @@ impl ToolContributor for PythonContributor {
                         .profile
                         .data
                         .get::<codex_extension_api::AgentProfileHandoffTools>();
+                    let executor = source
+                        .profile
+                        .data
+                        .get::<codex_extension_api::AgentProfileExecutorTools>();
                     let native = handoffs
                         .as_ref()
                         .into_iter()
@@ -7039,7 +7039,13 @@ impl ToolContributor for PythonContributor {
                                 .tools()
                                 .iter()
                                 .map(|tool| tool.canonical_tool_name()),
-                        );
+                        )
+                        .chain(executor.as_ref().into_iter().flat_map(|tools| {
+                            tools
+                                .allowed
+                                .iter()
+                                .map(|name| ToolName::plain(name.clone()))
+                        }));
                     Some(merge_profile_native_defaults(
                         self.code_mode_enabled,
                         ordinary,
@@ -7362,9 +7368,8 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 self.builtin_tools
                     .as_ref()
                     .and_then(|receipt| receipt.names()),
-
-                    call.conversation_history.provider_agent_metadata().cloned(),
-);
+                call.conversation_history.provider_agent_metadata().cloned(),
+            );
             let (key, invocation, receiver) = match pending {
                 Ok(pending) => pending,
                 Err(error) => {
@@ -10151,19 +10156,46 @@ pub(crate) mod managed_tests {
     #[tokio::test]
     async fn handoff_reply_wrong_kind_preserves_the_original_preparation() {
         let tools = sdk();
-        tools.family.members.write().unwrap()
+        tools
+            .family
+            .members
+            .write()
+            .unwrap()
             .insert("thread".into(), Arc::downgrade(&tools));
         let id = tools.family.next_invocation.fetch_add(1, Ordering::Relaxed);
         let mut request = json!({"id":"turn", "msg":{"thread":"thread"}});
         let callback = tools.preparation_callback(id, &mut request);
         let receipt = callback.receipt.clone();
         let (reply, mut receive) = oneshot::channel::<Option<ModelContextUpdate>>();
-        tools.preparation_replies.lock().unwrap().as_mut().unwrap().insert(id,
-            PreparationSlot {turn:"turn".into(), reply:Some(PreparationReply::Context(reply)), callback});
+        tools
+            .preparation_replies
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .insert(
+                id,
+                PreparationSlot {
+                    turn: "turn".into(),
+                    reply: Some(PreparationReply::Context(reply)),
+                    callback,
+                },
+            );
         assert!(tools.callback_operation("thread", &receipt, "enter"));
-        assert!(tools.reply_handoff_input(id, Some(r#"{"input":[],"previous":[],"generated":[]}"#),
-            Some("thread"), None).is_err());
-        assert!(matches!(receive.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        assert!(
+            tools
+                .reply_handoff_input(
+                    id,
+                    Some(r#"{"input":[],"previous":[],"generated":[]}"#),
+                    Some("thread"),
+                    None
+                )
+                .is_err()
+        );
+        assert!(matches!(
+            receive.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
         let PreparationReply::Context(original) = tools.take_preparation(id).unwrap() else {
             panic!("The original callback kind changed");
         };

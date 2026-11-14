@@ -1,7 +1,9 @@
 //! JSON adapters for native operations that contain Rust-only channels or values.
 use crate::config::{decode, optional};
 use anyhow::{Context, Result, bail, ensure};
-use codex_core::context::{ContextualUserFragment, InternalContextSource, InternalModelContextFragment};
+use codex_core::context::{
+    ContextualUserFragment, InternalContextSource, InternalModelContextFragment,
+};
 use codex_core_api::{AbsolutePathBuf, CodexThread, WithTurnExtensionData};
 use codex_extension_api::{ExtensionDataInit, ToolNotFoundBehavior};
 use codex_protocol::config_types::{
@@ -646,6 +648,16 @@ pub async fn submit_replaceable_with_attempts(
                 .is_some_and(|mode| mode.reasoning_effort() == Some(ReasoningEffort::Persistent)),
         "replaceable tools support ordinary submit/steer only, without persistent execution"
     );
+    if thread
+        .thread_extension_data()
+        .get::<crate::agent_profiles::ProfileEnvironments>()
+        .is_some()
+    {
+        ensure!(
+            p.writable_roots.is_none() && p.thread_settings.environments.is_none(),
+            "Executor selection belongs to the current Agent environment"
+        );
+    }
     let writes = if let Some(roots) = p.writable_roots.take() {
         ensure!(
             matches!(p.mode, Mode::StartIfIdle) && p.thread_settings.environments.is_none(),
