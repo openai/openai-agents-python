@@ -88,6 +88,7 @@ from ._callback_execution import (
     _RecoverableFunctionCallback as _RecoverableFunctionCallback,
 )
 from ._compat import cancel_once as cancel_once, cancellation_requested
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._environment_lifetime import (
     _EnvironmentLease as _EnvironmentLease,
     _release_environment as _release_environment,
@@ -741,7 +742,7 @@ class TurnStoppedError(RuntimeError):
     """
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class FeatureSupport:
     """Availability for this configuration, never a readiness or effect receipt."""
 
@@ -1026,7 +1027,7 @@ class NativeError(RuntimeError):
         return self._effects
 
 
-@dataclass
+@_sdk_dataclass
 class _RunBudget:
     """Accounting shared by all native turns in one logical run."""
 
@@ -1217,7 +1218,7 @@ class _ManualBoundaryLost(RuntimeError):
     """No settled manual boundary remains at the pre-seal check."""
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class ManagedAgentToolOrigin:
     """The tool name and declared role for a managed agent invocation."""
 
@@ -1225,7 +1226,7 @@ class ManagedAgentToolOrigin:
     role: str
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class ProducedItem:
     """One accepted assistant or tool item and its producing Agent."""
 
@@ -1235,7 +1236,7 @@ class ProducedItem:
     tool_origin: ManagedAgentToolOrigin | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class RunErrorDetails:
     """Evidence retained before a failed one-shot submission closes.
 
@@ -1252,7 +1253,7 @@ class RunErrorDetails:
     history: tuple[dict[str, Any], ...] = field(default=(), repr=False)
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class RunFailure:
     """A settled one-shot failure and its bounded native run evidence."""
 
@@ -1262,7 +1263,7 @@ class RunFailure:
     context: object = field(repr=False)
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class RecoverRun(Generic[OutputT]):
     """Supply the run's final output, with optional assistant history insertion."""
 
@@ -1289,7 +1290,7 @@ class RunDiagnosticError(Exception):
         return self._details
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class Completed(Generic[OutputT, TurnT]):
     """One completed root or captured child turn.
 
@@ -1339,7 +1340,7 @@ def _validate_function_concurrency(value: int | None) -> None:
         raise ValueError("max_function_concurrency must be a positive integer or None")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _ToolCompletionProposal:
     """Provisional converted value; only a matching native terminal acknowledges it."""
 
@@ -1361,14 +1362,14 @@ class _ToolCompletionProposal:
         )
 
 
-@dataclass
+@_sdk_dataclass
 class _NativeCallback:
     receipt: dict[str, Any]
     native: Any
     cancelled: bool = False
 
 
-@dataclass
+@_sdk_dataclass
 class _ChildCallbacks:
     """Application callbacks for one native child incarnation and turn."""
 
@@ -1436,7 +1437,7 @@ class _ChildCallbacks:
 _CallbackState = _Submission | _ChildCallbacks
 
 
-@dataclass(eq=False)
+@_sdk_dataclass(eq=False)
 class _ConfiguredChild:
     owner: _CallbackState
     session: Session[Any, Any]
@@ -1453,7 +1454,7 @@ class _ConfiguredChild:
     seal_hold: asyncio.Event = field(default_factory=asyncio.Event)
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class _SuspendBoundary:
     session: Session[Any, Any]
     active: _Submission
@@ -1506,7 +1507,7 @@ class _BeforeStep(Protocol[_SelectionContextT_contra]):
     ): ...
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _ConfiguredOpening:
     agent: Agent[Any, Any]
     environment: Environment[Any] | None
@@ -1515,7 +1516,7 @@ class _ConfiguredOpening:
     executor_tools: tuple[str, ...]
 
 
-@dataclass
+@_sdk_dataclass
 class _Invocation:
     session: object
     active: bool = True
@@ -1532,7 +1533,7 @@ _CODEX_RESPONSES_BASE_URL = f"{_CODEX_ACCOUNT_BASE_URL}/codex"
 _SIWC_RESPONSES_BASE_URL = _SIWC_RESOURCE
 
 
-@dataclass(repr=False)
+@_sdk_dataclass(repr=False)
 class _RestoreDeclaration:
     agent: Agent[Any, Any]
     declaration: Agent[Any, Any]
@@ -1852,7 +1853,7 @@ async def _join_run_owner(owner: Any) -> tuple[Any, asyncio.CancelledError | Non
         raise
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _RunHandoff:
     scope: tuple[Any, Any, Any]
     info: dict[str, Any]
@@ -2494,7 +2495,7 @@ def _split_tools(
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _OpeningTools:
     """One classified opening declaration, before context binding."""
 
@@ -2540,7 +2541,7 @@ def _bind_sandbox_opening_tools(
     return catalog, declared.python, mcp_names
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _SandboxContextTransforms:
     callbacks: tuple[Callable[..., Any], ...]
 
@@ -2725,7 +2726,7 @@ def _native_tool_output_parts(body: Any) -> list[dict[str, Any]]:
     return parts
 
 
-@dataclass
+@_sdk_dataclass
 class _ApprovalArguments:
     value: Any
     approved: bool = False
@@ -2766,7 +2767,7 @@ def _same_approval_arguments(
     return bool(left == right)
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _ProfileRuntime:
     profile: _AgentProfile
     catalog: _ToolCatalog

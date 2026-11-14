@@ -5,12 +5,13 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass as dataclass, field
 from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PlainValidator, TypeAdapter
 from typing_extensions import TypedDict
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._function_tools import (
     FunctionTool,
     ToolContext,
@@ -102,7 +103,7 @@ _ShellBinder: TypeAlias = Callable[
 ]
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class _CapturedShell(_CapturedFunction):
     def _arguments(self, parsed: BaseModel) -> dict[str, Any]:
         return {"call": cast(ShellCall, parsed)}
@@ -111,7 +112,7 @@ class _CapturedShell(_CapturedFunction):
         raise TypeError("Shell before policies must return Allow or Deny")
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class _ShellTool(FunctionTool[ShellCall, ShellOutput, _ShellBinder[_ContextT]], Generic[_ContextT]):
     shell_spec: str = field(repr=False)
 

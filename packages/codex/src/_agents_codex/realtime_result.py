@@ -1,16 +1,17 @@
 """Trusted function-result controls, separate from application content."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass as dataclass, field
 from typing import ClassVar, Generic, TypeVar
 
 from pydantic import ConfigDict
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 
 _ResultT = TypeVar("_ResultT")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class BackgroundResult(Generic[_ResultT]):
     """A validated tool result that does not request another Realtime response.
 

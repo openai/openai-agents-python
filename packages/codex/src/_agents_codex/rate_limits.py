@@ -9,10 +9,11 @@ from decimal import Context as Context, Decimal as Decimal, localcontext as loca
 from email.utils import parsedate_to_datetime as parsedate_to_datetime
 from typing import Any as Any
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class ApiRateLimitWindow:
     """Reported counts and time until reset, measured at the provider response.
 
@@ -24,7 +25,7 @@ class ApiRateLimitWindow:
     reset_after_seconds: Decimal | None = None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class ApiRateLimits:
     """Rate limits from the latest observed response with usable rate-limit data.
 
@@ -39,7 +40,7 @@ class ApiRateLimits:
     retry_at: datetime | None = None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class CodexPlanWindow:
     """Provider-reported consumption and reset for one plan window.
 
@@ -52,7 +53,7 @@ class CodexPlanWindow:
     resets_at: datetime | None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class CodexPlanCredits:
     """Reported plan credits, with the provider's balance string when available."""
 
@@ -61,7 +62,7 @@ class CodexPlanCredits:
     balance: str | None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class CodexPlanSpendLimit:
     """A reported monthly credit limit for an individual workspace member.
 
@@ -75,7 +76,7 @@ class CodexPlanSpendLimit:
     resets_at: datetime
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class CodexPlanLimit:
     """One provider usage bucket, including the windows available for that bucket."""
 
@@ -90,7 +91,7 @@ class CodexPlanLimit:
     individual_limit: CodexPlanSpendLimit | None = None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class CodexPlanUsage:
     """An account usage read from the Codex backend.
 

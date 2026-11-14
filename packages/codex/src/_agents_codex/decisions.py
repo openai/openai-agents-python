@@ -8,10 +8,11 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass as dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Union, cast
 
 from ._compat import cancel_once
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._lifecycle import _close_after_error, _join
 from ._public import preserve_module_identity as _preserve_module_identity
 from .schema import OutputValidationError, _prepare_output, _PreparedOutput
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 DecisionInput = str | Sequence[dict[str, Any]]
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class DecisionRequest:
     """One question, explicit input, and the exact JSON schema a provider must satisfy.
 
@@ -38,7 +39,7 @@ class DecisionRequest:
     output_schema: dict[str, Any] = field(repr=False)
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class DecisionResponse:
     """Completed provider output and optional trustworthy response metadata.
 
@@ -87,7 +88,7 @@ class DecisionError(ValueError):
         )
 
 
-@dataclass
+@_sdk_dataclass
 class _DecisionScope:
     owner: object
     active: Callable[[], bool]

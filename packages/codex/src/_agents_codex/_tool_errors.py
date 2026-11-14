@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass as dataclass, field
 from typing import Any, Generic, Literal, TypeAlias, TypeVar
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 from .tools import ToolCallInfo
 
 ContextT = TypeVar("ContextT")
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class ToolErrorContext(Generic[ContextT]):
     """A recoverable function failure. Return only application-approved model text.
 

@@ -28,6 +28,7 @@ from typing import (
     runtime_checkable as runtime_checkable,
 )
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._legacy_history import (
     check_legacy_history_size as _check_legacy_history_size,
     decode_legacy_history_array as _decode_legacy_history_array,
@@ -138,7 +139,7 @@ class SessionStoreCleanup:
                 self._pending = None
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class CustomStorage:
     """Select an application-owned canonical store for a native Session.
 

@@ -460,6 +460,22 @@ def _module_contract(
         tree = _annotation_namespaces(_logical_tree(module, source, tree, parse))
     else:
         tree = prepare(module, source, tree)
+    if source.__name__.startswith("_agents_codex.") and any(
+        isinstance(node, ast.ImportFrom)
+        and node.level == 1
+        and node.module == "_compiled_dataclasses"
+        and any(
+            alias.name == "dataclass" and alias.asname == "_sdk_dataclass" for alias in node.names
+        )
+        for node in tree.body
+    ):
+        # The SDK uses the standard dataclass contract with precompiled method bodies.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                for decorator in node.decorator_list:
+                    target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                    if isinstance(target, ast.Name) and target.id == "_sdk_dataclass":
+                        target.id = "dataclass"
     definitions = [(node, _names(node)) for node in tree.body if _names(node)]
     if exports is None:
         exports = (

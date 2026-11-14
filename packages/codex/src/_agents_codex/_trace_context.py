@@ -7,6 +7,7 @@ from collections.abc import Mapping as Mapping
 from dataclasses import dataclass as dataclass, field as field
 from typing import cast as cast
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 
 _PARENT = re.compile(r"([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})")
@@ -15,7 +16,7 @@ _KEY = re.compile(
 )
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class TraceContext:
     """An immutable W3C parent carrier, independent of any tracing provider.
 

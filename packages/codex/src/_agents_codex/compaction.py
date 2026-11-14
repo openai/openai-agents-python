@@ -25,6 +25,7 @@ from typing import (
 if TYPE_CHECKING:
     from openai import AsyncOpenAI as AsyncOpenAI
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 from .model_context import ModelRequestContext, _ContextTransform
 from .usage import TokenUsage, _UsageCollector
@@ -32,7 +33,7 @@ from .usage import TokenUsage, _UsageCollector
 ContextT = TypeVar("ContextT")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class CompactionContext(Generic[ContextT]):
     """Detached conversation input for an awaited ``before_compact`` callback.
 
@@ -73,7 +74,7 @@ _BeforeCompact: TypeAlias = Callable[
 ]
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ResponsesCompactionContext(CompactionContext[ContextT]):
     """Captured native window and resolved request for a compaction predicate."""
 
@@ -84,7 +85,7 @@ class ResponsesCompactionContext(CompactionContext[ContextT]):
 _ShouldCompact: TypeAlias = Callable[[ResponsesCompactionContext[ContextT]], bool | Awaitable[bool]]
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ResponsesCompaction(Generic[ContextT]):
     """Use a borrowed Responses client for native conversation compaction.
 

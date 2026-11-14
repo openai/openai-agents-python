@@ -6,9 +6,11 @@ import asyncio
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass as dataclass
 from threading import Event, Lock
 from typing import Any
+
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 
 _UNAVAILABLE_ROUTE = object()
 
@@ -71,7 +73,7 @@ class _TraceDeliveryOwner:
         return _UNAVAILABLE_ROUTE
 
 
-@dataclass
+@_sdk_dataclass
 class _Invocation:
     owner: _TraceDeliveryOwner | None
     events: frozenset[int]

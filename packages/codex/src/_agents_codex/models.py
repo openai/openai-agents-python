@@ -11,7 +11,7 @@ import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass as dataclass, field, replace
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, TypeAlias, cast
 from uuid import uuid4
 
@@ -21,6 +21,7 @@ from typing_extensions import NotRequired, TypedDict
 from agents.config import JsonValue
 
 from ._compat import cancellation_requested
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._hosted_agent_metadata import (
     HostedAgentMetadata as HostedAgentMetadata,
     get_hosted_agent_metadata as get_hosted_agent_metadata,
@@ -107,7 +108,7 @@ def _capture_model_override(value: str | None) -> str | None:
     return value
 
 
-@dataclass(frozen=True, eq=False)
+@_sdk_dataclass(frozen=True, eq=False)
 class ModelRunOwner:
     """Identity of one live native run, shared only with its owned continuations."""
 
@@ -115,7 +116,7 @@ class ModelRunOwner:
     turn_id: str
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ModelRequest:
     """Detached provider request. The current application context is never persisted."""
 
@@ -180,7 +181,7 @@ def _capture_model_usage(usage: Mapping[str, int] | None) -> dict[str, int] | No
         del usage
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class ModelRetryAdviceRequest:
     """One failed producer request, with logical policy and physical request indexes."""
 
@@ -335,7 +336,7 @@ def _client_request_options(options: Mapping[str, Any]) -> dict[str, Any]:
         del options, headers, key, value
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ModelResponse:
     """One completed model response. Output uses Responses item JSON.
 
@@ -641,7 +642,7 @@ def _chat_completion_usage(raw: Mapping[str, Any] | None) -> dict[str, int] | No
         del raw, usage
 
 
-@dataclass(frozen=True, init=False)
+@_sdk_dataclass(frozen=True, init=False)
 class ChatCompletionsModel:
     """Use an injected asynchronous Chat Completions client with the native loop.
 
@@ -1644,7 +1645,7 @@ class ChatCompletionsModel:
             del request, options, selected, client
 
 
-@dataclass(frozen=True, init=False)
+@_sdk_dataclass(frozen=True, init=False)
 class LitellmModel(ChatCompletionsModel):
     """Borrow LiteLLM or a Router exposing asynchronous ``acompletion``.
 
@@ -1691,7 +1692,7 @@ def _anyllm_responses_streaming_supported(client: Any) -> bool:
     return match is not None and (int(match[1]), int(match[2])) >= (1, 28)
 
 
-@dataclass(frozen=True, init=False)
+@_sdk_dataclass(frozen=True, init=False)
 class AnyLLMModel(ChatCompletionsModel):
     """Borrow an AnyLLM provider exposing asynchronous ``acompletion``.
 
@@ -1815,7 +1816,7 @@ class AnyLLMModel(ChatCompletionsModel):
             del request, options
 
 
-@dataclass(frozen=True, init=False)
+@_sdk_dataclass(frozen=True, init=False)
 class ResponsesModel:
     """Borrow an asynchronous Responses client for the native Core model loop.
 

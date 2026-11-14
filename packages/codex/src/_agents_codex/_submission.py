@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass as dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._lifecycle import _error_contexts, _retain_cleanup_error
 from .usage import _UsageCollector
 
@@ -43,7 +44,7 @@ def _future() -> asyncio.Future[Any]:
     return future
 
 
-@dataclass
+@_sdk_dataclass
 class _Submission:
     output: _PreparedOutput
     run_usage: _UsageCollector = field(default_factory=_UsageCollector)

@@ -11,12 +11,13 @@ from typing import (
     TypeVar as TypeVar,
 )
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 
 ContextT = TypeVar("ContextT")
 
 
-@dataclass(frozen=True, eq=False)
+@_sdk_dataclass(frozen=True, eq=False)
 class ModelContextSnapshot:
     """Current model context captured by an idle Session.
 
@@ -29,7 +30,7 @@ class ModelContextSnapshot:
     items: tuple[dict[str, Any], ...] = field(repr=False)
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ModelRequestContext(Generic[ContextT]):
     """Detached input and identity for one awaited context transformation.
 
@@ -63,7 +64,7 @@ class ModelRequestContext(Generic[ContextT]):
     purpose: Literal["turn", "compaction", "output_repair"]
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ModelCompletionContext(Generic[ContextT]):
     """The accepted response of one native model request, before direct tool execution."""
 

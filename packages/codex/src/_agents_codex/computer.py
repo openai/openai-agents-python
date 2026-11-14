@@ -26,6 +26,7 @@ from pydantic import (
 )
 
 from . import tools as _tool_output_types
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._function_tools import FunctionTool as FunctionTool, ToolContext as ToolContext
 from ._public import preserve_module_identity as _preserve_module_identity
 from .tools import ToolOutput as ToolOutput, _CapturedFunction as _CapturedFunction
@@ -58,7 +59,7 @@ class Computer(Protocol):
     def drag(self, path: list[tuple[float, float]]) -> None | Awaitable[None]: ...
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ComputerProvider:
     """Acquire one driver lazily per Session and dispose it after callbacks join.
 
@@ -86,7 +87,7 @@ class _ComputerCall(BaseModel):
     pending_safety_checks: list[dict[str, Any]] = Field(default_factory=list)
 
 
-@dataclass(frozen=True, eq=False)
+@_sdk_dataclass(frozen=True, eq=False)
 class _Declaration:
     source: Computer | ComputerProvider = field(repr=False)
     approve: Callable[[ToolContext[Any], list[dict[str, Any]]], bool | Awaitable[bool]] | None = (
@@ -143,7 +144,7 @@ def _borrowed_gate(driver: Computer) -> _DeviceGate:
         return gate
 
 
-@dataclass
+@_sdk_dataclass
 class _Lease:
     lock: _DeviceGate = field(default_factory=_DeviceGate)
     driver: Computer | None = None
@@ -293,7 +294,7 @@ async def _call_owned_callback(
             issued.close()
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class _CapturedComputer(_CapturedFunction):
     computer: _Declaration = field(repr=False)
 
@@ -421,7 +422,7 @@ class _CapturedComputer(_CapturedFunction):
             return tool_output
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class _ComputerTool(FunctionTool[Any, str, Any]):
     computer_spec: str = field(repr=False)
 

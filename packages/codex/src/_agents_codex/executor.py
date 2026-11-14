@@ -37,6 +37,7 @@ from urllib.parse import (
 
 from typing_extensions import Self as Self, TypeVar as TypeVar
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._options import (
     RuntimeEnvironment as RuntimeEnvironment,
     RuntimeNetworkPolicy as RuntimeNetworkPolicy,
@@ -122,7 +123,7 @@ def _domain_rules(name: str, values: Sequence[str]) -> set[str]:
     return rules
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class NetworkPolicy:
     """Set the managed proxy and socket rules for native commands on a Unix executor.
 
@@ -189,7 +190,7 @@ class NetworkPolicy:
         }
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class ExecutorContext(Generic[ContextT_co]):
     """The actual native identity of one executor call.
 
@@ -223,7 +224,7 @@ class ExecutorContext(Generic[ContextT_co]):
     model: str | None = field(default=None, kw_only=True)
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class LocalStorageMount:
     """Read an existing canonical Linux directory through a native read-only bind.
 
@@ -260,7 +261,7 @@ class LocalStorageMount:
             raise ValueError("Storage mounts require the same source and destination")
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class Environment(Generic[ContextT_contra]):
     """Select one authenticated WSS executor or use :meth:`local` for local work.
 
@@ -753,7 +754,7 @@ class Environment(Generic[ContextT_contra]):
         return result
 
 
-@dataclass(frozen=True, kw_only=True)
+@_sdk_dataclass(frozen=True, kw_only=True)
 class _LocalEnvironment(Environment[ContextT_contra]):
     _is_local = True
 

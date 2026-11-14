@@ -26,6 +26,7 @@ from typing import (
 from typing_extensions import TypeVar as TypeVar
 
 from ._compat import cancellation_requested
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._mcp_errors import _protect_mcp_methods, _strip_mcp_frames, _uses_mcp
 from ._public import preserve_module_identity as _preserve_module_identity
 from .usage import RunUsage, _UsageCollector
@@ -45,7 +46,7 @@ _DecisionT = TypeVar("_DecisionT")
 TurnT = TypeVar("TurnT", default="Turn[OutputT]")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class PendingRequests(Generic[OutputT, TurnT]):
     """Current requests of one Turn. Another consumer may answer first."""
 
@@ -53,7 +54,7 @@ class PendingRequests(Generic[OutputT, TurnT]):
     requests: tuple[Interaction, ...] = field(repr=False)
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class SteeringReceipt:
     """Native acceptance of one input for an exact root turn.
 
@@ -66,7 +67,7 @@ class SteeringReceipt:
     input_id: str
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class TurnNeedsAttention:
     """A settled turn and the latest Session-level API limits at read time."""
 
@@ -77,7 +78,7 @@ class TurnNeedsAttention:
     rate_limits: ApiRateLimits
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class RequestAttemptCount:
     """Native sends have been counting by owner, operation, and transport."""
 
@@ -87,7 +88,7 @@ class RequestAttemptCount:
     count: int
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class RequestAttempts:
     """Transport sends have been counting within the reporting property's scope.
 
@@ -134,7 +135,7 @@ def _request_attempts_snapshot(capture: Any) -> RequestAttempts | None:
     )
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class AcceptedTextChunk:
     """An application-approved prefix has been retaining its exact native item."""
 
@@ -185,7 +186,7 @@ class _SubmissionRequestAttempts:
         )
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@_sdk_dataclass(frozen=True, slots=True, init=False)
 class Turn(Generic[OutputT]):
     """One submitted root task, or a separately scoped native child turn.
 

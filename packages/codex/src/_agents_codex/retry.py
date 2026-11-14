@@ -5,10 +5,11 @@ from __future__ import annotations
 import inspect
 import math
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass as dataclass, field, replace
 from typing import Any, Literal, cast
 
 from ._captured_values import _CapturedValues
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 from .usage import TokenUsage
 
@@ -24,7 +25,7 @@ def _delay(value: float | None, name: str) -> None:
         raise ValueError(f"{name} must be a finite nonnegative number or None")
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class RetryBackoffSettings:
     """Milliseconds between attempts, excluding each attempt's timeout."""
 
@@ -51,7 +52,7 @@ class RetryBackoffSettings:
         }
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class NormalizedError:
     """Captured error facts, independent of subsequent application mutation."""
 
@@ -65,7 +66,7 @@ class NormalizedError:
     is_timeout: bool = False
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class RetryAdvice:
     suggested: bool | None = None
     retry_after_ms: float | None = None
@@ -105,7 +106,7 @@ class RetryAdvice:
             raise TypeError("reason must be a string or None")
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class RetryDecision:
     retry: bool
     delay_ms: float | None = None
@@ -123,7 +124,7 @@ class RetryDecision:
             raise TypeError("reason must be a string or None")
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class RetryPolicyContext:
     attempt_id: str
     attempt: int
@@ -156,7 +157,7 @@ RetryPolicy = Callable[[RetryPolicyContext], bool | RetryDecision | Awaitable[bo
 _RetryPolicyInvoker = Callable[[RetryPolicy, RetryPolicyContext], Awaitable[bool | RetryDecision]]
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class ModelRetrySettings:
     """Captured retry settings. Configuration JSON excludes the policy callable.
 
@@ -203,7 +204,7 @@ async def _evaluate(
     return result
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class _CombinedRetryPolicy:
     evaluate: Callable[[RetryPolicyContext, _RetryPolicyInvoker | None], Awaitable[RetryDecision]]
 

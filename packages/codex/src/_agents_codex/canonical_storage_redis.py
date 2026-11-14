@@ -8,9 +8,10 @@ import json
 import os
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass as dataclass
 from typing import Any, cast
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._legacy_history import (
     check_legacy_history_size,
     decode_legacy_item,
@@ -70,7 +71,7 @@ return {count, size, items}
 """
 
 
-@dataclass
+@_sdk_dataclass
 class _Lease:
     token: str
     pid: int

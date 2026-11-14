@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 import math
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass as dataclass, field
 from typing import Any
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from .models import ModelRequest
 from .retry import NormalizedError
 
 
-@dataclass(frozen=True, slots=True)
+@_sdk_dataclass(frozen=True, slots=True)
 class _ModelFailure:
     attempt_id: str
     request: ModelRequest = field(repr=False)

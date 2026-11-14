@@ -20,12 +20,13 @@ from pydantic import (
     create_model as create_model,
 )
 
+from ._compiled_dataclasses import dataclass as _sdk_dataclass
 from ._public import preserve_module_identity as _preserve_module_identity
 
 OutputT = TypeVar("OutputT")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class NativeOutput(Generic[OutputT]):
     """Request a native schema and validate the final output once in Python.
 
@@ -43,7 +44,7 @@ class NativeOutput(Generic[OutputT]):
             raise TypeError("NativeOutput strict must be a boolean")
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class PromptedOutput(Generic[OutputT]):
     """Request JSON through the turn's prompt, validated in Python.
 
@@ -74,7 +75,7 @@ class PromptedOutput(Generic[OutputT]):
 OutputSpec: TypeAlias = type[OutputT] | NativeOutput[OutputT] | PromptedOutput[OutputT]
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class OutputValidationIssue:
     """Sensitive diagnostic selected from one failed output validation.
 
@@ -103,7 +104,7 @@ class OutputValidationError(ValueError):
         self._run_recoverable = False
 
 
-@dataclass(frozen=True)
+@_sdk_dataclass(frozen=True)
 class _PreparedOutput:
     mode: Literal["plain", "native", "prompted"]
     adapter: TypeAdapter[Any] | None
