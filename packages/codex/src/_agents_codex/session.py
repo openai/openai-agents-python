@@ -17967,6 +17967,10 @@ class Session(Generic[ContextT, OutputT]):
                             child_session, turn, declaration, context, admitted, initial_agent
                         )
                     except BaseException:
+                        if child.callback_task is not None and cancellation_requested(
+                            child.callback_task
+                        ):
+                            raise
                         if not child.sealing and child.recovery is None:
                             raise
                         await child.seal_hold.wait()

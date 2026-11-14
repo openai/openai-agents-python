@@ -13,6 +13,7 @@ from agents import (
     Environment,
     PendingRequests,
     SessionState,
+    ToolTimeoutError,
     TurnStoppedError,
     function_tool,
 )
@@ -269,3 +270,62 @@ async def test_configured_rollback_keeps_issuing_executor_tool_ceiling(
                 assert "exec_command" not in str(child_model.requests[-1].get("tools", []))
             assert effects == ["accepted-sibling", "child-effect"]
             assert not executor.synthetic_process_starts
+
+
+async def test_configured_timeout_during_seal_retires_callback(monkeypatch):
+    async with timeout(15), fixture() as values:
+        parent, _child, context, root_model, child_model, effects, _guards, sibling = values
+        timed = replace(parent.tools[0], callback_timeout=5, timeout_behavior="raise_exception")
+        parent = replace(parent, tools=[timed, *parent.tools[1:]])
+        async with parent.session(context=context) as source:
+            turn = await source.submit("Capture the child once.")
+            assert isinstance(await turn.wait_for_request_or_result(), PendingRequests)
+            await sibling.wait()
+            [child] = source._configured_children
+            suspend_child = child.session._suspend_ready
+            wait_hold = child.seal_hold.wait
+            held = asyncio.Event()
+
+            async def observe_hold():
+                held.set()
+                return await wait_hold()
+
+            async def seal_after_timeout(*args, **kwargs):
+                assert child.sealing
+                waiter = asyncio.create_task(held.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        [waiter, child.callback_task],
+                        timeout=8,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    assert done
+                finally:
+                    waiter.cancel()
+                    await asyncio.gather(waiter, return_exceptions=True)
+                assert isinstance(child.owner.failure.result(), ToolTimeoutError)
+                return await suspend_child(*args, **kwargs)
+
+            monkeypatch.setattr(child.seal_hold, "wait", observe_hold)
+            monkeypatch.setattr(child.session, "_suspend_ready", seal_after_timeout)
+            capture = asyncio.create_task(source.suspend())
+            closer = None
+            try:
+                done, _ = await asyncio.wait([capture], timeout=10)
+                assert capture in done
+                with pytest.raises(
+                    RuntimeError,
+                    match="^(Session is closed|child continuation requires a live entered call)$",
+                ):
+                    await capture
+                closer = asyncio.create_task(source.aclose())
+                done, _ = await asyncio.wait([closer], timeout=2)
+                assert closer in done
+                await closer
+                with pytest.raises(ToolTimeoutError):
+                    await turn.get_result()
+            finally:
+                child.seal_hold.set()
+                await asyncio.gather(capture, *([closer] if closer else []), return_exceptions=True)
+        assert effects == ["accepted-sibling"]
+        assert len(root_model.requests) == len(child_model.requests) == 1
