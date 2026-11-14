@@ -18,6 +18,20 @@ RMCP_COMMIT = b"tree " + b"1" * 40 + b"\n\nsynthetic RMCP fixture\n"
 RMCP_REVISION = hashlib.sha1(
     b"commit " + str(len(RMCP_COMMIT)).encode() + b"\0" + RMCP_COMMIT
 ).hexdigest()
+FACTORY_GENERATOR = "build_dataclass_factories.py"
+FACTORY_ARCHIVE = (
+    f"_dataclass_factories_{sys.version_info.major}{sys.version_info.minor}-fixture.zip"
+)
+BUILDS_FACTORIES = (
+    sys.implementation.name == "cpython"
+    and sys.version_info[:2] in {(3, 12), (3, 13)}
+    and not sys.flags.optimize
+    and not sys._xoptions
+)
+
+
+def generates_factories(argv):
+    return argv[:3] == [sys.executable, "-P", "-B"] and Path(argv[3]).name == FACTORY_GENERATOR
 
 
 def rmcp_qualification(native):
@@ -94,6 +108,15 @@ def hook_project(monkeypatch, tmp_path):
         path = native / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("fixture " + name)
+    (native / "scripts" / FACTORY_GENERATOR).write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from zipfile import ZipFile\n"
+        "output = Path(sys.argv[sys.argv.index('--output') + 1])\n"
+        "output.mkdir()\n"
+        f"with ZipFile(output / {FACTORY_ARCHIVE!r}, 'x') as archive:\n"
+        "    archive.writestr('_dataclass_factories.py', 'FACTORIES = {}\\n')\n"
+    )
     (native / "rmcp-patches").mkdir()
     (native / "rmcp-patches/series.json").write_text(
         json.dumps({"patches": [], "result_tree": "1" * 40})
@@ -213,6 +236,8 @@ def test_standard_wheel_owns_native_assets_once_without_gitignore(
         assert archive.read("agents/licenses/SDK_LICENSE") == b"SDK license"
         assert archive.read("agents/licenses/RMCP_LICENSE") == b"pinned RMCP license"
         assert archive.read("agents/__init__.py") == b"VERSION = 'variant'\n"
+        assert (f"_agents_codex/{FACTORY_ARCHIVE}" in names) is BUILDS_FACTORIES
+        assert not any(name.endswith(".pyc") for name in names)
         (metadata_name,) = (name for name in names if name.endswith(".dist-info/METADATA"))
         metadata = archive.read(metadata_name).decode()
         description = metadata.split("\n\n", 1)[1]
@@ -233,10 +258,13 @@ def test_reuse_never_compiles_and_preserves_current_python(
     (source / "bin").mkdir()
     (source / "bin" / ("applypatch" + suffix)).write_text("old editable build")
     monkeypatch.setenv("OPENAI_AGENTS_NATIVE_WHEEL", str(sdk_wheel))
-    monkeypatch.setattr(
-        "hatch_build.subprocess.run",
-        lambda *args, **kwargs: pytest.fail("Reuse must not invoke a compiler or fetch Codex"),
-    )
+    real_run = subprocess.run
+
+    def generate_only(argv, **kwargs):
+        assert generates_factories(argv), "Reuse must not invoke a compiler or fetch Codex"
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr("hatch_build.subprocess.run", generate_only)
     data = {"force_include": {}}
     hook.initialize(version, data)
     try:
@@ -247,6 +275,7 @@ def test_reuse_never_compiles_and_preserves_current_python(
             entries = {value: Path(key) for key, value in data["force_include"].items()}
             packaged = entries["agents"]
             libs = entries["openai_agents.libs"]
+            assert (f"_agents_codex/{FACTORY_ARCHIVE}" in entries) is BUILDS_FACTORIES
         assert (source / "__init__.py").read_text() == "VERSION = 'variant'\n"
         assert (source / "new_module.py").is_file()
         assert not (source / "removed_module.py").exists()
@@ -313,9 +342,12 @@ def test_fresh_thin_wheel_preserves_current_sdk_python_and_assets(
     hook, source = hook_project
     monkeypatch.delenv("OPENAI_AGENTS_NATIVE_WHEEL", raising=False)
     calls = []
+    real_run = subprocess.run
 
     def run(command, **kwargs):
         calls.append(command)
+        if generates_factories(command):
+            return real_run(command, **kwargs)
         if command[1].endswith("build.py"):
             output = Path(command[command.index("--out") + 1])
             wheel = output / "openai_agents-0.24.0a4-cp310-abi3-linux_x86_64.whl"
@@ -695,7 +727,11 @@ def test_mutating_or_failed_build_cannot_mint_receipt(
         },
     )
 
+    real_run = subprocess.run
+
     def run(argv, **kwargs):
+        if generates_factories(argv):
+            return real_run(argv, **kwargs)
         if argv[1].endswith("prepare_codex.py") and change_at == "prepare":
             (native / "rust/ingress.c").write_text("mutated during prepare")
         if argv[1].endswith("build.py"):
@@ -741,9 +777,13 @@ def test_source_free_reuse_binds_reviewed_patch_identity(monkeypatch, hook_proje
     (native / "patches/series.json").write_text(json.dumps(manifest))
     make_wheel(sdk_wheel, native_root=native)
     monkeypatch.setenv("OPENAI_AGENTS_NATIVE_WHEEL", str(sdk_wheel))
-    monkeypatch.setattr(
-        "hatch_build.subprocess.run", lambda *a, **k: pytest.fail("no source build")
-    )
+    real_run = subprocess.run
+
+    def generate_only(argv, **kwargs):
+        assert generates_factories(argv), "Reuse must not build native source"
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr("hatch_build.subprocess.run", generate_only)
     hook.initialize("standard", {"force_include": {}})
     assert _wheel_qualification(native, sdk_wheel)["patch_series"] == patch_series(native)
     assert not (native / ".upstream/codex").exists()
