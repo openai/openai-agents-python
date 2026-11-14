@@ -760,6 +760,12 @@ class ChatCompletionsModel:
         try:
             messages = []
             native_tools = list(request.body.get("tools") or [])
+            thinking = request.body.get("thinking")
+            replay_thinking = (
+                thinking.get("type") in ("enabled", "adaptive")
+                if isinstance(thinking, dict)
+                else (request.body.get("reasoning") or {}).get("effort") is not None
+            )
             for input_index, item in enumerate(request.body["input"]):
                 kind = item.get("type")
                 if kind == "message" and item.get("role") != "assistant":
@@ -931,7 +937,7 @@ class ChatCompletionsModel:
                         if (
                             isinstance(self, LitellmModel)
                             and any(provider in target for provider in ("claude", "anthropic"))
-                            and (request.body.get("reasoning") or {}).get("effort") is not None
+                            and replay_thinking
                             and "thinking_blocks" in replay
                         ):
                             pending_reasoning["thinking_blocks"] = replay["thinking_blocks"]

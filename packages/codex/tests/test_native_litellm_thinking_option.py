@@ -26,10 +26,11 @@ BLOCKS = [
 
 
 @pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("effort", [None, "high"])
 @pytest.mark.parametrize("cold_restore", [False])
 @pytest.mark.parametrize("visible_text", [False])
 async def test_native_litellm_enabled_thinking_reaches_the_wire(
-    monkeypatch, streaming, cold_restore, visible_text
+    monkeypatch, streaming, cold_restore, visible_text, effort
 ):
     monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
     litellm = pytest.importorskip("litellm")
@@ -117,7 +118,7 @@ async def test_native_litellm_enabled_thinking_reaches_the_wire(
                     tools=[lookup],
                     provider=provider,
                     model_settings={
-                        "reasoning_effort": "high",
+                        **({"reasoning_effort": effort} if effort is not None else {}),
                         "extra_body": {"thinking": {"type": "enabled", "budget_tokens": 1024}},
                         "retry": ModelRetrySettings(max_retries=0),
                     },
