@@ -652,6 +652,7 @@ class ToolSearchCallItem(TypedDict):
     call_id: str | None
     execution: str
     arguments: JsonValue
+    provider_data: NotRequired[JsonValue]
     status: FunctionCallStatus
 
 
@@ -662,7 +663,19 @@ class ToolSearchOutputItem(TypedDict):
     call_id: str | None
     execution: str
     tools: list[JsonValue]
+    provider_data: NotRequired[JsonValue]
     status: FunctionCallStatus
+
+
+class HostedMcpApprovalDecisionItem(TypedDict):
+    type: Literal["mcp_approval_response"]
+    id: str
+    turn_id: str
+    status: str
+    approval_request_id: str
+    approve: bool
+    reason: str | None
+    provider_data: JsonValue
 
 
 class McpCallItem(TypedDict):

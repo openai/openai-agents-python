@@ -1487,7 +1487,43 @@
     {
       "path": "sdk-portable-pending-apply-patch.patch",
       "sha256": "dfb4bc07da2315cedaf2388ea1145bef72b8bed3f8e3044ddc53c663f62af0a5"
+    },
+    {
+      "path": "sdk-live-semantic-tool-observation.patch",
+      "sha256": "5011f3f79d6e28865edcce687f83b8ef232d9ff93adfd2df324161e7dab5ab26"
+    },
+    {
+      "path": "sdk-join-remote-command-cancellation.patch",
+      "sha256": "d19bd9037c4240c9eb3410671c0f05c0fb8ad5d2e758acfcc62781d2c662dee9"
+    },
+    {
+      "path": "sdk-join-owned-remote-on-prune.patch",
+      "sha256": "f13d9fa10beb8ba94c2c14253a0dbbccab26eff66189a14488ce67377ccf5e7e"
+    },
+    {
+      "path": "sdk-keep-remote-pruning-off-launch-path.patch",
+      "sha256": "77ec641aea93f203bf1f2bfdcfe0b0f29bbdfad424bf7dc0546638f34337a5fc"
+    },
+    {
+      "path": "sdk-enable-owned-remote-command-termination.patch",
+      "sha256": "0a3a6278eaf3536f798d3577d268c3f824c1392bb747e0d2a6ce261e430a93d3"
+    },
+    {
+      "path": "sdk-drain-remote-output-on-checked-close.patch",
+      "sha256": "b6509c5178feffbf4e13c0ae53420e11796a41a13b00421fd134f9658726c558"
+    },
+    {
+      "path": "sdk-retire-unresolved-remote-start-on-close.patch",
+      "sha256": "565b46f9892c60b6014dc47fb2ad26c29bd7fe93ce9a68e1c153e50fcfa4598b"
+    },
+    {
+      "path": "sdk-fence-remote-reconnect-on-close.patch",
+      "sha256": "9a3aa3c51a447750066e5ab52ed9d0bab277cd873f2238147f841592e7ac9e5c"
+    },
+    {
+      "path": "sdk-retire-scoped-executor-connections.patch",
+      "sha256": "b2ca618ba90702a56da989543402a216d3b9d18fee7e75e1c721f1e94dae8c51"
     }
   ],
-  "result_tree": "08393cca1794260ff7fd1691c7066b878f64020d"
+  "result_tree": "9dc1a2b6d4d80eb4d73d87d695e92b5949304549"
 }

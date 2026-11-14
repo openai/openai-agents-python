@@ -121,6 +121,18 @@ impl Settlement {
 pub(crate) struct Contributor;
 
 impl ThreadLifecycleContributor<Config> for Contributor {
+    fn on_thread_start<'a>(
+        &'a self,
+        input: codex_extension_api::ThreadStartInput<'a, Config>,
+    ) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            // Runtime-only policy also covers SDK-owned nested and resumed threads.
+            input
+                .thread_store
+                .get_or_init(codex_core_api::ConfirmRemoteProcessTermination::default);
+        })
+    }
+
     fn on_thread_idle<'a>(&'a self, input: ThreadIdleInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             if let Some(settlement) = input.thread_store.get::<Settlement>() {
