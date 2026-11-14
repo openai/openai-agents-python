@@ -605,7 +605,12 @@ async def test_request_budget_survives_portable_same_turn_restart(
             if approval:
                 await request.approve()
             else:
-                await request.respond("live result")
+                try:
+                    await request.respond("live result")
+                except NativeError as error:
+                    # The resumed turn can reach its budget limit before reply delivery returns.
+                    if max_requests != 1 or error.code != "run_budget_exceeded":
+                        raise
             if max_requests == 1:
                 with pytest.raises(NativeError) as stopped:
                     await restored.restored_turn.get_result()
