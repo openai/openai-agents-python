@@ -1,3 +1,6 @@
+#[path = "agent_lifecycle.rs"]
+pub(crate) mod agent_lifecycle;
+
 #[path = "handoff_inputs.rs"]
 pub(crate) mod handoff_inputs;
 
@@ -283,6 +286,7 @@ pub(crate) enum ToolCompletionReply {
 }
 
 enum PreparationReply {
+    AgentLifecycle(oneshot::Sender<std::result::Result<(), ()>>),
     HandoffInput(oneshot::Sender<std::result::Result<handoff_inputs::Groups, ()>>),
     ModelCompletion(oneshot::Sender<std::result::Result<(), ()>>),
     ProviderResponseSpan(
@@ -324,6 +328,7 @@ impl PreparationReply {
         match self {
             Self::HandoffInput(reply) => reply.is_closed(),
             Self::ModelCompletion(reply) => reply.is_closed(),
+            Self::AgentLifecycle(reply) => reply.is_closed(),
             Self::ProviderResponseSpan(reply) => reply.is_closed(),
             Self::ModelRetry(reply) => reply.is_closed(),
             Self::PreparedRequest { ticket, reply } => reply.is_closed() || !ticket.admits(),
@@ -5491,6 +5496,21 @@ fn terminal_tool_call(item: &ResponseItem) -> Option<(&str, &str, Option<&str>)>
 }
 
 impl TurnLifecycleContributor for PythonContributor {
+    fn before_agent_lifecycle<'a>(
+        &'a self,
+        input: codex_extension_api::AgentLifecycleInput<'a>,
+    ) -> ExtensionFuture<'a, std::result::Result<(), String>> {
+        Box::pin(async move {
+            let Some(tools) = input.thread_store.get::<PythonTools>() else {
+                return Ok(());
+            };
+            tools
+                .agent_lifecycle(input)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
     fn hold_tool_completion(&self, input: codex_extension_api::ToolCompletionInput<'_>) -> bool {
         let Some(tools) = input.thread_store.get::<PythonTools>() else {
             return false;

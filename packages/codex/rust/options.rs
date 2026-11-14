@@ -100,6 +100,8 @@ pub struct ThreadOptions {
     pub(crate) post_turn_compact: bool,
     #[serde(rename = "_before_complete")]
     pub(crate) before_complete: bool,
+    #[serde(rename = "_agent_lifecycle")]
+    pub(crate) agent_lifecycle: Vec<String>,
     #[serde(rename = "_hold_assistant_completion")]
     hold_assistant_completion: bool,
     #[serde(rename = "_tool_batch_completion")]
@@ -314,9 +316,11 @@ impl ThreadOptions {
         }
         let mut options = StartThreadOptions::new(configuration);
         if !self.profile_provider_keys.is_empty() {
-            options.thread_extension_init.insert(
-                crate::agent_profiles::PendingProviderKeys(self.profile_provider_keys),
-            );
+            options
+                .thread_extension_init
+                .insert(crate::agent_profiles::PendingProviderKeys(
+                    self.profile_provider_keys,
+                ));
         }
         if self.hold_assistant_completion {
             anyhow::ensure!(

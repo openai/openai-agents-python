@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         SignInWithChatGPT as SignInWithChatGPT,
         SignInWithChatGPTCredentials as SignInWithChatGPTCredentials,
     )
+    from .agent_lifecycle import AgentLifecycleContext as AgentLifecycleContext
     from .apply_patch import (
         ApplyPatchEditor as ApplyPatchEditor,
         ApplyPatchOperation as ApplyPatchOperation,
@@ -429,6 +430,7 @@ _MODULES = {
     "Agent": ".agent",
     "Handoff": ".handoffs",
     "HandoffInput": ".handoffs",
+    "AgentLifecycleContext": ".agent_lifecycle",
     "CodexAccount": ".agent",
     "CodexLogin": ".agent",
     "ModelSettings": ".agent",

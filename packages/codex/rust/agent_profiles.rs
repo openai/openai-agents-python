@@ -1135,7 +1135,11 @@ async fn prepare_profile(
         descriptor.selecting_steps,
         descriptor.transform_context,
         descriptor.before_compact,
-        descriptor.before_complete,
+        descriptor.before_complete
+            || crate::python_tools::agent_lifecycle::enabled(
+                thread.thread_extension_data(),
+                &descriptor.id,
+            ),
         descriptor.tool_batch_completion,
         descriptor.post_turn_compact,
     ];
@@ -2168,6 +2172,38 @@ pub(crate) async fn activate(
         .thread
         .activate_agent_profile(Some(expected), candidate)
         .await?)
+}
+
+pub(crate) fn validate_lifecycle_handoff(
+    input: &codex_extension_api::AgentLifecycleInput<'_>,
+) -> Result<()> {
+    let Some(target) = input.target_profile_id else {
+        return Ok(());
+    };
+    let source = input
+        .source
+        .context("Lifecycle handoff has no admitted source")?;
+    let profiles = input
+        .thread_store
+        .get::<Arc<AgentProfiles>>()
+        .context("Lifecycle handoff has no captured graph")?;
+    let declaration = &profiles
+        .profiles
+        .get(&source.receipt.profile_id)
+        .context("Lifecycle source is outside the graph")?
+        .declaration;
+    ensure!(
+        declaration
+            .handoffs
+            .values()
+            .any(|candidate| candidate == target)
+            || declaration
+                .decision_handoffs
+                .values()
+                .any(|entry| entry.targets.iter().any(|candidate| candidate == target)),
+        "Lifecycle handoff target is outside its source declaration"
+    );
+    Ok(())
 }
 
 pub(crate) struct Contributor;

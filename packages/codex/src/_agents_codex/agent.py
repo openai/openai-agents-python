@@ -48,7 +48,11 @@ from typing import (
 )
 from urllib.parse import urlsplit as urlsplit
 
-from typing_extensions import Required as _Required, TypedDict as TypedDict, TypeVar as TypeVar
+from typing_extensions import (
+    Required as _Required,
+    TypedDict as TypedDict,
+    TypeVar as TypeVar,
+)
 
 from ._hosted_prompts import _capture_hosted_prompt_source, _hosted_prompt_controls
 from ._lifecycle import (
@@ -66,7 +70,11 @@ from ._model_settings import (
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._tool_errors import ToolErrorFormatter as ToolErrorFormatter
-from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
+from ._trace_context import (
+    TraceContext as TraceContext,
+    _trace_context as _trace_context,
+)
+from .agent_lifecycle import _AgentLifecycleCallback
 from .compaction import ResponsesCompaction, _BeforeCompact
 from .completion import _BeforeComplete, _ToolBatchCompletion
 from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
@@ -376,9 +384,16 @@ class SignInWithChatGPT:
                 and credentials.subject.strip()
                 and _valid_siwc_bearer(credentials.access_token, credentials.client_id)
             ):
-                identity = (credentials.issuer, credentials.client_id, credentials.subject)
+                identity = (
+                    credentials.issuer,
+                    credentials.client_id,
+                    credentials.subject,
+                )
                 binding = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-                return credentials.access_token, _SIWC_VERIFIED_PROVIDER_PREFIX + binding
+                return (
+                    credentials.access_token,
+                    _SIWC_VERIFIED_PROVIDER_PREFIX + binding,
+                )
             del credentials
             failure = ValueError(
                 "Provide verified Sign in with ChatGPT credentials with an active access token"
@@ -724,7 +739,12 @@ class NativeProvider:
             result["query_params"] = dict(query)
         if any(
             value is not None
-            for value in (self.headers, self.env_headers, self.organization, self.project)
+            for value in (
+                self.headers,
+                self.env_headers,
+                self.organization,
+                self.project,
+            )
         ):
             result["http_headers"] = dict(headers)
         return result
@@ -1021,6 +1041,7 @@ class Agent(Generic[ContextT, OutputT]):
     prepare_handoff_input: _PrepareHandoffInput[ContextT] | None
     tool_name_collision_policy: Literal["error", "warn"]
     environment: EnvironmentSource[ContextT] | None
+    on_lifecycle: _AgentLifecycleCallback[ContextT] | None = field(default=None, kw_only=True)
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -1129,6 +1150,7 @@ class Agent(Generic[ContextT, OutputT]):
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
+        on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -1167,6 +1189,7 @@ class Agent(Generic[ContextT, OutputT]):
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
+        on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -1203,6 +1226,7 @@ class Agent(Generic[ContextT, OutputT]):
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
+        on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -1239,6 +1263,7 @@ class Agent(Generic[ContextT, OutputT]):
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
+        on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
     ) -> None: ...
 
     def __init__(
@@ -1274,6 +1299,7 @@ class Agent(Generic[ContextT, OutputT]):
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
+        on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
     ) -> None:
         if isinstance(instructions, _OmittedInstructions):
             instructions = None
@@ -1288,6 +1314,8 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("name must be a string or None")
         if not isinstance(programmatic_tool_calling, bool):
             raise TypeError("programmatic_tool_calling must be a bool")
+        if on_lifecycle is not None and not callable(on_lifecycle):
+            raise TypeError("on_lifecycle must be callable or None")
         if prepare_handoff_input is not None and not callable(prepare_handoff_input):
             raise TypeError("prepare_handoff_input must be callable or None")
         if after_model is not None and not callable(after_model):
@@ -1342,7 +1370,9 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(self, "decisions", decisions)
         object.__setattr__(self, "provider", provider)
         object.__setattr__(
-            self, "model_settings", MappingProxyType(_copy_model_settings(model_settings))
+            self,
+            "model_settings",
+            MappingProxyType(_copy_model_settings(model_settings)),
         )
         object.__setattr__(self, "output_type", output_type)
         object.__setattr__(self, "programmatic_tool_calling", programmatic_tool_calling)
@@ -1353,6 +1383,7 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(self, "transform_context", transform_context)
         object.__setattr__(self, "after_model", after_model)
         object.__setattr__(self, "prepare_handoff_input", prepare_handoff_input)
+        object.__setattr__(self, "on_lifecycle", on_lifecycle)
         object.__setattr__(self, "before_compact", before_compact)
         object.__setattr__(self, "before_complete", before_complete)
         object.__setattr__(self, "tool_batch_completion", tool_batch_completion)
@@ -2658,7 +2689,10 @@ class Agent(Generic[ContextT, OutputT]):
                         submission = cast("Turn[OutputT]", session._last_turn)
                     else:
                         submission = await session.submit(
-                            input, tools=tools, before_step=before_step, **submit_options
+                            input,
+                            tools=tools,
+                            before_step=before_step,
+                            **submit_options,
                         )
                 if observe_failure and input is not None and input_storage_policy is None:
                     session._remember_run_error_input(submission, error_input)

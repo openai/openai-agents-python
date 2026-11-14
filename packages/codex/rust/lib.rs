@@ -2844,6 +2844,25 @@ impl NativeThread {
         Ok(true)
     }
 
+    #[pyo3(signature = (id, thread=None, instance=None, *, error=false))]
+    fn _reply_agent_lifecycle(
+        &self,
+        id: u64,
+        thread: Option<&str>,
+        instance: Option<&str>,
+        error: bool,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Agent lifecycle requires current tools"))?;
+        tools
+            .reply_agent_lifecycle(id, error, thread, instance)
+            .map_err(py_error)
+    }
+
     #[pyo3(signature = (id, data, thread=None, instance=None))]
     fn _reply_handoff_input(
         &self,

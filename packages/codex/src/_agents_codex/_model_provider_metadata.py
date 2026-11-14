@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 _LIMIT = 8 * 1024 * 1024
 _ITEMS = 4096
@@ -27,7 +27,7 @@ def _encoded(value: Any) -> str:
 
 
 def _retain_output(
-    response: Any, provider: str, model: str, values: list[tuple[int, dict]]
+    response: Any, provider: str, model: str, values: list[tuple[int, dict[str, Any]]]
 ) -> None:
     rows = captured = index = value = None
     snapshot = None
@@ -69,7 +69,7 @@ def _retain_output(
         del response, provider, model, values, rows, snapshot, captured, index, value
 
 
-def _capture_output(response: Any) -> list[dict] | None:
+def _capture_output(response: Any) -> list[dict[str, Any]] | None:
     captured = None
     try:
         captured = getattr(response, "_provider_output_snapshot", None)
@@ -77,7 +77,7 @@ def _capture_output(response: Any) -> list[dict] | None:
             return None
         if _encoded(response.output) != captured[0]:
             raise ValueError("Model provider output changed before settlement")
-        return json.loads(_encoded(captured[1]))
+        return cast(list[dict[str, Any]], json.loads(_encoded(captured[1])))
     finally:
         del response, captured
 
@@ -115,7 +115,9 @@ def _bind_input(request: Any, raw: Any) -> None:
         del request, raw, rows, row, metadata
 
 
-def _replay_input(request: Any, index: int, item: dict, provider: str, model: str) -> dict | None:
+def _replay_input(
+    request: Any, index: int, item: dict[str, Any], provider: str, model: str
+) -> dict[str, Any] | None:
     rows = row = metadata = None
     try:
         rows = getattr(request, "_provider_input_snapshot", ())
@@ -129,7 +131,7 @@ def _replay_input(request: Any, index: int, item: dict, provider: str, model: st
             or _encoded(row["item"]) != _encoded(item)
         ):
             return None
-        return json.loads(_encoded(metadata["value"]))
+        return cast(dict[str, Any], json.loads(_encoded(metadata["value"])))
     finally:
         del request, index, item, provider, model, rows, row, metadata
 
@@ -176,7 +178,7 @@ def _capture_frame(encoded: str, event: Any) -> str:
         del encoded, event, captured
 
 
-def _chat_reasoning(message: dict) -> dict:
+def _chat_reasoning(message: dict[str, Any]) -> dict[str, Any]:
     value = blocks = block = None
     try:
         value = {
@@ -199,12 +201,12 @@ def _chat_reasoning(message: dict) -> dict:
                 for key in ("thinking", "signature")
             ):
                 raise ValueError("Chat thinking text and signatures must contain text")
-        return json.loads(_encoded(value))
+        return cast(dict[str, Any], json.loads(_encoded(value)))
     finally:
         del message, value, blocks, block
 
 
-def _fold_chat_reasoning(target: dict, delta: dict) -> None:
+def _fold_chat_reasoning(target: dict[str, Any], delta: dict[str, Any]) -> None:
     block = current = fields = blocks = None
     try:
         fields = _chat_reasoning(delta)
@@ -243,7 +245,7 @@ def _fold_chat_reasoning(target: dict, delta: dict) -> None:
         del target, delta, block, current, fields, blocks
 
 
-def _chat_call_metadata(call: dict) -> dict:
+def _chat_call_metadata(call: dict[str, Any]) -> dict[str, Any]:
     fields = extra = google = signature = None
     try:
         fields = call.get("provider_specific_fields") or {}

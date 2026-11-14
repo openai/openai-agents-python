@@ -2163,6 +2163,7 @@ impl EngineState {
             !self.closed.load(Ordering::Acquire),
             "Codex engine is closed"
         );
+        let agent_lifecycle = options.agent_lifecycle.clone();
         let finish_slots = options.terminal_tool_slots.clone();
         let input_error_slots = options.input_error_tool_slots.clone();
         let (mut startup, instructions) = options
@@ -2181,6 +2182,11 @@ impl EngineState {
         startup
             .thread_extension_init
             .insert(crate::python_tools::InputErrorToolSlots(input_error_slots));
+        startup
+            .thread_extension_init
+            .insert(crate::python_tools::agent_lifecycle::Bindings(
+                agent_lifecycle,
+            ));
         self.apply_deferred_environment(&mut startup)?;
         crate::agent_profiles::bind_profile_providers(&mut startup).await?;
         if startup.environments.is_none()

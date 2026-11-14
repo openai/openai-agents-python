@@ -1270,8 +1270,8 @@
     },
     {
       "path": "sdk-agent-resource-grants.patch",
-      "sha256": "14846993064db29bdd8c66f7f06d8dbf8f84b1b296625fe77690912725d31a52"
+      "sha256": "2b80df5fc246d5b832bac775e43621d4400d0e7f68f466b0ead29a5307c3c6a1"
     }
   ],
-  "result_tree": "cc463833e051c456d4ee73b724a99a080e333fbd"
+  "result_tree": "07b09ff28c9aee2bde803e035298fe7803c511da"
 }
