@@ -804,7 +804,9 @@ class NativeProvider:
             native = importlib.import_module("agents._native")
             transport = vars(self).get("_transport")
             if transport is None:
-                transport = native.NativeProviderOwner()
+                transport = native.NativeProviderOwner(
+                    buffered_responses=self.response_mode == "buffered"
+                )
                 object.__setattr__(self, "_transport", transport)
             return native, transport, transport.acquire()
 

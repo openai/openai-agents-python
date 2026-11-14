@@ -45,10 +45,14 @@ struct ProviderResource {
     prepared_runtime: AsyncMutex<Option<runtime::PreparedRuntime>>,
 }
 impl ProviderResource {
-    fn new() -> Self {
+    fn new(buffered_responses: bool) -> Self {
         Self {
             state: Mutex::new(State::default()),
-            model_http_pool: codex_http_client::SdkModelHttpPool::default(),
+            model_http_pool: if buffered_responses {
+                codex_http_client::SdkModelHttpPool::with_http1_only()
+            } else {
+                codex_http_client::SdkModelHttpPool::default()
+            },
             private_model_http_pool: OnceLock::new(),
             prepared_runtime: AsyncMutex::new(None),
         }
@@ -325,9 +329,10 @@ pub(crate) struct NativeProviderOwner {
 #[pymethods]
 impl NativeProviderOwner {
     #[new]
-    fn new() -> Self {
+    #[pyo3(signature = (buffered_responses=false))]
+    fn new(buffered_responses: bool) -> Self {
         Self {
-            inner: Arc::new(ProviderResource::new()),
+            inner: Arc::new(ProviderResource::new(buffered_responses)),
         }
     }
     fn acquire(&self) -> PyResult<NativeProviderLease> {
@@ -435,7 +440,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn orphan_home_waits_for_windows_lock_before_retiring_lease() {
         Python::initialize();
-        let owner = NativeProviderOwner::new();
+        let owner = NativeProviderOwner::new(false);
         let lease = owner.acquire().expect("acquire");
         let home = lease.home().expect("private home");
         let path = std::path::Path::new(&home.name);
@@ -462,7 +467,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn expired_windows_orphan_cleanup_keeps_original_failure_and_real_home_for_retry() {
         Python::initialize();
-        let owner = NativeProviderOwner::new();
+        let owner = NativeProviderOwner::new(false);
         let lease = owner.acquire().expect("acquire");
         let home = lease.home().expect("private home");
         let path = std::path::Path::new(&home.name);
@@ -500,5 +505,48 @@ mod tests {
         assert!(home.inner.lock().unwrap().is_none());
         assert!(lease.inner.record.lock().unwrap().phase == Phase::Retired);
         assert!(owner.inner.state.lock().unwrap().leases.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod http_policy_tests {
+    use super::*;
+
+    #[test]
+    fn buffered_and_streaming_owners_keep_independent_immutable_pools() {
+        let buffered = NativeProviderOwner::new(true);
+        let streaming = NativeProviderOwner::new(false);
+        let buffered_lease = buffered.acquire().unwrap();
+        let streaming_lease = streaming.acquire().unwrap();
+        let buffered_pool = buffered_lease.inner.model_http_pool().unwrap();
+        let clone = buffered_pool.clone();
+        let streaming_pool = streaming_lease.inner.model_http_pool().unwrap();
+        assert!(clone.is_http1_only());
+        assert!(!streaming_pool.is_http1_only());
+        let factory = codex_http_client::HttpClientFactory::new(
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        );
+        buffered_pool.close();
+        assert!(
+            clone
+                .client(&factory, "ftp://example.invalid", false, Default::default())
+                .is_err()
+        );
+        assert!(
+            streaming_pool
+                .client(&factory, "ftp://example.invalid", false, Default::default())
+                .unwrap()
+                .is_none()
+        );
+        let replacement = NativeProviderOwner::new(true);
+        let replacement_lease = replacement.acquire().unwrap();
+        let replacement_pool = replacement_lease.inner.model_http_pool().unwrap();
+        assert!(replacement_pool.is_http1_only());
+        assert!(
+            replacement_pool
+                .client(&factory, "ftp://example.invalid", false, Default::default())
+                .unwrap()
+                .is_none()
+        );
     }
 }

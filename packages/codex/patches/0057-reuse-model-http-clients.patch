@@ -116,7 +116,7 @@ index 58d43f7af9e4a3a29dd410436b5f3295249bd4ce..cf7ca828dd3a0be54ee54e671f1dff28
      #[expect(
          clippy::await_holding_invalid_type,
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index b3ae84d194ebd9316f091926ca830d37b2e6f031..390fa6668116a6c7231ec1390284b9be38ba3a21 100644
+index b3ae84d194ebd9316f091926ca830d37b2e6f031..30dc83d8a73edcf60f34c49722319761dd475b03 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -272,6 +272,7 @@ pub struct ModelClient {
@@ -150,10 +150,11 @@ index b3ae84d194ebd9316f091926ca830d37b2e6f031..390fa6668116a6c7231ec1390284b9be
      pub(crate) fn with_executed_tool_calls(mut self, recorder: ExecutedToolCalls) -> Self {
          self.executed_tool_calls = Some(recorder);
          self
-@@ -1203,6 +1213,28 @@ impl ModelClient {
+@@ -1203,7 +1213,38 @@ impl ModelClient {
          } else {
              redirect_policy
          };
+-        let client = create_client_for_route(
 +        // Session startup attaches this only for an explicit API-key SDK Provider.
 +        // Resolve current auth/provider/routing before reaching this transport seam.
 +        if endpoint == "/responses"
@@ -176,9 +177,19 @@ index b3ae84d194ebd9316f091926ca830d37b2e6f031..390fa6668116a6c7231ec1390284b9be
 +        {
 +            return Ok(ReqwestTransport::from_http_client(client));
 +        }
-         let client = create_client_for_route(
++        let create_client = if self
++            .sdk_model_http_pool
++            .as_ref()
++            .is_some_and(|pool| pool.is_http1_only())
++        {
++            codex_login::default_client::create_http1_client_for_route
++        } else {
++            create_client_for_route
++        };
++        let client = create_client(
              &self.http_client_factory,
              &api_provider.url_for_path(endpoint),
+             ClientRouteClass::Api,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
 index 641e390371085f65819f721a102164d766d58e89..c232c57f8f7cf8db3b8f75e7656abde111ab848e 100644
 --- a/codex-rs/core/src/session/session.rs
@@ -222,10 +233,38 @@ index c5c2e40bba02d337cbb7602909d9492054d55ed4..49db9caa234dd96b532f2aa4af4a66e9
          self.request(Method::GET, url)
      }
 diff --git a/codex-rs/http-client/src/client_builder.rs b/codex-rs/http-client/src/client_builder.rs
-index d3b8054767a89c56ac5209ba9aa87508a7b73746..ada92f34dbcf0a318828645cc5583c092d562d07 100644
+index d3b8054767a89c56ac5209ba9aa87508a7b73746..2af5edb38bb300ad266bccdad36f447172cefbce 100644
 --- a/codex-rs/http-client/src/client_builder.rs
 +++ b/codex-rs/http-client/src/client_builder.rs
-@@ -239,6 +239,41 @@ impl HttpClientBuilder {
+@@ -35,6 +35,7 @@ use crate::with_chatgpt_cloudflare_cookie_store;
+ #[derive(Clone)]
+ pub struct HttpClientBuilder {
+     http2_prior_knowledge: bool,
++    http1_only: bool,
+     pub(crate) default_headers: Option<HeaderMap>,
+     follow_redirects: bool,
+     pub(crate) redirect_observed: Option<Arc<AtomicBool>>,
+@@ -99,11 +100,19 @@ impl HttpClientBuilder {
+             .into_client()
+     }
+ 
++    /// Restricts this client to HTTP/1, including its legacy fallback.
++    pub fn http1_only(mut self) -> Self {
++        self.http1_only = true;
++        self.http2_prior_knowledge = false;
++        self
++    }
++
+     /// Uses HTTP/2 for SDKs such as gRPC that require framed bidirectional bodies.
+     pub fn http2_prior_knowledge(mut self) -> Self {
+         // Native TLS may lack ALPN support; HTTPS HTTP/2 requires advertising h2.
+         self.tls_backend = TlsBackend::Rustls;
+         self.http2_prior_knowledge = true;
++        self.http1_only = false;
+         self
+     }
+     pub fn new() -> Self {
+@@ -239,6 +248,41 @@ impl HttpClientBuilder {
          self.build_with_proxy_routing(ProxyRouting::TransportDefault)
      }
  
@@ -267,6 +306,138 @@ index d3b8054767a89c56ac5209ba9aa87508a7b73746..ada92f34dbcf0a318828645cc5583c09
      /// Builds a client that connects directly without using a proxy.
      ///
      /// # Exceptional use only
+@@ -314,6 +358,7 @@ impl HttpClientBuilder {
+     ) -> TransportClient {
+         let request_logging = self.request_logging;
+         let default_headers = self.default_headers.take().unwrap_or_default();
++        let http1_only = self.http1_only;
+         let inner = match build_with_custom_ca(self.clone().reqwest_builder(proxy_routing)) {
+             Ok(inner) => inner,
+             Err(error) => {
+@@ -331,13 +376,24 @@ impl HttpClientBuilder {
+                             error = %fallback_error,
+                             "failed to build fallback HTTP client"
+                         );
+-                        reqwest::Client::new()
++                        Self::legacy_fallback_client(http1_only)
+                     })
+             }
+         };
+         TransportClient::new(inner, request_logging, default_headers)
+     }
+ 
++    fn legacy_fallback_client(http1_only: bool) -> reqwest::Client {
++        if http1_only {
++            reqwest::Client::builder()
++                .http1_only()
++                .build()
++                .expect("failed to build HTTP/1 fallback client")
++        } else {
++            reqwest::Client::new()
++        }
++    }
++
+     fn into_reqwest_parts(mut self) -> (reqwest::ClientBuilder, RequestLogging, HeaderMap) {
+         let request_logging = self.request_logging;
+         let default_headers = self.default_headers.take().unwrap_or_default();
+@@ -358,7 +414,9 @@ impl HttpClientBuilder {
+ 
+     fn base_reqwest_builder(self) -> reqwest::ClientBuilder {
+         let mut builder = reqwest::Client::builder();
+-        if self.http2_prior_knowledge {
++        if self.http1_only {
++            builder = builder.http1_only();
++        } else if self.http2_prior_knowledge {
+             builder = builder.http2_prior_knowledge();
+         }
+         if self.tls_backend == TlsBackend::Rustls || self.tls.client_identity.is_some() {
+@@ -398,6 +456,7 @@ impl Default for HttpClientBuilder {
+     fn default() -> Self {
+         Self {
+             http2_prior_knowledge: false,
++            http1_only: false,
+             default_headers: None,
+             follow_redirects: true,
+             redirect_observed: None,
+diff --git a/codex-rs/http-client/src/client_builder_tests.rs b/codex-rs/http-client/src/client_builder_tests.rs
+index 99c0662ea9de77350082aa53711ff64e88d65b08..a7af2bbd5b246da732f3f5efb21c5f8cc2987202 100644
+--- a/codex-rs/http-client/src/client_builder_tests.rs
++++ b/codex-rs/http-client/src/client_builder_tests.rs
+@@ -29,6 +29,8 @@ async fn custom_ca_fallback_preserves_builder_configuration() {
+     headers.insert("x-builder-test", HeaderValue::from_static("preserved"));
+     let client = HttpClientBuilder::new()
+         .default_headers(headers)
++        .http2_prior_knowledge()
++        .http1_only()
+         .build_with_custom_ca_fallback_using(ProxyRouting::Direct, |_| {
+             Err(BuildCustomCaTransportError::InvalidCaFile {
+                 source_env: "TEST_CA_ENV",
+@@ -54,3 +56,65 @@ async fn custom_ca_fallback_preserves_builder_configuration() {
+             .any(|line| line.eq_ignore_ascii_case("x-builder-test: preserved"))
+     );
+ }
++
++async fn fallback_client_alpn(client: reqwest::Client) -> Vec<Vec<u8>> {
++    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("TLS listener");
++    listener
++        .set_nonblocking(true)
++        .expect("nonblocking listener");
++    let address = listener.local_addr().expect("TLS address");
++    let server = std::thread::spawn(move || {
++        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++        let mut stream = loop {
++            match listener.accept() {
++                Ok((stream, _)) => break stream,
++                Err(error)
++                    if error.kind() == std::io::ErrorKind::WouldBlock
++                        && std::time::Instant::now() < deadline =>
++                {
++                    std::thread::sleep(std::time::Duration::from_millis(2));
++                }
++                Err(error) => panic!("TLS accept failed: {error}"),
++            }
++        };
++        stream.set_nonblocking(false).expect("blocking TLS stream");
++        stream
++            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
++            .expect("read deadline");
++        let mut acceptor = rustls::server::Acceptor::default();
++        loop {
++            assert!(acceptor.read_tls(&mut stream).expect("ClientHello read") > 0);
++            if let Some(accepted) = acceptor.accept().expect("ClientHello parse") {
++                return accepted
++                    .client_hello()
++                    .alpn()
++                    .map(|protocols| protocols.map(<[u8]>::to_vec).collect())
++                    .unwrap_or_default();
++            }
++        }
++    });
++    // Parsing the real ClientHello requires neither certificates nor trust overrides.
++    let result = client
++        .get(format!("https://{address}/fallback"))
++        .timeout(std::time::Duration::from_secs(5))
++        .send()
++        .await;
++    let offered = server.join().expect("joined ClientHello observer");
++    assert!(
++        result.is_err(),
++        "observer never completes the TLS handshake"
++    );
++    offered
++}
++
++#[tokio::test]
++async fn final_legacy_fallback_retains_http1_alpn_policy() {
++    let ordinary = fallback_client_alpn(HttpClientBuilder::legacy_fallback_client(false)).await;
++    let restricted = fallback_client_alpn(HttpClientBuilder::legacy_fallback_client(true)).await;
++    assert!(!restricted.iter().any(|protocol| protocol == b"h2"));
++    // The owning SDK graph enables native-tls-alpn; older graphs may omit ALPN entirely.
++    if !ordinary.is_empty() {
++        assert!(ordinary.iter().any(|protocol| protocol == b"h2"));
++        assert_eq!(restricted, vec![b"http/1.1".to_vec()]);
++    }
++}
 diff --git a/codex-rs/http-client/src/custom_ca.rs b/codex-rs/http-client/src/custom_ca.rs
 index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..13a21b37368a32cc975f6d32d579747a84164e47 100644
 --- a/codex-rs/http-client/src/custom_ca.rs
@@ -1004,10 +1175,10 @@ index 905aaf8f0dd11598b9ff4e31e03bb3e42c8bec89..28104827934e95dd644ae8f1072dfec0
      client_build: Arc<tokio::sync::Mutex<()>>,
 diff --git a/codex-rs/http-client/src/sdk_model_http_pool.rs b/codex-rs/http-client/src/sdk_model_http_pool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b5ca928957a5e1f666b3cdd4e67fb7465ae7fb4a
+index 0000000000000000000000000000000000000000..c07be1888c03eb2737db9d3f6bdf1e3fdeaaad51
 --- /dev/null
 +++ b/codex-rs/http-client/src/sdk_model_http_pool.rs
-@@ -0,0 +1,551 @@
+@@ -0,0 +1,568 @@
 +//! SDK Provider-owned connection reuse, deliberately restricted to legacy unmanaged HTTP.
 +//! Ordinary system trust is captured for this owner's lifetime. Explicit SSL_CERT_FILE
 +//! trust is revalidated on every checkout; all other transports keep their original builder.
@@ -1057,6 +1228,7 @@ index 0000000000000000000000000000000000000000..b5ca928957a5e1f666b3cdd4e67fb746
 +pub struct SdkModelHttpPool {
 +    state: Arc<Mutex<State>>,
 +    preconfigured_tls: Option<Arc<rustls::ClientConfig>>,
++    http1_only: bool,
 +}
 +impl std::fmt::Debug for SdkModelHttpPool {
 +    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1064,12 +1236,25 @@ index 0000000000000000000000000000000000000000..b5ca928957a5e1f666b3cdd4e67fb746
 +    }
 +}
 +impl SdkModelHttpPool {
++    /// Creates a separate Provider-owned pool restricted to HTTP/1.
++    pub fn with_http1_only() -> Self {
++        Self {
++            http1_only: true,
++            ..Self::default()
++        }
++    }
++
++    pub fn is_http1_only(&self) -> bool {
++        self.http1_only
++    }
++
 +    /// Uses an immutable TLS policy in a separate Provider-owned pool.
 +    /// Custom-CA profiles retain the caller's original construction path.
 +    pub fn with_preconfigured_tls(config: rustls::ClientConfig) -> Self {
 +        Self {
 +            state: Arc::default(),
 +            preconfigured_tls: Some(Arc::new(config)),
++            http1_only: false,
 +        }
 +    }
 +
@@ -1169,6 +1354,9 @@ index 0000000000000000000000000000000000000000..b5ca928957a5e1f666b3cdd4e67fb746
 +        let owner = Arc::downgrade(&self.state);
 +        self.client_with_key(key, headers, |token| {
 +            let mut builder = HttpClientBuilder::new().with_chatgpt_cloudflare_cookie_store();
++            if self.http1_only {
++                builder = builder.http1_only();
++            }
 +            if reject_redirects {
 +                builder = builder.without_redirects();
 +            }
@@ -1559,6 +1747,31 @@ index 0000000000000000000000000000000000000000..b5ca928957a5e1f666b3cdd4e67fb746
 +        assert!(owner.upgrade().is_none());
 +    }
 +}
+diff --git a/codex-rs/login/src/auth/default_client.rs b/codex-rs/login/src/auth/default_client.rs
+index 28a952ea2d7affef05648affdc74f275efcf9680..c61225a91df0ce84fadaf3bf94c1f6f56e2c862f 100644
+--- a/codex-rs/login/src/auth/default_client.rs
++++ b/codex-rs/login/src/auth/default_client.rs
+@@ -268,6 +268,20 @@ pub fn create_client_for_route(
+     create_client_for_route_with_builder(http_client_factory, request_url, route_class, builder)
+ }
+ 
++/// Builds the same route-aware client with an immutable HTTP/1 preference.
++pub fn create_http1_client_for_route(
++    http_client_factory: &HttpClientFactory,
++    request_url: &str,
++    route_class: ClientRouteClass,
++    redirect_policy: ClientRedirectPolicy,
++) -> Result<HttpClient, BuildRouteAwareHttpClientError> {
++    let mut builder = default_http_client_builder().http1_only();
++    if redirect_policy == ClientRedirectPolicy::Reject {
++        builder = builder.without_redirects();
++    }
++    create_client_for_route_with_builder(http_client_factory, request_url, route_class, builder)
++}
++
+ fn create_client_for_route_with_builder(
+     http_client_factory: &HttpClientFactory,
+     request_url: &str,
 diff --git a/codex-rs/websocket-client/src/dialer_tests.rs b/codex-rs/websocket-client/src/dialer_tests.rs
 index e965915ee596af8333941b74d09fdbcf134f39f5..5737726353a4ddbe3f0ed63d01748da3f8b70840 100644
 --- a/codex-rs/websocket-client/src/dialer_tests.rs

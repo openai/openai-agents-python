@@ -8,7 +8,7 @@ import json
 import pickle
 from contextlib import asynccontextmanager
 from copy import copy, deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -542,3 +542,47 @@ async def test_cancelled_open_consumes_late_acquisition_error_without_background
     finally:
         release.set()
         loop.set_exception_handler(previous)
+
+
+@pytest.mark.asyncio
+async def test_interleaved_buffered_streaming_copies_and_replacement_keep_owners_separate():
+    async with peer() as remote:
+        buffered = NativeProvider(
+            base_url=remote.url,
+            api_key="local",
+            supports_websockets=False,
+            response_mode="buffered",
+        )
+        streaming = replace(buffered, response_mode="streaming")
+        providers = [buffered, streaming]
+        try:
+            async with Agent(
+                instructions="answer", model="gpt-5.1-codex", provider=buffered
+            ).session() as session:
+                handle = await session.submit("warm original before copying")
+                assert (await handle.get_result()).final_output == TEXT
+            duplicate = copy(buffered)
+            providers.append(duplicate)
+            for provider in (streaming, duplicate, buffered, streaming):
+                agent = Agent(instructions="answer", model="gpt-5.1-codex", provider=provider)
+                async with agent.session() as session:
+                    handle = await session.submit("fresh independent conversation")
+                    assert (await handle.get_result()).final_output == TEXT
+            await duplicate.aclose()
+            async with Agent(
+                instructions="answer", model="gpt-5.1-codex", provider=buffered
+            ).session() as session:
+                handle = await session.submit("original survives copied owner close")
+                assert (await handle.get_result()).final_output == TEXT
+            assert [entry["body"]["stream"] for entry in remote.requests] == [
+                False,
+                True,
+                False,
+                False,
+                True,
+                False,
+            ]
+            assert len({id(vars(provider)["_transport"]) for provider in providers}) == 3
+        finally:
+            for provider in providers:
+                await provider.aclose()
