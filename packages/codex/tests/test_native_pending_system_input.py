@@ -115,9 +115,17 @@ async def test_new_caller_system_import_uses_native_retention_without_hidden_aut
     assert "CURRENT_APP_SYSTEM_SCOPE" in json.dumps(responses.requests[0])
 
 
-async def test_old_audit_only_system_original_does_not_gain_projection_on_restore(responses):
+async def test_old_audit_only_system_original_does_not_gain_projection_on_restore(
+    responses, tmp_path
+):
     fixture = Path(__file__).with_name("fixtures") / "native-old-system-audit-state.json"
-    state = SessionState.from_json(fixture.read_text())
+    serialized = fixture.read_text()
+    fixture_cwd = json.loads(serialized)["root_metadata"]["cwd"]
+    # Keep the historical checkpoint intact apart from its native host paths.
+    assert serialized.count(json.dumps(fixture_cwd)) == 8
+    state = SessionState.from_json(
+        serialized.replace(json.dumps(fixture_cwd), json.dumps(str(tmp_path)))
+    )
     marker = "OLD_AUDIT_ONLY_SYSTEM_STAYS_INERT"
     responses.respond(assistant_output("restored"))
     async with (

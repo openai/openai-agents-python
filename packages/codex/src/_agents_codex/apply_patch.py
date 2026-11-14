@@ -208,8 +208,10 @@ class _ScopedPatchEditor:
         self.patch_format = patch_format
 
     async def apply(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
-        from _agents_shared.workspace_editor import WorkspaceEditor
-        from agents.classic.editor import ApplyPatchOperation as WorkspaceOperation
+        from _agents_shared.workspace_editor import (
+            WorkspaceEditor,
+            _WorkspaceOperation as WorkspaceOperation,
+        )
 
         from .sandbox import _capability_workspace
 

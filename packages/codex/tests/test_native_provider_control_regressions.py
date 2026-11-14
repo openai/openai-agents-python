@@ -229,8 +229,7 @@ async def test_anyllm_anthropic_native_output_cap(cache_override):
 
 
 @pytest.mark.parametrize("configured", [False, True])
-async def test_litellm_reasoning_rejected_before_native_tool_effect(configured, monkeypatch):
-    litellm = pytest.importorskip("litellm")
+async def test_chat_unsupported_thinking_rejected_before_native_tool_effect(configured):
     seen, effects = [], []
 
     @function_tool
@@ -245,9 +244,7 @@ async def test_litellm_reasoning_rejected_before_native_tool_effect(configured, 
         if first:
             message.update(
                 reasoning_content="synthetic-private-reasoning",
-                thinking_blocks=[
-                    {"type": "thinking", "thinking": "private", "signature": "opaque"}
-                ],
+                thinking_blocks=[{"type": "thinking", "thinking": "private", "signature": 42}],
                 tool_calls=[
                     {
                         "id": "call_record",
@@ -276,13 +273,12 @@ async def test_litellm_reasoning_rejected_before_native_tool_effect(configured, 
     app = web.Application()
     app.router.add_route("*", "/{tail:.*}", respond)
     async with timeout(25), TestServer(app) as server:
-        monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
-        monkeypatch.setattr(litellm, "telemetry", False)
-        monkeypatch.setattr(litellm, "api_base", str(server.make_url("/v1")))
-        monkeypatch.setattr(litellm, "api_key", "synthetic")
-        async with NativeProvider(
-            model_backend=LitellmModel(litellm, "openai/gpt-4.1")
-        ) as provider:
+        async with (
+            AsyncOpenAI(
+                api_key="synthetic", base_url=str(server.make_url("/v1")), max_retries=0
+            ) as client,
+            NativeProvider(model_backend=ChatCompletionsModel(client)) as provider,
+        ):
             agent = Agent(
                 instructions="Use record.",
                 model="gpt-4.1",
@@ -298,8 +294,9 @@ async def test_litellm_reasoning_rejected_before_native_tool_effect(configured, 
                     else {}
                 ),
             )
-            with pytest.raises(ValueError, match="thinking|reasoning"):
+            with pytest.raises(ValueError, match="thinking|reasoning") as caught:
                 await agent.run("go")
+            assert "private" not in str(caught.value)
     assert not effects
     assert len(seen) == (0 if configured else 1)
 

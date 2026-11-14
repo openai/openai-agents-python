@@ -7211,6 +7211,7 @@ pub(crate) mod tests {
                     thread_id: "root",
                     model: "actual-model",
                     model_omitted: false,
+                    native_reasoning_context: false,
                     client_metadata: &mut metadata,
                 },
             );

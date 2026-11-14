@@ -12,6 +12,7 @@ from agents import (
     CapabilityError,
     Environment,
     PendingRequests,
+    SessionState,
     TurnStoppedError,
     function_tool,
 )
@@ -152,9 +153,9 @@ async def test_configured_capture_leaves_child_readiness_cancellable(monkeypatch
                 )
 
 
-async def test_configured_capture_rejects_handoff_profiles_before_retiring_child():
+async def test_configured_capture_restores_handoff_profiles_without_repeating_effects():
     async with timeout(35), fixture() as values:
-        parent, _child, context, _root_model, _child_model, effects, _guards, sibling = values
+        parent, _child, context, root_model, child_model, effects, _guards, sibling = values
         target = Agent(name="Unused handoff target", instructions="Never invoked.")
         parent = replace(parent, handoffs=[target])
         async with parent.session(context=context) as source:
@@ -164,14 +165,60 @@ async def test_configured_capture_rejects_handoff_profiles_before_retiring_child
             [request] = boundary.requests
             assert isinstance(request, ApprovalRequested)
             await sibling.wait()
-            [child] = source._configured_children
-            with pytest.raises(CapabilityError, match="handoff profiles"):
-                await source.suspend()
-            assert source._sealed_checkpoint is None
-            assert child.session._sealed_checkpoint is None
-            await source.respond(request.reply(True))
-            assert (await turn.get_result()).final_output == "parent complete"
+            saved = await source.suspend()
+        assert effects == ["accepted-sibling"]
+        assert len(root_model.requests) == len(child_model.requests) == 1
+        saved = SessionState.from_json(saved.to_json())
+        async with parent.session(context=context, state=saved) as restored:
+            assert restored.restored_turn is not None
+            boundary = await restored.restored_turn.wait_for_request_or_result()
+            assert isinstance(boundary, PendingRequests)
+            [request] = boundary.requests
+            assert isinstance(request, ApprovalRequested)
+            assert effects == ["accepted-sibling"]
+            assert len(root_model.requests) == len(child_model.requests) == 1
+            await restored.respond(request.reply(True))
+            assert (await restored.restored_turn.get_result()).final_output == "parent complete"
         assert effects == ["accepted-sibling", "child-effect"]
+        assert len(root_model.requests) == len(child_model.requests) == 2
+
+
+async def test_configured_capture_rejects_graph_executor_before_retiring_child(
+    tmp_path, monkeypatch, native_executor_binary
+):
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.test_native_child_agents import trust
+
+    async with timeout(45), fixture() as values:
+        parent, _child, context, root_model, child_model, effects, _guards, sibling = values
+        target = Agent(name="Unused handoff target", instructions="Never invoked.")
+        parent = replace(parent, handoffs=[target])
+        async with ExecutorPeer(tmp_path / "executor").serve() as executor:
+            trust(executor, tmp_path, monkeypatch)
+            environment = Environment(
+                url=executor.url,
+                headers={"Authorization": "Bearer " + executor.token},
+                cwd=str(executor.root),
+                tools=["exec_command"],
+                write_policy="legacy",
+            )
+            async with parent.session(context=context, environment=environment) as source:
+                turn = await source.submit("Keep the live approval.")
+                boundary = await turn.wait_for_request_or_result()
+                assert isinstance(boundary, PendingRequests)
+                [request] = boundary.requests
+                assert isinstance(request, ApprovalRequested)
+                await sibling.wait()
+                [child] = source._configured_children
+                with pytest.raises(CapabilityError, match="parent graph with an executor"):
+                    await source.suspend()
+                assert source._sealed_checkpoint is None
+                assert child.session._sealed_checkpoint is None
+                await source.respond(request.reply(True))
+                assert (await turn.get_result()).final_output == "parent complete"
+            assert effects == ["accepted-sibling", "child-effect"]
+            assert len(root_model.requests) == len(child_model.requests) == 2
+            assert not executor.synthetic_process_starts
 
 
 async def test_configured_rollback_keeps_issuing_executor_tool_ceiling(

@@ -535,10 +535,14 @@ impl ModelRequestContributor for Contributor {
         {
             return None;
         }
-        Some(Box::new(Producer(tools, input.model.to_owned())))
+        Some(Box::new(Producer(
+            tools,
+            input.model.to_owned(),
+            input.native_reasoning_context,
+        )))
     }
 }
-struct Producer(Arc<PythonTools>, String);
+struct Producer(Arc<PythonTools>, String, bool);
 impl ModelResponseInterceptor for Producer {
     fn produces_response(&self) -> bool {
         true
@@ -553,6 +557,7 @@ impl ModelResponseInterceptor for Producer {
     ) -> Option<BoxFuture<'a, std::result::Result<ModelResponseStream, String>>> {
         let tools = self.0.clone();
         let model = self.1.clone();
+        let native_reasoning_context = self.2;
         Some(Box::pin(async move {
             let admission = admission.ok_or(FAILURE)?;
             let receipt = admission
@@ -591,7 +596,7 @@ impl ModelResponseInterceptor for Producer {
             let cancellation = attempt.as_ref().map(|attempt| attempt.cancellation());
             let id = tools.family.next_invocation.fetch_add(1, Ordering::Relaxed);
             let (reply, receive) = oneshot::channel();
-            let mut event = json!({"id":receipt.turn_id,"msg":{"type":"_sdk_model_produce","turn_id":receipt.turn_id,"thread":admission.thread_id(),"instance":tools.instance,"request_id":id,"generation":ticket.generation.id,"model":model,"data":request}});
+            let mut event = json!({"id":receipt.turn_id,"msg":{"type":"_sdk_model_produce","turn_id":receipt.turn_id,"thread":admission.thread_id(),"instance":tools.instance,"request_id":id,"generation":ticket.generation.id,"model":model,"native_reasoning_context":native_reasoning_context,"data":request}});
             {
                 let message = &mut event["msg"];
                 let retained = admission.provider_input_metadata();

@@ -14716,6 +14716,11 @@ class Session(Generic[ContextT, OutputT]):
                 disable_provider_retries=message.get("disable_provider_retries") is True,
                 _report_usage=report_usage,
             )
+            object.__setattr__(
+                request,
+                "_native_reasoning_context",
+                message.get("native_reasoning_context") is True,
+            )
             from ._model_provider_metadata import _bind_input
 
             _bind_input(request, message.get("provider_metadata"))

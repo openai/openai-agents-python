@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 
 import pytest
@@ -8,6 +7,7 @@ from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 
 from _agents_codex import _hosted_responses_websocket as hosted
+from tests._asyncio import timeout
 
 
 @pytest.mark.parametrize("terminal_only", [False, True])
@@ -63,7 +63,7 @@ async def test_terminal_before_rejection_admits_queued_calls(store, with_users, 
         {"type": "message", "role": "user", "id": f"user_{index}", "content": f"followup_{index}"}
         for index in (1, 2)
     ]
-    async with asyncio.timeout(5), serve(peer, "127.0.0.1", 0) as server:
+    async with timeout(5), serve(peer, "127.0.0.1", 0) as server:
         async with connect(
             f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}", proxy=None
         ) as socket:
@@ -190,7 +190,7 @@ async def test_native_terminal_before_rejection_executes_each_callback_once(stor
         effects.append(n)
         return f"result_{n}"
 
-    async with asyncio.timeout(15), serve(peer, "127.0.0.1", 0) as server:
+    async with timeout(15), serve(peer, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         async with AsyncOpenAI(
             api_key="synthetic", base_url=f"http://127.0.0.1:{port}/v1"

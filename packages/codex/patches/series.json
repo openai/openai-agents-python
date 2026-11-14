@@ -1266,7 +1266,7 @@
     },
     {
       "path": "sdk-caller-system-input-and-reasoning.patch",
-      "sha256": "cf1878b34256d82521c3815d3f1ea6fac45383829adf82685d49183c82a79166"
+      "sha256": "aba0134b00afbb8e580ad16d035a04ca34347cbcce3d26e318cf97c0699ecb1f"
     },
     {
       "path": "sdk-preserve-guardian-reasoning-default.patch",
@@ -1285,5 +1285,5 @@
       "sha256": "8fd6f5d9b02da7ff5a5ec9d82f0926c7a47bc250242500b6d6c84f8c46fbe7bb"
     }
   ],
-  "result_tree": "3bbc991a6b0de1f64e7c4477aca7e16828afaa18"
+  "result_tree": "3dbd0885277e810ae12f3bcef22e4284a381ff59"
 }

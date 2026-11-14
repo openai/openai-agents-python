@@ -37,6 +37,9 @@ class V4AFormat:
         return apply_diff(input, diff, mode=mode)
 
 
+_WorkspaceOperation = ApplyPatchOperation
+
+
 class WorkspaceEditor:
     def __init__(
         self,

@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, TypeAlias, cast
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -131,6 +131,8 @@ class ModelRequest:
     _report_usage: Callable[[dict[str, int]], bool] | None = field(
         default=None, repr=False, compare=False, kw_only=True
     )
+
+    _native_reasoning_context: ClassVar[bool] = False
 
     def report_usage(self, usage: Mapping[str, int]) -> bool:
         """Report measured cumulative tokens for this exact native attempt.
@@ -1049,7 +1051,10 @@ class ChatCompletionsModel:
                     },
                 }
             reasoning = request.body.get("reasoning") or {}
-            if reasoning.keys() - {"effort", "summary"}:
+            allowed_reasoning = {"effort", "summary"}
+            if request._native_reasoning_context and reasoning.get("context") == "all_turns":
+                allowed_reasoning.add("context")
+            if reasoning.keys() - allowed_reasoning:
                 raise ValueError("Extended reasoning options require a Responses model")
             if reasoning.get("effort") is not None:
                 options["reasoning_effort"] = reasoning["effort"]

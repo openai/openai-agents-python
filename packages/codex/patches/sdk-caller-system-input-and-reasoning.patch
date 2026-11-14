@@ -1,5 +1,5 @@
 diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
-index ae390525..479854cc 100644
+index ae3905259926b71b1c27a97c122460aec0e8bc02..479854cc0597d5e2905c33d40e2a5082ab9a8168 100644
 --- a/codex-rs/codex-api/src/common.rs
 +++ b/codex-rs/codex-api/src/common.rs
 @@ -172,6 +172,8 @@ pub struct Reasoning {
@@ -9,10 +9,10 @@ index ae390525..479854cc 100644
 +    #[serde(flatten)]
 +    pub options: std::collections::BTreeMap<String, serde_json::Value>,
  }
- 
+
  fn serialize_reasoning_effort<S>(
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index f4478c40..af74cbdd 100644
+index 41de57fad64a6b8c4eb8f8627296ee1e6b182dc2..2b3adf04e974d3771b1276cd05eb390bc83ad226 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -1139,6 +1139,7 @@ impl ModelClient {
@@ -22,7 +22,7 @@ index f4478c40..af74cbdd 100644
 +                    options: Default::default(),
                  }),
          };
- 
+
 @@ -1250,6 +1251,7 @@ impl ModelClient {
              context: model_info
                  .use_responses_lite
@@ -30,7 +30,7 @@ index f4478c40..af74cbdd 100644
 +            options: Default::default(),
          }
      }
- 
+
 @@ -1289,6 +1291,17 @@ impl ModelClient {
          controls
              .validate_profile(model_info)
@@ -81,8 +81,30 @@ index f4478c40..af74cbdd 100644
              .then_some(reasoning),
              store: controls.store.flatten().unwrap_or(false),
              stream: true,
+@@ -2584,6 +2603,10 @@ impl ModelClientSession {
+                 &self.client.state.thread_id.to_string(),
+                 &model_info.slug,
+                 request.model.is_none(),
++                request
++                    .reasoning
++                    .as_ref()
++                    .is_some_and(|reasoning| reasoning.context.is_some()),
+                 codex_extension_api::ModelRequestKind::Generation,
+                 &mut request.client_metadata,
+                 prompt.tool_admission.clone(),
+@@ -2924,6 +2947,10 @@ impl ModelClientSession {
+                 &self.client.state.thread_id.to_string(),
+                 &model_info.slug,
+                 request.model.is_none(),
++                request
++                    .reasoning
++                    .as_ref()
++                    .is_some_and(|reasoning| reasoning.context.is_some()),
+                 if warmup {
+                     codex_extension_api::ModelRequestKind::Warmup
+                 } else {
 diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
-index c504720e..d31b9021 100644
+index c504720e289c9a1e31dc5440624bd98500f52ce3..d31b90211c0a4401f766d2734fea4d883c851922 100644
 --- a/codex-rs/core/src/context_manager/history.rs
 +++ b/codex-rs/core/src/context_manager/history.rs
 @@ -1197,7 +1197,10 @@ pub(crate) fn is_api_message(
@@ -129,8 +151,91 @@ index c504720e..d31b9021 100644
 +        assert!(is_sdk_original_item(&forged, Some(&caller)));
 +    }
 +}
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index 4e3f44593d5b3b27c7e100588b2393aef453ab2f..e3d9e162ba6484998aa1af3a4669dda02d6419a1 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -61,11 +61,13 @@ impl HttpTransport for SamplingStopTransport {
+     }
+ }
+
++#[allow(clippy::too_many_arguments)]
+ pub(crate) fn prepare(
+     contributors: &[Arc<dyn ModelRequestContributor>],
+     thread_id: &str,
+     model: &str,
+     model_omitted: bool,
++    native_reasoning_context: bool,
+     kind: ModelRequestKind,
+     metadata: &mut Option<HashMap<String, String>>,
+     tool_admission: Option<Arc<dyn ModelToolAdmission>>,
+@@ -80,6 +82,7 @@ pub(crate) fn prepare(
+                 client_metadata: &mut additions,
+                 model,
+                 model_omitted,
++                native_reasoning_context,
+             });
+             if let Some(additions) = additions {
+                 for (key, value) in crate::responses_metadata::filter_extra_metadata(additions) {
+diff --git a/codex-rs/core/src/model_request_tests.rs b/codex-rs/core/src/model_request_tests.rs
+index e55dd3ca91ddcd4c1fb526ad6d4b5cb4da5b6b51..4f74e78d08f3bf069f54e1b11c0753fa11b2c6e8 100644
+--- a/codex-rs/core/src/model_request_tests.rs
++++ b/codex-rs/core/src/model_request_tests.rs
+@@ -102,6 +102,7 @@ fn contributor_metadata_preserves_core_fields_and_existing_values() {
+             "thread",
+             "model",
+             false,
++            false,
+             ModelRequestKind::Generation,
+             &mut metadata,
+             None
+@@ -251,6 +252,7 @@ async fn prepared_interceptors_keep_the_original_admission_across_overlapping_re
+             admission.thread_id(),
+             "model",
+             false,
++            false,
+             ModelRequestKind::Generation,
+             &mut None,
+             Some(admission.clone()),
+@@ -345,3 +347,36 @@ async fn native_admission_retains_actual_step_and_compaction_source_never_admits
+     assert!(normal.admits(&unexpected));
+     assert!(normal.step_store().is_none());
+ }
++
++#[test]
++fn contributor_receives_typed_reasoning_context_provenance() {
++    #[derive(Debug)]
++    struct Capture(std::sync::Mutex<Vec<bool>>);
++    impl ModelRequestContributor for Capture {
++        fn request(
++            &self,
++            input: ModelRequestInput<'_>,
++        ) -> Option<Box<dyn ModelResponseInterceptor>> {
++            self.0.lock().unwrap().push(input.native_reasoning_context);
++            None
++        }
++    }
++    let captured = Arc::new(Capture(std::sync::Mutex::new(Vec::new())));
++    let contributors: Vec<Arc<dyn ModelRequestContributor>> = vec![captured.clone()];
++    for implicit in [false, true] {
++        assert!(
++            prepare(
++                &contributors,
++                "thread",
++                "model",
++                false,
++                implicit,
++                ModelRequestKind::Generation,
++                &mut None,
++                None,
++            )
++            .is_empty()
++        );
++    }
++    assert_eq!(*captured.0.lock().unwrap(), vec![false, true]);
++}
 diff --git a/codex-rs/core/src/request_observation_tests.rs b/codex-rs/core/src/request_observation_tests.rs
-index 9665e641..6b47f3b2 100644
+index 9665e6413c739db672f0da2877561e5e2497d14f..6b47f3b2a3e362c4322367c97857cf9842cfa07a 100644
 --- a/codex-rs/core/src/request_observation_tests.rs
 +++ b/codex-rs/core/src/request_observation_tests.rs
 @@ -95,6 +95,7 @@ fn effort_bridge_preserves_wire_scalar_kind_and_exact_integer() {
@@ -150,11 +255,11 @@ index 9665e641..6b47f3b2 100644
      assert_eq!(
          resolved_reasoning(Some(&reasoning)),
 diff --git a/codex-rs/core/src/sdk_history_retention.rs b/codex-rs/core/src/sdk_history_retention.rs
-index dbcfb900..313e94b5 100644
+index dbcfb90037fb1e63ed021403e47b227bd47163a7..313e94b5e7885517b33f9973fb99cf26e1d95254 100644
 --- a/codex-rs/core/src/sdk_history_retention.rs
 +++ b/codex-rs/core/src/sdk_history_retention.rs
 @@ -78,11 +78,10 @@ impl SdkHistoryRetention {
- 
+
  fn expires(envelope: &ResponseItemEnvelope) -> bool {
      match &envelope.item {
 -        ResponseItem::Message { role, .. } if role == "developer" => envelope
@@ -169,7 +274,7 @@ index dbcfb900..313e94b5 100644
 @@ -169,6 +168,17 @@ mod tests {
          assert!(!policy.retain(&caller, &61.into()).unwrap());
      }
- 
+
 +    #[test]
 +    fn caller_system_history_expires_while_native_system_policy_remains_protected() {
 +        let policy = SdkHistoryRetention::new(Some(10));
@@ -185,7 +290,7 @@ index dbcfb900..313e94b5 100644
      fn older_client_developer_history_requires_an_age_without_renewal() {
          let policy = SdkHistoryRetention::new(Some(10));
 diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
-index 014db38d..d7fba255 100644
+index 014db38da5baf58e3f1e33302c5aa27ffb27cf69..d7fba2556570747c4ba475bbc69af2b469f223e5 100644
 --- a/codex-rs/core/src/session/inject.rs
 +++ b/codex-rs/core/src/session/inject.rs
 @@ -552,7 +552,7 @@ impl Session {
@@ -198,7 +303,7 @@ index 014db38d..d7fba255 100644
                          }
                          if let Some(policy) = self
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index ecc42764..e06732da 100644
+index ecc4276437b932b2eacfd836321650cb44d06961..e06732da3fc530c9932c6282abaa28771be1083a 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -784,8 +784,39 @@ pub(crate) async fn run_turn(
@@ -243,8 +348,21 @@ index ecc42764..e06732da 100644
              sess.ensure_rollout_durable().await?;
              staged.acknowledge();
          }
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 1e73a136e238fb9f0fee7536936ba9207f09d1fa..a0f934548d099e227dd9dac077a6c68d6169d1a3 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -143,6 +143,8 @@ pub struct ModelRequestInput<'a> {
+     pub model: &'a str,
+     /// True only when the final typed provider request omits its model field.
+     pub model_omitted: bool,
++    /// True when Core adds reasoning context separately from application reasoning options.
++    pub native_reasoning_context: bool,
+ }
+
+ /// Native-owned marker for one discarded recovery preparation, not a sampling admission.
 diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
-index e0d95711..1701180f 100644
+index e0d957117f37cdb767045854492438c4b32bc012..1701180fb7a1fd8c01e6a4fc07798e3bf68cb9f2 100644
 --- a/codex-rs/history/src/sdk_originals.rs
 +++ b/codex-rs/history/src/sdk_originals.rs
 @@ -101,7 +101,6 @@ pub fn input_projection(value: &str) -> Result<Option<ResponseItem>, String> {
@@ -256,7 +374,7 @@ index e0d95711..1701180f 100644
      })
  }
 diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
-index a092accc..36b05381 100644
+index a092acccebcb00bf185b3a79a53bc7ec03f52483..36b053819ba7dc0349103dd72703f67240898e1e 100644
 --- a/codex-rs/protocol/src/model_request_controls.rs
 +++ b/codex-rs/protocol/src/model_request_controls.rs
 @@ -261,6 +261,15 @@ pub struct ModelRequestControls {
@@ -272,7 +390,7 @@ index a092accc..36b05381 100644
 +    #[ts(optional = nullable, type = "unknown")]
 +    #[schemars(with = "Option<BTreeMap<String, serde_json::Value>>")]
 +    pub reasoning_options: Option<Option<BTreeMap<String, serde_json::Value>>>,
- 
+
      #[serde(
          default,
 @@ -406,6 +415,7 @@ impl ModelRequestControls {
@@ -290,7 +408,7 @@ index a092accc..36b05381 100644
 +        if patch.reasoning_options.is_some() {
 +            self.reasoning_options = patch.reasoning_options.clone();
 +        }
- 
+
          if patch.max_output_tokens.is_some() {
              self.max_output_tokens = patch.max_output_tokens;
 @@ -565,6 +578,25 @@ impl ModelRequestControls {
