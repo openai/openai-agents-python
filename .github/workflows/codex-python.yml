@@ -17,14 +17,6 @@ on:
         type: string
         required: false
         default: "{}"
-      native_dependency_run:
-        type: string
-        required: false
-        default: ''
-      native_dependencies:
-        type: string
-        required: false
-        default: "{}"
     outputs:
       artifact_id:
         value: ${{ jobs.build.outputs.artifact_id }}
@@ -63,8 +55,7 @@ jobs:
            ((github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness') ||
             (github.event_name == 'pull_request' &&
              github.event.pull_request.head.repo.full_name == github.repository &&
-             (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness' &&
-             inputs.native_dependency_run == '')) &&
+             (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness')) &&
            '"macos-26-xlarge"' || '"macos-15-xlarge"') ||
         toJSON(inputs.runner)
       ) }}
@@ -182,13 +173,12 @@ jobs:
             done
           } >> "$GITHUB_ENV"
       - name: Configure cold harness PR builds
-        # The dependency cache uses the standard build settings.
         if: >-
           github.repository == 'openai/openai-agents-python' &&
           github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository &&
           (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness' &&
-          inputs.native_source_run == '' && inputs.native_dependency_run == ''
+          inputs.native_source_run == ''
         env:
           COLD_PR_RUST_OPT_LEVEL: ${{ runner.os == 'macOS' && 's' || '1' }}
         run: |
@@ -224,8 +214,6 @@ jobs:
         name: Install native build tools
         if: inputs.native_source_run == ''
         uses: ./.github/actions/setup-native
-        env:
-          OPENAI_AGENTS_RESTORE_NATIVE_DEPENDENCIES: ${{ inputs.native_dependency_run != '' && '1' || '0' }}
       - name: Report the Linux ARM64 build toolchain
         if: inputs.runner == 'ubuntu-24.04-arm'
         run: |
@@ -252,13 +240,6 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write(f"OPENAI_AGENTS_BUILD_SOURCE={project.resolve()}\n")
           PYTHON
-      - name: Restore verified Rust dependencies
-        if: inputs.native_source_run == '' && inputs.native_dependency_run != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          NATIVE_DEPENDENCIES: ${{ inputs.native_dependencies }}
-          NATIVE_DEPENDENCY_RUN: ${{ inputs.native_dependency_run }}
-        run: python -I -S .github/scripts/native-dependencies.py restore
       - name: Download the qualified native build
         if: inputs.native_source_run != ''
         env:
@@ -291,7 +272,7 @@ jobs:
         if: >-
           runner.os == 'Windows' && inputs.native_source_run == '' &&
           !(github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
-          inputs.native_source_run == '' && inputs.native_dependency_run == '' &&
+          inputs.native_source_run == '' &&
           github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness')
         run: &windows_filename_command |
           python -I -S - <<'PYTHON'
@@ -503,21 +484,6 @@ jobs:
             dist/native-provenance.json
           if-no-files-found: error
           retention-days: 90
-      - name: Prepare Rust dependency cache
-        if: github.event_name == 'push' && inputs.native_source_run == '' && inputs.runner != 'ubuntu-24.04-arm'
-        run: python -I -S .github/scripts/native-dependencies.py pack
-      - name: Publish Rust dependencies
-        if: github.event_name == 'push' && inputs.native_source_run == '' && inputs.runner != 'ubuntu-24.04-arm'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: native-dependencies-${{ runner.os }}-${{ runner.arch }}
-          path: |
-            dist/native-dependencies.tar
-            dist/native-dependencies.json
-            dist/native-provenance.json
-          compression-level: 1
-          if-no-files-found: error
-          retention-days: 14
       - name: Report native build configuration
         if: always()
         env:
@@ -556,7 +522,7 @@ jobs:
     name: Windows project-search filename regression
     if: >-
       github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
-      inputs.native_source_run == '' && inputs.native_dependency_run == '' &&
+      inputs.native_source_run == '' &&
       github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness'
     runs-on: *native_snapshot_runner
     timeout-minutes: 100
