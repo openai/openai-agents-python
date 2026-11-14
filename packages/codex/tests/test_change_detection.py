@@ -827,7 +827,7 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
     assert suites["if"] == "${{ !inputs.native_only }}"
     assert suites["strategy"] == {
         "fail-fast": "false",
-        "matrix": {"python-version": ["3.10", "3.14"], "shard": ["0", "1"]},
+        "matrix": {"python-version": ["3.10", "3.14"], "shard": ["0", "1", "2"]},
     }
     assert suites["runs-on"] == (
         "${{ fromJSON(github.repository == 'openai/openai-agents-python' && "
@@ -838,7 +838,7 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
     parallel = steps["Run parallel tests"]
     assert parallel["env"] == {
         "SDK_TEST_SHARD_INDEX": "${{ matrix.shard }}",
-        "SDK_TEST_SHARD_COUNT": "2",
+        "SDK_TEST_SHARD_COUNT": "3",
     }
     assert 'pytest -n 2 --dist worksteal -m "not serial"' in parallel["run"]
     serial = steps["Run serial tests after all workers exit"]

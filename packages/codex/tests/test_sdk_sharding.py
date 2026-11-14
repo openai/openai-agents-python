@@ -26,7 +26,7 @@ def _collect(nodes: list[_Node]) -> tuple[list[_Node], list[_Node]]:
     return selected, deselected
 
 
-@pytest.mark.parametrize("count", [2, 4])
+@pytest.mark.parametrize("count", [3, 4])
 def test_shards_partition_parallel_nodes_and_retain_serial_nodes(monkeypatch, count: int) -> None:
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     parallel = [_Node(f"test_example.py::test_case[{i}]") for i in range(80)]
@@ -73,7 +73,7 @@ def test_invalid_shard_configuration_fails_before_collection(monkeypatch, index,
         _collect([_Node("example::case")])
 
 
-@pytest.mark.parametrize("count", [2, 4])
+@pytest.mark.parametrize("count", [3, 4])
 def test_actual_collection_hook_applies_the_partition(monkeypatch, count: int) -> None:
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("SDK_TEST_SHARD_INDEX", "0")
