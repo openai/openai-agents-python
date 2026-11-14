@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import json
 
+import anyio
 import pytest
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
@@ -63,29 +63,32 @@ async def test_rejected_injections_preserve_all_inputs_on_physical_socket(store,
         {"type": "message", "role": "user", "id": f"user_{index}", "content": f"followup_{index}"}
         for index in (1, 2)
     ]
-    async with asyncio.timeout(5), serve(peer, "127.0.0.1", 0) as server:
-        async with connect(
-            f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}", proxy=None
-        ) as socket:
-            run = hosted._Run(account=lambda op: "lineage" if op["operation"] == "create" else None)
-            wrapper = hosted._Socket(socket, run, {}, None)
-            frame = {
-                "type": "response.create",
-                "model": "gpt-5.5",
-                "store": store,
-                "input": [original],
-            }
-            await wrapper.send(json.dumps(frame))
-            assert (await wrapper.recv())["type"] == "response.created"
-            assert (await wrapper.recv())["item"]["call_id"] == "call_1"
-            assert (await wrapper.recv())["type"] == "response.completed"
-            first = [results[0], *([users[0]] if with_users else [])]
-            await wrapper.send(json.dumps({**frame, "input": [original, *first]}))
-            assert (await wrapper.recv())["item"]["call_id"] == "call_2"
-            assert (await wrapper.recv())["type"] == "response.completed"
-            second = [results[1], *([users[1]] if with_users else [])]
-            await wrapper.send(json.dumps({**frame, "input": [original, *first, *second]}))
-            assert (await wrapper.recv())["response"]["id"] == "continued"
+    with anyio.fail_after(5):
+        async with serve(peer, "127.0.0.1", 0) as server:
+            async with connect(
+                f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}", proxy=None
+            ) as socket:
+                run = hosted._Run(
+                    account=lambda op: "lineage" if op["operation"] == "create" else None
+                )
+                wrapper = hosted._Socket(socket, run, {}, None)
+                frame = {
+                    "type": "response.create",
+                    "model": "gpt-5.5",
+                    "store": store,
+                    "input": [original],
+                }
+                await wrapper.send(json.dumps(frame))
+                assert (await wrapper.recv())["type"] == "response.created"
+                assert (await wrapper.recv())["item"]["call_id"] == "call_1"
+                assert (await wrapper.recv())["type"] == "response.completed"
+                first = [results[0], *([users[0]] if with_users else [])]
+                await wrapper.send(json.dumps({**frame, "input": [original, *first]}))
+                assert (await wrapper.recv())["item"]["call_id"] == "call_2"
+                assert (await wrapper.recv())["type"] == "response.completed"
+                second = [results[1], *([users[1]] if with_users else [])]
+                await wrapper.send(json.dumps({**frame, "input": [original, *first, *second]}))
+                assert (await wrapper.recv())["response"]["id"] == "continued"
     assert [frame["type"] for frame in captured] == [
         "response.create",
         "response.inject",
