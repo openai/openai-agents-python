@@ -693,10 +693,7 @@ async def test_restored_buffered_session_keeps_http1_when_server_offers_http2(
             assert all(request["stream"] is False for request in peer.requests)
             assert "original input" in str(peer.requests[-1]["input"])
             assert "continued input" in str(peer.requests[-1]["input"])
-            for transport in peer.transports:
-                secured = transport.get_extra_info("ssl_object")
-                assert secured is not None
-                assert secured.selected_alpn_protocol() == "http/1.1"
+            assert peer.alpn_protocols == ["http/1.1", "http/1.1"]
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Provider HTTP pooling is Linux-only")
