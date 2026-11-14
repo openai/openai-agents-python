@@ -150,6 +150,7 @@ async def test_remote_cancel_waits_for_stop_and_peer_exit(
             tmp_path / "remote",
             synthetic_process_output="remote-ready",
             synthetic_process_stays_running=True,
+            synthetic_exit_on_terminate=False,
             before_synthetic_process_reply=hold_start,
         ).serve() as peer,
         provider(responses) as native,
@@ -233,6 +234,7 @@ async def test_remote_cancel_raises_when_peer_acknowledges_stop_without_exiting(
             tmp_path / "remote",
             synthetic_process_output="remote-ready",
             synthetic_process_stays_running=True,
+            synthetic_exit_on_terminate=False,
         ).serve() as peer,
         provider(responses) as native,
     ):
@@ -401,6 +403,7 @@ async def test_delivered_terminal_survives_cancellation_and_successor(
             tmp_path / "remote",
             synthetic_process_output="remote-ready",
             synthetic_process_stays_running=True,
+            synthetic_exit_on_terminate=False,
         ).serve() as peer,
         provider(responses) as native,
         Agent(instructions="Call the controlled tool.", provider=native).session(
