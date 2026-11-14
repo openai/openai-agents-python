@@ -87,6 +87,7 @@ async def test_checkpoint_diagnostic_validation_precedes_irreversible_native_sea
     owner = SimpleNamespace(
         _profiles={},
         _executor=None,
+        _portable_profile_workspaces={},
         _strict_executor_writes=False,
         _executor_policy_digest=AsyncMock(return_value=None),
         _manual_ready=AsyncMock(return_value=True),
