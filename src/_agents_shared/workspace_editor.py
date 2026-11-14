@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from _agents_shared.apply_diff import ApplyDiffMode, apply_diff
 from _agents_shared.patch_format import PatchFormat
-from agents.classic.editor import ApplyPatchOperation, ApplyPatchResult
+from agents.classic.editor import ApplyPatchOperation, ApplyPatchOperationType, ApplyPatchResult
 from agents.classic.sandbox.errors import (
     ApplyPatchDecodeError,
     ApplyPatchDiffError,
@@ -350,7 +350,8 @@ def _coerce_operation_mapping(operation: dict[str, object]) -> ApplyPatchOperati
             message=f"Invalid apply_patch move_to type: {type(raw_move_to).__name__}"
         )
     return ApplyPatchOperation(
-        type=raw_type,
+        # Pyright does not narrow the set-membership check above.
+        type=cast(ApplyPatchOperationType, raw_type),  # type: ignore[redundant-cast]
         path=raw_path,
         diff=raw_diff,
         ctx_wrapper=cast(Any, raw_ctx_wrapper),

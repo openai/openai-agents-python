@@ -4380,6 +4380,47 @@ def _capture_opening_model(
     return None, _capture_model_override(model)
 
 
+def _configure_opening_executables(
+    runtime: dict[str, Any],
+    executor: Environment[Any] | None,
+    profiles: tuple[_AgentProfile, ...],
+    *,
+    programmatic_tool_calling: bool,
+    has_host_mcp: bool,
+) -> None:
+    try:
+        if programmatic_tool_calling:
+            helpers = _package_files("agents") / "bin"
+            runtime["code_mode_host_exe"] = str(
+                helpers
+                / (
+                    "codex-code-mode-host.exe"
+                    if sys.platform == "win32"
+                    else "codex-code-mode-host"
+                )
+            )
+        if (
+            (executor is not None and executor._is_local)
+            or any(
+                isinstance(profile.declaration.environment, Environment)
+                and profile.declaration.environment._is_local
+                for profile in profiles
+            )
+            or has_host_mcp
+        ):
+            # A named local destination uses its own restricted native registration.
+            helpers = _package_files("agents") / "bin"
+            runtime["codex_self_exe"] = str(
+                helpers
+                / ("codex-sdk-runtime.exe" if sys.platform == "win32" else "codex-sdk-runtime")
+            )
+            if sys.platform == "linux":
+                runtime["codex_linux_sandbox_exe"] = str(helpers / "codex-linux-sandbox")
+    finally:
+        # Do not retain opening credentials in a helper traceback frame.
+        del runtime, executor, profiles
+
+
 def _configure_session_features(
     config: dict[str, Any],
     *,
@@ -5074,11 +5115,15 @@ class Session(Generic[ContextT, OutputT]):
                 startup_allowed_mcp,
                 programmatic_tool_calling=programmatic_tool_calling,
             )
-            if lease is not None and any(
-                profile is not profiles[0] and profile.declaration.environment is not None
-                for profile in profiles
-            ):
-                raise TypeError("Distinct Agent executors require captured sandbox source routing")
+            if lease is not None:
+                root_profile = next(iter(profiles), None)
+                if any(
+                    profile is not root_profile and profile.declaration.environment is not None
+                    for profile in profiles
+                ):
+                    raise TypeError(
+                        "Distinct Agent executors require captured sandbox source routing"
+                    )
             profile_environments = _complete_profile_mcp(
                 profiles, profile_roster, executor, native_responses=codex_login is None
             )
@@ -5165,33 +5210,13 @@ class Session(Generic[ContextT, OutputT]):
                 runtime["environment"] = native_environment
                 runtime["sandbox_mode"] = "read-only"
                 _configure_project_search(runtime, executor, native_environment["cwd"])
-            if programmatic_tool_calling:
-                helpers = _package_files("agents") / "bin"
-                runtime["code_mode_host_exe"] = str(
-                    helpers
-                    / (
-                        "codex-code-mode-host.exe"
-                        if sys.platform == "win32"
-                        else "codex-code-mode-host"
-                    )
-                )
-            if (
-                (executor is not None and executor._is_local)
-                or any(
-                    isinstance(profile.declaration.environment, Environment)
-                    and profile.declaration.environment._is_local
-                    for profile in profiles
-                )
-                or has_host_mcp
-            ):
-                # A named local destination uses its own restricted native registration.
-                helpers = _package_files("agents") / "bin"
-                runtime["codex_self_exe"] = str(
-                    helpers
-                    / ("codex-sdk-runtime.exe" if sys.platform == "win32" else "codex-sdk-runtime")
-                )
-                if sys.platform == "linux":
-                    runtime["codex_linux_sandbox_exe"] = str(helpers / "codex-linux-sandbox")
+            _configure_opening_executables(
+                runtime,
+                executor,
+                profiles,
+                programmatic_tool_calling=programmatic_tool_calling,
+                has_host_mcp=has_host_mcp,
+            )
             # Allocate only after local admission. An omitted provider belongs to
             # this Session alone; the captured declaration keeps None for restore.
             provider = agent.provider
