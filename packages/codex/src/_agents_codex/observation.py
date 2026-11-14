@@ -27,22 +27,25 @@ from typing_extensions import TypedDict as TypedDict
 
 from agents.config import JsonValue as JsonValue
 
-from ._events import (
-    CodeInterpreterCallItem,
-    ExecutionItem as ExecutionItem,
-    FileSearchCallItem,
-    FunctionCallStatus as FunctionCallStatus,
-    HostedMcpCallItem,
-    ImageGenerationCallItem,
-    McpListToolsItem,
-    MessageItem,
-    ProgramCallItem,
-    ProgramOutputItem,
-    ReasoningItem,
-    ShellCallItem,
-    ShellCallOutputItem,
-    WebSearchCallItem,
-)
+from . import _tool_response_types as _tool_response_types
+from ._tool_response_types import FunctionCallStatus as FunctionCallStatus
+
+if TYPE_CHECKING:
+    from ._events import (
+        CodeInterpreterCallItem as CodeInterpreterCallItem,
+        ExecutionItem as ExecutionItem,
+        FileSearchCallItem as FileSearchCallItem,
+        HostedMcpCallItem as HostedMcpCallItem,
+        ImageGenerationCallItem as ImageGenerationCallItem,
+        McpListToolsItem as McpListToolsItem,
+        MessageItem as MessageItem,
+        ProgramCallItem as ProgramCallItem,
+        ProgramOutputItem as ProgramOutputItem,
+        ReasoningItem as ReasoningItem,
+        ShellCallItem as ShellCallItem,
+        ShellCallOutputItem as ShellCallOutputItem,
+        WebSearchCallItem as WebSearchCallItem,
+    )
 from ._mcp_errors import _protect_mcp_methods
 from ._public import preserve_module_identity as _preserve_module_identity
 from .rate_limits import ApiRateLimits as ApiRateLimits
@@ -56,6 +59,8 @@ from .usage import TokenUsageInfo as TokenUsageInfo
 
 if TYPE_CHECKING:
     from .turn import Turn
+
+_wire_types = _tool_response_types
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -207,18 +212,18 @@ class ModelOutputItemCompleted(_SubmissionEvent):
     """
 
     item: (
-        MessageItem
-        | ReasoningItem
-        | WebSearchCallItem
-        | McpListToolsItem
-        | HostedMcpCallItem
-        | ProgramCallItem
-        | ProgramOutputItem
-        | FileSearchCallItem
-        | CodeInterpreterCallItem
-        | ShellCallItem
-        | ShellCallOutputItem
-        | ImageGenerationCallItem
+        _wire_types._events.MessageItem
+        | _wire_types._events.ReasoningItem
+        | _wire_types._events.WebSearchCallItem
+        | _wire_types._events.McpListToolsItem
+        | _wire_types._events.HostedMcpCallItem
+        | _wire_types._events.ProgramCallItem
+        | _wire_types._events.ProgramOutputItem
+        | _wire_types._events.FileSearchCallItem
+        | _wire_types._events.CodeInterpreterCallItem
+        | _wire_types._events.ShellCallItem
+        | _wire_types._events.ShellCallOutputItem
+        | _wire_types._events.ImageGenerationCallItem
         | HostedToolCallSummary
     )
     type: Literal["model_output_item_completed"] = field(
@@ -347,7 +352,7 @@ class ExecutionItemCompleted(_SubmissionEvent):
     Calls interrupted before Core reports a completion may have no item.
     """
 
-    item: ExecutionItem | _ExecutionItemReference
+    item: _wire_types._events.ExecutionItem | _ExecutionItemReference
     type: Literal["execution_item_completed"] = field(
         default="execution_item_completed", init=False
     )
@@ -910,3 +915,30 @@ def _event_stream_mcp(stream: Any) -> Any:
 
 _protect_mcp_methods(EventStream, _event_stream_mcp)
 _preserve_module_identity(globals(), "agents.observation")
+
+
+_WIRE_EXPORTS = (
+    "CodeInterpreterCallItem",
+    "ExecutionItem",
+    "FileSearchCallItem",
+    "HostedMcpCallItem",
+    "ImageGenerationCallItem",
+    "McpListToolsItem",
+    "MessageItem",
+    "ProgramCallItem",
+    "ProgramOutputItem",
+    "ReasoningItem",
+    "ShellCallItem",
+    "ShellCallOutputItem",
+    "WebSearchCallItem",
+)
+
+
+def __getattr__(name: str) -> Any:
+    if name not in _WIRE_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(_wire_types._events, name)
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_WIRE_EXPORTS))

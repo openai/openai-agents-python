@@ -112,7 +112,8 @@ def _has_realtime_predicates(
 
 
 def _has_interceptors(session: Session[Any, Any], pending: Sequence[Agent[Any, Any]] = ()) -> bool:
-    from .mcp import _MCP
+    from . import tools as _tool_types
+    from ._function_tools import FunctionTool
 
     return (
         session._executor is not None
@@ -122,7 +123,9 @@ def _has_interceptors(session: Session[Any, Any], pending: Sequence[Agent[Any, A
         or _has_realtime_predicates(session, pending)
         or any(server._has_before for server in session._mcp_tools)
         or any(
-            isinstance(tool, _MCP) and tool._has_before
+            type(tool) is not FunctionTool
+            and isinstance(tool, _tool_types._MCP)
+            and tool._has_before
             for agent in (
                 *(profile.profile.declaration for profile in session._profiles.values()),
                 *(profile.profile.declaration for profile in session._voice_profiles.values()),

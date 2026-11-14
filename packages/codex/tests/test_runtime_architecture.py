@@ -124,17 +124,27 @@ def test_public_modules_only_forward_to_the_runtime(module: str) -> None:
             )
             forwarded |= target == "_agents_codex." + module
         elif isinstance(statement, ast.If):
-            assert module == "testing", path
-            assert isinstance(statement.test, ast.Name) and statement.test.id == "TYPE_CHECKING", (
-                path
-            )
+            assert isinstance(statement.test, ast.Name), path
+            assert any(
+                isinstance(declaration, ast.ImportFrom)
+                and declaration.level == 0
+                and declaration.module == "_agents_codex." + module
+                and any(
+                    alias.name == "TYPE_CHECKING" and alias.asname == statement.test.id
+                    for alias in declaration.names
+                )
+                for declaration in tree.body
+            ), path
             assert not statement.orelse, path
             for declaration in statement.body:
                 assert isinstance(declaration, ast.ImportFrom), path
-                assert (
-                    declaration.level == 0 and declaration.module == "_agents_codex.testing_sandbox"
+                assert declaration.level == 0, path
+                assert declaration.module == "_agents_codex." + module or (
+                    module == "testing" and declaration.module == "_agents_codex.testing_sandbox"
                 ), path
-                assert all(alias.name == alias.asname for alias in declaration.names), path
+                assert all(
+                    alias.name != "*" and alias.name == alias.asname for alias in declaration.names
+                ), path
         elif isinstance(statement, ast.Assign):
             if (
                 module == "experimental._mcp_tasks_wire"
@@ -823,8 +833,8 @@ _DOMAIN_DEPENDENCIES = {
     "_mcp_names": ({"_agents_codex._public"}, set()),
     "_public": (set(), set()),
     "_web_projection": (
-        {"_agents_codex._events", "_agents_codex._public"},
-        {"_agents_codex._events"},
+        {"_agents_codex._events", "_agents_codex._public", "_agents_codex._tool_response_types"},
+        {"_agents_codex._events", "_agents_codex._tool_response_types"},
     ),
 }
 

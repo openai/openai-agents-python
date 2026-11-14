@@ -35,7 +35,6 @@ from typing import (
 from pydantic import (
     BaseModel as BaseModel,
     PydanticSchemaGenerationError as PydanticSchemaGenerationError,
-    RootModel,
     TypeAdapter as TypeAdapter,
     ValidationError,
 )
@@ -46,6 +45,7 @@ from _agents_shared.strict_schema import (
     ensure_strict_json_schema,
 )
 
+from . import tools as tools
 from ._callback_execution import (
     _call_application_callback,
     _FunctionBodyFailure,
@@ -53,20 +53,6 @@ from ._callback_execution import (
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext
-from .hosted_mcp import HostedMCP
-from .manual import (
-    ActionRequested as ActionRequested,
-    InputT as InputT,
-    ResultT as ResultT,
-    _CapturedApproval as _CapturedApproval,
-    _CapturedManual as _CapturedManual,
-)
-from .mcp import HttpMCP as HttpMCP, StdioMCP as StdioMCP
-from .native_agents import (
-    ChildInvocation as ChildInvocation,
-    ChildStepContext as ChildStepContext,
-    NativeAgents as NativeAgents,
-)
 from .native_interception import Allow as Allow, Deny as Deny, ReplaceArguments as ReplaceArguments
 from .realtime_result import BackgroundResult as BackgroundResult
 from .realtime_usage import (
@@ -74,32 +60,54 @@ from .realtime_usage import (
     RealtimeUsageAccounting as RealtimeUsageAccounting,
 )
 from .tools import (
-    Checklist as Checklist,
-    CodeInterpreter as CodeInterpreter,
-    FileSearch as FileSearch,
-    HostedProgrammaticToolCalling as HostedProgrammaticToolCalling,
-    HostedShell as HostedShell,
-    ImageGeneration as ImageGeneration,
-    NativeGoals as NativeGoals,
+    InputT as InputT,
+    ResultT as ResultT,
     ToolCaller as ToolCaller,
     ToolCallInfo as ToolCallInfo,
     ToolOutput as ToolOutput,
     ToolRef as ToolRef,
-    ToolSearch,
-    ToolSearchResult,
-    WebSearch as WebSearch,
     _CapturedFunction as _CapturedFunction,
     _function_parameters as _function_parameters,
-    _hosted_tool_spec,
     _rebuild_tool_output_adapter,
     _snapshot_function_arguments,
 )
 from .turn import Turn as Turn
+from .usage import TokenUsage as TokenUsage
 
 if TYPE_CHECKING:
     from .decisions import DecisionInput, DecisionProvider
-    from .executor import Environment
-    from .usage import TokenUsage
+
+
+if TYPE_CHECKING:
+    from ._tool_catalog import (
+        Checklist as Checklist,
+        CodeInterpreter as CodeInterpreter,
+        FileSearch as FileSearch,
+        HostedProgrammaticToolCalling as HostedProgrammaticToolCalling,
+        HostedShell as HostedShell,
+        ImageGeneration as ImageGeneration,
+        NativeGoals as NativeGoals,
+        Tool as Tool,
+        ToolSearch as ToolSearch,
+        ToolSearchResult as ToolSearchResult,
+        WebSearch as WebSearch,
+        _ClientToolSearch as _ClientToolSearch,
+        _hosted_tool_spec as _hosted_tool_spec,
+    )
+    from .hosted_mcp import HostedMCP as HostedMCP
+    from .manual import (
+        ActionRequested as ActionRequested,
+        _CapturedApproval as _CapturedApproval,
+        _CapturedManual as _CapturedManual,
+    )
+    from .mcp import HttpMCP as HttpMCP, StdioMCP as StdioMCP
+    from .native_agents import (
+        ChildInvocation as ChildInvocation,
+        ChildStepContext as ChildStepContext,
+        NativeAgents as NativeAgents,
+    )
+
+_declaration_types = tools
 
 ToolContextT = TypeVar("ToolContextT")
 _DecisionT = TypeVar("_DecisionT")
@@ -163,7 +171,7 @@ class ToolInputErrorContext(Generic[ContextT_co]):
     """Admitted invocation identity before validated arguments."""
 
     context: ContextT_co = field(repr=False)
-    submission: Turn[Any] | ChildInvocation
+    submission: Turn[Any] | _declaration_types.ChildInvocation
     call_id: str
     call: ToolCallInfo = field(kw_only=True)
     trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)
@@ -190,7 +198,7 @@ class ToolContext(Generic[ContextT_co]):
     """
 
     context: ContextT_co = field(repr=False)
-    submission: Turn[Any] | ChildInvocation
+    submission: Turn[Any] | _declaration_types.ChildInvocation
     call_id: str
     original_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)
     effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)
@@ -207,7 +215,7 @@ class ToolContext(Generic[ContextT_co]):
         default=None, init=False, repr=False, compare=False
     )
 
-    _environment: Environment[Any] | None = field(
+    _environment: _declaration_types.Environment[Any] | None = field(
         default=None, init=False, repr=False, compare=False
     )
     _sandbox_source: object | None = field(default=None, init=False, repr=False, compare=False)
@@ -447,7 +455,10 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     run_before_approval: bool = False
     approval_key: str | None = None
     is_enabled: (
-        bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]]
+        bool
+        | Callable[
+            [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+        ]
     ) = True
 
     error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(
@@ -498,7 +509,9 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         run_before_approval: bool = False,
         approval_key: str | None = None,
         is_enabled: bool
-        | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+        | Callable[
+            [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+        ] = True,
         error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]]
         | None = _UNSET_ERROR_FUNCTION,
         _allow_run_error_formatter: bool | _RunErrorFormatterInheritance | None = None,
@@ -624,8 +637,10 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         ):
             raise TypeError("Callback settings require a callback registered with function_tool")
 
-    def match(self, event: object) -> ActionRequested[InputT, ResultT] | None:
+    def match(self, event: object) -> _declaration_types.ActionRequested[InputT, ResultT] | None:
         """Narrow only requests issued for this exact captured declaration."""
+        from .manual import ActionRequested
+
         if isinstance(event, ActionRequested) and event._declaration is self:
             return cast("ActionRequested[InputT, ResultT]", event)
         return None
@@ -716,6 +731,8 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             # The callback body and its policies share the Session context.
             captured = self._bind(context, context, self)
             if self.needs_approval is not False:
+                from .manual import _CapturedApproval
+
                 return _CapturedApproval(
                     self.name,
                     self._spec_json(),
@@ -725,6 +742,8 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
                     captured,
                 )
             return captured
+        from .manual import _CapturedManual
+
         return _CapturedManual(
             self.name,
             self._spec_json(),
@@ -814,49 +833,6 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
                             )
 
 
-class _ClientToolSearch(FunctionTool[Any, ToolSearchResult, None]):
-    def __init__(self, declaration: ToolSearch) -> None:
-        super().__init__(
-            name="tool_search",
-            description=declaration.description or "Select deferred tools.",
-            input_type=RootModel[Any],
-            output_type=ToolSearchResult,
-        )
-        object.__setattr__(
-            self,
-            "_provider_fields",
-            {
-                "execution": "client",
-                "description": declaration.description,
-                "parameters": declaration.parameters,
-            },
-        )
-        object.__setattr__(self, "_provider_data", declaration.provider_data)
-
-    _provider_fields: dict[str, Any]
-    _provider_data: dict[str, Any] | None
-
-    def _spec_json(self) -> str:
-        return json.dumps(
-            {
-                "type": "toolSearch",
-                "declaration": _hosted_tool_spec(
-                    "tool_search", self._provider_fields, self._provider_data
-                ),
-            },
-            allow_nan=False,
-        )
-
-    def _capture(self, context: object) -> _CapturedManual:
-        return _CapturedManual(
-            self.name,
-            self._spec_json(),
-            self,
-            TypeAdapter(Any),
-            TypeAdapter(ToolSearchResult),
-        )
-
-
 # The frozen binder consumes application context. Keeping its callable type
 # preserves that requirement when type checkers join mixed tool lists.
 _PythonTool: TypeAlias = FunctionTool[
@@ -864,27 +840,6 @@ _PythonTool: TypeAlias = FunctionTool[
     Any,
     Callable[[ToolContextT, PolicyContextT, FunctionTool[Any, Any, Any]], _CapturedFunction],
 ]
-Tool: TypeAlias = (
-    _PythonTool[ToolContextT, ToolContextT]
-    | _PythonTool[ToolContextT, object]
-    | _PythonTool[object, ToolContextT]
-    | FunctionTool[Any, Any]
-    | HttpMCP[object]
-    | StdioMCP[object]
-    | HttpMCP[ToolContextT]
-    | StdioMCP[ToolContextT]
-    | Checklist
-    | NativeGoals
-    | WebSearch
-    | FileSearch
-    | CodeInterpreter
-    | HostedShell
-    | HostedProgrammaticToolCalling
-    | ImageGeneration
-    | HostedMCP[ToolContextT]
-    | ToolSearch
-    | NativeAgents[ToolContextT]
-)
 
 
 class _ToolDecorator(Protocol[PolicyContextT_contra]):
@@ -1111,7 +1066,9 @@ def function_tool(
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[PolicyContextT],
     is_enabled: bool
-    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    | Callable[
+        [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+    ] = True,
     error_function: _BodyErrorFormatter[PolicyContextT] | None = None,
     extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _PythonTool[ToolContextT, PolicyContextT]: ...
@@ -1130,7 +1087,9 @@ def function_tool(
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[ToolContextT] | None = None,
     is_enabled: bool
-    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    | Callable[
+        [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+    ] = True,
     error_function: _BodyErrorFormatter[ToolContextT] | None = None,
     extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _PythonTool[ToolContextT, ToolContextT]: ...
@@ -1149,7 +1108,9 @@ def function_tool(
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[PolicyContextT],
     is_enabled: bool
-    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    | Callable[
+        [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+    ] = True,
     error_function: _BodyErrorFormatter[PolicyContextT] | None = None,
     extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _PythonTool[PolicyContextT, PolicyContextT]: ...
@@ -1168,7 +1129,9 @@ def function_tool(
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[PolicyContextT] | None = None,
     is_enabled: bool
-    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    | Callable[
+        [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+    ] = True,
     error_function: _BodyErrorFormatter[PolicyContextT],
     extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _PythonTool[PolicyContextT, PolicyContextT]: ...
@@ -1187,7 +1150,9 @@ def function_tool(
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
-    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    | Callable[
+        [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+    ] = True,
     error_function: _BodyErrorFormatter[object] | None = None,
     extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _PythonTool[object, object]: ...
@@ -1215,7 +1180,9 @@ def function_tool(
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
-    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    | Callable[
+        [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+    ] = True,
     error_function: _BodyErrorFormatter[object] | None = None,
     extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _ToolDecorator[object]: ...
@@ -1245,7 +1212,9 @@ def function_tool(
     | _InputErrorFormatter[PolicyContextT]
     | None = None,
     is_enabled: bool
-    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    | Callable[
+        [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+    ] = True,
     error_function: _BodyErrorFormatter[object] | _BodyErrorFormatter[PolicyContextT] | None = None,
     extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _ToolDecorator[PolicyContextT]: ...
@@ -1273,7 +1242,9 @@ def function_tool(
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
-    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    | Callable[
+        [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+    ] = True,
     error_function: _BodyErrorFormatter[object] | None = None,
     extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _ToolDecorator[object]: ...
@@ -1303,7 +1274,9 @@ def function_tool(
     | _InputErrorFormatter[PolicyContextT]
     | None = None,
     is_enabled: bool
-    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    | Callable[
+        [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+    ] = True,
     error_function: _BodyErrorFormatter[object] | _BodyErrorFormatter[PolicyContextT] | None = None,
     extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _ToolDecorator[PolicyContextT]: ...
@@ -1331,7 +1304,9 @@ def function_tool(
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
-    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    | Callable[
+        [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+    ] = True,
     error_function: _BodyErrorFormatter[object] | None = None,
     extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _ToolDecorator[object]: ...
@@ -1363,7 +1338,9 @@ def function_tool(
     | _InputErrorFormatter[PolicyContextT]
     | None = None,
     is_enabled: bool
-    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    | Callable[
+        [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+    ] = True,
     error_function: _BodyErrorFormatter[object] | _BodyErrorFormatter[PolicyContextT] | None = None,
     extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _ToolDecorator[PolicyContextT]: ...
@@ -1403,7 +1380,9 @@ def function_tool(
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[Any] | None = None,
     is_enabled: bool
-    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    | Callable[
+        [Any, Turn[Any] | _declaration_types.ChildStepContext[Any]], bool | Awaitable[bool]
+    ] = True,
     error_function: _BodyErrorFormatter[Any] | None = _UNSET_ERROR_FUNCTION,
     extra_arguments: Literal["forbid", "ignore"] = "forbid",
 ) -> _PythonTool[Any, Any] | _ToolDecorator[Any]:
@@ -1579,3 +1558,50 @@ def function_tool(
 
 
 _preserve_module_identity(globals(), "agents._function_tools")
+
+
+_OPTIONAL_EXPORTS = {
+    "HostedMCP": "hosted_mcp",
+    "ActionRequested": "manual",
+    "_CapturedApproval": "manual",
+    "_CapturedManual": "manual",
+    "HttpMCP": "mcp",
+    "StdioMCP": "mcp",
+    "ChildInvocation": "native_agents",
+    "ChildStepContext": "native_agents",
+    "NativeAgents": "native_agents",
+    "Checklist": "_tool_catalog",
+    "CodeInterpreter": "_tool_catalog",
+    "FileSearch": "_tool_catalog",
+    "HostedProgrammaticToolCalling": "_tool_catalog",
+    "HostedShell": "_tool_catalog",
+    "ImageGeneration": "_tool_catalog",
+    "NativeGoals": "_tool_catalog",
+    "ToolSearch": "_tool_catalog",
+    "ToolSearchResult": "_tool_catalog",
+    "WebSearch": "_tool_catalog",
+    "_hosted_tool_spec": "_tool_catalog",
+    "Tool": "_tool_catalog",
+    "_ClientToolSearch": "_tool_catalog",
+}
+
+
+def __getattr__(name: str) -> Any:
+    module = _OPTIONAL_EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    implementation = import_module("." + module, __package__)
+    globals().update(
+        {
+            key: getattr(implementation, key)
+            for key, owner in _OPTIONAL_EXPORTS.items()
+            if owner == module
+        }
+    )
+    return globals()[name]
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_OPTIONAL_EXPORTS))

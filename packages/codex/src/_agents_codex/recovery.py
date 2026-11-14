@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import json as json
 from dataclasses import dataclass as dataclass, field as field
-from typing import Any, Literal as Literal
+from typing import TYPE_CHECKING as _TYPE_CHECKING, Any, Literal as Literal
 
 from pydantic import JsonValue as JsonValue
 
-from ._events import FunctionCallItem as FunctionCallItem, SessionItem as SessionItem
+from . import _tool_response_types as _wire_types
+
+if _TYPE_CHECKING:
+    from ._events import (
+        FunctionCallItem as FunctionCallItem,
+        SessionItem as SessionItem,
+    )
 from ._public import preserve_module_identity as _preserve_module_identity
 from .history import RecordedTurn as RecordedTurn
 from .shell import ShellOutput as ShellOutput
@@ -92,7 +98,7 @@ class LocalRecoveryRequired(RuntimeError):
         self,
         calls: tuple[UncertainCall, ...],
         turns: tuple[RecordedTurn, ...],
-        items: tuple[SessionItem, ...],
+        items: tuple[_wire_types._events.SessionItem, ...],
     ) -> None:
         super().__init__(
             "Native local history has an unknown tool outcome. "
@@ -104,7 +110,7 @@ class LocalRecoveryRequired(RuntimeError):
 
 
 def _uncertain_call(
-    thread_id: str, item: FunctionCallItem, *, original_input: JsonValue | None
+    thread_id: str, item: _wire_types._events.FunctionCallItem, *, original_input: JsonValue | None
 ) -> UncertainCall:
     arguments = original_input if original_input is not None else item["arguments"]
     if original_input is None and isinstance(arguments, str):
@@ -162,3 +168,9 @@ def _application_shell_recovery(
 
 
 _preserve_module_identity(globals(), "agents.recovery")
+
+
+def __getattr__(name: str):
+    if name not in ("FunctionCallItem", "SessionItem"):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(_wire_types._events, name)

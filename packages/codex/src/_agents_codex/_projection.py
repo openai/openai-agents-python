@@ -6,32 +6,34 @@ import copy as copy
 import re as re
 import shlex as shlex
 import time as time
-from typing import Any as Any, Literal as Literal, cast as cast
+from typing import TYPE_CHECKING as _TYPE_CHECKING, Any as Any, Literal as Literal, cast as cast
 
-from ._events import (
-    CommandOutputDeltaEvent as CommandOutputDeltaEvent,
-    EnvironmentError as EnvironmentError,
-    EnvironmentStatus as EnvironmentStatus,
-    ErrorEvent as ErrorEvent,
-    ExecutionItem as ExecutionItem,
-    Failure as Failure,
-    NativeEvent as NativeEvent,
-    RequiredAction as RequiredAction,
-    SessionCreatedEvent as SessionCreatedEvent,
-    SessionEvent as SessionEvent,
-    SessionSnapshot as SessionSnapshot,
-    TokenUsage as TokenUsage,
-)
+from . import _tool_response_types as _wire_types
+
+if _TYPE_CHECKING:
+    from ._events import (
+        CommandOutputDeltaEvent as CommandOutputDeltaEvent,
+        EnvironmentError as EnvironmentError,
+        EnvironmentStatus as EnvironmentStatus,
+        ErrorEvent as ErrorEvent,
+        ExecutionItem as ExecutionItem,
+        Failure as Failure,
+        NativeEvent as NativeEvent,
+        RequiredAction as RequiredAction,
+        SessionCreatedEvent as SessionCreatedEvent,
+        SessionEvent as SessionEvent,
+        SessionSnapshot as SessionSnapshot,
+        TokenUsage as TokenUsage,
+    )
 from ._hosted_projection import project_hosted_response_item as project_hosted_response_item
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._subagent_projection import project_subagent_item as project_subagent_item
 from ._web_projection import project_web_search_item as project_web_search_item
 from .input import _response_content
-from .subagents import Subagent as Subagent
 
 
-def _usage(native: dict[str, Any]) -> TokenUsage:
-    usage: TokenUsage = {
+def _usage(native: dict[str, Any]) -> "_wire_types._events.TokenUsage":
+    usage: _wire_types._events.TokenUsage = {
         "input_tokens": native.get("input_tokens", 0),
         "input_tokens_details": {"cached_tokens": native.get("cached_input_tokens", 0)},
         "output_tokens": native.get("output_tokens", 0),
@@ -189,7 +191,7 @@ def _execution_item(
 
 def project_execution_completion(
     message: dict[str, Any], *, thread_id: str | None, turn_id: str
-) -> ExecutionItem | None:
+) -> "_wire_types._events.ExecutionItem | None":
     """Project a canonical completion owned by this exact native turn."""
     if (
         message["type"] != "item_completed"
@@ -204,7 +206,9 @@ def project_execution_completion(
         or native.get("status") in {"in_progress", "inProgress"}
     ):
         return None
-    return cast(ExecutionItem | None, _execution_item(native, thread_id, turn_id))
+    return cast(
+        "_wire_types._events.ExecutionItem | None", _execution_item(native, thread_id, turn_id)
+    )
 
 
 def project_model_output_item(
@@ -295,9 +299,9 @@ class EventProjector:
         self._decoders: dict[tuple[str | None, str, str], Any] = {}
         self._last_message: dict[str | None, str] = {}
         self._turn_usage: dict[str, int] | None = None
-        self._turn_failure: Failure | None = None
+        self._turn_failure: _wire_types._events.Failure | None = None
         now = int(time.time())
-        self._session: SessionSnapshot = {
+        self._session: _wire_types._events.SessionSnapshot = {
             "id": session_id,
             "object": "agent.session",
             "metadata": {},
@@ -309,10 +313,10 @@ class EventProjector:
             "usage": None,
         }
 
-    def _envelope(self, event_type: str, **fields: Any) -> SessionEvent:
+    def _envelope(self, event_type: str, **fields: Any) -> "_wire_types._events.SessionEvent":
         self._sequence += 1
         return cast(
-            SessionEvent,
+            "_wire_types._events.SessionEvent",
             {
                 "type": event_type,
                 "event_id": f"{self.source_id}:{self._sequence}",
@@ -320,13 +324,17 @@ class EventProjector:
             },
         )
 
-    def _event(self, event_type: str, turn_id: str | None, **fields: Any) -> SessionEvent:
+    def _event(
+        self, event_type: str, turn_id: str | None, **fields: Any
+    ) -> "_wire_types._events.SessionEvent":
         return self._envelope(event_type, session_id=self.session_id, turn_id=turn_id, **fields)
 
-    def _session_event(self, event_type: str) -> SessionEvent:
+    def _session_event(self, event_type: str) -> "_wire_types._events.SessionEvent":
         return self._envelope(event_type, session=copy.deepcopy(self._session))
 
-    def model_response_declined(self, turn_id: str, response_id: str | None) -> SessionEvent:
+    def model_response_declined(
+        self, turn_id: str, response_id: str | None
+    ) -> "_wire_types._events.SessionEvent":
         return self._event(
             "agent.session.turn.model_response.decision",
             turn_id,
@@ -336,16 +344,18 @@ class EventProjector:
             reason="declined",
         )
 
-    def created(self) -> SessionCreatedEvent:
-        return cast(SessionCreatedEvent, self._session_event("agent.session.created"))
+    def created(self) -> "_wire_types._events.SessionCreatedEvent":
+        return cast(
+            "_wire_types._events.SessionCreatedEvent", self._session_event("agent.session.created")
+        )
 
     def environment_status(
         self,
-        status: EnvironmentStatus,
+        status: "_wire_types._events.EnvironmentStatus",
         environment_id: str,
         turn_id: str | None = None,
-        error: EnvironmentError | None = None,
-    ) -> SessionEvent:
+        error: "_wire_types._events.EnvironmentError | None" = None,
+    ) -> "_wire_types._events.SessionEvent":
         return self._event(
             f"agent.session.environment.{status}",
             turn_id,
@@ -357,15 +367,21 @@ class EventProjector:
             },
         )
 
-    def subagent_turn_completed(self, subagent_id: str, turn_id: str) -> SessionEvent:
+    def subagent_turn_completed(
+        self, subagent_id: str, turn_id: str
+    ) -> "_wire_types._events.SessionEvent":
         return self._event(
             "agent.session.subagent.turn.completed", turn_id, subagent_id=subagent_id
         )
 
-    def subagent_lifecycle(self, kind: str, subagent: Subagent) -> SessionEvent:
+    def subagent_lifecycle(
+        self, kind: str, subagent: "_wire_types._events.Subagent"
+    ) -> "_wire_types._events.SessionEvent":
         return self._envelope(f"agent.session.subagent.{kind}", subagent=copy.deepcopy(subagent))
 
-    def set_required_actions(self, actions: list[RequiredAction]) -> list[SessionEvent]:
+    def set_required_actions(
+        self, actions: "list[_wire_types._events.RequiredAction]"
+    ) -> "list[_wire_types._events.SessionEvent]":
         blocking = any(
             action["type"] != "user_input" or action["is_blocking"] for action in actions
         )
@@ -379,14 +395,14 @@ class EventProjector:
         self._session["last_active_at"] = int(time.time())
         return [self._session_event(f"agent.session.{status}")]
 
-    def current_required_actions(self) -> SessionEvent | None:
+    def current_required_actions(self) -> "_wire_types._events.SessionEvent | None":
         if not self._session["required_actions"]:
             return None
         return self._session_event(f"agent.session.{self._session['status']}")
 
-    def error(self, message: str) -> ErrorEvent:
+    def error(self, message: str) -> "_wire_types._events.ErrorEvent":
         return cast(
-            ErrorEvent,
+            "_wire_types._events.ErrorEvent",
             self._envelope(
                 "error",
                 session_id=self.session_id,
@@ -405,7 +421,9 @@ class EventProjector:
             self._indices[key] = sum(turn == turn_id for turn, _ in self._indices)
         return {"item_id": item_id, "output_index": self._indices[key]}
 
-    def _item_added(self, turn_id: str | None, item: dict[str, Any]) -> list[SessionEvent]:
+    def _item_added(
+        self, turn_id: str | None, item: dict[str, Any]
+    ) -> "list[_wire_types._events.SessionEvent]":
         key = (turn_id, item["id"])
         if key in self._items:
             return []
@@ -426,7 +444,7 @@ class EventProjector:
         index: int,
         reasoning: bool,
         text: str = "",
-    ) -> list[SessionEvent]:
+    ) -> "list[_wire_types._events.SessionEvent]":
         key = (turn_id, item_id, index)
         if key in self._parts:
             return []
@@ -446,8 +464,10 @@ class EventProjector:
             )
         ]
 
-    def _flush_command(self, turn_id: str | None, item_id: str) -> list[CommandOutputDeltaEvent]:
-        result: list[CommandOutputDeltaEvent] = []
+    def _flush_command(
+        self, turn_id: str | None, item_id: str
+    ) -> "list[_wire_types._events.CommandOutputDeltaEvent]":
+        result: list[_wire_types._events.CommandOutputDeltaEvent] = []
         for key in list(self._decoders):
             turn, item, _ = key
             if (turn, item) != (turn_id, item_id):
@@ -456,7 +476,7 @@ class EventProjector:
             if delta:
                 result.append(
                     cast(
-                        CommandOutputDeltaEvent,
+                        "_wire_types._events.CommandOutputDeltaEvent",
                         self._event(
                             "agent.output.command_execution_output.delta",
                             turn_id,
@@ -493,7 +513,7 @@ class EventProjector:
         self,
         native: dict[str, Any],
         turn_id: str | None,
-    ) -> SessionEvent:
+    ) -> "_wire_types._events.SessionEvent":
         output = _response_content(
             [
                 content
@@ -523,7 +543,7 @@ class EventProjector:
         self,
         message: dict[str, Any],
         response: dict[str, Any] | None = None,
-    ) -> list[SessionEvent]:
+    ) -> "list[_wire_types._events.SessionEvent]":
         done = response is not None
         success = response["success"] if response is not None else None
         return self._item_events(
@@ -547,7 +567,7 @@ class EventProjector:
         self,
         msg: dict[str, Any],
         turn_id: str | None,
-    ) -> list[SessionEvent]:
+    ) -> "list[_wire_types._events.SessionEvent]":
         native = msg["item"]
         done = msg["type"] == "item_completed"
         if native["type"] == "UserMessage":
@@ -606,7 +626,9 @@ class EventProjector:
         result.extend(self._finish_item(turn_id, item))
         return result
 
-    def _finish_item(self, turn_id: str | None, item: dict[str, Any]) -> list[SessionEvent]:
+    def _finish_item(
+        self, turn_id: str | None, item: dict[str, Any]
+    ) -> "list[_wire_types._events.SessionEvent]":
         item_id = item["id"]
         key = (turn_id, item_id)
         if key in self._done_items:
@@ -614,7 +636,7 @@ class EventProjector:
         self._done_items.add(key)
         self._items[key] = copy.deepcopy(item)
         fields = self._item_fields(turn_id, item_id)
-        result: list[SessionEvent] = []
+        result: list[_wire_types._events.SessionEvent] = []
         if item["type"] in {"message", "reasoning"}:
             reasoning = item["type"] == "reasoning"
             parts = item["summary"] if reasoning else item["content"]
@@ -668,7 +690,7 @@ class EventProjector:
         )
         return result
 
-    def finish_failed_turn(self) -> list[SessionEvent]:
+    def finish_failed_turn(self) -> "list[_wire_types._events.SessionEvent]":
         """Finish only a received fatal failure when the native stream ends."""
         if self._turn_id is None or self._turn_failure is None:
             return []
@@ -679,9 +701,9 @@ class EventProjector:
         msg: dict[str, Any],
         turn_id: str | None,
         http_status_code: int | None = None,
-    ) -> list[SessionEvent]:
+    ) -> "list[_wire_types._events.SessionEvent]":
         start = msg["type"] in {"task_started", "turn_started"}
-        result: list[SessionEvent] = []
+        result: list[_wire_types._events.SessionEvent] = []
         if start:
             self._turn_id = turn_id
             self._started_at = msg.get("started_at") or int(time.time())
@@ -798,10 +820,10 @@ class EventProjector:
 
     def project(
         self,
-        event: NativeEvent | dict[str, Any],
+        event: "_wire_types._events.NativeEvent | dict[str, Any]",
         *,
         http_status_code: int | None = None,
-    ) -> list[SessionEvent]:
+    ) -> "list[_wire_types._events.SessionEvent]":
         msg = cast(dict[str, Any], event["msg"])
         kind = msg["type"]
         turn_id = msg.get("turn_id", msg.get("turnId"))
@@ -936,3 +958,23 @@ class EventProjector:
 
 
 _preserve_module_identity(globals(), "agents._projection")
+
+
+def __getattr__(name: str):
+    if name not in (
+        "CommandOutputDeltaEvent",
+        "EnvironmentError",
+        "EnvironmentStatus",
+        "ErrorEvent",
+        "ExecutionItem",
+        "Failure",
+        "NativeEvent",
+        "RequiredAction",
+        "SessionCreatedEvent",
+        "SessionEvent",
+        "SessionSnapshot",
+        "TokenUsage",
+        "Subagent",
+    ):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(_wire_types._events, name)

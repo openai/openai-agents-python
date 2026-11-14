@@ -9,8 +9,8 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 
+from . import tools as _tool_types
 from ._compat import cancel_once
-from .native_agents import NativeRoleToolInvocation, NativeRoleToolStreamEvent
 from .observation import Observation, _observation_sizes
 
 _logger = logging.getLogger("agents.native.managed_tool")
@@ -56,9 +56,9 @@ class _ManagedToolPrefix:
 class _ManagedToolStream:
     def __init__(
         self,
-        invocation: NativeRoleToolInvocation,
+        invocation: _tool_types.NativeRoleToolInvocation,
         submission_id: str,
-        callback: Callable[[NativeRoleToolStreamEvent], None | Awaitable[None]],
+        callback: Callable[[_tool_types.NativeRoleToolStreamEvent], None | Awaitable[None]],
         limit: int | None,
         overflow: Callable[[], None],
         *,

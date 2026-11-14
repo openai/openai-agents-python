@@ -17,7 +17,6 @@ from _agents_codex.observation import (
     ContextCompacted as ContextCompacted,
     EventGap as EventGap,
     EventStream as EventStream,
-    ExecutionItem as ExecutionItem,
     ExecutionItemCompleted as ExecutionItemCompleted,
     FunctionCallStatus as FunctionCallStatus,
     HostedToolCallProgress as HostedToolCallProgress,
@@ -43,12 +42,15 @@ from _agents_codex.observation import (
     TypedDict as TypedDict,
     TypeVar as TypeVar,
     UsageUpdated as UsageUpdated,
+    __dir__ as __dir__,
+    __getattr__ as __getattr__,
     _Event as _Event,
     _ExecutionItemReference as _ExecutionItemReference,
     _ObservationBuffer as _ObservationBuffer,
     _ObservationT as _ObservationT,
     _request_observation as _request_observation,
     _SubmissionEvent as _SubmissionEvent,
+    _wire_types as _wire_types,
     asyncio as asyncio,
     cast as cast,
     dataclass as dataclass,
@@ -60,6 +62,12 @@ from _agents_codex.observation import (
     replace as replace,
     weakref as weakref,
 )
+
+if TYPE_CHECKING:
+    from _agents_codex.observation import (
+        ExecutionItem as ExecutionItem,
+    )
+
 
 __all__ = [
     "ApiRateLimitsUpdated",

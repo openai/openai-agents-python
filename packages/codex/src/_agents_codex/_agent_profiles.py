@@ -8,18 +8,18 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from ._function_tools import FunctionTool, Tool
+from . import tools as _tool_types
+from ._function_tools import FunctionTool
 from .agent import Agent
-from .decision_handoff import DecisionHandoff, _decision_handoff_tool
 from .handoffs import Handoff
-from .hosted_mcp import HostedMCP
-from .mcp import _MCP
-from .native_agents import NativeAgents
-from .realtime_agents import RealtimeHandoff, _handoff_tool
 from .schema import OutputSpec, _prepare_spec
-from .tools import ToolRef, ToolSearch
+from .tools import ToolRef
+
+if TYPE_CHECKING:
+    from .decision_handoff import DecisionHandoff
+    from .realtime_agents import RealtimeHandoff
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,7 @@ class _AgentProfile:
     handoff_options: Mapping[str, RealtimeHandoff] = field(default_factory=dict)
     decision_handoffs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     native_provider_id: str | None = None
-    opening_tools: tuple[Tool[Any], ...] = ()
+    opening_tools: tuple[_tool_types.Tool[Any], ...] = ()
 
 
 def _handoff_name(agent: Agent[Any, Any]) -> str:
@@ -47,7 +47,11 @@ def _check_handoff_tool_names(refs: Iterable[ToolRef], handoffs: Mapping[str, st
 
 
 def _python_tool_slot(tool: object) -> FunctionTool[Any, Any, Any] | None:
-    if isinstance(tool, HostedMCP):
+    if type(tool) is FunctionTool:
+        return tool
+    from ._tool_catalog import ToolSearch
+
+    if type(tool) is not FunctionTool and isinstance(tool, _tool_types.HostedMCP):
         return cast(FunctionTool[Any, Any, Any], tool._binding)
     if isinstance(tool, ToolSearch) and tool._manual is not None:
         return tool._manual
@@ -55,8 +59,8 @@ def _python_tool_slot(tool: object) -> FunctionTool[Any, Any, Any] | None:
 
 
 def _resolve_tool_name_collisions(
-    tools: Sequence[Tool[Any]], handoff_names: Sequence[str]
-) -> tuple[tuple[Tool[Any], ...], tuple[int, ...]]:
+    tools: Sequence[_tool_types.Tool[Any]], handoff_names: Sequence[str]
+) -> tuple[tuple[_tool_types.Tool[Any], ...], tuple[int, ...]]:
     """Apply the opt-in winner policy only to eager application functions and handoffs."""
     function_indices: dict[str, list[int]] = {}
     handoff_indices: dict[str, list[int]] = {}
@@ -111,9 +115,18 @@ def _capture_agent_graph(
     agents = [root]
     opening = root if root_declaration is None else root_declaration
     root_output = _prepare_spec(opening.output_type)
-    root_roles = tuple(tool for tool in opening.tools if isinstance(tool, NativeAgents))
+    root_roles = tuple(
+        tool
+        for tool in opening.tools
+        if (type(tool) is not FunctionTool and isinstance(tool, _tool_types.NativeAgents))
+    )
     runtime_tools = tuple(
-        tool for tool in opening.tools if not isinstance(tool, (FunctionTool, _MCP, HostedMCP))
+        tool
+        for tool in opening.tools
+        if not (
+            type(tool) is FunctionTool
+            or isinstance(tool, (FunctionTool, _tool_types._MCP, _tool_types.HostedMCP))
+        )
     )
     indices = {id(root): 0}
     resolved: dict[int, tuple[Callable[[], Agent[Any, Any]], Agent[Any, Any]]] = {}
@@ -136,6 +149,9 @@ def _capture_agent_graph(
     def name_for(
         reference: Agent[Any, Any] | Handoff[Any, Any] | DecisionHandoff | RealtimeHandoff,
     ) -> str:
+        from .decision_handoff import DecisionHandoff
+        from .realtime_agents import RealtimeHandoff
+
         if isinstance(reference, DecisionHandoff):
             return reference.name
         if isinstance(reference, Handoff):
@@ -235,14 +251,21 @@ def _capture_agent_graph(
             root_output.strict,
         ):
             raise ValueError("Realtime handoff profiles must share output mode and prompted schema")
-        roles = tuple(tool for tool in declaration.tools if isinstance(tool, NativeAgents))
+        roles = tuple(
+            tool
+            for tool in declaration.tools
+            if (type(tool) is not FunctionTool and isinstance(tool, _tool_types.NativeAgents))
+        )
         if roles != root_roles:
             raise ValueError("Handoff profiles must share native child-role configuration")
         if (
             tuple(
                 tool
                 for tool in declaration.tools
-                if not isinstance(tool, (FunctionTool, _MCP, HostedMCP))
+                if not (
+                    type(tool) is FunctionTool
+                    or isinstance(tool, (FunctionTool, _tool_types._MCP, _tool_types.HostedMCP))
+                )
             )
             != runtime_tools
         ):
@@ -254,6 +277,9 @@ def _capture_agent_graph(
         decision_handoffs: dict[str, Mapping[str, Any]] = {}
         python_slots = sum(_python_tool_slot(tool) is not None for tool in declaration.tools)
         for reference in declaration.handoffs:
+            from .decision_handoff import DecisionHandoff, _decision_handoff_tool
+            from .realtime_agents import RealtimeHandoff, _handoff_tool
+
             if isinstance(reference, DecisionHandoff):
                 if opening.realtime is not None or declaration.realtime is not None:
                     raise ValueError("DecisionHandoff does not support Realtime")

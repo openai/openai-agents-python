@@ -2319,6 +2319,7 @@ async def test_child_question_context_failure_discards_only_expired_grant(
     monkeypatch: pytest.MonkeyPatch, pending: bool, unsupported: bool
 ) -> None:
     import _agents_codex.session as sessions
+    from _agents_codex import tools as runtime_tools
 
     loop = asyncio.get_running_loop()
     state = SimpleNamespace(
@@ -2342,7 +2343,7 @@ async def test_child_question_context_failure_discards_only_expired_grant(
         assert question_id == "exact-original-grant"
         return pending
 
-    monkeypatch.setattr(sessions, "_question", capture)
+    monkeypatch.setattr(runtime_tools, "_question", capture)
     issuer = SimpleNamespace(
         _closing=False,
         _fail_unhandled_questions=False,

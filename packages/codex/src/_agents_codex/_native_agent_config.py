@@ -7,11 +7,13 @@ from pathlib import Path as Path
 from tempfile import TemporaryDirectory as TemporaryDirectory
 from typing import Any as Any
 
-from .native_agents import NativeAgents as NativeAgents
+from . import tools as _tool_types
 
 
 def _configure_child_roles(
-    config: dict[str, Any], home: TemporaryDirectory[str], native_agents: NativeAgents[Any]
+    config: dict[str, Any],
+    home: TemporaryDirectory[str],
+    native_agents: _tool_types.NativeAgents[Any],
 ) -> None:
     for role in native_agents.additional_roles:
         role_path = Path(home.name) / ("role-" + role.name + ".toml")

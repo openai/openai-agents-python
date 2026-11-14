@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect as inspect
 import json as json
+import sys
 from collections.abc import (
     Awaitable as Awaitable,
     Callable as Callable,
@@ -13,7 +14,7 @@ from collections.abc import (
 from copy import deepcopy as deepcopy
 from dataclasses import dataclass as dataclass, field as field
 from types import MappingProxyType
-from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Literal as Literal, cast
+from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Literal as Literal, TypeVar, cast
 
 from pydantic import (
     BaseModel as BaseModel,
@@ -22,438 +23,148 @@ from pydantic import (
     TypeAdapter as TypeAdapter,
     create_model as create_model,
 )
-from typing_extensions import NotRequired, Required, TypedDict
 
-from ._events import FunctionCallResponse as FunctionCallResponse
 from ._media import ImageDetail as ImageDetail, _capture_file, _capture_image, _capture_tool_part
 from ._public import preserve_module_identity as _preserve_module_identity
-from .manual import _CapturedManual as _CapturedManual
+from ._tool_response_types import FunctionCallResponse as FunctionCallResponse
 from .realtime_result import BackgroundResult as BackgroundResult
+
+InputT = TypeVar("InputT", bound=BaseModel)
+ResultT = TypeVar("ResultT")
+
+
+class _DefaultApprovalReason(str):
+    """Preserve omission while retaining the existing string default."""
+
+
+_DEFAULT_APPROVAL_REASON = _DefaultApprovalReason("Tool execution was rejected")
+
+_preserve_module_identity(
+    {
+        "__name__": __name__,
+        "InputT": InputT,
+        "ResultT": ResultT,
+        "_DefaultApprovalReason": _DefaultApprovalReason,
+        "_DEFAULT_APPROVAL_REASON": _DEFAULT_APPROVAL_REASON,
+    },
+    "agents.manual",
+)
 
 if TYPE_CHECKING:
     from ._agent_tool import _ConfiguredAgentTool
     from ._function_tools import (
         FunctionTool,
-        Tool,
         ToolContext,
         ToolInputErrorContext,
         ToolTimeoutBehavior,
         ToolTimeoutError,
     )
+    from ._tool_catalog import (
+        _HOSTED_TOOLS as _HOSTED_TOOLS,
+        Checklist as Checklist,
+        CodeInterpreter as CodeInterpreter,
+        CodeInterpreterAutoContainer as CodeInterpreterAutoContainer,
+        ContainerDomainSecret as ContainerDomainSecret,
+        ContainerNetworkAllowlist as ContainerNetworkAllowlist,
+        ContainerNetworkDisabled as ContainerNetworkDisabled,
+        FileSearch as FileSearch,
+        FileSearchComparisonFilter as FileSearchComparisonFilter,
+        FileSearchCompoundFilter as FileSearchCompoundFilter,
+        FileSearchHybridRanking as FileSearchHybridRanking,
+        FileSearchRanking as FileSearchRanking,
+        HostedProgrammaticToolCalling as HostedProgrammaticToolCalling,
+        HostedShell as HostedShell,
+        HostedShellAutoEnvironment as HostedShellAutoEnvironment,
+        HostedShellReferenceEnvironment as HostedShellReferenceEnvironment,
+        ImageGeneration as ImageGeneration,
+        ImageGenerationMask as ImageGenerationMask,
+        ImageGenerationSvg as ImageGenerationSvg,
+        ImageGenerationSvgReasoning as ImageGenerationSvgReasoning,
+        NativeGoals as NativeGoals,
+        Tool as Tool,
+        ToolSearch as ToolSearch,
+        ToolSearchResult as ToolSearchResult,
+        WebSearch as WebSearch,
+        WebSearchImageSettings as WebSearchImageSettings,
+        WebSearchLocation as WebSearchLocation,
+        _hosted_tool_name as _hosted_tool_name,
+        _hosted_tool_spec as _hosted_tool_spec,
+    )
     from .agent import ContextT
-    from .executor import Environment
-    from .manual import ActionRequested
-    from .native_agents import NativeAgents
+    from .executor import Environment as Environment
+    from .hosted_mcp import HostedMCP as HostedMCP
+    from .manual import (
+        _FORM_MODES as _FORM_MODES,
+        _URL_ACCEPT as _URL_ACCEPT,
+        ActionReply as ActionReply,
+        ActionRequested as ActionRequested,
+        ApprovalDecision as ApprovalDecision,
+        ApprovalRequest as ApprovalRequest,
+        ApprovalRequested as ApprovalRequested,
+        ElicitationRequest as ElicitationRequest,
+        FormRequest as FormRequest,
+        Interaction as Interaction,
+        UrlRequest as UrlRequest,
+        VerificationRequest as VerificationRequest,
+        _CapturedApproval as _CapturedApproval,
+        _CapturedManual as _CapturedManual,
+        _InteractionHandler as _InteractionHandler,
+        _is_json_value as _is_json_value,
+        _NativeQuestion as _NativeQuestion,
+        _PreparedManualResult as _PreparedManualResult,
+        _publish_question as _publish_question,
+        _question as _question,
+    )
+    from .mcp import (
+        _MCP as _MCP,
+        ChatGPTAppsMCP as ChatGPTAppsMCP,
+        HostedVerificationMCP as HostedVerificationMCP,
+        HttpMCP as HttpMCP,
+        MCPDiscoveryContext as MCPDiscoveryContext,
+        MCPGetPromptResult as MCPGetPromptResult,
+        MCPListResourcesResult as MCPListResourcesResult,
+        MCPListResourceTemplatesResult as MCPListResourceTemplatesResult,
+        MCPMetadataContext as MCPMetadataContext,
+        MCPPrompt as MCPPrompt,
+        MCPReadResourceResult as MCPReadResourceResult,
+        MCPResultContext as MCPResultContext,
+        MCPToolDefinition as MCPToolDefinition,
+        StdioMCP as StdioMCP,
+        _ready as _ready,
+        _result_policies as _result_policies,
+        _transform_and_extract_result as _transform_and_extract_result,
+    )
+    from .native_agents import (
+        _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
+        ChildInvocation as ChildInvocation,
+        ChildStepContext as ChildStepContext,
+        NativeAgents as NativeAgents,
+        NativeRoleToolInvocation as NativeRoleToolInvocation,
+        NativeRoleToolResult as NativeRoleToolResult,
+        NativeRoleToolStreamEvent as NativeRoleToolStreamEvent,
+    )
     from .native_interception import Allow, Deny, ReplaceArguments
+    from .subagents import Subagent as Subagent
 
 _TOOL_RESPONSE = TypeAdapter(FunctionCallResponse)
 
 
-@dataclass(frozen=True)
-class Checklist:
-    """Enable Core's update_plan for this Session at open.
-
-    Put Checklist() in Agent.tools. Operation and step selections may retain
-    that same declaration or its ToolRef, or omit it to disable update_plan.
-    Session.checklist() reads the native list, including on read-only restore
-    without this declaration. Saved list data grants no tool access.
-    """
-
-
-class WebSearchLocation(TypedDict, total=False, closed=True):
-    """Approximate user location for hosted web search."""
-
-    country: str
-    region: str
-    city: str
-    timezone: str
-
-
-class WebSearchImageSettings(TypedDict, total=False, closed=True):
-    """Provider-hosted image result count and caption controls."""
-
-    max_results: int
-    caption: bool
-
-
-@dataclass(frozen=True, kw_only=True)
-class WebSearch:
-    """Allow the native web search tool for this Session.
-
-    Put WebSearch() in Agent.tools. Omission disables both
-    native search and provider-hosted search. Cached uses indexed content; live
-    permits native Core to request external web access. The route selects the
-    corresponding native provider protocol, which the current provider must
-    support. It grants no other tools. An operation/step cannot add or change
-    its binding. A selection may omit it to disable search for that step.
-
-    ``search_context_size`` has been selecting the low, medium, or high context
-    budget on either route. An omitted value has been retaining the route's default.
-
-    Domain filters and approximate location require ``route="hosted"``,
-    a Responses provider with the ``web_search`` tool, and a model that
-    supports that route, such as ``gpt-5.5``. Supply domains without a URL
-    scheme. Use a two-letter country code and an IANA timezone such as
-    ``America/Chicago`` when setting those location fields. The Session
-    captures the controls when it opens. The provider applies them.
-    ``search_content_types`` and ``image_settings`` have been selecting hosted
-    image results. Image selection has been requesting raw search results.
-    Session items and detailed completed-item observations have been preserving
-    those results, including provider fields unknown to this SDK. Detailed readers
-    have been using ``include_execution_details=True``. Default observations have
-    been retaining search metadata without raw result payloads.
-    """
-
-    mode: Literal["cached", "live"] = "cached"
-    route: Literal["standalone", "hosted"] = "standalone"
-    search_context_size: Literal["low", "medium", "high"] | None = None
-    allowed_domains: Sequence[str] | None = None
-    blocked_domains: Sequence[str] | None = None
-    location: WebSearchLocation | None = None
-    search_content_types: Sequence[Literal["text", "image"]] | None = None
-    image_settings: WebSearchImageSettings | None = None
-
-
 def _capture_web_search_config(search: WebSearch | None) -> dict[str, Any]:
-    config: dict[str, Any] = {}
-    if search is not None:
-        if search.search_context_size is not None:
-            config["tools.web_search.context_size"] = search.search_context_size
-        if search.allowed_domains is not None:
-            config["tools.web_search.allowed_domains"] = list(search.allowed_domains)
-        if search.blocked_domains is not None:
-            config["tools.web_search.blocked_domains"] = list(search.blocked_domains)
-        if search.location is not None:
-            config["tools.web_search.location"] = dict(search.location)
-        if search.search_content_types is not None:
-            config["tools.web_search.search_content_types"] = list(search.search_content_types)
-        if search.image_settings is not None:
-            image_settings = search.image_settings.copy()
-            # Native configuration uses signed 64-bit TOML integers.
-            max_results = image_settings.get("max_results")
-            if max_results is not None and (
-                isinstance(max_results, bool)
-                or not isinstance(max_results, int)
-                or not 0 <= max_results < 2**63
-            ):
-                raise ValueError(
-                    "WebSearch image max_results must be a non-negative integer below 2**63"
-                )
-            config["tools.web_search.image_settings"] = dict(image_settings)
-    return config
-
-
-@dataclass(frozen=True)
-class NativeGoals:
-    """Allow Core's create_goal, get_goal and update_goal in LocalStorage.
-
-    This is an opening capability in Agent.tools. The destination must
-    declare it again on local reopen. Operation and step selections may omit
-    it to disable goal tools. Without LocalStorage, opening fails.
-    This does not enable Checklist or save an application callback.
-    """
-
-
-class FileSearchComparisonFilter(TypedDict):
-    key: str
-    type: Literal["eq", "ne", "gt", "gte", "lt", "lte", "in", "nin"]
-    value: str | int | float | bool | list[str] | list[int | float]
-
-
-class FileSearchCompoundFilter(TypedDict):
-    type: Literal["and", "or"]
-    filters: list[FileSearchComparisonFilter | FileSearchCompoundFilter]
-
-
-class FileSearchHybridRanking(TypedDict):
-    embedding_weight: float
-    text_weight: float
-
-
-class FileSearchRanking(TypedDict, total=False):
-    ranker: Literal["auto", "default-2024-11-15"]
-    score_threshold: float
-    hybrid_search: FileSearchHybridRanking
-
-
-class ContainerDomainSecret(TypedDict):
-    domain: str
-    name: str
-    value: str
-
-
-class ContainerNetworkDisabled(TypedDict):
-    type: Literal["disabled"]
-
-
-class ContainerNetworkAllowlist(TypedDict):
-    type: Literal["allowlist"]
-    allowed_domains: list[str]
-    domain_secrets: NotRequired[list[ContainerDomainSecret]]
-
-
-class CodeInterpreterAutoContainer(TypedDict, total=False):
-    type: Required[Literal["auto"]]
-    file_ids: Sequence[str]
-    memory_limit: Literal["1g", "4g", "16g", "64g"] | None
-    network_policy: ContainerNetworkDisabled | ContainerNetworkAllowlist
-
-
-class ImageGenerationMask(TypedDict, total=False):
-    file_id: str
-    image_url: str
-
-
-class ImageGenerationSvgReasoning(TypedDict, total=False):
-    effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-
-
-class ImageGenerationSvg(TypedDict, total=False):
-    model: str
-    reasoning: ImageGenerationSvgReasoning | None
-
-
-@dataclass(frozen=True, kw_only=True)
-class FileSearch:
-    """Search provider-hosted vector stores from the native Responses loop.
-
-    The provider owns retrieval and validates filters, ranking and result limits.
-    Set include_search_results to retain raw retrieval results in session items.
-    The Session captures configuration when it opens; later selections can only
-    retain or omit this capability.
-    """
-
-    vector_store_ids: Sequence[str]
-    max_num_results: int | None = None
-    include_search_results: bool = False
-    ranking_options: FileSearchRanking | None = None
-    filters: FileSearchComparisonFilter | FileSearchCompoundFilter | None = None
-    provider_data: dict[str, Any] | None = None
-    """Additional provider fields; declared fields and tool identity cannot be replaced."""
-
-    def __post_init__(self) -> None:
-        value = self.max_num_results
-        if type(value) is int and value == 0:
-            object.__setattr__(self, "max_num_results", None)
-
-
-@dataclass(frozen=True, kw_only=True)
-class CodeInterpreter:
-    """Run provider-owned Python code, without granting local execution.
-
-    Pass an existing container ID or an auto-container configuration. OpenAI
-    owns auto-container creation, reuse and expiry. Closing or cancelling an
-    SDK Session does not delete a provider container or its files. The caller
-    manages existing containers and downloads artifacts through the provider API.
-    """
-
-    container: str | CodeInterpreterAutoContainer
-    allowed_callers: Sequence[Literal["direct", "programmatic"]] | None = None
-    """Caller modes the provider permits; None retains the provider default."""
-    include_outputs: bool = True
-    """Whether to request raw provider code outputs in accepted history."""
-    provider_data: dict[str, Any] | None = None
-    """Additional provider fields; declared fields and tool identity cannot be replaced."""
-
-
-class HostedShellAutoEnvironment(TypedDict, total=False):
-    type: Required[Literal["container_auto"]]
-    file_ids: Sequence[str]
-    memory_limit: Literal["1g", "4g", "16g", "64g"] | None
-    network_policy: ContainerNetworkDisabled | ContainerNetworkAllowlist
-    skills: Sequence[dict[str, Any]]
-
-
-class HostedShellReferenceEnvironment(TypedDict):
-    type: Literal["container_reference"]
-    container_id: str
-
-
-@dataclass(frozen=True, kw_only=True)
-class HostedShell:
-    """Provider containers have been running shell commands through Responses.
-
-    container_auto has been provisioning containers; container_reference has
-    been reusing them. The provider has been controlling lifetime and validating
-    resource, skill and network settings. Closing a Session has been leaving
-    the provider container and its files intact.
-    """
-
-    environment: HostedShellAutoEnvironment | HostedShellReferenceEnvironment
-    allowed_callers: Sequence[Literal["direct", "programmatic"]] | None = None
-    provider_data: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True, kw_only=True)
-class ImageGeneration:
-    """Generate or edit images with a provider-hosted Responses tool.
-
-    Options omitted here retain provider defaults. The provider validates
-    model-specific combinations. Supply edit images as inline input_image
-    content and an optional mask. Results contain provider image bytes, not a
-    local filename. Partial images are observations, not final results.
-    """
-
-    model: str | None = None
-    action: Literal["generate", "edit", "auto"] | None = None
-    quality: Literal["low", "medium", "high", "xhigh", "max", "auto"] | None = None
-    size: str | None = None
-    background: Literal["transparent", "opaque", "auto"] | None = None
-    output_format: Literal["png", "webp", "jpeg", "gif", "svg"] | None = None
-    output_compression: int | None = None
-    moderation: Literal["auto", "low"] | None = None
-    input_fidelity: Literal["high", "low"] | None = None
-    input_image_mask: ImageGenerationMask | None = None
-    partial_images: int | None = None
-    complexity: Literal["low", "medium", "high"] | None = None
-    frame_count: int | None = None
-    frame_duration_ms: int | None = None
-    svg: ImageGenerationSvg | None = None
-    provider_data: dict[str, Any] | None = None
-    """Additional provider fields; declared fields and tool identity cannot be replaced."""
-
-
-@dataclass(frozen=True, kw_only=True)
-class ToolSearch:
-    """Configure Responses tool search for deferred tools in this Session.
-
-    Client execution issues a manual request. Use match() to identify requests
-    for this declaration, then respond with the admitted tools to return.
-    """
-
-    execution: Literal["server", "client"] | None = None
-    description: str | None = None
-    parameters: object | None = None
-    provider_data: dict[str, Any] | None = None
-    _manual: FunctionTool[Any, ToolSearchResult, Any] | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
-
-    def __post_init__(self) -> None:
-        if self.execution not in (None, "server", "client"):
-            raise ValueError("ToolSearch execution must be server or client")
-        if self.execution == "client":
-            from ._function_tools import _ClientToolSearch
-
-            object.__setattr__(self, "_manual", _ClientToolSearch(self))
-
-    @property
-    def ref(self) -> ToolRef:
-        """Select this declaration by its native identity."""
-        return ToolRef("tool_search", None if self._manual is not None else "functions")
-
-    def match(self, event: object) -> ActionRequested[Any, ToolSearchResult] | None:
-        """Narrow a live client-search request for this exact declaration."""
-        return self._manual.match(event) if self._manual is not None else None
-
-    def _provider_spec(self) -> dict[str, Any]:
-        return _hosted_tool_spec(
-            "tool_search",
-            {
-                "execution": self.execution,
-                "description": self.description,
-                "parameters": self.parameters,
-            },
-            self.provider_data,
-        )
-
-
-@dataclass(frozen=True, kw_only=True)
-class HostedProgrammaticToolCalling:
-    """Declare provider-side programmatic tool calling for Responses.
-
-    Use with a provider tool that permits programmatic callers or with tool
-    search. The Responses provider owns execution of the program.
-    """
-
-
-_HOSTED_TOOLS = (
-    FileSearch,
-    CodeInterpreter,
-    HostedShell,
-    ImageGeneration,
-    ToolSearch,
-    HostedProgrammaticToolCalling,
-)
-
-
-def _hosted_tool_name(
-    tool: FileSearch
-    | CodeInterpreter
-    | HostedShell
-    | ImageGeneration
-    | ToolSearch
-    | HostedProgrammaticToolCalling,
-) -> str:
-    if isinstance(tool, FileSearch):
-        return "file_search"
-    if isinstance(tool, CodeInterpreter):
-        return "code_interpreter"
-    if isinstance(tool, HostedShell):
-        return "shell"
-    if isinstance(tool, ToolSearch):
-        return "tool_search"
-    if isinstance(tool, HostedProgrammaticToolCalling):
-        return "programmatic_tool_calling"
-    return "image_generation"
-
-
-def _hosted_tool_spec(
-    name: str, fields: dict[str, Any], provider_data: dict[str, Any] | None
-) -> dict[str, Any]:
-    if provider_data is None:
-        provider_data = {}
-    if not isinstance(provider_data, dict):
-        raise TypeError("Hosted tool provider_data must be an object")
-    if set(provider_data) & ({"type", "provider_data"} | fields.keys()):
-        raise ValueError("Hosted tool provider_data cannot replace declared fields")
-    return {
-        **provider_data,
-        "type": name,
-        **{key: value for key, value in fields.items() if value is not None},
-    }
+    if search is None:
+        return {}
+    from ._tool_catalog import _capture_web_search_config as capture
+
+    return capture(search)
 
 
 def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
-    from dataclasses import asdict
+    from ._function_tools import FunctionTool
 
-    # Capture nested mutable configuration before opening can await.
-    specs: list[dict[str, Any]] = []
-    hosted_servers: dict[str, dict[str, Any]] = {}
-    from .hosted_mcp import HostedMCP, _live_config
+    if all(type(tool) is FunctionTool for tool in tools):
+        return []
+    from ._tool_catalog import _capture_hosted_tools as capture
 
-    for tool in tools:
-        if isinstance(tool, HostedMCP):
-            config = _live_config(tool)
-            label = config["server_label"]
-            previous = hosted_servers.get(label)
-            if previous is not None:
-                if previous != config:
-                    raise ValueError(
-                        "Hosted MCP profiles must share configuration for the same server label"
-                    )
-                continue
-            hosted_servers[label] = config
-            specs.append(config)
-            continue
-        if not isinstance(tool, _HOSTED_TOOLS):
-            continue
-        if isinstance(tool, ToolSearch):
-            if tool.execution != "client":
-                specs.append(tool._provider_spec())
-            continue
-        if isinstance(tool, HostedProgrammaticToolCalling):
-            specs.append(
-                {
-                    "type": "provider_only",
-                    "definition": {"type": "programmatic_tool_calling"},
-                }
-            )
-            continue
-        fields = asdict(tool)
-        provider_data = fields.pop("provider_data")
-        specs.append(_hosted_tool_spec(_hosted_tool_name(tool), fields, provider_data))
-    return cast(list[dict[str, Any]], json.loads(json.dumps(specs, allow_nan=False)))
+    return capture(tools)
 
 
 @dataclass(frozen=True)
@@ -462,21 +173,6 @@ class ToolRef:
 
     name: str
     namespace: str | None = None
-
-
-@dataclass(frozen=True, kw_only=True)
-class ToolSearchResult:
-    """Ordered references to tools admitted for a native client-search request."""
-
-    tool_refs: tuple[ToolRef, ...] = ()
-
-    def __post_init__(self) -> None:
-        refs = tuple(self.tool_refs)
-        if any(not isinstance(ref, ToolRef) for ref in refs):
-            raise TypeError("ToolSearchResult requires ToolRef values")
-        if len({(ref.namespace or "functions", ref.name) for ref in refs}) != len(refs):
-            raise ValueError("ToolSearchResult requires distinct tool references")
-        object.__setattr__(self, "tool_refs", refs)
 
 
 ToolCaller = Literal["direct", "code", "programmatic"]
@@ -831,25 +527,41 @@ class _ToolCatalog:
     tools: tuple[_CapturedFunction | _CapturedManual, ...]
 
     def manual_slots(self) -> list[int]:
-        return [slot for slot, tool in enumerate(self.tools) if isinstance(tool, _CapturedManual)]
-
-    def finish_slots(self) -> list[int]:
-        return [
-            slot
-            for slot, tool in enumerate(self.tools)
-            if (
-                tool.declaration.finish_turn
-                if isinstance(tool, _CapturedManual)
-                else tool.finish_turn
-            )
-        ]
-
-    def input_error_slots(self, *, run_formatter: bool = False) -> list[int]:
-        from ._function_tools import _CapturedApproval
-
         slots = []
         for slot, tool in enumerate(self.tools):
-            function = tool.function if isinstance(tool, _CapturedApproval) else tool
+            if type(tool) is _CapturedFunction:
+                continue
+            from .manual import _CapturedManual
+
+            if isinstance(tool, _CapturedManual):
+                slots.append(slot)
+        return slots
+
+    def finish_slots(self) -> list[int]:
+        slots = []
+        for slot, tool in enumerate(self.tools):
+            if type(tool) is _CapturedFunction:
+                finish_turn = tool.finish_turn
+            else:
+                from .manual import _CapturedManual
+
+                finish_turn = (
+                    tool.declaration.finish_turn
+                    if isinstance(tool, _CapturedManual)
+                    else tool.finish_turn
+                )
+            if finish_turn:
+                slots.append(slot)
+        return slots
+
+    def input_error_slots(self, *, run_formatter: bool = False) -> list[int]:
+        slots = []
+        for slot, tool in enumerate(self.tools):
+            function = tool
+            if type(tool) is not _CapturedFunction:
+                from .manual import _CapturedApproval
+
+                function = tool.function if isinstance(tool, _CapturedApproval) else tool
             if isinstance(function, _CapturedFunction) and (
                 function.input_error_function is not None
                 or (run_formatter and function._allow_run_error_formatter)
@@ -858,12 +570,14 @@ class _ToolCatalog:
         return slots
 
     def native_specs(self) -> str:
-        from ._function_tools import _CapturedApproval
-
         specs = []
         for tool in self.tools:
             spec = json.loads(tool.spec_json)
-            function = tool.function if isinstance(tool, _CapturedApproval) else tool
+            function = tool
+            if type(tool) is not _CapturedFunction:
+                from .manual import _CapturedApproval
+
+                function = tool.function if isinstance(tool, _CapturedApproval) else tool
             if isinstance(function, _CapturedFunction) and function.configured_agent is not None:
                 spec["configuredAgentRole"] = function.configured_agent.agent.name or function.name
             specs.append(spec)
@@ -1076,3 +790,139 @@ def _function_parameters(
 
 
 _preserve_module_identity(globals(), "agents.tools")
+
+
+_CATALOG_EXPORTS = (
+    "Checklist",
+    "WebSearchLocation",
+    "WebSearchImageSettings",
+    "WebSearch",
+    "_capture_web_search_config",
+    "NativeGoals",
+    "FileSearchComparisonFilter",
+    "FileSearchCompoundFilter",
+    "FileSearchHybridRanking",
+    "FileSearchRanking",
+    "ContainerDomainSecret",
+    "ContainerNetworkDisabled",
+    "ContainerNetworkAllowlist",
+    "CodeInterpreterAutoContainer",
+    "ImageGenerationMask",
+    "ImageGenerationSvgReasoning",
+    "ImageGenerationSvg",
+    "FileSearch",
+    "CodeInterpreter",
+    "HostedShellAutoEnvironment",
+    "HostedShellReferenceEnvironment",
+    "HostedShell",
+    "ImageGeneration",
+    "ToolSearch",
+    "HostedProgrammaticToolCalling",
+    "_hosted_tool_name",
+    "_hosted_tool_spec",
+    "_capture_hosted_tools",
+    "_HOSTED_TOOLS",
+    "ToolSearchResult",
+    "Tool",
+)
+
+
+def __getattr__(name: str) -> Any:
+    from importlib import import_module
+
+    if name in _CATALOG_EXPORTS:
+        module = "_tool_catalog"
+    else:
+        optional_module = _OPTIONAL_OWNERS.get(name)
+        if optional_module is None:
+            raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+        module = optional_module
+    implementation = import_module("." + module, __package__)
+    names = (
+        _CATALOG_EXPORTS
+        if module == "_tool_catalog"
+        else tuple(key for key, owner in _OPTIONAL_OWNERS.items() if owner == module)
+    )
+    values = {key: getattr(implementation, key) for key in names}
+    globals().update(values)
+    if module == "_tool_catalog":
+        # Public dataclass hints resolve bare sibling names in the facade.
+        facade = sys.modules.get("agents.tools")
+        if facade is not None:
+            vars(facade).update(
+                (key, value) for key, value in values.items() if key in facade.__all__
+            )
+    return values[name]
+
+
+def _tool_names(servers: Any) -> list[dict[str, str]]:
+    if not servers:
+        return []
+    from .mcp import _tool_names as names
+
+    return names(servers)
+
+
+def _native_agent_options(declaration: Any) -> dict[str, Any]:
+    if declaration is None:
+        return {}
+    from .native_agents import _native_agent_options as options
+
+    return options(declaration)
+
+
+_OPTIONAL_OWNERS = {
+    "Environment": "executor",
+    "Subagent": "subagents",
+    "_MCP": "mcp",
+    "ChatGPTAppsMCP": "mcp",
+    "HostedVerificationMCP": "mcp",
+    "HttpMCP": "mcp",
+    "MCPDiscoveryContext": "mcp",
+    "MCPGetPromptResult": "mcp",
+    "MCPListResourcesResult": "mcp",
+    "MCPListResourceTemplatesResult": "mcp",
+    "MCPMetadataContext": "mcp",
+    "MCPPrompt": "mcp",
+    "MCPReadResourceResult": "mcp",
+    "MCPResultContext": "mcp",
+    "MCPToolDefinition": "mcp",
+    "StdioMCP": "mcp",
+    "_ready": "mcp",
+    "_result_policies": "mcp",
+    "_tool_names": "mcp",
+    "_transform_and_extract_result": "mcp",
+    "_COLLABORATION_TOOLS": "native_agents",
+    "ChildInvocation": "native_agents",
+    "ChildStepContext": "native_agents",
+    "NativeAgents": "native_agents",
+    "NativeRoleToolInvocation": "native_agents",
+    "NativeRoleToolResult": "native_agents",
+    "_native_agent_options": "native_agents",
+    "HostedMCP": "hosted_mcp",
+    "NativeRoleToolStreamEvent": "native_agents",
+    "_FORM_MODES": "manual",
+    "_URL_ACCEPT": "manual",
+    "ActionReply": "manual",
+    "ActionRequested": "manual",
+    "ApprovalDecision": "manual",
+    "ApprovalRequest": "manual",
+    "ApprovalRequested": "manual",
+    "ElicitationRequest": "manual",
+    "FormRequest": "manual",
+    "Interaction": "manual",
+    "UrlRequest": "manual",
+    "VerificationRequest": "manual",
+    "_CapturedApproval": "manual",
+    "_CapturedManual": "manual",
+    "_is_json_value": "manual",
+    "_NativeQuestion": "manual",
+    "_PreparedManualResult": "manual",
+    "_publish_question": "manual",
+    "_question": "manual",
+    "_InteractionHandler": "manual",
+}
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_CATALOG_EXPORTS) | set(_OPTIONAL_OWNERS))

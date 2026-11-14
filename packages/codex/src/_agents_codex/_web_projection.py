@@ -1,12 +1,18 @@
 """Project core and extension web search items into the public contract."""
 
-from typing import Any as Any
+from typing import TYPE_CHECKING as _TYPE_CHECKING, Any as Any
 
-from ._events import WebSearchAction as WebSearchAction, WebSearchActionSearch
+from . import _tool_response_types as _wire_types
+
+if _TYPE_CHECKING:
+    from ._events import (
+        WebSearchAction as WebSearchAction,
+        WebSearchActionSearch as WebSearchActionSearch,
+    )
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
-def _action(native: dict[str, Any]) -> WebSearchAction | None:
+def _action(native: dict[str, Any]) -> "_wire_types._events.WebSearchAction | None":
     action = native.get("action")
     if action is None:
         query = native.get("query")
@@ -15,7 +21,7 @@ def _action(native: dict[str, Any]) -> WebSearchAction | None:
         )
     match action.get("type"):
         case "search":
-            search: WebSearchActionSearch = {
+            search: _wire_types._events.WebSearchActionSearch = {
                 "type": "search",
                 "query": action.get("query"),
                 "queries": action.get("queries"),
@@ -56,3 +62,9 @@ def project_web_search_item(
 
 
 _preserve_module_identity(globals(), "agents._web_projection")
+
+
+def __getattr__(name: str):
+    if name not in ("WebSearchAction", "WebSearchActionSearch"):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(_wire_types._events, name)
