@@ -10,7 +10,11 @@ from uuid import uuid4
 
 from _agents_shared.apply_diff import ApplyDiffMode, apply_diff
 from _agents_shared.patch_format import PatchFormat
-from agents.classic.editor import ApplyPatchOperation, ApplyPatchResult
+from agents.classic.editor import (
+    ApplyPatchOperation,
+    ApplyPatchOperationType,
+    ApplyPatchResult,
+)
 from agents.classic.sandbox.errors import (
     ApplyPatchDecodeError,
     ApplyPatchDiffError,
@@ -139,6 +143,22 @@ class WorkspaceEditor:
             message=f"Unknown operation type: {operation.type}",
             path=operation.path,
         )
+
+    async def _apply_scoped_operation(
+        self,
+        *,
+        type: ApplyPatchOperationType,
+        path: str,
+        diff: str | None,
+        move_to: str | None,
+        patch_format: PatchFormat,
+    ) -> ApplyPatchResult:
+        requested = ApplyPatchOperation(type=type, path=path, diff=diff, move_to=move_to)
+        normalized = self.normalize_operation(requested)
+        self._session.normalize_path(normalized.path, for_write=True)
+        if normalized.move_to is not None:
+            self._session.normalize_path(normalized.move_to, for_write=True)
+        return await self.apply_operation(requested, patch_format=patch_format)
 
     def normalize_operation(self, operation: ApplyPatchOperation) -> ApplyPatchOperation:
         """Return an operation whose paths use the workspace policy's canonical form."""
