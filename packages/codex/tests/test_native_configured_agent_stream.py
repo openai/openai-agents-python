@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
 
 import pytest
 
@@ -146,9 +151,69 @@ async def test_configured_child_stream_overflow_joins_the_active_callback():
             assert len(parent_model.requests) == 1
 
 
+def _dump_await_locations(
+    trace_path: str, phase: str, owner: asyncio.Task[object] | None
+) -> None:
+    # Emit code locations only; never format tasks, awaitables, locals, or values.
+    lines = [f"restored-handoff await locations: {phase}"]
+    tasks = ([owner] if owner is not None else []) + [
+        task for task in asyncio.all_tasks() if task is not owner
+    ]
+    for index, task in enumerate(tasks):
+        if index == 64:
+            lines.append("task limit reached")
+            break
+        lines.append("task")
+        pending = task.get_coro()
+        for _ in range(32):
+            if inspect.iscoroutine(pending):
+                frame, pending = pending.cr_frame, pending.cr_await
+            elif inspect.isgenerator(pending):
+                frame, pending = pending.gi_frame, pending.gi_yieldfrom
+            elif inspect.isasyncgen(pending):
+                frame, pending = pending.ag_frame, pending.ag_await
+            else:
+                break
+            if frame is not None:
+                code = frame.f_code
+                lines.append(f"  {Path(code.co_filename).name}:{code.co_name}:{frame.f_lineno}")
+    # Each callback closes its file before the watchdog can terminate the worker.
+    sample = ("\n".join(lines) + "\n").encode("utf-8", errors="replace")
+    if len(sample) > 12000:
+        sample = sample[:11950].decode("utf-8", errors="ignore").encode("utf-8")
+        sample += b"\nawait diagnostic truncated\n"
+    with open(trace_path, "ab") as trace:
+        trace.write(sample)
+        trace.flush()
+
+
+@asynccontextmanager
+async def _await_diagnostics(parent_handoff: bool) -> AsyncIterator[None]:
+    trace_path = os.environ.get("HILLCLIMB_HANDOFF_TRACE")
+    if parent_handoff or not trace_path:
+        yield
+        return
+    loop = asyncio.get_running_loop()
+    owner = asyncio.current_task()
+    diagnostics = [
+        loop.call_later(15, _dump_await_locations, trace_path, "before timeout", owner),
+        loop.call_later(25, _dump_await_locations, trace_path, "after timeout", owner),
+    ]
+    try:
+        yield
+    finally:
+        for diagnostic in diagnostics:
+            diagnostic.cancel()
+
+
 @pytest.mark.parametrize("parent_handoff", [False, True])
 async def test_configured_child_stream_uses_the_restored_handoff_destination(parent_handoff):
-    async with timeout(20), peer() as parent_model, peer() as child_model:
+    async with (
+        _await_diagnostics(parent_handoff),
+        timeout(20),
+        peer() as parent_model,
+        peer() as child_model,
+    ):
         if parent_handoff:
             parent_model.respond(function_call("transfer_to_coordinator", {}, "parent-transfer"))
         parent_model.respond(function_call("specialist", {"input": "Work."}, "outer-call"))
