@@ -108,6 +108,22 @@ if TYPE_CHECKING:
         ShellCallOutputItem as ShellCallOutputItem,
         WebSearchCallItem as WebSearchCallItem,
     )
+
+    _ProjectedModelOutput = (
+        MessageItem
+        | ReasoningItem
+        | WebSearchCallItem
+        | McpListToolsItem
+        | HostedMcpCallItem
+        | ProgramCallItem
+        | ProgramOutputItem
+        | FileSearchCallItem
+        | CodeInterpreterCallItem
+        | ShellCallItem
+        | ShellCallOutputItem
+        | ImageGenerationCallItem
+    )
+
 from ._function_tools import (
     FunctionTool as FunctionTool,
     ToolContext as ToolContext,
@@ -1677,23 +1693,7 @@ def _project_progress(
                         session_id=buffer.session_id,
                         turn_id=turn_id,
                         submission_id=submission_id,
-                        item=cast(
-                            (
-                                "_wire_types._events.MessageItem | "
-                                "_wire_types._events.ReasoningItem | "
-                                "_wire_types._events.WebSearchCallItem | "
-                                "_wire_types._events.McpListToolsItem | "
-                                "_wire_types._events.HostedMcpCallItem | "
-                                "_wire_types._events.ProgramCallItem | "
-                                "_wire_types._events.ProgramOutputItem | "
-                                "_wire_types._events.FileSearchCallItem | "
-                                "_wire_types._events.CodeInterpreterCallItem | "
-                                "_wire_types._events.ShellCallItem | "
-                                "_wire_types._events.ShellCallOutputItem | "
-                                "_wire_types._events.ImageGenerationCallItem"
-                            ),
-                            item,
-                        ),
+                        item=cast("_ProjectedModelOutput", item),
                     )
                 )
 
@@ -2201,17 +2201,6 @@ def _split_tools(
     ceiling = bindings(ceiling) if ceiling is not None else None
     opening = ceiling if ceiling is not None else tools if available is None else available
     ordinary_opening = all(type(item) is FunctionTool for item in opening)
-    if not ordinary_opening:
-        from ._tool_catalog import (
-            _HOSTED_TOOLS,
-            Checklist,
-            NativeGoals,
-            ToolSearch,
-            WebSearch,
-            _ClientToolSearch,
-            _hosted_tool_name,
-        )
-
     admitted: dict[
         ToolRef, FunctionTool[Any, Any, Any] | _tool_types.HttpMCP[Any] | _tool_types.StdioMCP[Any]
     ] = {}
@@ -2236,7 +2225,9 @@ def _split_tools(
                     if isinstance(item, FunctionTool) and item.ref == declaration.ref
                 )
                 admitted[declaration.ref] = current
-            elif isinstance(declaration, ToolSearch) and declaration._manual is not None:
+            elif (
+                isinstance(declaration, _tool_types.ToolSearch) and declaration._manual is not None
+            ):
                 admitted[declaration.ref] = declaration._manual
             elif type(declaration) is not FunctionTool and isinstance(
                 declaration, (_tool_types.StdioMCP, _tool_types.HttpMCP)
@@ -2257,21 +2248,32 @@ def _split_tools(
                     mcp_pairs.add((declaration.name, raw))
     python_tools: list[FunctionTool[Any, Any, Any]] = []
     mcp_tools: dict[str, _tool_types._MCP[Any]] = {}
-    has_checklist = not ordinary_opening and any(isinstance(item, Checklist) for item in opening)
-    has_goals = not ordinary_opening and any(isinstance(item, NativeGoals) for item in opening)
+    has_checklist = not ordinary_opening and any(
+        isinstance(item, _tool_types.Checklist) for item in opening
+    )
+    has_goals = not ordinary_opening and any(
+        isinstance(item, _tool_types.NativeGoals) for item in opening
+    )
     has_native_agents = native_agents is not None or any(
         (type(item) is not FunctionTool and isinstance(item, _tool_types.NativeAgents))
         for item in opening
     )
-    if not ordinary_opening and sum(isinstance(item, WebSearch) for item in opening) > 1:
+    if (
+        not ordinary_opening
+        and sum(isinstance(item, _tool_types.WebSearch) for item in opening) > 1
+    ):
         raise ValueError("Declare WebSearch only once per Session")
     hosted_names = set()
     if not ordinary_opening:
-        for hosted_type in _HOSTED_TOOLS:
+        from ._tool_catalog import _ClientToolSearch
+
+        for hosted_type in _tool_types._HOSTED_TOOLS:
             if sum(isinstance(item, hosted_type) for item in opening) > 1:
                 raise ValueError(f"Declare {hosted_type.__name__} only once per Session")
         hosted_names = {
-            _hosted_tool_name(item) for item in opening if isinstance(item, _HOSTED_TOOLS)
+            _tool_types._hosted_tool_name(item)
+            for item in opening
+            if isinstance(item, _tool_types._HOSTED_TOOLS)
         }
     for item in tools:
         tool = item
@@ -2454,7 +2456,15 @@ def _split_tools(
             if native_agents is not None:
                 raise ValueError("A Session supports exactly one NativeAgents declaration")
             native_agents = tool
-        elif isinstance(tool, (Checklist, NativeGoals, WebSearch, *_HOSTED_TOOLS)):
+        elif isinstance(
+            tool,
+            (
+                _tool_types.Checklist,
+                _tool_types.NativeGoals,
+                _tool_types.WebSearch,
+                *_tool_types._HOSTED_TOOLS,
+            ),
+        ):
             if (
                 available is None
                 and isinstance(tool, _tool_types.WebSearch)
@@ -4697,6 +4707,47 @@ def _selected_opening_declaration(
     return None
 
 
+def _opening_checklist_and_goals(
+    tools: Sequence[_declaration_types.Tool[Any]],
+) -> tuple[bool, bool]:
+    return (
+        any(
+            type(tool) is not FunctionTool and isinstance(tool, _tool_types.Checklist)
+            for tool in tools
+        ),
+        any(
+            type(tool) is not FunctionTool and isinstance(tool, _tool_types.NativeGoals)
+            for tool in tools
+        ),
+    )
+
+
+def _opening_web_search(
+    tools: Sequence[_declaration_types.Tool[Any]],
+) -> _tool_types.WebSearch | None:
+    return next(
+        (
+            tool
+            for tool in tools
+            if type(tool) is not FunctionTool and isinstance(tool, _tool_types.WebSearch)
+        ),
+        None,
+    )
+
+
+def _opening_has_host_mcp(
+    mcp_tools: Sequence[_tool_types._MCP[Any]],
+    profiles: Sequence[_AgentProfile],
+) -> bool:
+    return any(
+        type(server) is not FunctionTool
+        and isinstance(server, _tool_types.StdioMCP)
+        and server.location == "host"
+        for declarations in (mcp_tools, *(profile.declaration.tools for profile in profiles))
+        for server in declarations
+    )
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -4910,14 +4961,7 @@ class Session(Generic[ContextT, OutputT]):
                 )
             _check_native_agents_provider(native_agents, agent.provider)
             available = agent.tools
-            checklist = any(
-                type(tool) is not FunctionTool and (isinstance(tool, _tool_types.Checklist))
-                for tool in available
-            )
-            goals = any(
-                type(tool) is not FunctionTool and (isinstance(tool, _tool_types.NativeGoals))
-                for tool in available
-            )
+            checklist, goals = _opening_checklist_and_goals(available)
             _validate_custom_storage_capabilities(
                 storage,
                 native_agents=native_agents,
@@ -4932,14 +4976,7 @@ class Session(Generic[ContextT, OutputT]):
             if goals and storage is None:
                 raise ValueError("NativeGoals requires an explicit LocalStorage profile")
             hosted_tools = _capture_opening_hosted_tools(available, profiles, tools, codex_login)
-            web_search = next(
-                (
-                    tool
-                    for tool in available
-                    if type(tool) is not FunctionTool and (isinstance(tool, _tool_types.WebSearch))
-                ),
-                None,
-            )
+            web_search = _opening_web_search(available)
             # Capture the controls before opening can await. Later selections only select the grant.
             web_search_config = _capture_web_search_config(web_search)
             allowed_tools, allowed_mcp = tools, mcp_tools
@@ -5225,15 +5262,7 @@ class Session(Generic[ContextT, OutputT]):
                 settings.setdefault("request_controls", {})["sdk_default_provider_compaction"] = (
                     default_compaction
                 )
-            has_host_mcp = any(
-                (type(server) is not FunctionTool and isinstance(server, _tool_types.StdioMCP))
-                and server.location == "host"
-                for declarations in (
-                    allowed_mcp,
-                    *(profile.declaration.tools for profile in profiles),
-                )
-                for server in declarations
-            )
+            has_host_mcp = _opening_has_host_mcp(allowed_mcp, profiles)
             profile_fingerprint = _profile_fingerprint(native, profiles, profile_roster)
             if executor is not None:
                 executor._check_context(context)
@@ -18752,7 +18781,7 @@ class Session(Generic[ContextT, OutputT]):
                     value = await self._call_decision_callback(
                         state,
                         message,
-                        entry.invoke,
+                        cast("_CapturedHostedMCPApproval", entry).invoke,
                         lambda: self._admit_tool(state, request),
                         context,
                         parsed,
