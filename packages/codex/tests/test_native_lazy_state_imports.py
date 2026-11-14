@@ -274,7 +274,7 @@ async def test_first_run_defers_state_until_public_checkpoint_use(responses) -> 
     }
     environment = {
         key: os.environ[key]
-        for key in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE")
+        for key in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT")
         if key in os.environ
     }
     environment.update(
