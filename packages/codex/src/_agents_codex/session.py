@@ -5895,7 +5895,7 @@ class Session(Generic[ContextT, OutputT]):
                     active.task = _create_task(session._execute(active, [], admitted=True))
                     if continuation.staged_retry or continuation.pending_mcp:
                         driver = _create_task(session._continue_restored_turn(active))
-                        active.add_callback(driver)
+                        active.add_manual_recovery(driver)
                 if handoff is not None:
                     await session._finish_run_opening(
                         opening,
@@ -9469,12 +9469,7 @@ class Session(Generic[ContextT, OutputT]):
                 self._application_tool_outputs.append(application_output)
             self._observations.notify()
             if isinstance(state, _Submission) and state.restored_pending:
-                submission = state
-                assert submission.handle is not None
-
-                continuation = _create_task(self._continue_restored_turn(submission))
-                submission.add_callback(continuation)
-                await _join(continuation)
+                await self._continue_restored_turn(state)
             if isinstance(state, _Submission):
                 state.changed.set()
             return handle
@@ -9483,7 +9478,10 @@ class Session(Generic[ContextT, OutputT]):
             _clear_current(),
             _private_task(deliver_and_continue()) as (delivery, delivered),
         ):
-            state.add_callback(delivery)
+            if isinstance(state, _Submission) and state.restored_pending:
+                state.add_manual_recovery(delivery)
+            else:
+                state.add_callback(delivery)
             try:
                 return cast(Turn[Any], await _join(delivery, outcome=delivered))
             except asyncio.CancelledError as error:
@@ -9495,6 +9493,8 @@ class Session(Generic[ContextT, OutputT]):
 
     async def _continue_restored_turn(self, submission: _Submission) -> None:
         assert submission.handle is not None
+        if submission.stopping:
+            raise asyncio.CancelledError
         try:
             # Core may already have queued recovery when this callback
             # is cancelled. Retain its mutation ownership through the
@@ -9511,21 +9511,21 @@ class Session(Generic[ContextT, OutputT]):
                 )
             if self._profiles and submission.output_override:
                 tracing_args["profile_output_override"] = True
-            operation = self._native._continue_manual(
-                submission.handle.submission_id, **tracing_args
-            )
-            with _private_task(operation) as (admitting, admitted):
-                receipt = json.loads(await _join(admitting, outcome=admitted))
-            if receipt["status"] == "pending":
-                return
-            if receipt["status"] == "not_pending":
-                # A concurrently submitted last reply already recovered
-                # this frame. Its owned task validates the receipt.
+            handle = submission.handle
+
+            async def admit() -> None:
+                receipt = json.loads(
+                    await self._native._continue_manual(handle.submission_id, **tracing_args)
+                )
+                if receipt["status"] in ("pending", "not_pending"):
+                    # Only the owner with the started receipt can confirm recovery.
+                    return
+                if receipt["status"] != "started" or receipt["turn_id"] != handle.turn_id:
+                    raise NativeError("Native manual continuation was not resumed")
                 submission.restored_pending = False
-                return
-            if receipt["status"] != "started" or receipt["turn_id"] != submission.handle.turn_id:
-                raise NativeError("Native manual continuation was not resumed")
-            submission.restored_pending = False
+
+            with _private_task(admit()) as (admitting, admitted):
+                await _join(admitting, outcome=admitted)
         except BaseException as error:
             if not submission.stopping and not submission.failure.done():
                 submission.failure.set_result(error)
@@ -12479,6 +12479,8 @@ class Session(Generic[ContextT, OutputT]):
         # is in flight. Keep ownership of the terminal retirement already chosen.
         state.retire_manual = state.retire_manual or state.restored_pending
         state.stopping = True
+        if state.manual_recovery_stop is not None and not state.manual_recovery_stop.done():
+            state.manual_recovery_stop.set_result(None)
         if should_cancel:
             cancel_once(state.task)
         if accepted is not None:
@@ -13083,6 +13085,26 @@ class Session(Generic[ContextT, OutputT]):
                 if error is not None and state.model_run is not None
                 else None
             )
+            if (
+                state.manual_recoveries
+                and not isinstance(error, asyncio.CancelledError)
+                and not state.retire_manual
+                and not state.policy_stop
+                and not self._closing
+                and not self._broken
+            ):
+                # A resumed turn can fail before Python sees its admission
+                # receipt. Let the accepted replies finish before deciding
+                # whether to retire a suspended frame or interrupt a live turn.
+                stop: asyncio.Future[None] = self._loop.create_future()
+                state.manual_recovery_stop = stop
+                try:
+                    while state.manual_recoveries and not stop.done():
+                        await asyncio.wait(
+                            (*state.manual_recoveries, stop), return_when=asyncio.FIRST_COMPLETED
+                        )
+                finally:
+                    state.manual_recovery_stop = None
             # A pending selector blocks Core before it can settle an interrupt.
             # Notify callbacks now; retain this owner until their exit below.
             for callback in state.callbacks:
@@ -16783,7 +16805,7 @@ class Session(Generic[ContextT, OutputT]):
                     and not self._closing
                 ):
                     continuation = _create_task(self._continue_restored_turn(state))
-                    state.add_callback(continuation)
+                    state.add_manual_recovery(continuation)
             except BaseException as error:
                 state.retain_cleanup_error(error)
             finally:
@@ -20451,6 +20473,9 @@ class Session(Generic[ContextT, OutputT]):
                             state.handle is None or not state.failure.done()
                         )
                         state.stopping = True
+                        stop = state.manual_recovery_stop
+                        if stop is not None and not stop.done():
+                            stop.set_result(None)
                         if should_cancel:
                             cancel_once(state.task)
                         # The owner interrupts native sampling before joining

@@ -1114,6 +1114,8 @@ def test_native_selection_routes_stack_sources_and_pr_provenance(
         "harness_pr_qualification_failed",
         "harness_pr_release_missing_windows_job",
         "harness_pr_different_attempt",
+        "harness_pr_partial_rerun",
+        "harness_pr_failed_partial_rerun",
         "harness_pr_producer_different_attempt",
         "harness_pr_qualifier_different_attempt",
         "harness_push_in_progress",
@@ -1276,7 +1278,7 @@ def test_native_build_selection(
         or scenario.startswith("pending_python_")
         or (
             harness_pr
-            and scenario not in {"failed_run", "retried_during_selection"}
+            and scenario not in {"failed_run", "failed_partial_rerun", "retried_during_selection"}
             and arm64_case not in {"completed", "branch"}
         )
     )
@@ -1724,7 +1726,9 @@ def test_native_build_selection(
         _git(repo, "merge", "--no-ff", "--no-commit", head)
         _commit(repo)
     source = {
-        "run_attempt": 2 if scenario == "different_attempt" else 1,
+        "run_attempt": 2
+        if scenario in {"different_attempt", "partial_rerun", "failed_partial_rerun"}
+        else 1,
         "id": 456 if scenario == "current_run" else 123,
         "head_sha": donor,
         "repository": {"full_name": repository, "id": 10},
@@ -1757,7 +1761,7 @@ def test_native_build_selection(
         "conclusion": None
         if pending_python
         else "failure"
-        if scenario in {"failed_run", "retried_during_selection"}
+        if scenario in {"failed_run", "failed_partial_rerun", "retried_during_selection"}
         else "success",
     }
     source["referenced_workflows"] = [
@@ -2362,6 +2366,11 @@ def test_native_build_selection(
                 key: items[(page - 1) * 100 : page * 100],
             }
         return io.StringIO(json.dumps(response))
+
+    if scenario in {"partial_rerun", "failed_partial_rerun"}:
+        # GitHub carries completed jobs forward with the new attempt number.
+        # The uploaded identity still records the original attempt.
+        jobs.extend(dict(job, run_attempt=2) for job in tuple(jobs))
 
     monkeypatch.chdir(repo)
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)

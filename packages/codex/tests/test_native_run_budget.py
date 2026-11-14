@@ -941,3 +941,88 @@ async def test_manual_capture_drains_usage_before_retiring_reader(
                 await restored.restored_turn.get_result()
             assert stopped.value.code == "run_budget_exceeded"
     assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("interrupt", [None, "force", "close"])
+async def test_restored_reply_budget_stop_joins_recovery_receipt(
+    responses: ResponsesFixture, interrupt: Literal["force", "close"] | None
+) -> None:
+    lookup = lookup_tool()
+    native_provider = provider(responses)
+    agent = Agent(instructions="Look up the key.", provider=native_provider, tools=[lookup])
+    budget = RunBudget(max_requests=1)
+    responses.respond(function_call("lookup", {"key": "A"}, "manual"))
+    async with timeout(15):
+        async with agent.session() as source:
+            await source.submit("Look up A", budget=budget)
+            await next_request(source.interactions(), lookup)
+            saved = await source.suspend()
+        async with agent.session(state=saved, resume_budget=budget) as restored:
+            request = await next_request(restored.interactions(), lookup)
+            original = restored._native
+            receipt_ready = asyncio.Event()
+            release_receipt = asyncio.Event()
+            retiring = asyncio.Event()
+            active = restored._active
+            assert active is not None
+            turn = restored.restored_turn
+            assert turn is not None
+
+            class HeldRecoveryReceipt:
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(original, name)
+
+                async def _continue_manual(self, *args: Any, **kwargs: Any) -> str:
+                    receipt = await original._continue_manual(*args, **kwargs)
+                    assert json.loads(receipt)["status"] == "started"
+                    receipt_ready.set()
+                    await release_receipt.wait()
+                    return receipt
+
+                async def _prepare_manual_retirement(self) -> None:
+                    retiring.set()
+                    await original._prepare_manual_retirement()
+
+            restored._native = HeldRecoveryReceipt()
+            reply = asyncio.create_task(request.respond("accepted result"))
+            stopping = None
+            try:
+                await receipt_ready.wait()
+                failure = await asyncio.shield(active.failure)
+                assert isinstance(failure, NativeError) and failure.code == "run_budget_exceeded"
+                # Let the Turn's failure waiter enter cleanup with the receipt held.
+                await asyncio.sleep(0)
+                if interrupt is not None:
+                    stopping = asyncio.create_task(
+                        turn.cancel(mode="force") if interrupt == "force" else restored.aclose()
+                    )
+                    await retiring.wait()
+                    assert not stopping.done()
+                else:
+                    assert not retiring.is_set()
+            finally:
+                release_receipt.set()
+                await asyncio.gather(reply, return_exceptions=True)
+                if stopping is not None:
+                    await stopping
+            if interrupt is None:
+                await reply
+            else:
+                with pytest.raises(NativeError) as interrupted:
+                    await reply
+                assert interrupted.value is failure
+            with pytest.raises(NativeError) as stopped:
+                await turn.get_result()
+            assert stopped.value is failure
+            assert len(responses.requests) == 1
+            if interrupt is None:
+                responses.respond(assistant_output("Fresh turn"))
+                fresh = await restored.submit("Use the accepted result")
+                assert (await fresh.get_result()).final_output == "Fresh turn"
+                outputs = [
+                    item
+                    for item in responses.requests[1]["input"]
+                    if item["type"] == "function_call_output" and item["call_id"] == "manual"
+                ]
+                assert len(outputs) == 1 and outputs[0]["output"] == "accepted result"
+        await native_provider.aclose()
