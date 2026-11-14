@@ -131,9 +131,8 @@ async def test_anyllm_opaque_provider_is_not_dispatched_when_core_owns_retry():
     while traceback is not None:
         frame = traceback.tb_frame
         if frame.f_code.co_name == "_anyllm_provider_for_attempt":
-            assert (
-                not {"request", "provider", "client", "replay_provider", "replay_client"}
-                & frame.f_locals.keys()
+            assert not {"request", "provider", "client", "replay_provider", "replay_client"} & set(
+                frame.f_locals
             )
             assert "owned-request-canary" not in repr(frame.f_locals)
         traceback = traceback.tb_next
