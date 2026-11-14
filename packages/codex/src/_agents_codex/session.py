@@ -19307,8 +19307,8 @@ class Session(Generic[ContextT, OutputT]):
         retire the original session. A repeated suspend returns the same state.
         A single configured child at a portable manual boundary can be saved
         once other automatic callbacks settle. The configured child can have
-        its own managed handoff graph. A parent with a managed handoff graph
-        still requires a live reply to its configured child.
+        its own managed handoff graph, as can its parent. A parent that uses
+        a managed graph and an executor must reply to its configured child live.
         Settled native stored values and terminal cell observations are retained.
         Active code cells and root before_step callbacks cannot be captured.
         """
@@ -19337,9 +19337,11 @@ class Session(Generic[ContextT, OutputT]):
         child = self._configured_children[0]
         if any(not task.done() and task is not child.callback_task for task in active.callbacks):
             raise RuntimeError("Other automatic callbacks have not settled")
-        if self._profiles:
+        if self._profiles and any(
+            runtime.environment is not None for runtime in self._profiles.values()
+        ):
             raise CapabilityError(
-                "Configured checkpoints cannot capture a parent managed handoff profile; "
+                "Configured checkpoints cannot capture a parent graph with an executor; "
                 "reply in the live Session"
             )
         return child

@@ -449,7 +449,9 @@ pub(crate) fn validate_for_opening(
     opening.validate_pending_source(&source)?;
     let accepted = crate::agent_profiles::validate_restored(opening, &history)?;
     let (specs, manual_slots) = opening.restore_catalog(&history, &state["managed_tool_specs"])?;
-    let mut frame = validate_frame(state, &accepted.text, &specs, &manual_slots)?;
+    let mut frame = validate_frame(state, &accepted.text, &specs, &manual_slots, |slot| {
+        specs.configured_agent_role(slot).is_some()
+    })?;
     let mut target = None;
     let mut pending_handoffs = Vec::new();
     for (name, handoff) in frame.handoffs.drain(..) {
@@ -503,7 +505,7 @@ pub(crate) fn validate(
 ) -> Result<Frame> {
     let history: Vec<RolloutItem> = serde_json::from_value(state["history"].clone())?;
     crate::application_instructions::validate(&history, instructions)?;
-    validate_frame(state, instructions, specs, manual_slots)
+    validate_frame(state, instructions, specs, manual_slots, |_| false)
 }
 
 // A canonical wrapper preserves accepted handoff metadata. Older snapshots stored
@@ -543,6 +545,7 @@ fn validate_frame(
     instructions: &str,
     specs: &[DynamicToolSpec],
     manual_slots: &[usize],
+    is_configured: impl Fn(usize) -> bool,
 ) -> Result<Frame> {
     ensure!(
         (state["format_version"] == 3 || state["format_version"] == 5)
@@ -936,8 +939,10 @@ fn validate_frame(
             })
             .context("Current catalog does not allow a pending manual tool")?;
         ensure!(
-            manual_slots.contains(&slot),
-            "Current declaration is not a manual tool"
+            manual_slots.contains(&slot)
+                || (fields.get("continuation").is_some_and(Value::is_object)
+                    && is_configured(slot)),
+            "Current declaration is not a manual tool or the configured continuation owner"
         );
         admitted.push(serde_json::from_value::<ResponseItem>(saved.clone())?);
     }
@@ -1035,15 +1040,13 @@ fn validate_frame(
     if let Some(items) = frame.get("pending_input") {
         for item in items.as_array().context("Staged input must be an array")? {
             ensure!(
-                (if item.get("type").and_then(Value::as_str)
-                    == Some("local_shell_call_output")
-                {
+                (if item.get("type").and_then(Value::as_str) == Some("local_shell_call_output") {
                     item.get("id")
                 } else {
                     item.get("call_id")
                 })
-                    .and_then(Value::as_str)
-                    .is_none_or(|id| !seen_calls.contains(id)),
+                .and_then(Value::as_str)
+                .is_none_or(|id| !seen_calls.contains(id)),
                 "Staged input cannot reuse a call from the saved turn"
             );
             let item: ResponseItem = serde_json::from_value(item.clone())
@@ -1377,8 +1380,10 @@ impl Frame {
             }
             let mut output: ResponseItemEnvelope = receipt.into();
             if let Some(origin) = origin {
-                output.metadata.get_or_insert_with(Default::default).sdk_managed_agent_tool =
-                    Some(origin);
+                output
+                    .metadata
+                    .get_or_insert_with(Default::default)
+                    .sdk_managed_agent_tool = Some(origin);
             }
             self.accepted.insert(key.call.clone(), output);
         }
@@ -1618,9 +1623,10 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
                 .and_then(|pending| pending.get("continuation"))
                 .filter(|value| !value.is_null())
             {
+                let source = captured.as_deref();
                 ensure!(
-                    frame.profile_source.is_none(),
-                    "Configured continuation with managed profiles is not supported"
+                    source.map(|source| &source.receipt) == frame.profile_source.as_ref(),
+                    "Configured continuation Agent source changed"
                 );
                 tools.enqueue_configured_reentry(
                     &thread.id.to_string(),
@@ -1628,6 +1634,7 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
                     item,
                     model,
                     continuation.clone(),
+                    source,
                 )?
             } else if let Some(source) = &frame.profile_source {
                 crate::agent_profiles::enqueue_manual_reentry(

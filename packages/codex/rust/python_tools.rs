@@ -4398,12 +4398,26 @@ impl PythonTools {
         item: &ResponseItem,
         model: Option<&str>,
         continuation: Value,
+        source: Option<&codex_extension_api::CapturedAgentProfile>,
     ) -> Result<oneshot::Receiver<ToolReply>> {
         ensure!(
             continuation["kind"] == "configured-child-v1" && continuation["state"].is_object(),
             "Invalid configured continuation"
         );
-        let generation = self.snapshot();
+        let generation = if let Some(source) = source {
+            let catalog = source
+                .profile
+                .data
+                .get::<ProfileCatalog>()
+                .context("Configured continuation Agent catalog is absent")?;
+            ensure!(
+                self.admits_generation(&catalog.generation),
+                "Configured continuation Agent catalog expired"
+            );
+            catalog.generation.clone()
+        } else {
+            self.snapshot()
+        };
         let (name, call_id, arguments) = crate::manual_checkpoint::manual_request(item)?;
         let slot = generation
             .entries
@@ -4413,7 +4427,11 @@ impl PythonTools {
                 !entry.manual
                     && entry.name.clone().with_default_namespace()
                         == name.clone().with_default_namespace()
-                    && matches!(generation.specs[slot], DynamicToolSpec::Function(_))
+                    && generation.specs.configured_agent_role(slot).is_some()
+                    && generation
+                        .specs
+                        .caller_limits(slot)
+                        .is_none_or(|limits| limits.contains(codex_tools::ToolExposures::DIRECT))
             })
             .context("Current configured continuation function is absent")?;
         // The host intersects this fresh opening ceiling with current Environment tools.
@@ -4427,11 +4445,14 @@ impl PythonTools {
             .cloned()
             .map(ToolName::with_default_namespace)
             .filter(|name| {
-                defaults.as_ref().is_none_or(|names| {
-                    names
-                        .iter()
-                        .any(|selected| selected.clone().with_default_namespace() == *name)
-                })
+                // Managed reentry has no live step receipt from which to
+                // inherit executor grants. Rebind only its application tool.
+                source.is_none()
+                    && defaults.as_ref().is_none_or(|names| {
+                        names
+                            .iter()
+                            .any(|selected| selected.clone().with_default_namespace() == *name)
+                    })
             })
             .collect::<HashSet<_>>();
         drop(defaults);
@@ -4446,7 +4467,7 @@ impl PythonTools {
             &ToolCallSource::Direct,
             model,
             true,
-            None,
+            source.map(|source| &source.receipt),
             None,
             None,
             Some(&builtin_tools),

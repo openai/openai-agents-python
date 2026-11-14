@@ -1279,7 +1279,11 @@
     {
       "path": "sdk-managed-sandbox-provider-compaction.patch",
       "sha256": "9ee0acecf2584d841d8175997e0fb9423c8cc0febcbb65358ed49b76e1e3d41f"
+    },
+    {
+      "path": "sdk-interactive-environment-authority.patch",
+      "sha256": "8fd6f5d9b02da7ff5a5ec9d82f0926c7a47bc250242500b6d6c84f8c46fbe7bb"
     }
   ],
-  "result_tree": "1fd7bc856b958c79f7c996f8d2bf8afbbf4316f9"
+  "result_tree": "b798027efa6b6b28fbb26ae94eab555c2f3262f3"
 }

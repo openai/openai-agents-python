@@ -146,8 +146,11 @@ async def test_configured_child_stream_overflow_joins_the_active_callback():
             assert len(parent_model.requests) == 1
 
 
-async def test_configured_child_stream_uses_the_restored_handoff_destination():
+@pytest.mark.parametrize("parent_handoff", [False, True])
+async def test_configured_child_stream_uses_the_restored_handoff_destination(parent_handoff):
     async with timeout(20), peer() as parent_model, peer() as child_model:
+        if parent_handoff:
+            parent_model.respond(function_call("transfer_to_coordinator", {}, "parent-transfer"))
         parent_model.respond(function_call("specialist", {"input": "Work."}, "outer-call"))
         parent_model.respond(assistant_output("parent complete"))
         child_model.respond(function_call("transfer_to_destination", {}, "transfer"))
@@ -179,12 +182,26 @@ async def test_configured_child_stream_uses_the_restored_handoff_destination():
                 provider=child_provider,
                 handoffs=[destination],
             )
-            parent = Agent(
-                instructions="Use specialist.",
-                model=MODEL,
-                provider=root_provider,
-                tools=[child.as_tool("specialist", on_stream=observed.append)],
-            )
+
+            def root_using(configured):
+                coordinator = Agent(
+                    name="coordinator",
+                    instructions="Use specialist.",
+                    model=MODEL,
+                    provider=root_provider,
+                    tools=[configured.as_tool("specialist", on_stream=observed.append)],
+                )
+                if not parent_handoff:
+                    return coordinator
+                return Agent(
+                    name="front door",
+                    instructions="Transfer to coordinator.",
+                    model=MODEL,
+                    provider=root_provider,
+                    handoffs=[coordinator],
+                )
+
+            parent = root_using(child)
             async with parent.session() as source:
                 turn = await source.submit("Start.")
                 pending = await turn.wait_for_request_or_result()
@@ -209,18 +226,13 @@ async def test_configured_child_stream_uses_the_restored_handoff_destination():
                 provider=child_provider,
                 handoffs=[changed_destination],
             )
-            changed_parent = Agent(
-                instructions="Use specialist.",
-                model=MODEL,
-                provider=root_provider,
-                tools=[changed_child.as_tool("specialist", on_stream=observed.append)],
-            )
+            changed_parent = root_using(changed_child)
             async with changed_parent.session(state=checkpoint) as changed:
                 assert changed.restored_turn is not None
                 with pytest.raises(RuntimeError, match="(fingerprint|Agent declaration graph)"):
                     await changed.restored_turn.get_result()
             assert not effects and not observed
-            assert len(parent_model.requests) == 1
+            assert len(parent_model.requests) == 1 + parent_handoff
             assert len(child_model.requests) == 2
 
             async with parent.session(state=checkpoint) as fresh:
@@ -238,5 +250,5 @@ async def test_configured_child_stream_uses_the_restored_handoff_destination():
             assert deltas[0].event.delta == "approved child"
             assert deltas[0].agent is destination and deltas[0].tool_call.call_id == "outer-call"
             assert effects == ["gated"]
-            assert len(parent_model.requests) == 2
+            assert len(parent_model.requests) == 2 + parent_handoff
             assert len(child_model.requests) == 3

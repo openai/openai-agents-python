@@ -120,6 +120,24 @@ class ExecutorPeer:
     # Override advertised admission metadata, not real executor enforcement.
     advertised_platform: str | None = None
     synthetic_process_starts: list[str] = field(default_factory=list)
+    _synthetic_process_streams: dict[str, Any] = field(default_factory=dict, repr=False)
+    _synthetic_process_chunks: dict[str, list[str]] = field(default_factory=dict, repr=False)
+
+    async def emit_synthetic_output(self, process_id: str, text: str) -> None:
+        chunks = self._synthetic_process_chunks[process_id]
+        chunks.append(text)
+        await self._synthetic_process_streams[process_id].send_json(
+            {
+                "method": "process/output",
+                "params": {
+                    "processId": process_id,
+                    "seq": len(chunks),
+                    "stream": "stdout",
+                    "chunk": base64.b64encode(text.encode()).decode(),
+                },
+            }
+        )
+
     capture_handshake_headers: bool = False
     handshake_headers: list[dict[str, str]] = field(default_factory=list, repr=False)
 
@@ -226,6 +244,12 @@ class ExecutorPeer:
                                                     assert process_id not in synthetic_processes
                                                     synthetic_processes.add(process_id)
                                                     self.synthetic_process_starts.append(process_id)
+                                                    self._synthetic_process_streams[process_id] = (
+                                                        downstream
+                                                    )
+                                                    self._synthetic_process_chunks[process_id] = [
+                                                        self.synthetic_process_output
+                                                    ]
                                                     if (
                                                         self.before_synthetic_process_reply
                                                         is not None
@@ -289,26 +313,33 @@ class ExecutorPeer:
                                                     continue
                                                 if process_id in synthetic_processes:
                                                     if method == "process/read":
-                                                        chunk = base64.b64encode(
-                                                            self.synthetic_process_output.encode()
-                                                        ).decode()
-                                                        chunks = (
-                                                            [
-                                                                {
-                                                                    "seq": 1,
-                                                                    "stream": "stdout",
-                                                                    "chunk": chunk,
-                                                                }
+                                                        process_chunks = (
+                                                            self._synthetic_process_chunks[
+                                                                process_id
                                                             ]
-                                                            if (params.get("afterSeq") or 0) < 1
-                                                            else []
                                                         )
+                                                        chunks = [
+                                                            {
+                                                                "seq": index + 1,
+                                                                "stream": "stdout",
+                                                                "chunk": base64.b64encode(
+                                                                    text.encode()
+                                                                ).decode(),
+                                                            }
+                                                            for index, text in enumerate(
+                                                                process_chunks
+                                                            )
+                                                            if index + 1
+                                                            > (params.get("afterSeq") or 0)
+                                                        ]
                                                         running = (
                                                             self.synthetic_process_stays_running
                                                         )
                                                         reply = {
                                                             "chunks": chunks,
-                                                            "nextSeq": 1 if running else 3,
+                                                            "nextSeq": len(process_chunks)
+                                                            if running
+                                                            else len(process_chunks) + 2,
                                                             "exited": not running,
                                                             "exitCode": None
                                                             if running
@@ -317,6 +348,11 @@ class ExecutorPeer:
                                                             "failure": None,
                                                             "sandboxDenied": sandbox_denied,
                                                         }
+                                                    elif (
+                                                        method == "process/write"
+                                                        and self.synthetic_process_stays_running
+                                                    ):
+                                                        reply = {"status": "accepted"}
                                                     elif method == "process/terminate":
                                                         reply = {"running": False}
                                                     else:
