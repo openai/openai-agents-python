@@ -1037,7 +1037,6 @@ class Agent(Generic[ContextT, OutputT]):
     output_type: OutputSpec[OutputT] | None
     programmatic_tool_calling: bool
     transform_context: _ContextTransform[ContextT] | None
-    after_model: _AfterModel[ContextT] | None
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
     decisions: DecisionProvider | None
@@ -1051,6 +1050,7 @@ class Agent(Generic[ContextT, OutputT]):
     tool_name_collision_policy: Literal["error", "warn"]
     environment: EnvironmentSource[ContextT] | None
     on_lifecycle: _AgentLifecycleCallback[ContextT] | None = field(default=None, kw_only=True)
+    after_model: _AfterModel[ContextT] | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -1081,13 +1081,13 @@ class Agent(Generic[ContextT, OutputT]):
             | None = None,
             output_type: None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
-            after_model: _AfterModel[ContextT] | None = None,
             prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
             tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
             input_guardrails: Sequence[InputGuardrail[ContextT]] | None = None,
             output_guardrails: Sequence[OutputGuardrail[ContextT]] | None = None,
+            after_model: _AfterModel[ContextT] | None = None,
             **kwargs: Any,
         ) -> TextAgentT: ...
 
@@ -1106,13 +1106,13 @@ class Agent(Generic[ContextT, OutputT]):
             ]
             | None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
-            after_model: _AfterModel[ContextT] | None = None,
             prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
             tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
             input_guardrails: Sequence[InputGuardrail[ContextT]] | None = None,
             output_guardrails: Sequence[OutputGuardrail[ContextT]] | None = None,
+            after_model: _AfterModel[ContextT] | None = None,
             **kwargs: Any,
         ) -> TypedAgentT: ...
 
@@ -1147,7 +1147,6 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
-        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1160,6 +1159,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
         on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -1187,7 +1187,6 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
-        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1199,6 +1198,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
         on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -1223,7 +1223,6 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
-        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1236,6 +1235,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
         on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -1261,7 +1261,6 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
-        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1273,6 +1272,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
         on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
     ) -> None: ...
 
     def __init__(
@@ -1296,7 +1296,6 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: OutputSpec[OutputT] | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
-        after_model: _AfterModel[ContextT] | None = None,
         prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1309,6 +1308,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
         on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
+        after_model: _AfterModel[ContextT] | None = None,
     ) -> None:
         if isinstance(instructions, _OmittedInstructions):
             instructions = None

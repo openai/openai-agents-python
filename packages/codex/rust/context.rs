@@ -160,6 +160,12 @@ impl Change {
         self.settings.request_controls.request_transport.clone()
     }
 
+    pub(crate) fn default_provider_compaction(&self) -> Option<bool> {
+        self.settings
+            .request_controls
+            .sdk_default_provider_compaction
+    }
+
     pub(crate) fn validate_mcp_provider(&self, candidate: &EngineState) -> anyhow::Result<()> {
         let source = &self.state.engine;
         let source_auth = source.manager.auth_manager().auth_cached();

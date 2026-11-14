@@ -1272,8 +1272,9 @@ async def test_linux_network_policy_enforces_proxy_rules(
         assert received == expected_requests
 
 
+@pytest.mark.parametrize("explicit_grant", [False, True], ids=["default-roots", "explicit-grant"])
 async def test_default_strict_rejects_unsupported_remote_platform(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_grant: bool
 ) -> None:
     async with (
         timeout(30),
@@ -1291,6 +1292,7 @@ async def test_default_strict_rejects_unsupported_remote_platform(
                     url=executor.url,
                     cwd=str(executor.root),
                     headers={"Authorization": "Bearer " + executor.token},
+                    **({"writable_roots": (executor.root,)} if explicit_grant else {}),
                 )
             ):
                 pytest.fail("Opened a strict Environment on an unsupported executor")

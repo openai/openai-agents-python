@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
+
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -61,12 +63,14 @@ async def test_input_only_manual_restore_completes_without_replaying_initial_che
         async with agent.session(state=saved) as restored:
             request = await next_request(restored.interactions(), lookup)
             responses.respond(assistant_output("restored complete"))
-            await request.respond("record-value")
             if block_output:
+                with suppress(GuardrailTripwire):
+                    await request.respond("record-value")
                 with pytest.raises(GuardrailTripwire):
                     await restored.restored_turn.get_result()
                 assert converted == ["restored complete"]
             else:
+                await request.respond("record-value")
                 assert (
                     await restored.restored_turn.get_result()
                 ).final_output == "restored complete"

@@ -1101,6 +1101,14 @@ pub async fn restore(
     if let Some(transport) = restored_transport {
         startup.config.sdk_request_controls.request_transport = transport;
     }
+    let current_default_provider_compaction = source
+        .map(crate::context::Change::default_provider_compaction)
+        .unwrap_or(
+            startup
+                .config
+                .sdk_request_controls
+                .sdk_default_provider_compaction,
+        );
     // Snapshot data is not authority to enable model-facing goal tools. The
     // validated record still requires goal storage above, but never the feature.
     if let Some(specs) = python_specs {
@@ -1151,6 +1159,11 @@ pub async fn restore(
             post_turn_compact,
         )?;
     }
+    // Live compaction keeps its captured default; portable restore uses current startup authority.
+    startup
+        .config
+        .sdk_request_controls
+        .sdk_default_provider_compaction = current_default_provider_compaction;
     crate::agent_profiles::prepare_environments(engine, &mut startup).await?;
     let environments = startup
         .thread_extension_init

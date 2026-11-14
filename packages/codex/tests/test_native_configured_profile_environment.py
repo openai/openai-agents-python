@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from _agents_codex.session import _invocation
@@ -14,6 +16,9 @@ from tests.test_native_agent import provider
 from tests.test_native_executor_tools import tool_output
 
 
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"), reason="requires a Linux or macOS strict executor"
+)
 @pytest.mark.parametrize("root_resource", [True, False], ids=["distinct-root", "model-only-root"])
 async def test_configured_child_inherits_issuing_profile_environment(
     tmp_path, monkeypatch, responses, root_resource

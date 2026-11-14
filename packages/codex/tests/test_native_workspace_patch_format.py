@@ -1,5 +1,6 @@
 """Custom patch formats run inside the native tool's acquired workspace."""
 
+import sys
 from contextlib import asynccontextmanager
 
 import pytest
@@ -23,6 +24,9 @@ class ReplaceFormat:
         return input + diff
 
 
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"), reason="requires a Linux or macOS strict executor"
+)
 async def test_native_workspace_editor_uses_resource_scope(responses, tmp_path, monkeypatch):
     from agents.classic.sandbox.sandboxes.unix_local import (
         UnixLocalSandboxClient,
@@ -96,7 +100,10 @@ async def test_native_workspace_editor_rejects_unowned_workspace(responses, tmp_
     async with ExecutorPeer(tmp_path / "executor").serve() as peer:
         trust(peer, tmp_path, monkeypatch)
         environment = Environment(
-            url=peer.url, headers={"Authorization": "Bearer " + peer.token}, cwd=str(tmp_path)
+            url=peer.url,
+            headers={"Authorization": "Bearer " + peer.token},
+            cwd=str(tmp_path),
+            **({"write_policy": "legacy"} if sys.platform == "win32" else {}),
         )
         async with agent.session(environment=environment) as session:
             with pytest.raises(RuntimeError, match="require the current sandbox environment"):

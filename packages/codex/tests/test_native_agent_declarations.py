@@ -47,9 +47,12 @@ def test_realtime_preserves_existing_agent_field_and_parameter_order():
         "compaction",
         "prepare_handoff_input",
         "tool_name_collision_policy",
+        "environment",
+        "on_lifecycle",
+        "after_model",
     )
     assert tuple(field.name for field in fields(Agent)) == expected_fields
-    assert Agent.__match_args__ == expected_fields
+    assert Agent.__match_args__ == (*expected_fields[:-2], "after_model")
     realtime = RealtimeAgentConfig(instructions="Answer aloud.")
     agent = Agent(instructions="Answer.", name="Voice", realtime=realtime)
     match agent:
@@ -84,6 +87,9 @@ def test_realtime_preserves_existing_agent_field_and_parameter_order():
         "hosted_prompt",
         "compaction",
         "tool_name_collision_policy",
+        "environment",
+        "on_lifecycle",
+        "after_model",
     )
     assert all(parameter.kind is Parameter.KEYWORD_ONLY for parameter in parameters)
 
