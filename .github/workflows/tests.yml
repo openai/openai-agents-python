@@ -998,7 +998,7 @@ jobs:
         python-version:
           - "3.10"
           - "3.14"
-        shard: [0, 1]
+        shard: [0, 1, 2]
     env:
       OPENAI_API_KEY: fake-for-tests
       PYTEST_ADDOPTS: "-rap"
@@ -1030,7 +1030,7 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         env:
           SDK_TEST_SHARD_INDEX: ${{ matrix.shard }}
-          SDK_TEST_SHARD_COUNT: "2"
+          SDK_TEST_SHARD_COUNT: "3"
         # Native completions use loopback sockets on Windows.
         run: uv run python packages/codex/scripts/test_native.py --sdk -m pytest -n 2 --dist worksteal -m "not serial" -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
       - name: Run serial tests after all workers exit
