@@ -178,6 +178,48 @@ def _capture_frame(encoded: str, event: Any) -> str:
         del encoded, event, captured
 
 
+def _anyllm_reasoning_text(value: Any, depth: int = 0) -> str:
+    text = part = parts = None
+    try:
+        if isinstance(value, str):
+            return value
+        if depth >= 32:
+            raise ValueError("AnyLLM reasoning exceeds the supported nesting depth")
+        if isinstance(value, dict):
+            for key in ("content", "text", "thinking"):
+                text = _anyllm_reasoning_text(value.get(key), depth + 1)
+                if text:
+                    return text
+        if isinstance(value, (list, tuple)):
+            parts = []
+            for part in value:
+                parts.append(_anyllm_reasoning_text(part, depth + 1))
+            return "".join(parts)
+        return ""
+    finally:
+        del value, text, part, parts
+
+
+def _normalize_anyllm_reasoning(message: dict[str, Any]) -> dict[str, Any]:
+    """Normalize AnyLLM's plaintext wrappers before retaining private replay metadata."""
+    try:
+        reasoning = message.get("reasoning")
+        if isinstance(reasoning, str):
+            return message
+        if reasoning is None and (
+            message.get("reasoning_content") or message.get("thinking_blocks")
+        ):
+            return message
+        if reasoning is None:
+            reasoning = message.get("thinking")
+            if reasoning is None:
+                return message
+        _encoded(reasoning)
+        return {**message, "reasoning": _anyllm_reasoning_text(reasoning)}
+    finally:
+        del message, reasoning
+
+
 def _chat_reasoning(message: dict[str, Any]) -> dict[str, Any]:
     value = blocks = block = None
     try:

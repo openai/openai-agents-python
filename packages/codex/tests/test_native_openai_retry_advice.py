@@ -10,7 +10,9 @@ from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
 from agents import (
     Agent,
+    AnyLLMModel,
     ChatCompletionsModel,
+    LitellmModel,
     ModelRetrySettings,
     NativeProvider,
     ResponsesModel,
@@ -118,8 +120,8 @@ async def test_borrowed_openai_provider_header_advice(kind, suggested):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["responses", "chat"])
-async def test_borrowed_openai_http_date_advice(kind):
+@pytest.mark.parametrize("kind", ["responses", "chat", "litellm", "any_llm"])
+async def test_borrowed_provider_http_date_advice(kind):
     attempts = []
     captured = []
 
@@ -154,7 +156,21 @@ async def test_borrowed_openai_http_date_advice(kind):
             http_client=DefaultAsyncHttpxClient(trust_env=False),
         ) as client,
     ):
-        adapter = ResponsesModel(client) if kind == "responses" else ChatCompletionsModel(client)
+        if kind in ("litellm", "any_llm"):
+
+            class BorrowedClient:
+                async def acompletion(self, **kwargs):
+                    return await client.chat.completions.create(**kwargs)
+
+            adapter = (
+                LitellmModel(BorrowedClient())
+                if kind == "litellm"
+                else AnyLLMModel(BorrowedClient())
+            )
+        else:
+            adapter = (
+                ResponsesModel(client) if kind == "responses" else ChatCompletionsModel(client)
+            )
         async with NativeProvider(model_backend=adapter) as provider:
             agent = Agent(
                 model="gpt-5.5",
@@ -166,4 +182,5 @@ async def test_borrowed_openai_http_date_advice(kind):
                 await agent.run("Reply.")
     assert len(attempts) == 1 and len(captured) == 1
     assert captured[0].suggested is None
+    assert captured[0].retry_after_ms is not None
     assert 100_000 < captured[0].retry_after_ms <= 120_000
