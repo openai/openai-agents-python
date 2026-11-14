@@ -899,6 +899,7 @@ async def test_session_open_captures_before_await_and_releases_after_cleanup(
     session = object.__new__(Session)
     session._trace_context = None
     session._environment_lease = None
+    session._environment_owner = None
     session._closed = False
     cleanup_leases: list[str] = []
     files = [tmp_path / "instructions.md"] if with_instruction_files else []

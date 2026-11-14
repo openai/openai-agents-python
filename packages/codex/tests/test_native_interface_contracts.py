@@ -80,6 +80,7 @@ async def cleanup_session(events, *, managed_environment=True):
     session._sync_cleanup_deferred = False
     session._interaction_error = None
     session._environment_lease = lease
+    session._environment_owner = lease
     session._resources_retired = False
     session._closed = False
     session._last_turn = None
