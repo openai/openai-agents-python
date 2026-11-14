@@ -2201,6 +2201,17 @@ def _split_tools(
     ceiling = bindings(ceiling) if ceiling is not None else None
     opening = ceiling if ceiling is not None else tools if available is None else available
     ordinary_opening = all(type(item) is FunctionTool for item in opening)
+    if TYPE_CHECKING or not ordinary_opening:
+        from ._tool_catalog import (
+            _HOSTED_TOOLS,
+            Checklist,
+            NativeGoals,
+            ToolSearch,
+            WebSearch,
+            _ClientToolSearch,
+            _hosted_tool_name,
+        )
+
     admitted: dict[
         ToolRef, FunctionTool[Any, Any, Any] | _tool_types.HttpMCP[Any] | _tool_types.StdioMCP[Any]
     ] = {}
@@ -2225,9 +2236,7 @@ def _split_tools(
                     if isinstance(item, FunctionTool) and item.ref == declaration.ref
                 )
                 admitted[declaration.ref] = current
-            elif (
-                isinstance(declaration, _tool_types.ToolSearch) and declaration._manual is not None
-            ):
+            elif isinstance(declaration, ToolSearch) and declaration._manual is not None:
                 admitted[declaration.ref] = declaration._manual
             elif type(declaration) is not FunctionTool and isinstance(
                 declaration, (_tool_types.StdioMCP, _tool_types.HttpMCP)
@@ -2248,32 +2257,21 @@ def _split_tools(
                     mcp_pairs.add((declaration.name, raw))
     python_tools: list[FunctionTool[Any, Any, Any]] = []
     mcp_tools: dict[str, _tool_types._MCP[Any]] = {}
-    has_checklist = not ordinary_opening and any(
-        isinstance(item, _tool_types.Checklist) for item in opening
-    )
-    has_goals = not ordinary_opening and any(
-        isinstance(item, _tool_types.NativeGoals) for item in opening
-    )
+    has_checklist = not ordinary_opening and any(isinstance(item, Checklist) for item in opening)
+    has_goals = not ordinary_opening and any(isinstance(item, NativeGoals) for item in opening)
     has_native_agents = native_agents is not None or any(
         (type(item) is not FunctionTool and isinstance(item, _tool_types.NativeAgents))
         for item in opening
     )
-    if (
-        not ordinary_opening
-        and sum(isinstance(item, _tool_types.WebSearch) for item in opening) > 1
-    ):
+    if not ordinary_opening and sum(isinstance(item, WebSearch) for item in opening) > 1:
         raise ValueError("Declare WebSearch only once per Session")
     hosted_names = set()
     if not ordinary_opening:
-        from ._tool_catalog import _ClientToolSearch
-
-        for hosted_type in _tool_types._HOSTED_TOOLS:
+        for hosted_type in _HOSTED_TOOLS:
             if sum(isinstance(item, hosted_type) for item in opening) > 1:
                 raise ValueError(f"Declare {hosted_type.__name__} only once per Session")
         hosted_names = {
-            _tool_types._hosted_tool_name(item)
-            for item in opening
-            if isinstance(item, _tool_types._HOSTED_TOOLS)
+            _hosted_tool_name(item) for item in opening if isinstance(item, _HOSTED_TOOLS)
         }
     for item in tools:
         tool = item
@@ -2456,15 +2454,7 @@ def _split_tools(
             if native_agents is not None:
                 raise ValueError("A Session supports exactly one NativeAgents declaration")
             native_agents = tool
-        elif isinstance(
-            tool,
-            (
-                _tool_types.Checklist,
-                _tool_types.NativeGoals,
-                _tool_types.WebSearch,
-                *_tool_types._HOSTED_TOOLS,
-            ),
-        ):
+        elif isinstance(tool, (Checklist, NativeGoals, WebSearch, *_HOSTED_TOOLS)):
             if (
                 available is None
                 and isinstance(tool, _tool_types.WebSearch)
@@ -18771,7 +18761,7 @@ class Session(Generic[ContextT, OutputT]):
                         entered_media_owner._tool_body_ended()
 
             try:
-                if type(entry) is not _CapturedFunction:
+                if TYPE_CHECKING or type(entry) is not _CapturedFunction:
                     from ._hosted_mcp_binding import _CapturedHostedMCPApproval
 
                 if type(entry) is not _CapturedFunction and isinstance(
@@ -18781,7 +18771,7 @@ class Session(Generic[ContextT, OutputT]):
                     value = await self._call_decision_callback(
                         state,
                         message,
-                        cast("_CapturedHostedMCPApproval", entry).invoke,
+                        entry.invoke,
                         lambda: self._admit_tool(state, request),
                         context,
                         parsed,
