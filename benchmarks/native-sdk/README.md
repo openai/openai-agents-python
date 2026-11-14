@@ -348,7 +348,8 @@ The following command has been comparing two native wheels through public HTTP c
 ```sh
 "$PEER_PY" -B "$BENCH/compare.py" \
   --peer-http-mode dual --default-host-setup /run/sdk-benchmark/setup.json \
-  --reference-engine v1 --native-provider-mode caller-owned --native-transport http \
+  --reference-engine v1 --reference-transport http \
+  --native-provider-mode caller-owned --native-transport http \
   --reference-response-mode streaming --v1-response-mode streaming \
   --v0-python "$REFERENCE_NATIVE_PY" --v1-python "$NATIVE_PY" \
   --v0-version "$REFERENCE_NATIVE_VERSION" --v1-version "$NATIVE_VERSION" \
