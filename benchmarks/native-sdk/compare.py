@@ -477,7 +477,9 @@ def main():
         ):
             parser.error("Default-host HTTP/SSE mode: --native-transport http only")
         args.default_host_setup = args.default_host_setup.resolve()
-        if "buffered" in native_response_modes or any(
+        if (
+            "buffered" in native_response_modes and args.native_provider_mode != "caller-owned"
+        ) or any(
             case == "startup_import" or not fresh_native_supported(WORKLOADS[case])
             for case in args.cases
         ):
