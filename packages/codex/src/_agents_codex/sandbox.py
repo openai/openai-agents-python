@@ -612,10 +612,22 @@ async def _portable_workspace_identity(
         scope = _capability_workspace(lease[0], environment)
     except ValueError:
         return None
+    borrowed = getattr(source, "_sdk_portable_borrowed_generation", None)
+    if borrowed is not None:
+        inner, generation = borrowed
+        if not inner._running or inner._portable_workspace_generation != generation:
+            return None
     path, before = root
-    return await run_blocking_workspace_io(
+    identity = await run_blocking_workspace_io(
         _portable_local_workspace_identity, path, before, scope.cwd
     )
+    if identity is None or borrowed is None:
+        return identity
+    if not inner._running or inner._portable_workspace_generation != generation:
+        return None
+    return hashlib.sha256(
+        json.dumps(["borrowed-unixlocal-v1", identity, generation]).encode("ascii")
+    ).hexdigest()
 
 
 @redact_mount_error_data_sync
@@ -793,13 +805,27 @@ def sandbox_environment(
     # Import UnixLocal only for its own backend. Importing it on Windows
     # would also break unrelated sandbox providers.
     unix_local_client = False
+    borrowed_generation = None
     if client.backend_id == "unix_local" and os.name == "posix":
-        from agents.classic.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+        from agents.classic.sandbox.sandboxes.unix_local import (
+            UnixLocalSandboxClient,
+            UnixLocalSandboxSession,
+        )
 
         unix_local_client = type(client) is UnixLocalSandboxClient
+        if unix_local_client and session is not None:
+            inner = session._inner
+            while isinstance(inner, SandboxSession):
+                inner = inner._inner
+            if (
+                type(inner) is UnixLocalSandboxSession
+                and inner._running
+                and inner._portable_workspace_generation is not None
+                and type(inner.state.snapshot) is NoopSnapshot
+            ):
+                borrowed_generation = (inner, inner._portable_workspace_generation)
     portable_local_workspace = (
         unix_local_client
-        and session is None
         and snapshot is None
         and authorized_resume_state is None
         and not managed_workspace
@@ -809,9 +835,17 @@ def sandbox_environment(
         and captured_user is None
         and captured_manifest.root != "/workspace"
         and Path(captured_manifest.root).is_absolute()
-        # A new local acquisition applies its manifest again. A durable
-        # reattachment cannot overwrite files created by an earlier turn.
-        and not captured_manifest.entries
+        # Fresh sources cannot replay seeds. Existing caller-owned running
+        # sessions use the metadata-only borrow branch and retain their generation.
+        and (
+            session is None
+            and not captured_manifest.entries
+            or borrowed_generation is not None
+            and all(
+                type(entry) in (Dir, File) and not entry.ephemeral
+                for _, entry in captured_manifest.iter_entries()
+            )
+        )
         and not captured_manifest.extra_path_grants
     )
 
@@ -977,6 +1011,9 @@ def sandbox_environment(
                         selected.state.manifest.root,
                         portable_workspace_root,
                     )
+                    cast(
+                        Any, source_manager
+                    )._sdk_portable_borrowed_generation = borrowed_generation
                 cast(Any, source_manager)._sdk_patch_workspace = (
                     selected,
                     environment,
@@ -997,6 +1034,7 @@ def sandbox_environment(
             finally:
                 profile_workspace.retire()
                 cast(Any, source_manager)._sdk_portable_workspace_root = None
+                cast(Any, source_manager)._sdk_portable_borrowed_generation = None
                 cast(Any, source_manager)._sdk_patch_workspace = None
                 if observer is not None:
                     observer.active = False
