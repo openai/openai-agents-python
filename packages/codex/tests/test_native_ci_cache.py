@@ -613,6 +613,12 @@ def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
     assert producer["needs"] == "changes"
     assert producer["with"] == {
         "runner": "ubuntu-24.04-arm",
+        "native_source_run": (
+            "${{ needs.changes.outputs.native_artifacts != '' && "
+            "fromJSON(needs.changes.outputs.native_artifacts)['Linux-ARM64'] && "
+            "needs.changes.outputs.native_source_run || '' }}"
+        ),
+        "native_artifacts": "${{ needs.changes.outputs.native_artifacts }}",
         "native_provenance": "${{ needs.changes.outputs.native_provenance }}",
     }
     produced = _condition(producer["if"], values)
@@ -622,7 +628,8 @@ def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
         assert (produced and _condition(job["if"], values)) is runs
         assert job["uses"] == "./.github/workflows/codex-python-qualify.yml"
         assert job["with"] == {
-            **producer["with"],
+            "runner": producer["with"]["runner"],
+            "native_provenance": producer["with"]["native_provenance"],
             "artifact_id": "${{ needs.produce-linux-arm64.outputs.artifact_id }}",
             "artifact_digest": "${{ needs.produce-linux-arm64.outputs.artifact_digest }}",
         }

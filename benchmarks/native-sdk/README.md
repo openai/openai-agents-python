@@ -168,7 +168,7 @@ For a paired comparison of two native modes, `--reference-engine v1 --reference-
   --samples 5 --iterations 20 --cases oneshot_tool_output_16k_128
 ```
 
-This loopback comparison has been excluding default-host TLS and implicit-provider cache behavior. The controller has been recording each arm's response mode in metadata and summaries, and checking it against that arm's worker and peer receipts. Buffered mode has been remaining restricted to final-result workloads outside the default-host profile.
+This loopback comparison has been excluding default-host TLS and implicit-provider cache behavior. The controller has been recording each arm's response mode in metadata and summaries, and checking it against that arm's worker and peer receipts. Buffered mode has been remaining restricted to final-result workloads. Default-host buffered calls have been requiring a caller-owned Provider and independent fresh conversations.
 
 Rows record the native response mode and expected wire transport, checked against all actual request receipts, per-response chunk counts and total emitted chunks. Both modes retain the same final output, input/history and tool-result checks. Buffered comparisons reject live-observation workloads. They report no first-delta metric or token-live claim; buffered progress arrives after the complete body. Existing live streaming cursor, gap and exact chunk checks remain unchanged.
 
@@ -219,19 +219,58 @@ A separate context command has been comparing stable v0 over HTTP with the nativ
 
 ## Optional default-host container smoke
 
-The [default-host container guide](container-default-host/README.md) has been supplying an offline functional check against a local TLS peer at the normal API hostname. Its image setup has been provisioning matching Python environments and explicit certifi prerequisites. Scope: fresh native HTTP/SSE calls or omitted-Provider WSS calls, with no tools or one asynchronous function tool. The optional smoke has been supplying correctness checks, without a performance claim.
+The [default-host container guide](container-default-host/README.md) has been supplying an offline functional check against a local TLS peer at the normal API hostname. Its image setup has been provisioning matching Python environments and explicit certifi prerequisites. Scope: fresh native HTTP/SSE or caller-owned buffered JSON calls, or omitted-Provider WSS calls, with no tools or one asynchronous function tool. The optional smoke has been supplying correctness checks, without a performance claim.
 
 `--native-provider-mode omitted` has been selecting the public `Agent.run` entrypoint without constructing a caller-owned `NativeProvider` or passing the Agent's `provider` argument. The default `caller-owned` mode has been retaining one Provider per worker. Both modes have been opening a fresh conversation for every oneshot call; neither has been reusing conversation history. The single flag has been applying to every v1 arm, including `--reference-engine v1`, while leaving the v0 adapter unchanged. Worker rows and comparison summaries have been recording `native_provider_mode`.
 
 Omitted mode has been accepting the default-host profile's fresh no-tool cases and one asynchronous function tool per call. No-tool cases have been including cold, large-input and oneshot concurrent calls. The tool profile has been excluding retained conversations, synchronous tools, fanout and multiple tool rounds. Live observation has been using the one-tool active-reader case. The worker has been discarding inherited credentials and setting only `OPENAI_API_KEY=synthetic-benchmark-key` before importing the SDK. The [complete container example](container-default-host/README.md#run-one-offline-functional-smoke) has been selecting this mode without a custom endpoint or trust override.
 
-In default-host omitted mode, `--native-transport` has been declaring the target wheel's expected default route, without changing the SDK transport. `--reference-transport` has been declaring that route for a v1 reference arm. A WSS reference and an HTTP/SSE target have been remaining comparable with the same omitted-Provider entrypoint. Standalone summaries have been recording both effective transports. Caller-owned default-host mode has been continuing to accept only HTTP/SSE.
+In default-host omitted mode, `--native-transport` has been declaring the target wheel's expected default route, without changing the SDK transport. `--reference-transport` has been declaring that route for a v1 reference arm. A WSS reference and an HTTP/SSE target have been remaining comparable with the same omitted-Provider entrypoint. Standalone summaries have been recording both effective transports. Caller-owned default-host mode has been accepting HTTP/SSE or explicit buffered JSON.
 
 `--native-request-transport {auto,http,websocket}` has been selecting the per-run `ModelSettings.request_transport` for every native arm, including `--reference-engine v1`. This option has been requiring fresh calls with an omitted Provider in default-host mode. The v0 adapter has been keeping its existing behavior.
 
 Omitting the option has been preserving prompt-only `Agent.run` calls and the SDK's default transport selection. `--native-transport` and `--reference-transport` have been checking the observed wire independently. Rows, metadata, and summaries have been recording `native_request_transport` separately from those expectations. Explicit HTTP requests have been using the omitted Provider and normal API hostname.
 
 In omitted mode, `Agent.run` has been owning each call's Provider creation and close inside the call measurement. Process-owned caches have been remaining outside the Adapter's final-close ownership. The existing all-thread process CPU clocks have been retaining their measurement windows; `full_owner_*` has not been claiming process-exit CPU or final cached-resource retirement. Comparisons have been describing the selected Provider lifetime and its transport ownership, without isolating Engine construction cost.
+
+### Compare public Auto and buffered configurations
+
+The existing flags have been selecting two complete public configurations: omitted-Provider Auto and a caller-owned `NativeProvider(response_mode="buffered", supports_websockets=False)`. The caller-owned configuration has been retaining one Provider per worker process while each `Agent.run` has been opening an independent fresh conversation. The comparison has been including that lifetime difference, transport framing and TLS; it has not been isolating buffering alone. Buffered delivery has been postponing model progress and tool dispatch until each complete response body. These commands have not been establishing live-observation or cancellation-timing equivalence, or a formal parity claim.
+
+The [default-host container image recipe](container-default-host/README.md#provision-the-image) has been provisioning stable v0, the native wheel, shared dependency versions and the pinned [dual HTTP peer](#optional-http2-peer) before offline execution. The commands below have been replacing the setup and worker body inside that guide's owned `docker run`, with root privileges, `--network none`, the API-host mapping and the `/out` results mount unchanged. The outer container timeout has been increasing from the single-smoke `180s` to `7200s` for both comparisons. The variables below have been identifying that container's interpreters, directories and installed native version.
+
+Both comparisons have been using the same native wheel, dependencies, host and local TLS assets. Each sample has been using a fresh worker process, one prefill and 100 measured fresh calls, with one async tool, 128 input characters and 16 KiB output. The streaming peer has been sending 128 text fragments; JSON has been sending no SSE fragments.
+
+```sh
+BENCH=/bench
+LAB=/out
+STABLE_PY=/opt/stable/bin/python
+NATIVE_PY=/opt/sdk/bin/python
+PEER_PY=/opt/peer/bin/python
+NATIVE_VERSION="$("$NATIVE_PY" -B -c "from importlib.metadata import version; print(version(\"openai-agents\"))")"
+cp /input/stable-packages.txt /input/sdk-packages.txt /input/peer-packages.txt /out/
+"$PEER_PY" -B "$BENCH/container-default-host/setup.py" \
+  --directory /run/sdk-benchmark \
+  --python "$STABLE_PY" --python "$NATIVE_PY" --python "$PEER_PY"
+
+"$PEER_PY" -B "$BENCH/compare.py" \
+  --default-host-setup /run/sdk-benchmark/setup.json --peer-http-mode dual \
+  --v0-python "$STABLE_PY" --v1-python "$NATIVE_PY" \
+  --v0-version 0.24.0 --v1-version "$NATIVE_VERSION" \
+  --server-python "$PEER_PY" --output-dir "$LAB/v0-auto-new" \
+  --native-provider-mode omitted --native-transport websocket \
+  --samples 12 --iterations 100 --timeout 60 --cases oneshot_tool_output_16k_128
+
+"$PEER_PY" -B "$BENCH/compare.py" \
+  --default-host-setup /run/sdk-benchmark/setup.json --peer-http-mode dual \
+  --v0-python "$STABLE_PY" --v1-python "$NATIVE_PY" \
+  --v0-version 0.24.0 --v1-version "$NATIVE_VERSION" \
+  --server-python "$PEER_PY" --output-dir "$LAB/v0-buffered-new" \
+  --native-provider-mode caller-owned --native-transport http --v1-response-mode buffered \
+  --samples 12 --iterations 100 --timeout 60 --cases oneshot_tool_output_16k_128
+```
+
+The two outputs have been reporting separate v0 pairwise comparisons. They have not been forming a matched three-arm experiment or supplying a paired Auto-versus-buffered interval. Latency has been including waits for the peer; all-thread client process CPU has been excluding peer-process CPU. `full_owner_*` has been measuring an overlapping Adapter lifetime, including caller-owned Provider close when present, rather than an additional cost to add to call measurements. Omitted-Provider process caches have been remaining outside that close boundary. The dual peer has been checking actual HTTP/ALPN receipts: default WSS and buffered JSON have been using HTTP/1.1, while streaming native HTTP has been using H2. Existing output, tool-result, history and joined-peer cleanup checks have been remaining in force. No source patch or default transport change has been entering either SDK configuration.
 
 ### Fresh implicit tools and dense output
 
@@ -280,7 +319,7 @@ The existing estimator has been retaining matched block order, raw metric vector
 
 ## Optional HTTP/2 peer
 
-The default peer has been remaining aiohttp HTTP/1.1, including its WebSocket upgrade path. The explicit `--peer-http-mode dual` option has been selecting a TLS peer advertising both `h2` and `http/1.1`, using the same response, tool and history validation. This option has been requiring the existing default-host container setup. Native HTTP arms have been requiring actual H2 receipts; v0 HTTP and native WebSocket arms have been requiring HTTP/1.1. Unsupported native wheels have been failing validation rather than silently qualifying an HTTP/1.1 fallback.
+The default peer has been remaining aiohttp HTTP/1.1, including its WebSocket upgrade path. The explicit `--peer-http-mode dual` option has been selecting a TLS peer advertising both `h2` and `http/1.1`, using the same response, tool and history validation. This option has been requiring the existing default-host container setup. Streaming native HTTP arms have been requiring actual H2 receipts; explicit buffered native HTTP, v0 HTTP and native WebSocket arms have been requiring HTTP/1.1. Unsupported native wheels have been failing validation rather than silently qualifying an HTTP/1.1 fallback.
 
 The optional peer dependency has been remaining outside both SDK environments. Before measurement, install it only in the peer environment:
 
@@ -289,12 +328,7 @@ uv pip install --compile-bytecode --python "$PEER_PY" \
   --requirement "$BENCH/requirements-http2-peer.txt"
 ```
 
-For the [default-host container guide](container-default-host/README.md), add the following line to its generated Dockerfile after the existing environment provisioning. Rebuild the image before the offline run:
-
-```dockerfile
-RUN uv pip install --no-build --compile-bytecode --python /opt/peer/bin/python -r /bench/requirements-http2-peer.txt \
-    && uv pip freeze --python /opt/peer/bin/python > /input/peer-packages.txt
-```
+The [default-host container image recipe](container-default-host/README.md#provision-the-image) has been installing this requirements file in `/opt/peer` and recording its package inventory before offline execution. The host-environment command above has been remaining applicable outside that image.
 
 Inside that guide's existing owned container command, the following comparison has been selecting H2 for both native HTTP arms, retaining fresh Sessions and the real async tool. Use the installed versions and paths from the guide's second-wheel setup:
 

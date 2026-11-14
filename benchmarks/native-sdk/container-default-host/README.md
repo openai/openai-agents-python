@@ -2,7 +2,7 @@
 
 The `--default-host-setup` profile has been exercising the normal `https://api.openai.com/v1` address against a local TLS peer. Container-only hostname mapping and a temporary trusted certificate authority (CA) have been preserving hostname verification without a custom endpoint or certificate override.
 
-Supported workloads: fresh no-tool calls, or one asynchronous function tool with final-only or active-reader output, using the default streaming response mode. Omitted-Provider mode has been accepting the selected wheel's actual default HTTP/SSE or WSS route. Caller-owned mode has been accepting only HTTP/SSE. Buffered responses, retained-conversation workloads, synchronous tools, tool fanout and multiple tool rounds have been remaining outside this profile.
+Supported workloads: fresh no-tool calls, or one asynchronous function tool with final-only or active-reader output, using streaming response mode or explicit caller-owned buffered mode for final-only calls. Omitted-Provider mode has been accepting the selected wheel's actual default HTTP/SSE or WSS route. Caller-owned mode has been accepting HTTP/SSE or buffered JSON. Buffered calls have been requiring final-only workloads. Retained-conversation workloads, synchronous tools, tool fanout and multiple tool rounds have been remaining outside this profile.
 
 The example has been selecting `--native-provider-mode omitted`, with the worker setting only its synthetic API key before SDK import. No caller-owned Provider has been entering that route. The default `caller-owned` option has been retaining the earlier Provider ownership. Both modes have been using fresh independent conversations.
 
@@ -15,7 +15,7 @@ The example has been selecting `--native-provider-mode omitted`, with the worker
 - A complete, relocatable standard CPython 3.13.16 directory, including `bin`, `lib` and its bundled libraries. The same copied interpreter for SDK and peer environments.
 - Package access during image provisioning; offline networking during the smoke. No SDK source build in this example.
 
-The supplied three-line Dockerfile has been providing OS setup tools only. It has not been provisioning Python 3.13.16 or SDK environments. The complete image recipe below has been adding those prerequisites. Explicit `certifi==2026.10.23` in both environments: setup has been importing certifi for every interpreter before installing the temporary CA. Neither SDK nor peer dependencies have been guaranteeing that import transitively.
+The supplied three-line Dockerfile has been providing OS setup tools only. The complete image recipe below has been provisioning the native SDK, stable v0 and peer environments from the same Python 3.13.16 directory. It has also been installing the pinned dual-HTTP peer dependencies before offline execution. All three environments have been receiving explicit `certifi==2026.10.23`: setup has been importing certifi for every interpreter before installing the temporary CA.
 
 ## Provision the image
 
@@ -49,10 +49,14 @@ COPY native.whl wheel-name.txt /input/
 COPY bench/ /bench/
 RUN wheel_name="$(cat /input/wheel-name.txt)" && mv /input/native.whl "/input/$wheel_name" \
     && uv venv --python /opt/python/bin/python3.13 /opt/sdk \
+    && uv venv --python /opt/python/bin/python3.13 /opt/stable \
     && uv venv --python /opt/python/bin/python3.13 /opt/peer \
     && uv pip install --no-build --compile-bytecode --python /opt/sdk/bin/python "/input/$wheel_name" 'pydantic==2.12.3' 'typing-extensions==4.16.0' 'jsonschema==4.26.0' 'referencing==0.37.0' 'certifi==2026.10.23' \
+    && uv pip install --no-build --compile-bytecode --python /opt/stable/bin/python 'openai-agents==0.24.0' 'openai==3.29.0' 'pydantic==2.12.3' 'typing-extensions==4.16.0' 'certifi==2026.10.23' \
     && uv pip install --no-build --compile-bytecode --python /opt/peer/bin/python 'aiohttp==3.14.3' 'openai==3.41.0' 'pydantic==2.12.3' 'certifi==2026.10.23' \
+    && uv pip install --no-build --compile-bytecode --python /opt/peer/bin/python -r /bench/requirements-http2-peer.txt \
     && uv pip freeze --python /opt/sdk/bin/python > /input/sdk-packages.txt \
+    && uv pip freeze --python /opt/stable/bin/python > /input/stable-packages.txt \
     && uv pip freeze --python /opt/peer/bin/python > /input/peer-packages.txt
 DOCKERFILE
 timeout --signal=TERM --kill-after=15s 600s \

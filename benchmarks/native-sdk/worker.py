@@ -383,7 +383,9 @@ def validate_transport(
         raise ValueError("Fresh WebSocket connections have not been retiring")
     for receipt in receipts:
         if peer_http_mode == "dual":
-            expected_version = "2" if engine == "v1" and not websocket else "1.1"
+            expected_version = (
+                "2" if engine == "v1" and not websocket and response_mode == "streaming" else "1.1"
+            )
             connection = stats.get("tls_transports", {}).get(str(receipt.get("tls_connection_id")))
             if not connection or receipt.get("http_version") != expected_version:
                 raise ValueError("Actual HTTP protocol differs from the dual peer schedule")
@@ -539,9 +541,12 @@ def main():
     if setup and (
         args.import_only
         or not fresh_native_supported(workload)
-        or args.response_mode != "streaming"
+        or (args.response_mode == "buffered" and args.native_provider_mode != "caller-owned")
     ):
-        parser.error("Default-host mode requires fresh no-tool or one-async-tool streaming calls")
+        parser.error(
+            "Default-host mode requires fresh calls; "
+            "buffered native calls require a caller-owned Provider"
+        )
     result = {
         "default_host": bool(setup),
         "response_mode": args.response_mode
