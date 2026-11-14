@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from _agents_codex import session as session_module
 from agents import Agent, CustomStorage, Environment, NativeProvider
 from tests.native_storage_fixtures import MemorySessionStore
 
@@ -34,6 +35,29 @@ def assert_private_opening(error: BaseException, environment: Environment, marke
         pending.extend(
             chained for chained in (current.__cause__, current.__context__) if chained is not None
         )
+
+
+async def test_failed_opening_helper_lookup_releases_secrets(tmp_path, monkeypatch) -> None:
+    marker = "synthetic-helper-lookup-token"
+    environment = Environment.local(cwd=str(tmp_path), env={"TOKEN": marker})
+    provider = NativeProvider(api_key="synthetic-model-key")
+    failure = RuntimeError("Helper lookup failed")
+
+    def missing_package(_package):
+        raise failure
+
+    monkeypatch.setattr(session_module, "_package_files", missing_package)
+    try:
+        with pytest.raises(RuntimeError, match="Helper lookup failed") as caught:
+            async with Agent(instructions="Answer.", provider=provider).session(
+                environment=environment
+            ):
+                pytest.fail("Opened without the local runtime helper")
+        assert caught.value is failure
+        assert_private_opening(caught.value, environment, marker)
+        assert environment.env == {"TOKEN": marker}
+    finally:
+        await provider.aclose()
 
 
 @pytest.mark.parametrize(
