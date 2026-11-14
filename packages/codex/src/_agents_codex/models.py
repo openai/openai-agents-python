@@ -1772,32 +1772,36 @@ class LitellmModel(ChatCompletionsModel):
 
 
 def _anyllm_provider_for_attempt(provider: Any, request: ModelRequest) -> Any:
-    if not request.disable_provider_retries:
-        return provider
+    any_llm = provider_class = client = replay_provider = replay_client = None
+    try:
+        if not request.disable_provider_retries:
+            return provider
 
-    from openai import AsyncOpenAI
+        from openai import AsyncOpenAI
 
-    any_llm = sys.modules.get("any_llm")
-    provider_class = getattr(any_llm, "AnyLLM", None)
-    client = getattr(provider, "client", None)
-    if (
-        not isinstance(provider_class, type)
-        or not isinstance(provider, provider_class)
-        or not isinstance(client, AsyncOpenAI)
-    ):
-        raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
-    if client.max_retries == 0:
-        return provider
+        any_llm = sys.modules.get("any_llm")
+        provider_class = getattr(any_llm, "AnyLLM", None)
+        client = getattr(provider, "client", None)
+        if (
+            not isinstance(provider_class, type)
+            or not isinstance(provider, provider_class)
+            or not isinstance(client, AsyncOpenAI)
+        ):
+            raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
+        if client.max_retries == 0:
+            return provider
 
-    replay_provider = copy(cast(Any, provider))
-    if replay_provider is provider:
-        raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
-    replay_client = client.with_options(max_retries=0)
-    if replay_client.max_retries != 0:
-        raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
-    # The replay client borrows the same HTTP transport. The application closes it.
-    replay_provider.client = replay_client
-    return replay_provider
+        replay_provider = copy(cast(Any, provider))
+        if replay_provider is provider:
+            raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
+        replay_client = client.with_options(max_retries=0)
+        if replay_client.max_retries != 0:
+            raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
+        # The replay client borrows the same HTTP transport. The application closes it.
+        replay_provider.client = replay_client
+        return replay_provider
+    finally:
+        del request, provider, any_llm, provider_class, client, replay_provider, replay_client
 
 
 def _anyllm_responses_streaming_supported(client: Any) -> bool:

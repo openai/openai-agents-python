@@ -121,8 +121,22 @@ async def test_anyllm_opaque_provider_is_not_dispatched_when_core_owns_retry():
         turn_id="turn",
         disable_provider_retries=True,
     )
-    with pytest.raises(TypeError, match="cannot suppress borrowed client retries"):
+    object.__setattr__(
+        request, "_request_transport", {"headers": {"x-test-private": "owned-request-canary"}}
+    )
+    with pytest.raises(TypeError, match="cannot suppress borrowed client retries") as failure:
         await adapter.complete(request)
+
+    traceback = failure.value.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if frame.f_code.co_name == "_anyllm_provider_for_attempt":
+            assert (
+                not {"request", "provider", "client", "replay_provider", "replay_client"}
+                & frame.f_locals.keys()
+            )
+            assert "owned-request-canary" not in repr(frame.f_locals)
+        traceback = traceback.tb_next
 
 
 async def test_litellm_native_retry_preserves_first_provider_retry_only(monkeypatch):
