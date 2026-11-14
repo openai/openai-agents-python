@@ -222,15 +222,17 @@ class _ScopedPatchEditor:
         editor = WorkspaceEditor(
             resource, user=user, workspace_scope=_capability_workspace(resource, environment)
         )
-        result = await editor.apply_operation(
-            WorkspaceOperation(
-                type=operation.type,
-                path=operation.path,
-                diff=operation.diff,
-                move_to=operation.move_to,
-            ),
-            patch_format=self.patch_format,
+        requested = WorkspaceOperation(
+            type=operation.type,
+            path=operation.path,
+            diff=operation.diff,
+            move_to=operation.move_to,
         )
+        normalized = editor.normalize_operation(requested)
+        resource.normalize_path(normalized.path, for_write=True)
+        if normalized.move_to is not None:
+            resource.normalize_path(normalized.move_to, for_write=True)
+        result = await editor.apply_operation(requested, patch_format=self.patch_format)
         return ApplyPatchResult(status=result.status, output=result.output)
 
     create_file = update_file = delete_file = apply

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import pytest
 
 from agents import Agent, Environment, sandbox_apply_patch_tool
+from agents.classic.sandbox.errors import ApplyPatchPathError
 from agents.sandbox import Manifest, sandbox_environment
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import assistant_output, responses as responses
@@ -36,7 +37,9 @@ async def test_native_workspace_editor_uses_resource_scope(responses, tmp_path, 
 
     @asynccontextmanager
     async def connect(_resource):
-        async with ExecutorPeer(tmp_path / "executor").serve() as peer:
+        from uuid import uuid4
+
+        async with ExecutorPeer(tmp_path / uuid4().hex).serve() as peer:
             trust(peer, tmp_path, monkeypatch)
             yield Environment(
                 url=peer.url, headers={"Authorization": "Bearer " + peer.token}, cwd=str(child)
@@ -62,6 +65,22 @@ async def test_native_workspace_editor_uses_resource_scope(responses, tmp_path, 
     assert format.calls == [("before", " after", "default")]
     assert (child / "target.txt").read_text() == "before after"
     assert not (root / "target.txt").exists()
+
+    responses.respond(
+        patch_call({"type": "update_file", "path": "../../outside.txt", "diff": " reject"})
+    )
+    async with agent.session(
+        environment=sandbox_environment(
+            UnixLocalSandboxClient(),
+            manifest=Manifest(root=str(root)),
+            options=UnixLocalSandboxClientOptions(),
+            connect=connect,
+        )
+    ) as session:
+        with pytest.raises(ApplyPatchPathError, match="must not escape root"):
+            await (await session.submit("Reject the escape.")).get_result()
+    assert format.calls == [("before", " after", "default")]
+    assert not (tmp_path / "outside.txt").exists()
 
 
 async def test_native_workspace_editor_rejects_unowned_workspace(responses, tmp_path, monkeypatch):
