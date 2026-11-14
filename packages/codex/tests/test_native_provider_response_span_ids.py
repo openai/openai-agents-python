@@ -36,10 +36,11 @@ async def test_host_response_id_admission_uses_exact_owner(monkeypatch, outcome)
     loop = asyncio.get_running_loop()
     problem = ValueError("Tracing ID generator returned an invalid identifier")
 
-    def policy(_context):
+    def policy(_context, *, model):
         nonlocal revoked
         # A worker-thread call or an extra callback execution path fails here.
         assert asyncio.get_running_loop() is loop
+        assert model is None
         entered.append(True)
         if outcome == "invalid":
             raise problem
