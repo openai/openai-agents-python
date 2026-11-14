@@ -1,0 +1,158 @@
+diff --git a/codex-rs/core/src/mcp_tool_call.rs b/codex-rs/core/src/mcp_tool_call.rs
+index bae232f8..bb792b2e 100644
+--- a/codex-rs/core/src/mcp_tool_call.rs
++++ b/codex-rs/core/src/mcp_tool_call.rs
+@@ -139,6 +139,7 @@ pub(crate) async fn handle_mcp_tool_call(
+     invocation_tool_name: ToolName,
+     source: &crate::tools::context::ToolCallSource,
+     arguments: String,
++    output_observers: &[Arc<dyn codex_extension_api::RecordedToolOutputObserver>],
+ ) -> HandledMcpToolCall {
+     let turn_context = &step_context.turn;
+     let server = tool_info.server_name.clone();
+@@ -153,6 +154,7 @@ pub(crate) async fn handle_mcp_tool_call(
+             Err(e) => {
+                 error!("failed to parse tool call arguments: {e}");
+                 return HandledMcpToolCall {
++                    observer_failed: false,
+                     result: CallToolResult::from_error_text(format!("err: {e}")),
+                     tool_input: JsonValue::Object(serde_json::Map::new()),
+                 };
+@@ -180,6 +182,7 @@ pub(crate) async fn handle_mcp_tool_call(
+         )
+         .await;
+         return HandledMcpToolCall {
++                    observer_failed: false,
+             result: CallToolResult::from_result(result),
+             tool_input: arguments_value
+                 .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+@@ -205,6 +208,7 @@ pub(crate) async fn handle_mcp_tool_call(
+             )
+             .await;
+             return HandledMcpToolCall {
++                    observer_failed: false,
+                 result: CallToolResult::from_result(result),
+                 tool_input: arguments_value
+                     .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+@@ -250,6 +254,7 @@ pub(crate) async fn handle_mcp_tool_call(
+             /*duration*/ None,
+         );
+         return HandledMcpToolCall {
++                    observer_failed: false,
+             result: CallToolResult::from_result(result),
+             tool_input: arguments_value
+                 .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+@@ -314,6 +319,7 @@ pub(crate) async fn handle_mcp_tool_call(
+                         decision,
+                         policy: approval_policy,
+                     },
++                    output_observers,
+                 )
+                 .await;
+             }
+@@ -372,6 +378,7 @@ pub(crate) async fn handle_mcp_tool_call(
+         );
+ 
+         return HandledMcpToolCall {
++                    observer_failed: false,
+             result: CallToolResult::from_result(result),
+             tool_input: arguments_value
+                 .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+@@ -390,11 +397,13 @@ pub(crate) async fn handle_mcp_tool_call(
+         item_metadata,
+         source,
+         McpToolApprovalApplication::NotRequired,
++        output_observers,
+     )
+     .await
+ }
+ 
+ pub(crate) struct HandledMcpToolCall {
++    pub(crate) observer_failed: bool,
+     pub(crate) result: CallToolResult,
+     pub(crate) tool_input: JsonValue,
+ }
+@@ -457,6 +466,7 @@ async fn handle_approved_mcp_tool_call(
+     item_metadata: McpToolCallItemMetadata,
+     source: &crate::tools::context::ToolCallSource,
+     approval_application: McpToolApprovalApplication,
++    output_observers: &[Arc<dyn codex_extension_api::RecordedToolOutputObserver>],
+ ) -> HandledMcpToolCall {
+     let turn_context = step_context.turn.as_ref();
+     let server = invocation.server.clone();
+@@ -472,6 +482,7 @@ async fn handle_approved_mcp_tool_call(
+         .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new()));
+     let mut elicitation_type = None;
+     let mut request_failed = false;
++    let mut observer_failed = false;
+     let mut transport_error: Option<Arc<dyn std::error::Error + Send + Sync>> = None;
+     let result = async {
+         if let Some(recovery) = turn_context
+@@ -514,6 +525,14 @@ async fn handle_approved_mcp_tool_call(
+                             };
+                         let mcp_tool =
+                             McpToolContext::from_prepared_call(&prepared_call, server_config);
++                        anyhow::ensure!(!cancellation_token.is_cancelled(), "MCP call cancelled before entry");
++                        for observer in output_observers {
++                            if observer.on_mcp_entry().await.is_err() {
++                                observer_failed = true;
++                                anyhow::bail!("MCP tool lifecycle callback failed");
++                            }
++                        }
++                        anyhow::ensure!(!cancellation_token.is_cancelled(), "MCP call cancelled during entry");
+                         let is_cancelled: Arc<dyn Fn() -> bool + Send + Sync> = {
+                             let token = cancellation_token.clone();
+                             Arc::new(move || token.is_cancelled())
+@@ -790,6 +809,7 @@ async fn handle_approved_mcp_tool_call(
+     );
+ 
+     HandledMcpToolCall {
++        observer_failed,
+         result: CallToolResult::from_result(result),
+         tool_input,
+     }
+diff --git a/codex-rs/core/src/tools/handlers/mcp.rs b/codex-rs/core/src/tools/handlers/mcp.rs
+index 5af0e341..ffae2160 100644
+--- a/codex-rs/core/src/tools/handlers/mcp.rs
++++ b/codex-rs/core/src/tools/handlers/mcp.rs
+@@ -265,6 +265,10 @@ impl McpHandler {
+         )
+         .await?;
+ 
++        let output_observers = invocation.call_state.as_ref()
++            .and_then(std::sync::Weak::upgrade)
++            .and_then(|state| state.output_observers.get().cloned())
++            .unwrap_or_default();
+         let originating_call = invocation.originating_call().await;
+         let ToolInvocation {
+             session,
+@@ -305,9 +309,13 @@ impl McpHandler {
+             tool_name,
+             &source,
+             payload,
++            &output_observers,
+         )
+         .await;
+ 
++        if result.observer_failed {
++            return Err(FunctionCallError::Fatal("MCP tool lifecycle callback failed".into()));
++        }
+         Ok(boxed_tool_output(McpToolOutput {
+             result: result.result,
+             tool_input: result.tool_input,
+diff --git a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+index ed79e9b6..bccfe98b 100644
+--- a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+@@ -287,6 +287,11 @@ pub struct ToolFinishInput<'a> {
+ /// An observer retained by the exact dispatch until its native output is recorded.
+ /// The callback cannot replace output or mint a tool/approval grant.
+ pub trait RecordedToolOutputObserver: Send + Sync {
++    /// Run after approval inside the exact prepared MCP lease, before request
++    /// preparation or tools/call. This cannot grant access or rewrite the call.
++    fn on_mcp_entry(&self) -> crate::ExtensionFuture<'_, Result<(), String>> {
++        Box::pin(async { Ok(()) })
++    }
+     /// Observe the exact live handler value before result projection replaces it.
+     /// This cannot grant acceptance or replace the output.
+     fn on_handler_output(&self, _output: &dyn codex_tools::ToolOutput) {}

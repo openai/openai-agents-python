@@ -25,6 +25,7 @@ mod live;
 mod local_reconciliation;
 mod local_sandbox;
 mod manual_checkpoint;
+mod mcp_discovery_trace;
 mod mcp_result_control;
 mod mcp_roster;
 mod native_agents;
@@ -246,7 +247,9 @@ impl Engine {
         options_json: &str,
         specs_json: Option<&str>,
         source: Option<Arc<context::Change>>,
+        opening_trace_context: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let trace = resolve_opening_trace_context(opening_trace_context)?;
         let inner = self.current()?;
         let lease = self
             .managed_lease
@@ -285,18 +288,46 @@ impl Engine {
             None
         };
         let payload = serde_json::from_value(payload).map_err(py_error)?;
-        async_bridge::future_into_py(py, async move {
+        let restore = async move {
             let _context_operation = inner.operation(false).map_err(py_error)?;
-            let thread = checkpoint::restore(&inner, payload, options, specs, source.as_deref())
-                .await
-                .map_err(py_error)?;
+            let thread = if inner
+                .store
+                .as_any()
+                .is::<canonical_storage::CanonicalStore>()
+            {
+                let frame = manual.as_ref().ok_or_else(|| {
+                    py_error("CustomStorage restore requires an ordinary manual checkpoint")
+                })?;
+                if source.is_some() {
+                    return Err(py_error("CustomStorage cannot replace provider state"));
+                }
+                checkpoint::restore_canonical(&inner, payload, options, specs, &frame.state).await
+            } else {
+                checkpoint::restore(&inner, payload, options, specs, source.as_deref()).await
+            }
+            .map_err(py_error)?;
             *thread.manual.lock().map_err(py_error)? = manual;
             if let Some(lease) = lease {
                 lease.register_thread(thread.inner.clone())?;
             }
             Ok(thread)
+        };
+        async_bridge::future_into_py(py, async move {
+            match trace {
+                Some(trace) => trace.scope(restore).await,
+                None => restore.await,
+            }
         })
     }
+}
+
+fn resolve_opening_trace_context(
+    token: Option<&str>,
+) -> PyResult<Option<codex_otel::sdk_trace::OpeningContext>> {
+    token
+        .map(codex_otel::sdk_trace::OpeningContext::resolve)
+        .transpose()
+        .map_err(py_error)
 }
 
 #[pymethods]
@@ -306,17 +337,25 @@ impl Engine {
         Ok(!self.current()?.owns_runtime_services())
     }
 
-    #[pyo3(signature = (payload_json, options_json="{}", specs_json=None))]
+    #[pyo3(signature = (payload_json, options_json="{}", specs_json=None, *, _opening_trace_context=None))]
     fn restore_checkpoint<'py>(
         &self,
         py: Python<'py>,
         payload_json: &str,
         options_json: &str,
         specs_json: Option<&str>,
+        _opening_trace_context: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let raw = serde_json::from_str(payload_json).map_err(py_error)?;
         let payload = checkpoint_json_value(raw, 0).map_err(py_error)?;
-        self.restore_decoded_checkpoint(py, payload, options_json, specs_json, None)
+        self.restore_decoded_checkpoint(
+            py,
+            payload,
+            options_json,
+            specs_json,
+            None,
+            _opening_trace_context,
+        )
     }
     #[getter]
     fn _codex_account(&self) -> PyResult<Option<(Option<String>, String, String)>> {
@@ -454,7 +493,7 @@ impl Engine {
         })
     }
 
-    #[pyo3(signature = (options_json, specs_json, initial_messages_json=None, *, _process_private_http=false))]
+    #[pyo3(signature = (options_json, specs_json, initial_messages_json=None, *, _process_private_http=false, _opening_trace_context=None))]
     fn _start_initial_replaceable_thread<'py>(
         &self,
         py: Python<'py>,
@@ -462,7 +501,9 @@ impl Engine {
         specs_json: &str,
         initial_messages_json: Option<&str>,
         _process_private_http: bool,
+        _opening_trace_context: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let trace = resolve_opening_trace_context(_opening_trace_context)?;
         let inner = self.current()?;
         let lease = self
             .managed_lease
@@ -483,15 +524,21 @@ impl Engine {
         }
         let specs = serde_json::from_str(specs_json).map_err(py_error)?;
         async_bridge::future_factory_into_py(py, move || async move {
-            let _context_operation = inner.operation(false).map_err(py_error)?;
-            let thread = inner
-                .start_with_initial_messages(options, None, Some(specs), true, initial_messages)
-                .await
-                .map_err(py_error)?;
-            if let Some(lease) = lease {
-                lease.register_thread(thread.inner.clone())?;
+            let open = async move {
+                let _context_operation = inner.operation(false).map_err(py_error)?;
+                let thread = inner
+                    .start_with_initial_messages(options, None, Some(specs), true, initial_messages)
+                    .await
+                    .map_err(py_error)?;
+                if let Some(lease) = lease {
+                    lease.register_thread(thread.inner.clone())?;
+                }
+                Ok(thread)
+            };
+            match trace {
+                Some(trace) => trace.scope(open).await,
+                None => open.await,
             }
-            Ok(thread)
         })
     }
 
@@ -770,6 +817,9 @@ impl NativeThread {
                 "release"
             },
         )
+    }
+    fn _mark_tool_lifecycle_started(&self, receipt_json: &str) -> PyResult<bool> {
+        self.python_callback_operation(receipt_json, "lifecycle_started")
     }
     fn _enter_python_callback(&self, receipt_json: &str) -> PyResult<bool> {
         self.python_callback_operation(receipt_json, "enter")
@@ -1191,12 +1241,13 @@ impl NativeThread {
         expected_revision: String,
         keep: usize,
         items_json: &str,
+        allow_rebuild: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         let items = serde_json::from_str(items_json)
             .map_err(|_| py_error("Invalid canonical history items"))?;
         async_bridge::future_into_py(py, async move {
-            let value = canonical_history::replace(&inner, expected_revision, keep, items)
+            let value = canonical_history::replace(&inner, expected_revision, keep, items, allow_rebuild)
                 .await
                 .map_err(py_error)?;
             serde_json::to_string(&value).map_err(py_error)
@@ -1425,7 +1476,12 @@ impl NativeThread {
                 .await
                 .map_err(py_error)?;
             if request.is_none()
-                && let Some(retry) = manual_checkpoint::staged_retry(&inner, &state)
+                && let Some(passive) = manual_checkpoint::passive_input(&inner, &state).map_err(py_error)?
+            {
+                state["_passive_pending_input"] = serde_json::to_value(passive).map_err(py_error)?;
+            }
+            if request.is_none()
+                && let Some(retry) = manual_checkpoint::staged_retry(&inner, &state).map_err(py_error)?
             {
                 state["_staged_manual_retry"] = retry;
             }
@@ -1459,6 +1515,81 @@ impl NativeThread {
             .map_err(py_error)?
             .map(|value| serde_json::to_string(&value).map_err(py_error))
             .transpose()
+    }
+
+    fn _runtime_handoff_published(&self) -> PyResult<bool> {
+        let inner = self.current()?;
+        Ok(agent_profiles::runtime_handoff_published(&inner.thread))
+    }
+
+    fn _runtime_approval_graph(&self) -> PyResult<Option<String>> {
+        let inner = self.current()?;
+        agent_profiles::runtime_approval_graph(&inner.thread).map_err(py_error)
+    }
+
+    fn _runtime_handoff_checkpoint_status(&self) -> PyResult<String> {
+        let inner = self.current()?;
+        let status = agent_profiles::runtime_handoff_checkpoint_status(&inner.thread)
+            .map_err(py_error)?;
+        serde_json::to_string(&status).map_err(py_error)
+    }
+
+    fn _adopt_runtime_handoff<'py>(
+        &self,
+        py: Python<'py>,
+        target: String,
+        name: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            agent_profiles::adopt_runtime_handoff(&inner.thread, &target, &name)
+                .await
+                .map_err(py_error)
+        })
+    }
+
+    // Stage only metadata under the exact entered callback owner.
+    fn _stage_runtime_handoff(
+        &self,
+        request_json: &str,
+        factory: &str,
+        roster_json: &str,
+        root_id: &str,
+    ) -> PyResult<String> {
+        let request: serde_json::Value = serde_json::from_str(request_json).map_err(py_error)?;
+        let inner = self.current()?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        let key: python_tools::PendingKey =
+            serde_json::from_value(request.clone()).map_err(py_error)?;
+        if key.reply.thread != inner.id.to_string() || key.reply.instance.is_some() {
+            return Err(py_error("Runtime handoff requires its root callback owner"));
+        }
+        let invocation = request
+            .get("_sdk_invocation")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| py_error("Invalid runtime handoff invocation nonce"))?;
+        let root = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Runtime handoff owner is unavailable"))?;
+        let tools = root
+            .owner(&inner.id.to_string(), &key)
+            .ok_or_else(|| py_error("Runtime handoff callback owner expired"))?;
+        let receipt = tools
+            .stage_runtime_handoff(
+                &inner.thread,
+                &inner.id.to_string(),
+                &key,
+                invocation,
+                factory,
+                roster_json,
+                root_id,
+            )
+            .map_err(py_error)?;
+        serde_json::to_string(&receipt).map_err(py_error)
     }
 
     // Recheck after caller-owned checkpoint storage has settled, immediately
@@ -2851,6 +2982,30 @@ impl NativeThread {
         Ok(true)
     }
 
+    #[pyo3(signature = (id, thread=None, instance=None))]
+    fn _wait_agent_workspace_admission<'py>(
+        &self, py: Python<'py>, id: u64, thread: Option<&str>, instance: Option<&str>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        let tools = inner.thread.thread_extension_data().get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Agent workspace requires current tools"))?;
+        let admission = tools.take_workspace_admission(id, thread, instance).map_err(py_error)?;
+        // Observation owns no engine operation; shutdown must retire the producer.
+        async_bridge::future_factory_into_py(py, move || async move {
+            admission.wait().await.map_err(py_error)
+        })
+    }
+
+    #[pyo3(signature = (id, guidance=None, thread=None, instance=None))]
+    fn _reply_agent_workspace(
+        &self, id: u64, guidance: Option<String>, thread: Option<&str>, instance: Option<&str>,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner.thread.thread_extension_data().get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Agent workspace requires current tools"))?;
+        tools.reply_agent_workspace(id, guidance, thread, instance).map_err(py_error)
+    }
+
     #[pyo3(signature = (id, thread=None, instance=None, *, error=false))]
     fn _reply_agent_lifecycle(
         &self,
@@ -2867,6 +3022,25 @@ impl NativeThread {
             .ok_or_else(|| py_error("Agent lifecycle requires current tools"))?;
         tools
             .reply_agent_lifecycle(id, error, thread, instance)
+            .map_err(py_error)
+    }
+
+    #[pyo3(signature = (id, thread=None, instance=None, *, error=false))]
+    fn _reply_tool_lifecycle(
+        &self,
+        id: u64,
+        thread: Option<&str>,
+        instance: Option<&str>,
+        error: bool,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Tool lifecycle requires current tools"))?;
+        tools
+            .reply_tool_lifecycle(id, error, thread, instance)
             .map_err(py_error)
     }
 
@@ -2889,6 +3063,24 @@ impl NativeThread {
             .map_err(py_error)
     }
 
+    #[pyo3(signature = (id, text=None, *, cancelled=false))]
+    fn _reply_tool_not_found(
+        &self,
+        id: u64,
+        text: Option<String>,
+        cancelled: bool,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Unknown tool formatter requires current tools"))?;
+        tools
+            .reply_tool_not_found(id, text, cancelled)
+            .map_err(py_error)
+    }
+
     #[pyo3(signature = (id, items_json, thread=None, instance=None))]
     fn _reply_context(
         &self,
@@ -2907,7 +3099,13 @@ impl NativeThread {
             .map(|text| {
                 serde_json::from_str::<serde_json::Value>(text)
                     .and_then(|value| {
-                        if value.is_object() {
+                        if value.get("application_instructions").is_some() {
+                            serde_json::from_value::<python_tools::ApplicationContextProjection>(value)
+                                .map(python_tools::ModelContextUpdate::Application)
+                        } else if value.get("source_indices").is_some() {
+                            serde_json::from_value::<python_tools::SourceMappedContext>(value)
+                                .map(python_tools::ModelContextUpdate::SourceMapped)
+                        } else if value.is_object() {
                             serde_json::from_value::<python_tools::HostedContextProjection>(value)
                                 .map(python_tools::ModelContextUpdate::Hosted)
                         } else {
@@ -3122,13 +3320,23 @@ impl NativeThread {
     }
 
     // Private SDK ingress. Do not expose via NativeThread.call/ops::OPERATIONS.
-    #[pyo3(signature = (servers_json, policies_json=None))]
+    #[pyo3(signature = (servers_json, policies_json=None, *, tracing_context=None, _discovery_policy=None))]
     fn _replace_mcp_servers<'py>(
         &self,
         py: Python<'py>,
         servers_json: &str,
         policies_json: Option<&str>,
+        tracing_context: Option<&str>,
+        _discovery_policy: Option<PyRef<'_, mcp_discovery_trace::DiscoveryPolicy>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let mut trace = resolve_opening_trace_context(tracing_context)?;
+        if let Some(policy) = _discovery_policy {
+            trace = Some(
+                trace
+                    .ok_or_else(|| py_error("MCP discovery policy requires its trace owner"))?
+                    .with_mcp_discovery_policy(policy.take()?),
+            );
+        }
         let servers = serde_json::from_str(servers_json)
             .map_err(|_| PyValueError::new_err("invalid MCP servers JSON"))?;
         let servers =
@@ -3143,7 +3351,7 @@ impl NativeThread {
                 .map_err(|err| PyValueError::new_err(err.to_string()))?;
         }
         let inner = self.current()?;
-        async_bridge::future_into_py(py, async move {
+        let replace = async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
             let _mutation = inner.mutations.lock().await;
             let control = inner
@@ -3167,6 +3375,13 @@ impl NativeThread {
                 }
             }
             serde_json::to_string(&receipt).map_err(py_error)
+        };
+        async_bridge::future_into_py(py, async move {
+            if let Some(trace) = trace {
+                trace.scope(replace).await
+            } else {
+                replace.await
+            }
         })
     }
 
@@ -3317,13 +3532,14 @@ impl NativeThread {
         })
     }
 
-    #[pyo3(signature = (output_schema_json=None, include_model_attempt=false, *, drain_events=false))]
+    #[pyo3(signature = (output_schema_json=None, include_model_attempt=false, *, drain_events=false, include_produced_prefix=false))]
     fn _seal_manual<'py>(
         &self,
         py: Python<'py>,
         output_schema_json: Option<&str>,
         include_model_attempt: bool,
         drain_events: bool,
+        include_produced_prefix: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let output_schema: Option<serde_json::Value> = output_schema_json
             .map(serde_json::from_str)
@@ -3378,7 +3594,19 @@ impl NativeThread {
                     }
                     _ => None,
                 };
-                Ok(serde_json::json!({"checkpoint":checkpoint,"model_attempt":model_attempt}))
+                let produced_prefix = match (&checkpoint, include_produced_prefix) {
+                    (Some(checkpoint), true) => {
+                        let turn = checkpoint["native_continuation"]["turn_id"]
+                            .as_str()
+                            .ok_or_else(|| py_error("Produced prefix has no sealed turn"))?;
+                        Some(inner.thread.sdk_take_produced_items(turn).map_err(py_error)?)
+                    }
+                    _ => None,
+                };
+                Ok(serde_json::json!({
+                    "checkpoint":checkpoint,"model_attempt":model_attempt,
+                    "produced_prefix":produced_prefix
+                }))
             })
             .await?;
             serde_json::to_string(&checkpoint).map_err(py_error)
@@ -3507,6 +3735,46 @@ impl NativeThread {
             if !tools.check_manual(&grant.key.reply.thread, &grant) {
                 return Ok(false);
             }
+            if inner
+                .engine
+                .store
+                .as_any()
+                .is::<canonical_storage::CanonicalStore>()
+                && tools.is_reentry(&grant.key)
+            {
+                let Some(item) = tools
+                    .response_receipt(&grant.key, response.clone())
+                    .map_err(py_error)?
+                else {
+                    return Ok(false);
+                };
+                return async_bridge::retain_writer_operation(async move {
+                    let _operation = _context_operation;
+                    let _mutation = _mutation;
+                    let store = inner
+                        .engine
+                        .store
+                        .as_any()
+                        .downcast_ref::<canonical_storage::CanonicalStore>()
+                        .expect("selected canonical SDK writer");
+                    store
+                        .commit_sdk_receipt(inner.id, &grant.key, item)
+                        .await
+                        .map_err(py_error)?;
+                    store.managed_calls.register(
+                        &grant.key.reply.thread,
+                        &grant.key.turn,
+                        &grant.key.call,
+                    );
+                    Ok(tools.respond_manual(
+                        &grant.key.reply.thread,
+                        &grant,
+                        response,
+                        start_response,
+                    ))
+                })
+                .await;
+            }
             if inner.engine.local_checklist_store.is_some() {
                 let id = codex_protocol::ThreadId::from_string(&grant.key.reply.thread)
                     .map_err(py_error)?;
@@ -3551,6 +3819,13 @@ impl NativeThread {
     ) -> PyResult<Bound<'py, PyAny>> {
         let response: python_tools::Reply =
             serde_json::from_str(response_json).map_err(py_error)?;
+        if wait_for_acceptance
+            && matches!(&response, python_tools::Reply::ContinuationBatch(_))
+        {
+            return Err(py_error(
+                "Configured continuation batches acknowledge native mutation, not tool output",
+            ));
+        }
         let inner = self.current()?;
         let (acceptance, accepted) = if wait_for_acceptance {
             let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -3571,6 +3846,13 @@ impl NativeThread {
                 return Ok(false);
             };
             match response {
+                python_tools::Reply::ContinuationBatch(batch) => {
+                    // This pure-validation refusal is authoritative: the batch
+                    // commit loop cannot fail after changing its first entry.
+                    Ok(tools
+                        .update_configured_continuations(&inner.id.to_string(), batch)
+                        .unwrap_or(false))
+                }
                 python_tools::Reply::Park { request, park } => {
                     if !park {
                         return Err(py_error("park must be true"));
@@ -3752,14 +4034,28 @@ impl NativeThread {
                                 .commit_sdk_receipt(inner.id, &request, item)
                                 .await
                                 .map_err(py_error)?;
-                            Ok(sender
+                            if reentry {
+                                store.managed_calls.register(
+                                    &request.reply.thread,
+                                    &request.turn,
+                                    &request.call,
+                                );
+                            }
+                            let receipt = response.clone();
+                            let accepted = sender
                                 .send(python_tools::ToolReply {
                                     response,
                                     start_response,
                                     handoff_target_profile_id,
                                     acceptance,
                                 })
-                                .is_ok())
+                                .is_ok();
+                            if accepted {
+                                tools
+                                    .record_approved_result(&request, &receipt)
+                                    .map_err(py_error)?;
+                            }
+                            Ok(accepted)
                         })
                         .await;
                     }
@@ -4229,19 +4525,63 @@ impl NativeThread {
             Ok(inner.child_question_pending(&question_id).await)
         })
     }
+    fn _can_remember_mcp_question<'py>(
+        &self,
+        py: Python<'py>,
+        question_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            inner
+                .can_remember_mcp_question(&question_id)
+                .await
+                .map_err(py_error)
+        })
+    }
+
+    fn _export_mcp_approval_choices(&self) -> PyResult<String> {
+        let inner = self.current()?;
+        serde_json::to_string(&inner.export_mcp_approval_choices()).map_err(py_error)
+    }
+
+    fn _restore_mcp_approval_choices(&self, choices_json: &str) -> PyResult<()> {
+        let inner = self.current()?;
+        let choices = serde_json::from_str(choices_json).map_err(py_error)?;
+        inner.restore_mcp_approval_choices(choices).map_err(py_error)
+    }
+
+    fn _remembered_mcp_decision<'py>(
+        &self,
+        py: Python<'py>,
+        question_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            inner
+                .remembered_mcp_decision(&question_id)
+                .await
+                .map_err(py_error)
+        })
+    }
+
+    #[pyo3(signature = (question_id, operation, params_json, remember_mcp=None, use_portable_mcp=false))]
     fn _respond_child_question<'py>(
         &self,
         py: Python<'py>,
         question_id: String,
         operation: String,
         params_json: &str,
+        remember_mcp: Option<bool>,
+        use_portable_mcp: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let params = serde_json::from_str(params_json).map_err(py_error)?;
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
             inner
-                .respond_child_question(&question_id, &operation, params)
+                .respond_child_question(&question_id, &operation, params, remember_mcp, use_portable_mcp)
                 .await
                 .map_err(py_error)
         })
@@ -4543,6 +4883,7 @@ impl ContextChange {
             options_json,
             specs_json,
             Some(Arc::clone(&*owner.change)),
+            None,
         )
     }
 
@@ -4871,13 +5212,14 @@ fn create_engine<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (config_json="{}", runtime_json="{}", api_key=None, *, provider_lease=None, initial_checkpoint=None, initial_specs_json=None, initial_options_json="{}", _verify_current_default_model=false))]
+#[pyo3(signature = (config_json="{}", runtime_json="{}", api_key=None, *, provider_lease=None, canonical_store=None, initial_checkpoint=None, initial_specs_json=None, initial_options_json="{}", _verify_current_default_model=false))]
 fn create_checkpoint_engine<'py>(
     py: Python<'py>,
     config_json: &str,
     runtime_json: &str,
     api_key: Option<String>,
     provider_lease: Option<PyRef<'py, provider_owner::NativeProviderLease>>,
+    canonical_store: Option<Py<PyAny>>,
     initial_checkpoint: Option<&str>,
     initial_specs_json: Option<&str>,
     initial_options_json: &str,
@@ -4933,12 +5275,14 @@ fn create_checkpoint_engine<'py>(
         if let Some(lease) = &lease {
             lease.check_live()?;
         }
-        let inner = engine::EngineState::new_with_model(
+        let inner = engine::EngineState::new_with_store(
             config_json,
             runtime_json,
             true,
             api_key,
             initial_model,
+            canonical_store,
+            false,
         )
         .await
         .map_err(py_error)?;
@@ -4965,6 +5309,67 @@ fn _validate_python_tool_declarations(specs_json: &str) -> PyResult<()> {
 }
 
 #[pyfunction]
+fn _best_effort_strict_mcp_schema(schema_json: &str) -> Option<String> {
+    let schema: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(schema_json).ok()?;
+    let tool: rmcp::model::Tool = serde_json::from_value(serde_json::json!({
+        "name": "sdk_schema",
+        "inputSchema": schema,
+    }))
+    .ok()?;
+    let converted = codex_tools::mcp_tool_to_best_effort_strict_responses_api_tool(
+        &codex_tools::ToolName::plain("sdk_schema"),
+        &tool,
+        None,
+    )
+    .ok()?;
+    if !converted.strict {
+        return None;
+    }
+    serde_json::to_string(&converted.parameters).ok()
+}
+
+#[cfg(test)]
+mod borrowed_mcp_schema_tests {
+    use super::_best_effort_strict_mcp_schema;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn converts_properties_with_the_managed_strict_owner() {
+        let source = json!({"type":"object","properties":{
+            "key":{"type":"string"},"optional":{"type":"integer"}
+        },"required":["key"],"additionalProperties":false});
+        let result = _best_effort_strict_mcp_schema(&source.to_string()).unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["required"], json!(["key", "optional"]));
+        assert_eq!(result["additionalProperties"], json!(false));
+    }
+
+    #[test]
+    fn retains_unsupported_constraints_and_open_objects_as_non_strict() {
+        for source in [
+            json!({"type":"object","properties":{},"additionalProperties":true}),
+            json!({"type":"object","properties":{"n":{"type":"integer","minimum":0}}}),
+            json!({"$ref":"#/$defs/Input","$defs":{"Input":{"type":"object","properties":{}}}}),
+        ] {
+            assert!(_best_effort_strict_mcp_schema(&source.to_string()).is_none());
+        }
+    }
+
+    #[test]
+    fn recognizes_the_original_empty_schema_and_managed_size_budget() {
+        let empty = _best_effort_strict_mcp_schema("{}").unwrap();
+        let empty: Value = serde_json::from_str(&empty).unwrap();
+        assert_eq!(empty["additionalProperties"], json!(false));
+        assert_eq!(empty["properties"], json!({}));
+        let oversized = json!({"type":"object","properties":{"value":{
+            "type":"string","description":"x".repeat(6000)
+        }}});
+        assert!(_best_effort_strict_mcp_schema(&oversized.to_string()).is_none());
+    }
+}
+
+#[pyfunction]
 fn _python_tool_parameters(specs_json: &str) -> PyResult<String> {
     let specs: tool_callers::ToolDeclarations =
         serde_json::from_str(specs_json).map_err(py_error)?;
@@ -4984,13 +5389,19 @@ fn _agent_profiles_fingerprint(roster_json: &str, root_id: &str) -> PyResult<Str
 }
 
 #[pyfunction]
+#[pyo3(signature = (roster_json, root_id, history_json, enrollment_json=None))]
 fn _agent_profiles_restore_source(
     roster_json: &str,
     root_id: &str,
     history_json: &str,
+    enrollment_json: Option<&str>,
 ) -> PyResult<String> {
     let opening = agent_profiles::OpeningProfiles {
         input_preparations: Default::default(),
+        runtime_enrollment: enrollment_json
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(py_error)?,
         root_id: root_id.to_owned(),
         roster: serde_json::from_str(roster_json).map_err(py_error)?,
         fingerprint: agent_profiles::fingerprint(roster_json, root_id).map_err(py_error)?,
@@ -5004,14 +5415,20 @@ fn _agent_profiles_restore_source(
 }
 
 #[pyfunction]
+#[pyo3(signature = (roster_json, root_id, history_json, turn_id, enrollment_json=None))]
 fn _agent_profiles_operation_source(
     roster_json: &str,
     root_id: &str,
     history_json: &str,
     turn_id: &str,
+    enrollment_json: Option<&str>,
 ) -> PyResult<String> {
     let opening = agent_profiles::OpeningProfiles {
         input_preparations: Default::default(),
+        runtime_enrollment: enrollment_json
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(py_error)?,
         root_id: root_id.to_owned(),
         roster: serde_json::from_str(roster_json).map_err(py_error)?,
         fingerprint: agent_profiles::fingerprint(roster_json, root_id).map_err(py_error)?,
@@ -5273,6 +5690,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
         .thread_stack_size(codex_async_utils::THREAD_STACK_SIZE_BYTES);
     pyo3_async_runtimes::tokio::init(runtime);
     module.add_class::<Engine>()?;
+    module.add_class::<mcp_discovery_trace::DiscoveryPolicy>()?;
     module.add_class::<CanonicalReconciliation>()?;
     module.add_class::<python_tools::ManualToolGrant>()?;
     module.add_class::<NativeChildTurn>()?;
@@ -5297,6 +5715,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(config_schema, module)?)?;
     module.add_function(wrap_pyfunction!(live::_connect_live, module)?)?;
     module.add_function(wrap_pyfunction!(_python_tool_parameters, module)?)?;
+    module.add_function(wrap_pyfunction!(_best_effort_strict_mcp_schema, module)?)?;
     module.add_function(wrap_pyfunction!(
         _validate_python_tool_declarations,
         module

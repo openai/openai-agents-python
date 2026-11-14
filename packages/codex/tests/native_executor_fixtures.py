@@ -119,6 +119,8 @@ class ExecutorPeer:
     )
     # Override advertised admission metadata, not real executor enforcement.
     advertised_platform: str | None = None
+    advertised_shell: dict[str, str] | None = None
+    advertised_alternate_shells: tuple[dict[str, str], ...] | None = None
     synthetic_process_starts: list[str] = field(default_factory=list)
     _synthetic_process_streams: dict[str, Any] = field(default_factory=dict, repr=False)
     _synthetic_process_chunks: dict[str, list[str]] = field(default_factory=dict, repr=False)
@@ -383,14 +385,27 @@ class ExecutorPeer:
                                                     }
                                                 )
                                                 continue
-                                        elif (
-                                            methods.get(value.get("id"))
-                                            in ("initialize", "environment/info")
-                                            and self.advertised_platform is not None
+                                        elif methods.get(value.get("id")) in (
+                                            "initialize",
+                                            "environment/info",
+                                        ) and (
+                                            self.advertised_platform is not None
+                                            or self.advertised_shell is not None
+                                            or self.advertised_alternate_shells is not None
                                         ):
                                             result = value["result"]
                                             info = result.get("environmentInfo", result)
-                                            info["platformOs"] = self.advertised_platform
+                                            if self.advertised_platform is not None:
+                                                info["platformOs"] = self.advertised_platform
+                                            if self.advertised_shell is not None:
+                                                info["shell"] = self.advertised_shell
+                                            if self.advertised_alternate_shells is not None:
+                                                if self.advertised_alternate_shells:
+                                                    info["alternateShells"] = list(
+                                                        self.advertised_alternate_shells
+                                                    )
+                                                else:
+                                                    info.pop("alternateShells", None)
                                             await destination.send_json(value)
                                             continue
                                         elif (

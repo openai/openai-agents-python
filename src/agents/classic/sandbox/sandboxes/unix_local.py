@@ -285,6 +285,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     def __init__(self, *, state: UnixLocalSandboxSessionState) -> None:
         self.state = state
         self._running = False
+        self._portable_workspace_generation: str | None = None
         self._pty_lock = asyncio.Lock()
         self._pty_processes = {}
         self._reserved_pty_process_ids = set()
@@ -336,9 +337,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         # recreate an empty workspace after cleanup deleted the previous root, so reporting
         # "running" too early can incorrectly skip snapshot restoration based on a stale
         # fingerprint cache file.
+        self._portable_workspace_generation = uuid.uuid4().hex
         self._running = True
 
     async def _after_start_failed(self) -> None:
+        self._portable_workspace_generation = None
         self._running = False
 
     def _wrap_stop_error(self, error: Exception) -> Exception:
@@ -369,6 +372,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             )
 
     async def _after_shutdown(self) -> None:
+        self._portable_workspace_generation = None
         await self._wait_for_fd_close_tasks()
         # Best-effort: mark session not running. We intentionally do not delete the workspace
         # directory here; cleanup is handled by the Client.delete().

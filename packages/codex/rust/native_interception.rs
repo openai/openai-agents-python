@@ -627,6 +627,10 @@ pub(crate) fn capture_step_stop(
 }
 
 impl CapturedTurnStop {
+    pub(crate) fn cancellation(&self) -> CancellationToken {
+        self.owner.cancelled.clone()
+    }
+
     pub(crate) fn stop(&self) {
         let _state = self
             .control
@@ -2625,6 +2629,48 @@ impl ModelRequestContributor for Boundary {
         })
     }
 
+    fn has_tool_span_policy(&self) -> bool {
+        true
+    }
+
+    fn admit_agent_span(
+        &self, input: codex_extension_api::SdkAgentSpanInput,
+    ) -> futures_util::future::BoxFuture<'_, std::result::Result<codex_extension_api::SdkAgentSpanAdmission, String>> {
+        let tools = input.admission.turn_store()
+            .get::<Arc<crate::python_tools::TurnAdmission>>()
+            .and_then(|receipt| receipt.callback_tools());
+        Box::pin(async move {
+            use codex_extension_api::SdkAgentSpanAdmission;
+            let Some(tools) = tools else { return Ok(SdkAgentSpanAdmission::Unhandled); };
+            tools.admit_agent_span(input).await
+                .map(|value| value.map_or(SdkAgentSpanAdmission::Suppress, SdkAgentSpanAdmission::Record))
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn admit_tool_span(
+        &self,
+        input: codex_extension_api::SdkProviderResponseSpanInput,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        std::result::Result<codex_extension_api::SdkToolSpanAdmission, String>,
+    > {
+        let tools = input
+            .admission
+            .turn_store()
+            .get::<Arc<crate::python_tools::TurnAdmission>>()
+            .and_then(|receipt| receipt.callback_tools());
+        Box::pin(async move {
+            use codex_extension_api::SdkToolSpanAdmission;
+            let Some(tools) = tools else {
+                return Ok(SdkToolSpanAdmission::Unhandled);
+            };
+            tools.admit_provider_response_span(input).await
+                .map(|value| value.map_or(SdkToolSpanAdmission::Suppress, SdkToolSpanAdmission::Record))
+                .map_err(|error| error.to_string())
+        })
+    }
+
     fn model_attempt(
         &self,
         input: codex_extension_api::ModelAttemptInput,
@@ -2925,6 +2971,11 @@ struct AdmissionOnly {
     owner: Arc<DirectTurn>,
 }
 impl ModelResponseInterceptor for AdmissionOnly {
+    fn permits_post_terminal_tool_dispatch(&self) -> bool {
+        // This owned wrapper admits or rewrites calls; Core alone executes them.
+        true
+    }
+
     fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {
         self.generation.then(|| self.control.text_demand.clone())
     }
@@ -2948,6 +2999,11 @@ impl ModelResponseInterceptor for AdmissionOnly {
 struct RevokedRequest;
 
 impl ModelResponseInterceptor for RevokedRequest {
+    fn permits_post_terminal_tool_dispatch(&self) -> bool {
+        // This owned wrapper admits or rewrites calls; Core alone executes them.
+        true
+    }
+
     fn admit_request(&self) -> Result<(), String> {
         Err(FAILURE.into())
     }
@@ -3354,6 +3410,11 @@ impl DirectRequest {
 }
 
 impl ModelResponseInterceptor for DirectRequest {
+    fn permits_post_terminal_tool_dispatch(&self) -> bool {
+        // This owned wrapper admits or rewrites calls; Core alone executes them.
+        true
+    }
+
     fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {
         Some(self.control.text_demand.clone())
     }

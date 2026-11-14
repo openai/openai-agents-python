@@ -34,6 +34,7 @@ from typing import (
     Protocol as Protocol,
     TypeAlias as TypeAlias,
     TypeVar as TypeVar,
+    cast as _cast,
 )
 from uuid import uuid4 as _uuid4
 
@@ -673,7 +674,9 @@ def _generated_scope_ids(
 _default_agent_harness_id: str | None = None
 
 
-def _native_provider_response_span_id(context: str) -> dict[str, str | None] | None:
+def _native_provider_response_span_id(
+    context: str, *, name: str = "response", kind: str = "model", model: str | None = None
+) -> dict[str, str | None] | None:
     """Allocate on the host loop under a borrowed owner, without another span."""
     parent = None
     options = TraceOptions()
@@ -682,7 +685,7 @@ def _native_provider_response_span_id(context: str) -> dict[str, str | None] | N
             parent = current_context()
             if _tracing_disabled or _in_processor.get() or parent is None or parent.disabled:
                 return None
-            if not _create_provider_response_span():
+            if not _should_create_span(name, kind, model=model):
                 return None
             ids = _generated_scope_ids(options, parent, parent, (), _native_tracing())
             return {"span_id": ids.get("span_id")}
@@ -690,11 +693,62 @@ def _native_provider_response_span_id(context: str) -> dict[str, str | None] | N
         del context, parent, options
 
 
-def _create_provider_response_span() -> bool:
-    return _should_create_span("response", "model")
+async def _run_mcp_discovery_policy(
+    replace_servers: _Callable[..., Any],
+    servers: str,
+    policies: str,
+    *,
+    tracing_context: str | None,
+) -> str:
+    if tracing_context is None or not _named_tool_span_policy():
+        options = {"tracing_context": tracing_context} if tracing_context is not None else {}
+        return _cast(str, await replace_servers(servers, policies, **options))
+
+    policy = _native_tracing()._McpDiscoverySpanPolicy()
+
+    async def process_requests() -> None:
+        try:
+            while (request := await policy.next()) is not None:
+                if not request.is_live():
+                    continue
+                try:
+                    decision = _native_provider_response_span_id(
+                        request.parent, name=request.server, kind="mcp_tools"
+                    )
+                except Exception:
+                    # Native startup reports a stable error without retaining callback data.
+                    request.settle(False, error=True)
+                else:
+                    request.settle(
+                        decision is not None, decision["span_id"] if decision is not None else None
+                    )
+        finally:
+            policy.close()
+
+    worker = _create_task(process_requests())
+    try:
+        return _cast(
+            str,
+            await replace_servers(
+                servers, policies, tracing_context=tracing_context, _discovery_policy=policy
+            ),
+        )
+    finally:
+        policy.close()
+        await _join(worker)
 
 
-def _should_create_span(name: str, kind: str) -> bool:
+def _named_tool_span_policy() -> bool:
+    if _id_generator.generate_span_id is not None:
+        return True
+    with _processor_lock:
+        return any(
+            getattr(_processors[key].processor, "should_create_span", None) is not None
+            for key in _active_processor_ids
+        )
+
+
+def _should_create_span(name: str, kind: str, *, model: str | None = None) -> bool:
     # Match the current processor routes selected by native event emission.
     # Snapshot objects under the lock; run application policy without it.
     with _processor_lock:
@@ -704,19 +758,29 @@ def _should_create_span(name: str, kind: str) -> bool:
     try:
         for processor in processors:
             callback = getattr(processor, "should_create_span", None)
-            if callback is None:
-                continue
-            value = callback(name, kind)
-            if not isinstance(value, bool):
-                if _inspect.iscoroutine(value):
-                    value.close()
-                raise TypeError("Trace creation policies must return bool")
-            if not value:
-                return False
+            if callback is not None:
+                value = callback(name, kind)
+                if not _trace_creation_decision(value):
+                    return False
+        if model is not None:
+            for processor in processors:
+                callback = getattr(processor, "should_create_model_span", None)
+                if callback is not None:
+                    value = callback(model)
+                    if not _trace_creation_decision(value):
+                        return False
         return True
     finally:
         _in_processor.reset(token)
         del processors, processor, callback, value
+
+
+def _trace_creation_decision(value: Any) -> bool:
+    if not isinstance(value, bool):
+        if _inspect.iscoroutine(value):
+            value.close()
+        raise TypeError("Trace creation policies must return bool")
+    return value
 
 
 def _normalize_agent_harness_id(value: str | None) -> str | None:
@@ -948,6 +1012,8 @@ class TraceScope:
                 )
             )
             if enabled:
+                if _named_tool_span_policy():
+                    wire["named_tool_policy"] = True
                 if _should_create_span(self._name, self._kind):
                     wire.update(
                         _generated_scope_ids(value, parent, ambient, self._restrictions, native)
@@ -1270,12 +1336,18 @@ class TraceProcessor(Protocol):
     """Receive immutable native lifecycle snapshots; callbacks may be async.
 
     A processor may define should_create_span(name, kind) -> bool as a
-    synchronous policy before creating a host-owned span or a logical model
-    response span. A False result disables recording for a host scope and its
-    descendants. For logical response spans, it suppresses only that response
-    span. Native transport spans follow the admitted operation's policy.
+    synchronous policy before creating a host-owned span (including individual guardrails)
+    or a native logical model response, tool, or handoff span. A False result
+    disables recording for a host scope and its descendants. For a native
+    semantic span, it suppresses only that span. Native transport spans
+    follow the admitted operation's policy.
     Exceptions or non-boolean results fail admission. Scopes opened inside
     the callback inherit recursion suppression.
+
+    A processor may define should_create_model_span(model) -> bool to select
+    logical response spans using the model Core selected for that step. It runs
+    after the generic creation policy, under the same scope and with the same
+    synchronous return contract. It receives no request input or credentials.
 
     A processor may define on_trace_events(events) to consume a native-drain
     batch instead of individual callbacks. The SDK awaits that callback before
@@ -1322,11 +1394,12 @@ def _validate_processors(processors: Sequence[TraceProcessor]) -> None:
     if any(not callable(getattr(processor, "on_trace_event", None)) for processor in processors):
         raise TypeError("Processors must define on_trace_event")
     for processor in processors:
-        callback = getattr(processor, "should_create_span", None)
-        if callback is not None and (
-            not callable(callback) or _inspect.iscoroutinefunction(callback)
-        ):
-            raise TypeError("Trace creation policies must be synchronous callables")
+        for name in ("should_create_span", "should_create_model_span"):
+            callback = getattr(processor, name, None)
+            if callback is not None and (
+                not callable(callback) or _inspect.iscoroutinefunction(callback)
+            ):
+                raise TypeError("Trace creation policies must be synchronous callables")
 
 
 def _check_processor_capacity(count: int, *, replace: bool) -> None:
@@ -1689,6 +1762,13 @@ def _activate(context: str | None) -> Iterator[None]:
         yield
     finally:
         _current.reset(token)
+
+
+@contextmanager
+def _guardrail_span(name: str, context: str | None = None) -> Iterator[TraceScope | None]:
+    name = name.encode("utf-8", "replace")[:4096].decode("utf-8", "ignore")
+    with _owned_span(name, "guardrail", context) as span:
+        yield span
 
 
 @contextmanager

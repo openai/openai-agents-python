@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +17,39 @@ if TYPE_CHECKING:
     from .state import LocalStorage, SessionState
 
 
+def _single_configured_child(state: SessionState) -> bool:
+    # The native store repeats this scope check and authenticates the full
+    # captured frame against its original canonical writer and current call.
+    from .state import SessionState
+
+    frame = state.native_continuation
+    if frame is None or len(frame.pending_manual) != 1:
+        return False
+    continuation = frame.pending_manual[0].continuation
+    if continuation is None or continuation.get("kind") != "configured-child-v1":
+        return False
+    try:
+        child = SessionState.model_validate_json(json.dumps(continuation["state"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+    nested = child.native_continuation
+    return (
+        child.format_version == 5
+        and child.codex_revision == state.codex_revision
+        and child.source_session_id != state.source_session_id
+        and not child.descendants
+        and child.root_goal is None
+        and child.root_checklist is None
+        and child.root_code_mode is None
+        and child.run_budget is None
+        and nested is not None
+        and len(nested.pending_manual) == 1
+        and nested.pending_manual[0].continuation is None
+        and not nested.pending_mcp
+        and not nested.pending_input
+    )
+
+
 def _validate_storage_opening(
     storage: LocalStorage | CustomStorage | None,
     state: SessionState | None,
@@ -27,8 +61,28 @@ def _validate_storage_opening(
 
         if not isinstance(storage, (LocalStorage, CustomStorage)):
             raise TypeError("storage must be LocalStorage or CustomStorage")
-    if state is not None and (storage is not None or resume is not None):
-        raise ValueError("Portable state cannot be combined with persistent storage or resume")
+    if state is not None and (
+        resume is not None or storage is not None and not isinstance(storage, CustomStorage)
+    ):
+        raise ValueError("Portable state cannot be combined with LocalStorage or resume")
+    if state is not None and isinstance(storage, CustomStorage):
+        frame = state.native_continuation
+        if (
+            frame is None
+            or len(frame.pending_manual) != 1
+            or frame.accepted_replies
+            or frame.pending_mcp
+            or frame.pending_input
+            or (
+                frame.pending_manual[0].continuation is not None
+                and not _single_configured_child(state)
+            )
+            or state.descendants
+            or state.root_goal is not None
+            or state.root_checklist is not None
+            or state.root_code_mode is not None
+        ):
+            raise ValueError("CustomStorage restore requires a sealed ordinary manual call")
     if resume is not None:
         if storage is None:
             raise ValueError("resume requires the original storage backend")
@@ -65,7 +119,6 @@ def _validate_custom_storage_capabilities(
     # Other executor routes still need durable effect and continuation receipts.
     unsupported_environment = environment is not None and (
         not isinstance(environment, Environment)
-        or environment._is_local
         or not environment.read_only
         or not environment.tools
         or any(name not in ("project_glob", "project_grep") for name in environment.tools)
@@ -86,9 +139,9 @@ def _validate_custom_storage_capabilities(
         )
         or unsupported_environment
         or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
-        or any(tool._bind is None or tool.needs_approval is not False for tool in tools)
+        or any(tool.needs_approval is not False for tool in tools)
     ):
         raise ValueError(
             "CustomStorage preview does not support children, goals, checklist, "
-            "code mode, manual tools, standalone native tools or environments"
+            "code mode, standalone native tools or environments"
         )

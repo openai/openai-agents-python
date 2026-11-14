@@ -199,6 +199,11 @@ impl ModelRequestContributor for RecoveryContributor {
 struct Request(Arc<HashSet<String>>);
 
 impl ModelResponseInterceptor for Request {
+    fn permits_post_terminal_tool_dispatch(&self) -> bool {
+        // This owned wrapper only rejects replayed calls; it never executes tools.
+        true
+    }
+
     fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
         Box::pin(GuardedStream {
             original_ids: self.0,

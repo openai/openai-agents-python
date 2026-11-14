@@ -1235,7 +1235,6 @@ def test_duplicate_hosted_declarations_rejected(tool):
 @pytest.mark.parametrize(
     "tool,name",
     [
-        (FileSearch(vector_store_ids=["vs_fixture"]), "file_search"),
         (CodeInterpreter(container="cntr_fixture"), "code_interpreter"),
         (ImageGeneration(), "image_generation"),
     ],

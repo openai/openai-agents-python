@@ -1,0 +1,172 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 017c6c5c..21ecb217 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -2647,6 +2647,14 @@ impl ModelClientSession {
+                 &mut request.client_metadata,
+                 prompt.tool_admission.clone(),
+             );
++            if crate::model_request::requires_post_terminal_tool_dispatch(
++                prompt.tool_admission.as_ref(),
++            ) {
++                // This list belongs to this exact HTTP attempt. Check before
++                // admission, observation, custom production, or provider send.
++                crate::model_request::check_post_terminal_http_interceptors(&interceptors)
++                    .map_err(CodexErr::InvalidRequest)?;
++            }
+             if codex_protocol::input_video::contains_video_input(&request.input)
+                 && !interceptors
+                     .iter()
+@@ -3520,6 +3528,15 @@ impl ModelClientSession {
+         self.allow_http_fallback = Self::request_transport_mode(prompt) != codex_protocol::model_request_transport::RequestTransportMode::Websocket;
+         let projected_model = request_model_info(prompt, model_info);
+         let model_info = projected_model.as_ref();
++        if websocket_enabled
++            && crate::model_request::requires_post_terminal_tool_dispatch(
++                prompt.tool_admission.as_ref(),
++            )
++        {
++            return Err(CodexErr::InvalidRequest(
++                crate::model_request::MODEL_COMPLETION_BOUNDARY_ERROR.into(),
++            ));
++        }
+         if prompt.prefer_buffered_response
+             && (model_info.use_responses_lite || websocket_enabled)
+         {
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index e3d9e162..01ea1cb7 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -22,6 +22,33 @@ use codex_protocol::models::ResponseItem;
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ 
++pub(crate) const MODEL_COMPLETION_BOUNDARY_ERROR: &str =
++    "Model completion hooks require a provider response that can finish before local tool execution";
++
++/// Captured from the same request's selected completion observers and tools.
++pub(crate) struct PostTerminalToolDispatch;
++
++pub(crate) fn requires_post_terminal_tool_dispatch(
++    admission: Option<&Arc<dyn ModelToolAdmission>>,
++) -> bool {
++    admission
++        .and_then(|admission| admission.step_store())
++        .and_then(|store| store.get::<PostTerminalToolDispatch>())
++        .is_some()
++}
++
++pub(crate) fn check_post_terminal_http_interceptors(
++    interceptors: &[Box<dyn ModelResponseInterceptor>],
++) -> Result<(), String> {
++    if interceptors.iter().all(|interceptor| {
++        !interceptor.produces_response() && interceptor.permits_post_terminal_tool_dispatch()
++    }) {
++        Ok(())
++    } else {
++        Err(MODEL_COMPLETION_BOUNDARY_ERROR.to_owned())
++    }
++}
++
+ pub(crate) fn turn_sampling_stop(turn_store: &ExtensionData) -> Option<Arc<TurnSamplingStop>> {
+     turn_store.get::<TurnSamplingStop>()
+ }
+@@ -106,6 +133,10 @@ struct BoundInterceptor {
+     admission: Option<Arc<dyn ModelToolAdmission>>,
+ }
+ impl ModelResponseInterceptor for BoundInterceptor {
++    fn permits_post_terminal_tool_dispatch(&self) -> bool {
++        self.inner.permits_post_terminal_tool_dispatch()
++    }
++
+     fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {
+         self.inner.text_delta_demand()
+     }
+@@ -365,3 +396,46 @@ fn bound_interceptor_forwards_provider_window_attestation() {
+     };
+     assert!(!unknown.preserves_provider_message_window());
+ }
++
++#[cfg(test)]
++mod post_terminal_http_tests {
++    use super::*;
++
++    struct Native;
++    impl ModelResponseInterceptor for Native {
++        fn permits_post_terminal_tool_dispatch(&self) -> bool {
++            true
++        }
++        fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
++            stream
++        }
++    }
++    struct Unknown;
++    impl ModelResponseInterceptor for Unknown {
++        fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
++            stream
++        }
++    }
++    struct Producer;
++    impl ModelResponseInterceptor for Producer {
++        fn permits_post_terminal_tool_dispatch(&self) -> bool {
++            true
++        }
++        fn produces_response(&self) -> bool {
++            true
++        }
++        fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
++            stream
++        }
++    }
++
++    #[test]
++    fn only_owned_native_http_wrappers_allow_terminal_before_tools() {
++        assert!(check_post_terminal_http_interceptors(&[]).is_ok());
++        assert!(check_post_terminal_http_interceptors(&[Box::new(Native)]).is_ok());
++        assert!(
++            check_post_terminal_http_interceptors(&[Box::new(Native), Box::new(Unknown)]).is_err()
++        );
++        assert!(check_post_terminal_http_interceptors(&[Box::new(Producer)]).is_err());
++    }
++}
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index bdb59ddf..fcbb7710 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -5310,9 +5310,15 @@ async fn try_run_sampling_request(
+         && (step_context.settings.model_info.use_responses_lite
+             || step_context.tool_router.has_provider_programmatic_tool())
+     {
+-        return Err(CodexErr::InvalidRequest(
+-            "Model completion hooks require a provider response that can finish before local tool execution".into(),
+-        ));
++        // The concrete client checks its selected transport and captured
++        // interceptors before dispatch. Do not infer transport from Lite alone.
++        step_context
++            .extension_data
++            .insert(crate::model_request::PostTerminalToolDispatch);
++    } else {
++        step_context
++            .extension_data
++            .remove::<crate::model_request::PostTerminalToolDispatch>();
+     }
+     // Without a configured observer, preserve native streaming tool dispatch.
+     let completion_gate = (!observers.is_empty()).then(CancellationToken::new);
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 97dfa744..7322ca0d 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -587,6 +587,13 @@ pub struct ModelAttemptInput {
+ /// Interceptors compose in registration order; dropping their stream must release unfinished work.
+ /// Trusted host implementations must bound any model-visible content they synthesize.
+ pub trait ModelResponseInterceptor: Send + Sync {
++    /// Native stream wrappers may confirm that receiving a terminal response
++    /// never requires an SDK local tool result. Unknown wrappers and response
++    /// producers do not receive this authority by default.
++    fn permits_post_terminal_tool_dispatch(&self) -> bool {
++        false
++    }
++
+     /// Attest safe pre-interceptor text grouping and uncaptured empty-fact omission.
+     /// Unknown/text-sensitive interceptors preserve the original stream by default.
+     fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {

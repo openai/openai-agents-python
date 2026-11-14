@@ -1,0 +1,183 @@
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index d91c6466..5d6e82ec 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -460,9 +460,24 @@ impl ToolRegistry {
+         &mut self,
+         runtime: Arc<dyn CoreToolRuntime>,
+         exposure: ToolExposure,
++    ) -> bool {
++        self.register_external_admitted(runtime, exposure, false)
++    }
++
++    /// Only the exact captured-profile application callback path uses this entry.
++    pub(crate) fn register_runtime_callback(&mut self, runtime: Arc<dyn CoreToolRuntime>) -> bool {
++        let exposure = runtime.exposure();
++        self.register_external_admitted(runtime, exposure, true)
++    }
++
++    fn register_external_admitted(
++        &mut self,
++        runtime: Arc<dyn CoreToolRuntime>,
++        exposure: ToolExposure,
++        application_callback: bool,
+     ) -> bool {
+         let tool_name = runtime.tool_name().with_default_namespace();
+-        if !self.tool_policy.allows(&tool_name) {
++        if !self.tool_policy.allows(&tool_name) && !application_callback {
+             return false;
+         }
+         if tool_name.is_default_namespace()
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 6accf96b..2212ffe3 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -241,10 +241,41 @@ pub(crate) async fn build_tool_router(
+         &registered_mcp_tools,
+         &mut registry,
+     );
++    // Materialize contributors first: the SDK retains its exact executor Arcs,
++    // rather than allowing another contributor to borrow a callback's name.
++    let extension_executors = extension_tool_executors(session, step_store).collect::<Vec<_>>();
++    let callbacks = step_store
++        .get::<codex_extension_api::CapturedAgentProfile>()
++        .and_then(|profile| {
++            // Mutable extension receipts cannot manufacture this opening grant.
++            let grant = ToolName::namespaced("_agents_sdk", "runtime_handoff_callbacks");
++            if !session.tool_policy.allowed_tools.as_ref().is_some_and(|names| {
++                names.iter().any(|name| name.clone().with_default_namespace() == grant)
++            }) {
++                return None;
++            }
++            let attached = profile
++                .profile
++                .data
++                .get::<codex_extension_api::AgentProfileRuntimeCallbacks>()?;
++            let opening = session
++                .services
++                .thread_extension_data
++                .get::<Arc<codex_extension_api::RuntimeHandoffCallbackPermission>>()?;
++            let issued =
++                step_store.get::<codex_extension_api::RuntimeHandoffCallbackExecutors>()?;
++            (attached.profile_id == profile.receipt.profile_id
++                && issued.receipt == profile.receipt
++                && opening.thread_id() == session.thread_id.to_string()
++                && Arc::ptr_eq(&attached.permission, opening.as_ref())
++                && Arc::ptr_eq(&issued.permission, opening.as_ref()))
++            .then(|| issued.executors.clone())
++        });
+     let standalone_web_search_tool = append_extension_tool_executors(
+         turn_context,
+         model_info,
+-        extension_tool_executors(session, step_store),
++        extension_executors,
++        callbacks.as_deref(),
+         &mut registry,
+     );
+     append_dynamic_tool_runtimes(&turn_context.dynamic_tools, &mut registry);
+@@ -545,6 +576,7 @@ pub(crate) fn append_source_tools(
+         turn_context,
+         model_info,
+         extension_tool_executors,
++        None,
+         registry,
+     );
+     append_dynamic_tool_runtimes(dynamic_tools, registry);
+@@ -1899,6 +1931,7 @@ fn append_extension_tool_executors(
+     turn_context: &TurnContext,
+     model_info: &ModelInfo,
+     executors: impl IntoIterator<Item = Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>>,
++    application_callbacks: Option<&[Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>]>,
+     registry: &mut ToolRegistry,
+ ) -> Option<ToolName> {
+     let standalone_web_search_enabled = standalone_web_search_enabled(turn_context, model_info);
+@@ -1916,8 +1949,18 @@ fn append_extension_tool_executors(
+         {
+             continue;
+         }
++        let admitted_callback = application_callbacks.is_some_and(|executors| {
++            executors
++                .iter()
++                .any(|admitted| Arc::ptr_eq(admitted, &executor))
++        });
+         let runtime = Arc::new(ExtensionToolAdapter::new(executor));
+-        if registry.register_external(runtime) && is_standalone_web_search {
++        let registered = if admitted_callback {
++            registry.register_runtime_callback(runtime)
++        } else {
++            registry.register_external(runtime)
++        };
++        if registered && is_standalone_web_search {
+             standalone_web_search_tool = Some(tool_name);
+         }
+     }
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 90c5b482..b8444cb4 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -71,6 +71,9 @@ pub use turn_lifecycle::AgentProfileBoundaryInput;
+ pub use turn_lifecycle::AgentProfileDecisionHandoffTools;
+ pub use turn_lifecycle::AgentProfileLiveHandoffAdmission;
+ pub use turn_lifecycle::LiveAgentHandoffAdmission;
++pub use turn_lifecycle::AgentProfileRuntimeCallbacks;
++pub use turn_lifecycle::RuntimeHandoffCallbackPermission;
++pub use turn_lifecycle::RuntimeHandoffCallbackExecutors;
+ pub use turn_lifecycle::AgentProfileEnvironment;
+ pub use turn_lifecycle::AgentProfileExecutorTools;
+ pub use turn_lifecycle::AgentProfileHandoffTools;
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 7f3f54f6..08a0ce29 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -238,6 +238,37 @@ pub struct AgentProfileDecisionHandoffTools {
+     pub targets: std::collections::HashMap<codex_tools::ToolName, Vec<String>>,
+ }
+ 
++/// A separately captured opening permission for runtime-created application callbacks.
++/// The owner is the native thread, not any serialized profile or tool result.
++pub struct RuntimeHandoffCallbackPermission {
++    thread_id: String,
++}
++impl RuntimeHandoffCallbackPermission {
++    pub fn new(thread_id: String) -> Self {
++        Self { thread_id }
++    }
++    pub fn thread_id(&self) -> &str {
++        &self.thread_id
++    }
++}
++
++/// Exact application callbacks of an accepted live profile.
++#[derive(Clone)]
++pub struct AgentProfileRuntimeCallbacks {
++    pub permission: std::sync::Arc<RuntimeHandoffCallbackPermission>,
++    pub profile_id: String,
++    pub names: std::collections::HashSet<codex_tools::ToolName>,
++}
++
++/// The exact application executors constructed by the SDK for one captured step.
++#[derive(Clone)]
++pub struct RuntimeHandoffCallbackExecutors {
++    pub permission: std::sync::Arc<RuntimeHandoffCallbackPermission>,
++    pub receipt: AgentProfileReceipt,
++    pub executors:
++        Vec<std::sync::Arc<dyn for<'call> codex_tools::ToolExecutor<codex_tools::ToolCall<'call>>>>,
++}
++
+ /// Live native authorization for one factory-selected destination.
+ /// Implementations never deserialize this authority from tool output or checkpoints.
+ pub trait LiveAgentHandoffAdmission: Send + Sync {
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 25c2d14b..ad050a38 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -58,6 +58,9 @@ pub use contributors::AgentProfileBoundaryInput;
+ pub use contributors::AgentProfileDecisionHandoffTools;
+ pub use contributors::AgentProfileLiveHandoffAdmission;
+ pub use contributors::LiveAgentHandoffAdmission;
++pub use contributors::AgentProfileRuntimeCallbacks;
++pub use contributors::RuntimeHandoffCallbackPermission;
++pub use contributors::RuntimeHandoffCallbackExecutors;
+ pub use contributors::AgentProfileEnvironment;
+ pub use contributors::AgentProfileExecutorTools;
+ pub use contributors::AgentProfileHandoffTools;

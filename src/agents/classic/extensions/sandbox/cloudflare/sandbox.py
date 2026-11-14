@@ -1592,6 +1592,16 @@ class CloudflareSandboxClient(BaseSandboxClient[CloudflareSandboxClientOptions])
         self._exec_timeout_s = exec_timeout_s
         self._request_timeout_s = request_timeout_s
 
+    def assert_resume_state_authority(
+        self, state: SandboxSessionState, options: CloudflareSandboxClientOptions
+    ) -> None:
+        if not isinstance(state, CloudflareSandboxSessionState):
+            raise TypeError("CloudflareSandboxClient requires Cloudflare sandbox state")
+        if options.worker_url.rstrip("/") != state.worker_url.rstrip("/") or set(
+            options.exposed_ports
+        ) != set(state.exposed_ports):
+            raise ValueError("Current Cloudflare worker or port exposure requires a fresh sandbox")
+
     @redact_mount_error_data
     async def create(
         self,

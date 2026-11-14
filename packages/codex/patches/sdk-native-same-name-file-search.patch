@@ -1,0 +1,98 @@
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 2212ffe3..5e5602d2 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -301,6 +301,26 @@ pub(crate) async fn build_tool_router(
+ 
+     hosted_specs.extend(captured_hosted.tools.iter().cloned().map(ToolSpec::from));
+ 
++    // Keep the SDK's distinct File Search identity from the opening ceiling even
++    // when a profile or an operation narrows the currently offered catalog.
++    let hosted_file_search = ToolName::namespaced("_agents_sdk_hosted", "file_search");
++    let hosted_file_search = session
++        .tool_policy
++        .allowed_tools
++        .as_ref()
++        .filter(|names| names.contains(&hosted_file_search))
++        .map(|_| hosted_file_search);
++    if let Some(name) = &hosted_file_search
++        && registry
++            .entries()
++            .any(|entry| entry.runtime.tool_name() == *name)
++    {
++        return Err(CodexErrorDetails::InvalidRequest(
++            "The hosted File Search identity is reserved".into(),
++        )
++        .into());
++    }
++
+     // Keep one immutable selected plan with the issuing step, including helper
+     // identities. Every downstream catalog is derived from the retained registry.
+     let selection = if let Some(selected) = step_store.get::<SelectedStepTools>() {
+@@ -315,7 +335,11 @@ pub(crate) async fn build_tool_router(
+         let mut candidates = registry
+             .entries()
+             .map(|entry| entry.runtime.tool_name())
+-            .chain(hosted_specs.iter().map(hosted_tool_policy_name))
++            .chain(
++                hosted_specs
++                    .iter()
++                    .map(|spec| hosted_tool_policy_name(spec, hosted_file_search.as_ref())),
++            )
+             .collect::<Vec<_>>();
+         if matches!(
+             effective_tool_mode(turn_context, model_info),
+@@ -391,7 +415,10 @@ pub(crate) async fn build_tool_router(
+             registry.remove(&name);
+         }
+         hosted_specs.retain(|spec| {
+-            selected.contains(&hosted_tool_policy_name(spec).with_default_namespace())
++            selected.contains(
++                &hosted_tool_policy_name(spec, hosted_file_search.as_ref())
++                    .with_default_namespace(),
++            )
+         });
+     }
+     let router = finalize_selected_tool_router(
+@@ -401,6 +428,7 @@ pub(crate) async fn build_tool_router(
+         hosted_specs,
+         &session.services.tool_search_handler_cache,
+         selection.0.as_ref(),
++        hosted_file_search.as_ref(),
+     )?;
+     if let Some(receipt) = step_store.get::<FinalStepBuiltinTools>()
+         && !receipt.capture(router.exposed_builtin_tool_names())
+@@ -622,12 +650,14 @@ pub(crate) fn finalize_tool_router(
+         hosted_specs,
+         tool_search_handler_cache,
+         None,
++        None,
+     )
+ }
+ 
+ // MCP's wire type is shared, but its authority is captured per server.
+-fn hosted_tool_policy_name(spec: &ToolSpec) -> ToolName {
++fn hosted_tool_policy_name(spec: &ToolSpec, hosted_file_search: Option<&ToolName>) -> ToolName {
+     match spec {
++        ToolSpec::FileSearch(_) if let Some(name) = hosted_file_search => name.clone(),
+         ToolSpec::Mcp(config) => {
+             ToolName::new(Some("hosted_mcp".into()), config.server_label.clone())
+         }
+@@ -642,11 +672,16 @@ fn finalize_selected_tool_router(
+     mut hosted_specs: Vec<ToolSpec>,
+     tool_search_handler_cache: &ToolSearchHandlerCache,
+     selected: Option<&HashSet<ToolName>>,
++    hosted_file_search: Option<&ToolName>,
+ ) -> CodexResult<ToolRouter> {
+     let allows = |name: &ToolName| {
+         selected.is_none_or(|names| names.contains(&name.clone().with_default_namespace()))
+     };
+-    hosted_specs.retain(|spec| registry.tool_policy.allows(&hosted_tool_policy_name(spec)));
++    hosted_specs.retain(|spec| {
++        registry
++            .tool_policy
++            .allows(&hosted_tool_policy_name(spec, hosted_file_search))
++    });
+     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
+     enforce_strict_3p_tools(turn_context, model_info, &mut registry);
+     for tool in registry.entries_mut() {

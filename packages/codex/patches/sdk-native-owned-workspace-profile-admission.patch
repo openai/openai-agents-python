@@ -1,0 +1,150 @@
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index c33db7f0..f25d10ab 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -65,6 +65,34 @@ fn invalid(message: impl Into<String>) -> CodexErr {
+     CodexErr::InvalidRequest(message.into())
+ }
+ 
++struct AgentProfileAdmissionGuard {
++    owner: Option<std::sync::Arc<codex_extension_api::AgentProfileAdmissionObserverOwner>>,
++    accepted: bool,
++}
++
++impl AgentProfileAdmissionGuard {
++    fn new(profile: &AgentProfile) -> Self {
++        Self { owner: profile.data.get::<codex_extension_api::AgentProfileAdmissionObserverOwner>(), accepted: false }
++    }
++
++    fn accept(&mut self, receipt: &AgentProfileReceipt) {
++        self.accepted = true;
++        if let Some(owner) = &self.owner {
++            owner.0.accepted(receipt);
++        }
++    }
++}
++
++impl Drop for AgentProfileAdmissionGuard {
++    fn drop(&mut self) {
++        if !self.accepted {
++            if let Some(owner) = &self.owner {
++                owner.0.refused();
++            }
++        }
++    }
++}
++
+ #[derive(Default)]
+ struct AgentLifecycleStarted(tokio::sync::Mutex<Option<Option<AgentProfileReceipt>>>);
+ 
+@@ -588,6 +616,7 @@ impl Session {
+         let Some(candidate) = candidate else {
+             return Ok(None);
+         };
++        let mut admission = AgentProfileAdmissionGuard::new(&candidate.target);
+         if accepted_handoff.is_none() && preparation.is_none() {
+             let source = current
+                 .agent_profile
+@@ -652,6 +681,7 @@ impl Session {
+                 candidate.target,
+             )
+             .await?;
++        admission.accept(&receipt);
+         Ok(Some(receipt))
+     }
+ 
+@@ -2862,6 +2892,71 @@ for line in sys.stdin:
+             .await;
+     }
+ 
++    #[derive(Default)]
++    struct ObserveProfileAdmission {
++        accepted: std::sync::atomic::AtomicUsize,
++        refused: std::sync::atomic::AtomicUsize,
++    }
++
++    impl codex_extension_api::AgentProfileAdmissionObserver for ObserveProfileAdmission {
++        fn accepted(&self, _: &AgentProfileReceipt) {
++            self.accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++        }
++        fn refused(&self) {
++            self.refused.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++        }
++    }
++
++    #[tokio::test]
++    async fn prepared_owner_waits_for_real_publication_and_refuses_cancelled_admission() {
++        for cancel in [false, true] {
++            let (mut session, context) = make_session_and_context().await;
++            attach_thread_persistence(&mut session).await;
++            let source = session.activate_agent_profile(None, profile(&context, "a", "owned-source"))
++                .await.unwrap();
++            let target = profile(&context, "b", "owned-target");
++            let observer = Arc::new(ObserveProfileAdmission::default());
++            target.data.insert(codex_extension_api::AgentProfileAdmissionObserverOwner(observer.clone()));
++            let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
++            extensions.turn_lifecycle_contributor(Arc::new(BoundaryActivation {
++                candidate: std::sync::Mutex::new(Some(codex_extension_api::AgentProfileActivation {
++                    expected: source.clone(), target,
++                })), gate: None,
++            }));
++            session.services.extensions = Arc::new(extensions.build());
++            let session = Arc::new(session);
++            let root = session.new_default_turn().await;
++            let entered = Arc::new(Notify::new());
++            assert!(session.start_task(Arc::clone(&root), Vec::new(), HoldProfileRoot(entered.clone())).await);
++            tokio::time::timeout(std::time::Duration::from_secs(15), entered.notified()).await.unwrap();
++            let root_cancel = session.active_turn.lock().await.as_ref().unwrap().task.as_ref().unwrap()
++                .cancellation_token.clone();
++            let batch_cancel = root_cancel.child_token();
++            let gate = super::super::thread_settings::acquire_persistence_lock(&session).await;
++            let activation = session.activate_agent_at_tool_boundary(&root, &batch_cancel, None);
++            tokio::pin!(activation);
++            assert!(futures::poll!(&mut activation).is_pending());
++            assert_eq!(observer.accepted.load(std::sync::atomic::Ordering::SeqCst), 0);
++            assert_eq!(observer.refused.load(std::sync::atomic::Ordering::SeqCst), 0);
++            if cancel { batch_cancel.cancel(); }
++            drop(gate);
++            if cancel {
++                assert!(activation.await.is_err());
++                assert_eq!(session.agent_profile_receipt().await.unwrap(), Some(source));
++                assert_eq!(observer.accepted.load(std::sync::atomic::Ordering::SeqCst), 0);
++                assert_eq!(observer.refused.load(std::sync::atomic::Ordering::SeqCst), 1);
++            } else {
++                let accepted = activation.await.unwrap().unwrap();
++                assert_eq!(accepted.profile_id, "b");
++                assert_eq!(session.agent_profile_receipt().await.unwrap(), Some(accepted));
++                assert_eq!(observer.accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
++                assert_eq!(observer.refused.load(std::sync::atomic::Ordering::SeqCst), 0);
++            }
++            assert!(!root_cancel.is_cancelled());
++            session.abort_all_tasks(codex_protocol::protocol::TurnAbortReason::Interrupted).await;
++        }
++    }
++
+     struct CancelIssuedReplies(CancellationToken);
+     impl codex_extension_api::ThreadLifecycleContributor<crate::config::Config>
+         for CancelIssuedReplies
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 5d746d65..4db0da62 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -414,6 +414,18 @@ pub struct CapturedAgentProfile {
+     pub profile: std::sync::Arc<AgentProfile>,
+ }
+ 
++/// Observe the actual publication of a prepared Agent profile.
++/// Implementations must resolve without blocking or invoking application code.
++pub trait AgentProfileAdmissionObserver: Send + Sync {
++    fn accepted(&self, receipt: &AgentProfileReceipt);
++    fn refused(&self);
++}
++
++/// Optional ownership attached to a candidate's ExtensionData.
++pub struct AgentProfileAdmissionObserverOwner(
++    pub std::sync::Arc<dyn AgentProfileAdmissionObserver>,
++);
++
+ /// Requested transition. Core verifies the source and assigns the destination epoch.
+ pub struct AgentProfileActivation {
+     pub expected: AgentProfileReceipt,

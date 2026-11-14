@@ -1,0 +1,101 @@
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index fdad7e82..0ebac4d0 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -242,6 +242,7 @@ impl ToolCallRuntime {
+         let ignored = self.ignores_handoff(&call.tool_name, &call.call_id);
+         let handoff_selection = Arc::clone(&self.handoff_selection);
+         let error_call = call.clone();
++        let runtime_handoff_thread = self.session.thread_id.to_string();
+         let source = call.direct_source();
+         let recorder = self.session.services.executed_tool_calls.clone();
+         let recorded_call = recorder.prepare_direct_call(&call, &source, &self.step_context);
+@@ -337,11 +338,24 @@ impl ToolCallRuntime {
+                                             .agent_profile
+                                             .as_ref()
+                                             .is_some_and(|profile| {
+-                                                admits_handoff(
+-                                                    &profile.profile.data,
+-                                                    name,
+-                                                    Some(&handoff.target_profile_id),
+-                                                )
++                                                profile.profile.data
++                                                    .get::<codex_extension_api::AgentProfileLiveHandoffAdmission>()
++                                                    .and_then(|live| live.captured_targets.get(name).map(|targets| {
++                                                        targets.contains(&handoff.target_profile_id)
++                                                            || (source == Some(&handoff.source)
++                                                                && live.admission.consume(
++                                                                    &runtime_handoff_thread,
++                                                                    &handoff.source,
++                                                                    &retained_step_context.turn.sub_id,
++                                                                    &handoff.call_id,
++                                                                    name,
++                                                                    &handoff.target_profile_id,
++                                                                ))
++                                                    }))
++                                                    .unwrap_or_else(|| admits_handoff(
++                                                        &profile.profile.data, name,
++                                                        Some(&handoff.target_profile_id),
++                                                    ))
+                                             })
+                                 });
+                         if source != Some(&handoff.source) || !admitted {
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index b2beb6fb..90c5b482 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -69,6 +69,8 @@ pub use turn_lifecycle::AgentProfile;
+ pub use turn_lifecycle::AgentProfileActivation;
+ pub use turn_lifecycle::AgentProfileBoundaryInput;
+ pub use turn_lifecycle::AgentProfileDecisionHandoffTools;
++pub use turn_lifecycle::AgentProfileLiveHandoffAdmission;
++pub use turn_lifecycle::LiveAgentHandoffAdmission;
+ pub use turn_lifecycle::AgentProfileEnvironment;
+ pub use turn_lifecycle::AgentProfileExecutorTools;
+ pub use turn_lifecycle::AgentProfileHandoffTools;
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 6d8830bf..7f3f54f6 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -238,6 +238,28 @@ pub struct AgentProfileDecisionHandoffTools {
+     pub targets: std::collections::HashMap<codex_tools::ToolName, Vec<String>>,
+ }
+ 
++/// Live native authorization for one factory-selected destination.
++/// Implementations never deserialize this authority from tool output or checkpoints.
++pub trait LiveAgentHandoffAdmission: Send + Sync {
++    fn consume(
++        &self,
++        thread_id: &str,
++        source: &AgentProfileReceipt,
++        turn_id: &str,
++        call_id: &str,
++        tool: &codex_tools::ToolName,
++        target: &str,
++    ) -> bool;
++}
++
++/// Only a factory-capable producing profile attaches this native object.
++#[derive(Clone)]
++pub struct AgentProfileLiveHandoffAdmission {
++    pub admission: std::sync::Arc<dyn LiveAgentHandoffAdmission>,
++    /// Original captured choices for factory-capable names, never expanded by live publication.
++    pub captured_targets: std::collections::HashMap<codex_tools::ToolName, Vec<String>>,
++}
++
+ /// Clean application text captured with the accepted profile publication.
+ /// A missing attachment preserves legacy inheritance; `text: None` clears it.
+ #[derive(Clone, Debug)]
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index e39c810f..25c2d14b 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -56,6 +56,8 @@ pub use contributors::AgentProfile;
+ pub use contributors::AgentProfileActivation;
+ pub use contributors::AgentProfileBoundaryInput;
+ pub use contributors::AgentProfileDecisionHandoffTools;
++pub use contributors::AgentProfileLiveHandoffAdmission;
++pub use contributors::LiveAgentHandoffAdmission;
+ pub use contributors::AgentProfileEnvironment;
+ pub use contributors::AgentProfileExecutorTools;
+ pub use contributors::AgentProfileHandoffTools;

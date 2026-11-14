@@ -285,15 +285,19 @@ class ActionReply(Generic[ResultT]):
 
     _request: Interaction = field(repr=False)
     _value: ResultT = field(repr=False)
+    _native_always: bool = field(default=False, repr=False)
 
     def __new__(cls) -> ActionReply[ResultT]:
         raise TypeError("Create an ActionReply with a live request.reply(value)")
 
 
-def _reply(request: Interaction, value: ResultT) -> ActionReply[ResultT]:
+def _reply(
+    request: Interaction, value: ResultT, *, _native_always: bool = False
+) -> ActionReply[ResultT]:
     reply = object.__new__(ActionReply)
     object.__setattr__(reply, "_request", request)
     object.__setattr__(reply, "_value", value)
+    object.__setattr__(reply, "_native_always", _native_always)
     return reply
 
 
@@ -446,9 +450,22 @@ class _NativeQuestion:
         session._check_question(self)
         return session
 
-    async def _enqueue(self, operation: str, params: dict[str, Any]) -> None:
+    async def _enqueue(
+        self,
+        operation: str,
+        params: dict[str, Any],
+        *,
+        remember_mcp: bool | None = None,
+        use_portable_mcp: bool = False,
+    ) -> None:
         session = self._check_current()
-        await session._respond_question(self, operation, json.dumps(params, allow_nan=False))
+        await session._respond_question(
+            self,
+            operation,
+            json.dumps(params, allow_nan=False),
+            remember_mcp=remember_mcp,
+            use_portable_mcp=use_portable_mcp,
+        )
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -456,7 +473,10 @@ class ApprovalRequest(_NativeQuestion):
     """A real native MCP or Environment approval for this live owning turn.
 
     respond confirms enqueue, not native acceptance, effect or durability.
-    No grant to persist approvals is available here. Repr excludes prompt data.
+    An always choice remembers a live MCP declaration within this Session.
+    A saved ordinary credential-free root HTTP choice can be restored with
+    verify_remembered_approvals. Each future call receives its own native
+    approval. Repr excludes prompt data.
     """
 
     submission_id: str
@@ -464,18 +484,26 @@ class ApprovalRequest(_NativeQuestion):
     type: Literal["approval_request"] = field(default="approval_request", init=False)
 
     def reply(
-        self, decision: Literal["allow_once", "deny"]
+        self, decision: Literal["allow_once", "deny"], *, always: bool = False
     ) -> ActionReply[Literal["allow_once", "deny"]]:
-        """Package a one-shot approval decision; delivery acknowledges enqueue only."""
-        return _reply(self, decision)
+        """Package a decision for this native request."""
+        if type(always) is not bool:
+            raise TypeError("Approval always must be a bool")
+        return _reply(self, decision, _native_always=always)
 
-    async def respond(self, decision: Literal["allow_once", "deny"]) -> None:
-        """Enqueue once from this request. An invalid reply may be corrected."""
+    async def respond(
+        self, decision: Literal["allow_once", "deny"], *, always: bool = False
+    ) -> None:
+        """Enqueue once and optionally remember the exact live MCP declaration."""
         self._check_current()
+        if type(always) is not bool:
+            raise TypeError("Approval always must be a bool")
         if decision not in ("allow_once", "deny"):
             raise ValueError("Approval decision must be 'allow_once' or 'deny'")
         message = self._message
         if message["type"] in {"exec_approval_request", "apply_patch_approval_request"}:
+            if always:
+                raise ValueError("Remembering requires a native MCP approval")
             params = {
                 "id": message.get("approval_id") or message["call_id"],
                 "decision": "approved"
@@ -489,15 +517,21 @@ class ApprovalRequest(_NativeQuestion):
                 operation = "patch_approval"
             await self._enqueue(operation, params)
             return
+        await self._respond_mcp(decision == "allow_once", always=always)
+
+    async def _respond_mcp(self, approve: bool, *, always: bool, portable: bool = False) -> None:
+        message = self._message
         await self._enqueue(
             "resolve_elicitation",
             {
                 "server_name": message["server_name"],
                 "request_id": message["id"],
-                "decision": "accept" if decision == "allow_once" else "decline",
+                "decision": "accept" if approve else "decline",
                 "content": None,
                 "meta": None,
             },
+            remember_mcp=approve if always else None,
+            use_portable_mcp=portable,
         )
 
 

@@ -1,0 +1,37 @@
+diff --git a/codex-rs/core/src/session/staged_input_terminal.rs b/codex-rs/core/src/session/staged_input_terminal.rs
+index b72d4f0c..6c99aa2b 100644
+--- a/codex-rs/core/src/session/staged_input_terminal.rs
++++ b/codex-rs/core/src/session/staged_input_terminal.rs
+@@ -422,17 +422,23 @@ pub(crate) async fn append(
+             let originals = batch
+                 .items_for(&step.turn.sub_id)
+                 .ok_or("The staged batch does not belong to this pending turn")?;
+-            // This first owner does not perform image/file preparation before a
+-            // provider accepts the request. Broader media routes retain their gates.
+-            if originals.iter().any(|item| {
+-                !matches!(
+-                    item, ResponseItem::Message { role, content, .. }
+-                    if matches!(role.as_str(), "user" | "developer" | "system") && content.iter().all(|part|
+-                        matches!(part, ContentItem::InputText { .. }))
+-                )
++            // File inputs use the current provider's ordinary wire validation. Core
++            // does not fetch or transform them before the provider accepts the batch.
++            if originals.iter().any(|item| match item {
++                ResponseItem::Message { role, content, .. }
++                    if matches!(role.as_str(), "user" | "developer" | "system") =>
++                {
++                    !content.iter().all(|part| match part {
++                        ContentItem::InputText { .. } => true,
++                        ContentItem::InputFile { .. } => role == "user",
++                        _ => false,
++                    })
++                }
++                _ => true,
+             }) {
+                 return Err(
+-                    "Terminal staged admission currently requires text message rows".to_string(),
++                    "Terminal staged admission requires text messages or user file inputs"
++                        .to_string(),
+                 );
+             }
+             let annotated = originals

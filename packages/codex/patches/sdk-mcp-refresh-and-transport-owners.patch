@@ -1,0 +1,246 @@
+diff --git a/codex-rs/codex-mcp/src/rmcp_client.rs b/codex-rs/codex-mcp/src/rmcp_client.rs
+index 380890ef..d59931f8 100644
+--- a/codex-rs/codex-mcp/src/rmcp_client.rs
++++ b/codex-rs/codex-mcp/src/rmcp_client.rs
+@@ -479,7 +479,17 @@ impl ManagedClientStartup {
+             startup_complete.store(true, Ordering::Release);
+             outcome
+         };
+-        originator.scope(startup).in_current_span().boxed().shared()
++        let discovery_trace = sdk_trace::OpeningContext::capture_sdk_discovery();
++        let startup = originator.scope(startup).in_current_span();
++        async move {
++            if let Some(trace) = discovery_trace {
++                trace.scope(startup).await
++            } else {
++                startup.await
++            }
++        }
++        .boxed()
++        .shared()
+     }
+ }
+ 
+@@ -830,7 +840,7 @@ fn start_sdk_mcp_discovery_span(server: &str) -> Option<sdk_trace::ProviderRespo
+     if policy.disabled || policy.named_tool_policy {
+         return None;
+     }
+-    let parent = sdk_trace::ContextLease::capture()?;
++    let parent = sdk_trace::ContextLease::capture_submission()?;
+     sdk_trace::start_sdk_semantic_span(&parent, None, server.to_owned(), "mcp_tools").ok()
+ }
+ 
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index c8b9d58c..7d5caead 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -3605,11 +3605,11 @@ impl ModelClientSession {
+             .and_then(|store| store.get::<crate::session::staged_input_terminal::SampledSources>());
+         let websocket_enabled = self.websocket_for_prompt(prompt)?;
+         if staged_sources.is_some()
+-            && (websocket_enabled || model_info.use_responses_lite
++            && (model_info.use_responses_lite
+                 || prompt.request_controls.hosted_prompt.as_ref().and_then(Option::as_ref).is_some())
+         {
+             return Err(CodexErr::InvalidRequest(
+-                "Selected staged input requires ordinary HTTP Responses without a hosted prompt".into()));
++                "Selected staged input requires ordinary Responses without a hosted prompt".into()));
+         }
+         let mut source_origins = (0..prompt.input.len()).map(Some).collect::<Vec<_>>();
+         self.allow_http_fallback = Self::request_transport_mode(prompt) != codex_protocol::model_request_transport::RequestTransportMode::Websocket;
+diff --git a/codex-rs/core/src/session/config_refresh.rs b/codex-rs/core/src/session/config_refresh.rs
+index 0fe59df6..e118df3b 100644
+--- a/codex-rs/core/src/session/config_refresh.rs
++++ b/codex-rs/core/src/session/config_refresh.rs
+@@ -164,8 +164,10 @@ impl Session {
+             drop(policy_guard);
+             if matches!(scope, RuntimeConfigRefresh::Mcp) {
+                 self.services.mcp_runtime.invalidate_resource_caches();
++                self.mcp_refresh.invalidate_sdk_roster(Arc::clone(&config));
++            } else {
++                self.mark_mcp_runtime_dirty();
+             }
+-            self.mark_mcp_runtime_dirty();
+             let new_config = notify_contributors
+                 .then(|| self.build_effective_session_config(&state.session_configuration));
+             (previous_config, new_config)
+diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
+index f19e223a..506e8516 100644
+--- a/codex-rs/core/src/session/mcp.rs
++++ b/codex-rs/core/src/session/mcp.rs
+@@ -298,9 +298,9 @@ impl Session {
+                 self.mark_mcp_runtime_dirty();
+             }
+ 
+-            if !self.mcp_refresh.claim() {
++            let Some(discovery_trace) = self.mcp_refresh.claim_with_discovery_trace() else {
+                 return;
+-            }
++            };
+             let mut refresh_invalidation = McpRefreshInvalidationGuard {
+                 refresh: &self.mcp_refresh,
+                 published: false,
+@@ -340,13 +340,19 @@ impl Session {
+                     executor_capability_discovery.as_deref(),
+                 )
+                 .await;
+-            self.publish_mcp_runtime(
++            let publication = self.publish_mcp_runtime(
+                 &desired,
+                 mcp_projection,
+                 &ready_selected_capability_roots,
+                 Some(self.mcp_elicitation_reviewer()),
+-            )
+-            .await;
++            );
++            if let Some(trace) = discovery_trace
++                && Arc::ptr_eq(&trace.roster, &desired.roster_owner)
++            {
++                trace.context.scope(publication).await;
++            } else {
++                publication.await;
++            }
+             refresh_invalidation.published = true;
+         }
+     }
+diff --git a/codex-rs/core/src/session/mcp_refresh.rs b/codex-rs/core/src/session/mcp_refresh.rs
+index 9afd414b..ea8715c0 100644
+--- a/codex-rs/core/src/session/mcp_refresh.rs
++++ b/codex-rs/core/src/session/mcp_refresh.rs
+@@ -1,12 +1,21 @@
++use crate::config::Config;
++use codex_otel::sdk_trace::OpeningContext;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
++use std::sync::{Arc, Mutex};
+ use tokio::sync::AcquireError;
+ use tokio::sync::Semaphore;
+ use tokio::sync::SemaphorePermit;
+ 
++pub(super) struct McpDiscoveryTrace {
++    pub(super) roster: Arc<Config>,
++    pub(super) context: OpeningContext,
++}
++
+ /// Owns MCP invalidation and the single gate used to publish runtime updates.
+ pub(super) struct McpRefresh {
+     pending: AtomicBool,
++    discovery_trace: Mutex<Option<McpDiscoveryTrace>>,
+     gate: Semaphore,
+ }
+ 
+@@ -14,6 +23,7 @@ impl McpRefresh {
+     pub(super) fn new() -> Self {
+         Self {
+             pending: AtomicBool::new(false),
++            discovery_trace: Mutex::new(None),
+             gate: Semaphore::new(/*permits*/ 1),
+         }
+     }
+@@ -22,6 +32,27 @@ impl McpRefresh {
+         self.pending.store(true, Ordering::Release);
+     }
+ 
++    /// Publish the tracing owner alongside the pending roster revision.
++    pub(super) fn invalidate_sdk_roster(&self, config: Arc<Config>) {
++        let mut trace = self
++            .discovery_trace
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        *trace = OpeningContext::capture_sdk_discovery().map(|context| McpDiscoveryTrace {
++            roster: config,
++            context,
++        });
++        self.invalidate();
++    }
++
++    pub(super) fn claim_with_discovery_trace(&self) -> Option<Option<McpDiscoveryTrace>> {
++        let mut trace = self
++            .discovery_trace
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        self.claim().then(|| trace.take())
++    }
++
+     #[cfg(test)]
+     pub(super) fn is_pending(&self) -> bool {
+         self.pending.load(Ordering::Acquire)
+diff --git a/codex-rs/core/src/session/mcp_runtime.rs b/codex-rs/core/src/session/mcp_runtime.rs
+index a1b91031..2c7342fb 100644
+--- a/codex-rs/core/src/session/mcp_runtime.rs
++++ b/codex-rs/core/src/session/mcp_runtime.rs
+@@ -23,6 +23,7 @@ use std::collections::HashSet;
+ 
+ pub(super) struct McpDesiredState {
+     pub(super) config: Arc<Config>,
++    pub(super) roster_owner: Arc<Config>,
+     pub(super) auth: Option<CodexAuth>,
+     pub(super) submit_id: String,
+     pub(super) originator: String,
+@@ -217,6 +218,7 @@ impl Session {
+         ));
+         let desired = McpDesiredState {
+             config: Arc::clone(&config),
++            roster_owner: Arc::clone(&source.configuration.original_config_do_not_use),
+             auth: self.services.auth_manager.auth().await,
+             submit_id: source.sub_id.clone(),
+             originator: source.configuration.originator.clone(),
+@@ -367,6 +369,7 @@ impl Session {
+ 
+         McpDesiredState {
+             config: Arc::new(config),
++            roster_owner: Arc::clone(&session_configuration.original_config_do_not_use),
+             auth,
+             submit_id: self.next_internal_sub_id(),
+             originator: session_configuration.originator,
+@@ -398,6 +401,7 @@ impl Session {
+             .to_path_buf();
+         let desired = McpDesiredState {
+             config: Arc::new(config),
++            roster_owner: Arc::clone(&session_configuration.original_config_do_not_use),
+             auth,
+             submit_id: INITIAL_SUBMIT_ID.to_owned(),
+             originator: session_configuration.originator.clone(),
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+index 6fc65cd9..370dcb8b 100644
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -787,6 +787,15 @@ impl OpeningContext {
+     pub async fn scope<F: std::future::Future>(self, future: F) -> F::Output {
+         future.with_context(self.0).await
+     }
++
++    pub fn capture_sdk_discovery() -> Option<Self> {
++        let current = current_submission_context();
++        let policy = policy_for_context(&current)?;
++        if policy.disabled || policy.restriction_only {
++            return None;
++        }
++        Some(Self(explicit_submission_context(current)))
++    }
+ }
+ 
+ /// One SDK response scope around a logical model round and all of its attempts.
+@@ -1041,7 +1050,10 @@ pub fn submission_trace() -> (
+ pub fn current_context_token() -> Option<String> {
+     // Native lifecycle hooks can inherit private values on the instrumented
+     // span. A W3C round trip would discard those values before policy lookup.
+-    let context = crate::trace_context::current_span_context();
++    context_token_for(crate::trace_context::current_span_context())
++}
++
++fn context_token_for(context: Context) -> Option<String> {
+     let generation = context
+         .get::<TraceGeneration>()
+         .copied()
+@@ -1227,6 +1239,10 @@ pub struct ContextLease {
+     token: String,
+ }
+ impl ContextLease {
++    pub fn capture_submission() -> Option<Self> {
++        context_token_for(current_submission_context()).map(|token| Self { token })
++    }
++
+     pub fn capture() -> Option<Self> {
+         current_context_token().map(|token| Self { token })
+     }

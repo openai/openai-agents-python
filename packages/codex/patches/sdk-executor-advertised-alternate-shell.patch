@@ -1,0 +1,125 @@
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+index 971e5a09..7ec2a034 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+@@ -6,6 +6,7 @@ use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
+ use crate::exec_policy::prompt_is_rejected_by_policy;
+ use crate::function_tool::FunctionCallError;
+ use crate::maybe_emit_implicit_skill_invocation;
++use crate::shell::Shell;
+ use crate::tools::context::ExecCommandToolOutput;
+ use crate::tools::context::ToolInvocation;
+ use crate::tools::context::ToolPayload;
+@@ -266,25 +267,44 @@ impl ExecCommandHandler {
+             .clone()
+             .map(Arc::new)
+             .unwrap_or_else(|| session.user_shell());
+-        // TODO(anp): Resolve requested shells in remote environments instead of restricting
+-        // commands to the reported default shell.
+-        if environment.is_remote()
++        let shell = if environment.is_remote()
+             && let Some(requested_shell) = args.shell.take()
+         {
++            let environment_id = &turn_environment.selection.environment_id;
+             let Some(remote_shell) = turn_environment.shell.as_ref() else {
+                 return Err(FunctionCallError::RespondToModel(format!(
+-                    "environment `{}` does not report a shell",
+-                    turn_environment.selection.environment_id
++                    "environment `{environment_id}` does not report a shell"
+                 )));
+             };
+-            if detect_shell_type(Path::new(&requested_shell)) != Some(remote_shell.shell_type) {
+-                return Err(FunctionCallError::RespondToModel(format!(
+-                    "environment `{}` only supports `{}`",
+-                    turn_environment.selection.environment_id,
+-                    remote_shell.name()
+-                )));
++            // A model path chooses a shell type only. The remote executable
++            // comes from the authenticated executor's current metadata.
++            let requested_name = requested_shell
++                .rsplit(['/', '\\'])
++                .next()
++                .unwrap_or_default();
++            let requested_type = detect_shell_type(Path::new(requested_name));
++            if requested_type == Some(remote_shell.shell_type) {
++                shell
++            } else {
++                let alternate = match requested_type {
++                    Some(shell_type) => environment.info().await.ok().and_then(|info| {
++                        info.alternate_shells
++                            .into_iter()
++                            .filter_map(|info| Shell::from_environment_shell_info(info).ok())
++                            .find(|shell| shell.shell_type == shell_type)
++                    }),
++                    None => None,
++                };
++                Arc::new(alternate.ok_or_else(|| {
++                    FunctionCallError::RespondToModel(format!(
++                        "environment `{environment_id}` only supports `{}` and its advertised alternate shells",
++                        remote_shell.name()
++                    ))
++                })?)
+             }
+-        }
++        } else {
++            shell
++        };
+         let resolved_command = get_command(
+             &args,
+             shell,
+diff --git a/codex-rs/exec-server-protocol/src/protocol.rs b/codex-rs/exec-server-protocol/src/protocol.rs
+index 8396c963..ddc27487 100644
+--- a/codex-rs/exec-server-protocol/src/protocol.rs
++++ b/codex-rs/exec-server-protocol/src/protocol.rs
+@@ -13,6 +13,9 @@ use codex_protocol::ThreadId;
+ use codex_protocol::capabilities::SelectedCapabilityRoot;
+ use codex_protocol::config_types::ShellEnvironmentPolicyInherit;
+ use codex_shell_command::shell_detect::DetectedShell;
++use codex_shell_command::shell_detect::ShellType;
++use codex_shell_command::shell_detect::default_user_shell;
++use codex_shell_command::shell_detect::get_shell;
+ use codex_utils_path_uri::PathUri;
+ use serde::Deserialize;
+ use serde::Serialize;
+@@ -122,6 +125,9 @@ pub enum ExecutorProcessIdentity {
+ #[serde(rename_all = "camelCase")]
+ pub struct EnvironmentInfo {
+     pub shell: ShellInfo,
++    /// Other supported shell types discovered on this executor.
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub alternate_shells: Vec<ShellInfo>,
+     /// Kernel-reported executor identity; absent for legacy and unsupported executors.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub process_identity: Option<ExecutorProcessIdentity>,
+@@ -313,8 +319,22 @@ impl EnvironmentInfo {
+         };
+         let temp_dir = normalize_temp_path(std::env::temp_dir().into_os_string());
+ 
++        let shell = default_user_shell();
++        let shell_types = if cfg!(windows) {
++            &[ShellType::PowerShell, ShellType::Cmd][..]
++        } else {
++            &[ShellType::Zsh, ShellType::Bash, ShellType::Sh][..]
++        };
++        let alternate_shells = shell_types
++            .iter()
++            .copied()
++            .filter(|shell_type| *shell_type != shell.shell_type)
++            .filter_map(get_shell)
++            .map(ShellInfo::from)
++            .collect();
+         Self {
+-            shell: codex_shell_command::shell_detect::default_user_shell().into(),
++            shell: shell.into(),
++            alternate_shells,
+             executor_version: unknown_executor_version(),
+             process_identity: None,
+             provider_id: None,
+@@ -1500,6 +1520,7 @@ mod tests {
+                     name: "zsh".to_string(),
+                     path: "/bin/zsh".to_string(),
+                 },
++                alternate_shells: Vec::new(),
+                 executor_version: "0.0.0".to_string(),
+                 process_identity: None,
+                 provider_id: None,

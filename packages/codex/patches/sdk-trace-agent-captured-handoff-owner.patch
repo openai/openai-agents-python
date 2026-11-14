@@ -1,0 +1,141 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 4916c5cb..d57bd5d1 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -188,6 +188,7 @@ pub(crate) async fn run_turn(
+         .filter(|_| codex_otel::sdk_trace::current_scope_policy().is_some_and(|p| !p.disabled))
+         .map(|parent| Arc::new(SdkAgentSpanOwner {
+             parent,
++            profile: std::sync::Mutex::new(None),
+             active: Arc::new(std::sync::Mutex::new((false, None))),
+         }));
+     let _agent_guard = SdkAgentRunGuard(agent_owner.clone());
+@@ -393,7 +394,7 @@ async fn run_turn_agent_owned(
+         Err(err) => return Err(err),
+     };
+     if let Some(owner) = &agent_owner {
+-        admit_sdk_agent_lifetime(&sess, &first_step_context, owner, false, cancellation_token.clone()).await?;
++        admit_sdk_agent_lifetime(&sess, &first_step_context, owner, None, cancellation_token.clone()).await?;
+     }
+     // Keep the exact model-visible state used by this turn and its inline compactions.
+     let (world_state, display_roots) = tokio::join!(
+@@ -743,22 +744,14 @@ async fn run_turn_agent_owned(
+         .await;
+ 
+         let accepted_agent_handoff = pending_agent_handoff.take();
+-        let prior_agent = turn_context.next_step_settings.load_full().agent_profile
+-            .as_ref().map(|profile| profile.receipt.clone());
+         let restored_agent_handoff = sess.services.thread_extension_data
+             .get::<codex_protocol::agent_profile::AgentProfileHandoffInputRequest>()
+-            .filter(|request| request.restored && request.turn_id == turn_context.sub_id
+-                && Some(&request.handoff.source) == prior_agent.as_ref())
++            .filter(|request| request.restored && request.turn_id == turn_context.sub_id)
+             .map(|request| request.handoff.clone());
+         let activated_agent = sess
+             .activate_agent_at_tool_boundary(
+                 &turn_context, &cancellation_token, accepted_agent_handoff.as_ref(),
+             ).await?;
+-        let agent_entry_changed = activated_agent.as_ref().is_some_and(|next| {
+-            accepted_agent_handoff.as_ref().or(restored_agent_handoff.as_ref())
+-                .is_some_and(|handoff| handoff.matches_destination(next))
+-                || prior_agent.as_ref().is_some_and(|prior| prior.profile_id != next.profile_id)
+-        });
+         if activated_agent.is_some() {
+             next_step_context = None;
+         }
+@@ -819,7 +812,11 @@ async fn run_turn_agent_owned(
+             }
+         };
+         if let Some(owner) = &agent_owner {
+-            admit_sdk_agent_lifetime(&sess, &step_context, owner, agent_entry_changed, cancellation_token.clone()).await?;
++            admit_sdk_agent_lifetime(
++                &sess, &step_context, owner,
++                accepted_agent_handoff.as_ref().or(restored_agent_handoff.as_ref()),
++                cancellation_token.clone(),
++            ).await?;
+         }
+         if let Some(staged) = &staged_input
+             && !staged.projects_occurrences()
+@@ -3311,6 +3308,7 @@ async fn poll_provider_response<F: std::future::Future>(
+ 
+ struct SdkAgentSpanOwner {
+     parent: codex_otel::sdk_trace::ContextLease,
++    profile: std::sync::Mutex<Option<codex_protocol::agent_profile::AgentProfileReceipt>>,
+     active: Arc<std::sync::Mutex<(bool, Option<codex_otel::sdk_trace::ProviderResponseSpan>)>>,
+ }
+ struct SdkAgentSpanState(Arc<std::sync::Mutex<(bool, Option<codex_otel::sdk_trace::ProviderResponseSpan>)>>);
+@@ -3341,16 +3339,73 @@ pub(crate) fn sdk_agent_span_parent(
+     active.1.as_ref().map(|span| span.agent_parent_lease()).transpose()
+ }
+ 
++// Compare completed native capture, not mutable next-step settings that prefetch can advance.
++// A same-profile refresh retains its span unless an accepted transfer owns this exact epoch.
++fn sdk_agent_entry_changed(
++    previous: Option<&codex_protocol::agent_profile::AgentProfileReceipt>,
++    current: Option<&codex_protocol::agent_profile::AgentProfileReceipt>,
++    handoff: Option<&codex_protocol::agent_profile::AgentProfileHandoff>,
++) -> bool {
++    let (Some(previous), Some(current)) = (previous, current) else {
++        return false;
++    };
++    previous.profile_id != current.profile_id
++        || handoff.is_some_and(|handoff| {
++            &handoff.source == previous && handoff.matches_destination(current)
++        })
++}
++
++#[cfg(test)]
++mod sdk_agent_entry_tests {
++    use super::sdk_agent_entry_changed;
++    use codex_protocol::agent_profile::{AgentProfileHandoff, AgentProfileReceipt};
++
++    fn receipt(id: &str, epoch: u64) -> AgentProfileReceipt {
++        AgentProfileReceipt { profile_id: id.into(), epoch }
++    }
++
++    #[test]
++    fn captured_distinct_profile_starts_an_entry() {
++        assert!(sdk_agent_entry_changed(Some(&receipt("a", 0)), Some(&receipt("b", 1)), None));
++    }
++
++    #[test]
++    fn same_profile_refresh_keeps_its_entry() {
++        for epoch in [0, 1, 5] {
++            assert!(!sdk_agent_entry_changed(Some(&receipt("a", 0)), Some(&receipt("a", epoch)), None));
++        }
++        assert!(!sdk_agent_entry_changed(None, Some(&receipt("a", 0)), None));
++    }
++
++    #[test]
++    fn same_profile_transfer_requires_exact_source_and_destination() {
++        let transfer = AgentProfileHandoff {
++            source: receipt("a", 2), target_profile_id: "a".into(), call_id: "call".into(),
++        };
++        assert!(sdk_agent_entry_changed(Some(&receipt("a", 2)), Some(&receipt("a", 3)), Some(&transfer)));
++        assert!(!sdk_agent_entry_changed(Some(&receipt("a", 1)), Some(&receipt("a", 3)), Some(&transfer)));
++        assert!(!sdk_agent_entry_changed(Some(&receipt("a", 2)), Some(&receipt("a", 4)), Some(&transfer)));
++        assert!(!sdk_agent_entry_changed(Some(&receipt("a", 2)), Some(&receipt("a", 2)), Some(&transfer)));
++    }
++}
++
+ async fn admit_sdk_agent_lifetime(
+     sess: &Session,
+     step: &Arc<StepContext>,
+     owner: &SdkAgentSpanOwner,
+-    new_entry: bool,
++    handoff: Option<&codex_protocol::agent_profile::AgentProfileHandoff>,
+     cancellation: CancellationToken,
+ ) -> CodexResult<()> {
+     if step.extension_data.get::<codex_extension_api::SdkTurnReceiptSeed>().is_none() {
+         return Ok(());
+     }
++    let current = step.settings.agent_profile.as_ref().map(|profile| profile.receipt.clone());
++    let new_entry = {
++        let mut previous = owner.profile.lock().unwrap_or_else(|e| e.into_inner());
++        let changed = sdk_agent_entry_changed(previous.as_ref(), current.as_ref(), handoff);
++        *previous = current;
++        changed
++    };
+     if owner.active.lock().unwrap_or_else(|e| e.into_inner()).0 && !new_entry {
+         return Ok(());
+     }

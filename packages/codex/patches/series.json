@@ -1283,7 +1283,207 @@
     {
       "path": "sdk-interactive-environment-authority.patch",
       "sha256": "8fd6f5d9b02da7ff5a5ec9d82f0926c7a47bc250242500b6d6c84f8c46fbe7bb"
+    },
+    {
+      "path": "sdk-compaction-request-usage.patch",
+      "sha256": "8fdb4bb6fa1113cf6075e00a77b5b82999692491cc48bfc427dc91492958da38"
+    },
+    {
+      "path": "sdk-handoff-canonical-occurrences.patch",
+      "sha256": "08a7322b03b1d53fbd66f51d1de844edf81b95acec50902ae34454742ff048e1"
+    },
+    {
+      "path": "sdk-thread-settings-canonical-controls.patch",
+      "sha256": "eefb61c4251d314f20ce132fd5086b48f96bb2f65442d6e1c4b524ff89111bf8"
+    },
+    {
+      "path": "sdk-unknown-function-presentation.patch",
+      "sha256": "0729d3cca601652676fb2a804662b6342b6991f54018f601c361a5d9a94888e0"
+    },
+    {
+      "path": "0185-profile-workspace-sampling.patch",
+      "sha256": "7c0615f41e1ac28fe79964199e1f0967e5329ce0e5273e88cbe70e301cd29faf"
+    },
+    {
+      "path": "sdk-native-guardrail-span.patch",
+      "sha256": "985fb9b5c93a5bb3a299ceef0bfe790525cc69ec340ce93b009f0b7988709914"
+    },
+    {
+      "path": "sdk-native-mcp-remembered-live.patch",
+      "sha256": "98bad2798ff2a6a5e918043de53c731b6cbfb3e0a468b1178b7f774669d47ad1"
+    },
+    {
+      "path": "sdk-configured-workspace-request-only.patch",
+      "sha256": "bc3d7a5c06c3d97952807673b0084966b839c7bd28f928a6cf67483c7b8406d3"
+    },
+    {
+      "path": "sdk-history-prefix-rebuild.patch",
+      "sha256": "f5a908134d451a1435a117b0b523f7e30b43abe7efbbe23d013662add1f5b424"
+    },
+    {
+      "path": "sdk-http-model-completion-boundary.patch",
+      "sha256": "a0a3b82e5f00f79a38d24c48e8e15132992b738f669e309bda817c26cefa3f68"
+    },
+    {
+      "path": "sdk-manual-suspension-persistence-owner.patch",
+      "sha256": "d3b59815d6425c1d1270ce0f55fb44a51913dc97e86814740eb1e7b500151931"
+    },
+    {
+      "path": "sdk-history-prefix-opaque-compaction.patch",
+      "sha256": "45ddb843020921e3e6531e087ea202df420a0a1e187ff69f28f78e0833b5f92d"
+    },
+    {
+      "path": "sdk-nested-handoff-summary-occurrences.patch",
+      "sha256": "49958f07cbca34789303fe44141f0a9ceb3ce9e29c69b45a07746932e918195b"
+    },
+    {
+      "path": "sdk-named-tool-tracing-admission.patch",
+      "sha256": "074e24069823b355833c13b1e277a491313e25f1f85d7bd05cf0178cf2a8e22d"
+    },
+    {
+      "path": "sdk-provider-staged-input-admission.patch",
+      "sha256": "19153bc2d5c290ac3fc9cea1864bd7baf6f579e3fdd2cdd7f931a8cd3fe233a5"
+    },
+    {
+      "path": "sdk-semantic-dispatch-and-staged-ownership.patch",
+      "sha256": "f1a7524a351aea5d6120a47496a44bfe655d24152029da49051a0f5a1e483601"
+    },
+    {
+      "path": "sdk-selected-staged-roles-and-managed-discovery.patch",
+      "sha256": "19c972b7c58556d96ed84f826459bc746fc8f00a4005c2d7f1c7817aed9c0633"
+    },
+    {
+      "path": "sdk-mcp-refresh-and-transport-owners.patch",
+      "sha256": "18d8186c12d07080d453d95996028280fe6276f7dc88185da7ee63212fba91e6"
+    },
+    {
+      "path": "sdk-agent-trace-and-sandbox-observation.patch",
+      "sha256": "9bd379f1d4e36eaab280ec57d1bdf694d0280472ce7278050e68ba2bbdd277ea"
+    },
+    {
+      "path": "sdk-executor-advertised-alternate-shell.patch",
+      "sha256": "cf79361ce64638be6342d6bc3b8e47950e20f5efd139a8fca137e63b593cd2ec"
+    },
+    {
+      "path": "sdk-trace-agent-captured-handoff-owner.patch",
+      "sha256": "c1a6bdb5461c022c252671763da36f0e4f4e1a0cdc8c85c3951af5e08da716e9"
+    },
+    {
+      "path": "sdk-mcp-discovery-named-trace-admission.patch",
+      "sha256": "c6e5a58d5010562577deb6ca5ce42f35f80a9b5c91aaa00403e3cf0636f6208b"
+    },
+    {
+      "path": "sdk-agent-trace-after-world-state-publication.patch",
+      "sha256": "c04da41c5cb32ddb85f2438835d9f55e355ab3c0bb9c5696f65f3c2985ef8078"
+    },
+    {
+      "path": "sdk-staged-input-with-hosted-prompt.patch",
+      "sha256": "6178b61d872b00e7b3aa67425915faa4d7268ae57e8315cdc52b1781bb325baf"
+    },
+    {
+      "path": "sdk-native-portable-mcp-choices.patch",
+      "sha256": "4f51d7677688fefb7604424a9bd09c8f0dda7a326dfa8061bcee72125303f48f"
+    },
+    {
+      "path": "sdk-native-staged-file-input.patch",
+      "sha256": "3eb22680f92014e5ce26817b191ffd98490c196b20301feaaf403a2d85c01ea3"
+    },
+    {
+      "path": "sdk-native-staged-historical-output.patch",
+      "sha256": "3ee2c302a02e0f9c424b9dd2bc569670da6e930333d39d8186cde8273d781b84"
+    },
+    {
+      "path": "sdk-native-staged-legacy-output-only.patch",
+      "sha256": "31203abecae87af951479fddaa37afbba61a1a81b649af889c5cfa4e346e66b2"
+    },
+    {
+      "path": "sdk-native-staged-text-projection.patch",
+      "sha256": "057a474451fbf582d5e76d837bb71ad3f87e6169090348a7937efaabdaaab71a"
+    },
+    {
+      "path": "sdk-native-lite-websocket-terminal-gate.patch",
+      "sha256": "a0125ae23383072b8fd21d50da814c5173be5bc121109162ec6d45359178daed"
+    },
+    {
+      "path": "sdk-native-logical-model-trace-selection.patch",
+      "sha256": "dd964eb11ebb80603195228218d5161da9ef4dd37ce69a4766ebae0211ee5bd7"
+    },
+    {
+      "path": "sdk-native-passive-terminal-pending-input.patch",
+      "sha256": "677e5c5bd03a25bf1716aea0fb35bdf6eda8d862cfbba9de9c2c58f750ea1d5b"
+    },
+    {
+      "path": "sdk-native-live-handoff-one-shot.patch",
+      "sha256": "15301991131ead9bbcd77602c773e433d0693c8b33fd09f2f0fe0b224c647eab"
+    },
+    {
+      "path": "sdk-native-stable-sampling-wire-window.patch",
+      "sha256": "750eb72261c22a0365aadb30180a690409bd488406980234f60d6cffc234cf0f"
+    },
+    {
+      "path": "sdk-native-handoff-callback-projection.patch",
+      "sha256": "c1095df4f1ae19908d231ce4a97a82085aadff6c121fe19e273e32e56650d22e"
+    },
+    {
+      "path": "sdk-native-tool-lifecycle-observer.patch",
+      "sha256": "49a51933733c058ad78d5964daddc9eaa090f5bd29b9c99fab4e47d1c279d1a8"
+    },
+    {
+      "path": "sdk-qualify-canonical-handoff-function-pair.patch",
+      "sha256": "90dc64a630350520412f44a30b0644fbde72c6935aa4871d8c200cf6ddfb2afb"
+    },
+    {
+      "path": "sdk-match-handoff-pair-recorded-payload.patch",
+      "sha256": "544e7253844f17f00fbc8b4996877b59518810223f97bf3469e583ecf95fccdc"
+    },
+    {
+      "path": "sdk-match-bounded-handoff-tool-result.patch",
+      "sha256": "fd47fa6bccef7d650926246c845285a5519e931cfb3c0eb8c85da255fd006aff"
+    },
+    {
+      "path": "sdk-admit-restored-pair-with-empty-mcp-receipt.patch",
+      "sha256": "7a02faca3adc2860144895a0d5f8e4e20ad642273753b2f9edbd4464a9449095"
+    },
+    {
+      "path": "sdk-native-tool-observer-post-admission.patch",
+      "sha256": "f26e8300a07249e1d32381ec125dbae18afdc0de1c86de2d71de7a6d5ea74ec6"
+    },
+    {
+      "path": "sdk-handoff-recorded-application-assistant-text.patch",
+      "sha256": "1b7bbe7582e4ec3cb42eec8513957733afa0db670cf8c67940133d860d8ffac7"
+    },
+    {
+      "path": "sdk-reconcile-partial-handoff-tool-pair.patch",
+      "sha256": "fd4ca094ab82e205d91056a94a7b3c9d88bacd6b4cf62d8489b2e0d597c26704"
+    },
+    {
+      "path": "sdk-native-mcp-observer-admission.patch",
+      "sha256": "c54b5c80eb50842a2757cc92254062e19f0f821df6ad21188a1528ece7860426"
+    },
+    {
+      "path": "sdk-native-same-name-file-search.patch",
+      "sha256": "4c53da03fd8f182bdbf1048fa2020d575a649e601de870842c241f169f6919f4"
+    },
+    {
+      "path": "sdk-native-legacy-hosted-file-search-ref.patch",
+      "sha256": "40377c0f9a6948d1c6d692e280f29ea1e09d2c0c0454b33a689d2247e2359e26"
+    },
+    {
+      "path": "sdk-native-owned-workspace-profile-admission.patch",
+      "sha256": "8c4c9de84fcbc22c336a79b429811b5da6e5a2ffa0fbfe85ee2fbaa5af897897"
+    },
+    {
+      "path": "sdk-native-owned-workspace-profile-admission-exports.patch",
+      "sha256": "f8ae7066cbafde3df3a8e30319f6e3e52b209d9137aff46e843f284762b84af8"
+    },
+    {
+      "path": "sdk-native-owned-workspace-profile-test-builder.patch",
+      "sha256": "228c5d9abb7c39aeb02740ef466d9cb630699df339c137567a4bed9dd3b19e13"
+    },
+    {
+      "path": "sdk-portable-manual-suspension-join-budget.patch",
+      "sha256": "4a1e5412aa6129140e7055461edbe5fb6251e1f61e20e26b8ab92b482796dcf1"
     }
   ],
-  "result_tree": "4db49902827a55b8260428446083ecc50275b5b5"
+  "result_tree": "a8a945fd58ad3569ca748a4d0a8a0ca62a21c484"
 }

@@ -1,0 +1,189 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index e5f7d9cc..e8789674 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1644,11 +1644,21 @@ impl ModelClient {
+                 item.set_id(/*new_id*/ None);
+             }
+             match item {
+-                ResponseItem::ShellCall {
+-                    provider_fields, ..
+-                } => {
++                ResponseItem::FileSearchCall { provider_fields, .. }
++                | ResponseItem::CodeInterpreterCall { provider_fields, .. }
++                | ResponseItem::ImageGenerationCall { provider_fields, .. }
++                | ResponseItem::ShellCall { provider_fields, .. } => {
+                     provider_fields.remove("created_by");
+                 }
++                ResponseItem::ApplyPatchCall { fields, .. }
++                | ResponseItem::ComputerCall { fields, .. }
++                | ResponseItem::McpListTools { provider_fields: fields, .. }
++                | ResponseItem::McpCall { provider_fields: fields, .. }
++                | ResponseItem::McpApprovalRequest { provider_fields: fields, .. }
++                | ResponseItem::Program { provider_fields: fields, .. }
++                | ResponseItem::ProgramOutput { provider_fields: fields, .. } => {
++                    fields.remove("created_by");
++                }
+                 ResponseItem::ShellCallOutput {
+                     provider_fields, ..
+                 } => {
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 8110a1e8..1aac9797 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2313,6 +2313,39 @@ pub(super) fn selected_profile_output_schema(
+     })
+ }
+ 
++fn append_profile_workspace_guidance(
++    prompt: &mut Prompt,
++    guidance: &codex_extension_api::AgentProfileWorkspaceGuidance,
++    supports_websockets: bool,
++) -> Result<(), String> {
++    if prompt.canonical_history_input.is_some()
++        || prompt.request_controls.store == Some(Some(true))
++        || supports_websockets
++        || prompt
++            .request_controls
++            .request_transport
++            .as_ref()
++            .and_then(Option::as_ref)
++            .and_then(|transport| transport.mode.flatten())
++            == Some(codex_protocol::model_request_transport::RequestTransportMode::Websocket)
++    {
++        return Err("Scoped workspace guidance requires stateless Responses HTTP without provider history or store=true".into());
++    }
++    let Some(text) = guidance.0.as_ref() else {
++        return Ok(());
++    };
++    if text.len() > 40_000 {
++        return Err("Scoped workspace guidance exceeds 40000 UTF-8 bytes".into());
++    }
++    use crate::context::ContextualUserFragment;
++    let fragment = crate::context::UserInstructions {
++        directory: None,
++        text: text.clone(),
++    };
++    prompt.input.push(fragment.render_fragment().into());
++    Ok(())
++}
++
+ #[instrument(level = "trace", skip_all)]
+ pub(crate) fn build_prompt(
+     input: Vec<ResponseItem>,
+@@ -2794,6 +2827,14 @@ async fn run_sampling_request(
+                         });
+                     }
+                 }
++                if let Some(guidance) = step_context.settings.agent_profile.as_ref()
++                    .and_then(|profile| profile.profile.data.get::<codex_extension_api::AgentProfileWorkspaceGuidance>())
++                {
++                    append_profile_workspace_guidance(
++                        sampling_prompt.to_mut(), &guidance,
++                        client_session.provider_info().supports_websockets,
++                    ).map_err(CodexErr::InvalidRequest)?;
++                }
+                 crate::file_admission::validate_response_items(
+                     sess.captured_provider_image_reference_policy(),
+                     &step_context.settings.model_info,
+@@ -4949,6 +4990,60 @@ fn admit_hosted_program_item(
+     Ok(())
+ }
+ 
++#[cfg(test)]
++mod workspace_sampling_tests {
++    use super::*;
++
++    #[test]
++    fn workspace_uses_user_resource_metadata_and_keeps_existing_policy() {
++        let policy: ResponseItem = serde_json::from_value(serde_json::json!({
++            "type":"message", "role":"developer", "content":[{"type":"input_text","text":"unchanged policy"}]
++        })).unwrap();
++        let mut prompt = Prompt::default();
++        prompt.input.push(policy.clone());
++        append_profile_workspace_guidance(
++            &mut prompt,
++            &codex_extension_api::AgentProfileWorkspaceGuidance(Some("current resource".into())),
++            false,
++        )
++        .unwrap();
++        assert_eq!(prompt.input[0], policy);
++        assert!(
++            matches!(&prompt.input[1], ResponseItem::Message {role, internal_chat_message_metadata_passthrough: Some(metadata), ..}
++            if role == "user" && metadata.content_item_kinds.as_ref().is_some_and(|kinds| kinds.len() == 1 && serde_json::to_string(metadata).unwrap().contains("agents_md.instructions")))
++        );
++        let mut cleared = Prompt::default();
++        append_profile_workspace_guidance(
++            &mut cleared,
++            &codex_extension_api::AgentProfileWorkspaceGuidance(None),
++            false,
++        )
++        .unwrap();
++        assert!(cleared.input.is_empty());
++    }
++
++    #[test]
++    fn workspace_refuses_server_storage_or_websocket_before_injection() {
++        for websocket in [false, true] {
++            let mut prompt = Prompt::default();
++            if !websocket {
++                prompt.request_controls.store = Some(Some(true));
++            }
++            assert!(
++                append_profile_workspace_guidance(
++                    &mut prompt,
++                    &codex_extension_api::AgentProfileWorkspaceGuidance(Some(
++                        "private resource".into()
++                    )),
++                    websocket
++                )
++                .is_err()
++            );
++            assert!(prompt.input.is_empty());
++        }
++    }
++}
++
+ #[cfg(test)]
+ mod hosted_program_admission_tests {
+     use super::*;
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index ea734d21..b2beb6fb 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -76,6 +76,7 @@ pub use turn_lifecycle::AgentProfileInstructions;
+ pub use turn_lifecycle::AgentProfileModelSettings;
+ pub use turn_lifecycle::AgentProfileOutputControl;
+ pub use turn_lifecycle::AgentProfileOutputGuidance;
++pub use turn_lifecycle::AgentProfileWorkspaceGuidance;
+ pub use turn_lifecycle::AgentProfileOutputSchema;
+ pub use turn_lifecycle::AgentProfileOutputStrict;
+ pub use turn_lifecycle::AgentProfileReceipt;
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 1e66a004..efecd727 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -279,6 +279,11 @@ pub struct AgentProfileOutputStrict(pub bool);
+ #[derive(Clone, Debug)]
+ pub struct AgentProfileOutputGuidance(pub String);
+ 
++/// Current resource context for a selected profile, never application policy or history.
++/// The outer typed value marks scoped mode; None explicitly clears the snapshot.
++#[derive(Clone, Debug)]
++pub struct AgentProfileWorkspaceGuidance(pub Option<String>);
++
+ /// Live output selection scoped to its actual managed SDK thread.
+ #[derive(Clone, Debug)]
+ pub struct AgentProfileOutputControl {
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index aa74bc5a..39323009 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -63,6 +63,7 @@ pub use contributors::AgentProfileInstructions;
+ pub use contributors::AgentProfileModelSettings;
+ pub use contributors::AgentProfileOutputControl;
+ pub use contributors::AgentProfileOutputGuidance;
++pub use contributors::AgentProfileWorkspaceGuidance;
+ pub use contributors::AgentProfileOutputSchema;
+ pub use contributors::AgentProfileOutputStrict;
+ pub use contributors::AgentProfileReceipt;

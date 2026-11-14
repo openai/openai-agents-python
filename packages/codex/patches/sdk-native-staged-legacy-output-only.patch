@@ -1,0 +1,19 @@
+diff --git a/codex-rs/core/src/session/staged_input_terminal.rs b/codex-rs/core/src/session/staged_input_terminal.rs
+index c0bfc389..b5466455 100644
+--- a/codex-rs/core/src/session/staged_input_terminal.rs
++++ b/codex-rs/core/src/session/staged_input_terminal.rs
+@@ -434,11 +434,9 @@ pub(crate) async fn append(
+                         _ => false,
+                     })
+                 }
+-                // Detached historical outputs have no pending-call authority.
+-                // The checkpoint boundary already excludes the current call identities.
+-                ResponseItem::FunctionCallOutput { output, .. } => {
+-                    !matches!(&output.body, FunctionCallOutputBody::Text(_))
+-                }
++                // Legacy shell outputs remain detached historical data. Ordinary
++                // function outputs require a matching canonical call before they
++                // may survive the next request's history normalization.
+                 ResponseItem::LocalShellCallOutput { .. } => false,
+                 _ => true,
+             }) {

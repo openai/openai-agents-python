@@ -1,0 +1,282 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 81fb77cf..0d157503 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3265,6 +3265,7 @@ async fn admit_sdk_provider_response_span(
+         let reply = contributor
+             .admit_provider_response_span(codex_extension_api::SdkProviderResponseSpanInput {
+                 admission: admission.clone(),
++                tool_scope: None,
+                 parent_context: parent.token().to_owned(),
+                 cancellation: cancellation.clone(),
+             })
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 9559d358..cad29f4e 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -442,6 +442,7 @@ impl ToolCallRuntime {
+         let router = &step_context.tool_router;
+         let supports_parallel = router.tool_supports_parallel(&call);
+         let tool_runtime = router.tool_runtime(&call.tool_name);
++        let resolved_tool = tool_runtime.is_some();
+         let router = Arc::clone(router);
+         let session = Arc::clone(&self.session);
+         let turn = Arc::clone(&step_context.turn);
+@@ -487,15 +488,17 @@ impl ToolCallRuntime {
+         let dispatch_call_id = call.call_id.clone();
+ 
+         // Code-mode callbacks can resume outside the turn's local span ancestry.
+-        let dispatch_span = trace_span!(
+-            "dispatch_tool_call_with_code_mode_result",
+-            otel.name = %call.tool_name,
+-            tool_name = %call.tool_name,
+-            thread.id = %session.thread_id,
+-            call_id = call.call_id.as_str(),
+-            aborted = false,
+-        );
+-        let abort_dispatch_span = dispatch_span.clone();
++        let scope_owner = (resolved_tool
++            && matches!(source, ToolCallSource::Direct | ToolCallSource::DirectPlaintextMessage)
++            && step_context
++            .extension_data
++            .get::<codex_extension_api::SdkTurnReceiptSeed>()
++            .is_some()
++            && codex_otel::sdk_trace::current_scope_policy().is_some_and(|policy| !policy.disabled))
++            .then(codex_otel::sdk_trace::ContextLease::capture)
++            .flatten();
++        let abort_dispatch_span = Arc::new(OnceLock::<tracing::Span>::new());
++        let dispatch_span_handle = Arc::clone(&abort_dispatch_span);
+ 
+         let mut dispatch_handle = AbortOnDropHandle::new(tokio::spawn(
+             async move {
+@@ -528,9 +531,40 @@ impl ToolCallRuntime {
+                     let _ = execution_started_at.set(Instant::now());
+                 }
+ 
++                let (named, trace) = admit_tool_span(
++                    &session,
++                    &step_context,
++                    &dispatch_call.tool_name,
++                    scope_owner.as_ref(),
++                    &invocation_cancellation_token,
++                )
++                .await?;
++                let native_span = if named {
++                    trace_span!(
++                        "dispatch_tool_call_with_code_mode_result",
++                        tool_name = %dispatch_call.tool_name,
++                        thread.id = %session.thread_id,
++                        call_id = dispatch_call.call_id.as_str(),
++                        aborted = false,
++                    )
++                } else {
++                    trace_span!(
++                        "dispatch_tool_call_with_code_mode_result",
++                        otel.name = %dispatch_call.tool_name,
++                        tool_name = %dispatch_call.tool_name,
++                        thread.id = %session.thread_id,
++                        call_id = dispatch_call.call_id.as_str(),
++                        aborted = false,
++                    )
++                };
++                if let Some(trace) = &trace {
++                    codex_otel::set_parent_from_context(&native_span, trace.context());
++                }
++                let _ = dispatch_span_handle.set(native_span.clone());
+                 if let Some(captured) = step_context.extension_data.get::<codex_extension_api::CapturedModelAttempt>() {
+                     captured.0.mark_local_effect();
+                 }
++                let invocation_scope_cancelled = invocation_cancellation_token.clone();
+                 let result = router
+                     .dispatch_tool_call_with_state(
+                         session,
+@@ -541,8 +575,16 @@ impl ToolCallRuntime {
+                         source,
+                         dispatch_call_state,
+                     )
+-                    .instrument(dispatch_span.clone())
++                    .instrument(native_span)
+                     .await;
++                if let Some(trace) = trace {
++                    use codex_otel::sdk_trace::ProviderResponseOutcome;
++                    trace.finish(match &result {
++                        _ if invocation_scope_cancelled.is_cancelled() => ProviderResponseOutcome::Cancelled,
++                        Ok(result) if result.result.success_for_logging() => ProviderResponseOutcome::Ok,
++                        _ => ProviderResponseOutcome::Error,
++                    });
++                }
+                 drop(guard);
+                 // The sampling loop collects results in order only after its stream ends.
+                 // Record readiness here, before either caller encodes or collects the result.
+@@ -571,7 +613,9 @@ impl ToolCallRuntime {
+                         dispatch_handle.await.map_err(Self::tool_task_join_error)?
+                     } else {
+                         let secs = started.elapsed().as_secs_f32().max(0.1);
+-                        abort_dispatch_span.record("aborted", true);
++                        if let Some(span) = abort_dispatch_span.get() {
++                            span.record("aborted", true);
++                        }
+                         dispatch_handle.abort();
+                         match dispatch_handle.await {
+                             Ok(result) => result,
+@@ -620,6 +664,57 @@ impl ToolCallRuntime {
+     }
+ }
+ 
++async fn admit_tool_span(
++    session: &Session,
++    step: &Arc<StepContext>,
++    name: &codex_tools::ToolName,
++    parent: Option<&codex_otel::sdk_trace::ContextLease>,
++    cancellation: &CancellationToken,
++) -> Result<(bool, Option<codex_otel::sdk_trace::ProviderResponseSpan>), FunctionCallError> {
++    let Some(parent) = parent else {
++        return Ok((false, None));
++    };
++    let admission =
++        crate::model_request::tool_admission_for_step(session.thread_id.to_string(), step.clone(), Vec::new());
++    let scope = codex_extension_api::SdkToolSpanScope {
++        name: name.to_string(),
++        is_handoff: step.settings.agent_profile.as_ref()
++            .is_some_and(|profile| admits_handoff(&profile.profile.data, name, None)),
++    };
++    use codex_extension_api::SdkToolSpanAdmission;
++    let mut selected = None;
++    for contributor in session.services.extensions.model_request_contributors() {
++        let reply = contributor
++            .admit_tool_span(codex_extension_api::SdkProviderResponseSpanInput {
++                admission: admission.clone(),
++                tool_scope: Some(scope.clone()),
++                parent_context: parent.token().to_owned(),
++                cancellation: cancellation.clone(),
++            })
++            .await
++            .map_err(FunctionCallError::Fatal)?;
++        if !matches!(reply, SdkToolSpanAdmission::Unhandled) && selected.replace(reply).is_some() {
++            return Err(FunctionCallError::Fatal("Multiple SDK tool span admissions".into()));
++        }
++    }
++    let Some(reply) = selected else {
++        return Ok((false, None));
++    };
++    if cancellation.is_cancelled() {
++        return Err(FunctionCallError::Fatal("SDK tool span admission cancelled".into()));
++    }
++    let kind = if scope.is_handoff { "handoff" } else { "tool" };
++    let trace = match reply {
++        SdkToolSpanAdmission::Record(reply) => Some(
++            codex_otel::sdk_trace::start_sdk_semantic_span(parent, reply.span_id, scope.name, kind)
++                .map_err(FunctionCallError::Fatal)?,
++        ),
++        SdkToolSpanAdmission::Suppress => None,
++        SdkToolSpanAdmission::Unhandled => unreachable!("Unhandled admission is excluded"),
++    };
++    Ok((true, trace))
++}
++
+ impl ToolCallRuntime {
+     fn tool_task_join_error(err: JoinError) -> FunctionCallError {
+         FunctionCallError::Fatal(format!("tool task failed to receive: {err:?}"))
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 39323009..399a1f5f 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -181,6 +181,8 @@ pub use model_request::ResponseEvent;
+ pub use model_request::SdkCompletedModelResponse;
+ pub use model_request::SdkProviderResponseSpanAdmission;
+ pub use model_request::SdkProviderResponseSpanInput;
++pub use model_request::SdkToolSpanAdmission;
++pub use model_request::SdkToolSpanScope;
+ pub use model_request::SelectedStagedInput;
+ pub use model_request::StagedInputBatch;
+ pub use model_request::StagedInputPreparation;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 7322ca0d..e8b35f13 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -290,10 +290,25 @@ pub struct ToolsOnlyCallInput {
+ #[derive(Clone)]
+ pub struct SdkProviderResponseSpanInput {
+     pub admission: Arc<dyn ModelToolAdmission>,
++    /// A named tool or handoff on the same native dispatch owner.
++    pub tool_scope: Option<SdkToolSpanScope>,
+     pub parent_context: String,
+     pub cancellation: tokio_util::sync::CancellationToken,
+ }
+ 
++#[derive(Clone)]
++pub struct SdkToolSpanScope {
++    pub name: String,
++    pub is_handoff: bool,
++}
++
++/// Result of consulting an SDK's policy for a named native tool.
++pub enum SdkToolSpanAdmission {
++    Unhandled,
++    Suppress,
++    Record(SdkProviderResponseSpanAdmission),
++}
++
+ /// A host-validated synchronous ID policy result for this exact admission.
+ /// Core validates the optional span ID again before constructing its real span.
+ #[derive(Debug, Clone, serde::Deserialize)]
+@@ -324,6 +339,14 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+         Box::pin(async { Ok(None) })
+     }
+ 
++    /// Consult host tracing without giving the host tool execution authority.
++    fn admit_tool_span(
++        &self,
++        _input: SdkProviderResponseSpanInput,
++    ) -> BoxFuture<'_, Result<SdkToolSpanAdmission, String>> {
++        Box::pin(async { Ok(SdkToolSpanAdmission::Unhandled) })
++    }
++
+     /// Captured host policy may await model completion before direct tool effects.
+     fn observes_completed_model_response(&self, _admission: &dyn ModelToolAdmission) -> bool {
+         false
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+index 51181c8b..12f96df6 100644
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -604,7 +604,7 @@ struct StartedSpan {
+ 
+ fn start_trace_span_options(
+     options: Options,
+-    provider_response: bool,
++    native_semantic: bool,
+ ) -> Result<StartedSpan, String> {
+     if options.name.is_empty() || options.name.len() > 4096 {
+         return Err("Tracing span name must contain 1–4096 UTF-8 bytes".into());
+@@ -618,7 +618,7 @@ fn start_trace_span_options(
+         "guardrail",
+     ]
+     .contains(&options.kind.as_str())
+-        && !(provider_response && options.kind == "model")
++        && !(native_semantic && ["model", "tool", "handoff"].contains(&options.kind.as_str()))
+     {
+         return Err("Unsupported native tracing span kind".into());
+     }
+@@ -787,11 +787,20 @@ pub enum ProviderResponseOutcome {
+ pub fn start_provider_response_span(
+     parent: &ContextLease,
+     span_id: Option<String>,
++) -> Result<ProviderResponseSpan, String> {
++    start_sdk_semantic_span(parent, span_id, "response".into(), "model")
++}
++
++pub fn start_sdk_semantic_span(
++    parent: &ContextLease,
++    span_id: Option<String>,
++    name: String,
++    kind: &str,
+ ) -> Result<ProviderResponseSpan, String> {
+     let started = start_trace_span_options(
+         Options {
+-            name: "response".into(),
+-            kind: "model".into(),
++            name,
++            kind: kind.into(),
+             parent: Some(parent.token().to_owned()),
+             span_id,
+             ..Options::default()

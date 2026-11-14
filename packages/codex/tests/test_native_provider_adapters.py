@@ -153,6 +153,23 @@ async def _exercise_borrowed_provider(
                     "output_tokens_details": {"reasoning_tokens": 1},
                 },
             }
+            if anyllm_provider == "huggingface":
+                # The OpenResponses router validates a complete response resource.
+                completed.update(
+                    tools=[],
+                    tool_choice="auto",
+                    truncation="disabled",
+                    parallel_tool_calls=False,
+                    text={"format": {"type": "text"}},
+                    top_p=1.0,
+                    presence_penalty=0.0,
+                    frequency_penalty=0.0,
+                    top_logprobs=0,
+                    temperature=1.0,
+                    store=False,
+                    background=False,
+                    service_tier="default",
+                )
             if not streaming:
                 return web.json_response(completed)
             frames = [{"type": "response.created", "response": {"id": completed["id"]}}]
@@ -230,10 +247,12 @@ async def _exercise_borrowed_provider(
         )
 
     app = web.Application()
+    app.router.add_post("/api/v1/responses", create)
     app.router.add_post("/v1/responses", create)
     app.router.add_post("/openai/v1/responses", create)
     app.router.add_post("/v1/chat/completions", create)
     app.router.add_route("*", "/fallback/{tail:.*}", unexpected)
+    groq_response_clients: list[AsyncOpenAI] = []
     async with timeout(30), TestServer(app) as server:
         base = str(server.make_url("/v1"))
         async with AsyncOpenAI(api_key="synthetic", base_url=base, max_retries=0) as client:
@@ -253,14 +272,44 @@ async def _exercise_borrowed_provider(
                 backend = LitellmModel(litellm, "openai/gpt-4.1", **options)
             else:
                 any_llm = pytest.importorskip("any_llm")
-                borrowed = any_llm.AnyLLM.create(
-                    anyllm_provider,
-                    api_key="synthetic",
-                    api_base=str(server.make_url("/"))
-                    if anyllm_provider == "azureopenai"
-                    else base,
-                    max_retries=0,
-                )
+                if anyllm_provider == "fireworks":
+                    pytest.importorskip("fireworks")
+                if anyllm_provider == "huggingface":
+                    from any_llm.providers.huggingface.huggingface import HuggingfaceProvider
+
+                    monkeypatch.setattr(HuggingfaceProvider, "OPENRESPONSES_ROUTER_URL", base)
+                    borrowed = any_llm.AnyLLM.create(
+                        anyllm_provider, api_key="synthetic", api_base=base
+                    )
+                elif anyllm_provider == "groq":
+                    pytest.importorskip("groq")
+                    from any_llm.providers.groq import groq as groq_adapter
+
+                    def local_responses_client(**kwargs):
+                        kwargs["base_url"] = base
+                        local = AsyncOpenAI(**kwargs)
+                        groq_response_clients.append(local)
+                        return local
+
+                    monkeypatch.setattr(groq_adapter, "AsyncOpenAI", local_responses_client)
+                    borrowed = any_llm.AnyLLM.create("groq", api_key="synthetic", max_retries=0)
+                elif anyllm_provider == "otari":
+                    pytest.importorskip("otari")
+                    borrowed = any_llm.AnyLLM.create(
+                        "otari",
+                        api_key="synthetic",
+                        api_base=str(server.make_url("/")).rstrip("/"),
+                        platform_mode=False,
+                    )
+                else:
+                    borrowed = any_llm.AnyLLM.create(
+                        anyllm_provider,
+                        api_key="synthetic",
+                        api_base=str(server.make_url("/"))
+                        if anyllm_provider == "azureopenai"
+                        else base,
+                        max_retries=0,
+                    )
                 if anyllm_api is not None:
                     options["api"] = anyllm_api
                 backend = AnyLLMModel(borrowed, "gpt-4.1", **options)
@@ -335,13 +384,25 @@ async def _exercise_borrowed_provider(
             assert seen[0].get("stream", False) is streaming
             if adapter == "responses":
                 assert not client.is_closed()
-            if adapter == "any_llm_responses":
+            if adapter == "any_llm_responses" and anyllm_provider == "otari":
+                assert routes == ["/api/v1/responses"] * len(seen)
+                assert all(body["tool_choice"] == "auto" for body in seen)
+                await borrowed.client.close()
+            elif adapter == "any_llm_responses":
                 assert routes == [
                     "/openai/v1/responses" if anyllm_provider == "azureopenai" else "/v1/responses"
                 ] * len(seen)
                 assert all(body["client_metadata"]["session_id"] for body in seen)
-                assert not borrowed.client.is_closed()
+                if anyllm_provider == "huggingface":
+                    assert not borrowed.responses_client.is_closed()
+                    await borrowed.responses_client.close()
+                else:
+                    assert not borrowed.client.is_closed()
                 await borrowed.client.close()
+                for local in groq_response_clients:
+                    await local.close()
+                if anyllm_provider == "fireworks":
+                    await borrowed.fireworks_client.close()
 
             if penalties:
                 assert all(body["frequency_penalty"] == 0.4 for body in seen)
@@ -388,7 +449,18 @@ async def test_native_chat_penalties_reach_borrowed_clients(adapter, monkeypatch
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("api", ["responses", "auto"])
 @pytest.mark.parametrize(
-    "provider_name", ["openai", "openrouter", "azureopenai", "gmi", "deepseek", "meta"]
+    "provider_name",
+    [
+        "openai",
+        "openrouter",
+        "azureopenai",
+        "gmi",
+        "deepseek",
+        "meta",
+        "fireworks",
+        "otari",
+        "groq",
+    ],
 )
 async def test_anyllm_responses_uses_native_tool_continuation(
     api, streaming, monkeypatch, provider_name
@@ -403,8 +475,36 @@ async def test_anyllm_responses_uses_native_tool_continuation(
     )
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("api", ["responses", "auto"])
+async def test_anyllm_huggingface_responses_uses_native_tool_continuation(
+    api, streaming, monkeypatch
+):
+    await _exercise_borrowed_provider(
+        "any_llm_responses",
+        "complete",
+        monkeypatch,
+        streaming=streaming,
+        anyllm_api=api,
+        anyllm_provider="huggingface",
+    )
+
+
+def test_anyllm_huggingface_streaming_requires_direct_close_owner():
+    async def aresponses(model, input_data, *, extra_body=None):
+        raise AssertionError("the provider must not be called")
+
+    provider = SimpleNamespace(
+        PROVIDER_NAME="huggingface", SUPPORTS_RESPONSES=True, aresponses=aresponses
+    )
+    with pytest.raises(ValueError, match="requires its OpenAI client"):
+        AnyLLMModel(provider, api="responses", stream=True)
+    assert AnyLLMModel(provider, api="auto", stream=True) == AnyLLMModel(provider, stream=True)
+
+
 @pytest.mark.parametrize(
-    "provider_name", ["openai", "openrouter", "azureopenai", "gmi", "deepseek", "meta"]
+    "provider_name",
+    ["openai", "openrouter", "azureopenai", "gmi", "deepseek", "meta", "fireworks", "huggingface"],
 )
 async def test_anyllm_responses_cancel_keeps_borrowed_client_owned(monkeypatch, provider_name):
     await _exercise_borrowed_provider(

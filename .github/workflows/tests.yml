@@ -890,6 +890,57 @@ jobs:
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."
 
+  qualify-native-docker:
+    name: Qualify native Docker path and identity grants
+    needs: [changes, native-linux]
+    if: >-
+      !inputs.native_only && !cancelled() &&
+      needs.changes.outputs.code == 'true' && needs.native-linux.result == 'success' &&
+      github.repository == 'openai/openai-agents-python' &&
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.base_ref == 'feat/codex-harness') ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness'))
+    # Scope access to the Docker daemon to a dedicated, ephemeral GitHub-hosted VM.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CODEX_DOCKER_TEST_SOCKET: /var/run/docker.sock
+      CODEX_DOCKER_TEST_IMAGE: docker.io/library/python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Setup uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          version: "0.11.14"
+          python-version: "3.11"
+      - name: Use the shared native build
+        uses: ./.github/actions/use-native
+      - name: Install dependencies
+        run: make sync
+      - name: Test strict Docker path and identity grants
+        run: |
+          test "$(uname -m)" = x86_64
+          test -S "$CODEX_DOCKER_TEST_SOCKET"
+          test -x "$CODEX_EXEC_SERVER_TEST_BINARY"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" pull "$CODEX_DOCKER_TEST_IMAGE"
+          uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q \
+            packages/codex/tests/test_native_docker_path_authority.py \
+            packages/codex/tests/test_native_docker_run_as.py \
+            --junitxml="$RUNNER_TEMP/native-docker.xml"
+          python3 - "$RUNNER_TEMP/native-docker.xml" <<'PYTHON'
+          from pathlib import Path
+          import sys
+          from xml.etree import ElementTree
+
+          suite = ElementTree.parse(Path(sys.argv[1]))
+          cases = suite.findall(".//testcase")
+          assert cases and not suite.findall(".//skipped"), "Native Docker cases must run"
+          assert any(case.get("name", "").startswith("test_native_docker_path_grants") for case in cases)
+          PYTHON
+
   native-macos-sandbox-shards:
     if: ${{ !inputs.native_only }}
     needs: native-macos

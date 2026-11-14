@@ -1,0 +1,58 @@
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 6b41a586..be906916 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -1116,7 +1116,13 @@ async fn handle_any_tool(
+     let call_id = invocation.call_id.clone();
+     let payload = invocation.payload.clone();
+     let (output, pending_exec) = match tool.handle(invocation.clone()).await {
+-        Ok(output) => match result_owner {
++        Ok(output) => {
++            if let Some(observers) = call_state.and_then(|state| state.output_observers.get()) {
++                for observer in observers {
++                    observer.on_handler_output(output.as_ref());
++                }
++            }
++            match result_owner {
+             Some(owner) => super::builtin_result_policy::accept(&invocation, owner, output).await?,
+             None => {
+                 let pending_exec = if !tool.is_third_party_tool()
+@@ -1131,6 +1137,7 @@ async fn handle_any_tool(
+                 };
+                 (output, pending_exec)
+             }
++        }
+         },
+         Err(_) if result_owner.is_some() => return Err(super::builtin_result_policy::failure()),
+         Err(error) => return Err(error),
+diff --git a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+index aecfa860..ed79e9b6 100644
+--- a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+@@ -287,6 +287,10 @@ pub struct ToolFinishInput<'a> {
+ /// An observer retained by the exact dispatch until its native output is recorded.
+ /// The callback cannot replace output or mint a tool/approval grant.
+ pub trait RecordedToolOutputObserver: Send + Sync {
++    /// Observe the exact live handler value before result projection replaces it.
++    /// This cannot grant acceptance or replace the output.
++    fn on_handler_output(&self, _output: &dyn codex_tools::ToolOutput) {}
++
+     fn on_output<'a>(
+         &'a self,
+         output: &'a codex_history::ResponseItemEnvelope,
+diff --git a/codex-rs/tools/src/tool_output.rs b/codex-rs/tools/src/tool_output.rs
+index c442032e..a11b4d95 100644
+--- a/codex-rs/tools/src/tool_output.rs
++++ b/codex-rs/tools/src/tool_output.rs
+@@ -10,6 +10,11 @@ use crate::{LoadableToolSpec, ToolPayload};
+ 
+ /// Model-facing output contract returned by executable tool runtimes.
+ pub trait ToolOutput: Send {
++    /// Optional live concrete identity for owner-bound output observers.
++    fn as_any(&self) -> Option<&dyn std::any::Any> {
++        None
++    }
++
+     /// Called only after Core accepts this output following hooks and validation.
+     /// Implementations may consume an owned acceptance receipt; dropped outputs stay unaccepted.
+     fn mark_accepted(&mut self) {}

@@ -429,19 +429,45 @@ def test_native_windows_build_supplies_checksum_verified_v8_binding(monkeypatch,
 
 
 @pytest.mark.parametrize(
-    ("platform", "configured_target", "host", "timings", "develop", "free_threaded"),
+    (
+        "platform",
+        "configured_target",
+        "host",
+        "timings",
+        "develop",
+        "free_threaded",
+        "implementation",
+    ),
     [
-        ("win32", None, "x86_64-pc-windows-msvc", False, False, False),
-        ("win32", "aarch64-pc-windows-msvc", "aarch64-pc-windows-msvc", False, False, False),
-        ("linux", None, "x86_64-unknown-linux-gnu", True, False, False),
-        ("linux", None, "x86_64-unknown-linux-gnu", True, True, False),
-        ("linux", None, "x86_64-unknown-linux-gnu", False, False, True),
-        ("linux", None, "x86_64-unknown-linux-gnu", False, True, True),
-        ("darwin", None, "aarch64-apple-darwin", False, False, False),
+        ("win32", None, "x86_64-pc-windows-msvc", False, False, False, "cpython"),
+        (
+            "win32",
+            "aarch64-pc-windows-msvc",
+            "aarch64-pc-windows-msvc",
+            False,
+            False,
+            False,
+            "cpython",
+        ),
+        ("linux", None, "x86_64-unknown-linux-gnu", True, False, False, "cpython"),
+        ("linux", None, "x86_64-unknown-linux-gnu", True, True, False, "cpython"),
+        ("linux", None, "x86_64-unknown-linux-gnu", False, False, True, "cpython"),
+        ("linux", None, "x86_64-unknown-linux-gnu", False, True, True, "cpython"),
+        ("darwin", None, "aarch64-apple-darwin", False, False, False, "cpython"),
+        ("linux", None, "x86_64-unknown-linux-gnu", False, False, False, "pypy"),
+        ("linux", None, "x86_64-unknown-linux-gnu", False, True, False, "pypy"),
     ],
 )
 def test_helpers_and_extension_share_the_selected_target_and_crt(
-    monkeypatch, tmp_path, platform, configured_target, host, timings, develop, free_threaded
+    monkeypatch,
+    tmp_path,
+    platform,
+    configured_target,
+    host,
+    timings,
+    develop,
+    free_threaded,
+    implementation,
 ):
     run_cli = subprocess.run
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -473,6 +499,7 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
     )
     monkeypatch.setattr(build, "build_environment", lambda _root: environment.copy())
     monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(sys.implementation, "name", implementation)
     monkeypatch.setattr(
         build.sysconfig,
         "get_config_var",
@@ -525,7 +552,7 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
             assert not any(arg.startswith("--timings") for arg in command)
             assert "--release" in command and "--locked" in command
             extension_builds.append(command)
-            if free_threaded and not develop:
+            if (free_threaded or implementation == "pypy") and not develop:
                 assert command[command.index("--interpreter") + 1] == sys.executable
             else:
                 assert "--interpreter" not in command

@@ -1,0 +1,340 @@
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index 96b28aa0..860738b8 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -182,7 +182,7 @@ fn validate_envelope(profile: &AgentProfile) -> CodexResult<()> {
+ 
+ // Source history retains its audit facts. Only its derived presentation archives
+ // completed approval pairs, matching the SDK portable-import replay policy.
+-fn handoff_source_values(
++pub(super) fn handoff_source_values(
+     approved: &std::collections::HashSet<String>,
+     selected: &[&ResponseItem],
+ ) -> CodexResult<Vec<serde_json::Value>> {
+@@ -519,6 +519,7 @@ impl Session {
+         context
+             .extension_data
+             .remove::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>();
++        context.extension_data.remove::<codex_extension_api::HandoffGeneratedHistorySelection>();
+         context
+             .extension_data
+             .remove::<codex_protocol::agent_profile::AgentProfileHandoffInputRequest>();
+@@ -976,6 +977,20 @@ impl Session {
+             crate::prepared_request::validate_handoff_presentation(presentation)
+                 .map_err(invalid)?;
+         }
++        let history_replacement = if let Some(selection) = context
++            .extension_data
++            .remove::<codex_extension_api::HandoffGeneratedHistorySelection>()
++        {
++            if task_fence.is_none()
++                || presentation.as_ref().map(|value| &value.handoff) != Some(&selection.handoff)
++                || expected.as_ref() != Some(&selection.handoff.source)
++            {
++                return Err(invalid("Canonical handoff history requires this owned transfer"));
++            }
++            self.prepare_handoff_history_replacement(&context, &selection).await?
++        } else {
++            None
++        };
+         let mut envelope = target.application_instructions.clone();
+         if saved.items.iter().any(|item| matches!(item, RolloutItem::ResponseItem(prior) if prior.item.id() == envelope.item.id())) {
+             return Err(invalid("Agent activation requires a fresh instruction publication identity"));
+@@ -998,7 +1013,7 @@ impl Session {
+         configuration.step_settings = Arc::new(destination.selected().clone());
+         let mut settings = configuration.thread_settings_snapshot(&configuration.environments);
+         settings.request_controls = settings.request_controls.for_persistence();
+-        let batch = [
++        let profile_batch = [
+             RolloutItem::ResponseItem(envelope.clone()),
+             RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+                 ThreadSettingsAppliedEvent {
+@@ -1007,6 +1022,16 @@ impl Session {
+                 },
+             )),
+         ];
++        let mut batch = Vec::with_capacity(3);
++        if let Some(replacement) = &history_replacement {
++            batch.push(RolloutItem::Compacted(replacement.checkpoint.clone()));
++        }
++        batch.extend(profile_batch.iter().cloned());
++        let expected_checkpoint = history_replacement
++            .as_ref()
++            .map(|replacement| serde_json::to_value(&replacement.checkpoint))
++            .transpose()
++            .map_err(|_| persistence_failure())?;
+         // Canonical history loading above can await after the first task check.
+         // A scoped batch can stop while its sibling keeps the root task alive.
+         if task_fence
+@@ -1031,14 +1056,22 @@ impl Session {
+                 return Err(persistence_failure());
+             }
+         };
+-        if !durable.items.windows(2).any(|items| {
++        let recorded_profile = |items: &[RolloutItem]| {
+             matches!((&items[0], &items[1]), (RolloutItem::ResponseItem(recorded), RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(applied)))
+-                if recorded == &envelope && matches!(&batch[1], RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(expected)) if applied == expected))
+-        }) {
++                if recorded == &envelope && matches!(&profile_batch[1], RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(expected)) if applied == expected))
++        };
++        let witnessed = match &expected_checkpoint {
++            Some(expected) => durable.items.windows(3).any(|items| {
++                matches!(&items[0], RolloutItem::Compacted(recorded)
++                    if serde_json::to_value(recorded).ok().as_ref() == Some(expected))
++                    && recorded_profile(&items[1..])
++            }),
++            None => durable.items.windows(2).any(recorded_profile),
++        };
++        if !witnessed {
+             self.revoke_agent_profile_admission();
+             return Err(persistence_failure());
+         }
+-        // One synchronous publication under state/task gates. Getters see only committed state.
+         let mut state = self.state.lock().await;
+         // Revalidate authority against current state after persistence awaits. Other configuration
+         // owners may update fields without taking the profile persistence gate.
+@@ -1054,6 +1087,14 @@ impl Session {
+             self.revoke_agent_profile_admission();
+             return Err(persistence_failure());
+         }
++        if let Some(replacement) = history_replacement {
++            state.replace_annotated_history(
++                replacement.envelopes,
++                None,
++                crate::context_manager::HistoryReplacement::Reset,
++            );
++            state.sdk_originals = codex_history::sdk_originals::SdkOriginalHistoryCache::from(&replacement.originals);
++        }
+         state.record_annotated_items(
+             &mut vec![envelope],
+             destination.model_info.truncation_policy.into(),
+diff --git a/codex-rs/core/src/session/handoff_history.rs b/codex-rs/core/src/session/handoff_history.rs
+new file mode 100644
+index 00000000..e3cec362
+--- /dev/null
++++ b/codex-rs/core/src/session/handoff_history.rs
+@@ -0,0 +1,184 @@
++//! Canonical removal of current, occurrence-bound assistant text at an accepted transfer.
++use std::collections::HashSet;
++
++use codex_history::CompactedItem;
++use codex_history::ResponseItemEnvelope;
++use codex_history::sdk_originals::SdkOriginalHistory;
++use codex_protocol::agent_profile::AgentProfileHandoffPresentation;
++use codex_protocol::error::CodexErr;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::ResponseItem;
++
++use super::Session;
++use super::TurnContext;
++
++pub(super) struct Replacement {
++    pub checkpoint: CompactedItem,
++    pub originals: SdkOriginalHistory,
++    pub envelopes: Vec<ResponseItemEnvelope>,
++}
++
++impl Session {
++    /// The caller retains the profile persistence/task gates through publication.
++    pub(super) async fn prepare_handoff_history_replacement(
++        &self,
++        context: &TurnContext,
++        selection: &codex_extension_api::HandoffGeneratedHistorySelection,
++    ) -> Result<Option<Replacement>, CodexErr> {
++        let invalid = |message: &str| CodexErr::InvalidRequest(message.into());
++        let source = context
++            .extension_data
++            .get::<AgentProfileHandoffPresentation>()
++            .ok_or_else(|| invalid("Canonical handoff history lacks its native source"))?;
++        if selection.handoff != source.handoff
++            || selection.keep.windows(2).any(|pair| pair[0] >= pair[1])
++            || selection
++                .keep
++                .iter()
++                .any(|index| *index >= source.generated.len())
++        {
++            return Err(invalid(
++                "Canonical handoff history has another source selection",
++            ));
++        }
++        if selection.keep.len() == source.generated.len() {
++            return Ok(None);
++        }
++        let current = self.sdk_load_original_history().await?;
++        if current.items.len() > 4096
++            || current
++                .items
++                .iter()
++                .map(|item| item.original.len())
++                .sum::<usize>()
++                > 8 * 1024 * 1024
++        {
++            return Err(invalid(
++                "Canonical handoff history exceeds 4096 records or 8 MiB",
++            ));
++        }
++        let state = self.state.lock().await;
++        if state.sdk_originals.revision() != Some(current.revision()) {
++            return Err(invalid(
++                "Canonical handoff history changed during source capture",
++            ));
++        }
++        let rows = state.history.annotated_items();
++        let approved = rows
++            .iter()
++            .filter_map(|row| match &row.item {
++                ResponseItem::McpApprovalResponse {
++                    approve: true,
++                    approval_request_id,
++                    ..
++                } => Some(approval_request_id.clone()),
++                _ => None,
++            })
++            .collect::<HashSet<_>>();
++        // The complete sampled suffix pins occurrences, including byte-equal IDs across steps.
++        let mut generated = Vec::new();
++        for (index, row) in rows.iter().enumerate().rev() {
++            let values = super::agent_profile::handoff_source_values(&approved, &[&row.item])?;
++            if let Some(value) = values.into_iter().next() {
++                generated.push((index, value));
++                if generated.len() == source.generated.len() {
++                    break;
++                }
++            }
++        }
++        generated.reverse();
++        if generated
++            .iter()
++            .map(|(_, value)| value)
++            .ne(source.generated.iter())
++        {
++            return Err(invalid("Canonical handoff generated occurrences changed"));
++        }
++        let keep = selection.keep.iter().copied().collect::<HashSet<_>>();
++        let mut drop_rows = HashSet::new();
++        let mut drop_originals = HashSet::new();
++        for (ordinal, (index, _)) in generated.iter().enumerate() {
++            if keep.contains(&ordinal) {
++                continue;
++            }
++            let row = &rows[*index];
++            if !matches!(&row.item, ResponseItem::Message { role, content, .. }
++                if role == "assistant" && content.iter().all(|item| matches!(item, ContentItem::OutputText { .. })))
++            {
++                return Err(invalid(
++                    "Canonical handoff history preserves tool, policy and non-text source rows",
++                ));
++            }
++            let origin = row
++                .metadata
++                .as_ref()
++                .and_then(|metadata| metadata.retained_source.as_ref())
++                .ok_or_else(|| {
++                    invalid("Canonical handoff message lacks native occurrence provenance")
++                })?;
++            let order = row.metadata.as_ref().and_then(|metadata| metadata.user_input_order)
++                .ok_or_else(|| invalid("Canonical handoff message lacks native occurrence order"))?;
++            let matches = current
++                .items
++                .iter()
++                .enumerate()
++                .filter_map(|(index, original)| {
++                    let projection = original.projection.as_ref()?;
++                    (projection.item == row.item
++                        && projection
++                            .metadata
++                            .as_ref()
++                            .and_then(|metadata| metadata.retained_source.as_ref())
++                            == Some(origin)
++                        && projection.metadata.as_ref().and_then(|metadata| metadata.user_input_order)
++                            == Some(order))
++                    .then_some(index)
++                })
++                .collect::<Vec<_>>();
++            if matches.len() != 1 || !drop_originals.insert(matches[0]) {
++                return Err(invalid(
++                    "Canonical handoff message has no unique original occurrence",
++                ));
++            }
++            drop_rows.insert(*index);
++        }
++        let envelopes = rows
++            .iter()
++            .enumerate()
++            .filter_map(|(index, row)| (!drop_rows.contains(&index)).then(|| row.clone()))
++            .collect::<Vec<_>>();
++        let mut originals = SdkOriginalHistory::default();
++        for (index, original) in current.items.into_iter().enumerate() {
++            if !drop_originals.contains(&index) {
++                originals.append(original);
++            }
++        }
++        let checkpoint = CompactedItem {
++            sdk_originals: Some(originals.clone().into()),
++            message: String::new(),
++            replacement_history: Some(envelopes.clone()),
++            guardian_history: None,
++            retained_context: Some(Default::default()),
++            mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
++            window_number: Some(state.auto_compact_window_number()),
++            first_window_id: Some(state.auto_compact_window_ids().first_window_id.to_string()),
++            previous_window_id: state
++                .auto_compact_window_ids()
++                .previous_window_id
++                .map(|id| id.to_string()),
++            window_id: Some(state.auto_compact_window_ids().window_id.to_string()),
++            compaction_response_id: None,
++            latest_token_usage_record: state.latest_token_usage_record.clone(),
++            resume_metadata: Some(codex_history::CompactionResumeMetadata {
++                multi_agent_version: self.multi_agent_version(),
++                last_started_turn_id: state.last_started_turn_id.clone(),
++                previous_turn_settings: state.previous_turn_settings(),
++            }),
++        };
++        Ok(Some(Replacement {
++            checkpoint,
++            originals,
++            envelopes,
++        }))
++    }
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index e9bad71a..5461ad1b 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -1,4 +1,5 @@
+ mod agent_profile;
++mod handoff_history;
+ pub(crate) mod startup;
+ 
+ use crate::WithTurnExtensionData;
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 60e73ef2..ea0c384d 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -195,6 +195,7 @@ pub use model_attempt::ModelAttemptRecorder;
+ pub use model_attempt::ModelAttemptRoute;
+ mod model_request_observation;
+ pub use model_request::PreparedRequestAdmission;
++pub use model_request::HandoffGeneratedHistorySelection;
+ pub use model_request::PreparedRequestData;
+ pub use model_request::PreparedRequestInput;
+ pub use model_request::PreparedRequestOutput;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 1e73a136..2f342cfa 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -131,6 +131,13 @@ pub enum ModelRequestKind {
+     Warmup,
+ }
+ 
++/// A fresh owned preparation may retain these current generated source occurrences.
++/// This attachment is deliberately absent from serialized profile/checkpoint data.
++pub struct HandoffGeneratedHistorySelection {
++    pub handoff: codex_protocol::agent_profile::AgentProfileHandoff,
++    pub keep: Vec<usize>,
++}
++
+ /// Request identity and additional metadata supplied before sending to the provider.
+ pub struct ModelRequestInput<'a> {
+     /// Whether this request generates output or warms up the session.

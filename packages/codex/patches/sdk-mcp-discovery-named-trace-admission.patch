@@ -1,0 +1,109 @@
+diff --git a/codex-rs/codex-mcp/src/rmcp_client.rs b/codex-rs/codex-mcp/src/rmcp_client.rs
+index d59931f8..a2a0179b 100644
+--- a/codex-rs/codex-mcp/src/rmcp_client.rs
++++ b/codex-rs/codex-mcp/src/rmcp_client.rs
+@@ -761,7 +761,9 @@ pub(crate) async fn list_tools_for_client_uncached(
+     server_instructions: Option<&str>,
+ ) -> Result<Vec<ToolInfo>> {
+     let fetch_start = Instant::now();
+-    let discovery = start_sdk_mcp_discovery_span(server_name);
++    let discovery = sdk_trace::start_sdk_mcp_discovery_span(server_name)
++        .await
++        .map_err(|_| anyhow!("SDK MCP discovery trace admission failed"))?;
+     let result =
+         collect_paginated_with_limit("tools/list", timeout, catalog_item_limit, |params| {
+             let client = Arc::clone(client);
+@@ -833,17 +835,6 @@ pub(crate) async fn list_tools_for_client_uncached(
+     Ok(tools)
+ }
+ 
+-fn start_sdk_mcp_discovery_span(server: &str) -> Option<sdk_trace::ProviderResponseSpan> {
+-    let policy = sdk_trace::current_scope_policy()?;
+-    // Synchronous host policy and custom IDs require admission by the host loop.
+-    // A runtime-only observer span cannot stand in for that admission.
+-    if policy.disabled || policy.named_tool_policy {
+-        return None;
+-    }
+-    let parent = sdk_trace::ContextLease::capture_submission()?;
+-    sdk_trace::start_sdk_semantic_span(&parent, None, server.to_owned(), "mcp_tools").ok()
+-}
+-
+ /// Filters disabled connectors, presents declared Codex Apps file parameters to the model as
+ /// local-path inputs, and adds plugin names to each tool. Plugin membership is resolved by
+ /// connector ID, falling back to the MCP server when absent.
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+index d1f0f07a..1968271d 100644
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -779,6 +779,59 @@ fn start_trace_span_options(
+ /// Process-local ancestry for an SDK-owned thread opening.
+ pub struct OpeningContext(Context);
+ 
++/// An operation-scoped host decision for actual managed MCP catalog requests.
++pub trait McpDiscoverySpanPolicy: Send + Sync {
++    fn admit<'a>(
++        &'a self,
++        parent: &'a ContextLease,
++        server: &'a str,
++    ) -> std::pin::Pin<
++        Box<dyn std::future::Future<Output = Result<McpDiscoverySpanAdmission, String>> + Send + 'a>,
++    >;
++}
++
++pub enum McpDiscoverySpanAdmission {
++    Suppress,
++    Record(Option<String>),
++}
++
++struct OpeningMcpDiscoveryPolicy(Arc<dyn McpDiscoverySpanPolicy>);
++
++pub async fn start_sdk_mcp_discovery_span(server: &str) -> Result<Option<ProviderResponseSpan>, String> {
++    let current = current_submission_context();
++    let Some(policy) = policy_for_context(&current) else {
++        return Ok(None);
++    };
++    if policy.disabled || policy.restriction_only {
++        return Ok(None);
++    }
++    let host = current
++        .get::<OpeningMcpDiscoveryPolicy>()
++        .map(|owner| Arc::clone(&owner.0));
++    let Some(token) = context_token_for(current) else {
++        return Ok(None);
++    };
++    let parent = ContextLease { token };
++    let span_id = if policy.named_tool_policy {
++        let Some(host) = host else {
++            return Ok(None);
++        };
++        match host.admit(&parent, server).await? {
++            McpDiscoverySpanAdmission::Suppress => return Ok(None),
++            McpDiscoverySpanAdmission::Record(span_id) => span_id,
++        }
++    } else {
++        None
++    };
++    let span = start_sdk_semantic_span(&parent, span_id, server.to_owned(), "mcp_tools");
++    if policy.named_tool_policy {
++        span.map(Some)
++    } else {
++        // An observer-only span cannot make MCP discovery fail.
++        Ok(span.ok())
++    }
++}
++
+ impl OpeningContext {
+     pub fn resolve(token: &str) -> Result<Self, String> {
+         context(token).map(explicit_submission_context).map(Self)
+@@ -788,6 +841,11 @@ impl OpeningContext {
+         future.with_context(self.0).await
+     }
+ 
++    pub fn with_mcp_discovery_policy(mut self, host: Arc<dyn McpDiscoverySpanPolicy>) -> Self {
++        self.0 = self.0.with_value(OpeningMcpDiscoveryPolicy(host));
++        self
++    }
++
+     pub fn capture_sdk_discovery() -> Option<Self> {
+         let current = current_submission_context();
+         let policy = policy_for_context(&current)?;

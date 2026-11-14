@@ -1,0 +1,64 @@
+diff --git a/codex-rs/codex-mcp/src/binding.rs b/codex-rs/codex-mcp/src/binding.rs
+index 543a22dc..0baa4723 100644
+--- a/codex-rs/codex-mcp/src/binding.rs
++++ b/codex-rs/codex-mcp/src/binding.rs
+@@ -329,6 +329,10 @@ impl PreparedMcpCall {
+             && self.client.tool_timeout == current.client.tool_timeout
+     }
+ 
++    pub fn has_uncredentialed_http_transport(&self) -> bool {
++        self.client.client.has_uncredentialed_http_transport()
++    }
++
+     pub fn transport_instance(&self) -> Option<u64> {
+         self.client.client.transport_instance()
+     }
+diff --git a/codex-rs/core/src/owned_question.rs b/codex-rs/core/src/owned_question.rs
+index 36523916..156ea226 100644
+--- a/codex-rs/core/src/owned_question.rs
++++ b/codex-rs/core/src/owned_question.rs
+@@ -420,6 +420,18 @@ impl LiveMcpApprovalPolicy {
+             && self.transport == other.transport
+             && self.call.has_same_approval_declaration(&other.call)
+     }
++
++    /// Portable policy key for a narrowly proven credential-free root declaration.
++    /// It contains no transport authority and is compared against a new question.
++    pub fn portable_declaration(&self) -> Option<String> {
++        if self.profile.is_some()
++            || !self.call.has_uncredentialed_http_transport()
++            || self.call.transport_instance() != Some(self.transport)
++        {
++            return None;
++        }
++        mcp_approval_declaration_fingerprint(&self.call).ok()
++    }
+ }
+ 
+ impl OwnedQuestion {
+diff --git a/codex-rs/rmcp-client/src/rmcp_client.rs b/codex-rs/rmcp-client/src/rmcp_client.rs
+index b4aa24d0..ae8249a2 100644
+--- a/codex-rs/rmcp-client/src/rmcp_client.rs
++++ b/codex-rs/rmcp-client/src/rmcp_client.rs
+@@ -711,6 +711,21 @@ impl RmcpClient {
+     }
+ 
+     /// Requests server-side read-only filtering and invocation checks for every tool request.
++    /// Proves the current HTTP transport cannot be carrying stored or injected credentials.
++    pub fn has_uncredentialed_http_transport(&self) -> bool {
++        matches!(&self.transport_recipe, TransportRecipe::StreamableHttp {
++            bearer_token: None,
++            http_headers,
++            env_http_headers,
++            oauth_config: None,
++            pinned_credential_store,
++            auth_provider: None,
++            ..
++        } if http_headers.as_ref().is_none_or(HashMap::is_empty)
++            && env_http_headers.as_ref().is_none_or(HashMap::is_empty)
++            && pinned_credential_store.get().is_none())
++    }
++
+     pub fn with_read_only_tools(mut self, requires_read_only_tools: bool) -> Self {
+         self.requires_read_only_tools = requires_read_only_tools;
+         self

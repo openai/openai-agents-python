@@ -166,6 +166,8 @@ from ._opening_compatibility import (
     _validate_storage_opening as _validate_storage_opening,
 )
 from ._output_guardrails import _settle_output_guardrails
+from ._produced_prefix import _ProducedPrefix
+from ._profile_environments import _acquire_profile_environments
 from ._projection import (
     _error_code as _error_code,
     project_execution_completion as project_execution_completion,
@@ -208,7 +210,7 @@ from .agent import (
     _copy_model_settings as _copy_model_settings,
     _RunInputStoragePolicy,
 )
-from .agent_lifecycle import AgentLifecycleContext
+from .agent_lifecycle import AgentLifecycleContext, ToolLifecycleContext, _ToolLifecycleCallback
 from .apply_patch import _ApplyPatchTool
 from .canonical_storage import (
     CustomStorage as CustomStorage,
@@ -258,6 +260,7 @@ from .history import (
 from .input import UserInput as UserInput, _native_input as _native_input
 from .model_context import (
     ModelCompletionContext,
+    ModelContextProjection,
     ModelContextSnapshot,
     ModelRequestContext,
 )
@@ -335,8 +338,10 @@ from .telemetry import (
     _CapturedTrace as _CapturedTrace,
     _clear_current as _clear_current,
     _create_task as _create_task,
+    _guardrail_span,
     _native_provider_response_span_id,
     _owned_span as _owned_span,
+    _run_mcp_discovery_policy,
 )
 from .tools import (
     ToolCallInfo as ToolCallInfo,
@@ -387,6 +392,7 @@ _wire_types = _tool_response_types
 
 if TYPE_CHECKING:
     from ._sandbox_events import _OperationObserver
+    from ._sandbox_profile_workspace import _OwnedProfileWorkspace
     from .hosted_mcp import HostedMCP
     from .manual import Interaction as Interaction, _InteractionHandler as _InteractionHandler
     from .realtime import RealtimeConfig, RealtimeSession, _RealtimePolicySource
@@ -408,6 +414,7 @@ if TYPE_CHECKING:
 _MutationResultT = TypeVar("_MutationResultT")
 _ResultT = TypeVar("_ResultT")
 _TurnT = TypeVar("_TurnT")
+_SelectedToolT = TypeVar("_SelectedToolT")
 _SelectionContextT_contra = TypeVar("_SelectionContextT_contra", contravariant=True)
 _NATIVE_HOME_CLOSE_TIMEOUT = 30.0
 _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST = hashlib.sha256(b"implicit-remote-workspace").hexdigest()
@@ -811,7 +818,7 @@ class Capabilities:
                 "New root Turns and their automatic successors",
             )
         if feature == "native_output_manual_restore":
-            if s._storage is not None:
+            if s._storage is not None and not isinstance(s._storage, CustomStorage):
                 return FeatureSupport(
                     "unsupported",
                     "Persistent Sessions cannot export SessionState",
@@ -823,7 +830,7 @@ class Capabilities:
                 "Same root Turn and matching output declaration; capture readiness is separate",
             )
         if feature == "manual_suspend":
-            if s._storage is not None:
+            if s._storage is not None and not isinstance(s._storage, CustomStorage):
                 return FeatureSupport(
                     "unsupported",
                     "Persistent storage cannot export SessionState",
@@ -1458,8 +1465,16 @@ class _ConfiguredChild:
 class _SuspendBoundary:
     session: Session[Any, Any]
     active: _Submission
-    child: _ConfiguredChild | None
-    descendant: _SuspendBoundary | None = None
+    children: tuple[tuple[_ConfiguredChild, _SuspendBoundary | None], ...] = ()
+
+
+@dataclass
+class _CheckpointPhase:
+    state: Literal["preseal", "sealing", "refused", "sealed", "uncertain"] = "preseal"
+
+    @property
+    def refused_before_seal(self) -> bool:
+        return self.state in {"preseal", "refused"}
 
 
 def _native_callback_cancelled(state: _CallbackState) -> bool:
@@ -1514,6 +1529,12 @@ class _ConfiguredOpening:
     writable_roots: tuple[str, ...] | None
     admitted: Callable[[], bool]
     executor_tools: tuple[str, ...]
+    workspace_instructions: str | None
+    sandbox_observer: _OperationObserver | None
+    capture_produced_items: bool
+    on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = field(default=None, repr=False)
+    sandbox_lease: _EnvironmentLease | None = field(default=None, repr=False)
+    checkpoint_prefix: _ProducedPrefix = field(default_factory=_ProducedPrefix)
 
 
 @_sdk_dataclass
@@ -2093,6 +2114,57 @@ async def _finish_native_home_cleanup(
 
 
 _PROJECT_GUIDANCE_TOOL_NAMES = ("read_text_file", "view_image")
+_HOSTED_FILE_SEARCH_NAMESPACE = "_agents_sdk_hosted"
+_LEGACY_HOSTED_FILE_SEARCH_REF = ToolRef("file_search", "functions")
+_HOSTED_FILE_SEARCH_REF = ToolRef("file_search", _HOSTED_FILE_SEARCH_NAMESPACE)
+
+
+def _declares_local_file_search(tools: Sequence[object]) -> bool:
+    return any(
+        type(tool) is FunctionTool
+        and tool.ref.namespace in (None, "functions")
+        and tool.ref.name == "file_search"
+        for tool in tools
+    )
+
+
+def _declares_hosted_file_search(tools: Sequence[object]) -> bool:
+    from ._tool_catalog import FileSearch
+
+    return any(isinstance(tool, FileSearch) for tool in tools)
+
+
+def _shares_file_search_name(tools: Sequence[object]) -> bool:
+    return _declares_local_file_search(tools) and _declares_hosted_file_search(tools)
+
+
+def _resolve_legacy_file_search_refs(
+    selection: Sequence[_SelectedToolT],
+    opening: Sequence[object],
+    distinct_file_search: bool,
+) -> Sequence[_SelectedToolT]:
+    if (
+        not distinct_file_search
+        or not any(
+            isinstance(tool, ToolRef) and tool == _LEGACY_HOSTED_FILE_SEARCH_REF
+            for tool in selection
+        )
+        or _declares_local_file_search(opening)
+        or not _declares_hosted_file_search(opening)
+    ):
+        return selection
+    return tuple(
+        cast(_SelectedToolT, _HOSTED_FILE_SEARCH_REF)
+        if isinstance(tool, ToolRef) and tool == _LEGACY_HOSTED_FILE_SEARCH_REF
+        else tool
+        for tool in selection
+    )
+
+
+def _hosted_tool_namespace(name: str, distinct_file_search: bool) -> str:
+    if distinct_file_search and name == "file_search":
+        return _HOSTED_FILE_SEARCH_NAMESPACE
+    return "functions"
 
 
 def _fixed_tool_refs(
@@ -2102,6 +2174,7 @@ def _fixed_tool_refs(
     native_agents: _tool_types.NativeAgents[Any] | None,
     *,
     project_guidance: bool = False,
+    distinct_file_search: bool = False,
 ) -> set[ToolRef]:
     """Derive selectors only from native grants captured for this opening."""
     if (
@@ -2114,6 +2187,7 @@ def _fixed_tool_refs(
         return set()
     from ._tool_catalog import (
         _HOSTED_TOOLS,
+        FileSearch,
         _hosted_tool_name,
     )
 
@@ -2130,7 +2204,13 @@ def _fixed_tool_refs(
         ) and tool._manual is not None:
             continue
         elif isinstance(tool, _HOSTED_TOOLS):
-            fixed.add(ToolRef(_hosted_tool_name(tool), "functions"))
+            name = _hosted_tool_name(tool)
+            namespace = (
+                _hosted_tool_namespace(name, distinct_file_search)
+                if isinstance(tool, FileSearch)
+                else "functions"
+            )
+            fixed.add(ToolRef(name, namespace))
         elif type(tool) is not FunctionTool and (isinstance(tool, _tool_types.WebSearch)):
             fixed.add(
                 ToolRef("run", "web")
@@ -2194,6 +2274,7 @@ def _split_tools(
     rebind: bool = False,
     handoffs: Mapping[str, str] | None = None,
     project_guidance: bool = False,
+    distinct_file_search: bool = False,
 ) -> tuple[
     tuple[FunctionTool[Any, Any, Any], ...],
     tuple[_tool_types._MCP[Any], ...],
@@ -2237,6 +2318,7 @@ def _split_tools(
             environment,
             native_agents,
             project_guidance=project_guidance,
+            distinct_file_search=distinct_file_search,
         )
         fixed.update(ToolRef(name) for name in handoffs or ())
         for declaration in opening:
@@ -2277,6 +2359,7 @@ def _split_tools(
     if not ordinary_opening and sum(isinstance(item, WebSearch) for item in opening) > 1:
         raise ValueError("Declare WebSearch only once per Session")
     hosted_names = set()
+    shares_file_search = False
     if not ordinary_opening:
         for hosted_type in _HOSTED_TOOLS:
             if sum(isinstance(item, hosted_type) for item in opening) > 1:
@@ -2284,6 +2367,7 @@ def _split_tools(
         hosted_names = {
             _hosted_tool_name(item) for item in opening if isinstance(item, _HOSTED_TOOLS)
         }
+        shares_file_search = "file_search" in hosted_names and _shares_file_search_name(opening)
     for item in tools:
         tool = item
         if available is not None and (
@@ -2298,6 +2382,7 @@ def _split_tools(
                 tool if isinstance(tool, Environment) else None,
                 tool if (isinstance(tool, _tool_types.NativeAgents)) else None,
                 project_guidance=project_guidance and isinstance(tool, Environment),
+                distinct_file_search=distinct_file_search,
             )
             if retained.intersection(refs):
                 raise CapabilityError("Operation tools must select distinct fixed capabilities")
@@ -2420,6 +2505,8 @@ def _split_tools(
         python_tool = _python_tool_slot(tool)
         if python_tool is not None:
             tool = python_tool
+            if tool.ref == ToolRef("file_search", _HOSTED_FILE_SEARCH_NAMESPACE):
+                raise ValueError("Python tool uses a reserved File Search selector")
             if has_native_agents and tool.ref.namespace == "collaboration":
                 raise ValueError(
                     f"NativeAgents reserves the collaboration namespace: {tool.name}; "
@@ -2428,6 +2515,9 @@ def _split_tools(
             if (
                 tool.ref.namespace in (None, "functions")
                 and tool.name in hosted_names
+                and not (
+                    type(tool) is FunctionTool and tool.name == "file_search" and shares_file_search
+                )
                 and not isinstance(tool, _ClientToolSearch)
             ):
                 raise ValueError(f"Hosted tools reserve the tool name {tool.name}")
@@ -2482,7 +2572,9 @@ def _split_tools(
                     "WebSearch domain filters, location, and image controls require route='hosted'"
                 )
             if available is not None:
-                refs = _fixed_tool_refs((tool,), False, None, None)
+                refs = _fixed_tool_refs(
+                    (tool,), False, None, None, distinct_file_search=distinct_file_search
+                )
                 if retained.intersection(refs):
                     raise CapabilityError("Operation tools must select distinct fixed capabilities")
                 retained.update(refs)
@@ -2545,17 +2637,21 @@ def _bind_sandbox_opening_tools(
 class _SandboxContextTransforms:
     callbacks: tuple[Callable[..., Any], ...]
 
-    async def __call__(self, request: ModelRequestContext[Any]) -> Sequence[dict[str, Any]]:
+    async def __call__(
+        self, request: ModelRequestContext[Any]
+    ) -> Sequence[dict[str, Any]] | ModelContextProjection:
         raise NativeError("Composed sandbox callbacks require live native admission")
 
     def bind(
         self, active: Callable[[], bool]
-    ) -> Callable[[ModelRequestContext[Any]], Awaitable[Sequence[dict[str, Any]]]]:
+    ) -> Callable[
+        [ModelRequestContext[Any]], Awaitable[Sequence[dict[str, Any]] | ModelContextProjection]
+    ]:
         async def transform(
             request: ModelRequestContext[Any],
-        ) -> Sequence[dict[str, Any]]:
+        ) -> Sequence[dict[str, Any]] | ModelContextProjection:
             items = request.items
-            for callback in self.callbacks:
+            for index, callback in enumerate(self.callbacks):
                 if not active():
                     return items
                 changed = await _call_callback(callback, active, replace(request, items=items))
@@ -2563,6 +2659,10 @@ class _SandboxContextTransforms:
                 # another application callback while that native owner is stale.
                 if not active():
                     return items
+                if isinstance(changed, ModelContextProjection):
+                    if index != len(self.callbacks) - 1:
+                        raise TypeError("Only the final context callback can project instructions")
+                    return replace(changed, items=items) if changed.items is None else changed
                 if changed is not None:
                     items = tuple(changed)
             return items
@@ -2574,22 +2674,48 @@ def _apply_sandbox_contributions(
     agent: Agent[Any, Any],
     lease: _EnvironmentLease | None,
     *,
-    has_graph: bool,
-    manual_restore: bool,
+    allowed: bool,
+    profile: tuple[_AgentProfile, Environment[Any] | None] | None = None,
+    workspace_owner: Any = None,
 ) -> bool:
     if lease is None:
         return False
     contributions = getattr(lease.source, _SANDBOX_CAPABILITIES_ATTRIBUTE, None)
+    if profile is not None and workspace_owner is not None:
+        contributions = workspace_owner.contributions(profile[0].id)
+
     if contributions is None:
         return False
     from .sandbox import _SandboxContributions
 
     if not isinstance(contributions, _SandboxContributions):
         raise TypeError("Sandbox capabilities require a sandbox_environment source")
-    if has_graph or manual_restore:
+    if not allowed:
+        if profile is not None:
+            raise CapabilityError(
+                "Per-Agent sandbox capabilities require a fresh stateless native handoff graph"
+            )
         raise CapabilityError(
             "Sandbox capability callbacks require a single root and an idle opening"
         )
+    if profile is not None:
+        source, executor = profile
+        _check_handoff_tool_names(
+            (tool.ref for tool in contributions.tools),
+            {**source.handoffs, **dict.fromkeys(source.decision_handoffs, "")},
+        )
+        _check_environment_python_tool_collisions(executor, contributions.tools)
+        # Keep every previously captured native callback slot at its original index.
+        existing = {
+            (tool.ref.namespace or "functions", tool.ref.name)
+            for tool in agent.tools
+            if isinstance(tool, FunctionTool)
+        }
+        for tool in contributions.tools:
+            ref = (tool.ref.namespace or "functions", tool.ref.name)
+            if ref in existing:
+                raise ValueError("Per-Agent sandbox capability tools require unique ToolRefs")
+            existing.add(ref)
     original_transform = agent.transform_context
     capability_transforms = contributions.transforms()
     transforms = (
@@ -2605,7 +2731,7 @@ def _apply_sandbox_contributions(
     if capability_transforms:
         object.__setattr__(agent, "transform_context", _SandboxContextTransforms(transforms))
     tools = (*agent.tools, *contributions.tools)
-    if agent.tool_name_collision_policy == "warn":
+    if profile is None and agent.tool_name_collision_policy == "warn":
         tools, _ = _resolve_tool_name_collisions(tools, ())
     object.__setattr__(agent, "tools", tools)
     return True
@@ -2656,6 +2782,7 @@ def _selected_tool_refs(
     environment: Environment[Any] | None,
     native_agents: _tool_types.NativeAgents[Any] | None,
     project_guidance: bool = False,
+    distinct_file_search: bool = False,
 ) -> tuple[ToolRef, ...]:
     """Normalize admitted declarations through the same identities as dispatch."""
     refs = {tool.ref for tool in python}
@@ -2673,6 +2800,7 @@ def _selected_tool_refs(
             environment if any(item is environment for item in selection) else None,
             native_agents if any(item is native_agents for item in selection) else None,
             project_guidance=project_guidance and any(item is environment for item in selection),
+            distinct_file_search=distinct_file_search,
         )
     )
     # Execution helpers remain an implementation detail of an admitted nonempty
@@ -2774,6 +2902,10 @@ class _ProfileRuntime:
     output: _PreparedOutput
     instructions: str
     environment: Environment[Any] | None = None
+    environment_source: object | None = None
+    workspace_instructions: str | None = None
+    sandbox_observer: _OperationObserver | None = None
+    workspace_owner: _OwnedProfileWorkspace | None = None
 
 
 def _native_session_config(
@@ -2872,6 +3004,15 @@ def _capture_profile_runtimes(
     *,
     run_error_formatter: bool = False,
 ) -> tuple[dict[str, _ProfileRuntime], list[dict[str, Any]]]:
+    from ._tool_catalog import _SCOPED_HOSTED_TYPES, _capture_hosted_tools
+
+    hosted = [
+        _capture_hosted_tools(
+            [tool for tool in profile.declaration.tools if isinstance(tool, _SCOPED_HOSTED_TYPES)]
+        )
+        for profile in profiles
+    ]
+    scoped_hosted = bool(hosted and any(tools != hosted[0] for tools in hosted[1:]))
     outputs = tuple(_prepare_spec(profile.declaration.output_type) for profile in profiles)
     distinct_wire_outputs = _distinct_profile_wire_outputs(outputs)
     profile_prompted_output = _profile_prompted_output(outputs)
@@ -2950,6 +3091,7 @@ def _capture_profile_runtimes(
                 },
                 "instructions": instructions,
                 "tools": json.loads(catalog.native_specs()),
+                **({"hosted_tools": {"tools": hosted[index]}} if scoped_hosted else {}),
                 "manual_slots": catalog.manual_slots(),
                 "terminal_slots": catalog.finish_slots(),
                 "input_error_slots": catalog.input_error_slots(),
@@ -3030,6 +3172,410 @@ def _capture_profile_runtimes(
     return captured, roster
 
 
+async def _check_custom_opening_recovery(
+    opening: _OpeningOwner,
+    engine: Any,
+    storage: _state_types.LocalStorage | CustomStorage | None,
+    resume: str | None,
+) -> None:
+    if isinstance(storage, CustomStorage) and resume is not None:
+        # Inspect before Core starts, while the canonical backend's
+        # original writer still fences every other opener.
+        history, shell_calls = json.loads(
+            await opening.acquire(engine._inspect_custom_recovery(resume))
+        )
+        uncertain = [
+            UncertainCall(
+                thread_id=resume,
+                turn_id=turn_id,
+                call_id=call_id,
+                name="shell",
+                arguments=arguments,
+            )
+            for turn_id, call_id, arguments in shell_calls
+        ]
+        turns, items = project_history(history, resume, uncertain_calls=uncertain)
+        if uncertain:
+            raise LocalRecoveryRequired(tuple(uncertain), tuple(turns), tuple(items))
+
+
+async def _initialize_session_engine(
+    opening: _OpeningOwner,
+    native: Any,
+    config: dict[str, Any],
+    runtime: dict[str, Any],
+    options: dict[str, Any],
+    native_specs: str,
+    provider_lease: Any,
+    storage: _state_types.LocalStorage | CustomStorage | None,
+    checkpoint: str | None,
+    *,
+    using_codex_login: bool,
+    share_model_http: bool,
+    verify_current_default: bool,
+) -> Any:
+    create_engine = (
+        native.create_checkpoint_engine if checkpoint is not None else native.create_engine
+    )
+    return await opening.acquire(
+        create_engine(
+            json.dumps(config),
+            json.dumps(runtime),
+            # Preserve the captured environment value in API-key mode.
+            api_key=None if using_codex_login else (opening.api_key or ""),
+            provider_lease=provider_lease,
+            # One opening snapshot owns the runtime and its first thread.
+            **(
+                {
+                    "_capture_initial_config": True,
+                    "_share_model_http": share_model_http,
+                }
+                if checkpoint is None
+                else {}
+            ),
+            **({"canonical_store": storage.backend} if isinstance(storage, CustomStorage) else {}),
+            **(
+                {
+                    "initial_checkpoint": checkpoint,
+                    "initial_specs_json": native_specs,
+                    "initial_options_json": json.dumps(options),
+                    **({"_verify_current_default_model": True} if verify_current_default else {}),
+                }
+                if checkpoint is not None
+                else {}
+            ),
+        )
+    )
+
+
+async def _start_opening_thread(
+    opening: _OpeningOwner,
+    engine: Any,
+    options: dict[str, Any],
+    native_specs: str,
+    checkpoint: str | None,
+    *,
+    initial_messages_json: str | None,
+    allowed_mcp: Sequence[_tool_types._MCP[Any]],
+    tracing_context: str | None,
+    parent_trace: TraceContext | None,
+    private_http: bool,
+    owned_provider: bool,
+) -> Any:
+    opening_trace = (
+        {"_opening_trace_context": tracing_context}
+        if allowed_mcp and tracing_context is not None and parent_trace is None
+        else {}
+    )
+    return await opening.acquire(
+        engine._start_initial_replaceable_thread(
+            json.dumps(options),
+            native_specs,
+            initial_messages_json=initial_messages_json,
+            **opening_trace,
+            **({"_process_private_http": True} if private_http and owned_provider else {}),
+        )
+        if checkpoint is None
+        else engine.restore_checkpoint(
+            checkpoint, json.dumps(options), native_specs, **opening_trace
+        )
+    )
+
+
+async def _initialize_atomic_opening(
+    opening: _OpeningOwner,
+    native: Any,
+    config: dict[str, Any],
+    runtime: dict[str, Any],
+    options: dict[str, Any],
+    native_specs: str,
+    settings: dict[str, Any],
+    provider_lease: Any,
+    agent: Agent[Any, Any],
+    output: _PreparedOutput,
+    *,
+    use_completed_owner: bool,
+    completed_input: str | None,
+    private_http: bool,
+    owned_provider: bool,
+    private_function_run: bool,
+) -> tuple[Any, Any, Any] | Completed[Any] | _RunHandoff:
+    if use_completed_owner:
+        submission_id = uuid4().hex
+        owner = native._prepare_run_conversation(
+            json.dumps(config),
+            json.dumps(runtime),
+            json.dumps(options),
+            native_specs,
+            json.dumps(settings),
+            json.dumps(
+                {
+                    "mode": "start_if_idle",
+                    "input": _native_input(cast(str, completed_input)),
+                    "observation_submission_id": submission_id,
+                }
+            ),
+            api_key=opening.api_key or "",
+            provider_lease=provider_lease,
+            _share_model_http=True,
+            _private_http=private_http,
+            **({"_process_private_http": True} if private_http and owned_provider else {}),
+        )
+        return await opening.run(owner, agent, output, submission_id)
+    return cast(
+        tuple[Any, Any, Any],
+        await opening.acquire(
+            native._open_conversation(
+                json.dumps(config),
+                json.dumps(runtime),
+                json.dumps(options),
+                native_specs,
+                json.dumps(settings),
+                api_key=opening.api_key or "",
+                provider_lease=provider_lease,
+                _share_model_http=not private_function_run,
+                _private_http=private_http,
+                **({"_process_private_runtime": True} if private_function_run else {}),
+            )
+        ),
+    )
+
+
+async def _fail_session_opening(
+    error: BaseException,
+    opening: _OpeningOwner,
+    session: Session[Any, Any] | None,
+    provider: NativeProvider | None,
+    environment_owner: _EnvironmentLease | None,
+    *,
+    owned_provider: bool,
+) -> None:
+    session_cleanup = getattr(error, "cleanup", None)
+    session_owns_provider = (
+        owned_provider
+        and isinstance(session_cleanup, Session)
+        and not session_cleanup._closed
+        and session_cleanup._owned_provider is provider
+    )
+    if environment_owner is not None:
+        await _close_after_error(error, lambda: opening.fail_environment(environment_owner))
+        if opening.lease is not None and not environment_owner._retired.done():
+            # Only the native join itself can keep an admitted manager
+            # pending. Expose its existing owner to supported aclose.
+            assert provider is not None
+            provider._defer_opening(opening, environment_owner)
+    if owned_provider and not session_owns_provider:
+        assert provider is not None
+        await _close_after_error(error, provider.aclose)
+    try:
+        if environment_owner is not None:
+            try:
+                environment_owner.raise_if_interrupted(error)
+            except BaseException as interrupted:
+                # The manager's own error is the one the caller receives.
+                error = interrupted
+                raise
+    finally:
+        # A retired unpublished Session no longer needs the caller's
+        # Environment. Pending native cleanup must retain its policy owner.
+        if opening.lease is None and session is not None:
+            session._executor = None
+        # Both the original error and a manager-selected replacement
+        # must retain the same existing owner for unfinished cleanup.
+        if (
+            provider is not None
+            and not vars(provider).get("_closed", False)
+            and (owned_provider or opening.lease is not None)
+        ):
+            cast(Any, error).cleanup = session_cleanup if session_owns_provider else provider
+            if owned_provider:
+                cast(Any, error).provider = provider
+
+
+def _borrow_configured_opening(
+    policy_agent: Agent[Any, Any],
+    executor: Environment[Any] | None,
+    on_tool_lifecycle: _ToolLifecycleCallback[Any] | None,
+    *,
+    has_persistent_state: bool,
+    provider_history: ProviderHistory | None,
+    agent: Agent[Any, Any],
+    has_profiles: bool,
+) -> tuple[
+    _ConfiguredOpening | None,
+    _ToolLifecycleCallback[Any] | None,
+    str | None,
+    _OperationObserver | None,
+    _EnvironmentLease | None,
+]:
+    invocation = _invocation.get()
+    configured_opening = invocation.configured_opening if invocation is not None else None
+    if (
+        on_tool_lifecycle is None
+        and invocation is not None
+        and configured_opening is not None
+        and configured_opening.agent is policy_agent
+    ):
+        if not invocation.active or not configured_opening.admitted():
+            raise InteractionExpiredError("Configured parent invocation is expired")
+        on_tool_lifecycle = configured_opening.on_tool_lifecycle
+    if (
+        invocation is not None
+        and configured_opening is not None
+        and configured_opening.agent is policy_agent
+        and configured_opening.environment is executor
+    ):
+        invocation.configured_opening = None
+        if not invocation.active or not configured_opening.admitted():
+            raise InteractionExpiredError("Configured parent invocation is expired")
+    else:
+        configured_opening = None
+    inherited_workspace = (
+        configured_opening.workspace_instructions if configured_opening is not None else None
+    )
+    inherited_sandbox_observer = (
+        configured_opening.sandbox_observer if configured_opening is not None else None
+    )
+    if inherited_workspace is not None:
+        if has_persistent_state:
+            raise CapabilityError("Borrowed workspace guidance requires fresh native history")
+        if (
+            provider_history is not None
+            or agent.realtime is not None
+            or (agent.provider is not None and agent.provider.model_backend is not None)
+        ):
+            raise CapabilityError(
+                "Borrowed workspace guidance requires stateless native Responses HTTP"
+            )
+    borrowed_sandbox = configured_opening.sandbox_lease if configured_opening is not None else None
+    if borrowed_sandbox is not None:
+        if has_persistent_state:
+            raise CapabilityError("Borrowed sandbox capabilities require fresh native history")
+        if (
+            borrowed_sandbox.source is not policy_agent.environment
+            or borrowed_sandbox.interrupted
+            or borrowed_sandbox._owner.done()
+            or borrowed_sandbox._retired.done()
+            or not borrowed_sandbox._ready.done()
+            or borrowed_sandbox._ready.result() is not executor
+        ):
+            raise InteractionExpiredError("Configured sandbox source is retired")
+        if has_profiles:
+            raise CapabilityError("Borrowed sandbox capabilities require a single configured Agent")
+    return (
+        configured_opening,
+        on_tool_lifecycle,
+        inherited_workspace,
+        inherited_sandbox_observer,
+        borrowed_sandbox,
+    )
+
+
+def _workspace_guidance_options(instructions: str | None, scoped: bool) -> dict[str, str]:
+    if scoped or instructions is None:
+        return {}
+    return {"user_instructions_appendix": instructions}
+
+
+def _capture_opening_workspaces(
+    profiles: tuple[_AgentProfile, ...],
+    environment: EnvironmentSource[Any] | None,
+    *,
+    has_persistent_or_provider_history: bool,
+) -> dict[int, tuple[_OwnedProfileWorkspace, list[str]]]:
+    captured_workspaces: dict[int, tuple[_OwnedProfileWorkspace, list[str]]] = {}
+    for profile in profiles:
+        selected_source = (
+            environment
+            if profile is profiles[0] or profile.declaration.environment is None
+            else profile.declaration.environment
+        )
+        workspace = getattr(selected_source, "_sdk_owned_profile_workspace", None)
+        if workspace is None:
+            continue
+        from ._sandbox_profile_workspace import _OwnedProfileWorkspace
+
+        if isinstance(workspace, _OwnedProfileWorkspace):
+            captured_workspaces.setdefault(id(workspace), (workspace, []))[1].append(profile.id)
+    for workspace, profile_ids in captured_workspaces.values():
+        if len(profile_ids) > 1:
+            workspace.capture(tuple(profile_ids))
+            if workspace.changed and (
+                has_persistent_or_provider_history
+                or any(
+                    profile.declaration.hosted_prompt is not None
+                    or profile.declaration.programmatic_tool_calling
+                    for profile in profiles
+                )
+                or any(
+                    declaration.get("factories")
+                    for profile in profiles
+                    for declaration in profile.decision_handoffs.values()
+                )
+            ):
+                raise CapabilityError(
+                    "Captured workspace changes require fresh stateless native history"
+                )
+    return captured_workspaces
+
+
+async def _capture_portable_profile_workspaces(
+    profile_sources: Mapping[str, object | None],
+    selected_environments: Mapping[str, Environment[Any] | None],
+    lease: _EnvironmentLease | None,
+    *,
+    has_native_storage: bool,
+    has_checkpoint: bool,
+    portable_opening: bool,
+) -> tuple[bool, dict[str, str | None], bool]:
+    distinct_profile_sources = any(
+        source is not None and (lease is None or source is not lease.source)
+        for source in profile_sources.values()
+    )
+    workspace_identities: dict[str, str | None] = {}
+    if distinct_profile_sources and portable_opening:
+        from .sandbox import _portable_workspace_identity
+
+        workspace_identities = {
+            profile: await _portable_workspace_identity(source, selected_environments[profile])
+            for profile, source in profile_sources.items()
+            if source is not None
+        }
+    portable_profile_workspaces = bool(workspace_identities) and all(
+        identity is not None for identity in workspace_identities.values()
+    )
+    if distinct_profile_sources and (
+        has_native_storage or (has_checkpoint and not portable_profile_workspaces)
+    ):
+        raise CapabilityError("Per-Agent Environment sources require provider state restoration")
+    return distinct_profile_sources, workspace_identities, portable_profile_workspaces
+
+
+def _capture_profile_workspace_guidance(
+    profile_roster: list[dict[str, Any]],
+    selected_environments: Mapping[str, Environment[Any] | None],
+    profile_workspace_instructions: Mapping[str, str | None],
+    executor: Environment[Any] | None,
+    distinct_profile_sources: bool,
+    has_persistent_state: bool,
+    provider_history: ProviderHistory | None,
+) -> bool:
+    scoped = any(text is not None for text in profile_workspace_instructions.values()) and (
+        distinct_profile_sources
+        or any(selected is not executor for selected in selected_environments.values())
+    )
+    if scoped:
+        if has_persistent_state:
+            raise CapabilityError("Scoped workspace guidance requires fresh native history")
+        if provider_history is not None:
+            raise CapabilityError(
+                "Scoped workspace guidance requires stateless native Responses HTTP"
+            )
+        for row in profile_roster:
+            row["workspace_instructions"] = profile_workspace_instructions[row["id"]]
+    return scoped
+
+
 def _workspace_default_compaction(
     environment: Environment[Any] | None,
     agent: Agent[Any, Any],
@@ -3052,6 +3598,7 @@ def _complete_profile_mcp(
     executor: Environment[Any] | None,
     *,
     native_responses: bool,
+    selected_environments: Mapping[str, Environment[Any] | None] | None = None,
 ) -> dict[str, Environment[Any] | None]:
     environments: dict[str, Environment[Any] | None] = {}
     graph_environments = any(profile.declaration.environment is not None for profile in profiles)
@@ -3062,6 +3609,8 @@ def _complete_profile_mcp(
             if profile is profiles[0] or declaration.environment is None
             else declaration.environment
         )
+        if selected_environments is not None:
+            selected = selected_environments[profile.id]
         if selected is not None and not isinstance(selected, Environment):
             raise TypeError("Per-Agent Environment sources require joined graph acquisition")
         environments[profile.id] = selected
@@ -3114,6 +3663,8 @@ def _install_profile_options(
     profiles: tuple[_AgentProfile, ...],
     roster: list[dict[str, Any]],
     fingerprint: str | None,
+    *,
+    distinct_file_search: bool = False,
 ) -> None:
     if not profiles:
         return
@@ -3143,9 +3694,22 @@ def _install_profile_options(
         "_hold_assistant_completion", False
     ) or bool(options["_agent_lifecycle"])
     grants = options["tool_policy"]["allowed_tools"]
+    if any(
+        entry.get("factories")
+        for row in roster
+        for entry in row.get("decision_handoffs", {}).values()
+    ):
+        grants.append({"namespace": "_agents_sdk", "name": "runtime_handoff_callbacks"})
     for row in roster:
         grants.extend(
             {"name": name, "namespace": "functions"} for name in row.get("environment_tools", ())
+        )
+        grants.extend(
+            {
+                "name": tool["type"],
+                "namespace": _hosted_tool_namespace(tool["type"], distinct_file_search),
+            }
+            for tool in row.get("hosted_tools", {}).get("tools", ())
         )
         if row.get("environment") is not None:
             options["tool_policy"].update(
@@ -3223,6 +3787,7 @@ def _restore_operation_tools(
     native_agents: _tool_types.NativeAgents | None,
     handoffs: Mapping[str, str] | None,
     project_guidance: bool = False,
+    distinct_file_search: bool = False,
 ) -> tuple[
     tuple[int, ...],
     tuple[ToolRef, ...],
@@ -3241,6 +3806,7 @@ def _restore_operation_tools(
         native_agents=native_agents,
         handoffs=handoffs,
         project_guidance=project_guidance,
+        distinct_file_search=distinct_file_search,
     )
     refs = _selected_tool_refs(
         saved.operation_tools,
@@ -3250,6 +3816,7 @@ def _restore_operation_tools(
         environment=environment,
         native_agents=native_agents,
         project_guidance=project_guidance,
+        distinct_file_search=distinct_file_search,
     )
     if set(refs) != set(saved.operation_tools):
         raise ValueError("Saved operation does not describe a canonical tool subset")
@@ -3322,6 +3889,37 @@ def _handoff_restore_targets(profile: _AgentProfile) -> Iterator[str]:
         yield from decision["targets"]
 
 
+def _runtime_enrollment_ids(saved: _state_types.SessionState | None) -> dict[str, str]:
+    if saved is None:
+        return {}
+    enrollment = saved.agent_options.get("_sdk_runtime_enrollment")
+    if enrollment is None:
+        return {}
+    if not isinstance(enrollment, dict) or not isinstance(enrollment.get("promoted"), list):
+        raise ValueError("Invalid runtime Agent enrollment")
+    result: dict[str, str] = {}
+    for item in enrollment["promoted"]:
+        if not isinstance(item, dict):
+            raise ValueError("Invalid runtime Agent enrollment")
+        name, profile_id = item.get("name"), item.get("profile_id")
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(profile_id, str)
+            or not profile_id
+            or name in result
+            or profile_id in result.values()
+        ):
+            raise ValueError("Invalid runtime Agent enrollment owner")
+        result[name] = profile_id
+    return result
+
+
+def _runtime_enrollment_json(saved: _state_types.SessionState) -> str | None:
+    enrollment = saved.agent_options.get("_sdk_runtime_enrollment")
+    return json.dumps(enrollment) if enrollment is not None else None
+
+
 def _restore_profile_sources(
     native: Any,
     profiles: Mapping[str, _ProfileRuntime],
@@ -3334,7 +3932,10 @@ def _restore_profile_sources(
         return None, None, None
     source = json.loads(
         native._agent_profiles_restore_source(
-            json.dumps(roster), roster[0]["id"], json.dumps(saved.history)
+            json.dumps(roster),
+            roster[0]["id"],
+            json.dumps(saved.history),
+            *((enrollment,) if (enrollment := _runtime_enrollment_json(saved)) else ()),
         )
     )
     if not isinstance(source, dict) or source.get("profile_id") not in profiles:
@@ -3378,6 +3979,7 @@ def _restore_operation_origin(
             roster[0]["id"],
             json.dumps(saved.history),
             continuation.turn_id,
+            *((enrollment,) if (enrollment := _runtime_enrollment_json(saved)) else ()),
         )
     )
     if (
@@ -3443,7 +4045,12 @@ def _check_namespaced_tool_collisions(
     if not namespaced:
         return
     other_refs = {ToolRef(**item) for item in mcp_names} | _fixed_tool_refs(
-        available, False, None, native_agents, project_guidance=project_guidance
+        available,
+        False,
+        None,
+        native_agents,
+        project_guidance=project_guidance,
+        distinct_file_search=_shares_file_search_name(available),
     )
     if namespaced & other_refs:
         raise ValueError("A selected MCP tool shares a ToolRef with another Session capability")
@@ -3627,12 +4234,23 @@ def _without_untrusted_memory_admission(
 def _prepare_native_checkpoint(
     saved: _state_types.SessionState, *, has_output_override: bool
 ) -> tuple[str, bool, tuple[ToolRef, ...] | None, tuple[str, ...]]:
+    from .state import _passive_pending_items
+
     restored_override = False
     restored_defaults: tuple[ToolRef, ...] | None = None
     restored_resource_servers: tuple[str, ...] = ()
     # The binding still consumes its original idle/manual format.
     # Validate the SDK envelope before giving Core the native version.
     payload = json.loads(saved.to_json())
+    if "_sdk_runtime_enrollment" in saved.agent_options:
+        payload["agent_options"].pop("_sdk_runtime_enrollment")
+    if "_sdk_pending_input" in saved.agent_options:
+        # This is only caller data. Native restore still validates the idle
+        # history and current provider/catalog before a fresh turn can claim it.
+        _passive_pending_items(saved.agent_options["_sdk_pending_input"])
+        payload["_sdk_pending_input"] = payload["agent_options"].pop("_sdk_pending_input")
+    if "_sdk_configured_produced_prefix" in saved.agent_options:
+        payload["agent_options"].pop("_sdk_configured_produced_prefix")
     if "_sdk_output_override" in saved.agent_options:
         marker = saved.agent_options["_sdk_output_override"]
         if type(marker) is not bool or marker is not True:
@@ -3655,6 +4273,7 @@ def _prepare_native_checkpoint(
     payload.pop("repair_items", None)
     payload.pop("application_tool_outputs", None)
     payload.pop("remembered_approvals", None)
+    payload.pop("remembered_mcp_approvals", None)
     if "_sdk_default_tools" in saved.agent_options:
         restored_defaults = tuple(
             ToolRef(**item) for item in saved.agent_options["_sdk_default_tools"]
@@ -3860,18 +4479,24 @@ def _validate_siwc_opening_tools(
 async def _verify_remembered_approvals(
     saved: _state_types.SessionState | None,
     verifier: Callable[[_state_types.SessionState], bool | Awaitable[bool]] | None,
-) -> Sequence[_RememberedApproval]:
+) -> tuple[Sequence[_RememberedApproval], dict[str, bool]]:
     try:
         if verifier is not None and not callable(verifier):
             raise TypeError("verify_remembered_approvals must be callable")
-        if saved is None or not saved.remembered_approvals or verifier is None:
-            return ()
+        if (
+            saved is None
+            or verifier is None
+            or not (saved.remembered_approvals or saved.remembered_mcp_approvals)
+        ):
+            return (), {}
         from .state import SessionState
 
         detached = SessionState.from_json(saved.to_json())
+        function_choices = tuple(deepcopy(detached.remembered_approvals))
+        mcp_choices = dict(detached.remembered_mcp_approvals)
         if await _call_callback(verifier, lambda: True, detached) is not True:
-            return ()
-        return tuple(saved.remembered_approvals)
+            return (), {}
+        return function_choices, mcp_choices
     finally:
         del verifier
 
@@ -4026,6 +4651,7 @@ def _supports_atomic_first_turn(
         and agent.compaction is None
         and agent.before_complete is None
         and agent.on_lifecycle is None
+        and agent.on_tool_lifecycle is None
         and agent.tool_batch_completion is None
         and not agent.output_guardrails
         and not agent.input_guardrails
@@ -4054,7 +4680,7 @@ def _capture_opening_hosted_tools(
         type(tool) is FunctionTool for profile in profiles for tool in profile.declaration.tools
     ):
         return []
-    from ._tool_catalog import _capture_hosted_tools, _ClientToolSearch
+    from ._tool_catalog import _SCOPED_HOSTED_TYPES, _capture_hosted_tools, _ClientToolSearch
     from .hosted_mcp import HostedMCP
 
     profile_mcp = (
@@ -4065,7 +4691,13 @@ def _capture_opening_hosted_tools(
     )
     hosted_tools = _capture_hosted_tools([*available, *profile_mcp])
     if codex_login is not None and (
-        hosted_tools or any(isinstance(tool, _ClientToolSearch) for tool in tools)
+        hosted_tools
+        or any(isinstance(tool, _ClientToolSearch) for tool in tools)
+        or any(
+            isinstance(tool, _SCOPED_HOSTED_TYPES)
+            for profile in profiles
+            for tool in profile.declaration.tools
+        )
     ):
         raise ValueError("Hosted tools require an API-key Responses provider, not Codex login")
     return hosted_tools
@@ -4226,6 +4858,67 @@ def _opening_private_run_policy(
         # The fresh scope borrows HTTP; parent transport capabilities stay fixed.
         private_http = True
     return use_completed_owner, websockets_enabled, private_http, private_function_run
+
+
+def _install_opening_lifecycle_options(
+    options: dict[str, Any],
+    state: _state_types.SessionState | None,
+    agent: Agent[Any, Any],
+    profiles: Sequence[_AgentProfile],
+    on_tool_lifecycle: _ToolLifecycleCallback[Any] | None,
+) -> None:
+    if state is not None and "_sdk_runtime_enrollment" in state.agent_options:
+        options["_agent_profiles"]["runtime_enrollment"] = state.agent_options[
+            "_sdk_runtime_enrollment"
+        ]
+    if (
+        on_tool_lifecycle is not None
+        or agent.on_tool_lifecycle is not None
+        or any(profile.declaration.on_tool_lifecycle is not None for profile in profiles)
+    ):
+        options["_tool_lifecycle"] = True
+
+
+def _opening_apps_registrations(
+    allowed_mcp: Sequence[object],
+) -> tuple[_tool_types.HostedVerificationMCP | None, _tool_types.ChatGPTAppsMCP | None]:
+    hosted_verification = next(
+        (server for server in allowed_mcp if type(server) is _tool_types.HostedVerificationMCP),
+        None,
+    )
+    chatgpt_apps = next(
+        (server for server in allowed_mcp if type(server) is _tool_types.ChatGPTAppsMCP),
+        None,
+    )
+    if hosted_verification is not None and chatgpt_apps is not None:
+        raise ValueError("Select one explicit Apps registration per Session")
+    return hosted_verification, chatgpt_apps
+
+
+def _opening_apps_options(
+    hosted_verification: _tool_types.HostedVerificationMCP | None,
+    chatgpt_apps: _tool_types.ChatGPTAppsMCP | None,
+    native_agents: _tool_types.NativeAgents[Any] | None,
+) -> dict[str, Any]:
+    elicitation: dict[str, Any] = {"form": {}}
+    extensions: dict[str, Any] = {
+        "openai/form": {},
+        "openai/elicitation": elicitation,
+        "openai/sdk-root-prompts": {},
+    }
+    options: dict[str, Any] = {"client_mcp_extensions": extensions}
+    if native_agents is not None and native_agents.interactions:
+        extensions["openai/sdk-child-prompts"] = {}
+    if chatgpt_apps is not None:
+        options["_sdk_chatgpt_apps"] = {
+            "access_token": chatgpt_apps.access_token,
+            "account_id": chatgpt_apps.account_id,
+        }
+        elicitation["userVerification"] = {}
+    if hosted_verification is not None:
+        options["_sdk_hosted_verification"] = hosted_verification._config()
+        elicitation["userVerification"] = {}
+    return options
 
 
 def _opening_callback_options(
@@ -4452,7 +5145,7 @@ def _capture_opening_model(
 def _configure_opening_executables(
     runtime: dict[str, Any],
     executor: Environment[Any] | None,
-    profiles: tuple[_AgentProfile, ...],
+    profile_environments: Mapping[str, Environment[Any] | None],
     *,
     programmatic_tool_calling: bool,
     has_host_mcp: bool,
@@ -4471,9 +5164,8 @@ def _configure_opening_executables(
         if (
             (executor is not None and executor._is_local)
             or any(
-                isinstance(profile.declaration.environment, Environment)
-                and profile.declaration.environment._is_local
-                for profile in profiles
+                environment is not None and environment._is_local
+                for environment in profile_environments.values()
             )
             or has_host_mcp
         ):
@@ -4487,7 +5179,7 @@ def _configure_opening_executables(
                 runtime["codex_linux_sandbox_exe"] = str(helpers / "codex-linux-sandbox")
     finally:
         # Do not retain opening credentials in a helper traceback frame.
-        del runtime, executor, profiles
+        del runtime, executor, profile_environments
 
 
 def _configure_session_features(
@@ -4533,6 +5225,7 @@ def _opening_tool_policy(
     executor: Environment[Any] | None,
     inherited_executor_tools: tuple[str, ...] | None,
     programmatic_tool_calling: bool,
+    distinct_file_search: bool = False,
 ) -> dict[str, Any]:
     return {
         "allowed_mcp_tools": [
@@ -4553,7 +5246,7 @@ def _opening_tool_policy(
                 "name": tool["definition"]["type"]
                 if tool["type"] == "provider_only"
                 else tool["type"],
-                "namespace": "functions",
+                "namespace": _hosted_tool_namespace(tool["type"], distinct_file_search),
             }
             for tool in hosted_tools
             if tool["type"] != "mcp"
@@ -4642,6 +5335,7 @@ def _validate_opening_environment(
     *,
     project_guidance: bool,
     programmatic_tool_calling: bool,
+    distinct_file_search: bool = False,
 ) -> None:
     _check_environment_python_tool_collisions(executor, allowed_tools)
     if saved is not None:
@@ -4658,6 +5352,7 @@ def _validate_opening_environment(
             environment=executor,
             native_agents=native_agents,
             project_guidance=project_guidance,
+            distinct_file_search=distinct_file_search,
         )
 
 
@@ -4763,6 +5458,7 @@ class Session(Generic[ContextT, OutputT]):
         agent: Agent[ContextT, OutputT],
         *,
         context: ContextT | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[ContextT] | None = None,
         state: _state_types.SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[_state_types.SessionState], bool | Awaitable[bool]]
         | None = None,
@@ -4802,6 +5498,8 @@ class Session(Generic[ContextT, OutputT]):
         _prompt_cache_key: str | None = None,
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
+        if on_tool_lifecycle is not None and not callable(on_tool_lifecycle):
+            raise TypeError("on_tool_lifecycle must be callable or None")
         environment = agent.environment if environment is None else environment
         authenticated_memory_history = isinstance(state, ManagedWorkspaceCheckpoint)
         provider_history = _capture_provider_history(provider_history)
@@ -4818,6 +5516,7 @@ class Session(Generic[ContextT, OutputT]):
             _prompt_cache_key = None
         hosted_restore_grants = _capture_restored_hosted_mcp(state, restored_hosted_mcp)
         lease = None
+        environment_owner: _EnvironmentLease | None = None
         pending_environment: _EnvironmentLease | None = None
         owned_provider = False
         opening = _OpeningOwner(environment)
@@ -4884,10 +5583,26 @@ class Session(Generic[ContextT, OutputT]):
                 )
             if observation_retention not in ("bounded", "all"):
                 raise ValueError('observation_retention must be "bounded" or "all"')
+            restored_profile_ids = _runtime_enrollment_ids(state)
             profiles = (
-                _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
+                _capture_agent_graph(
+                    policy_agent,
+                    root_declaration=agent,
+                    restored_ids=restored_profile_ids,
+                )
+                if agent.handoffs or restored_profile_ids
+                else ()
             )
+            if storage is not None and any(
+                declaration.get("factories")
+                for profile in profiles
+                for declaration in profile.decision_handoffs.values()
+            ):
+                raise CapabilityError("Runtime handoff factories do not support durable storage")
             agent = _capture_tool_name_winner(agent, profiles)
+            distinct_file_search = _shares_file_search_name(agent.tools) or any(
+                _shares_file_search_name(profile.declaration.tools) for profile in profiles
+            )
             hold_assistant_completion = _opening_response_policy(
                 agent, profiles, output_guardrails, provider_history
             )
@@ -5142,9 +5857,21 @@ class Session(Generic[ContextT, OutputT]):
                 approval_checkpoint, verify_remembered_approvals
             )
             verify_remembered_approvals = None
-            remembered_approvals = await verification
+            remembered_approvals, remembered_mcp_approvals = await verification
             checkpoint = _without_untrusted_memory_admission(
                 checkpoint, authenticated=authenticated_memory_history
+            )
+            captured_workspaces = _capture_opening_workspaces(
+                profiles,
+                environment,
+                has_persistent_or_provider_history=any(
+                    (
+                        storage is not None,
+                        resume is not None,
+                        state is not None,
+                        provider_history is not None,
+                    )
+                ),
             )
             if environment is not None and not isinstance(environment, Environment):
                 if not isinstance(environment, AbstractAsyncContextManager):
@@ -5152,20 +5879,42 @@ class Session(Generic[ContextT, OutputT]):
                 pending_environment = _EnvironmentLease(environment)
                 environment = await pending_environment.acquire()
                 lease = pending_environment
+                environment_owner = lease
                 pending_environment = None
             executor = environment
+            (
+                configured_opening,
+                on_tool_lifecycle,
+                inherited_workspace,
+                inherited_sandbox_observer,
+                borrowed_sandbox,
+            ) = _borrow_configured_opening(
+                policy_agent,
+                executor,
+                on_tool_lifecycle,
+                has_persistent_state=any(
+                    (state is not None, storage is not None, resume is not None)
+                ),
+                provider_history=provider_history,
+                agent=agent,
+                has_profiles=bool(profiles),
+            )
+            workspace_instructions = (
+                lease._workspace_instructions if lease is not None else inherited_workspace
+            )
             if (lease is not None or executor is not None) and not isinstance(
                 executor, Environment
             ):
                 raise TypeError("environment must be an Environment")
             if project_guidance and executor is None:
                 raise ValueError("project_guidance requires an Environment")
-            if _apply_sandbox_contributions(
+            borrowed_contributions = False
+            if not profiles and _apply_sandbox_contributions(
                 agent,
-                lease,
-                has_graph=bool(profiles or native_agents),
-                manual_restore=manual_restore,
+                lease or borrowed_sandbox,
+                allowed=native_agents is None and not manual_restore,
             ):
+                borrowed_contributions = borrowed_sandbox is not None
                 catalog, allowed_tools, mcp_names = _bind_sandbox_opening_tools(
                     agent,
                     context,
@@ -5199,6 +5948,7 @@ class Session(Generic[ContextT, OutputT]):
                 restored_handoffs,
                 project_guidance=project_guidance,
                 programmatic_tool_calling=programmatic_tool_calling,
+                distinct_file_search=distinct_file_search,
             )
             if manual_restore and saved.operation_tools is not None:
                 (
@@ -5216,6 +5966,7 @@ class Session(Generic[ContextT, OutputT]):
                     native_agents=native_agents,
                     handoffs=operation_handoffs,
                     project_guidance=project_guidance,
+                    distinct_file_search=distinct_file_search,
                 )
             # Capture bindings at opening; acquire only a promoted operation's
             # selected servers. A manual restore already owns admitted work.
@@ -5232,20 +5983,132 @@ class Session(Generic[ContextT, OutputT]):
                 startup_allowed_mcp,
                 programmatic_tool_calling=programmatic_tool_calling,
             )
-            if lease is not None:
-                root_profile = next(iter(profiles), None)
-                if any(
-                    profile is not root_profile and profile.declaration.environment is not None
-                    for profile in profiles
-                ):
-                    raise TypeError(
-                        "Distinct Agent executors require captured sandbox source routing"
+            (
+                selected_environments,
+                profile_sources,
+                environment_owner,
+                profile_workspace_instructions,
+            ) = await _acquire_profile_environments(
+                profiles, executor, lease, inherited_workspace=inherited_workspace
+            )
+            (
+                distinct_profile_sources,
+                workspace_identities,
+                portable_profile_workspaces,
+            ) = await _capture_portable_profile_workspaces(
+                profile_sources,
+                selected_environments,
+                lease,
+                has_native_storage=storage is not None or resume is not None,
+                has_checkpoint=state is not None,
+                portable_opening=not any(
+                    (
+                        storage is not None,
+                        resume is not None,
+                        manual_restore,
+                        provider_history is not None,
+                        inherited_workspace is not None,
                     )
+                ),
+            )
+            profile_leases = {
+                key: environment_owner.for_source(source)
+                for key, source in profile_sources.items()
+                if environment_owner is not None and source is not None
+            }
+            prepared_workspaces = {
+                profile_id: workspace
+                for workspace, profile_ids in captured_workspaces.values()
+                if workspace.changed
+                for profile_id in profile_ids
+            }
+            profiled_contributions = False
+            for index, profile in enumerate(profiles):
+                profile_lease = profile_leases.get(profile.id)
+                declared_count = len(profile.declaration.tools)
+                changed = _apply_sandbox_contributions(
+                    profile.declaration,
+                    profile_lease,
+                    profile=(profile, selected_environments[profile.id]),
+                    workspace_owner=prepared_workspaces.get(profile.id),
+                    allowed=(
+                        state is None
+                        and storage is None
+                        and resume is None
+                        and provider_history is None
+                        and native_agents is None
+                        and profile.declaration.realtime is None
+                        and profile.declaration.hosted_prompt is None
+                        and not profile.declaration.programmatic_tool_calling
+                    ),
+                )
+                profiled_contributions |= changed
+                if changed and index == 0:
+                    # Mirror root defaults without re-entering application contributions.
+                    declaration = profile.declaration
+                    object.__setattr__(agent, "model_settings", declaration.model_settings)
+                    object.__setattr__(agent, "transform_context", declaration.transform_context)
+                    object.__setattr__(
+                        agent, "tools", (*agent.tools, *declaration.tools[declared_count:])
+                    )
+                    catalog, allowed_tools, mcp_names = _bind_sandbox_opening_tools(
+                        agent, context, None, project_guidance=project_guidance
+                    )
+                    available = restored_available = agent.tools
+                    bound_tools, restored_catalog = catalog.tools, catalog
+                    native_specs, manual_slots = catalog.native_specs(), catalog.manual_slots()
+                    native._validate_python_tool_declarations(native_specs)
+            if profiled_contributions:
+                profile_runtimes, profile_roster = _capture_profile_runtimes(
+                    profiles,
+                    catalog,
+                    instructions,
+                    context,
+                    output_guardrails,
+                    (*input_guardrails, *agent.input_guardrails),
+                    run_error_formatter=tool_error_formatter is not None,
+                )
+                model, settings = _prepare_opening_model_settings(
+                    agent, model, instructions, codex_login, None, None, profile_roster
+                )
             profile_environments = _complete_profile_mcp(
-                profiles, profile_roster, executor, native_responses=codex_login is None
+                profiles,
+                profile_roster,
+                executor,
+                native_responses=codex_login is None,
+                selected_environments=selected_environments,
+            )
+            for row in profile_roster:
+                if row["id"] in prepared_workspaces:
+                    row["workspace_preparation"] = True
+                if portable_profile_workspaces and row["id"] in workspace_identities:
+                    row["workspace_identity"] = workspace_identities[row["id"]]
+            scoped_workspace_guidance = _capture_profile_workspace_guidance(
+                profile_roster,
+                selected_environments,
+                profile_workspace_instructions,
+                executor,
+                distinct_profile_sources or bool(prepared_workspaces),
+                storage is not None
+                or resume is not None
+                or (state is not None and not portable_profile_workspaces),
+                provider_history,
             )
             profile_runtimes = {
-                key: replace(runtime, environment=profile_environments[key])
+                key: replace(
+                    runtime,
+                    environment=profile_environments[key],
+                    environment_source=profile_sources[key],
+                    workspace_owner=prepared_workspaces.get(key),
+                    workspace_instructions=profile_workspace_instructions[key],
+                    sandbox_observer=(
+                        profile_lease._sandbox_events
+                        if (profile_lease := profile_leases.get(key)) is not None
+                        else inherited_sandbox_observer
+                        if selected_environments[key] is executor
+                        else None
+                    ),
+                )
                 for key, runtime in profile_runtimes.items()
             }
             if executor is not None or profile_roster:
@@ -5299,19 +6162,7 @@ class Session(Generic[ContextT, OutputT]):
             inherited_executor_tools: tuple[str, ...] | None = None
             if executor is not None:
                 native_environment = cast(dict[str, Any], executor._to_native())
-                invocation = _invocation.get()
-                configured_opening = (
-                    invocation.configured_opening if invocation is not None else None
-                )
-                if (
-                    invocation is not None
-                    and configured_opening is not None
-                    and configured_opening.agent is policy_agent
-                    and configured_opening.environment is executor
-                ):
-                    invocation.configured_opening = None
-                    if not invocation.active or not configured_opening.admitted():
-                        raise InteractionExpiredError("Configured parent invocation is expired")
+                if configured_opening is not None:
                     inherited_writable_roots = configured_opening.writable_roots
                     inherited_executor_tools = configured_opening.executor_tools
                     if inherited_writable_roots is not None:
@@ -5323,7 +6174,7 @@ class Session(Generic[ContextT, OutputT]):
             _configure_opening_executables(
                 runtime,
                 executor,
-                profiles,
+                profile_environments,
                 programmatic_tool_calling=programmatic_tool_calling,
                 has_host_mcp=has_host_mcp,
             )
@@ -5426,24 +6277,7 @@ class Session(Generic[ContextT, OutputT]):
                     selected=selected,
                     captured_api_key=_captured_api_key,
                 )
-                hosted_verification = next(
-                    (
-                        server
-                        for server in allowed_mcp
-                        if type(server) is _tool_types.HostedVerificationMCP
-                    ),
-                    None,
-                )
-                chatgpt_apps = next(
-                    (
-                        server
-                        for server in allowed_mcp
-                        if type(server) is _tool_types.ChatGPTAppsMCP
-                    ),
-                    None,
-                )
-                if hosted_verification is not None and chatgpt_apps is not None:
-                    raise ValueError("Select one explicit Apps registration per Session")
+                hosted_verification, chatgpt_apps = _opening_apps_registrations(allowed_mcp)
                 options = {
                     "_hosted_tools": hosted_tools,
                     **(
@@ -5462,12 +6296,17 @@ class Session(Generic[ContextT, OutputT]):
                         else {}
                     ),
                     **guidance_options,
+                    **_workspace_guidance_options(
+                        workspace_instructions,
+                        scoped_workspace_guidance or inherited_workspace is not None,
+                    ),
                     **(
-                        {"user_instructions_appendix": lease._workspace_instructions}
-                        if lease is not None and lease._workspace_instructions is not None
+                        {"_sdk_workspace_guidance": inherited_workspace}
+                        if inherited_workspace is not None and not scoped_workspace_guidance
                         else {}
                     ),
                     "_buffered_responses": provider.response_mode == "buffered",
+                    "_format_tool_not_found": tool_error_formatter is not None,
                     **_opening_callback_options(
                         agent,
                         input_guardrails,
@@ -5476,39 +6315,8 @@ class Session(Generic[ContextT, OutputT]):
                         parent_trace=parent_trace,
                     ),
                     "config": config,
-                    **(
-                        {
-                            "_sdk_chatgpt_apps": {
-                                "access_token": chatgpt_apps.access_token,
-                                "account_id": chatgpt_apps.account_id,
-                            }
-                        }
-                        if chatgpt_apps is not None
-                        else {}
-                    ),
-                    **(
-                        {"_sdk_hosted_verification": hosted_verification._config()}
-                        if hosted_verification is not None
-                        else {}
-                    ),
+                    **_opening_apps_options(hosted_verification, chatgpt_apps, native_agents),
                     "runtime": runtime,
-                    "client_mcp_extensions": {
-                        "openai/form": {},
-                        "openai/elicitation": {
-                            "form": {},
-                            **(
-                                {"userVerification": {}}
-                                if hosted_verification is not None or chatgpt_apps is not None
-                                else {}
-                            ),
-                        },
-                        "openai/sdk-root-prompts": {},
-                        **(
-                            {"openai/sdk-child-prompts": {}}
-                            if native_agents is not None and native_agents.interactions
-                            else {}
-                        ),
-                    },
                     **({"_sdk_resume_thread_id": resume} if resume is not None else {}),
                     **(
                         {"_sdk_prompt_cache_key": _prompt_cache_key}
@@ -5540,9 +6348,19 @@ class Session(Generic[ContextT, OutputT]):
                         executor=executor,
                         inherited_executor_tools=inherited_executor_tools,
                         programmatic_tool_calling=programmatic_tool_calling,
+                        distinct_file_search=distinct_file_search,
                     ),
                 }
-                _install_profile_options(options, profiles, profile_roster, profile_fingerprint)
+                _install_profile_options(
+                    options,
+                    profiles,
+                    profile_roster,
+                    profile_fingerprint,
+                    distinct_file_search=distinct_file_search,
+                )
+                _install_opening_lifecycle_options(
+                    options, state, agent, profiles, on_tool_lifecycle
+                )
                 # The private merged opener owns paths for eligible runtime scopes.
                 if not _atomic_first_turn:
                     # Every conversation uses Core for model execution and history.
@@ -5561,104 +6379,25 @@ class Session(Generic[ContextT, OutputT]):
                     if native_agents is not None:
                         _configure_child_roles(config, home, native_agents)
 
-                async def initialize_engine() -> Any:
-                    create_engine = (
-                        native.create_checkpoint_engine
-                        if checkpoint is not None
-                        else native.create_engine
-                    )
-                    return await opening.acquire(
-                        create_engine(
-                            json.dumps(config),
-                            json.dumps(runtime),
-                            # Preserve the captured environment value in API-key mode.
-                            api_key=None if codex_login is not None else (opening.api_key or ""),
-                            provider_lease=provider_lease,
-                            # One opening snapshot owns the runtime and its first thread.
-                            **(
-                                {
-                                    "_capture_initial_config": True,
-                                    "_share_model_http": not owned_provider and auth is None,
-                                }
-                                if checkpoint is None
-                                else {}
-                            ),
-                            **(
-                                {"canonical_store": storage.backend}
-                                if isinstance(storage, CustomStorage)
-                                else {}
-                            ),
-                            **(
-                                {
-                                    "initial_checkpoint": checkpoint,
-                                    "initial_specs_json": native_specs,
-                                    "initial_options_json": json.dumps(options),
-                                    **(
-                                        {"_verify_current_default_model": True}
-                                        if verify_current_default
-                                        else {}
-                                    ),
-                                }
-                                if checkpoint is not None
-                                else {}
-                            ),
-                        )
-                    )
-
-                async def initialize_atomic() -> (
-                    tuple[Any, Any, Any] | Completed[Any] | _RunHandoff
-                ):
-                    if use_completed_owner:
-                        submission_id = uuid4().hex
-                        owner = native._prepare_run_conversation(
-                            json.dumps(config),
-                            json.dumps(runtime),
-                            json.dumps(options),
-                            native_specs,
-                            json.dumps(settings),
-                            json.dumps(
-                                {
-                                    "mode": "start_if_idle",
-                                    "input": _native_input(cast(str, _completed_input)),
-                                    "observation_submission_id": submission_id,
-                                }
-                            ),
-                            api_key=opening.api_key or "",
-                            provider_lease=provider_lease,
-                            _share_model_http=True,
-                            _private_http=private_http,
-                            **(
-                                {"_process_private_http": True}
-                                if private_http and owned_provider
-                                else {}
-                            ),
-                        )
-                        return await opening.run(owner, agent, output, submission_id)
-                    return cast(
-                        tuple[Any, Any, Any],
-                        await opening.acquire(
-                            native._open_conversation(
-                                json.dumps(config),
-                                json.dumps(runtime),
-                                json.dumps(options),
-                                native_specs,
-                                json.dumps(settings),
-                                api_key=opening.api_key or "",
-                                provider_lease=provider_lease,
-                                _share_model_http=not private_function_run,
-                                _private_http=private_http,
-                                **(
-                                    {"_process_private_runtime": True}
-                                    if private_function_run
-                                    else {}
-                                ),
-                            )
-                        ),
-                    )
-
                 handoff: _RunHandoff | None = None
                 if _atomic_first_turn:
-                    acquired = await initialize_atomic()
+                    acquired = await _initialize_atomic_opening(
+                        opening,
+                        native,
+                        config,
+                        runtime,
+                        options,
+                        native_specs,
+                        settings,
+                        provider_lease,
+                        agent,
+                        output,
+                        use_completed_owner=use_completed_owner,
+                        completed_input=_completed_input,
+                        private_http=private_http,
+                        owned_provider=owned_provider,
+                        private_function_run=private_function_run,
+                    )
                     if isinstance(acquired, Completed):
                         if owned_provider:
                             await provider.aclose()
@@ -5668,27 +6407,22 @@ class Session(Generic[ContextT, OutputT]):
                         acquired = handoff.scope
                     engine, thread, home = acquired
                 else:
-                    engine = await initialize_engine()
-
-                if isinstance(storage, CustomStorage) and resume is not None:
-                    # Inspect before Core starts, while the canonical backend's
-                    # original writer still fences every other opener.
-                    history, shell_calls = json.loads(
-                        await opening.acquire(engine._inspect_custom_recovery(resume))
+                    engine = await _initialize_session_engine(
+                        opening,
+                        native,
+                        config,
+                        runtime,
+                        options,
+                        native_specs,
+                        provider_lease,
+                        storage,
+                        checkpoint,
+                        using_codex_login=codex_login is not None,
+                        share_model_http=not any((owned_provider, auth is not None)),
+                        verify_current_default=verify_current_default,
                     )
-                    uncertain = [
-                        UncertainCall(
-                            thread_id=resume,
-                            turn_id=turn_id,
-                            call_id=call_id,
-                            name="shell",
-                            arguments=arguments,
-                        )
-                        for turn_id, call_id, arguments in shell_calls
-                    ]
-                    turns, items = project_history(history, resume, uncertain_calls=uncertain)
-                    if uncertain:
-                        raise LocalRecoveryRequired(tuple(uncertain), tuple(turns), tuple(items))
+
+                await _check_custom_opening_recovery(opening, engine, storage, resume)
 
                 if selected is None and provider.api_key is not None:
                     # Match Rust's whitespace after native UTF-8 validation.
@@ -5697,21 +6431,18 @@ class Session(Generic[ContextT, OutputT]):
                     )
 
                 if not _atomic_first_turn:
-                    thread = await opening.acquire(
-                        engine._start_initial_replaceable_thread(
-                            json.dumps(options),
-                            native_specs,
-                            initial_messages_json=initial_messages_json,
-                            **(
-                                {"_process_private_http": True}
-                                if private_http and owned_provider
-                                else {}
-                            ),
-                        )
-                        if checkpoint is None
-                        else engine.restore_checkpoint(
-                            checkpoint, json.dumps(options), native_specs
-                        )
+                    thread = await _start_opening_thread(
+                        opening,
+                        engine,
+                        options,
+                        native_specs,
+                        checkpoint,
+                        initial_messages_json=initial_messages_json,
+                        allowed_mcp=allowed_mcp,
+                        tracing_context=_tracing_context,
+                        parent_trace=parent_trace,
+                        private_http=private_http,
+                        owned_provider=owned_provider,
                     )
                 assert thread is not None
                 session = cls(
@@ -5734,6 +6465,7 @@ class Session(Generic[ContextT, OutputT]):
                     include_raw_provider_events=include_raw_provider_events,
                 )
                 session._provider_history = provider_history
+                session._on_tool_lifecycle = on_tool_lifecycle
                 session._input_guardrails = input_guardrails
                 session._output_guardrails = output_guardrails
                 session._managed_workspace = managed_source
@@ -5752,9 +6484,17 @@ class Session(Generic[ContextT, OutputT]):
                 session._bound_tools = bound_tools
                 session._agent = policy_agent
                 session._opening_agent = agent
+                session._distinct_file_search = distinct_file_search
                 session._decisions_provider = agent.decisions
                 session._profiles = profile_runtimes
                 session._agent_profile_fingerprint = profile_fingerprint
+                session._runtime_approval_graph = (
+                    thread._runtime_approval_graph()
+                    if state is not None and "_sdk_runtime_enrollment" in state.agent_options
+                    else None
+                )
+                if remembered_mcp_approvals:
+                    thread._restore_mcp_approval_choices(json.dumps(remembered_mcp_approvals))
                 session._configure_model_completion(thread)
                 session._bindings = agent.tools
                 session._catalog_bindings[(None, catalog.generation)] = agent.tools
@@ -5813,7 +6553,12 @@ class Session(Generic[ContextT, OutputT]):
                         json.dumps(saved.history)
                     )
                     session._mcp_tools = mcp_tools
-                session._bind_native_producers(lease, thread, provider)
+                session._bind_native_producers(
+                    lease,
+                    thread,
+                    provider,
+                    inherited_observer=inherited_sandbox_observer,
+                )
                 session._provider_lease = provider_lease
                 session._parent_trace = parent_trace
                 options.pop("_sdk_request_transport", None)
@@ -5821,111 +6566,36 @@ class Session(Generic[ContextT, OutputT]):
                 if owned_provider:
                     session._owned_provider = provider
                 session._websockets_enabled = websockets_enabled
+                if configured_opening is not None and configured_opening.capture_produced_items:
+                    session._start_produced_items()
+                    session._capture_produced_checkpoint_prefix = True
+                    session._produced_prefix = configured_opening.checkpoint_prefix
                 if manual_restore:
                     assert continuation is not None and checkpoint is not None
-                    session._start_raw_usage_on_restore(policy_agent, state)
-                    capture = _produced_items_restore.get()
-                    if (
-                        capture is not None
-                        and capture[0] is policy_agent
-                        and (capture[1] is state or capture[1] == state)
-                        and capture[2] is asyncio.current_task()
-                    ):
-                        session._start_produced_items()
-                    session._manual_source_digest = hashlib.sha256(
-                        saved.to_json().encode()
-                    ).hexdigest()
-                    if continuation.pending_input:
-                        session._staged_restore_checkpoint = saved
-                    active = _Submission(
-                        restored_output,
-                        model_override=continuation.model_override,
-                        model_settings_override=continuation.model_settings_override,
-                        retry_policy_override=restored_retry_policy,
-                        raise_on_unknown_tool=session._native._manual_raises_unknown_tool(),
-                        guardrail_results=session._restore_guardrail_records(saved),
-                        run_usage=_UsageCollector(session._configured_checkpoint_usage(saved)),
-                        original_input=saved.original_input,
-                        restored_pending=True,
-                        budget=restored_budget,
-                        observation_after=session._observations.sequence,
+                    await session._restore_manual_opening(
+                        saved,
+                        continuation,
+                        policy_agent=policy_agent,
+                        state=state,
+                        restored_output=restored_output,
+                        output_override=restored_override or restored_output_type is not None,
+                        restored_retry_policy=restored_retry_policy,
+                        restored_budget=restored_budget,
                         parent_trace=parent_trace,
                         operation_slots=operation_slots,
-                        operation_mcp=mcp_tools,
-                        operation_refs=restored_operation_refs,
-                        operation_declarations=restored_operation_declarations,
-                        operation_agent=operation_declaration
-                        if saved.operation_tools and operation_source is not None
-                        else None,
-                        operation_declaration_source=operation_source,
-                    )
-                    handle = _root_turn(
-                        session,
-                        continuation.turn_id,
-                        uuid4().hex,
-                        active.completion,
-                        active.observation_after,
-                    )
-                    session._last_turn = handle
-                    session._restored_turn = handle
-                    active.output_override = restored_override or restored_output_type is not None
-                    object.__setattr__(handle, "_guardrail_results", active.guardrail_results)
-                    object.__setattr__(handle, "_run_usage", active.run_usage)
-                    object.__setattr__(handle, "_original_input", active.original_input)
-                    session._usage_roots[continuation.turn_id] = active.run_usage
-                    active.handle = handle
-                    session._register_request_observation(active, handle)
-                    active.accepted.set_result(handle)
-                    session._active = active
-                    thread._select_steps(
-                        bool(session._profiles)
-                        or bool(continuation.pending_input)
-                        or active.budget is not None
-                        or bool(session._mcp_tools)
-                        or restored_operation_refs is not None
-                        or any(
-                            isinstance(tool, FunctionTool) and tool.is_enabled is not True
-                            for tool in session._bindings
+                        mcp_tools=mcp_tools,
+                        restored_operation_refs=restored_operation_refs,
+                        restored_operation_declarations=restored_operation_declarations,
+                        operation_declaration=(
+                            operation_declaration
+                            if saved.operation_tools and operation_source is not None
+                            else None
                         ),
-                        _native_tool_refs(restored_operation_refs)
-                        if restored_operation_refs is not None
-                        else None,
-                        native_agents is not None
-                        and (
-                            native_agents.before_step is not None
-                            or session._has_child_input_guardrails()
-                            or session._has_mcp_discovery_filters()
-                            or any(
-                                isinstance(tool, FunctionTool) and tool.is_enabled is not True
-                                for tool in session._bindings
-                            )
-                        ),
+                        operation_source=operation_source,
+                        native_agents=native_agents,
+                        tracing_context=_tracing_context,
+                        tracing_context_policy_only=_tracing_context_policy_only,
                     )
-                    # The native reader can receive restored requests during preparation.
-                    active.tracing = _capture(
-                        fallback=_tracing_context,
-                        fallback_policy_only=_tracing_context_policy_only,
-                        continuation_trace_id=(
-                            saved.continuation_trace_id if parent_trace is None else None
-                        ),
-                    )
-                    if continuation.pending_mcp:
-                        # Restore validation needs the current before/approval rules.
-                        session._start_interception()
-                    await thread._prepare_manual_restore()
-                    session._validate_pending_manual(active)
-                    session._observations.append(
-                        TurnStarted(
-                            session_id=session.id,
-                            turn_id=continuation.turn_id,
-                            submission_id=handle.submission_id,
-                        )
-                    )
-                    session._start_output_acceptance(handle)
-                    active.task = _create_task(session._execute(active, [], admitted=True))
-                    if continuation.staged_retry or continuation.pending_mcp:
-                        driver = _create_task(session._continue_restored_turn(active))
-                        active.add_manual_recovery(driver)
                 if handoff is not None:
                     await session._finish_run_opening(
                         opening,
@@ -5936,13 +6606,37 @@ class Session(Generic[ContextT, OutputT]):
                 session._restore_remembered_approvals(remembered_approvals)
                 session._start_readers()
                 opening.disown(session)
-                session._attach_environment_lease(lease, state=state, resume=resume)
+                session._attach_environment_lease(
+                    lease, owner=environment_owner, state=state, resume=resume
+                )
+                session._workspace_instructions = workspace_instructions
+                session._borrowed_sandbox_lease = borrowed_sandbox
+                if (
+                    portable_profile_workspaces
+                    and not prepared_workspaces
+                    and not profiled_contributions
+                    and not borrowed_contributions
+                ):
+                    session._portable_profile_workspaces = {
+                        profile: identity
+                        for profile, identity in workspace_identities.items()
+                        if identity is not None
+                    }
+                session._has_distinct_profile_sources = (
+                    distinct_profile_sources
+                    or profiled_contributions
+                    or borrowed_contributions
+                    or scoped_workspace_guidance
+                    or inherited_workspace is not None
+                )
                 return session
             except BaseException as error:
                 _normalize_opening_error(error, opening.api_key)
                 opening.api_key = None
                 if opening.lease is not None:
-                    await _close_after_error(error, lambda: opening.fail(session, transport, lease))
+                    await _close_after_error(
+                        error, lambda: opening.fail(session, transport, environment_owner)
+                    )
                 raise
 
         except BaseException as error:
@@ -5960,49 +6654,15 @@ class Session(Generic[ContextT, OutputT]):
             runtime.pop("environment", None)
             environment = executor = None
             pending_environment = None
-            session_cleanup = getattr(error, "cleanup", None)
-            session_owns_provider = (
-                owned_provider
-                and isinstance(session_cleanup, Session)
-                and not session_cleanup._closed
-                and session_cleanup._owned_provider is provider
+            await _fail_session_opening(
+                error,
+                opening,
+                session,
+                provider,
+                environment_owner,
+                owned_provider=owned_provider,
             )
-            if lease is not None:
-                await _close_after_error(error, lambda: opening.fail_environment(lease))
-                if opening.lease is not None and not lease._retired.done():
-                    # Only the native join itself can keep an admitted manager
-                    # pending. Expose its existing owner to supported aclose.
-                    assert provider is not None
-                    provider._defer_opening(opening, lease)
-            if owned_provider and not session_owns_provider:
-                assert provider is not None
-                await _close_after_error(error, provider.aclose)
-            try:
-                if lease is not None:
-                    try:
-                        lease.raise_if_interrupted(error)
-                    except BaseException as interrupted:
-                        # The manager's own error is the one the caller receives.
-                        error = interrupted
-                        raise
-                raise
-            finally:
-                # A retired unpublished Session no longer needs the caller's
-                # Environment. Pending native cleanup must retain its policy owner.
-                if opening.lease is None and session is not None:
-                    session._executor = None
-                # Both the original error and a manager-selected replacement
-                # must retain the same existing owner for unfinished cleanup.
-                if (
-                    provider is not None
-                    and not vars(provider).get("_closed", False)
-                    and (owned_provider or opening.lease is not None)
-                ):
-                    cast(Any, error).cleanup = (
-                        session_cleanup if session_owns_provider else provider
-                    )
-                    if owned_provider:
-                        cast(Any, error).provider = provider
+            raise
 
     async def _reconcile_local_history(self, reconciliation: Sequence[ReconciledCall]) -> None:
         # The writer is held. Read the saved graph, including
@@ -6262,7 +6922,11 @@ class Session(Generic[ContextT, OutputT]):
         self._profile_provider_keys: dict[int, str] = {}
         self._storage: _state_types.LocalStorage | CustomStorage | None = None
         self._history_ttl_seconds: int | None = None
+        self._environment_owner: _EnvironmentLease | None = None
         self._environment_lease: _EnvironmentLease | None = None
+        self._has_distinct_profile_sources = False
+        self._portable_profile_workspaces: dict[str, str] = {}
+        self._workspace_instructions: str | None = None
         self._sandbox_events: _OperationObserver | None = None
         self._memory_flush: asyncio.Task[None] | None = None
         self._memory_restored = False
@@ -6275,11 +6939,16 @@ class Session(Generic[ContextT, OutputT]):
         self._repair_transport_settings: tuple[tuple[str, int] | None, dict[str, Any]] | None = None
         self._raw_usage_started = False
         self._produced_items_started = False
+        self._capture_produced_checkpoint_prefix = False
+        self._produced_prefix = _ProducedPrefix()
+        self._authenticated_checkpoint = False
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
+        self._distinct_file_search = False
         self._profiles: dict[str, _ProfileRuntime] = {}
         self._voice_profiles: dict[str, _ProfileRuntime] = {}
         self._agent_profile_fingerprint: str | None = None
+        self._runtime_approval_graph: str | None = None
         self._profile_generation_high_water = catalog.generation
         self._catalog_publication_lock = asyncio.Lock()
         self._profile_current: tuple[str, int] | None = None
@@ -6356,6 +7025,7 @@ class Session(Generic[ContextT, OutputT]):
         self._input_guardrails: tuple[InputGuardrail[Any], ...] = ()
         self._output_guardrails: tuple[OutputGuardrail[Any], ...] = ()
         self._context = context
+        self._on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None
         self._default_output = output
         self._instructions = instructions
         self._id: str = thread.id
@@ -6378,6 +7048,7 @@ class Session(Generic[ContextT, OutputT]):
         self._child_callbacks: dict[tuple[str, str, str], _ChildCallbacks] = {}
         self._configured_children: list[_ConfiguredChild] = []
         self._configured_environment_source: tuple[Environment[Any], object] | None = None
+        self._borrowed_sandbox_lease: _EnvironmentLease | None = None
         self._child_admissions: set[asyncio.Task[Turn[str]]] = set()
         self._graph_interrupts: set[asyncio.Task[None]] = set()
         self._root_interrupts: set[asyncio.Task[None]] = set()
@@ -6396,6 +7067,7 @@ class Session(Generic[ContextT, OutputT]):
         self._resources_retired = False
         self._native_scope_failure: BaseException | None = None
         self._broken = False
+        self._workspace_admissions: set[asyncio.Task[None]] = set()
         self._history_context_retired = False
         self._startup_failure: asyncio.Future[BaseException] | None = None
         self._fail_unhandled_questions = False
@@ -6438,14 +7110,44 @@ class Session(Generic[ContextT, OutputT]):
             self._start_readers()
 
     def _bind_native_producers(
-        self, lease: _EnvironmentLease | None, thread: Any, provider: NativeProvider
+        self,
+        lease: _EnvironmentLease | None,
+        thread: Any,
+        provider: NativeProvider,
+        *,
+        inherited_observer: _OperationObserver | None = None,
     ) -> None:
-        if lease is not None and lease._sandbox_events is not None:
-            self._sandbox_events = lease._sandbox_events
+        self._sandbox_events = lease._sandbox_events if lease is not None else inherited_observer
+        if self._observes_sandbox_operations():
             thread._enable_sandbox_operations()
         self._model_backend = provider.model_backend
         if provider.model_backend is not None:
             self._native._enable_model_producer(True)
+
+    def _observes_sandbox_operations(self) -> bool:
+        return self._sandbox_events is not None or any(
+            runtime.sandbox_observer is not None for runtime in self._profiles.values()
+        )
+
+    def _sandbox_observer_for_profile(
+        self, receipt: Mapping[str, Any] | None
+    ) -> _OperationObserver | None:
+        if receipt is None:
+            return self._sandbox_events if not self._profiles else None
+        profile_id, epoch = receipt.get("profile_id"), receipt.get("epoch")
+        if not isinstance(profile_id, str) or type(epoch) is not int or epoch < 0:
+            return None
+        runtime = self._profiles.get(profile_id) or self._voice_profiles.get(profile_id)
+        return runtime.sandbox_observer if runtime is not None else None
+
+    def _sandbox_observer_for_message(
+        self, message: Mapping[str, Any]
+    ) -> _OperationObserver | None:
+        return self._sandbox_observer_for_profile(
+            {"profile_id": message.get("profile_id"), "epoch": message.get("profile_epoch")}
+            if "profile_id" in message or "profile_epoch" in message
+            else None
+        )
 
     def _start_readers(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
         self._start_interception(pending)
@@ -6545,6 +7247,127 @@ class Session(Generic[ContextT, OutputT]):
         finally:
             del config
 
+    async def _restore_manual_opening(
+        self,
+        saved: _state_types.SessionState,
+        continuation: _ManualContinuation,
+        *,
+        policy_agent: Agent[ContextT, OutputT],
+        state: _state_types.SessionState | None,
+        restored_output: _PreparedOutput,
+        output_override: bool,
+        restored_retry_policy: RetryPolicy | None,
+        restored_budget: _RunBudget | None,
+        parent_trace: TraceContext | None,
+        operation_slots: tuple[int, ...] | None,
+        mcp_tools: tuple[_tool_types._MCP[Any], ...],
+        restored_operation_refs: tuple[ToolRef, ...] | None,
+        restored_operation_declarations: tuple[Any, ...] | None,
+        operation_declaration: Agent[Any, Any] | None,
+        operation_source: dict[str, Any] | None,
+        native_agents: _tool_types.NativeAgents[Any] | None,
+        tracing_context: str | None,
+        tracing_context_policy_only: bool,
+    ) -> None:
+        self._start_raw_usage_on_restore(policy_agent, state)
+        capture = _produced_items_restore.get()
+        if (
+            capture is not None
+            and capture[0] is policy_agent
+            and (capture[1] is state or capture[1] == state)
+            and capture[2] is asyncio.current_task()
+        ):
+            self._start_produced_items()
+        self._authenticated_checkpoint = saved._authenticated_state_digest is not None
+        self._manual_source_digest = hashlib.sha256(saved.to_json().encode()).hexdigest()
+        if continuation.pending_input:
+            self._staged_restore_checkpoint = saved
+        active = _Submission(
+            restored_output,
+            model_override=continuation.model_override,
+            model_settings_override=continuation.model_settings_override,
+            retry_policy_override=restored_retry_policy,
+            raise_on_unknown_tool=self._native._manual_raises_unknown_tool(),
+            guardrail_results=self._restore_guardrail_records(saved),
+            run_usage=_UsageCollector(self._configured_checkpoint_usage(saved)),
+            original_input=saved.original_input,
+            restored_pending=True,
+            budget=restored_budget,
+            observation_after=self._observations.sequence,
+            parent_trace=parent_trace,
+            operation_slots=operation_slots,
+            operation_mcp=mcp_tools,
+            operation_refs=restored_operation_refs,
+            operation_declarations=restored_operation_declarations,
+            operation_agent=operation_declaration,
+            operation_declaration_source=operation_source,
+        )
+        handle = _root_turn(
+            self,
+            continuation.turn_id,
+            uuid4().hex,
+            active.completion,
+            active.observation_after,
+        )
+        self._last_turn = handle
+        self._restored_turn = handle
+        active.output_override = output_override
+        object.__setattr__(handle, "_guardrail_results", active.guardrail_results)
+        object.__setattr__(handle, "_run_usage", active.run_usage)
+        object.__setattr__(handle, "_original_input", active.original_input)
+        self._usage_roots[continuation.turn_id] = active.run_usage
+        active.handle = handle
+        self._register_request_observation(active, handle)
+        active.accepted.set_result(handle)
+        self._active = active
+        self._native._select_steps(
+            bool(self._profiles)
+            or bool(continuation.pending_input)
+            or active.budget is not None
+            or bool(self._mcp_tools)
+            or restored_operation_refs is not None
+            or any(
+                isinstance(tool, FunctionTool) and tool.is_enabled is not True
+                for tool in self._bindings
+            ),
+            _native_tool_refs(restored_operation_refs)
+            if restored_operation_refs is not None
+            else None,
+            native_agents is not None
+            and (
+                native_agents.before_step is not None
+                or self._has_child_input_guardrails()
+                or self._has_mcp_discovery_filters()
+                or any(
+                    isinstance(tool, FunctionTool) and tool.is_enabled is not True
+                    for tool in self._bindings
+                )
+            ),
+        )
+        # The native reader can receive restored requests during preparation.
+        active.tracing = _capture(
+            fallback=tracing_context,
+            fallback_policy_only=tracing_context_policy_only,
+            continuation_trace_id=(saved.continuation_trace_id if parent_trace is None else None),
+        )
+        if continuation.pending_mcp:
+            # Restore validation needs the current before/approval rules.
+            self._start_interception()
+        await self._native._prepare_manual_restore()
+        self._validate_pending_manual(active)
+        self._observations.append(
+            TurnStarted(
+                session_id=self.id,
+                turn_id=continuation.turn_id,
+                submission_id=handle.submission_id,
+            )
+        )
+        self._start_output_acceptance(handle)
+        active.task = _create_task(self._execute(active, [], admitted=True))
+        if continuation.staged_retry or continuation.pending_mcp:
+            driver = _create_task(self._continue_restored_turn(active))
+            active.add_manual_recovery(driver)
+
     async def _restore_opening_checkpoint(
         self,
         saved: _state_types.SessionState,
@@ -6589,6 +7412,7 @@ class Session(Generic[ContextT, OutputT]):
                 self._executor,
                 self._native_agents,
                 project_guidance=self._project_guidance,
+                distinct_file_search=self._distinct_file_search,
             ),
             key=lambda ref: (ref.namespace or "", ref.name),
         )
@@ -6760,6 +7584,7 @@ class Session(Generic[ContextT, OutputT]):
             native_agents=self._native_agents,
             handoffs=self._effective_handoffs(),
             project_guidance=self._project_guidance,
+            distinct_file_search=self._distinct_file_search,
         )
         if mcp == self._mcp_tools:
             return
@@ -7194,6 +8019,7 @@ class Session(Generic[ContextT, OutputT]):
             environment=self._executor,
             native_agents=self._native_agents,
             handoffs=self._effective_handoffs(),
+            distinct_file_search=self._distinct_file_search,
         )
         # Resolve only after the original selector passes exact source checks.
         # Submission still rejects a binding superseded by a racing mutation.
@@ -7220,6 +8046,7 @@ class Session(Generic[ContextT, OutputT]):
             self._executor,
             self._native_agents,
             project_guidance=self._project_guidance,
+            distinct_file_search=self._distinct_file_search,
         )
         if state.operation_agent is source:
             allowed.update(ToolRef(name) for name in handoffs or ())
@@ -7462,6 +8289,8 @@ class Session(Generic[ContextT, OutputT]):
                 await request._enqueue_form(reply._value)
         elif (isinstance(request, _tool_types.VerificationRequest)) and reply._value is None:
             await request.decline()
+        elif isinstance(request, _tool_types.ApprovalRequest):
+            await request.respond(reply._value, always=reply._native_always)
         else:
             await request.respond(reply._value)
 
@@ -7514,9 +8343,13 @@ class Session(Generic[ContextT, OutputT]):
 
     def _tool_sandbox_source(self, message: Mapping[str, Any]) -> object | None:
         environment = self._environment_for_message(message)
+        if environment is None:
+            return None
         borrowed = self._configured_environment_source
         if borrowed is not None and environment is borrowed[0]:
             return borrowed[1]
+        if "profile_id" in message:
+            return self._source_profile_runtime(message["profile_id"]).environment_source
         return (
             self._environment_lease.source
             if self._environment_lease is not None and environment is self._executor
@@ -7714,7 +8547,7 @@ class Session(Generic[ContextT, OutputT]):
             self._closing
             or self._closed
             or self._broken
-            or (self._environment_lease is not None and self._environment_lease.interrupted)
+            or (self._environment_owner is not None and self._environment_owner.interrupted)
             or self._sealed_checkpoint is not None
         ):
             raise InteractionExpiredError("Native request is expired or already answered")
@@ -7756,15 +8589,49 @@ class Session(Generic[ContextT, OutputT]):
         self._check_open()
         return state
 
+    async def _answer_remembered_mcp_question(
+        self, state: _CallbackState, question: _tool_types._NativeQuestion
+    ) -> bool:
+        if (
+            not isinstance(question, _tool_types.ApprovalRequest)
+            or question.subagent_id is not None
+        ):
+            return False
+        native_id = question._message.get("_sdk_question_id")
+        if native_id is None:
+            return False
+        decision = await self._native._remembered_mcp_decision(native_id)
+        if decision is None:
+            return False
+        state.questions[id(question)] = question
+        approve, portable = decision
+        await question._respond_mcp(approve, always=portable, portable=portable)
+        return True
+
     async def _respond_question(
-        self, question: _tool_types._NativeQuestion, operation: str, encoded: str
+        self,
+        question: _tool_types._NativeQuestion,
+        operation: str,
+        encoded: str,
+        *,
+        remember_mcp: bool | None = None,
+        use_portable_mcp: bool = False,
     ) -> None:
         state = self._check_question(question)
+        if remember_mcp is not None and question._message.get("_sdk_question_id") is None:
+            raise ValueError("Remembering requires an owned native MCP approval")
         if question._message.get("_sdk_question_id") is not None:
             if not await self._native._child_question_pending(
                 question._message["_sdk_question_id"]
             ):
                 raise InteractionExpiredError("Native request is expired or already answered")
+            state = self._check_question(question)
+        if remember_mcp is not None:
+            valid = await self._native._can_remember_mcp_question(
+                question._message["_sdk_question_id"]
+            )
+            if not valid:
+                raise ValueError("Remembering requires an actual current MCP approval")
             state = self._check_question(question)
         # Consume only after encoding/validation and before the enqueue await.
         # Do not restore on uncertain cancellation: native may already have it.
@@ -7776,10 +8643,18 @@ class Session(Generic[ContextT, OutputT]):
             try:
                 if question._message.get("_sdk_question_id") is None:
                     await self._native.call(operation, encoded)
-                elif not await self._native._respond_child_question(
-                    question._message["_sdk_question_id"], operation, encoded
-                ):
-                    raise InteractionExpiredError("Native request is expired or already answered")
+                else:
+                    mcp_options = (
+                        {"remember_mcp": remember_mcp, "use_portable_mcp": use_portable_mcp}
+                        if remember_mcp is not None
+                        else {}
+                    )
+                    if not await self._native._respond_child_question(
+                        question._message["_sdk_question_id"], operation, encoded, **mcp_options
+                    ):
+                        raise InteractionExpiredError(
+                            "Native request is expired or already answered"
+                        )
             except asyncio.CancelledError:
                 raise
             except BaseException as error:
@@ -7824,7 +8699,7 @@ class Session(Generic[ContextT, OutputT]):
         if (
             self._closing
             or self._closed
-            or (self._environment_lease is not None and self._environment_lease.interrupted)
+            or (self._environment_owner is not None and self._environment_owner.interrupted)
         ):
             raise RuntimeError("Session is closed")
         if self._sealing:
@@ -9125,7 +10000,7 @@ class Session(Generic[ContextT, OutputT]):
         return hashlib.sha256(
             json.dumps(
                 [
-                    self._agent_profile_fingerprint,
+                    self._runtime_approval_graph or self._agent_profile_fingerprint,
                     getattr(agent, "name", None),
                     instructions,
                 ]
@@ -9206,6 +10081,69 @@ class Session(Generic[ContextT, OutputT]):
                     self._remembered_approvals[(profile_id, record.key, record.signature)] = record
                     # Bind once to the freshly admitted catalog, never to a later replacement.
                     self._restored_approval_slots[(profile_id, catalog.generation, slot)] = record
+
+    async def _format_approval_rejection(
+        self, request: _tool_types.ApprovalRequested[Any], default: str
+    ) -> str:
+        state = self._active
+        formatter = self._tool_error_formatter
+        if state is None or formatter is None:
+            raise InteractionExpiredError("Managed approval is expired")
+
+        def admitted() -> bool:
+            return (
+                self._active is state
+                and not state.stopping
+                and not state.failure.done()
+                and not self._closing
+                and not self._closed
+                and self._sealed_checkpoint is None
+                and self._native._check_manual_tool(request._grant)
+            )
+
+        if not admitted():
+            raise InteractionExpiredError("Managed approval is expired or already decided")
+        source = getattr(request, "_approval_source", None)
+        entry = self._profile_catalogs[(source, request._approval_generation)].tools[request._slot]
+        if (
+            not isinstance(entry, _tool_types._CapturedApproval)
+            or entry.declaration is not request._declaration
+        ):
+            raise InteractionExpiredError("Managed approval belongs to a different declaration")
+        context = ToolErrorContext(
+            context=entry.function.context,
+            call=request.call,
+            phase="execution",
+            reason="approval_rejected",
+            default_message=str(default),
+            error=PermissionError(str(default)),
+        )
+        text: Any = None
+
+        async def format_rejection() -> None:
+            nonlocal text
+            scope = _Invocation(self)
+            token = _invocation.set(scope)
+            try:
+                try:
+                    if not admitted():
+                        raise InteractionExpiredError(
+                            "Managed approval is expired or already decided"
+                        )
+                    text = await _call_callback(formatter, admitted, context)
+                except Exception:
+                    if not admitted():
+                        raise
+            finally:
+                scope.active = False
+                _invocation.reset(token)
+
+        task = asyncio.create_task(format_rejection())
+        state.add_callback(task)
+        await task
+        if not admitted():
+            raise InteractionExpiredError("Managed approval expired during formatting")
+        return text if isinstance(text, str) else str(default)
 
     async def _decide_approval(
         self,
@@ -9301,6 +10239,14 @@ class Session(Generic[ContextT, OutputT]):
                     request.call_id,
                     reason,
                 )
+            elif (
+                isinstance(reason, _tool_types._DefaultApprovalReason)
+                and self._tool_error_formatter is not None
+                and self._realtime is None
+                and request.subagent_id is None
+                and isinstance(request._declaration, FunctionTool)
+            ):
+                reply_reason = await self._format_approval_rejection(request, reason)
             await self._respond(request, reply_reason, _approval_rejection=True)
             self._approval_ready.pop(request._invocation, None)
         if always:
@@ -9326,7 +10272,7 @@ class Session(Generic[ContextT, OutputT]):
             self._closing
             or self._closed
             or self._broken
-            or (self._environment_lease is not None and self._environment_lease.interrupted)
+            or (self._environment_owner is not None and self._environment_owner.interrupted)
             or self._sealed_checkpoint is not None
         ):
             raise InteractionExpiredError(
@@ -9392,7 +10338,7 @@ class Session(Generic[ContextT, OutputT]):
                 self._closing
                 or self._closed
                 or self._broken
-                or (self._environment_lease is not None and self._environment_lease.interrupted)
+                or (self._environment_owner is not None and self._environment_owner.interrupted)
                 or self._sealed_checkpoint is not None
                 or state.stopping
                 or state.terminal.done()
@@ -9486,7 +10432,7 @@ class Session(Generic[ContextT, OutputT]):
                 or self._closing
                 or self._closed
                 or self._broken
-                or (self._environment_lease is not None and self._environment_lease.interrupted)
+                or (self._environment_owner is not None and self._environment_owner.interrupted)
                 or self._sealed_checkpoint is not None
                 or not await (
                     self._native._respond_manual_tool(request._grant, output, False)
@@ -9657,6 +10603,7 @@ class Session(Generic[ContextT, OutputT]):
             native_agents=self._native_agents,
             handoffs=self._effective_handoffs(),
             project_guidance=self._project_guidance,
+            distinct_file_search=self._distinct_file_search,
         )
         selected_server = next(
             (
@@ -9710,6 +10657,26 @@ class Session(Generic[ContextT, OutputT]):
             self._native._start_produced_items()
             self._produced_items_started = True
 
+    @staticmethod
+    def _restore_produced_prefix(saved: SessionState) -> _ProducedPrefix:
+        data = continuation = None
+        try:
+            data = saved.agent_options.get("_sdk_configured_produced_prefix")
+            if data is None:
+                return _ProducedPrefix()
+            continuation = saved.native_continuation
+            if (
+                continuation is None
+                or not isinstance(data, dict)
+                or data.get("source_session_id") != saved.source_session_id
+                or data.get("turn_id") != continuation.turn_id
+                or not isinstance(data.get("items"), str)
+            ):
+                raise ValueError("Configured produced prefix belongs to another native source")
+            return _ProducedPrefix().extend(data["items"])
+        finally:
+            del saved, data, continuation
+
     def _take_produced_items(self, turn: Turn[Any]) -> tuple[ProducedItem, ...]:
         turn_id = turn.turn_id
         if turn_id is None:
@@ -9718,7 +10685,7 @@ class Session(Generic[ContextT, OutputT]):
             encoded = self._native._take_produced_items(turn_id)
         except RuntimeError as error:
             raise NativeError(str(error)) from error
-        captured = json.loads(encoded)
+        captured = self._produced_prefix.extend(encoded).rows()
         records = [
             {"type": "turn_context", "payload": {"turn_id": turn_id}},
             *(entry["record"] for entry in captured),
@@ -9734,6 +10701,7 @@ class Session(Generic[ContextT, OutputT]):
             self.id,
             item_record_indexes=item_record_indexes,
             tool_success_by_record=tool_success_by_record,
+            preserve_record_occurrences=True,
         )
         produced = []
         for item in items:
@@ -9762,10 +10730,12 @@ class Session(Generic[ContextT, OutputT]):
         self,
         lease: _EnvironmentLease | None,
         *,
+        owner: _EnvironmentLease | None = None,
         state: _state_types.SessionState | ManagedWorkspaceCheckpoint | None,
         resume: str | None,
     ) -> None:
         self._environment_lease = lease
+        self._environment_owner = owner if owner is not None else lease
         self._memory_restored = state is not None or resume is not None
         self._memory_restore_turn = self._last_turn
 
@@ -9943,6 +10913,7 @@ class Session(Generic[ContextT, OutputT]):
         expected_revision: str,
         keep: int,
         items: Sequence[Mapping[str, Any]] = (),
+        rebuild_model_context: bool = False,
     ) -> str:
         """Atomic original-prefix retention and suffix replacement with JSON objects.
 
@@ -9950,8 +10921,10 @@ class Session(Generic[ContextT, OutputT]):
         ``keep``: original-record count, including audit-only rows.
         Positive ``keep=snapshot.total``: append with current model context preserved.
         ``keep=0``: explicit whole-history and model-context replacement, even if empty.
-        Other prefixes: exact retained-original model projections only;
-        ambiguous partial compaction-summary edits rejected before commit.
+        Other prefixes retain exact model projections by default. Set
+        ``rebuild_model_context=True`` to discard the compacted projection when
+        it cannot be mapped to the retained originals and replay their admitted
+        model items.
 
         Unknown imported record types: audit-only, without model input or work.
         Known malformed executable records, invalid client tool pairs, stale
@@ -9966,11 +10939,15 @@ class Session(Generic[ContextT, OutputT]):
             raise ValueError("expected_revision must be nonempty text")
         if isinstance(keep, bool) or not isinstance(keep, int) or keep < 0:
             raise ValueError("keep must be a nonnegative integer")
+        if not isinstance(rebuild_model_context, bool):
+            raise TypeError("rebuild_model_context must be a bool")
         captured = json.dumps([json.dumps(item) for item in items])
 
         async def replace() -> str:
             value = self._history_mutation_value(
-                await self._native._transact_history(expected_revision, keep, captured)
+                await self._native._transact_history(
+                    expected_revision, keep, captured, rebuild_model_context
+                )
             )
             self._model_context_snapshots.clear()
             return str(value["revision"])
@@ -11013,7 +11990,7 @@ class Session(Generic[ContextT, OutputT]):
             self._check_root_admission()
             if (
                 self._mutation is not None
-                or (self._active is not None or self._queued_roots)
+                or (self._active is not None or self._queued_roots or self._workspace_admissions)
                 and (not enqueue or input is None)
                 or self._active is not None
                 and self.active_turn is None
@@ -11052,6 +12029,10 @@ class Session(Generic[ContextT, OutputT]):
             if input is not None:
                 assert self._opening_agent is not None
                 opening = self._effective_agent().tools
+                if tools is not None:
+                    tools = _resolve_legacy_file_search_refs(
+                        tools, opening, self._distinct_file_search
+                    )
                 if self._profiles and tools is not None:
                     for selected in tools:
                         if isinstance(selected, FunctionTool) and not any(
@@ -11069,6 +12050,7 @@ class Session(Generic[ContextT, OutputT]):
                     native_agents=None if tools is None else self._native_agents,
                     handoffs=self._effective_handoffs(),
                     project_guidance=self._project_guidance,
+                    distinct_file_search=self._distinct_file_search,
                 )
                 if tools is not None:
                     operation_refs = _selected_tool_refs(
@@ -11079,6 +12061,7 @@ class Session(Generic[ContextT, OutputT]):
                         environment=self._executor,
                         native_agents=self._native_agents,
                         project_guidance=self._project_guidance,
+                        distinct_file_search=self._distinct_file_search,
                     )
                 if tools is not None:
                     from .hosted_mcp import HostedMCP
@@ -11204,7 +12187,7 @@ class Session(Generic[ContextT, OutputT]):
                 )
             )
         try:
-            if self._sandbox_events is not None:
+            if self._observes_sandbox_operations():
                 self._native._enable_sandbox_operations()
             state.task = _create_task(
                 self._execute(state, input, admitted=admitted, native_admission=native_admission)
@@ -11234,15 +12217,16 @@ class Session(Generic[ContextT, OutputT]):
             self._broken
             or self._closed
             or self._closing
-            or (self._environment_lease is not None and self._environment_lease.interrupted)
+            or (self._environment_owner is not None and self._environment_owner.interrupted)
         ):
             self._queued_roots.discard(NativeError("Session ended before queued work was admitted"))
         while (
             not self._broken
             and not self._closed
             and not self._closing
-            and not (self._environment_lease is not None and self._environment_lease.interrupted)
+            and not (self._environment_owner is not None and self._environment_owner.interrupted)
             and self._active is None
+            and not self._workspace_admissions
             and self._mutation is None
             and self._checkpoint_task is None
             and not self._graph_interrupts
@@ -11262,6 +12246,7 @@ class Session(Generic[ContextT, OutputT]):
         if (
             self._active is not None
             or self._queued_roots
+            or self._workspace_admissions
             or self._mutation is not None
             or self._checkpoint_task is not None
         ):
@@ -11339,7 +12324,62 @@ class Session(Generic[ContextT, OutputT]):
         accepted bindings. Neither route may install a fresh declaration.
         Fixed grants and host-stdio startup authority remain as opened.
         Cancellation joins publication; accepted changes stay applied.
+
+        Selecting the actual runtime-created Agent also enrolls its declaration
+        for portable checkpoints. Enrollment can preserve a pending approval
+        while that Agent remains current; it does not change execution state.
+        Restore requires the original root with the target explicitly reachable
+        through a plain Agent handoff and the same native declaration shape.
+        This enrollment requires a factory on the opening root and unique
+        current Agent names. Durable storage and distinct per-Agent resources
+        remain unsupported.
         """
+        runtime_target = next(
+            (
+                key
+                for key, runtime in self._profiles.items()
+                if agent is not None
+                and runtime.profile.agent is agent
+                and key in getattr(self, "_runtime_handoff_profiles", set())
+            ),
+            None,
+        )
+        runtime_target_name = (
+            self._profiles[runtime_target].profile.declaration.name
+            if runtime_target is not None
+            else None
+        )
+        if runtime_target is not None and (
+            runtime_target_name is None or not runtime_target_name.strip()
+        ):
+            raise ValueError("Runtime enrollment requires a nonempty captured Agent.name")
+        if runtime_target is not None and any(
+            key != runtime_target and runtime.profile.declaration.name == runtime_target_name
+            for key, runtime in self._profiles.items()
+        ):
+            raise ValueError("Runtime enrollment requires a name unique across current Agents")
+        if runtime_target is not None and self._has_distinct_profile_sources:
+            raise CapabilityError("Runtime enrollment does not support distinct profile sources")
+        if runtime_target is not None and self._active is not None:
+            if any(value is not None for value in (model, model_settings, instructions, tools)):
+                raise ValueError("Update the Agent separately from other settings")
+            self._check_open()
+            self._check_callback_operation("update its own Session")
+            self._check_graph_admission()
+            self._check_root_admission()
+            if (
+                self._queued_roots
+                or self._mutation is not None
+                or self._checkpoint_task is not None
+            ):
+                raise RuntimeError("Session is busy")
+            assert runtime_target_name is not None
+
+            async def promote_runtime_target() -> None:
+                await self._native._adopt_runtime_handoff(runtime_target, runtime_target_name)
+
+            await self._join_mutation(asyncio.create_task(promote_runtime_target()))
+            return
         self._check_idle_update()
         captured_update_settings = _copy_model_settings(model_settings)
         requested_retry = (
@@ -11390,6 +12430,9 @@ class Session(Generic[ContextT, OutputT]):
                     self._broken = True
                     raise NativeError("Native Agent activation acknowledgement did not match")
                 await self._refresh_profile_bindings()
+                if runtime_target is not None:
+                    assert runtime_target_name is not None
+                    await self._native._adopt_runtime_handoff(runtime_target, runtime_target_name)
             else:
                 previous_profile = self._profile_current
                 previous_transport = self._repair_transport_settings
@@ -11437,8 +12480,10 @@ class Session(Generic[ContextT, OutputT]):
             if instructions is not None or settings:
                 raise ValueError("Update tools separately from instructions and model settings")
             assert self._opening_agent is not None
-            selection = tuple(tools)
             opening = self._effective_agent().tools
+            selection = tuple(
+                _resolve_legacy_file_search_refs(tools, opening, self._distinct_file_search)
+            )
             # Retain captured executor and collaboration grants in update
             # defaults. Explicit submissions still validate their whole roster.
             implicit = _fixed_tool_refs(
@@ -11469,6 +12514,7 @@ class Session(Generic[ContextT, OutputT]):
                 environment=self._executor,
                 native_agents=self._native_agents,
                 project_guidance=self._project_guidance,
+                distinct_file_search=self._distinct_file_search,
             )
             if self._profile_current is not None:
                 profile = self._profiles[self._profile_current[0]].profile
@@ -11688,14 +12734,13 @@ class Session(Generic[ContextT, OutputT]):
         *,
         default_slots: list[int] | None = None,
         default_handoffs: list[str] | None = None,
+        tracing_context: str | None = None,
     ) -> None:
         async with self._catalog_publication_lock:
             # A voice admission may have allocated catalogs while this replacement waited.
             generation = max(self._catalog.generation, self._profile_generation_high_water) + 1
             if candidate.generation != generation:
                 candidate = replace(candidate, generation=generation)
-            if isinstance(self._storage, CustomStorage) and candidate.manual_slots():
-                raise ValueError("CustomStorage preview does not support manual tools")
             assert self._opening_agent is not None
             if self._native_agents is not None:
                 children = json.loads(await self._native.call("list_subagents"))
@@ -11715,7 +12760,8 @@ class Session(Generic[ContextT, OutputT]):
             if allowed_mcp:
                 try:
                     receipt = await self._publish_startup(
-                        self._native._replace_mcp_servers(
+                        _run_mcp_discovery_policy(
+                            self._native._replace_mcp_servers,
                             _mcp_config(
                                 mcp_tools,
                                 self._executor,
@@ -11723,6 +12769,7 @@ class Session(Generic[ContextT, OutputT]):
                                 programmatic_tool_calling=self._effective_agent().programmatic_tool_calling,
                             ),
                             _tool_types._result_policies(mcp_tools, candidate.generation),
+                            tracing_context=tracing_context,
                         )
                     )
                 except BaseException as error:
@@ -12564,7 +13611,7 @@ class Session(Generic[ContextT, OutputT]):
                     raise handoff.cancelled
         except BaseException as error:
             await _close_after_error(error, self.aclose)
-            if not self._closed or self._environment_lease is not None:
+            if not self._closed or self._environment_owner is not None:
                 cast(Any, error).cleanup = self
             raise
 
@@ -12659,8 +13706,8 @@ class Session(Generic[ContextT, OutputT]):
             self._writable_roots = state.writable_roots
         if (
             input is not None
-            and self._environment_lease is not None
-            and self._environment_lease.interrupted
+            and self._environment_owner is not None
+            and self._environment_owner.interrupted
         ):
             # Input was admitted, so retire native ownership as uncertain.
             # Do not publish acceptance to readers which dispatch callbacks.
@@ -12808,6 +13855,7 @@ class Session(Generic[ContextT, OutputT]):
                             native_agents=self._native_agents,
                             handoffs=self._effective_handoffs(),
                             project_guidance=self._project_guidance,
+                            distinct_file_search=self._distinct_file_search,
                         )
             if admitted:
                 handle = state.handle
@@ -12853,6 +13901,11 @@ class Session(Generic[ContextT, OutputT]):
                                     state.operation_mcp,
                                     allowed_mcp,
                                     candidate.native_specs(),
+                                    tracing_context=(
+                                        state.tracing.context
+                                        if state.tracing is not None and state.parent_trace is None
+                                        else None
+                                    ),
                                 )
                             )
                             try:
@@ -12915,8 +13968,8 @@ class Session(Generic[ContextT, OutputT]):
                         )
                     else:
                         if (
-                            self._environment_lease is not None
-                            and self._environment_lease.interrupted
+                            self._environment_owner is not None
+                            and self._environment_owner.interrupted
                         ):
                             # Publication has settled; neither root nor continuation issued input.
                             confirmed_rejection = True
@@ -13352,6 +14405,8 @@ class Session(Generic[ContextT, OutputT]):
         error: BaseException | None,
         outcome: Completed[Any] | None,
     ) -> None:
+        if self._workspace_admissions:
+            await asyncio.gather(*tuple(self._workspace_admissions), return_exceptions=True)
         continuing = (
             error is None
             and state.cleanup_error is None
@@ -13686,6 +14741,7 @@ class Session(Generic[ContextT, OutputT]):
         repair = await Session[ContextT, str]._open(
             declaration,
             context=self._context,
+            on_tool_lifecycle=self._on_tool_lifecycle,
             _captured_api_key=self._profile_provider_keys.get(id(provider), self._model_api_key),
             _captured_siwc_provider=captured_siwc_provider,
             _expected_codex_login_binding=self._codex_login_binding,
@@ -13778,7 +14834,7 @@ class Session(Generic[ContextT, OutputT]):
                 captured_attempt = attempt or repair._last_turn
                 if captured_attempt is not None:
                     state.submission_request_attempts.add(captured_attempt.request_attempts)
-            if repair._closed and repair._environment_lease is None:
+            if repair._closed and repair._environment_owner is None:
                 self._repair_session = None
         return cast(str, result.final_output)
 
@@ -13802,8 +14858,6 @@ class Session(Generic[ContextT, OutputT]):
         children = [
             entry for entry in saved.native_continuation.pending_manual if entry.continuation
         ]
-        if len(children) > 1:
-            raise ValueError("Concurrent configured child usage is not supported")
         for entry in children:
             captured = entry.continuation
             assert captured is not None
@@ -15373,6 +16427,50 @@ class Session(Generic[ContextT, OutputT]):
 
         await self._run_owned_context_callback(state, message, prepare, reply, reject)
 
+    async def _format_missing_tool(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        formatter = self._tool_error_formatter
+        default = message["default_message"]
+
+        def prepare(active: Callable[[], bool]) -> tuple[Callable[..., Any], object]:
+            async def format_owned(context: ToolErrorContext[Any]) -> str | None:
+                if formatter is None:
+                    return None
+                try:
+                    value = await _call_callback(formatter, active, context)
+                except Exception:
+                    if not active():
+                        raise
+                    return None
+                return value if isinstance(value, str) else None
+
+            call = ToolCallInfo(
+                tool=ToolRef(message["name"], message["namespace"]),
+                session_id=self.id,
+                turn_id=message["turn_id"],
+                call_id=message["call_id"],
+                child_id=None,
+                child_incarnation=None,
+                role=None,
+                model=message["model"],
+                route="direct",
+            )
+            return format_owned, ToolErrorContext(
+                context=self._context,
+                call=call,
+                phase="execution",
+                default_message=default,
+                error=NativeError(default),
+                reason="tool_not_found",
+            )
+
+        def reply(value: Any) -> None:
+            self._native._reply_tool_not_found(message["step_id"], value)
+
+        def reject() -> None:
+            self._native._reply_tool_not_found(message["step_id"], cancelled=True)
+
+        await self._run_owned_context_callback(state, message, prepare, reply, reject)
+
     async def _admit_provider_response_span(
         self, state: _CallbackState, message: dict[str, Any]
     ) -> None:
@@ -15382,7 +16480,36 @@ class Session(Generic[ContextT, OutputT]):
             context = message["parent_context"]
             if not isinstance(context, str) or not context:
                 raise NativeError("SDK response span has no live parent owner")
-            return _native_provider_response_span_id, context
+            if message.get("span_kind") == "agent":
+                if isinstance(state, _ChildCallbacks) and "profile_id" not in message:
+                    # A native-only child has no captured application Agent label.
+                    return lambda _parent: None, context
+                declaration = self._agent_for_message(message)
+                agent_label = declaration.name or "Agent"
+                if not isinstance(agent_label, str) or len(agent_label.encode("utf-8")) > 4096:
+                    raise NativeError("SDK Agent span has an invalid name")
+
+                def allocate_agent(parent: str) -> dict[str, str | None] | None:
+                    value = _native_provider_response_span_id(
+                        parent, name=agent_label, kind="agent"
+                    )
+                    return None if value is None else {**value, "name": agent_label}
+
+                return allocate_agent, context
+            if "span_name" not in message and "span_kind" not in message:
+                model = message.get("model")
+                if model is not None and (not isinstance(model, str) or not model):
+                    raise NativeError("SDK response span has an invalid model")
+                return partial(_native_provider_response_span_id, model=model), context
+            name = message.get("span_name")
+            kind = message.get("span_kind")
+            if not isinstance(name, str) or not name or kind not in {"tool", "handoff"}:
+                raise NativeError("SDK span has an invalid native scope")
+
+            def allocate(parent: str) -> dict[str, str | None] | None:
+                return _native_provider_response_span_id(parent, name=name, kind=kind)
+
+            return allocate, context
 
         def reply(value: Any) -> None:
             self._native._reply_provider_response_span(
@@ -15404,6 +16531,243 @@ class Session(Generic[ContextT, OutputT]):
         await self._run_owned_context_callback(
             state, message, prepare, reply, reject, synchronous_id_policy=True
         )
+
+    @staticmethod
+    async def _notify_tool_lifecycle(
+        callbacks: Sequence[_ToolLifecycleCallback[Any]],
+        active: Callable[[], bool],
+        event: ToolLifecycleContext[Any],
+    ) -> None:
+        async def invoke(callback: _ToolLifecycleCallback[Any]) -> None:
+            if active():
+                await _call_callback(callback, active, event)
+
+        tasks = [asyncio.create_task(invoke(callback)) for callback in callbacks]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException as error:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+
+            async def join() -> None:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            await _close_after_error(error, join)
+            raise
+
+    async def _managed_tool_lifecycle_start(
+        self, state: _CallbackState, message: dict[str, Any], request: str
+    ) -> Callable[[], None] | None:
+        if not message.get("_sdk_managed_lifecycle"):
+            return None
+        if (
+            isinstance(state, _Submission)
+            and state.restored_pending
+            and self._native._configured_continuation(request) is not None
+        ):
+            return None
+        declaration = self._agent_for_message(message)
+        callbacks = tuple(
+            callback
+            for callback in (self._on_tool_lifecycle, declaration.on_tool_lifecycle)
+            if callback is not None
+        )
+        if not callbacks:
+            return None
+        invocation = _invocation.get()
+        owner = None
+        while invocation is not None:
+            if (
+                invocation.active
+                and invocation.native_callback is not None
+                and invocation.native_callback[0] is state
+            ):
+                owner = invocation.native_callback[1]
+                break
+            invocation = invocation.parent
+        if owner is None:
+            raise InteractionExpiredError("Tool lifecycle callback owner has expired")
+        arguments = message.get("_sdk_lifecycle_arguments")
+        if arguments is not None and not isinstance(arguments, str):
+            raise NativeError("Invalid native tool lifecycle arguments")
+        namespace = message.get("namespace")
+        event = ToolLifecycleContext(
+            kind="start",
+            context=cast(ContextT, self._context),
+            agent=self._original_agent_for_message(message),
+            tool=_tool_types.ToolRef(
+                message["tool"], None if namespace in (None, "functions") else namespace
+            ),
+            session_id=self.id,
+            turn_id=message["turnId"],
+            call_id=message["callId"],
+            arguments=arguments,
+            subagent_id=message.get("thread") if message.get("instance") is not None else None,
+        )
+
+        def active() -> bool:
+            return self._admit_tool(state, request)
+
+        await self._call_decision_callback(
+            state, message, partial(self._notify_tool_lifecycle, callbacks, active), active, event
+        )
+
+        def entered() -> None:
+            if not self._admit_tool(
+                state, request
+            ) or not owner.native._mark_tool_lifecycle_started(json.dumps(owner.receipt)):
+                raise InteractionExpiredError("Tool lifecycle callback owner has expired")
+
+        return entered
+
+    async def _tool_lifecycle(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        def prepare(active: Callable[[], bool]) -> tuple[Callable[..., Any], object]:
+            if message.get("profile_id") is not None:
+                self._catalog_for_message(message, message["generation"])
+            declaration = self._agent_for_message(message)
+            callbacks = tuple(
+                callback
+                for callback in (
+                    self._on_tool_lifecycle,
+                    declaration.on_tool_lifecycle,
+                )
+                if callback is not None
+            )
+            phase = message.get("phase")
+            name, namespace = message.get("name"), message.get("namespace")
+            call_id = message.get("call_id")
+            if phase not in {"start", "end"} or not isinstance(name, str) or not name:
+                raise NativeError("Invalid native tool lifecycle identity")
+            if (
+                not isinstance(call_id, str)
+                or not call_id
+                or namespace is not None
+                and not isinstance(namespace, str)
+            ):
+                raise NativeError("Invalid native tool lifecycle identity")
+            if message.get("arguments") is not None and not isinstance(message["arguments"], str):
+                raise NativeError("Invalid native tool lifecycle arguments")
+            output = message.get("output")
+            succeeded = message.get("succeeded")
+            if phase == "end" and (not isinstance(output, dict) or type(succeeded) is not bool):
+                raise NativeError("Invalid native tool lifecycle output")
+
+            return partial(self._notify_tool_lifecycle, callbacks, active), ToolLifecycleContext(
+                kind=cast(Any, phase),
+                context=cast(ContextT, self._context),
+                agent=self._original_agent_for_message(message),
+                tool=_tool_types.ToolRef(name, namespace),
+                session_id=self.id,
+                turn_id=message["turn_id"],
+                call_id=call_id,
+                arguments=message.get("arguments"),
+                subagent_id=message["thread"] if message["instance"] is not None else None,
+                output=deepcopy(output),
+                succeeded=succeeded,
+            )
+
+        def reply(_result: Any) -> None:
+            self._native._reply_tool_lifecycle(
+                message["step_id"], message["thread"], message["instance"]
+            )
+
+        def reject() -> None:
+            self._native._reply_tool_lifecycle(
+                message["step_id"], message["thread"], message["instance"], error=True
+            )
+
+        await self._run_owned_context_callback(state, message, prepare, reply, reject)
+
+    async def _agent_workspace(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        workspace: _OwnedProfileWorkspace | None = None
+        materialized = False
+        replied = False
+
+        def prepare(active: Callable[[], bool]) -> tuple[Callable[..., Any], object]:
+            nonlocal workspace
+            if not isinstance(state, _Submission) or message["instance"] is not None:
+                raise NativeError("Workspace preparation requires its ordinary root owner")
+            self._catalog_for_message(message, message["generation"])
+            source = self._profiles.get(message["profile_id"])
+            target = self._profiles.get(message["target_profile_id"])
+            if (
+                source is None
+                or target is None
+                or source.environment_source is not target.environment_source
+            ):
+                raise NativeError("Workspace target does not share its captured source")
+            owner = target.workspace_owner
+            if (
+                owner is None
+                or source.workspace_owner is not owner
+                or not owner.changed
+                or target.environment is not owner._environment
+            ):
+                raise NativeError("Workspace target has no captured preparation owner")
+            workspace = owner
+
+            async def materialize(_request: object) -> str:
+                nonlocal materialized
+                guidance = await owner.prepare(target.profile.id, active)
+                materialized = True
+                return guidance
+
+            return materialize, None
+
+        def reply(guidance: object) -> None:
+            nonlocal replied
+            if not isinstance(guidance, str):
+                raise TypeError("Workspace preparation requires text guidance")
+            self._native._reply_agent_workspace(
+                message["step_id"], guidance, message["thread"], message["instance"]
+            )
+            replied = True
+
+        def reject() -> None:
+            self._native._reply_agent_workspace(
+                message["step_id"], None, message["thread"], message["instance"]
+            )
+
+        async def observe_admission(owner: _OwnedProfileWorkspace) -> None:
+            accepted = False
+            if replied:
+                try:
+                    accepted = await self._native._wait_agent_workspace_admission(
+                        message["step_id"], message["thread"], message["instance"]
+                    )
+                except BaseException:
+                    accepted = False
+            if not accepted:
+                owner._failed = True
+                self._broken = True
+                # Preserve the native terminal cause, then use ordinary close.
+                # A retired reader also releases this wait after explicit close.
+                await asyncio.wait(
+                    {state.terminal, self._reader}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not self._closing:
+                    closing = _create_task(self.aclose())
+                    closing.add_done_callback(
+                        lambda task: None if task.cancelled() else task.exception()
+                    )
+
+        def settled(task: asyncio.Task[None]) -> None:
+            self._workspace_admissions.discard(task)
+            if not task.cancelled():
+                task.exception()
+            self._promote()
+
+        try:
+            await self._run_owned_context_callback(state, message, prepare, reply, reject)
+        finally:
+            if workspace is not None and (workspace._failed or materialized or replied):
+                if not replied:
+                    workspace._failed = True
+                    self._broken = True
+                monitor = _create_task(observe_admission(workspace))
+                self._workspace_admissions.add(monitor)
+                monitor.add_done_callback(settled)
 
     async def _agent_lifecycle(self, state: _CallbackState, message: dict[str, Any]) -> None:
         def prepare(_active: Callable[[], bool]) -> tuple[Callable[..., Any], object]:
@@ -15447,9 +16811,13 @@ class Session(Generic[ContextT, OutputT]):
         await self._run_owned_context_callback(state, message, prepare, reply, reject)
 
     async def _prepare_handoff_input(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        source_generated: tuple[dict[str, Any], ...] = ()
+        source_context: tuple[dict[str, Any], ...] = ()
+
         def prepare(
             _active: Callable[[], bool],
         ) -> tuple[Callable[..., Any], HandoffInput[Any]]:
+            nonlocal source_context, source_generated
             declaration = self._agent_for_message(message)
             callback = declaration.prepare_handoff_input
             if callback is None:
@@ -15466,6 +16834,8 @@ class Session(Generic[ContextT, OutputT]):
                 tuple(json.loads(json.dumps(message[name], allow_nan=False)))
                 for name in ("input", "previous", "generated")
             )
+            source_generated = generated
+            source_context = (*input_items, *previous)
             request = HandoffInput(
                 input_items,
                 previous,
@@ -15473,16 +16843,68 @@ class Session(Generic[ContextT, OutputT]):
                 context=self._context,
                 target=target.profile.agent,
             )
+            from .handoff_history import _bind_handoff_summaries
+
+            _bind_handoff_summaries(request, message.get("summaries", ()))
             return callback, request
 
         def reply(result: Any) -> None:
             if not isinstance(result, HandoffInput):
                 raise TypeError("prepare_handoff_input must return HandoffInput")
-            data = json.dumps(
-                {name: getattr(result, name) for name in ("input", "previous", "generated")},
-                allow_nan=False,
-                ensure_ascii=False,
-            )
+            groups: dict[str, Any] = {
+                name: getattr(result, name) for name in ("input", "previous", "generated")
+            }
+            from .handoff_history import _capture_handoff_summaries, _handoff_generated_ids
+
+            recorded = result.recorded_generated
+            if recorded is not None:
+                positions = {id(item): index for index, item in enumerate(source_generated)}
+                context_ids = {id(item) for item in source_context}
+                generated_ids = _handoff_generated_ids(result)
+                selected: list[int] = []
+                appended: list[list[str]] = []
+                seen_additions: set[int] = set()
+                for item in recorded:
+                    identity = id(item)
+                    if identity in positions:
+                        index = positions[identity]
+                        if appended or (selected and index <= selected[-1]):
+                            raise ValueError(
+                                "Canonical handoff source occurrences must stay unique and ordered"
+                            )
+                        if item != message["generated"][index]:
+                            raise ValueError("Canonical handoff source rows must stay unchanged")
+                        selected.append(index)
+                        continue
+                    if identity in context_ids or identity not in generated_ids:
+                        raise ValueError("Canonical handoff history must retain its source objects")
+                    if identity in seen_additions:
+                        raise ValueError("Canonical handoff additions must stay unique")
+                    seen_additions.add(identity)
+                    if (
+                        set(item) != {"type", "role", "content"}
+                        or item.get("type") != "message"
+                        or item.get("role") != "assistant"
+                        or not isinstance(content := item.get("content"), list)
+                        or not content
+                        or any(
+                            not isinstance(part, dict)
+                            or set(part) != {"type", "text"}
+                            or part.get("type") != "output_text"
+                            or not isinstance(part.get("text"), str)
+                            or not part["text"]
+                            for part in content
+                        )
+                    ):
+                        raise ValueError("Canonical handoff can add only plain assistant text")
+                    appended.append([part["text"] for part in content])
+                groups["recorded_generated_indices"] = selected
+                if appended:
+                    groups["recorded_assistant_text"] = appended
+            summaries = _capture_handoff_summaries(result)
+            if summaries:
+                groups["summaries"] = summaries
+            data = json.dumps(groups, allow_nan=False, ensure_ascii=False)
             self._native._reply_handoff_input(
                 message["step_id"], data, message["thread"], message["instance"]
             )
@@ -15501,6 +16923,14 @@ class Session(Generic[ContextT, OutputT]):
                 tracing.set_outcome(status="error", category="callback_error")
 
     async def _transform_context_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        source_map_required = message.get("source_map_required") is True
+        source_objects = tuple(message["items"])
+        source_snapshots = (
+            {id(item): (index, deepcopy(item)) for index, item in enumerate(source_objects)}
+            if source_map_required
+            else {}
+        )
+
         def prepare(
             active: Callable[[], bool],
         ) -> tuple[Callable[..., Any], ModelRequestContext[ContextT]]:
@@ -15538,10 +16968,16 @@ class Session(Generic[ContextT, OutputT]):
                         )
             request = ModelRequestContext(
                 context=cast(ContextT, self._context),
-                items=tuple(message["items"]),
+                items=source_objects,
                 session_id=self.id,
                 turn_id=message["turn_id"],
                 subagent_id=message["thread"] if message["instance"] is not None else None,
+                agent=(
+                    self._original_agent_for_message(message)
+                    if message["instance"] is None
+                    else None
+                ),
+                instructions=message.get("instructions"),
                 request_id=str(message["step_id"]),
                 model=message["model"],
                 purpose=(
@@ -15605,19 +17041,52 @@ class Session(Generic[ContextT, OutputT]):
             reference = None
             if message.get("hosted_prompt") is True:
                 reference, replacement = replacement
+            projection = replacement if isinstance(replacement, ModelContextProjection) else None
+            if projection is not None:
+                if (
+                    message.get("instructions") is None
+                    or message.get("instance") is not None
+                    or message.get("purpose") != "turn"
+                    or self._context_transform_purpose != "turn"
+                    or message.get("hosted_prompt") is True
+                ):
+                    raise ValueError("ModelContextProjection requires an ordinary root request")
+                replacement = projection.items
             if replacement is not None and (
                 not isinstance(replacement, Sequence)
                 or isinstance(replacement, (str, bytes, bytearray))
             ):
-                raise TypeError("transform_context must return input items or None")
+                raise TypeError(
+                    "transform_context must return input items, ModelContextProjection, or None"
+                )
             data: Any = list(replacement) if replacement is not None else None
+            if source_map_required and data is not None:
+                source_indices: list[int | None] = []
+                for item in data:
+                    source_item = source_snapshots.get(id(item))
+                    source_indices.append(
+                        source_item[0]
+                        if source_item is not None
+                        and (source_item[1] == item or source_item[1].get("role") == "user")
+                        else None
+                    )
+                data = {"items": data, "source_indices": source_indices}
+            if projection is not None:
+                data = {
+                    "application_instructions": projection.instructions,
+                    "input_projection": data,
+                }
             if reference is not None:
                 data = {
                     "hosted_prompt": reference,
                     "explicit_tools": getattr(state, "before_step", None) is not None
                     or getattr(state, "operation_refs", None) is not None
                     or getattr(state, "operation_slots", None) is not None,
-                    **({"items": data} if data is not None else {}),
+                    **(
+                        {("source_mapped_items" if source_map_required else "items"): data}
+                        if data is not None
+                        else {}
+                    ),
                 }
             items_json = json.dumps(data, allow_nan=False)
             self._native._reply_context(
@@ -15780,7 +17249,13 @@ class Session(Generic[ContextT, OutputT]):
             )
 
         await _settle_output_guardrails(
-            checks, agent, request, state.guardrail_results, invoke, active
+            checks,
+            agent,
+            request,
+            state.guardrail_results,
+            invoke,
+            active,
+            tracing_context=message.get("tracing_context"),
         )
         callback = captured.on_lifecycle
         if callback is not None:
@@ -15858,43 +17333,48 @@ class Session(Generic[ContextT, OutputT]):
             )
 
         async def check(guardrail: InputGuardrail[Any]) -> GuardrailRecord:
-            if isinstance(state, _ChildCallbacks):
-                assert guardrail.child_callback is not None
-                result = await self._call_decision_callback(
-                    state,
-                    message,
-                    guardrail.child_callback,
-                    active,
-                    _tool_types.ChildStepContext(
-                        context=self._context, child=state.handle, step_index=step_index
-                    ),
-                    agent,
-                    deepcopy(state.guardrail_input),
+            with _guardrail_span(guardrail.name, message.get("tracing_context")) as span:
+                if isinstance(state, _ChildCallbacks):
+                    assert guardrail.child_callback is not None
+                    result = await self._call_decision_callback(
+                        state,
+                        message,
+                        guardrail.child_callback,
+                        active,
+                        _tool_types.ChildStepContext(
+                            context=self._context, child=state.handle, step_index=step_index
+                        ),
+                        agent,
+                        deepcopy(state.guardrail_input),
+                    )
+                else:
+                    result = await self._call_decision_callback(
+                        state,
+                        message,
+                        guardrail.callback,
+                        active,
+                        handle,
+                        self._context,
+                        agent,
+                        deepcopy(state.guardrail_input),
+                    )
+                if not isinstance(result, GuardrailResult):
+                    raise TypeError("Guardrail callback must return GuardrailResult")
+                if span is not None and result.tripwire_triggered:
+                    span.set_outcome(status="ok", category="guardrail_triggered")
+                record = GuardrailRecord(
+                    kind="input",
+                    name=guardrail.name,
+                    result=result,
+                    agent=agent,
+                    session_id=self.id,
+                    turn_id=turn_id,
+                    subagent_id=state.handle.child_id
+                    if isinstance(state, _ChildCallbacks)
+                    else None,
                 )
-            else:
-                result = await self._call_decision_callback(
-                    state,
-                    message,
-                    guardrail.callback,
-                    active,
-                    handle,
-                    self._context,
-                    agent,
-                    deepcopy(state.guardrail_input),
-                )
-            if not isinstance(result, GuardrailResult):
-                raise TypeError("Guardrail callback must return GuardrailResult")
-            record = GuardrailRecord(
-                kind="input",
-                name=guardrail.name,
-                result=result,
-                agent=agent,
-                session_id=self.id,
-                turn_id=turn_id,
-                subagent_id=state.handle.child_id if isinstance(state, _ChildCallbacks) else None,
-            )
-            state.guardrail_results.append(record)
-            return record
+                state.guardrail_results.append(record)
+                return record
 
         tasks = [asyncio.create_task(check(guardrail)) for guardrail in checks]
         tripped = None
@@ -16550,6 +18030,7 @@ class Session(Generic[ContextT, OutputT]):
                     self._executor,
                     self._native_agents,
                     project_guidance=self._project_guidance,
+                    distinct_file_search=self._distinct_file_search,
                 )
                 # Idle subsets narrow only the current root profile's defaults.
                 if (
@@ -16576,12 +18057,16 @@ class Session(Generic[ContextT, OutputT]):
                             environment=self._executor,
                             native_agents=self._native_agents,
                             project_guidance=self._project_guidance,
+                            distinct_file_search=self._distinct_file_search,
                         )
                     )
                 defaults.update(fixed)
             if selection is None:
                 refs = defaults
             else:
+                selection = _resolve_legacy_file_search_refs(
+                    selection, source_agent.tools, self._distinct_file_search
+                )
                 python, mcp, _ = _split_tools(
                     selection,
                     source_agent.programmatic_tool_calling,
@@ -16591,6 +18076,7 @@ class Session(Generic[ContextT, OutputT]):
                     environment=self._executor,
                     native_agents=self._native_agents,
                     project_guidance=self._project_guidance,
+                    distinct_file_search=self._distinct_file_search,
                 )
                 refs = set(
                     _selected_tool_refs(
@@ -16601,6 +18087,7 @@ class Session(Generic[ContextT, OutputT]):
                         environment=self._executor,
                         native_agents=self._native_agents,
                         project_guidance=self._project_guidance,
+                        distinct_file_search=self._distinct_file_search,
                     )
                 )
                 refs = {resolve(ref) for ref in refs}
@@ -16872,8 +18359,11 @@ class Session(Generic[ContextT, OutputT]):
             "_sdk_select_step": self._select_step,
             "_sdk_provider_response_span": self._admit_provider_response_span,
             "_sdk_model_completion": self._after_model,
+            "_sdk_tool_not_found": self._format_missing_tool,
             "_sdk_handoff_input": self._prepare_handoff_input,
             "_sdk_agent_lifecycle": self._agent_lifecycle,
+            "_sdk_tool_lifecycle": self._tool_lifecycle,
+            "_sdk_agent_workspace": self._agent_workspace,
             "_sdk_transform_context": self._transform_context,
             "_sdk_before_compact": self._before_compact,
             "_sdk_before_compact_policy": self._before_compact,
@@ -16907,11 +18397,12 @@ class Session(Generic[ContextT, OutputT]):
                     continue
                 message = event.get("msg", {})
                 if message.get("type") == "_sdk_sandbox_operation":
-                    if self._sandbox_events is not None:
+                    observer = self._sandbox_observer_for_message(message)
+                    if observer is not None:
                         sandbox_invocation = _Invocation(self)
                         sandbox_token = _invocation.set(sandbox_invocation)
                         try:
-                            await self._sandbox_events.emit(message)
+                            await observer.emit(message)
                         finally:
                             sandbox_invocation.active = False
                             _invocation.reset(sandbox_token)
@@ -17419,12 +18910,14 @@ class Session(Generic[ContextT, OutputT]):
                         )
                         continue
                     try:
+                        assert state.handle is not None
+                        question = _tool_types._question(self, message, state.handle)
+                        if await self._answer_remembered_mcp_question(state, question):
+                            continue
                         if self._fail_unhandled_questions:
                             raise InteractionRequired(
                                 "Native interaction needs on_interaction or Agent.session()"
                             )
-                        assert state.handle is not None
-                        question = _tool_types._question(self, message, state.handle)
                     except InteractionRequired as error:
                         state.failure.set_result(error)
                     else:
@@ -18055,6 +19548,25 @@ class Session(Generic[ContextT, OutputT]):
             else ()
         )
         previous_opening = invocation.configured_opening
+        profile_id = message.get("profile_id")
+        workspace_instructions = None
+        if context._environment is not None:
+            # Tool admission has already validated the exact issuing profile receipt.
+            workspace_instructions = (
+                self._source_profile_runtime(profile_id).workspace_instructions
+                if isinstance(profile_id, str)
+                else self._workspace_instructions
+            )
+        sandbox_lease = None
+        if (
+            context._sandbox_source is not None
+            and declaration.agent.environment is context._sandbox_source
+        ):
+            owner = self._environment_owner or self._borrowed_sandbox_lease
+            if owner is not None:
+                sandbox_lease = owner.for_source(context._sandbox_source)
+            if sandbox_lease is None:
+                raise InteractionExpiredError("Configured sandbox source has no live owner")
         configured_opening = _ConfiguredOpening(
             declaration.agent,
             context._environment,
@@ -18068,8 +19580,14 @@ class Session(Generic[ContextT, OutputT]):
             ),
             admitted,
             executor_tools,
+            workspace_instructions,
+            self._sandbox_observer_for_message(message)
+            if context._environment is not None
+            else None,
+            declaration.return_items,
+            on_tool_lifecycle=self._on_tool_lifecycle,
+            sandbox_lease=sandbox_lease,
         )
-        invocation.configured_opening = configured_opening
         handler = self._interaction_handler
 
         async def answer(event: _tool_types.Interaction) -> _tool_types.ActionReply[Any]:
@@ -18086,6 +19604,7 @@ class Session(Generic[ContextT, OutputT]):
             if declaration.observer is not None and declaration.max_pending_events is None
             else "bounded"
         )
+        capture_raw = declaration.observer is not None and declaration.include_raw_provider_events
         restored_child_json = (
             self._native._configured_continuation(request)
             if isinstance(state, _Submission) and state.restored_pending
@@ -18098,8 +19617,17 @@ class Session(Generic[ContextT, OutputT]):
                 raise NativeError("Unsupported configured child continuation")
             from .state import SessionState
 
-            restored_child = SessionState.from_json(json.dumps(captured["state"]))
+            child_state_json = json.dumps(captured["state"])
+            restored_child = SessionState.from_json(child_state_json)
+            # The authenticated outer state and current native slot bind these
+            # detached rows without extending the child checkpoint's authority.
+            if self._authenticated_checkpoint and declaration.return_items:
+                configured_opening = replace(
+                    configured_opening,
+                    checkpoint_prefix=self._restore_produced_prefix(restored_child),
+                )
         session: Session[Any, Any] | None = None
+        invocation.configured_opening = configured_opening
         try:
             async with declaration.agent.session(
                 context=context.context,
@@ -18107,6 +19635,7 @@ class Session(Generic[ContextT, OutputT]):
                 state=restored_child,
                 on_interaction=answer if handler is not None else None,
                 observation_retention=observation_retention,
+                include_raw_provider_events=capture_raw,
             ) as child_session:
                 session = child_session
                 if not admitted():
@@ -18175,14 +19704,23 @@ class Session(Generic[ContextT, OutputT]):
                         assert child.checkpoint is not None and child.recovery_ready is not None
                         recovery_token = _invocation.set(invocation)
                         recovery_opening = invocation.configured_opening
-                        invocation.configured_opening = configured_opening
                         try:
+                            if declaration.return_items:
+                                invocation.configured_opening = replace(
+                                    configured_opening,
+                                    checkpoint_prefix=self._restore_produced_prefix(
+                                        child.checkpoint
+                                    ),
+                                )
+                            else:
+                                invocation.configured_opening = configured_opening
                             async with declaration.agent.session(
                                 context=context.context,
                                 environment=context._environment,
                                 state=child.checkpoint,
                                 on_interaction=answer if handler is not None else None,
                                 observation_retention=observation_retention,
+                                include_raw_provider_events=capture_raw,
                             ) as reopened:
                                 reopened._bind_configured_usage(state.run_usage, child.checkpoint)
                                 child_session = reopened
@@ -18254,6 +19792,10 @@ class Session(Generic[ContextT, OutputT]):
                     ):
                         raise InteractionExpiredError("Configured parent invocation is expired")
                     if declaration.extractor is not None:
+                        if declaration.return_items:
+                            result = replace(
+                                result, items=child.session._take_produced_items(result.turn)
+                            )
                         output = await _call_callback(declaration.extractor, admitted, result)
                         if not isinstance(output, str):
                             raise TypeError("custom_output_extractor must return a string")
@@ -18301,6 +19843,87 @@ class Session(Generic[ContextT, OutputT]):
             if _native_callback_cancelled(state):
                 return False
             raise
+
+    def _stage_runtime_handoff_target(
+        self, request: str, message: Mapping[str, Any], selection: Any
+    ) -> str:
+        from ._tool_catalog import _SCOPED_HOSTED_TYPES
+        from .realtime_agents import _capture_voice_graph
+
+        if self._storage is not None:
+            raise CapabilityError("Runtime handoff factories do not support durable storage")
+        target = selection.target
+        opening = self._opening_agent
+        if target is None or opening is None or selection.factory is None:
+            raise ValueError("Runtime handoff has no application target")
+        source = self._source_profile_runtime(message["profile_id"])
+        if any(
+            value != source.profile.declaration.model_settings.get(name)
+            for name, value in target.model_settings.items()
+        ):
+            raise ValueError("Runtime handoff must preserve its current model settings")
+        # Validate the supplied declaration before starting readers or acquiring resources.
+        if target.provider is not None and target.provider is not opening.provider:
+            raise ValueError("Runtime handoff must preserve the Session provider")
+        if target.environment is not None or target.handoffs or target.realtime is not None:
+            raise ValueError("Runtime handoff requires the existing runtime envelope")
+        if any(type(tool) is not FunctionTool or tool._bind is None for tool in target.tools):
+            raise ValueError("Runtime handoff initially supports ordinary Python tools")
+        if self._realtime is not None:
+            raise ValueError("Runtime handoff cannot share a voice graph")
+        restored_indices = [
+            int(parts[1])
+            for key in self._profiles
+            if len(parts := key.split("_")) == 3
+            and parts[0] == "runtime"
+            and parts[1].isascii()
+            and parts[1].isdigit()
+        ]
+        index = max([getattr(self, "_runtime_handoff_admissions", 0), *restored_indices]) + 1
+        if index > 1024:
+            raise CapabilityError("Runtime handoff admission capacity exceeded")
+        self._runtime_handoff_admissions = index
+        prefix = f"runtime_{index}_"
+        inherited_hosted = [
+            tool
+            for tool in source.profile.declaration.tools
+            if isinstance(tool, _SCOPED_HOSTED_TYPES)
+        ]
+        runtimes, roster = _capture_voice_graph(
+            self, target, prefix, inherited_hosted=inherited_hosted
+        )
+        if len(runtimes) != 1:
+            raise ValueError("Runtime handoff initially admits one target")
+        key = next(iter(runtimes))
+        receipt = json.loads(
+            self._native._stage_runtime_handoff(
+                request,
+                selection.factory,
+                json.dumps(roster),
+                key,
+            )
+        )
+        generation = receipt.get("generation")
+        if receipt.get("target") != key or type(generation) is not int or generation < 0:
+            self._broken = True
+            raise NativeError("Runtime handoff admission receipt did not match")
+        runtime = runtimes[key]
+        captured = replace(
+            runtime,
+            catalog=replace(runtime.catalog, generation=generation),
+            environment=source.environment,
+            environment_source=source.environment_source,
+            sandbox_observer=source.sandbox_observer,
+        )
+        self._profiles[key] = captured
+        self._profile_catalogs[(key, generation)] = captured.catalog
+        self._catalog_bindings[(key, generation)] = captured.profile.declaration.tools
+        self._profile_generation_high_water = max(self._profile_generation_high_water, generation)
+        self._start_readers((captured.profile.declaration,))
+        dynamic: set[str] = getattr(self, "_runtime_handoff_profiles", set())
+        dynamic.add(key)
+        self._runtime_handoff_profiles = dynamic
+        return key
 
     async def _respond_tool(
         self,
@@ -18722,6 +20345,7 @@ class Session(Generic[ContextT, OutputT]):
                                 return
             if not self._admit_tool(state, request):
                 return
+            lifecycle_entered = await self._managed_tool_lifecycle_start(state, message, request)
             # The body can mutate validated arguments before raising. The original
             # wire arguments are already isolated from validation and callback code.
             formatter_arguments = approved_kwargs
@@ -18745,6 +20369,8 @@ class Session(Generic[ContextT, OutputT]):
 
             def enter_body() -> None:
                 nonlocal entered_media_owner
+                if lifecycle_entered is not None:
+                    lifecycle_entered()
                 if self._realtime is None:
                     return
                 source = message.get("_sdk_realtime_tool_call")
@@ -18989,7 +20615,11 @@ class Session(Generic[ContextT, OutputT]):
                 if isinstance(entry, _CapturedDecisionHandoff):
                     if not isinstance(value, _DecisionHandoffSelection):
                         raise ValueError("Decision handoff selection failed")
-                    handoff_target_profile_id = value.target_profile_id
+                    handoff_target_profile_id = (
+                        self._stage_runtime_handoff_target(request, message, value)
+                        if value.target is not None
+                        else value.target_profile_id
+                    )
                     value = None
             output: ToolOutput | None = failure_output
             background = False
@@ -19585,13 +21215,14 @@ class Session(Generic[ContextT, OutputT]):
         LocalStorage snapshots include the native graph and accepted sidecar state.
         CustomStorage snapshots include the settled native root when no item TTL applies.
         Restore without storage into isolated memory using the current Agent.
-        Persistent manual suspension and fork require a different session.
+        CustomStorage can suspend ordinary manual requests into a portable state.
+        LocalStorage manual suspension and persistent fork require a different session.
         """
         return await self._save_state()
 
     async def _save_state(self, *, probe: bool = False) -> _state_types.SessionState:
         self._check_open()
-        self._check_portable_capture(allow_idle_storage=True)
+        self._check_portable_capture(allow_idle_storage=True, idle_snapshot=True)
         self._check_callback_operation("save its own Session")
         if self._active is not None:
             raise RuntimeError(
@@ -19634,7 +21265,10 @@ class Session(Generic[ContextT, OutputT]):
         if kind not in ("idle", "manual_wait"):
             raise ValueError("kind must be 'idle' or 'manual_wait'")
         try:
-            self._check_portable_capture(allow_idle_storage=kind == "idle")
+            self._check_portable_capture(
+                allow_idle_storage=kind == "idle" or isinstance(self._storage, CustomStorage),
+                idle_snapshot=kind == "idle",
+            )
             if kind == "idle":
                 await self._save_state(probe=True)
             else:
@@ -19657,7 +21291,7 @@ class Session(Generic[ContextT, OutputT]):
 
         Wait for the pending request's sample and callbacks to settle, then
         retire the original session. A repeated suspend returns the same state.
-        A single configured child at a portable manual boundary can be saved
+        Configured children at portable manual boundaries can be saved
         once other automatic callbacks settle. The configured child can have
         its own managed handoff graph, as can its parent. A parent that uses
         a managed graph and an executor must reply to its configured child live.
@@ -19685,13 +21319,14 @@ class Session(Generic[ContextT, OutputT]):
             ready = None
         return await self._suspend_ready(ready, before_seal=before_seal)
 
-    def _configured_checkpoint_child(self, active: _Submission) -> _ConfiguredChild | None:
-        if not self._configured_children:
-            return None
-        if len(self._configured_children) != 1 or self._configured_children[0].owner is not active:
-            raise RuntimeError("Concurrent configured continuations are not supported")
-        child = self._configured_children[0]
-        if any(not task.done() and task is not child.callback_task for task in active.callbacks):
+    def _configured_checkpoint_children(self, active: _Submission) -> tuple[_ConfiguredChild, ...]:
+        children = tuple(self._configured_children)
+        if not children:
+            return ()
+        if any(child.owner is not active or not child.active for child in children):
+            raise RuntimeError("Configured continuations do not belong to this submission")
+        callbacks = {child.callback_task for child in children}
+        if any(not task.done() and task not in callbacks for task in active.callbacks):
             raise RuntimeError("Other automatic callbacks have not settled")
         if self._profiles and any(
             runtime.environment is not None for runtime in self._profiles.values()
@@ -19700,118 +21335,240 @@ class Session(Generic[ContextT, OutputT]):
                 "Configured checkpoints cannot capture a parent graph with an executor; "
                 "reply in the live Session"
             )
-        return child
+        return children
 
     async def _wait_suspend_ready(self) -> _SuspendBoundary | None:
         # Readiness is a passive wait, including inside configured descendants.
         # Leave replies, cancellation, and close available until a seal starts.
         if self._configured_capture is not None or self._sealed_checkpoint is not None:
             return None
-        self._check_portable_capture()
+        self._check_portable_capture(allow_idle_storage=isinstance(self._storage, CustomStorage))
         active = self._active
         self._check_manual_capture(active)
         assert active is not None
-        child = self._configured_checkpoint_child(active)
-        if child is not None:
-            descendant = (
-                await child.session._wait_suspend_ready() if child.checkpoint is None else None
-            )
-            return _SuspendBoundary(self, active, child, descendant)
+        children = self._configured_checkpoint_children(active)
+        if children:
+            descendants = []
+            for child in children:
+                descendant = (
+                    await child.session._wait_suspend_ready() if child.checkpoint is None else None
+                )
+                descendants.append((child, descendant))
+            return _SuspendBoundary(self, active, tuple(descendants))
         if self._child_admissions:
             raise RuntimeError("Cannot save while native child work or callbacks remain active")
-        children = tuple(
+        child_completions = tuple(
             child.completion
             for child in self._child_callbacks.values()
             if not child.completion.done()
         )
-        if children:
+        if child_completions:
             # Native settlement can precede delivery of the host terminal
             # receipt. Join those owners before taking the checkpoint.
             if not await self._native._manual_children_settled():
                 raise RuntimeError("Cannot save while native child work or callbacks remain active")
-            await asyncio.gather(*(asyncio.shield(child) for child in children))
+            await asyncio.gather(*(asyncio.shield(completion) for completion in child_completions))
         if not await self._wait_manual_boundary(active, require_request=True):
             raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
-        return _SuspendBoundary(self, active, None)
+        return _SuspendBoundary(self, active)
 
     async def _suspend_ready(
         self,
         ready: _SuspendBoundary | None,
         *,
         before_seal: Callable[[], None] | None = None,
+        _phase: _CheckpointPhase | None = None,
     ) -> _state_types.SessionState:
         from .state import SessionState
 
+        phase = _phase if _phase is not None else _CheckpointPhase()
         if self._configured_capture is not None:
-            return cast("_state_types.SessionState", await _join(self._configured_capture))
+            phase.state = "uncertain"
+            result = cast("_state_types.SessionState", await _join(self._configured_capture))
+            phase.state = "sealed"
+            return result
         if self._sealed_checkpoint is not None:
+            phase.state = "sealed"
             return SessionState._from_native_capture(self._sealed_checkpoint)
-        self._check_portable_capture()
+        self._check_portable_capture(allow_idle_storage=isinstance(self._storage, CustomStorage))
         active = self._active
         self._check_manual_capture(active)
         assert active is not None
-        child = self._configured_checkpoint_child(active)
+        children = self._configured_checkpoint_children(active)
         if (
             ready is None
             or ready.session is not self
             or ready.active is not active
-            or ready.child is not child
+            or len(ready.children) != len(children)
+            or any(
+                saved is not current
+                for (saved, _), current in zip(ready.children, children, strict=True)
+            )
         ):
             raise _ManualBoundaryLost("The active submission changed before checkpoint sealing")
-        if child is not None:
+        if not children:
+            return await self._checkpoint(active, before_seal=before_seal, _phase=phase)
 
-            async def capture_configured() -> _state_types.SessionState:
-                if child.checkpoint is None:
+        retire = False
+
+        def live_parent() -> bool:
+            return (
+                self._active is active
+                and not self._closing
+                and not self._closed
+                and not active.stopping
+                and not active.failure.done()
+                and self._sealed_checkpoint is None
+                and not self._reader.done()
+            )
+
+        async def recover(sealed: list[_ConfiguredChild]) -> None:
+            if not live_parent() or any(
+                child.recover is None or not child.admitted() for child in sealed
+            ):
+                raise InteractionExpiredError("Configured parent invocation is expired")
+            waiting = []
+            for child in sealed:
+                assert child.recover is not None
+                child.recovery_ready = asyncio.get_running_loop().create_future()
+                child.recovery = _create_task(child.recover())
+                active.add_callback(child.recovery)
+                child.seal_hold.set()
+                waiting.append(child.recovery_ready)
+            await asyncio.gather(*(asyncio.shield(item) for item in waiting))
+
+        async def capture_configured() -> _state_types.SessionState:
+            nonlocal retire
+            sealed: list[_ConfiguredChild] = []
+            updates: list[dict[str, Any]] = []
+            stage: Literal["none", "uncertain", "refused", "parked"] = "none"
+            child_phase = _CheckpointPhase()
+            child = descendant = child_usage = None
+            try:
+                for child, descendant in ready.children:
+                    if not live_parent() or not child.admitted():
+                        raise InteractionExpiredError("Configured parent invocation is expired")
+                    if child.checkpoint is not None:
+                        raise RuntimeError("Configured child already has a staged checkpoint")
                     child.sealing = True
+                    child_phase = _CheckpointPhase()
                     try:
-                        child.checkpoint = await child.session._suspend_ready(ready.descendant)
+                        child.checkpoint = await child.session._suspend_ready(
+                            descendant, _phase=child_phase
+                        )
                     except BaseException:
                         child.sealing = False
                         raise
+                    sealed.append(child)
                     child_usage = self._configured_checkpoint_usage(child.checkpoint)
                     _merge_configured_child_restore_usage(
                         active.run_usage.snapshot(), child_usage, child_usage
                     )
-                    payload = {
-                        "request": json.loads(child.parent_request),
-                        "callback": child.parent_callback,
-                        "continuation": {
-                            "kind": "configured-child-v1",
-                            "state": json.loads(child.checkpoint.to_json()),
-                            "usage_in_parent": asdict(child_usage),
-                        },
-                    }
-                    if not await self._native._respond_python_tool(json.dumps(payload)):
-                        raise RuntimeError("Configured parent continuation expired")
-                try:
-                    return await self._checkpoint(active, before_seal=before_seal)
-                except Exception:
-                    # A known refusal leaves the same parent sender live. Rebind
-                    # only that held invocation to its saved child, never submit anew.
-                    if child.recover is not None and self._sealed_checkpoint is None:
-                        rollback = {
+                    updates.append(
+                        {
                             "request": json.loads(child.parent_request),
                             "callback": child.parent_callback,
-                            "continuation": None,
-                            "rollback": True,
+                            "continuation": {
+                                "kind": "configured-child-v1",
+                                "state": json.loads(child.checkpoint.to_json()),
+                                "usage_in_parent": asdict(child_usage),
+                            },
                         }
-                        await self._native._respond_python_tool(json.dumps(rollback))
-                        child.recovery_ready = asyncio.get_running_loop().create_future()
-                        child.recovery = _create_task(child.recover())
-                        active.add_callback(child.recovery)
+                    )
+                # The ordinary result acknowledges this atomic native mutation.
+                # Output-acceptance mode belongs only to actual tool outputs.
+                stage = "uncertain"
+                accepted = await self._native._respond_python_tool(
+                    json.dumps({"_sdk_configured_continuations": updates})
+                )
+                stage = "parked" if accepted else "refused"
+                if not accepted:
+                    raise RuntimeError("Configured parent continuation expired")
+                return await self._checkpoint(active, before_seal=before_seal, _phase=phase)
+            except BaseException as error:
+                known = (
+                    isinstance(error, Exception)
+                    and live_parent()
+                    and stage != "uncertain"
+                    and phase.refused_before_seal
+                    and (len(sealed) == len(children) or child_phase.refused_before_seal)
+                )
+                if known:
+                    try:
+                        if stage == "parked":
+                            if not await self._native._respond_python_tool(
+                                json.dumps(
+                                    {
+                                        "_sdk_configured_continuations": updates,
+                                        "rollback": True,
+                                    }
+                                )
+                            ):
+                                raise InteractionExpiredError(
+                                    "Configured parent continuation rollback expired"
+                                )
+                        await recover(sealed)
+                    except BaseException as cleanup:
+                        _retain_cleanup_error(error, cleanup, _error_contexts(error.__context__))
+                        retire = True
+                else:
+                    retire = True
+                if retire:
+                    phase.state = "uncertain"
+                    self._broken = True
+                    self._closing = True
+                    for child in children:
+                        child.sealing = False
                         child.seal_hold.set()
-                        await asyncio.shield(child.recovery_ready)
-                    raise
-
-            capture = _create_task(capture_configured())
-            self._configured_capture = capture
-            try:
-                return cast("_state_types.SessionState", await _join(capture))
+                raise
             finally:
-                self._configured_capture = None
-        return await self._checkpoint(active, before_seal=before_seal)
+                updates.clear()
+                sealed.clear()
+                del child, descendant, child_usage
 
-    def _check_portable_capture(self, *, allow_idle_storage: bool = False) -> None:
+        capture = _create_task(capture_configured())
+        self._configured_capture = capture
+        try:
+            return cast("_state_types.SessionState", await _join(capture))
+        except BaseException as error:
+            if retire:
+                # The capture task has joined. Release this ownership pointer
+                # before joining the ordinary scope-close owner, including a
+                # concurrent close already waiting for this same capture.
+                if self._configured_capture is capture:
+                    self._configured_capture = None
+                await _close_after_error(error, self.aclose)
+            raise
+        finally:
+            if self._configured_capture is capture:
+                self._configured_capture = None
+
+    def _check_portable_capture(
+        self, *, allow_idle_storage: bool = False, idle_snapshot: bool = False
+    ) -> None:
+        dynamic = getattr(self, "_runtime_handoff_profiles", None)
+        if dynamic:
+            status = json.loads(self._native._runtime_handoff_checkpoint_status())
+            admitted = set(status["ids"])
+            enrolled = set(status["enrolled"])
+            unknown = dynamic - admitted
+            if unknown and self._active is not None:
+                raise CapabilityError("An in-flight runtime handoff target cannot be checkpointed")
+            for key in unknown:
+                runtime = self._profiles.pop(key, None)
+                if runtime is not None:
+                    identity = (key, runtime.catalog.generation)
+                    self._profile_catalogs.pop(identity, None)
+                    self._catalog_bindings.pop(identity, None)
+                dynamic.discard(key)
+            if admitted - enrolled:
+                raise CapabilityError(
+                    "Runtime-created handoff targets require Session.update(agent=target)"
+                )
+        if self._has_distinct_profile_sources and not (
+            idle_snapshot and self._portable_profile_workspaces and self._active is None
+        ):
+            raise CapabilityError("Per-Agent Environment sources require provider state capture")
         if self._realtime is not None:
             raise CapabilityError("Close the Realtime connection before capturing a checkpoint")
         if self._active is not None and self._active.budget is not None:
@@ -19890,6 +21647,7 @@ class Session(Generic[ContextT, OutputT]):
         fork: bool = False,
         probe: bool = False,
         managed_retire: bool = False,
+        _phase: _CheckpointPhase | None = None,
     ) -> _state_types.SessionState:
         from .state import SessionState
 
@@ -19909,7 +21667,7 @@ class Session(Generic[ContextT, OutputT]):
             await asyncio.gather(*(asyncio.shield(task) for task in continuations))
         with _private_task(
             self._capture_checkpoint(
-                active, before_seal, fork, probe=probe, managed_retire=managed_retire
+                active, before_seal, fork, probe=probe, managed_retire=managed_retire, _phase=_phase
             )
         ) as (
             pending,
@@ -19933,8 +21691,24 @@ class Session(Generic[ContextT, OutputT]):
         *,
         probe: bool = False,
         managed_retire: bool = False,
+        _phase: _CheckpointPhase | None = None,
     ) -> str:
-        from .state import SessionState, _ManualContinuation
+        from .state import SessionState, _ManualContinuation, _passive_pending_items
+
+        if self._portable_profile_workspaces:
+            from .sandbox import _portable_workspace_identity
+
+            for profile_id, opening_identity in self._portable_profile_workspaces.items():
+                runtime = self._profiles[profile_id]
+                if (
+                    await _portable_workspace_identity(
+                        runtime.environment_source, runtime.environment
+                    )
+                    != opening_identity
+                ):
+                    raise CapabilityError("Cannot capture a changed Agent workspace identity")
+
+        passive: object = None
 
         drain_budget_usage = (
             active is not None
@@ -19985,6 +21759,7 @@ class Session(Generic[ContextT, OutputT]):
         native_sealed = False
         pre_seal_refused = False
         model_attempt: dict[str, Any] | None = None
+        remembered_mcp = {} if fork else json.loads(self._native._export_mcp_approval_choices())
         try:
             if active is None:
                 idle_mcp = self._mcp_tools
@@ -20006,6 +21781,7 @@ class Session(Generic[ContextT, OutputT]):
                             native_agents=self._native_agents,
                             handoffs=self._effective_handoffs(),
                             project_guidance=self._project_guidance,
+                            distinct_file_search=self._distinct_file_search,
                         )
                         bound = {tool._ref: tool for tool in self._bound_tools}
                         selected = tuple(bound[tool.ref] for tool in python)
@@ -20043,6 +21819,10 @@ class Session(Generic[ContextT, OutputT]):
                         raise
                     raise NativeError("Native checkpoint readiness could not be verified") from None
                 payload = json.loads(encoded)
+                if (passive := payload.pop("_passive_pending_input", None)) is not None:
+                    if fork:
+                        raise RuntimeError("fork requires settled staged input")
+                    _passive_pending_items(passive)
                 if (retry := payload.pop("_staged_manual_retry", None)) is not None:
                     if fork:
                         raise RuntimeError("fork requires settled staged input")
@@ -20055,16 +21835,63 @@ class Session(Generic[ContextT, OutputT]):
                         or continuation.turn_id != saved.native_continuation.turn_id
                     ):
                         raise NativeError("Staged retry does not match its original checkpoint")
-                    return saved.model_copy(
-                        update={
-                            "native_continuation": continuation,
-                            "remembered_approvals": self._current_remembered_approvals(),
-                            "application_tool_outputs": [
-                                record.model_copy(deep=True)
-                                for record in self._application_tool_outputs
-                            ],
+                    if payload["source_session_id"] != saved.source_session_id:
+                        raise NativeError("Staged retry changed its native source session")
+                    # Preserve the operation's SDK envelope, but capture current
+                    # canonical data. A terminal response can accept only some
+                    # staged originals before a later observer rejects it.
+                    captured = saved.model_dump(mode="json")
+                    for field in (
+                        "codex_revision",
+                        "source_session_id",
+                        "history",
+                        "root_metadata",
+                        "descendants",
+                        "interrupted_thread_ids",
+                    ):
+                        captured[field] = payload[field]
+                    for field in (
+                        "root_memory_mode",
+                        "root_checklist",
+                        "root_goal",
+                        "root_code_mode",
+                        "managed_tool_specs",
+                        "agent_environment_policy_digest",
+                    ):
+                        captured[field] = payload.get(field)
+                    captured["root_tool_origins"] = payload.get("root_tool_origins", {})
+                    captured["agent_options"] = {
+                        key: value
+                        for key, value in saved.agent_options.items()
+                        if key
+                        in {
+                            "_sdk_default_tools",
+                            "_sdk_default_mcp_resources",
+                            "_sdk_output_override",
+                            "_sdk_configured_produced_prefix",
                         }
-                    ).to_json()
+                    }
+                    captured.update(
+                        native_continuation=continuation.model_dump(mode="json"),
+                        remembered_approvals=[
+                            item.model_dump(mode="json")
+                            for item in self._current_remembered_approvals()
+                        ],
+                        remembered_mcp_approvals=remembered_mcp,
+                        application_tool_outputs=[
+                            record.model_dump(mode="json")
+                            for record in self._application_tool_outputs
+                        ],
+                    )
+                    if self._codex_login_binding is not None:
+                        captured["codex_login_binding"] = self._codex_login_binding
+                        for thread in (captured, *captured["descendants"]):
+                            for item in thread["history"]:
+                                if item["type"] == "session_meta":
+                                    item["payload"].pop("creator_account_id", None)
+                                    item["payload"].pop("creator_user_id", None)
+                    _redact_checkpoint_executor_receipts(captured)
+                    return SessionState.model_validate_json(json.dumps(captured)).to_json()
                 if fork:
                     if payload["descendants"]:
                         raise RuntimeError("fork cannot copy conversations with native descendants")
@@ -20100,7 +21927,11 @@ class Session(Generic[ContextT, OutputT]):
                                 "thread_id": payload["source_session_id"],
                             }
             else:
+                if _phase is not None:
+                    _phase.state = "sealing"
                 seal_options = {"drain_events": True} if drain_budget_usage else {}
+                if self._capture_produced_checkpoint_prefix:
+                    seal_options["include_produced_prefix"] = True
                 if active.output.mode == "native":
                     encoded = await self._native._seal_manual(
                         json.dumps(active.output.schema),
@@ -20118,8 +21949,15 @@ class Session(Generic[ContextT, OutputT]):
                         "The active submission is not a settled manual boundary"
                     )
                 native_sealed = True
+                if _phase is not None:
+                    _phase.state = "sealed"
                 payload = sealed["checkpoint"]
                 model_attempt = sealed["model_attempt"]
+                if self._capture_produced_checkpoint_prefix:
+                    self._produced_prefix = self._produced_prefix.extend(
+                        sealed.get("produced_prefix") or "[]",
+                        replayed_calls=frozenset(payload["native_continuation"]["reply_order"]),
+                    )
             if active is not None:
                 if payload is None:
                     pre_seal_refused = True
@@ -20137,6 +21975,19 @@ class Session(Generic[ContextT, OutputT]):
             # Current launch options are authority. Saved options may hold MCP
             # endpoints or literal credentials.
             payload["agent_options"] = {}
+            enrollment = payload.pop("_sdk_runtime_enrollment", None)
+            if enrollment is not None:
+                payload["agent_options"]["_sdk_runtime_enrollment"] = enrollment
+            if passive is not None:
+                payload["agent_options"]["_sdk_pending_input"] = passive
+            if active is not None and self._produced_prefix.count:
+                payload["agent_options"]["_sdk_configured_produced_prefix"] = {
+                    "source_session_id": payload["source_session_id"],
+                    "turn_id": payload["native_continuation"]["turn_id"],
+                    "items": self._produced_prefix.encode(),
+                }
+            if remembered_mcp:
+                payload["remembered_mcp_approvals"] = remembered_mcp
             remembered = self._current_remembered_approvals()
             if remembered and not fork:
                 payload["remembered_approvals"] = [
@@ -20174,6 +22025,7 @@ class Session(Generic[ContextT, OutputT]):
                     native_agents=self._native_agents,
                     handoffs=self._effective_handoffs(),
                     project_guidance=self._project_guidance,
+                    distinct_file_search=self._distinct_file_search,
                 )
                 default_refs = _selected_tool_refs(
                     self._default_tools,
@@ -20183,6 +22035,7 @@ class Session(Generic[ContextT, OutputT]):
                     environment=self._executor,
                     native_agents=self._native_agents,
                     project_guidance=self._project_guidance,
+                    distinct_file_search=self._distinct_file_search,
                 )
                 payload["agent_options"]["_sdk_default_tools"] = [
                     {"name": ref.name, "namespace": ref.namespace} for ref in default_refs
@@ -20253,6 +22106,14 @@ class Session(Generic[ContextT, OutputT]):
                 self._sealed_checkpoint = raw
             return raw
         except BaseException as error:
+            if _phase is not None and _phase.state != "preseal":
+                _phase.state = (
+                    "refused"
+                    if pre_seal_refused and not self._reader.done()
+                    else "sealed"
+                    if native_sealed
+                    else "uncertain"
+                )
             if active is not None:
                 if (
                     pre_seal_refused or (active.restored_pending and not native_sealed)
@@ -20287,7 +22148,7 @@ class Session(Generic[ContextT, OutputT]):
         cleanup exposes that same owner as error.cleanup. run_sync retains its
         loop until this obligation completes.
         """
-        if self._closed and self._environment_lease is None:
+        if self._closed and self._environment_owner is None:
             if self._scope_close_task is None and self._close_task is not None:
                 # Early native retirement may finish all resources yet report a
                 # cleanup failure. Its first enclosing scope must still observe
@@ -20334,7 +22195,7 @@ class Session(Generic[ContextT, OutputT]):
             if self._interaction_error is not None:
                 raise self._interaction_error
         except BaseException as error:
-            if not self._closed or self._environment_lease is not None:
+            if not self._closed or self._environment_owner is not None:
                 cast(Any, error).cleanup = self
                 if self._sync_cleanup_owner is not None and not self._sync_cleanup_deferred:
                     self._sync_cleanup_deferred = True
@@ -20385,10 +22246,10 @@ class Session(Generic[ContextT, OutputT]):
         try:
             await self._aclose()
         except BaseException as error:
-            if self._resources_retired and self._environment_lease is not None:
+            if self._resources_retired and self._environment_owner is not None:
                 await _close_after_error(error, self._release_provider_lease)
             raise
-        if self._environment_lease is not None:
+        if self._environment_owner is not None:
             await self._release_provider_lease()
 
     async def _close(self) -> None:
@@ -20396,12 +22257,12 @@ class Session(Generic[ContextT, OutputT]):
             if not self._resources_retired:
                 await self._close_session()
         except BaseException as error:
-            if self._resources_retired and self._environment_lease is None:
+            if self._resources_retired and self._environment_owner is None:
                 await _close_after_error(error, self._release_provider_lease)
             else:
                 self._closed = False
             raise
-        if self._environment_lease is None:
+        if self._environment_owner is None:
             await self._release_provider_lease()
 
     async def _release_provider_lease(self) -> None:
@@ -20413,13 +22274,15 @@ class Session(Generic[ContextT, OutputT]):
         if self._repair_session is not None:
             await self._repair_session.aclose()
             self._repair_session = None
-        if self._environment_lease is not None:
-            lease, self._environment_lease = self._environment_lease, None
+        if self._environment_owner is not None:
+            lease, self._environment_owner = self._environment_owner, None
+            self._environment_lease = None
             try:
                 await _release_environment(lease)
             except BaseException as error:
                 await _close_after_error(error, self._retire_provider)
                 raise
+        self._borrowed_sandbox_lease = None
         await _join(asyncio.create_task(self._retire_provider()))
 
     async def _retire_provider(self) -> None:
@@ -20669,6 +22532,10 @@ class Session(Generic[ContextT, OutputT]):
                                     await _close_after_error(error, finish_retirement)
                                     raise
                                 await finish_retirement()
+                                if self._workspace_admissions:
+                                    await asyncio.gather(
+                                        *tuple(self._workspace_admissions), return_exceptions=True
+                                    )
 
         except BaseException as error:
             # Keep the original close failure primary, then its stop-owner errors.

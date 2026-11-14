@@ -1,0 +1,42 @@
+--- a/codex-rs/core/src/session/handoff_history.rs
++++ b/codex-rs/core/src/session/handoff_history.rs
+@@ -129,7 +129,7 @@
+         }
+         let mut drop_rows = HashSet::new();
+         let mut drop_originals = HashSet::new();
+-        for (ordinal, (index, _)) in generated.iter().enumerate() {
++        for (ordinal, (index, source_value)) in generated.iter().enumerate() {
+             if keep.contains(&ordinal) {
+                 continue;
+             }
+@@ -145,20 +145,21 @@
+                         "Canonical handoff history can omit only an entire settled current tool pair",
+                     ));
+                 }
+-                // The native suffix is pinned by the handoff sampling frontier.
+-                // Reject ambiguous equality instead of editing an earlier use
+-                // of the same call ID or dropping an unrelated raw record.
+-                // The live executor tracks success separately from the recorded item.
+-                let mut recorded = row.clone();
+-                if let ResponseItem::FunctionCallOutput { output, .. } = &mut recorded.item {
+-                    output.success = None;
+-                }
++                // Match the entire recorded payload at the native sampling frontier.
++                // The live and replayed Rust projections carry different transient
++                // execution fields. Ambiguous recorded occurrences must stay intact.
+                 current
+                     .items
+                     .iter()
+                     .enumerate()
+                     .filter_map(|(index, original)| {
+-                        (original.projection.as_ref() == Some(&recorded)).then_some(index)
++                        let projection = original.projection.as_ref()?;
++                        (droppable_function_pair_part(projection)
++                            == droppable_function_pair_part(row)
++                            && projection.item.id() == row.item.id()
++                            && serde_json::from_str::<serde_json::Value>(&original.original)
++                                .is_ok_and(|value| &value == source_value))
++                        .then_some(index)
+                     })
+                     .collect::<Vec<_>>()
+             } else {

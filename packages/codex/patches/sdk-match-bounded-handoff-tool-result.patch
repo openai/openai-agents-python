@@ -1,0 +1,57 @@
+--- a/codex-rs/core/src/session/handoff_history.rs
++++ b/codex-rs/core/src/session/handoff_history.rs
+@@ -39,6 +39,28 @@
+         return None;
+     };
+     (!id.is_empty()).then_some((id, is_call))
++}
++
++/// Match the full recorded payload, substituting only the Core-projected body
++/// when history admission truncated a function result for the model window.
++fn matches_recorded_function_payload(
++    raw: &str,
++    projected: &ResponseItem,
++    source: &serde_json::Value,
++) -> bool {
++    let Ok(mut recorded) = serde_json::from_str::<serde_json::Value>(raw) else {
++        return false;
++    };
++    if let ResponseItem::FunctionCallOutput { output, .. } = projected {
++        let Some(body) = recorded.get_mut("output") else {
++            return false;
++        };
++        let Ok(projected_body) = serde_json::to_value(output) else {
++            return false;
++        };
++        *body = projected_body;
++    }
++    &recorded == source
+ }
+ 
+ impl Session {
+@@ -145,9 +167,8 @@
+                         "Canonical handoff history can omit only an entire settled current tool pair",
+                     ));
+                 }
+-                // Match the entire recorded payload at the native sampling frontier.
+-                // The live and replayed Rust projections carry different transient
+-                // execution fields. Ambiguous recorded occurrences must stay intact.
++                // Resolve only the occurrence pinned by the native sampling frontier.
++                // Reject multiple matching records even when truncation makes their bodies equal.
+                 current
+                     .items
+                     .iter()
+@@ -157,8 +178,11 @@
+                         (droppable_function_pair_part(projection)
+                             == droppable_function_pair_part(row)
+                             && projection.item.id() == row.item.id()
+-                            && serde_json::from_str::<serde_json::Value>(&original.original)
+-                                .is_ok_and(|value| &value == source_value))
++                            && matches_recorded_function_payload(
++                                &original.original,
++                                &projection.item,
++                                source_value,
++                            ))
+                         .then_some(index)
+                     })
+                     .collect::<Vec<_>>()

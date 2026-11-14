@@ -90,6 +90,7 @@ def _capture_opening_agent(
         compaction=agent.compaction,
         before_complete=contributions.before_complete,
         on_lifecycle=agent.on_lifecycle,
+        on_tool_lifecycle=agent.on_tool_lifecycle,
         tool_batch_completion=agent.tool_batch_completion,
         input_guardrails=agent.input_guardrails,
         output_guardrails=agent.output_guardrails,

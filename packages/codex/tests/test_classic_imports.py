@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 def run_isolated(code: str, *, no_site: bool = False) -> subprocess.CompletedProcess[str]:
-    environment = dict(os.environ, PYTHONPATH=str(ROOT / "src"))
+    source_paths = (ROOT / "src", ROOT / "packages/codex/src")
+    environment = dict(os.environ, PYTHONPATH=os.pathsep.join(map(str, source_paths)))
     return subprocess.run(
         [sys.executable, *(["-S"] if no_site else []), "-c", code],
         env=environment,
@@ -29,6 +30,31 @@ def test_native_package_without_classic_dependencies() -> None:
         "import agents, sys; assert agents.__all__; "
         "assert not any(x.startswith('agents.classic') for x in sys.modules)",
         no_site=True,
+    )
+
+
+def test_native_opening_without_classic_dependencies() -> None:
+    run_isolated(
+        """
+import importlib.abc
+import sys
+from types import SimpleNamespace
+
+class NoClassic(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "agents.classic" or fullname.startswith("agents.classic."):
+            raise ModuleNotFoundError("Classic dependencies unavailable", name=fullname)
+
+sys.meta_path.insert(0, NoClassic())
+from _agents_codex.session import _capture_opening_workspaces
+
+profile = SimpleNamespace(declaration=SimpleNamespace(environment=None))
+for environment in (None, SimpleNamespace()):
+    assert _capture_opening_workspaces(
+        (profile,), environment, has_persistent_or_provider_history=False,
+    ) == {}
+assert "agents.classic" not in sys.modules
+""",
     )
 
 

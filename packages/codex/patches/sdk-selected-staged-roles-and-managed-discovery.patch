@@ -1,0 +1,198 @@
+diff --git a/codex-rs/codex-mcp/src/rmcp_client.rs b/codex-rs/codex-mcp/src/rmcp_client.rs
+index ed3cbb1d..380890ef 100644
+--- a/codex-rs/codex-mcp/src/rmcp_client.rs
++++ b/codex-rs/codex-mcp/src/rmcp_client.rs
+@@ -58,6 +58,7 @@ use codex_connectors::ConnectorRuntimeFetchSource;
+ use codex_exec_server::Environment;
+ use codex_login::AuthChangeState;
+ use codex_otel::auth_storage::AuthStorageOriginator;
++use codex_otel::sdk_trace;
+ use codex_protocol::mcp::ClientMcpExtensions;
+ use codex_protocol::mcp::McpServerInfo;
+ use codex_protocol::protocol::Event;
+@@ -750,26 +751,62 @@ pub(crate) async fn list_tools_for_client_uncached(
+     server_instructions: Option<&str>,
+ ) -> Result<Vec<ToolInfo>> {
+     let fetch_start = Instant::now();
+-    let tools = collect_paginated_with_limit("tools/list", timeout, catalog_item_limit, |params| {
+-        let client = Arc::clone(client);
+-        async move {
+-            let response = client
+-                .list_tools_with_connector_ids(params, timeout)
+-                .await?;
+-            Ok((response.tools, response.next_cursor))
++    let discovery = start_sdk_mcp_discovery_span(server_name);
++    let result =
++        collect_paginated_with_limit("tools/list", timeout, catalog_item_limit, |params| {
++            let client = Arc::clone(client);
++            async move {
++                let response = client
++                    .list_tools_with_connector_ids(params, timeout)
++                    .await?;
++                Ok((response.tools, response.next_cursor))
++            }
++        })
++        .await;
++    let listed = match result {
++        Ok(listed) => listed,
++        Err(error) => {
++            if let Some(span) = &discovery {
++                span.finish(sdk_trace::ProviderResponseOutcome::Error);
++            }
++            return Err(error);
+         }
+-    })
+-    .await?
+-    .into_iter()
+-    .map(|tool| {
+-        tool_info_from_listed_tool(
+-            server_name,
+-            is_codex_apps_mcp_server,
+-            server_instructions,
+-            tool,
+-        )
+-    })
+-    .collect();
++    };
++    if let Some(span) = &discovery {
++        let data = span.includes_sensitive_data().then(|| {
++            let mut names = Vec::new();
++            let mut remaining = 60 * 1024;
++            for name in listed
++                .iter()
++                .take(16_384)
++                .map(|entry| entry.tool.name.as_ref())
++            {
++                if name.len() > 4_096 {
++                    break;
++                }
++                let size =
++                    serde_json::to_string(name).map_or(remaining + 1, |value| value.len() + 1);
++                if size > remaining {
++                    break;
++                }
++                names.push(name);
++                remaining -= size;
++            }
++            serde_json::json!({"tools": names, "omitted_tool_count": listed.len() - names.len()})
++        });
++        span.finish_with_data(sdk_trace::ProviderResponseOutcome::Ok, data);
++    }
++    let tools = listed
++        .into_iter()
++        .map(|tool| {
++            tool_info_from_listed_tool(
++                server_name,
++                is_codex_apps_mcp_server,
++                server_instructions,
++                tool,
++            )
++        })
++        .collect();
+     if is_codex_apps_mcp_server {
+         emit_duration(
+             MCP_TOOLS_FETCH_UNCACHED_DURATION_METRIC,
+@@ -786,6 +823,17 @@ pub(crate) async fn list_tools_for_client_uncached(
+     Ok(tools)
+ }
+ 
++fn start_sdk_mcp_discovery_span(server: &str) -> Option<sdk_trace::ProviderResponseSpan> {
++    let policy = sdk_trace::current_scope_policy()?;
++    // Synchronous host policy and custom IDs require admission by the host loop.
++    // A runtime-only observer span cannot stand in for that admission.
++    if policy.disabled || policy.named_tool_policy {
++        return None;
++    }
++    let parent = sdk_trace::ContextLease::capture()?;
++    sdk_trace::start_sdk_semantic_span(&parent, None, server.to_owned(), "mcp_tools").ok()
++}
++
+ /// Filters disabled connectors, presents declared Codex Apps file parameters to the model as
+ /// local-path inputs, and adds plugin names to each tool. Plugin membership is resolved by
+ /// connector ID, falling back to the MCP server when absent.
+diff --git a/codex-rs/core/src/session/staged_input_terminal.rs b/codex-rs/core/src/session/staged_input_terminal.rs
+index e79bf0c1..b72d4f0c 100644
+--- a/codex-rs/core/src/session/staged_input_terminal.rs
++++ b/codex-rs/core/src/session/staged_input_terminal.rs
+@@ -427,18 +427,26 @@ pub(crate) async fn append(
+             if originals.iter().any(|item| {
+                 !matches!(
+                     item, ResponseItem::Message { role, content, .. }
+-                    if role == "user" && content.iter().all(|part|
++                    if matches!(role.as_str(), "user" | "developer" | "system") && content.iter().all(|part|
+                         matches!(part, ContentItem::InputText { .. }))
+                 )
+             }) {
+                 return Err(
+-                    "Terminal staged admission currently requires text user rows".to_string(),
++                    "Terminal staged admission currently requires text message rows".to_string(),
+                 );
+             }
+             let annotated = originals
+                 .iter()
+                 .cloned()
+-                .map(|item| session.annotate_client_response_item(item))
++                .map(|item| {
++                let caller_instruction = matches!(&item, ResponseItem::Message { role, .. }
++                    if matches!(role.as_str(), "developer" | "system"));
++                let mut envelope = session.annotate_client_response_item(item);
++                if caller_instruction {
++                    envelope.metadata.get_or_insert_default().client_authored = true;
++                }
++                envelope
++            })
+                 .collect();
+             let (prepared, images) = session
+                 .prepare_annotated_conversation_items_for_history(
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+index c8e4afcd..6fc65cd9 100644
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -776,6 +776,19 @@ fn start_trace_span_options(
+     })
+ }
+ 
++/// Process-local ancestry for an SDK-owned thread opening.
++pub struct OpeningContext(Context);
++
++impl OpeningContext {
++    pub fn resolve(token: &str) -> Result<Self, String> {
++        context(token).map(explicit_submission_context).map(Self)
++    }
++
++    pub async fn scope<F: std::future::Future>(self, future: F) -> F::Output {
++        future.with_context(self.0).await
++    }
++}
++
+ /// One SDK response scope around a logical model round and all of its attempts.
+ /// Construction reuses the public scope's live-parent, ID and export validation.
+ pub struct ProviderResponseSpan {
+@@ -838,6 +851,14 @@ impl ProviderResponseSpan {
+     }
+ 
+     pub fn finish(&self, outcome: ProviderResponseOutcome) {
++        self.finish_with_data(outcome, None);
++    }
++
++    pub fn includes_sensitive_data(&self) -> bool {
++        policy_for_context(&self.context).is_some_and(|policy| policy.include_sensitive_data)
++    }
++
++    pub fn finish_with_data(&self, outcome: ProviderResponseOutcome, data: Option<Value>) {
+         if self.finished.swap(true, Ordering::AcqRel) {
+             return;
+         }
+@@ -846,7 +867,11 @@ impl ProviderResponseSpan {
+             ProviderResponseOutcome::Error => "error",
+             ProviderResponseOutcome::Cancelled => "cancelled",
+         };
+-        let _ = end_trace_span(&self.key, &json!({"status": status}).to_string());
++        let outcome = match data {
++            Some(data) => json!({"status": status, "data": data}),
++            None => json!({"status": status}),
++        };
++        let _ = end_trace_span(&self.key, &outcome.to_string());
+     }
+ }
+ 

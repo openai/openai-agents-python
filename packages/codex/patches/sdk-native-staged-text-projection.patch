@@ -1,0 +1,131 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 67ab316d410af2a89fb2ebe81752f6e19601ed81..40357fabae732ba82b4d789decf40fb92ae6b1ee 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1476,7 +1476,8 @@ impl ModelClient {
+                     let (canonical, origins) = source.0.current_projection()
+                         .map_err(CodexErr::InvalidRequest)?;
+                     let mut projection = provider_history::sampling_input_projection_from_origins(
+-                        &canonical, &prompt.input, &origins, indices, prefix.len(), text_receipt,
++                        &canonical, &prompt.input, &origins, indices, prefix.len(),
++                        source.0.base_input().len(), text_receipt,
+                     )?;
+                     if let Some(captured) = &prompt.canonical_history_input {
+                         let base = provider_history::canonical_input_projection(
+diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
+index d02a8b28fbabc6d8f4d4cf814d85639dad91c526..cf537ed2b1991fd93cba21a2000c64343106cde5 100644
+--- a/codex-rs/core/src/client/provider_history.rs
++++ b/codex-rs/core/src/client/provider_history.rs
+@@ -637,6 +637,7 @@ pub(super) fn sampling_input_projection_from_origins(
+     origins: &[Option<usize>],
+     wire_input_indices: Vec<usize>,
+     prefix_len: usize,
++    staged_start: usize,
+     receipt: Option<&TextReceiptCache>,
+ ) -> Result<codex_api::ProviderHistoryInputProjection> {
+     check_items(items.iter(), receipt)?;
+@@ -655,7 +656,11 @@ pub(super) fn sampling_input_projection_from_origins(
+         let user = matches!(item, ResponseItem::Message { role, .. } if role == "user");
+         match origin {
+             Some(index) => {
+-                if projection.item_sha256.get(*index) != Some(digest) {
++                if projection.item_sha256.get(*index) != Some(digest)
++                    && !(*index >= staged_start
++                        && canonical_items.get(*index)
++                            .is_some_and(|original| original.matches_user_text_projection(item)))
++                {
+                     return Err(invalid("Sampling origin does not match its canonical occurrence"));
+                 }
+                 if !delivered.insert(*index) && user {
+@@ -1687,13 +1692,13 @@ mod tests {
+         let original = vec![first.clone(), first.clone()];
+         let projection = sampling_input_projection_from_origins(
+             &original, &[first.clone(), first.clone()],
+-            &[Some(1), Some(0)], vec![0, 1], 0,
++            &[Some(1), Some(0)], vec![0, 1], 0, original.len(),
+             Some(&cache),
+         ).unwrap();
+         assert_eq!(projection.delivered_input_indices, vec![0, 1]);
+         assert!(sampling_input_projection_from_origins(
+             &original, &[first.clone(), first],
+-            &[Some(0), Some(0)], vec![0, 1], 0,
++            &[Some(0), Some(0)], vec![0, 1], 0, original.len(),
+             Some(&cache),
+         ).is_err());
+     }
+@@ -1704,13 +1709,13 @@ mod tests {
+         let cache = TextReceiptCache::default();
+         for origins in [vec![], vec![None], vec![Some(1)]] {
+             assert!(sampling_input_projection_from_origins(
+-                &original, &original, &origins, vec![0], 0,
++                &original, &original, &origins, vec![0], 0, original.len(),
+                 Some(&cache),
+             ).is_err());
+         }
+         assert!(sampling_input_projection_from_origins(
+             &original, &[input_message("msg_a", "changed")],
+-            &[Some(0)], vec![0], 0,
++            &[Some(0)], vec![0], 0, original.len(),
+             Some(&cache),
+         ).is_err());
+     }
+diff --git a/codex-rs/core/src/session/staged_input_sources.rs b/codex-rs/core/src/session/staged_input_sources.rs
+index 7d65cff10b7fa046a0a2da4d644e12664b4b5600..3f9a10afeb97b443f9a791d1b3e3d766726ec2bc 100644
+--- a/codex-rs/core/src/session/staged_input_sources.rs
++++ b/codex-rs/core/src/session/staged_input_sources.rs
+@@ -22,10 +22,14 @@ pub(crate) fn compose(
+                 let original = before
+                     .get(*index)
+                     .ok_or("Context source map is outside its captured input")?;
+-                if original != item {
++                let origin = origins[*index];
++                if original != item
++                    && !(origin.is_some_and(|source| staged_origins.contains(&source))
++                        && original.matches_user_text_projection(item))
++                {
+                     return Err("Context source map refers to a changed input item".into());
+                 }
+-                origins[*index]
++                origin
+             }
+             None => None,
+         };
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index 25b78d312cd43d36889dbedae0d0da362f1e12c9..4454b66076ae22e716702dcd433823f14b323ac5 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -1602,6 +1602,34 @@ pub enum ProgramOutputStatus {
+ }
+ 
+ impl ResponseItem {
++    /// Apply an exact user message's text-only sampling replacement while
++    /// retaining the native identity and other original fields.
++    pub fn with_user_text_projection(&self, content: Vec<ContentItem>) -> Option<Self> {
++        let Self::Message { role, content: original, .. } = self else {
++            return None;
++        };
++        if role != "user"
++            || content.len() != original.len()
++            || !original.iter().chain(&content).all(|part| matches!(part, ContentItem::InputText { .. }))
++        {
++            return None;
++        }
++        let mut projected = self.clone();
++        let Self::Message { content: target, .. } = &mut projected else {
++            unreachable!("cloning a message preserves the variant");
++        };
++        *target = content;
++        Some(projected)
++    }
++
++    /// Check a replacement previously bound to the native source occurrence.
++    pub fn matches_user_text_projection(&self, item: &Self) -> bool {
++        let Self::Message { content, .. } = item else {
++            return false;
++        };
++        self.with_user_text_projection(content.clone()).as_ref() == Some(item)
++    }
++
+     /// Returns whether this item is an ordinary user-role message.
+     pub fn is_user_message(&self) -> bool {
+         matches!(self, Self::Message { role, .. } if role == "user")

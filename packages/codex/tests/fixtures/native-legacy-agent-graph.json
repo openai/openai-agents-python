@@ -1,0 +1,57 @@
+{
+  "root_id": "a",
+  "expected_fingerprint": "d0b4f3f31a1f7d01f5e503372622840257e3a57b52b6b04f99bcc5753f7326b0",
+  "roster": [
+    {
+      "id": "a",
+      "model": {
+        "model": "",
+        "reasoning_effort": null,
+        "reasoning_summary": null,
+        "service_tier": null,
+        "tool_choice": null,
+        "personality": null
+      },
+      "instructions": "Root",
+      "tools": [
+        {
+          "type": "function",
+          "name": "lookup",
+          "description": "Lookup A",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "deferLoading": false
+        }
+      ],
+      "handoffs": {
+        "transfer_to_b": "b"
+      },
+      "output_fingerprint": "output-a",
+      "mcp_servers": {
+        "remote": {
+          "url": "https://first.invalid",
+          "headers": {
+            "Authorization": "first"
+          }
+        }
+      }
+    },
+    {
+      "id": "b",
+      "model": {
+        "model": "destination",
+        "reasoning_effort": null,
+        "reasoning_summary": null,
+        "service_tier": null,
+        "tool_choice": null,
+        "personality": null
+      },
+      "instructions": "Destination",
+      "tools": [],
+      "output_fingerprint": "output-b"
+    }
+  ]
+}

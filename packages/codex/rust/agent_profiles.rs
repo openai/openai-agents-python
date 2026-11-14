@@ -27,6 +27,9 @@ use crate::application_instructions::{Accepted, InstructionFile};
 use crate::python_tools::{ProfileCatalog, PythonTools};
 use crate::tool_callers::ToolDeclarations;
 
+mod runtime_enrollment;
+pub(crate) use runtime_enrollment::Enrollment as RuntimeEnrollment;
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OpeningProfiles {
@@ -36,6 +39,8 @@ pub(crate) struct OpeningProfiles {
     // Fresh presentation callbacks never participate in the effect-authority fingerprint.
     #[serde(default)]
     pub(crate) input_preparations: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub(crate) runtime_enrollment: Option<RuntimeEnrollment>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -46,7 +51,16 @@ pub(crate) struct ProfileSpec {
     native_provider_id: Option<String>,
     model: AgentProfileModelSettings,
     instructions: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_instructions: Option<String>,
+    #[serde(default)]
+    workspace_preparation: bool,
+    /// Current host-owned workspace identity. It never carries a provider locator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_identity: Option<String>,
     tools: ToolDeclarations,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hosted_tools: Option<codex_extension_api::HostedModelTools>,
     #[serde(default)]
     manual_slots: Vec<usize>,
     #[serde(default)]
@@ -108,6 +122,45 @@ pub(crate) struct ProfileSpec {
 struct DecisionHandoffSpec {
     slot: usize,
     targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    factories: Vec<String>,
+}
+
+fn is_scoped_hosted_tool(tool: &codex_tools::HostedToolSpec) -> bool {
+    matches!(
+        tool,
+        codex_tools::HostedToolSpec::FileSearch(_)
+            | codex_tools::HostedToolSpec::CodeInterpreter(_)
+    )
+}
+
+fn insert_profile_hosted_tools(
+    thread: &CodexThread,
+    profile: &ProfileSpec,
+    data: &mut ExtensionDataInit,
+) {
+    let common = thread
+        .thread_extension_data()
+        .get::<codex_extension_api::HostedModelTools>();
+    let scoped = profile.hosted_tools.as_ref();
+    if scoped.or(common.as_deref()).is_some_and(|hosted| {
+        hosted
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, codex_tools::HostedToolSpec::FileSearch(_)))
+    }) && !crate::python_tools::tool_names(&profile.tools)
+        .contains(&ToolName::plain("file_search").with_default_namespace())
+    {
+        data.insert(codex_extension_api::AgentProfileHostedFileSearchRef);
+    }
+    if let Some(scoped) = scoped {
+        let mut hosted = common
+            .map(|tools| tools.as_ref().clone())
+            .unwrap_or_default();
+        hosted.tools.retain(|tool| !is_scoped_hosted_tool(tool));
+        hosted.tools.extend(scoped.tools.iter().cloned());
+        data.insert(hosted);
+    }
 }
 
 impl ProfileSpec {
@@ -122,12 +175,131 @@ impl ProfileSpec {
 pub(crate) struct DecisionHandoffSelection {
     targets: HashSet<String>,
     selected: Mutex<BTreeMap<(String, String), String>>,
+    factories: HashSet<String>,
+    name: String,
+    thread: String,
+    source: AgentProfileReceipt,
+    dynamic: Mutex<BTreeMap<(String, String), Option<DynamicHandoffStage>>>,
 }
+
+fn runtime_callback_grant() -> ToolName {
+    ToolName::namespaced("_agents_sdk", "runtime_handoff_callbacks")
+}
+
+type FactoryHandoffKey = (String, String, u64, String, String, String);
+
+#[derive(Default)]
+struct FactoryHandoffIndex {
+    // Only the accepted-result hook moves a prepared payload into this live map.
+    entries: Mutex<BTreeMap<FactoryHandoffKey, Option<DynamicHandoffStage>>>,
+}
+
+impl codex_extension_api::LiveAgentHandoffAdmission for FactoryHandoffIndex {
+    fn consume(
+        &self,
+        thread_id: &str,
+        source: &AgentProfileReceipt,
+        turn: &str,
+        call: &str,
+        tool: &ToolName,
+        target: &str,
+    ) -> bool {
+        let key = (
+            thread_id.into(),
+            source.profile_id.clone(),
+            source.epoch,
+            turn.into(),
+            call.into(),
+            tool.clone().with_default_namespace().to_string(),
+        );
+        // Keep validation, one-time claim, failed-payload retirement, and graph
+        // publication under this one native authority mutex.
+        let mut entries = self.entries.lock().expect("Factory handoff index poisoned");
+        let stage = entries.get_mut(&key).and_then(Option::take);
+        let Some(stage) = stage else {
+            return false;
+        };
+        let Some(thread) = stage.base.thread.upgrade() else {
+            return false;
+        };
+        let Some(current) = thread.thread_extension_data().get::<Arc<AgentProfiles>>() else {
+            return false;
+        };
+        if stage.target != target || !Arc::ptr_eq(current.as_ref(), &stage.base) {
+            return false;
+        }
+        thread.thread_extension_data().insert(stage.prepared);
+        true
+    }
+}
+
+fn factory_handoff_index(thread: &CodexThread) -> Arc<FactoryHandoffIndex> {
+    if let Some(index) = thread
+        .thread_extension_data()
+        .get::<Arc<FactoryHandoffIndex>>()
+    {
+        return index.as_ref().clone();
+    }
+    let index = Arc::new(FactoryHandoffIndex::default());
+    thread.thread_extension_data().insert(index.clone());
+    index
+}
+
+pub(crate) fn retire_factory_handoffs(thread: &ExtensionData, turn: &ExtensionData) {
+    if let Some(index) = thread.get::<Arc<FactoryHandoffIndex>>() {
+        index.entries.lock().expect("Factory handoff index poisoned")
+            .retain(|key, _| key.0 != thread.level_id() || key.3 != turn.level_id());
+    }
+}
+
+fn original_factory_targets(
+    opening: &OpeningProfiles, source: &str,
+) -> HashMap<ToolName, Vec<String>> {
+    opening.roster.iter().find(|profile| profile.id == source)
+        .map(|profile| profile.decision_handoffs.iter()
+            .filter(|(_, entry)| !entry.factories.is_empty())
+            .map(|(name, entry)| (
+                ToolName::new(None, name.clone()).with_default_namespace(),
+                entry.targets.clone(),
+            )).collect())
+        .unwrap_or_default()
+}
+
+struct DynamicHandoffCleanup {
+    selection: Arc<DecisionHandoffSelection>,
+    turn: String,
+    call: String,
+    keep: bool,
+}
+
+impl Drop for DynamicHandoffCleanup {
+    fn drop(&mut self) {
+        if !self.keep {
+            self.selection
+                .dynamic
+                .lock()
+                .expect("Dynamic handoff poisoned")
+                .insert((self.turn.clone(), self.call.clone()), None);
+            self.selection
+                .selected
+                .lock()
+                .expect("Decision selection poisoned")
+                .remove(&(self.turn.clone(), self.call.clone()));
+        }
+    }
+}
+
+struct DynamicHandoffStage {
+    target: String,
+    base: Arc<AgentProfiles>,
+    prepared: Arc<AgentProfiles>,
+}
+
 
 impl DecisionHandoffSelection {
     pub(crate) fn record(&self, turn: &str, call: &str, target: &str) -> Result<()> {
         ensure!(
-            self.targets.contains(target),
+            self.admits(turn, call, target),
             "Decision handoff target is outside its captured roster"
         );
         self.selected
@@ -135,6 +307,63 @@ impl DecisionHandoffSelection {
             .expect("Decision selection poisoned")
             .insert((turn.into(), call.into()), target.into());
         Ok(())
+    }
+
+    fn admits(&self, turn: &str, call: &str, target: &str) -> bool {
+        self.targets.contains(target)
+            || self
+                .dynamic
+                .lock()
+                .expect("Dynamic handoff poisoned")
+                .get(&(turn.into(), call.into()))
+                .is_some_and(|stage| stage.as_ref().is_some_and(|stage| stage.target == target))
+    }
+
+    fn key(&self, turn: &str, call: &str) -> FactoryHandoffKey {
+        (
+            self.thread.clone(),
+            self.source.profile_id.clone(),
+            self.source.epoch,
+            turn.into(),
+            call.into(),
+            ToolName::new(None, self.name.clone())
+                .with_default_namespace()
+                .to_string(),
+        )
+    }
+
+    fn issue(&self, thread: &CodexThread, turn: &str, call: &str, target: &str) -> bool {
+        if self.targets.contains(target) {
+            return true;
+        }
+        // Moving leaves a tombstone: callback content and a second acceptance
+        // cannot reissue this call's native payload.
+        let stage = self
+            .dynamic
+            .lock()
+            .expect("Dynamic handoff poisoned")
+            .insert((turn.into(), call.into()), None)
+            .flatten();
+        let Some(stage) = stage else {
+            return false;
+        };
+        if stage.target != target {
+            return false;
+        }
+        let index = factory_handoff_index(thread);
+        let mut entries = index
+            .entries
+            .lock()
+            .expect("Factory handoff index poisoned");
+        // A root thread owns one live turn; old unclaimed payloads no longer
+        // have an acceptance route and do not extend staging lifetimes.
+        entries.retain(|key, _| key.0 == self.thread && key.3 == turn);
+        let key = self.key(turn, call);
+        if entries.contains_key(&key) {
+            return false;
+        }
+        entries.insert(key, Some(stage));
+        true
     }
 
     fn take(&self, turn: &str, call: &str) -> Option<String> {
@@ -164,6 +393,11 @@ pub(crate) fn decision_handoff_selection(
     Some(Arc::new(DecisionHandoffSelection {
         targets: declaration.targets.iter().cloned().collect(),
         selected: Mutex::new(BTreeMap::new()),
+        factories: declaration.factories.iter().cloned().collect(),
+        name: name.name.clone(),
+        thread: thread.level_id().to_owned(),
+        source: source?.clone(),
+        dynamic: Mutex::new(BTreeMap::new()),
     }))
 }
 
@@ -391,7 +625,23 @@ pub(crate) async fn prepare_environments(
         };
         admitted.insert(profile.id.clone(), environment);
     }
-    let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&policies)?));
+    let mut workspace_identities = BTreeMap::new();
+    for profile in &opening.roster {
+        if let Some(identity) = &profile.workspace_identity {
+            ensure!(
+                identity.len() == 64
+                    && identity.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "Invalid Agent workspace identity"
+            );
+            workspace_identities.insert(&profile.id, identity);
+        }
+    }
+    let policy_bytes = if workspace_identities.is_empty() {
+        serde_json::to_vec(&policies)?
+    } else {
+        serde_json::to_vec(&("profile-workspaces-v1", policies, workspace_identities))?
+    };
+    let digest = format!("{:x}", Sha256::digest(policy_bytes));
     startup.thread_extension_init.insert(ProfileEnvironments {
         profiles: admitted,
         _executor_owners: executor_owners,
@@ -447,7 +697,11 @@ impl OpeningProfiles {
                 ToolName::new(None, name.clone()).with_default_namespace()
                     == tool_name.clone().with_default_namespace()
                     && declaration.targets.contains(&receipt.target_profile_id)
-            }),
+            }) || (!pending && self.runtime_enrollment.as_ref().is_some_and(|enrollment| {
+                enrollment.admits_historical_handoff(
+                    &receipt.source.profile_id, &tool_name.name, &receipt.target_profile_id,
+                )
+            })),
             "Restored handoff is outside its source declaration"
         );
         // Checkpoints cannot authorize a callback for the current turn.
@@ -558,6 +812,22 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
             }),
             "Captured Agent prompted output requires text wire output and guidance"
         );
+        if let Some(hosted) = &profile.hosted_tools {
+            let files = hosted
+                .tools
+                .iter()
+                .filter(|tool| matches!(tool, codex_tools::HostedToolSpec::FileSearch(_)))
+                .count();
+            let code = hosted
+                .tools
+                .iter()
+                .filter(|tool| matches!(tool, codex_tools::HostedToolSpec::CodeInterpreter(_)))
+                .count();
+            ensure!(
+                files <= 1 && code <= 1 && files + code == hosted.tools.len(),
+                "Agent hosted tools require one captured File Search or Code Interpreter per kind"
+            );
+        }
         let mut all_declarations = profile.tools.clone();
         for name in profile.handoffs.keys() {
             if profile.handoff_callbacks.contains_key(name) {
@@ -596,7 +866,7 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
             let targets = declaration.targets.iter().collect::<HashSet<_>>();
             ensure!(
                 !profile.handoffs.contains_key(name)
-                    && !declaration.targets.is_empty()
+                    && (!declaration.targets.is_empty() || !declaration.factories.is_empty())
                     && targets.len() == declaration.targets.len()
                     && targets.iter().all(|target| ids.contains(target.as_str()))
                     && matches!(profile.tools.get(declaration.slot), Some(DynamicToolSpec::Function(spec)) if spec.name == *name)
@@ -629,6 +899,41 @@ fn roster_fingerprint(roster: &[ProfileSpec], root_id: &str) -> Result<String> {
             descriptor["tools"] =
                 serde_json::to_value(profile.tools.without_configured_agent_roles())?;
             descriptor["model"] = serde_json::to_value(profile.model.for_persistence())?;
+            if let Some(hosted) = &profile.hosted_tools {
+                // Scope includes the requested result projection. Wire serialization
+                // intentionally skips these local include flags.
+                descriptor["hosted_tools"] = json!(
+                    hosted
+                        .tools
+                        .iter()
+                        .map(|tool| {
+                            let mut definition = serde_json::to_value(tool)?;
+                            match tool {
+                                codex_tools::HostedToolSpec::FileSearch(config) => {
+                                    definition["include_search_results"] =
+                                        json!(config.include_search_results);
+                                }
+                                codex_tools::HostedToolSpec::CodeInterpreter(config) => {
+                                    definition["include_outputs"] = json!(config.include_outputs);
+                                    if let Some(secrets) = definition
+                                        .pointer_mut("/container/network_policy/domain_secrets")
+                                        .and_then(Value::as_array_mut)
+                                    {
+                                        for secret in secrets {
+                                            if let Some(object) = secret.as_object_mut() {
+                                                object.remove("value");
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            Ok(definition)
+                        })
+                        .collect::<Result<Vec<_>>>()?
+                );
+            }
+
             // Refreshed Session formatter policy; declared input callbacks remain pinned.
             descriptor
                 .as_object_mut()
@@ -642,6 +947,12 @@ fn roster_fingerprint(roster: &[ProfileSpec], root_id: &str) -> Result<String> {
                 .expect("Agent declaration object");
             fields.remove("environment");
             fields.remove("environment_tools");
+            fields.remove("workspace_instructions");
+            if !profile.workspace_preparation {
+                // Keep the fingerprint of checkpoints made before workspace preparation.
+                fields.remove("workspace_preparation");
+            }
+            fields.remove("workspace_identity");
             // Runtime-only policy reset; unchanged declaration compatibility.
             if let Some(controls) = descriptor
                 .pointer_mut("/model/request_controls")
@@ -700,6 +1011,9 @@ pub(crate) fn install_opening(
             .is_none(),
         "Captured Agent graph is already installed"
     );
+    if let Some(enrollment) = &opening.runtime_enrollment {
+        enrollment.validate(&opening)?;
+    }
     for (id, names) in &opening.input_preparations {
         let source = opening
             .roster
@@ -804,7 +1118,7 @@ fn restored_envelope<'a>(
         .as_ref()
         .context("Missing restored Agent metadata")?;
     ensure!(
-        metadata.sdk_agent_graph.as_deref() == Some(opening.fingerprint.as_str()),
+        opening.admits_recorded_graph(metadata.sdk_agent_graph.as_deref())?,
         "Restore requires the exact captured Agent declaration graph"
     );
     let receipt: PersistedProfile = serde_json::from_value(
@@ -815,6 +1129,16 @@ fn restored_envelope<'a>(
     )
     .map_err(|_| anyhow::anyhow!("Invalid restored Agent receipt"))?;
     receipt.validate_presentation()?;
+    ensure!(
+        opening.admits_recorded_profile_graph(
+            &AgentProfileReceipt {
+                profile_id: receipt.profile_id.clone(),
+                epoch: receipt.epoch,
+            },
+            metadata.sdk_agent_graph.as_deref(),
+        )?,
+        "Restored Agent receipt belongs to a different declaration phase"
+    );
     ensure!(
         opening
             .roster
@@ -879,7 +1203,7 @@ pub(crate) fn operation_source(
         };
         if profile_receipt(value)? == source {
             ensure!(
-                metadata.sdk_agent_graph.as_deref() == Some(opening.fingerprint.as_str()),
+                opening.admits_recorded_profile_graph(&source, metadata.sdk_agent_graph.as_deref())?,
                 "Original operation belongs to a different Agent graph"
             );
             ensure!(
@@ -1029,13 +1353,14 @@ struct Reservation {
 }
 
 struct AgentProfiles {
+    runtime_handoffs: bool,
     opening: Arc<OpeningProfiles>,
     environment_policy_digest: Option<String>,
     thread: Weak<CodexThread>,
     tools: Arc<PythonTools>,
     profiles: BTreeMap<String, PreparedProfile>,
     files: Vec<InstructionFile>,
-    reservation: Mutex<Option<Reservation>>,
+    reservation: Arc<Mutex<Option<Reservation>>>,
 }
 
 struct VoiceProfileRegistry {
@@ -1047,6 +1372,247 @@ struct VoiceProfileRegistry {
 struct VoiceGraphAdmission {
     receipt: AgentProfileReceipt,
     previous: Option<Arc<AgentProfiles>>,
+}
+
+pub(crate) fn runtime_handoff_published(thread: &CodexThread) -> bool {
+    thread
+        .thread_extension_data()
+        .get::<Arc<AgentProfiles>>()
+        .is_some_and(|profiles| profiles.runtime_handoffs)
+}
+
+pub(crate) fn stage_runtime_handoff(
+    thread: &CodexThread,
+    tools: &PythonTools,
+    selection: &Arc<DecisionHandoffSelection>,
+    source: &AgentProfileReceipt,
+    turn: &str,
+    call: &str,
+    factory: &str,
+    roster_json: &str,
+    root_id: &str,
+) -> Result<Value> {
+    ensure!(
+        selection.factories.contains(factory),
+        "Runtime handoff factory is outside the callback declaration"
+    );
+    ensure!(
+        thread
+            .thread_extension_data()
+            .get::<VoiceProfileRegistry>()
+            .is_none(),
+        "Runtime handoff cannot share a voice graph"
+    );
+    let current = thread
+        .thread_extension_data()
+        .get::<Arc<AgentProfiles>>()
+        .context("Runtime handoff has no captured graph")?;
+    let current = current.as_ref().clone();
+    let original = current
+        .profiles
+        .get(&source.profile_id)
+        .context("Runtime handoff source is absent")?;
+    let roster = decode_roster(roster_json)?;
+    validate(&roster, root_id)?;
+    ensure!(
+        roster.len() == 1,
+        "Runtime handoff initially admits one target"
+    );
+    let descriptor = &roster[0];
+    ensure!(
+        !current.profiles.contains_key(root_id) && current.profiles.len() < 1024,
+        "Runtime handoff identity is reused or graph capacity exceeded"
+    );
+    ensure!(
+        descriptor.native_provider_id == original.declaration.native_provider_id,
+        "Runtime handoff cannot change its provider route"
+    );
+    ensure!(
+        descriptor.output_fingerprint == original.declaration.output_fingerprint,
+        "Runtime handoff must preserve its output contract"
+    );
+    ensure!(
+        descriptor.environment.is_none()
+            && descriptor.environment_tools.is_none()
+            && descriptor.hosted_tools.is_none()
+            && descriptor.mcp_servers.is_empty()
+            && descriptor.mcp_tools.is_empty()
+            && original.declaration.mcp_servers.is_empty()
+            && descriptor.handoffs.is_empty()
+            && descriptor.decision_handoffs.is_empty()
+            && descriptor
+                .tools
+                .iter()
+                .enumerate()
+                .all(|(slot, tool)| matches!(tool, DynamicToolSpec::Function(_))
+                    && descriptor.tools.configured_agent_role(slot).is_none()),
+        "Runtime handoff target requires an existing runtime envelope and ordinary Python tools"
+    );
+    let flags = [
+        descriptor.selecting_steps,
+        descriptor.transform_context,
+        descriptor.before_compact,
+        descriptor.before_complete,
+        descriptor.tool_batch_completion,
+        descriptor.post_turn_compact,
+    ];
+    let permission = thread
+        .thread_extension_data()
+        .get::<Arc<codex_extension_api::RuntimeHandoffCallbackPermission>>();
+    let names = descriptor
+        .tools
+        .iter()
+        .filter_map(|tool| match tool {
+            DynamicToolSpec::Function(function) => {
+                Some(ToolName::plain(function.name.clone()).with_default_namespace())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let captured_callbacks = current
+        .profiles
+        .values()
+        .flat_map(|profile| {
+            profile
+                .declaration
+                .tools
+                .iter()
+                .enumerate()
+                .filter(|(slot, _)| {
+                    !profile.declaration.manual_slots.contains(slot)
+                        && profile
+                            .declaration
+                            .tools
+                            .configured_agent_role(*slot)
+                            .is_none()
+                })
+                .filter_map(|(_, tool)| match tool {
+                    DynamicToolSpec::Function(function) => {
+                        Some(ToolName::plain(function.name.clone()).with_default_namespace())
+                    }
+                    _ => None,
+                })
+        })
+        .collect::<HashSet<_>>();
+    let common_hosted = thread
+        .thread_extension_data()
+        .get::<codex_extension_api::HostedModelTools>();
+    let inherited_hosted = original
+        .declaration
+        .hosted_tools
+        .as_ref()
+        .or(common_hosted.as_deref());
+    let distinct_file_search =
+        tools.captured_policy_name(&ToolName::namespaced("_agents_sdk_hosted", "file_search"));
+    for name in &names {
+        ensure!(
+            inherited_hosted.is_none_or(|hosted| {
+                !hosted
+                    .tools
+                    .iter()
+                    .any(|tool| match (name.name.as_str(), tool) {
+                        ("code_interpreter", codex_tools::HostedToolSpec::CodeInterpreter(_)) => {
+                            true
+                        }
+                        ("file_search", codex_tools::HostedToolSpec::FileSearch(_)) => {
+                            !distinct_file_search
+                        }
+                        _ => false,
+                    })
+            }),
+            "Runtime handoff callback collides with its inherited hosted tool"
+        );
+        ensure!(
+            !matches!(name.name.as_str(), "exec_command" | "shell_command"),
+            "Runtime handoff callback uses a reserved execution tool name"
+        );
+        ensure!(
+            !tools.captured_policy_name(name) || captured_callbacks.contains(name),
+            "Runtime handoff callback collides with a captured resource"
+        );
+    }
+    let catalog = if permission.is_some() {
+        tools.voice_profile_catalog(
+            descriptor.tools.clone(),
+            &descriptor.manual_slots,
+            &descriptor.terminal_slots,
+            &descriptor.input_error_slots,
+            descriptor.step_defaults.as_deref(),
+            flags,
+        )?
+    } else {
+        tools.profile_catalog(
+            descriptor.tools.clone(),
+            &descriptor.manual_slots,
+            &descriptor.terminal_slots,
+            &descriptor.input_error_slots,
+            descriptor.step_defaults.as_deref(),
+            flags,
+            false,
+        )?
+    };
+    ensure!(
+        descriptor.model.model.is_empty() || descriptor.model.model == original.model.model,
+        "Runtime handoff must preserve its current model"
+    );
+    let model = original.model.clone();
+    let result_selection: crate::mcp_result_control::Selection = serde_json::from_value(json!({
+        "generation": catalog.generation.id, "servers": {},
+        "metadata_servers": {}, "discovery_servers": {},
+    }))?;
+    let mcp_policy = crate::native_interception::ProfileMcpPolicy::prepare(
+        &original.mcp,
+        &BTreeMap::new(),
+        catalog.generation.id,
+    )?;
+    let generation = catalog.generation.id;
+    let mut declaration = descriptor.clone();
+    declaration.hosted_tools = original.declaration.hosted_tools.clone();
+    let prepared = PreparedProfile {
+        declaration,
+        model,
+        catalog,
+        mcp: original.mcp.clone(),
+        plugins: original.plugins.clone(),
+        result_selection,
+        mcp_policy,
+        environment: original.environment.clone(),
+        environment_tools: original.environment_tools.clone(),
+    };
+    let mut profiles = current.profiles.clone();
+    let source_profile = profiles.get_mut(&source.profile_id).unwrap();
+    let declaration = source_profile
+        .declaration
+        .decision_handoffs
+        .get_mut(&selection.name)
+        .filter(|declaration| declaration.factories.iter().any(|name| name == factory))
+        .context("Runtime handoff source factory is absent")?;
+    declaration.targets.push(root_id.into());
+    profiles.insert(root_id.into(), prepared);
+    let prepared = Arc::new(AgentProfiles {
+        runtime_handoffs: true,
+        opening: current.opening.clone(),
+        environment_policy_digest: current.environment_policy_digest.clone(),
+        thread: current.thread.clone(),
+        tools: current.tools.clone(),
+        profiles,
+        files: current.files.clone(),
+        reservation: current.reservation.clone(),
+    });
+    let mut dynamic = selection.dynamic.lock().expect("Dynamic handoff poisoned");
+    ensure!(
+        !dynamic.contains_key(&(turn.into(), call.into())),
+        "Runtime handoff already has a staged target"
+    );
+    dynamic.insert(
+        (turn.into(), call.into()),
+        Some(DynamicHandoffStage {
+            target: root_id.into(),
+            base: current,
+            prepared,
+        }),
+    );
+    Ok(json!({"target":root_id,"generation":generation}))
 }
 
 pub(crate) struct PendingProviderKeys(pub BTreeMap<String, String>);
@@ -1303,6 +1869,7 @@ pub(crate) async fn admit_realtime_graph(
     let opening = match &current {
         Some(current) => current.opening.clone(),
         None => Arc::new(OpeningProfiles {
+            runtime_enrollment: None,
             input_preparations: Default::default(),
             root_id: root_id.to_owned(),
             roster: roster.clone(),
@@ -1310,6 +1877,7 @@ pub(crate) async fn admit_realtime_graph(
         }),
     };
     let profiles = Arc::new(AgentProfiles {
+        runtime_handoffs: current.as_ref().is_some_and(|profiles| profiles.runtime_handoffs),
         opening,
         environment_policy_digest: current
             .as_ref()
@@ -1321,7 +1889,7 @@ pub(crate) async fn admit_realtime_graph(
             .as_ref()
             .map(|current| current.files.clone())
             .unwrap_or_default(),
-        reservation: Mutex::new(None),
+        reservation: Arc::new(Mutex::new(None)),
     });
     let target = profiles.candidate(thread, root_id)?;
     thread.thread_extension_data().insert(profiles.clone());
@@ -1476,6 +2044,7 @@ impl AgentProfiles {
                 .unwrap_or(true),
         ));
         insert_profile_provider(thread, &prepared.declaration, &mut data)?;
+        insert_profile_hosted_tools(thread, &prepared.declaration, &mut data);
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
         });
@@ -1491,8 +2060,31 @@ impl AgentProfiles {
                 prepared.declaration.wire_output_schema.clone(),
             ));
         }
+        if self.opening.roster.iter().any(|profile| profile.workspace_instructions.is_some()) {
+            data.insert(codex_extension_api::AgentProfileWorkspaceGuidance(prepared.declaration.workspace_instructions.clone()));
+        }
         data.insert(accepted);
         data.insert(prepared.catalog.clone());
+        if self.runtime_handoffs
+            && !self.opening.roster.iter().any(|profile| profile.id == id)
+            && let Some(permission) = thread
+                .thread_extension_data()
+                .get::<Arc<codex_extension_api::RuntimeHandoffCallbackPermission>>()
+        {
+            let slots = (0..prepared.declaration.tools.len()).collect::<Vec<_>>();
+            let names = prepared
+                .catalog
+                .default_names(Some(&slots))?
+                .unwrap_or_default();
+            data.insert(codex_extension_api::AgentProfileRuntimeCallbacks {
+                permission: permission.as_ref().clone(),
+                profile_id: id.to_owned(),
+                names: names
+                    .into_iter()
+                    .map(ToolName::with_default_namespace)
+                    .collect(),
+            });
+        }
         data.insert(prepared.plugins.clone());
         data.insert(codex_extension_api::AgentProfileDecisionHandoffTools {
             targets: prepared
@@ -1507,6 +2099,12 @@ impl AgentProfiles {
                 })
                 .collect(),
         });
+        if prepared.declaration.decision_handoffs.values().any(|entry| !entry.factories.is_empty()) {
+            data.insert(codex_extension_api::AgentProfileLiveHandoffAdmission {
+                admission: factory_handoff_index(thread),
+                captured_targets: original_factory_targets(&self.opening, &prepared.declaration.id),
+            });
+        }
         data.insert(codex_extension_api::AgentProfileHandoffTools {
             targets: prepared
                 .declaration
@@ -1582,6 +2180,9 @@ pub(crate) async fn active(thread: &CodexThread) -> Result<Option<AgentProfileRe
     Ok(thread.agent_profile_receipt().await?)
 }
 
+// Native ID-resume route; never serialized or inferred from checkpoint content.
+pub(crate) struct IdResumedProfiles;
+
 pub(crate) async fn configure(
     state: &crate::engine::ThreadState,
     roster_json: &str,
@@ -1643,6 +2244,22 @@ pub(crate) async fn configure(
         .get::<PythonTools>()
         .context("Agent profiles require the admitted Python tool owner")?;
     tools.check_idle(thread).await?;
+    if opening.roster.iter().any(|profile| {
+        profile
+            .decision_handoffs
+            .values()
+            .any(|entry| !entry.factories.is_empty())
+    }) && thread
+        .thread_extension_data()
+        .get::<codex_extension_api::ToolPolicy>()
+        .is_some_and(|policy| policy.allows(&runtime_callback_grant()))
+    {
+        thread.thread_extension_data().insert(Arc::new(
+            codex_extension_api::RuntimeHandoffCallbackPermission::new(
+                thread.thread_extension_data().level_id().to_owned(),
+            ),
+        ));
+    }
     // A fresh local thread has no rollout until persistence is materialized.
     // Read only after initialization and its writes have completed.
     state
@@ -1669,7 +2286,7 @@ pub(crate) async fn configure(
             return None;
         };
         let metadata = envelope.metadata.as_ref()?;
-        if metadata.sdk_agent_graph.as_deref() != Some(opening.fingerprint.as_str()) {
+        if !opening.admits_recorded_graph(metadata.sdk_agent_graph.as_deref()).ok()? {
             return None;
         }
         let source: PersistedProfile =
@@ -1725,6 +2342,7 @@ pub(crate) async fn configure(
         );
     }
     let profiles = Arc::new(AgentProfiles {
+        runtime_handoffs: false,
         opening,
         environment_policy_digest: environments
             .as_ref()
@@ -1733,7 +2351,7 @@ pub(crate) async fn configure(
         tools,
         profiles,
         files,
-        reservation: Mutex::new(None),
+        reservation: Arc::new(Mutex::new(None)),
     });
     let restored = restored_envelope(&profiles.opening, &history.items)?;
     let target = if let Some((envelope, receipt)) = restored {
@@ -1742,17 +2360,24 @@ pub(crate) async fn configure(
             .get(&receipt.profile_id)
             .context("Restored Agent is outside the captured graph")?;
         let accepted = validate_restored(&profiles.opening, &history.items)?;
-        let mut catalog = profiles.tools.startup_profile_catalog(
-            [
-                prepared.catalog.selecting_steps,
-                prepared.catalog.transform_context,
-                prepared.catalog.before_compact,
-                prepared.catalog.before_complete,
-                prepared.catalog.tool_batch_completion,
-                prepared.catalog.post_turn_compact,
-            ],
-            default_slots,
-        )?;
+        let mut catalog = if default_slots.is_none()
+            && receipt.profile_id != profiles.opening.root_id
+            && thread.thread_extension_data().get::<IdResumedProfiles>().is_some()
+        {
+            prepared.catalog.clone()
+        } else {
+            profiles.tools.startup_profile_catalog(
+                [
+                    prepared.catalog.selecting_steps,
+                    prepared.catalog.transform_context,
+                    prepared.catalog.before_compact,
+                    prepared.catalog.before_complete,
+                    prepared.catalog.tool_batch_completion,
+                    prepared.catalog.post_turn_compact,
+                ],
+                default_slots,
+            )?
+        };
         catalog.handoff_defaults = handoff_defaults(&prepared.declaration, default_handoffs)?;
         let generation = catalog.generation.id;
         let mut data = ExtensionDataInit::new();
@@ -1765,6 +2390,7 @@ pub(crate) async fn configure(
                 .unwrap_or(true),
         ));
         insert_profile_provider(thread, &prepared.declaration, &mut data)?;
+        insert_profile_hosted_tools(thread, &prepared.declaration, &mut data);
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
         });
@@ -1779,6 +2405,9 @@ pub(crate) async fn configure(
             data.insert(codex_extension_api::AgentProfileOutputSchema(
                 prepared.declaration.wire_output_schema.clone(),
             ));
+        }
+        if profiles.opening.roster.iter().any(|profile| profile.workspace_instructions.is_some()) {
+            data.insert(codex_extension_api::AgentProfileWorkspaceGuidance(prepared.declaration.workspace_instructions.clone()));
         }
         data.insert(accepted);
         data.insert(catalog);
@@ -1795,6 +2424,12 @@ pub(crate) async fn configure(
                 })
                 .collect(),
         });
+        if prepared.declaration.decision_handoffs.values().any(|entry| !entry.factories.is_empty()) {
+            data.insert(codex_extension_api::AgentProfileLiveHandoffAdmission {
+                admission: factory_handoff_index(thread),
+                captured_targets: original_factory_targets(&profiles.opening, &prepared.declaration.id),
+            });
+        }
         data.insert(codex_extension_api::AgentProfileHandoffTools {
             targets: prepared
                 .declaration
@@ -2170,6 +2805,10 @@ pub(crate) async fn activate(
         .thread_extension_data()
         .get::<Arc<AgentProfiles>>()
         .context("Captured Agent graph is not configured")?;
+    ensure!(
+        !profiles.profiles.get(target).is_some_and(|profile| profile.declaration.workspace_preparation),
+        "Captured workspace preparation currently requires an accepted native handoff"
+    );
     profiles.tools.check_idle(&state.thread).await?;
     let candidate = profiles.candidate(&state.thread, target)?;
     Ok(state
@@ -2305,6 +2944,20 @@ impl TurnLifecycleContributor for Contributor {
                 let mut with_input = (*target).clone();
                 with_input.data.insert(prepared);
                 target = Arc::new(with_input);
+            }
+            if profiles.profiles.get(&target_id).is_some_and(|profile| profile.declaration.workspace_preparation) {
+                let captured = thread.captured_agent_profile().await
+                    .map_err(|error| error.to_string())?
+                    .ok_or("Workspace source profile closed")?;
+                if captured.receipt != expected {
+                    return Err("Workspace source profile changed".into());
+                }
+                let (guidance, admission) = profiles.tools.prepare_agent_workspace(&input, &captured, &target_id).await
+                    .map_err(|error| error.to_string())?;
+                let mut prepared = (*target).clone();
+                prepared.data.insert(codex_extension_api::AgentProfileWorkspaceGuidance(Some(guidance)));
+                prepared.data.insert(admission);
+                target = Arc::new(prepared);
             }
             Ok(Some(AgentProfileActivation { expected, target }))
         })
@@ -2451,10 +3104,16 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
                 || self
                     .decision_selection
                     .as_ref()
-                    .is_some_and(|selection| !selection.targets.contains(&pending.target))
+                    .is_some_and(|selection| !selection.admits(turn_id, call_id, &pending.target))
                 || !pending.calls.contains(call_id)
             {
                 return None;
+            }
+            if let Some(selection) = &self.decision_selection {
+                let thread = self.profiles.thread.upgrade()?;
+                if !selection.issue(&thread, turn_id, call_id, &pending.target) {
+                    return None;
+                }
             }
             pending.accepted = true;
             Some(codex_protocol::agent_profile::AgentProfileHandoff {
@@ -2494,6 +3153,12 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
         Box::pin(async move {
             let turn_id = call.turn_id.to_owned();
             let call_id = call.call_id.clone();
+            let mut dynamic_cleanup = self.decision_selection.as_ref().map(|selection| {
+                DynamicHandoffCleanup {
+                    selection: selection.clone(), turn: turn_id.clone(),
+                    call: call_id.clone(), keep: false,
+                }
+            });
             if self.callback.is_none() {
                 let arguments: Value =
                     serde_json::from_str(call.function_arguments()?).map_err(|_| {
@@ -2537,6 +3202,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
             }
             if let Some(reservation) = &mut reservation {
                 reservation.keep = true;
+            }
+            if let Some(cleanup) = &mut dynamic_cleanup {
+                cleanup.keep = true;
             }
             Ok(output)
         })
@@ -2759,6 +3427,7 @@ mod tests {
         let open = |raw: Value| {
             let raw = raw.to_string();
             OpeningProfiles {
+                runtime_enrollment: None,
                 input_preparations: Default::default(),
                 root_id: "a".into(),
                 roster: serde_json::from_str(&raw).unwrap(),
@@ -2832,6 +3501,14 @@ mod tests {
         let selection = DecisionHandoffSelection {
             targets: HashSet::from(["b".into()]),
             selected: Mutex::new(BTreeMap::new()),
+            factories: HashSet::new(),
+            name: "lookup".into(),
+            thread: "owner".into(),
+            source: AgentProfileReceipt {
+                profile_id: "a".into(),
+                epoch: 0,
+            },
+            dynamic: Mutex::new(BTreeMap::new()),
         };
         assert!(selection.record("turn", "call", "missing").is_err());
         selection.record("turn", "call", "b").unwrap();
@@ -2847,6 +3524,7 @@ mod tests {
         raw[0]["handoffs"] = json!({});
         raw[0]["decision_handoffs"] = json!({"lookup":{"slot":0,"targets":["b"]}});
         let opening = OpeningProfiles {
+            runtime_enrollment: None,
             input_preparations: Default::default(),
             root_id: "a".into(),
             roster: serde_json::from_value(raw.clone()).unwrap(),
@@ -2889,6 +3567,7 @@ mod tests {
     fn queued_operation_origin_is_distinct_from_admitted_and_restored_actor() {
         let raw = roster().to_string();
         let opening = OpeningProfiles {
+            runtime_enrollment: None,
             input_preparations: Default::default(),
             root_id: "a".into(),
             roster: serde_json::from_str(&raw).unwrap(),
@@ -3008,6 +3687,33 @@ mod tests {
     }
 
     #[test]
+    fn scoped_hosted_fingerprint_pins_catalog_and_projection_without_secret_values() {
+        let mut declaration = roster();
+        declaration[1]["hosted_tools"] = json!({"tools":[
+            {"type":"file_search", "vector_store_ids":["vs_owner"], "include_search_results":true},
+            {"type":"code_interpreter", "container":{
+                "type":"auto", "file_ids":["file_owner"], "network_policy":{
+                    "type":"allowlist", "allowed_domains":["example.invalid"],
+                    "domain_secrets":[{"domain":"example.invalid", "name":"token", "value":"secret-a"}]
+                }
+            }}
+        ]});
+        let original = fingerprint(&declaration.to_string(), "a").unwrap();
+        let secret = "/1/hosted_tools/tools/1/container/network_policy/domain_secrets/0/value";
+        *declaration.pointer_mut(secret).unwrap() = json!("secret-b");
+        assert_eq!(fingerprint(&declaration.to_string(), "a").unwrap(), original);
+        for (path, value) in [
+            ("/1/hosted_tools/tools/0/include_search_results", json!(false)),
+            ("/1/hosted_tools/tools/0/vector_store_ids/0", json!("vs_changed")),
+            ("/1/hosted_tools/tools/1/container/file_ids/0", json!("file_changed")),
+        ] {
+            let mut changed = declaration.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert_ne!(fingerprint(&changed.to_string(), "a").unwrap(), original, "{path}");
+        }
+    }
+
+    #[test]
     fn persisted_receipt_accepts_initial_epoch_and_rejects_unknown_metadata() {
         let model = roster()[1]["model"].clone();
         let receipt = json!({"profile_id":"b","epoch":0,"model":model});
@@ -3036,4 +3742,172 @@ pub(crate) fn native_mcp_checkpoint_source(source: &CapturedAgentProfile) -> boo
             .data
             .get::<crate::mcp_result_control::Selection>()
             .is_some_and(|selection| !selection.has_callbacks())
+}
+
+
+struct RuntimePromotions {
+    owner: Weak<CodexThread>,
+    enrollment: RuntimeEnrollment,
+}
+
+impl OpeningProfiles {
+    pub(crate) fn admits_recorded_profile_graph(
+        &self, profile: &AgentProfileReceipt, fingerprint: Option<&str>,
+    ) -> Result<bool> {
+        if let Some(enrollment) = &self.runtime_enrollment {
+            return enrollment.admits_profile_graph(self, profile, fingerprint.unwrap_or(""));
+        }
+        Ok(self.roster.iter().any(|item| item.id == profile.profile_id)
+            && self.admits_recorded_graph(fingerprint)?)
+    }
+
+    fn admits_recorded_graph(&self, fingerprint: Option<&str>) -> Result<bool> {
+        let historical = match &self.runtime_enrollment {
+            Some(enrollment) => enrollment.admits_graph(self, fingerprint.unwrap_or(""))?,
+            None => false,
+        };
+        Ok(fingerprint == Some(self.fingerprint.as_str()) || historical)
+    }
+}
+
+fn promoted_enrollment(
+    thread: &CodexThread,
+    registry: &AgentProfiles,
+) -> Result<Option<RuntimeEnrollment>> {
+    ensure!(
+        registry
+            .thread
+            .upgrade()
+            .is_some_and(|owner| std::ptr::eq(owner.as_ref(), thread)),
+        "Runtime enrollment registry belongs to another native Session"
+    );
+    if let Some(promotions) = thread.thread_extension_data().get::<RuntimePromotions>() {
+        ensure!(
+            promotions
+                .owner
+                .upgrade()
+                .is_some_and(|owner| std::ptr::eq(owner.as_ref(), thread)),
+            "Runtime enrollment belongs to another native Session"
+        );
+        return Ok(Some(promotions.enrollment.clone()));
+    }
+    Ok(registry.opening.runtime_enrollment.clone())
+}
+
+/// Readiness never depends on a Python-side flag or a serialized live permission.
+pub(crate) fn runtime_handoff_checkpoint_status(thread: &CodexThread) -> Result<Value> {
+    let Some(registry) = thread.thread_extension_data().get::<Arc<AgentProfiles>>() else {
+        return Ok(json!({"ids": [], "enrolled": []}));
+    };
+    let ids = if registry.runtime_handoffs {
+        registry
+            .profiles
+            .keys()
+            .filter(|id| {
+                !registry
+                    .opening
+                    .roster
+                    .iter()
+                    .any(|profile| &profile.id == *id)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let enrollment = promoted_enrollment(thread, &registry)?;
+    if let Some(enrollment) = &enrollment {
+        enrollment.check_native_registry(&registry)?;
+    }
+    let enrolled = enrollment
+        .map(|enrollment| {
+            enrollment
+                .names()
+                .values()
+                .map(|id| (*id).to_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(json!({"ids": ids, "enrolled": enrolled}))
+}
+
+pub(crate) async fn adopt_runtime_handoff(
+    thread: &CodexThread,
+    id: &str,
+    name: &str,
+) -> Result<()> {
+    let registry = thread
+        .thread_extension_data()
+        .get::<Arc<AgentProfiles>>()
+        .context("Runtime target requires its native Session")?;
+    let captured = thread
+        .captured_agent_profile()
+        .await?
+        .context("Runtime target has no active native owner")?;
+    let target = registry
+        .profiles
+        .get(id)
+        .context("Runtime target is outside this Session")?;
+    let catalog = captured
+        .profile
+        .data
+        .get::<ProfileCatalog>()
+        .context("Runtime target has no active callback catalog")?;
+    ensure!(
+        Arc::ptr_eq(&catalog.generation, &target.catalog.generation),
+        "Runtime target callback catalog differs from its accepted owner"
+    );
+    let previous = promoted_enrollment(thread, &registry)?;
+    let enrollment =
+        RuntimeEnrollment::adopt(previous.as_ref(), &registry, &captured.receipt, id, name)?;
+    ensure!(
+        thread
+            .thread_extension_data()
+            .get::<Arc<AgentProfiles>>()
+            .is_some_and(|current| Arc::ptr_eq(&current, &registry)),
+        "Runtime target registry changed during enrollment"
+    );
+    thread.thread_extension_data().insert(RuntimePromotions {
+        owner: registry.thread.clone(),
+        enrollment,
+    });
+    Ok(())
+}
+
+pub(crate) fn runtime_enrollment_for_capture(thread: &CodexThread) -> Result<Option<Value>> {
+    let Some(registry) = thread.thread_extension_data().get::<Arc<AgentProfiles>>() else {
+        return Ok(None);
+    };
+    let mut enrollment = promoted_enrollment(thread, &registry)?;
+    let status = runtime_handoff_checkpoint_status(thread)?;
+    let enrolled = status["enrolled"]
+        .as_array()
+        .context("Invalid runtime enrollment status")?;
+    ensure!(
+        status["ids"]
+            .as_array()
+            .context("Invalid runtime profile status")?
+            .iter()
+            .all(|id| enrolled.contains(id)),
+        "Runtime-created targets require explicit enrollment"
+    );
+    if let Some(enrollment) = &mut enrollment {
+        enrollment.check_native_registry(&registry)?;
+        enrollment.capture_opening(&registry.opening);
+    }
+    enrollment
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(Into::into)
+}
+
+pub(crate) fn runtime_approval_graph(thread: &CodexThread) -> Result<Option<String>> {
+    let Some(opening) = thread.thread_extension_data().get::<OpeningProfiles>() else {
+        return Ok(None);
+    };
+    let Some(enrollment) = &opening.runtime_enrollment else {
+        return Ok(None);
+    };
+    enrollment.validate(&opening)?;
+    Ok(Some(enrollment.approval_graph().to_owned()))
 }

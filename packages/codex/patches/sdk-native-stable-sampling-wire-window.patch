@@ -1,0 +1,142 @@
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index 479854cc0597d5e2905c33d40e2a5082ab9a8168..ef88c90994bec463074401da5ddfaa96643f0269 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -293,6 +293,8 @@ pub struct ProviderHistoryInputProjection {
+     pub item_sha256: Vec<[u8; 32]>,
+     pub item_ids: Vec<Option<String>>,
+     pub sampling_item_sha256: Vec<[u8; 32]>,
++    /// Current native canonical occurrence for each sampled row, if any.
++    pub sampling_canonical_indices: Vec<Option<usize>>,
+     pub delivered_input_indices: Vec<usize>,
+     pub wire_input_indices: Vec<usize>,
+     pub prefix_len: usize,
+diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
+index cf537ed2b1991fd93cba21a2000c64343106cde5..747bbd735a6a6f96cc1b1b0286efa2947b2fd430 100644
+--- a/codex-rs/core/src/client/provider_history.rs
++++ b/codex-rs/core/src/client/provider_history.rs
+@@ -533,6 +533,7 @@ pub(super) fn canonical_input_projection(
+             .map(|item| item.id().map(ToString::to_string))
+             .collect(),
+         sampling_item_sha256: hashes,
++        sampling_canonical_indices: (0..items.len()).map(Some).collect(),
+         delivered_input_indices: (0..items.len()).collect(),
+         wire_input_indices,
+         prefix_len,
+@@ -558,14 +559,16 @@ pub(super) fn sampling_input_projection(
+     projection.wire_input_indices = wire_input_indices;
+     projection.prefix_len = prefix_len;
+     projection.delivered_input_indices.clear();
++    projection.sampling_canonical_indices = vec![None; items.len()];
+     if projection.sampling_item_sha256 == projection.item_sha256 {
+         projection
+             .delivered_input_indices
+             .extend(0..projection.item_sha256.len());
++        projection.sampling_canonical_indices = (0..items.len()).map(Some).collect();
+         return Ok(projection);
+     }
+     let mut delivered = std::collections::HashSet::new();
+-    for (item, digest) in items.iter().zip(&projection.sampling_item_sha256) {
++    for (sample_index, (item, digest)) in items.iter().zip(&projection.sampling_item_sha256).enumerate() {
+         let id = item.id().map(ToString::to_string);
+         let by_id = id
+             .as_ref()
+@@ -620,6 +623,7 @@ pub(super) fn sampling_input_projection(
+             }
+         };
+         if let Some(index) = index {
++            projection.sampling_canonical_indices[sample_index] = Some(index);
+             delivered.insert(index);
+         }
+     }
+@@ -649,6 +653,7 @@ pub(super) fn sampling_input_projection_from_origins(
+     )?;
+     projection.sampling_item_sha256 = items.iter().map(|item| item_digest_with_receipt(item, receipt))
+         .collect::<Result<Vec<_>>>()?;
++    projection.sampling_canonical_indices = origins.to_vec();
+     let mut delivered = std::collections::HashSet::new();
+     for ((item, digest), origin) in items.iter()
+         .zip(&projection.sampling_item_sha256).zip(origins)
+@@ -709,6 +714,68 @@ fn unsent_hash_indices(
+         .map_err(CodexErr::InvalidRequest)
+ }
+ 
++/// Reuse the exact accepted wire view when new canonical input has moved its
++/// request-only suffix. The old canonical receipt still validates independently
++/// in prepare(). No caller-provided map or new persisted receipt enters here.
++fn stable_sampling_wire_indices(
++    window: &ProviderHistoryWindowReceipt,
++    canonical: &ProviderHistoryWindowReceipt,
++    projection: &codex_api::ProviderHistoryInputProjection,
++    wire: &[ResponseItem],
++) -> Result<Option<Vec<usize>>> {
++    // Omitted canonical occurrences and MCP output rewrites retain their existing
++    // dedicated admission paths. This fallback proves a complete ordered view.
++    if window.canonical_tail_sha256.is_some()
++        || projection.sampling_canonical_indices.len() != projection.sampling_item_sha256.len()
++        || projection.prefix_len + projection.wire_input_indices.len() != wire.len()
++    {
++        return Ok(None);
++    }
++    let unsent = unsent_hash_indices(canonical, &projection.item_sha256)?
++        .into_iter().collect::<std::collections::HashSet<_>>();
++    let acknowledged = (0..projection.item_sha256.len())
++        .filter(|index| !unsent.contains(index)).collect::<Vec<_>>();
++    let mut next_acknowledged = 0;
++    let mut prior_wire = wire[..projection.prefix_len].iter().collect::<Vec<_>>();
++    let mut selected = (0..projection.prefix_len).collect::<Vec<_>>();
++    for (offset, source) in projection.wire_input_indices.iter().enumerate() {
++        let position = projection.prefix_len + offset;
++        let item = &wire[position];
++        match projection.sampling_canonical_indices.get(*source).copied().flatten() {
++            Some(origin) if !unsent.contains(&origin) => {
++                if acknowledged.get(next_acknowledged) != Some(&origin) {
++                    return Ok(None);
++                }
++                next_acknowledged += 1;
++                if origin < canonical.input_len {
++                    prior_wire.push(item);
++                } else if projection.sampling_item_sha256[*source]
++                    != projection.item_sha256[origin]
++                {
++                    // The last acknowledged response output cannot acquire a
++                    // different wire body through this stable input fallback.
++                    return Ok(None);
++                }
++            }
++            Some(origin) if origin < projection.item_sha256.len() => {
++                selected.push(position);
++            }
++            Some(_) => return Ok(None),
++            None => {
++                prior_wire.push(item);
++                selected.push(position);
++            }
++        }
++    }
++    if next_acknowledged != acknowledged.len()
++        || prior_wire.len() != window.input_len
++        || input_digest(prior_wire)? != window.input_sha256
++    {
++        return Ok(None);
++    }
++    Ok(Some(selected))
++}
++
+ fn delivered_boundary(
+     projection: &codex_api::ProviderHistoryInputProjection,
+ ) -> Result<(ProviderHistoryInputBoundary, Option<Vec<String>>)> {
+@@ -1005,6 +1072,13 @@ impl Cursor {
+                     (window.input_len..canonical_input.prefix_len).collect::<Vec<_>>();
+                 indices.extend(unsent.into_iter().map(|index| mapped[index].0));
+                 Some(indices)
++            } else if let Some(indices) = canonical.as_ref()
++                .map(|canonical| stable_sampling_wire_indices(
++                    window, canonical, &canonical_input, request.input.as_ref(),
++                ))
++                .transpose()?.flatten()
++            {
++                Some(indices)
+             } else if let Some(canonical) = canonical {
+                 let unsent =
+                     unsent_hash_indices(&canonical, &canonical_input.sampling_item_sha256)?

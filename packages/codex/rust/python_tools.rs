@@ -1,3 +1,7 @@
+#[path = "tool_observers.rs"]
+pub(crate) mod tool_observers;
+#[path = "agent_workspace.rs"]
+pub(crate) mod agent_workspace;
 #[path = "agent_lifecycle.rs"]
 pub(crate) mod agent_lifecycle;
 
@@ -101,6 +105,11 @@ pub(crate) struct FinishToolSlots(pub(crate) Vec<usize>);
 pub(crate) struct InputErrorToolSlots(pub(crate) Vec<usize>);
 
 impl Generation {
+    fn managed_lifecycle_start(&self, name: &ToolName) -> bool {
+        self.entries.iter().enumerate().any(|(slot, entry)| entry.name.clone().with_default_namespace() == name.clone().with_default_namespace() && (!entry.manual || self.specs.managed_approval(slot))
+            && matches!(entry.spec, ToolSpec::Function(_) | ToolSpec::Freeform(_) | ToolSpec::Namespace(_)))
+    }
+
     pub(crate) fn configured_agent_origin(
         &self,
         slot: usize,
@@ -262,10 +271,66 @@ pub struct PythonTools {
 
 pub(crate) struct HoldAssistantCompletion;
 
+pub(crate) struct FormatToolNotFound;
+
 pub(crate) enum ModelContextUpdate {
     Keep,
     Replace(Vec<ResponseItem>),
+    SourceMapped(SourceMappedContext),
+    Application(ApplicationContextProjection),
     Hosted(HostedContextProjection),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SourceMappedContext {
+    items: Vec<Value>,
+    source_indices: Vec<Option<usize>>,
+}
+
+/// Validate callback-visible rows before deserializing them. ResponseItem
+/// serde omits private payload metadata, so a matched echo must reuse the
+/// exact native original rather than erase that metadata on a round trip.
+fn materialize_source_mapped_context(
+    originals: &[ResponseItem],
+    reply: &SourceMappedContext,
+) -> Result<Vec<ResponseItem>> {
+    ensure!(reply.items.len() == reply.source_indices.len(),
+        "Context source map does not cover the returned items");
+    reply.items.iter().zip(&reply.source_indices).map(|(wire, origin)| {
+        match origin {
+            Some(index) => {
+                let original = originals.get(*index)
+                    .context("Context source map is outside the current request")?;
+                if serde_json::to_value(original)? == *wire {
+                    return Ok(original.clone());
+                }
+                let replacement: ResponseItem = serde_json::from_value(wire.clone())?;
+                if let ResponseItem::Message { content, .. } = replacement
+                    && let Some(projected) = original.with_user_text_projection(content)
+                    && serde_json::to_value(&projected)? == *wire
+                {
+                    return Ok(projected);
+                }
+                anyhow::bail!("Context source map refers to a changed visible input item")
+            }
+            None => Ok(serde_json::from_value(wire.clone())?),
+        }
+    }).collect()
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ProjectedItems {
+    SourceMapped(SourceMappedContext),
+    Replacement(Vec<ResponseItem>),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ApplicationContextProjection {
+    application_instructions: Option<String>,
+    input_projection: Option<ProjectedItems>,
 }
 
 #[derive(Deserialize)]
@@ -274,6 +339,8 @@ pub(crate) struct HostedContextProjection {
     pub(crate) hosted_prompt: codex_protocol::model_request_controls::HostedPromptReference,
     #[serde(default)]
     pub(crate) items: Option<Vec<ResponseItem>>,
+    #[serde(default)]
+    pub(crate) source_mapped_items: Option<SourceMappedContext>,
     #[serde(default)]
     pub(crate) explicit_tools: bool,
 }
@@ -287,8 +354,14 @@ pub(crate) enum ToolCompletionReply {
 
 enum PreparationReply {
     AgentLifecycle(oneshot::Sender<std::result::Result<(), ()>>),
+    ToolLifecycle(oneshot::Sender<std::result::Result<(), ()>>),
+    AgentWorkspace(oneshot::Sender<std::result::Result<String, ()>>),
     HandoffInput(oneshot::Sender<std::result::Result<handoff_inputs::Groups, ()>>),
+    ToolNotFound(oneshot::Sender<std::result::Result<Option<String>, ()>>),
     ModelCompletion(oneshot::Sender<std::result::Result<(), ()>>),
+    AgentSpan(
+        oneshot::Sender<std::result::Result<Option<codex_extension_api::SdkAgentSpanRecord>, ()>>,
+    ),
     ProviderResponseSpan(
         oneshot::Sender<
             std::result::Result<Option<codex_extension_api::SdkProviderResponseSpanAdmission>, ()>,
@@ -327,8 +400,12 @@ impl PreparationReply {
     fn is_closed(&self) -> bool {
         match self {
             Self::HandoffInput(reply) => reply.is_closed(),
+            Self::ToolNotFound(reply) => reply.is_closed(),
             Self::ModelCompletion(reply) => reply.is_closed(),
             Self::AgentLifecycle(reply) => reply.is_closed(),
+            Self::ToolLifecycle(reply) => reply.is_closed(),
+            Self::AgentWorkspace(reply) => reply.is_closed(),
+            Self::AgentSpan(reply) => reply.is_closed(),
             Self::ProviderResponseSpan(reply) => reply.is_closed(),
             Self::ModelRetry(reply) => reply.is_closed(),
             Self::PreparedRequest { ticket, reply } => reply.is_closed() || !ticket.admits(),
@@ -434,6 +511,7 @@ struct PythonFamily {
     graph: Mutex<GraphInterruption>,
     graph_changed: watch::Sender<()>,
     next_invocation: AtomicU64,
+    workspace_admissions: Mutex<HashMap<u64, Arc<agent_workspace::AdmissionState>>>,
     requests: mpsc::UnboundedSender<QueuedRequest>,
     receiver: AsyncMutex<mpsc::UnboundedReceiver<QueuedRequest>>,
 }
@@ -470,6 +548,7 @@ impl Default for PythonFamily {
             graph: Mutex::new(GraphInterruption::default()),
             graph_changed: watch::channel(()).0,
             next_invocation: AtomicU64::new(1),
+            workspace_admissions: Mutex::new(HashMap::new()),
             requests,
             receiver: AsyncMutex::new(receiver),
         }
@@ -792,6 +871,12 @@ pub(crate) struct NativeMediaContext {
 }
 
 struct PendingCall {
+    // Logical call state survives the late physical callback created by approval.
+    lifecycle_started: Option<Arc<std::sync::atomic::AtomicBool>>,
+    dynamic_handoff: Option<(
+        codex_extension_api::AgentProfileReceipt,
+        Arc<crate::agent_profiles::DecisionHandoffSelection>,
+    )>,
     // Captured by native enqueue, never reconstructed from a host reply.
     original_payload: Option<ToolPayload>,
     callback: Option<Arc<CallbackRelease>>,
@@ -809,15 +894,34 @@ struct PendingCall {
     // can exempt them from response-control's live-turn capture check.
     reentry: bool,
     continuation: Option<Value>,
+    configured_prior: Option<(Option<Value>, Phase)>,
 }
 
 fn foreground_response_default() -> bool {
     true
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConfiguredContinuationUpdate {
+    request: Value,
+    callback: Value,
+    continuation: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConfiguredContinuationBatch {
+    #[serde(rename = "_sdk_configured_continuations")]
+    updates: Vec<ConfiguredContinuationUpdate>,
+    #[serde(default)]
+    rollback: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub(crate) enum Reply {
+    ContinuationBatch(ConfiguredContinuationBatch),
     Output {
         request: PendingKey,
         response: DynamicToolResponse,
@@ -950,6 +1054,10 @@ pub fn validate_declarations(specs: &[DynamicToolSpec]) -> Result<()> {
                 && key.namespace.as_deref() != Some("tool_search")
                 && !matches!(
                     (key.namespace.as_deref(), key.name.as_str()),
+                    (Some("_agents_sdk_hosted"), "file_search")
+                )
+                && !matches!(
+                    (key.namespace.as_deref(), key.name.as_str()),
                     (Some("web"), "run") | (Some("image_gen"), "imagegen")
                 ),
             "Python tool uses a reserved name: {key}"
@@ -969,7 +1077,7 @@ pub fn model_parameters(specs: &[DynamicToolSpec]) -> Result<Value> {
     Ok(serde_json::to_value(parameters)?)
 }
 
-fn tool_names(specs: &[DynamicToolSpec]) -> HashSet<ToolName> {
+pub(crate) fn tool_names(specs: &[DynamicToolSpec]) -> HashSet<ToolName> {
     functions(specs)
         .into_iter()
         .map(|(namespace, tool)| {
@@ -1023,6 +1131,10 @@ impl PythonTools {
         let Some(owner) = self.owner(root, &key) else {
             return false;
         };
+        if operation == "lifecycle_started" && !owner.resolve_generation(key.reply.generation)
+            .is_some_and(|generation| owner.admits_generation(&generation)) {
+            return false;
+        }
         let mut pending = owner.pending.lock().expect("callback pending poisoned");
         let Some(call) = pending.get_mut(&key) else {
             return false;
@@ -1044,6 +1156,24 @@ impl PythonTools {
                 }
                 callback.entered.store(true, Ordering::Release);
                 true
+            }
+            "lifecycle_started" => {
+                if call.retired || call.sender.is_closed()
+                    || matches!(call.phase, Phase::Parked)
+                    || !callback.entered.load(Ordering::Acquire)
+                    || !callback.admits_reply()
+                {
+                    return false;
+                }
+                let commit = || {
+                    let Some(started) = &call.lifecycle_started else { return false; };
+                    started.store(true, Ordering::Release);
+                    true
+                };
+                match &call.deadline {
+                    Some(deadline) => deadline.admit(commit).unwrap_or(false),
+                    None => commit(),
+                }
             }
             "cancelled" => callback.cancelled.load(Ordering::Acquire),
             "release" | "release_failed" => {
@@ -2245,6 +2375,14 @@ impl PythonTools {
             && receipt.has_steering_tail()
     }
 
+    pub(crate) fn captured_policy_name(&self, name: &ToolName) -> bool {
+        self.policy.allowed_tools.as_ref().is_some_and(|names| {
+            names
+                .iter()
+                .any(|existing| existing.clone().with_default_namespace() == *name)
+        })
+    }
+
     pub(crate) fn sdk_owned(&self) -> bool {
         self.policy.allowed_tools.as_deref() == Some(&[sdk_name()])
     }
@@ -2899,6 +3037,54 @@ impl PythonTools {
                 msg.insert("instance".into(), json!(self.instance));
                 msg.insert("turn_id".into(), json!(turn));
                 msg.insert("parent_context".into(), json!(input.parent_context));
+                if let Some(scope) = input.tool_scope {
+                    msg.insert("span_name".into(), json!(scope.name));
+                    msg.insert("span_kind".into(), json!(if scope.is_handoff { "handoff" } else { "tool" }));
+                } else if let Some(model) = input.model {
+                    msg.insert("model".into(), json!(model));
+                }
+                let mut event = json!({"id":turn,"msg":msg});
+                if let Some(instance) = &self.instance {
+                    event["subagent_id"] = json!(input.admission.thread_id());
+                    event["subagent_incarnation"] = json!(instance);
+                }
+                event
+            },
+            |reply| reply.map_err(|_| anyhow::anyhow!("SDK response span ID policy failed")),
+        )
+        .await
+    }
+
+    pub(crate) async fn admit_agent_span(
+        self: &Arc<Self>,
+        input: codex_extension_api::SdkAgentSpanInput,
+    ) -> Result<Option<codex_extension_api::SdkAgentSpanRecord>> {
+        let owner = input
+            .admission
+            .turn_store()
+            .get::<Arc<TurnAdmission>>()
+            .context("Missing SDK response span owner")?;
+        let source = self.source_metadata(input.admission.step_store())?;
+        let turn = owner.turn_id.clone();
+        self.exchange_preparation(
+            Arc::clone(owner.as_ref()),
+            None,
+            Some(input.cancellation),
+            [
+                "Expired SDK response span owner",
+                "SDK response span reader closed",
+                "SDK response span admission cancelled",
+            ],
+            PreparationReply::AgentSpan,
+            |id| {
+                let mut msg = source;
+                msg.insert("type".into(), json!("_sdk_provider_response_span"));
+                msg.insert("step_id".into(), json!(id));
+                msg.insert("thread".into(), json!(input.admission.thread_id()));
+                msg.insert("instance".into(), json!(self.instance));
+                msg.insert("turn_id".into(), json!(turn));
+                msg.insert("parent_context".into(), json!(input.parent_context));
+                msg.insert("span_kind".into(), json!("agent"));
                 let mut event = json!({"id":turn,"msg":msg});
                 if let Some(instance) = &self.instance {
                     event["subagent_id"] = json!(input.admission.thread_id());
@@ -2928,6 +3114,24 @@ impl PythonTools {
             .as_mut()
             .and_then(|pending| pending.get_mut(&id))
             .context("Expired SDK response span admission")?;
+        if matches!(slot.reply, Some(PreparationReply::AgentSpan(_))) {
+            ensure!(!slot.is_closed() && (!error || data.is_none()), "Expired SDK Agent span reply");
+            let value = if error { Err(()) } else {
+                let data = data.context("Missing SDK Agent span reply")?;
+                ensure!(data.len() <= 32_768, "SDK Agent span reply exceeds capacity");
+                let value: Option<codex_extension_api::SdkAgentSpanRecord> = serde_json::from_str(data)?;
+                if let Some(record) = &value {
+                    ensure!(!record.name.is_empty() && record.name.len() <= 4096, "Invalid Agent span name");
+                    if let Some(id) = &record.span_id {
+                        ensure!(id.len() == 16 && id.bytes().all(|c| c.is_ascii_hexdigit())
+                            && id.bytes().any(|c| c != b'0'), "Invalid Agent span ID");
+                    }
+                }
+                Ok(value)
+            };
+            let Some(PreparationReply::AgentSpan(reply)) = slot.reply.take() else { unreachable!() };
+            return reply.send(value).map_err(|_| anyhow::anyhow!("Expired SDK Agent span reply"));
+        }
         ensure!(
             !slot.is_closed()
                 && matches!(slot.reply, Some(PreparationReply::ProviderResponseSpan(_))),
@@ -3132,16 +3336,37 @@ impl PythonTools {
             .and_then(|step| step.get::<ProfileCatalog>())
             .is_some_and(|catalog| !catalog.transform_context)
         {
+            if let Some(source_indices) = input.source_indices {
+                *source_indices = Some((0..input.items.len()).map(Some).collect());
+            }
             return Ok(());
         }
+        let mut prompt_origins = Vec::new();
         if let Some(prompt) = input.hosted_prompt.as_deref_mut() {
             if !prompt.omit_instructions {
                 prompt.resolved_instructions = Some(
                     crate::application_instructions::captured_prompt_text(input.step_store)?,
                 );
             }
-            crate::application_instructions::remove_prompt_fragments(input.items)?;
+            crate::application_instructions::remove_prompt_fragments(
+                input.items,
+                input.source_indices.is_some().then_some(&mut prompt_origins),
+            )?;
         }
+        // Observe only this step's accepted application owner. In particular,
+        // never substitute the root declaration for an unowned child/compaction.
+        let has_instructions = !input.compaction
+            && !input
+                .hosted_prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.omit_instructions)
+            && input
+                .step_store
+                .and_then(|step| step.get::<codex_extension_api::SdkTurnReceiptSeed>())
+                .is_some_and(|seed| seed.application.is_some());
+        let instructions = has_instructions
+            .then(|| crate::application_instructions::captured_prompt_text(input.step_store))
+            .transpose()?;
         let owner = self.admission_ready(input.turn_id)?;
         let update = self
             .exchange_preparation(
@@ -3173,7 +3398,8 @@ impl PythonTools {
                                 "omit_model":prompt.omit_model, "omit_instructions":prompt.omit_instructions,
                                 "omit_tools":prompt.omit_tools,
                             })),
-                            "items": input.items,
+                            "items": input.items, "instructions": instructions,
+                            "source_map_required": input.source_indices.is_some(),
                         }
                     });
                     request["msg"]
@@ -3185,22 +3411,81 @@ impl PythonTools {
                 |update| update.context("Model context transformation failed"),
             )
             .await?;
-        match update {
-            ModelContextUpdate::Keep => {}
-            ModelContextUpdate::Replace(items) => *input.items = items,
-            ModelContextUpdate::Hosted(reply) => {
+        match (update, input.source_indices) {
+            (ModelContextUpdate::Keep, source_indices) => {
+                if let Some(source_indices) = source_indices {
+                    *source_indices = Some((0..input.items.len()).map(Some).collect());
+                }
+            }
+            (ModelContextUpdate::Replace(items), None) => *input.items = items,
+            (ModelContextUpdate::SourceMapped(reply), Some(source_indices)) => {
+                let items = materialize_source_mapped_context(input.items, &reply)?;
+                *input.items = items;
+                *source_indices = Some(reply.source_indices);
+            }
+            (ModelContextUpdate::Application(reply), source_indices) => {
+                ensure!(
+                    has_instructions && self.instance.is_none() && input.hosted_prompt.is_none(),
+                    "Application instruction projection requires an ordinary root request"
+                );
+                let mut origins = Vec::new();
+                let mut items = match (reply.input_projection, source_indices.is_some()) {
+                    (None, mapped) => {
+                        if mapped {
+                            origins.extend((0..input.items.len()).map(Some));
+                        }
+                        input.items.clone()
+                    }
+                    (Some(ProjectedItems::SourceMapped(reply)), true) => {
+                        let items = materialize_source_mapped_context(input.items, &reply)?;
+                        origins = reply.source_indices;
+                        items
+                    }
+                    (Some(ProjectedItems::Replacement(items)), false) => items,
+                    _ => anyhow::bail!("Application context reply has no matching staged source owner"),
+                };
+                // A provider may already own these exact native rows. Retain
+                // their acknowledged identity; the last request directive
+                // supersedes earlier application text without rewriting it.
+                items.push(crate::application_instructions::request_projection(
+                    reply.application_instructions.as_deref().unwrap_or_default(),
+                ));
+                *input.items = items;
+                if let Some(source_indices) = source_indices {
+                    *source_indices = Some(
+                        origins
+                            .into_iter()
+                            .chain(std::iter::once(None))
+                            .collect(),
+                    );
+                }
+            }
+            (ModelContextUpdate::Hosted(reply), source_indices) => {
                 let target = input
                     .hosted_prompt
                     .as_deref_mut()
                     .context("Unexpected hosted prompt reply")?;
+                match (reply.items, reply.source_mapped_items, source_indices) {
+                    (None, None, Some(source_indices)) => *source_indices = Some(prompt_origins),
+                    (None, Some(mapped), Some(source_indices)) => {
+                        let items = materialize_source_mapped_context(input.items, &mapped)?;
+                        *source_indices = Some(
+                            mapped.source_indices.iter()
+                                .map(|index| index.and_then(|index| prompt_origins[index]))
+                                .collect(),
+                        );
+                        *input.items = items;
+                    }
+                    (Some(items), None, None) => *input.items = items,
+                    (None, None, None) => {}
+                    _ => anyhow::bail!("Hosted context reply has no matching staged source owner"),
+                }
                 target.reference = Some(reply.hosted_prompt);
                 if reply.explicit_tools {
                     target.omit_tools = false;
                 }
-                if let Some(items) = reply.items {
-                    *input.items = items;
-                }
             }
+            _ => anyhow::bail!("Model context reply has no matching staged source owner"),
         }
         Ok(())
     }
@@ -3429,6 +3714,35 @@ impl PythonTools {
         reply
             .send(decision)
             .map_err(|_| anyhow::anyhow!("Expired completion callback"))
+    }
+
+    pub(crate) fn reply_tool_not_found(
+        self: &Arc<Self>,
+        id: u64,
+        text: Option<String>,
+        cancelled: bool,
+    ) -> Result<()> {
+        let mut preparations = self
+            .preparation_replies
+            .lock()
+            .expect("Python preparation replies poisoned");
+        let slot = preparations
+            .as_mut()
+            .context("Expired preparation")?
+            .get_mut(&id)
+            .filter(|slot| !slot.is_closed())
+            .context("Expired preparation")?;
+        ensure!(
+            matches!(slot.reply.as_ref(), Some(PreparationReply::ToolNotFound(_))),
+            "Invalid unknown tool formatter reply"
+        );
+        let Some(PreparationReply::ToolNotFound(reply)) = slot.reply.take() else {
+            unreachable!()
+        };
+        drop(preparations);
+        reply
+            .send(if cancelled { Err(()) } else { Ok(text) })
+            .map_err(|_| anyhow::anyhow!("Expired unknown tool formatter"))
     }
 
     pub(crate) fn reply_tool_completion(
@@ -3871,6 +4185,65 @@ impl PythonTools {
         }
     }
 
+    pub(crate) fn stage_runtime_handoff(
+        &self,
+        thread: &codex_core::CodexThread,
+        owner: &str,
+        key: &PendingKey,
+        invocation: u64,
+        factory: &str,
+        roster_json: &str,
+        root_id: &str,
+    ) -> Result<Value> {
+        ensure!(
+            key.reply.thread == owner
+                && key.reply.instance == self.instance
+                && self.resolve_generation(key.reply.generation).is_some(),
+            "Runtime handoff callback belongs to another owner"
+        );
+        let pending = self.pending.lock().expect("Python replies poisoned");
+        let call = pending
+            .get(key)
+            .context("Runtime handoff callback expired")?;
+        ensure!(
+            call.invocation == invocation,
+            "Invalid runtime handoff invocation nonce"
+        );
+        ensure!(
+            call.phase != Phase::Parked && !call.retired && !call.sender.is_closed(),
+            "Runtime handoff callback receiver is not live"
+        );
+        ensure!(
+            call.callback.as_ref().is_some_and(
+                |callback| callback.entered.load(Ordering::Acquire) && callback.admits_reply()
+            ),
+            "Runtime handoff requires an entered live callback"
+        );
+        let (source, selection) = call
+            .dynamic_handoff
+            .as_ref()
+            .context("Runtime handoff requires its declared Decision callback")?;
+        let admit = || {
+            crate::agent_profiles::stage_runtime_handoff(
+                thread,
+                self,
+                selection,
+                source,
+                &key.turn,
+                &key.call,
+                factory,
+                roster_json,
+                root_id,
+            )
+        };
+        match &call.deadline {
+            Some(deadline) => deadline
+                .admit(admit)
+                .context("Runtime handoff callback deadline expired")?,
+            None => admit(),
+        }
+    }
+
     pub(crate) fn is_reentry(&self, key: &PendingKey) -> bool {
         self.pending
             .lock()
@@ -3899,6 +4272,184 @@ impl PythonTools {
         Ok(true)
     }
 
+    /// Validate the complete owner tuple before parking or rolling back any call.
+    /// The NativeThread wrapper holds its mutation lease, also used by writer seal.
+    pub(crate) fn update_configured_continuations(
+        &self,
+        owner: &str,
+        batch: ConfiguredContinuationBatch,
+    ) -> Result<bool> {
+        ensure!(
+            !batch.updates.is_empty(),
+            "Configured continuation batch is empty"
+        );
+        let mut keys = HashSet::new();
+        let mut call_ids = HashSet::new();
+        let mut identities = Vec::with_capacity(batch.updates.len());
+        let mut turn = None;
+        for update in &batch.updates {
+            let key: PendingKey = serde_json::from_value(update.request.clone())?;
+            let invocation = update.request["_sdk_invocation"]
+                .as_u64()
+                .context("Configured continuation invocation is missing")?;
+            ensure!(
+                key.reply.thread == owner
+                    && turn.as_ref().is_none_or(|turn| turn == &key.turn)
+                    && keys.insert(key.clone())
+                    && call_ids.insert(key.call.clone()),
+                "Configured continuation batch has a duplicate or foreign owner"
+            );
+            turn.get_or_insert_with(|| key.turn.clone());
+            ensure!(
+                update.continuation["kind"] == "configured-child-v1"
+                    && update.continuation["state"].is_object(),
+                "Invalid configured child continuation"
+            );
+            identities.push((key, invocation));
+        }
+        let mut pending = self.pending.lock().expect("Python replies poisoned");
+        // A batch cannot omit another entered callback on the same parent turn.
+        // Ordinary unentered/manual siblings retain their existing independent grants.
+        let active: HashSet<_> = pending
+            .iter()
+            .filter(|(key, call)| {
+                key.reply.thread == owner
+                    && Some(&key.turn) == turn.as_ref()
+                    && !call.retired
+                    && !call.sender.is_closed()
+                    && call.callback.as_ref().is_some_and(|callback| {
+                        callback.entered.load(Ordering::Acquire)
+                            && !callback.released.load(Ordering::Acquire)
+                    })
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        ensure!(
+            active == keys,
+            "Configured continuation owner tuple changed"
+        );
+        let deadline = pending
+            .get(&identities[0].0)
+            .context("Configured continuation expired")?
+            .deadline
+            .clone();
+        ensure!(
+            identities
+                .iter()
+                .all(|(key, _)| pending.get(key).is_some_and(|call| {
+                    match (&deadline, &call.deadline) {
+                        (None, None) => true,
+                        (Some(expected), Some(actual)) => Arc::ptr_eq(expected, actual),
+                        _ => false,
+                    }
+                })),
+            "Configured continuations do not share one exact invocation deadline"
+        );
+        let model_attempt = pending
+            .get(&identities[0].0)
+            .and_then(|call| call.callback.as_ref())
+            .and_then(|callback| callback.model_attempt.clone());
+        ensure!(
+            identities
+                .iter()
+                .all(|(key, _)| pending.get(key).is_some_and(|call| {
+                    let actual = call
+                        .callback
+                        .as_ref()
+                        .and_then(|callback| callback.model_attempt.as_ref());
+                    match (model_attempt.as_ref(), actual) {
+                        (None, None) => true,
+                        (Some(expected), Some(actual)) => Arc::ptr_eq(expected, actual),
+                        _ => false,
+                    }
+                })),
+            "Configured continuations do not share one exact model attempt"
+        );
+        let commit = || -> Result<bool> {
+            for ((key, invocation), update) in identities.iter().zip(&batch.updates) {
+                let call = pending
+                    .get(key)
+                    .context("Configured continuation expired")?;
+                ensure!(
+                    call.invocation == *invocation
+                        && !call.retired
+                        && !call.sender.is_closed()
+                        && call.callback.as_ref().is_some_and(|callback| {
+                            update.callback == callback.receipt
+                                && callback.entered.load(Ordering::Acquire)
+                                && !callback.cancelled.load(Ordering::Acquire)
+                                && !callback.released.load(Ordering::Acquire)
+                                && callback
+                                    .model_attempt
+                                    .as_ref()
+                                    .is_none_or(|attempt| !attempt.cancellation().is_cancelled())
+                        }),
+                    "Configured continuation callback authority expired"
+                );
+                if batch.rollback {
+                    ensure!(
+                        call.phase == Phase::Parked
+                            && call.continuation.as_ref() == Some(&update.continuation)
+                            && call.configured_prior.is_some(),
+                        "Configured continuation rollback no longer owns its staged value"
+                    );
+                } else {
+                    ensure!(
+                        (call.phase == Phase::Admitted
+                            || (self.sdk_owned() && call.phase == Phase::Entered))
+                            && call.configured_prior.is_none()
+                            && (call.continuation.is_none() || call.reentry),
+                        "Configured continuation requires an unstaged live call"
+                    );
+                }
+            }
+            // No await or fallible operation may enter this commit loop.
+            for ((key, _), update) in identities.into_iter().zip(batch.updates) {
+                let call = pending.get_mut(&key).expect("validated pending call");
+                if batch.rollback {
+                    let (prior, phase) = call.configured_prior.take().expect("validated staged owner");
+                    call.phase = phase;
+                    call.continuation = prior;
+                } else {
+                    call.configured_prior = Some((call.continuation.take(), call.phase));
+                    call.phase = Phase::Parked;
+                    call.continuation = Some(update.continuation);
+                }
+            }
+            Ok(true)
+        };
+        // Tool callback revocation/release takes pending. Keep the same
+        // pending -> deadline order as admit_callback and reserve the attempt's
+        // stop/deadline chain only once. Calling admits_reply inside it would
+        // re-enter requested() and deadlock its deadline mutex.
+        if let Some(attempt) = model_attempt {
+            let stop = attempt.sampling_stop();
+            if let Some(expected) = &deadline {
+                ensure!(
+                    !expected.denies_admission(),
+                    "Configured continuation deadline expired"
+                );
+                if !expected.settled().is_cancelled() {
+                    ensure!(
+                        stop.capture_model_deadline()
+                            .as_ref()
+                            .is_some_and(|actual| Arc::ptr_eq(expected, actual)),
+                        "Configured continuation deadline has changed"
+                    );
+                }
+            }
+            stop.try_commit(|| stop.with_model_deadline_admission(commit))
+                .flatten()
+                .unwrap_or_else(|| Err(anyhow::anyhow!("Configured continuation attempt expired")))
+        } else {
+            match deadline {
+                Some(deadline) => deadline.admit(commit).unwrap_or_else(|| {
+                    Err(anyhow::anyhow!("Configured continuation deadline expired"))
+                }),
+                None => commit(),
+            }
+        }
+    }
     // Only the live SDK Agent.as_tool invocation can supply this after its
     // owned child returned unresolved approvals. It is not "not started".
     pub(crate) fn park_continuation(
@@ -4472,6 +5023,8 @@ impl PythonTools {
             None,
             Some(&builtin_tools),
             None,
+            None,
+            None,
         )?;
         // Opening has not published the Thread or started its Python reader yet.
         self.pending
@@ -4548,6 +5101,8 @@ impl PythonTools {
             model,
             true,
             profile.as_ref(),
+            None,
+            None,
             None,
             None,
             None,
@@ -4680,7 +5235,9 @@ impl PythonTools {
                     .outputs
                     .lock()
                     .expect("held terminal outputs poisoned")
-                    .clone()
+                    .iter()
+                    .map(|(output, succeeded, _observers)| (output.clone(), *succeeded))
+                    .collect()
             })
             .unwrap_or_default()
     }
@@ -4926,7 +5483,7 @@ impl PythonTools {
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         self.enqueue_profile(
             thread, generation, slot, turn, call, arguments, None, source, model, reentry, None,
-            media, None, None, None,
+            media, None, None, None, None, None,
         )
     }
 
@@ -4947,6 +5504,8 @@ impl PythonTools {
         realtime_tool_call: Option<Value>,
         builtin_tools: Option<&HashSet<ToolName>>,
         provider_agent_metadata: Option<Value>,
+        decision_selection: Option<Arc<crate::agent_profiles::DecisionHandoffSelection>>,
+        lifecycle_payload: Option<&ToolPayload>,
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         let entry = &generation.entries[slot];
         let key = PendingKey {
@@ -4987,6 +5546,12 @@ impl PythonTools {
                 "type":"dynamic_tool_call_request", "turnId": turn, "callId": call,
                 "namespace": entry.name.namespace, "tool": entry.name.name,
                 "arguments": arguments, "_sdk_python_tool": key.reply,
+                "_sdk_managed_lifecycle": lifecycle_payload.is_some() && generation.managed_lifecycle_start(&entry.name),
+                "_sdk_lifecycle_arguments": match lifecycle_payload {
+                    Some(ToolPayload::Function { arguments }) => Some(arguments.as_str()),
+                    Some(ToolPayload::Custom { input }) => Some(input.as_str()),
+                    _ => None,
+                },
                 "_sdk_invocation": invocation, "_sdk_manual": entry.manual,
                 "_sdk_code_origin": code_origin, "_sdk_model": model,
                 "_sdk_realtime_tool_call": realtime_tool_call,
@@ -5027,6 +5592,9 @@ impl PythonTools {
             pending.insert(
                 key.clone(),
                 PendingCall {
+                    lifecycle_started: (lifecycle_payload.is_some() && generation.managed_lifecycle_start(&entry.name))
+                        .then(|| Arc::new(std::sync::atomic::AtomicBool::new(false))),
+                    dynamic_handoff: profile.cloned().zip(decision_selection),
                     original_payload: match (&entry.spec, &generation.specs[slot]) {
                         (_, DynamicToolSpec::Custom(custom)) => Some(ToolPayload::Custom {
                             input: request["msg"]["arguments"][custom.input_field.as_str()]
@@ -5068,6 +5636,7 @@ impl PythonTools {
                     phase: Phase::Admitted,
                     reentry,
                     continuation: None,
+                    configured_prior: None,
                 },
             );
         }
@@ -5455,6 +6024,55 @@ pub(crate) fn admits_custom_call(
 }
 
 impl ToolLifecycleContributor for PythonContributor {
+    fn observe_tool_start<'a>(
+        &'a self,
+        input: ToolStartInput<'a>,
+    ) -> ExtensionFuture<'a, std::result::Result<
+        Option<Arc<dyn codex_extension_api::RecordedToolOutputObserver>>, String,
+    >> {
+        Box::pin(async move {
+            let Some(tools) = input.thread_store.get::<PythonTools>() else {
+                return Ok(None);
+            };
+            tools.start_tool_observer(input).await.map_err(|error| error.to_string())
+        })
+    }
+
+    fn on_tool_not_found<'a>(
+        &'a self,
+        input: codex_extension_api::ToolNotFoundInput<'a>,
+    ) -> ExtensionFuture<'a, std::result::Result<Option<String>, ()>> {
+        Box::pin(async move {
+            let Some(tools) = input.thread_store.get::<PythonTools>() else {
+                return Ok(None);
+            };
+            if tools.instance.is_some() || input.thread_store.get::<FormatToolNotFound>().is_none()
+            {
+                return Ok(None);
+            }
+            let Some(owner) = tools.admitted_turn(input.turn_store) else {
+                return Ok(None);
+            };
+            if owner.turn_id != input.turn_id {
+                return Err(());
+            }
+            tools.exchange_preparation(
+                owner,
+                None,
+                Some(input.cancellation),
+                ["Expired unknown tool formatter", "Unknown tool formatter reader closed", "Unknown tool formatter cancelled"],
+                PreparationReply::ToolNotFound,
+                |id| json!({"id":input.turn_id,"msg": {
+                    "type":"_sdk_tool_not_found","step_id":id,"turn_id":input.turn_id,
+                    "thread":input.thread_store.level_id(),"instance":null,
+                    "name":input.tool_name.name,"namespace":input.tool_name.namespace,
+                    "call_id":input.call_id,"model":input.model,"default_message":input.default_message,
+                }}),
+                |reply| reply.map_err(|_| anyhow::anyhow!("Unknown tool formatter cancelled")),
+            ).await.map_err(|_| ())
+        })
+    }
+
     fn on_tool_start<'a>(&'a self, input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(async move { sandbox_events::on_start(&input) })
     }
@@ -5616,7 +6234,7 @@ impl TurnLifecycleContributor for PythonContributor {
                         .lock()
                         .expect("held terminal outputs poisoned")
                         .iter()
-                        .any(|(item, _)| item.item == *input.output)
+                        .any(|(item, _, _observers)| item.item == *input.output)
                 })
             };
             let guard_only = input.guard_only || receipt.is_none();
@@ -6137,6 +6755,10 @@ impl TurnLifecycleContributor for PythonContributor {
         input: codex_extension_api::TurnStopInput<'a>,
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            crate::manual_checkpoint::retain_passive_at_stop(
+                input.thread_store, input.turn_store.level_id(),
+            );
+            crate::agent_profiles::retire_factory_handoffs(input.thread_store, input.turn_store);
             crate::request_metadata::retire(input.turn_store);
             if let Some(tools) = input.thread_store.get::<PythonTools>()
                 && let Some(receipt) = input.turn_store.get::<Arc<TurnAdmission>>()
@@ -6163,6 +6785,10 @@ impl TurnLifecycleContributor for PythonContributor {
         input: codex_extension_api::TurnAbortInput<'a>,
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            crate::manual_checkpoint::retain_passive_at_stop(
+                input.thread_store, input.turn_store.level_id(),
+            );
+            crate::agent_profiles::retire_factory_handoffs(input.thread_store, input.turn_store);
             crate::request_metadata::retire(input.turn_store);
             if let Some(tools) = input.thread_store.get::<PythonTools>()
                 && let Some(receipt) = input.turn_store.get::<Arc<TurnAdmission>>()
@@ -6550,6 +7176,7 @@ impl PythonContributor {
                     slot,
                     use_deferred_specs,
                     code_mode_enabled: self.code_mode_enabled,
+                    tool_lifecycle: thread.get::<tool_observers::Bindings>().is_some_and(|bindings| bindings.0),
                 })
                     as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>;
                 crate::agent_profiles::wrap_handoff_callback(
@@ -6997,16 +7624,35 @@ impl ToolContributor for PythonContributor {
                 .as_ref()
                 .is_some_and(|receipt| receipt.use_deferred_specs),
         });
-        self.executors(
+        let executors = self.executors(
             thread,
             tools,
             snapshot.generation.clone(),
             snapshot.use_deferred_specs,
             &snapshot.slots,
-            profile,
+            profile.clone(),
             Some(snapshot.accepted.clone()),
             Some(step.get_or_init(codex_extension_api::FinalStepBuiltinTools::default)),
-        )
+        );
+        if let Some(receipt) = profile
+            && let Some(attached) = step.get::<codex_extension_api::AgentProfileRuntimeCallbacks>()
+            && attached.profile_id == receipt.profile_id
+        {
+            step.insert(codex_extension_api::RuntimeHandoffCallbackExecutors {
+                permission: attached.permission.clone(),
+                receipt,
+                executors: executors
+                    .iter()
+                    .filter(|executor| {
+                        attached
+                            .names
+                            .contains(&executor.tool_name().with_default_namespace())
+                    })
+                    .cloned()
+                    .collect(),
+            });
+        }
+        executors
     }
 
     fn select_tools_for_step<'a>(
@@ -7180,7 +7826,7 @@ impl ToolContributor for PythonContributor {
                 request["msg"]["staged_input_preparation"] = json!(true);
             }
             if let Some(staged) = turn.get::<codex_extension_api::SelectedStagedInput>()
-                && let Some(items) = staged.0.items_for(turn.level_id())
+                && let Some(items) = staged.0.guard_items_for(turn.level_id())
             {
                 request["msg"]["staged_input"] = json!(items);
             }
@@ -7248,6 +7894,7 @@ struct PythonExecutor {
     slot: usize,
     use_deferred_specs: bool,
     code_mode_enabled: bool,
+    tool_lifecycle: bool,
 }
 
 impl PythonExecutor {
@@ -7410,6 +8057,8 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                     .as_ref()
                     .and_then(|receipt| receipt.names()),
                 call.conversation_history.provider_agent_metadata().cloned(),
+                self.decision_selection.clone(),
+                (self.tool_lifecycle && call.source == ToolCallSource::Direct).then_some(&call.payload),
             );
             let (key, invocation, receiver) = match pending {
                 Ok(pending) => pending,
@@ -7429,6 +8078,11 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
             if let Some(calls) = &self.managed_calls {
                 calls.register(&self.thread, &call.turn_id, &call.call_id);
             }
+            // Retain the exact callback across reply/release and pending retirement.
+            // A later map lookup could otherwise lose a successful body-entry mark.
+            let lifecycle_started_owner = self.tools.pending.lock().expect("Python pending poisoned")
+                .get(&key).filter(|pending| pending.invocation == invocation)
+                .and_then(|pending| pending.lifecycle_started.clone());
             let mut _reply = PendingReply {
                 completed: false,
                 tools: &self.tools,
@@ -7451,6 +8105,8 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                     )
                 }
             })?;
+            let lifecycle_started = lifecycle_started_owner.as_ref()
+                .is_some_and(|started| started.load(Ordering::Acquire));
             _reply.completed = true;
             match (
                 &self.decision_selection,
@@ -7510,6 +8166,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 })?;
                 return Ok(Box::new(ReplyOutput {
                     output,
+                    lifecycle_started,
                     start_response: response.start_response,
                     acceptance: response.acceptance,
                 }) as Box<dyn ToolOutput>);
@@ -7520,6 +8177,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                         arguments,
                         response.response,
                     )?,
+                    lifecycle_started,
                     start_response: response.start_response,
                     acceptance: response.acceptance,
                 }) as Box<dyn ToolOutput>);
@@ -7542,12 +8200,14 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                         arguments,
                         response.response,
                     )?,
+                    lifecycle_started,
                     start_response: response.start_response,
                     acceptance: response.acceptance,
                 }) as Box<dyn ToolOutput>);
             }
             Ok(Box::new(ReplyOutput {
                 output: PythonOutput(response.response),
+                lifecycle_started,
                 start_response: response.start_response,
                 acceptance: response.acceptance,
             }) as Box<dyn ToolOutput>)
@@ -7557,11 +8217,14 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
 
 struct ReplyOutput<T> {
     output: T,
+    lifecycle_started: bool,
     start_response: bool,
     acceptance: Option<oneshot::Sender<()>>,
 }
 
-impl<T: ToolOutput> ToolOutput for ReplyOutput<T> {
+impl<T: ToolOutput + 'static> ToolOutput for ReplyOutput<T> {
+    fn as_any(&self) -> Option<&dyn std::any::Any> { Some(self) }
+
     fn log_output(&self) -> String {
         self.output.log_output()
     }
@@ -7714,6 +8377,7 @@ pub(crate) mod manual_checkpoint_tests;
 #[cfg(test)]
 pub(crate) mod managed_tests {
     use super::*;
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn idle_catalog_joins_retired_callback_and_rejects_active_reply() {
@@ -8019,6 +8683,7 @@ pub(crate) mod managed_tests {
         ] {
             PythonContributor::default()
                 .on_tool_finish(ToolFinishInput {
+                    step_store: None,
                     builtin_sandbox_operation: None,
                     builtin_sandbox_duration: None,
                     builtin_sandbox_exit_code: None,
@@ -10246,6 +10911,526 @@ pub(crate) mod managed_tests {
         assert!(tools.callback_operation("thread", &receipt, "release"));
     }
 
+    fn configured_batch_pair() -> (
+        Arc<PythonTools>,
+        Vec<ConfiguredContinuationUpdate>,
+        Vec<oneshot::Receiver<ToolReply>>,
+    ) {
+        let tools = sdk();
+        let mut updates = Vec::new();
+        let mut receivers = Vec::new();
+        for name in ["left", "right"] {
+            let (key, receiver) = tools
+                .enqueue_reentry("owner", "turn", &call(name, "child", "{}"))
+                .unwrap();
+            let mut pending = tools.pending.lock().unwrap();
+            let native = pending.get_mut(&key).unwrap();
+            native.phase = Phase::Admitted;
+            let receipt = json!({"kind": "tool", "request": key, "invocation": native.invocation.to_string()});
+            let callback = CallbackRelease::new(receipt.clone());
+            callback.entered.store(true, Ordering::Release);
+            native.callback = Some(callback);
+            let mut request = serde_json::to_value(&key).unwrap();
+            request["_sdk_invocation"] = json!(native.invocation);
+            updates.push(ConfiguredContinuationUpdate {
+                request,
+                callback: receipt,
+                continuation: json!({
+                    "kind": "configured-child-v1",
+                    "state": {"synthetic": name},
+                    "usage_in_parent": {}
+                }),
+            });
+            receivers.push(receiver);
+        }
+        (tools, updates, receivers)
+    }
+
+    fn assert_batch_phase(tools: &PythonTools, phase: Phase, staged: bool) {
+        let pending = tools.pending.lock().unwrap();
+        assert_eq!(pending.len(), 2);
+        for call in pending.values() {
+            assert!(call.phase == phase);
+            assert_eq!(call.continuation.is_some(), staged);
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_batch_validates_every_owner_before_any_write() {
+        let (tools, updates, _receivers) = configured_batch_pair();
+        let mut invalid = updates.clone();
+        let invocation = invalid[1].request["_sdk_invocation"].as_u64().unwrap();
+        invalid[1].request["_sdk_invocation"] = json!(invocation + 1);
+        assert!(
+            tools
+                .update_configured_continuations(
+                    "owner",
+                    ConfiguredContinuationBatch {
+                        updates: invalid,
+                        rollback: false,
+                    }
+                )
+                .is_err()
+        );
+        assert_batch_phase(&tools, Phase::Admitted, false);
+        assert!(
+            tools
+                .update_configured_continuations(
+                    "owner",
+                    ConfiguredContinuationBatch {
+                        updates: updates.clone(),
+                        rollback: false,
+                    }
+                )
+                .unwrap()
+        );
+        assert_batch_phase(&tools, Phase::Parked, true);
+        assert!(
+            tools
+                .update_configured_continuations(
+                    "owner",
+                    ConfiguredContinuationBatch {
+                        updates,
+                        rollback: false,
+                    }
+                )
+                .is_err()
+        );
+        assert_batch_phase(&tools, Phase::Parked, true);
+    }
+
+    #[tokio::test]
+    async fn configured_batch_rejects_partial_duplicate_and_foreign_identity() {
+        for fault in [
+            "partial",
+            "duplicate",
+            "callback",
+            "thread",
+            "turn",
+            "slot",
+            "instance",
+            "state",
+        ] {
+            let (tools, mut updates, _receivers) = configured_batch_pair();
+            match fault {
+                "partial" => {
+                    updates.pop();
+                }
+                "duplicate" => {
+                    updates[1] = updates[0].clone();
+                }
+                "callback" => {
+                    updates[1].callback = updates[0].callback.clone();
+                }
+                "thread" => {
+                    updates[1].request["_sdk_python_tool"]["thread"] = json!("foreign");
+                }
+                "turn" => {
+                    updates[1].request["turnId"] = json!("foreign");
+                }
+                "slot" => {
+                    updates[1].request["_sdk_python_tool"]["slot"] = json!(usize::MAX);
+                }
+                "instance" => {
+                    updates[1].request["_sdk_python_tool"]["instance"] = json!("foreign");
+                }
+                "state" => {
+                    updates[1].continuation["state"] = Value::Null;
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                tools
+                    .update_configured_continuations(
+                        "owner",
+                        ConfiguredContinuationBatch {
+                            updates,
+                            rollback: false,
+                        }
+                    )
+                    .is_err(),
+                "{fault}"
+            );
+            assert_batch_phase(&tools, Phase::Admitted, false);
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_batch_preseal_rollback_preserves_exact_senders() {
+        let (tools, updates, mut receivers) = configured_batch_pair();
+        tools
+            .update_configured_continuations(
+                "owner",
+                ConfiguredContinuationBatch {
+                    updates: updates.clone(),
+                    rollback: false,
+                },
+            )
+            .unwrap();
+        let mut stale = updates.clone();
+        stale[1].continuation["state"]["synthetic"] = json!("foreign checkpoint");
+        assert!(
+            tools
+                .update_configured_continuations(
+                    "owner",
+                    ConfiguredContinuationBatch {
+                        updates: stale,
+                        rollback: true,
+                    }
+                )
+                .is_err()
+        );
+        assert_batch_phase(&tools, Phase::Parked, true);
+        tools
+            .update_configured_continuations(
+                "owner",
+                ConfiguredContinuationBatch {
+                    updates: updates.clone(),
+                    rollback: true,
+                },
+            )
+            .unwrap();
+        assert_batch_phase(&tools, Phase::Admitted, false);
+        for receiver in &mut receivers {
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+        }
+        assert!(
+            tools
+                .update_configured_continuations(
+                    "owner",
+                    ConfiguredContinuationBatch {
+                        updates,
+                        rollback: true,
+                    }
+                )
+                .is_err()
+        );
+        assert_batch_phase(&tools, Phase::Admitted, false);
+    }
+
+    #[tokio::test]
+    async fn configured_batch_cannot_rollback_revoked_or_closed_owners() {
+        for terminal in ["closed", "retired", "cancelled", "released"] {
+            let (tools, updates, mut receivers) = configured_batch_pair();
+            tools
+                .update_configured_continuations(
+                    "owner",
+                    ConfiguredContinuationBatch {
+                        updates: updates.clone(),
+                        rollback: false,
+                    },
+                )
+                .unwrap();
+            let key: PendingKey = serde_json::from_value(updates[0].request.clone()).unwrap();
+            match terminal {
+                "closed" => receivers[0].close(),
+                _ => {
+                    let mut pending = tools.pending.lock().unwrap();
+                    let native = pending.get_mut(&key).unwrap();
+                    match terminal {
+                        "retired" => native.retired = true,
+                        "cancelled" => native
+                            .callback
+                            .as_ref()
+                            .unwrap()
+                            .cancelled
+                            .store(true, Ordering::Release),
+                        "released" => native
+                            .callback
+                            .as_ref()
+                            .unwrap()
+                            .released
+                            .store(true, Ordering::Release),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            assert!(
+                tools
+                    .update_configured_continuations(
+                        "owner",
+                        ConfiguredContinuationBatch {
+                            updates,
+                            rollback: true,
+                        }
+                    )
+                    .is_err(),
+                "{terminal}"
+            );
+            assert_batch_phase(&tools, Phase::Parked, true);
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_batch_sdk_entered_still_requires_exact_physical_callback() {
+        let (tools, updates, _receivers) = configured_batch_pair();
+        {
+            let mut pending = tools.pending.lock().unwrap();
+            for call in pending.values_mut() {
+                call.phase = Phase::Entered;
+            }
+            let key: PendingKey = serde_json::from_value(updates[1].request.clone()).unwrap();
+            pending.get_mut(&key).unwrap().callback = None;
+        }
+        assert!(
+            tools
+                .update_configured_continuations(
+                    "owner",
+                    ConfiguredContinuationBatch {
+                        updates,
+                        rollback: false,
+                    }
+                )
+                .is_err()
+        );
+        assert_batch_phase(&tools, Phase::Entered, false);
+        let (tools, updates, _receivers) = configured_batch_pair();
+        for call in tools.pending.lock().unwrap().values_mut() {
+            call.phase = Phase::Entered;
+        }
+        assert!(
+            tools
+                .update_configured_continuations(
+                    "owner",
+                    ConfiguredContinuationBatch {
+                        updates,
+                        rollback: false,
+                    }
+                )
+                .unwrap()
+        );
+        assert_batch_phase(&tools, Phase::Parked, true);
+    }
+
+    #[tokio::test]
+    async fn configured_batch_uses_one_exact_deadline_gate() {
+        use codex_extension_api::ModelInvocationDeadlineState;
+        use tokio::time::{Duration, Instant};
+        for expired in [false, true] {
+            let (tools, updates, _receivers) = configured_batch_pair();
+            let deadline = Arc::new(ModelInvocationDeadlineState::new(
+                if expired {
+                    Instant::now() - Duration::from_secs(1)
+                } else {
+                    Instant::now() + Duration::from_secs(60)
+                },
+                CancellationToken::new(),
+            ));
+            for call in tools.pending.lock().unwrap().values_mut() {
+                call.deadline = Some(deadline.clone());
+            }
+            let result = tools.update_configured_continuations(
+                "owner",
+                ConfiguredContinuationBatch {
+                    updates,
+                    rollback: false,
+                },
+            );
+            assert_eq!(result.is_ok(), !expired);
+            assert_batch_phase(
+                &tools,
+                if expired {
+                    Phase::Admitted
+                } else {
+                    Phase::Parked
+                },
+                !expired,
+            );
+        }
+        let (tools, updates, _receivers) = configured_batch_pair();
+        for call in tools.pending.lock().unwrap().values_mut() {
+            call.deadline = Some(Arc::new(ModelInvocationDeadlineState::new(
+                Instant::now() + Duration::from_secs(60),
+                CancellationToken::new(),
+            )));
+        }
+        assert!(
+            tools
+                .update_configured_continuations(
+                    "owner",
+                    ConfiguredContinuationBatch {
+                        updates,
+                        rollback: false,
+                    }
+                )
+                .is_err()
+        );
+        assert_batch_phase(&tools, Phase::Admitted, false);
+    }
+
+    #[derive(Debug)]
+    struct BatchAttempt {
+        stop: Arc<codex_extension_api::TurnSamplingStop>,
+        cancelled: CancellationToken,
+    }
+    impl codex_extension_api::ModelAttemptAdmission for BatchAttempt {
+        fn id(&self) -> &str {
+            "same-text-is-not-authority"
+        }
+        fn attempt(&self) -> u64 {
+            1
+        }
+        fn retry_configured(&self) -> bool {
+            false
+        }
+        fn disable_provider_retries(&self) -> bool {
+            true
+        }
+        fn cancellation(&self) -> CancellationToken {
+            self.cancelled.clone()
+        }
+        fn sampling_stop(&self) -> Arc<codex_extension_api::TurnSamplingStop> {
+            self.stop.clone()
+        }
+        fn snapshot(&self) -> Result<codex_protocol::model_retry::ModelAttemptSnapshot, String> {
+            Err("unused fixture".into())
+        }
+        fn observe_request(&self, _: &str, _: Option<&str>, _: Option<&str>) -> Result<(), String> {
+            Ok(())
+        }
+        fn report_failure(
+            &self,
+            _: codex_protocol::model_retry::ModelProducerFailure,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn report_usage(&self, _: codex_protocol::protocol::TokenUsage) -> Result<(), String> {
+            Ok(())
+        }
+        fn account_provider_request(
+            &self,
+            _: codex_extension_api::ProviderRequestAccounting,
+        ) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn mark_response_started(&self) {}
+        fn mark_unsafe_output(&self) {}
+        fn mark_local_effect(&self) {}
+    }
+
+    fn configure_batch_attempt(
+        tools: &PythonTools,
+        attempt: Arc<dyn codex_extension_api::ModelAttemptAdmission>,
+        deadline: Option<Arc<codex_extension_api::ModelInvocationDeadlineState>>,
+    ) {
+        for call in tools.pending.lock().unwrap().values_mut() {
+            let receipt = call.callback.as_ref().unwrap().receipt.clone();
+            let callback = CallbackRelease::with_model_attempt(receipt, Some(attempt.clone()));
+            callback.entered.store(true, Ordering::Release);
+            call.callback = Some(callback);
+            call.deadline = deadline.clone();
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_batch_shared_attempt_deadline_does_not_reenter_requested() {
+        use tokio::time::{Duration, Instant};
+        let (tools, updates, _receivers) = configured_batch_pair();
+        let deadline = Arc::new(codex_extension_api::ModelInvocationDeadlineState::new(
+            Instant::now() + Duration::from_secs(60),
+            CancellationToken::new(),
+        ));
+        let stop = Arc::new(codex_extension_api::TurnSamplingStop::default());
+        stop.install_model_deadline(deadline.clone());
+        let attempt = Arc::new(BatchAttempt {
+            stop,
+            cancelled: CancellationToken::new(),
+        });
+        configure_batch_attempt(&tools, attempt, Some(deadline));
+        let (send, receive) = std::sync::mpsc::channel();
+        let captured = tools.clone();
+        let worker = std::thread::spawn(move || {
+            send.send(captured.update_configured_continuations(
+                "owner",
+                ConfiguredContinuationBatch {
+                    updates,
+                    rollback: false,
+                },
+            ))
+            .unwrap();
+        });
+        assert!(
+            receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("batch recursively locked its own deadline")
+                .unwrap()
+        );
+        worker.join().unwrap();
+        assert_batch_phase(&tools, Phase::Parked, true);
+    }
+
+    #[tokio::test]
+    async fn configured_batch_rejects_stopped_cancelled_or_different_attempts() {
+        for fault in ["stopped", "cancelled", "different"] {
+            let (tools, updates, _receivers) = configured_batch_pair();
+            let stop = Arc::new(codex_extension_api::TurnSamplingStop::default());
+            let cancelled = CancellationToken::new();
+            let attempt = Arc::new(BatchAttempt {
+                stop: stop.clone(),
+                cancelled: cancelled.clone(),
+            });
+            configure_batch_attempt(&tools, attempt, None);
+            match fault {
+                "stopped" => stop.request(),
+                "cancelled" => cancelled.cancel(),
+                "different" => {
+                    let key: PendingKey =
+                        serde_json::from_value(updates[1].request.clone()).unwrap();
+                    let mut pending = tools.pending.lock().unwrap();
+                    let call = pending.get_mut(&key).unwrap();
+                    let callback = CallbackRelease::with_model_attempt(
+                        call.callback.as_ref().unwrap().receipt.clone(),
+                        Some(Arc::new(BatchAttempt { stop, cancelled })),
+                    );
+                    callback.entered.store(true, Ordering::Release);
+                    call.callback = Some(callback);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                tools
+                    .update_configured_continuations(
+                        "owner",
+                        ConfiguredContinuationBatch {
+                            updates,
+                            rollback: false,
+                        }
+                    )
+                    .is_err(),
+                "{fault}"
+            );
+            assert_batch_phase(&tools, Phase::Admitted, false);
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_batch_wire_is_distinct_from_legacy_single_continuations() {
+        let (_tools, updates, _receivers) = configured_batch_pair();
+        let update = &updates[0];
+        let one = json!({
+            "request": update.request,
+            "callback": update.callback,
+            "continuation": update.continuation
+        });
+        assert!(matches!(
+            serde_json::from_value::<Reply>(one.clone()).unwrap(),
+            Reply::Continuation { .. }
+        ));
+        let two = json!({
+            "_sdk_configured_continuations": updates.iter().map(|entry| json!({
+                "request": entry.request,
+                "callback": entry.callback,
+                "continuation": entry.continuation
+            })).collect::<Vec<_>>()
+        });
+        assert!(matches!(
+            serde_json::from_value::<Reply>(two).unwrap(),
+            Reply::ContinuationBatch(_)
+        ));
+    }
     fn sdk() -> Arc<PythonTools> {
         catalog(
             ToolPolicy {
@@ -10445,6 +11630,7 @@ pub(crate) mod managed_tests {
             slot: 0,
             use_deferred_specs: false,
             code_mode_enabled: false,
+            tool_lifecycle: false,
         }
     }
 
@@ -11423,6 +12609,7 @@ pub(crate) mod managed_tests {
         assert!(plain.realtime_response_requested());
         let background = ReplyOutput {
             output: PythonOutput(response),
+            lifecycle_started: false,
             start_response: false,
             acceptance: None,
         };

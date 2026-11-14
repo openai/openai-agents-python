@@ -1,0 +1,98 @@
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -67,7 +67,7 @@
+ pub use codex_thread::ThreadConfigSnapshot;
+ pub use owned_question::{
+     CapturedMcpApproval, ClaimedMcpApproval, McpApprovalCheckpointData, McpApprovalSource,
+-    OwnedQuestion, PreparedMcpApproval,
++    LiveMcpApprovalPolicy, OwnedQuestion, PreparedMcpApproval,
+ };
+ pub use session::sdk_raw_usage::SdkRawUsageLink;
+ pub use session::turn_context::TurnContext;
+diff --git a/codex-rs/core/src/owned_question.rs b/codex-rs/core/src/owned_question.rs
+--- a/codex-rs/core/src/owned_question.rs
++++ b/codex-rs/core/src/owned_question.rs
+@@ -405,7 +405,82 @@
+     }
+ }
+ 
++/// Session-local remembered policy captured from an actual MCP question.
++/// It contains no sender and cannot settle a later invocation.
++#[derive(Clone)]
++pub struct LiveMcpApprovalPolicy {
++    call: codex_mcp::PreparedMcpCall,
++    profile: Option<(String, String)>,
++    transport: u64,
++}
++
++impl LiveMcpApprovalPolicy {
++    pub fn matches(&self, other: &Self) -> bool {
++        self.profile == other.profile
++            && self.transport == other.transport
++            && self.call.has_same_approval_declaration(&other.call)
++    }
++}
++
+ impl OwnedQuestion {
++    pub async fn live_mcp_approval_policy(&self) -> anyhow::Result<Option<LiveMcpApprovalPolicy>> {
++        if self.identity.is_none() {
++            return Ok(None);
++        }
++        let QuestionKey::Elicitation(server, RequestId::String(request_id)) = &self.key else {
++            return Ok(None);
++        };
++        let prefix = format!(
++            "{}_",
++            crate::mcp_tool_call::MCP_TOOL_APPROVAL_QUESTION_ID_PREFIX
++        );
++        let Some(call_id) = request_id.as_ref().strip_prefix(&prefix) else {
++            return Ok(None);
++        };
++        let Some(context) = self.session.mcp_tool_approval_metadata(server, call_id) else {
++            return Ok(None);
++        };
++        let Some(source) = context.checkpoint_source else {
++            return Ok(None);
++        };
++        let Some((invocation, call)) = context.checkpoint_call else {
++            return Ok(None);
++        };
++        anyhow::ensure!(
++            invocation.server == *server
++                && call.server_name() == server
++                && invocation.tool == call.tool_info().tool.name.as_ref(),
++            "MCP approval differs from its raw declaration"
++        );
++        let Some(current) = source.step.mcp.prepare_call(server, &invocation.tool) else {
++            return Ok(None);
++        };
++        if !call.has_same_approval_declaration(&current) || !self.is_pending().await {
++            return Ok(None);
++        }
++        let Some(transport) = current.transport_instance() else {
++            return Ok(None);
++        };
++        let profile = match source.step.settings.agent_profile.as_ref() {
++            Some(profile) => {
++                let graph = profile
++                    .profile
++                    .application_instructions
++                    .metadata
++                    .as_ref()
++                    .and_then(|metadata| metadata.sdk_agent_graph.as_ref())
++                    .ok_or_else(|| anyhow::anyhow!("MCP approval has no captured Agent graph"))?;
++                Some((profile.receipt.profile_id.clone(), graph.clone()))
++            }
++            None => None,
++        };
++        Ok(Some(LiveMcpApprovalPolicy {
++            call: current,
++            profile,
++            transport,
++        }))
++    }
++
+     /// Original in-memory MCP binding and SDK attachments from this native call.
+     /// Peer requests and serialized checkpoint fields cannot create this source.
+     pub async fn mcp_approval_source(&self) -> anyhow::Result<Option<McpApprovalSource>> {

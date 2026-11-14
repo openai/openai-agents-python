@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from ._lifecycle import _join
 from .completion import CompletionContext
 from .guardrails import GuardrailRecord, GuardrailResult, GuardrailTripwire, OutputGuardrail
+from .telemetry import _guardrail_span
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -25,27 +26,31 @@ async def _settle_output_guardrails(
     active: Callable[[], bool],
     *,
     revoke: Callable[[], None] | None = None,
+    tracing_context: str | None = None,
 ) -> None:
     async def check(guardrail: OutputGuardrail[Any]) -> GuardrailRecord:
-        result = await invoke(
-            guardrail, replace(request, final_output=deepcopy(request.final_output))
-        )
-        if not active():
-            raise asyncio.CancelledError()
-        if not isinstance(result, GuardrailResult):
-            raise TypeError("Guardrail callback must return GuardrailResult")
-        record = GuardrailRecord(
-            kind="output",
-            name=guardrail.name,
-            result=result,
-            agent=agent,
-            session_id=request.session_id,
-            turn_id=request.turn_id,
-            subagent_id=request.subagent_id,
-            tool_call=request.tool_call,
-        )
-        records.append(record)
-        return record
+        with _guardrail_span(guardrail.name, tracing_context) as span:
+            result = await invoke(
+                guardrail, replace(request, final_output=deepcopy(request.final_output))
+            )
+            if not active():
+                raise asyncio.CancelledError()
+            if not isinstance(result, GuardrailResult):
+                raise TypeError("Guardrail callback must return GuardrailResult")
+            if span is not None and result.tripwire_triggered:
+                span.set_outcome(status="ok", category="guardrail_triggered")
+            record = GuardrailRecord(
+                kind="output",
+                name=guardrail.name,
+                result=result,
+                agent=agent,
+                session_id=request.session_id,
+                turn_id=request.turn_id,
+                subagent_id=request.subagent_id,
+                tool_call=request.tool_call,
+            )
+            records.append(record)
+            return record
 
     tasks = [asyncio.create_task(check(guardrail)) for guardrail in checks]
     tripped = None

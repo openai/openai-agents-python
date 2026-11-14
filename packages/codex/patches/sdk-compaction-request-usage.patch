@@ -1,0 +1,131 @@
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 1dc285ea75b0565fe68973faa5938dd5e5b398c8..626b93d76a35c0ffa22194892586bd6e26f5767d 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -1460,7 +1460,7 @@ async fn drain_to_completed(
+                     .then(|| observation.response_id.clone())
+                     .flatten();
+                 response_observation_id = sess
+-                    .record_response_observation(turn_context, observation)
++                    .record_response_observation(turn_context, observation, true)
+                     .await?;
+             }
+             Ok(ResponseEvent::Completed {
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 953903870166c61b325d9ff570f1b613419a7711..751905c38fd5f8e57824fdfaaff80d1e212cc5b6 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -542,7 +542,7 @@ async fn collect_compaction_output(
+                     pending_raw_usage = Some(observation.clone());
+                 }
+                 response_observation_id = sess
+-                    .record_response_observation(turn_context, observation)
++                    .record_response_observation(turn_context, observation, true)
+                     .await?;
+             }
+             ResponseEvent::Completed {
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index e9bad71a39aa3a24fdbfe3499ddc994a62799ede..f6bba22ce32e1abbacde8d111b9445299d0155c6 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -5903,6 +5903,7 @@ impl Session {
+         &self,
+         turn_context: &TurnContext,
+         observation: codex_protocol::protocol::ResponseObservation,
++        compaction: bool,
+     ) -> CodexResult<Option<String>> {
+         let private = self
+             .services
+@@ -5916,6 +5917,7 @@ impl Session {
+             id: id.clone(),
+             thread_id: self.thread_id,
+             turn_id: turn_context.sub_id.clone(),
++            compaction: compaction.then_some(true),
+             observation,
+         };
+         if self.live_thread().is_none() {
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index e06732da3fc530c9932c6282abaa28771be1083a..8110a1e867f58dec4ded3001dbaa26c72c802ffb 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3549,6 +3549,7 @@ fn recovered_tools_from_history(
+     };
+     if record.thread_id != thread_id
+         || record.turn_id != turn_id
++        || record.compaction == Some(true)
+         || record.observation.status
+             != codex_protocol::protocol::ResponseObservationStatus::Completed
+     {
+@@ -5860,7 +5861,7 @@ async fn try_run_sampling_request(
+                             });
+                     }
+                     let result = sess
+-                        .record_response_observation(&turn_context, observation)
++                        .record_response_observation(&turn_context, observation, false)
+                         .await;
+                     if sample_cancel.is_cancelled() {
+                         if deadline.expired() {
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+index f7573452bceac283113bb2e0e05076804e27ad21..6620218121678aec216662cf2b0816fcae7779ca 100644
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -336,6 +336,7 @@ fn recovered_batch_fixture() -> (
+             id: id.into(),
+             thread_id: thread,
+             turn_id: "recovered".into(),
++            compaction: None,
+             observation: ResponseObservation {
+                 upstream_request_id: None,
+                 response_id: Some(id.into()),
+@@ -504,6 +505,16 @@ fn tool_terminal_recovery_rejects_stale_wrong_and_missing_anchors() {
+     assert!(recovered_tools_from_history(&candidates, thread, "recovered", &history).is_err());
+ }
+ 
++#[test]
++fn tool_terminal_recovery_refuses_compaction_as_a_sampled_batch() {
++    let (thread, candidates, mut history) = recovered_batch_fixture();
++    let RolloutItem::ResponseObservationRecord(record) = &mut history[7] else {
++        unreachable!()
++    };
++    record.compaction = Some(true);
++    assert!(recovered_tools_from_history(&candidates, thread, "recovered", &history).is_err());
++}
++
+ #[test]
+ fn tool_terminal_recovery_rejects_incomplete_duplicate_and_conflicting_outputs() {
+     let (thread, candidates, mut history) = recovered_batch_fixture();
+diff --git a/codex-rs/core/tests/tool_terminal_recovery.rs b/codex-rs/core/tests/tool_terminal_recovery.rs
+index cb03bda130b6ae07dd2e610869a179dd2b1c10d4..cac5b75b6acb8fadad81332ad519b5897ef7a768 100644
+--- a/codex-rs/core/tests/tool_terminal_recovery.rs
++++ b/codex-rs/core/tests/tool_terminal_recovery.rs
+@@ -232,6 +232,7 @@ async fn tool_terminal_recovery_request_boundary(case: RecoveryCase) -> anyhow::
+                     id: "retained-batch".into(),
+                     thread_id: thread,
+                     turn_id: TURN.into(),
++                    compaction: None,
+                     observation: ResponseObservation {
+                         upstream_request_id: None,
+                         response_id: Some("provider-batch".into()),
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 27e3763d88387a7169e61263273f2cb1b29a98bc..896e3a9fc6b7e2d24230ed2768f97ab28eca11d9 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -3109,6 +3109,10 @@ pub struct ResponseObservationRecord {
+     pub id: String,
+     pub thread_id: ThreadId,
+     pub turn_id: String,
++    /// This terminal belongs to a compaction request, independently of sampling.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub compaction: Option<bool>,
+     #[serde(flatten)]
+     pub observation: ResponseObservation,
+ }
+@@ -7365,6 +7369,7 @@ mod response_observation_tests {
+             id: "occurrence".to_string(),
+             thread_id: ThreadId::new(),
+             turn_id: "origin-turn".to_string(),
++            compaction: None,
+             observation: ResponseObservation {
+                 upstream_request_id: None,
+                 response_id: None,

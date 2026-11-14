@@ -1,0 +1,26 @@
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 7df03568..e8c2a080 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -68,6 +68,8 @@ pub use turn_input::TurnInputEnvironment;
+ pub use turn_lifecycle::AgentLifecycleInput;
+ pub use turn_lifecycle::AgentProfile;
+ pub use turn_lifecycle::AgentProfileActivation;
++pub use turn_lifecycle::AgentProfileAdmissionObserver;
++pub use turn_lifecycle::AgentProfileAdmissionObserverOwner;
+ pub use turn_lifecycle::AgentProfileBoundaryInput;
+ pub use turn_lifecycle::AgentProfileDecisionHandoffTools;
+ pub use turn_lifecycle::AgentProfileLiveHandoffAdmission;
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 3cd77995..1a9b6014 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -55,6 +55,8 @@ pub use codex_tools::parse_tool_input_schema_without_compaction;
+ pub use contributors::AgentLifecycleInput;
+ pub use contributors::AgentProfile;
+ pub use contributors::AgentProfileActivation;
++pub use contributors::AgentProfileAdmissionObserver;
++pub use contributors::AgentProfileAdmissionObserverOwner;
+ pub use contributors::AgentProfileBoundaryInput;
+ pub use contributors::AgentProfileDecisionHandoffTools;
+ pub use contributors::AgentProfileLiveHandoffAdmission;

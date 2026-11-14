@@ -64,9 +64,16 @@ async def test_current_sandbox_capability_controls(
             )
             async with agent.session(environment=source) as session:
                 assert (await (await session.submit("Begin.")).get_result()).final_output == "done"
-                assert (
-                    "sdk_default_provider_compaction" not in (await session.save_state()).to_json()
-                )
+                saved = await session.save_state()
+                assert "sdk_default_provider_compaction" not in saved.to_json()
+                snapshots = [
+                    row["payload"]["thread_settings"]
+                    for row in saved.history
+                    if row.get("type") == "event_msg"
+                    and row.get("payload", {}).get("type") == "thread_settings_applied"
+                ]
+                assert snapshots
+                assert all(snapshot.get("request_controls") != {} for snapshot in snapshots)
                 await session.compact(summary="The initial answer has been completed.")
                 responses.respond(assistant_output("continued"))
                 assert (

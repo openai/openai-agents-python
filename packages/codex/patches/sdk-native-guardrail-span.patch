@@ -1,0 +1,22 @@
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+index e674de8e..51181c8b 100644
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -609,8 +609,15 @@ fn start_trace_span_options(
+     if options.name.is_empty() || options.name.len() > 4096 {
+         return Err("Tracing span name must contain 1–4096 UTF-8 bytes".into());
+     }
+-    if !["workflow", "custom", "callback", "validation", "operation"]
+-        .contains(&options.kind.as_str())
++    if ![
++        "workflow",
++        "custom",
++        "callback",
++        "validation",
++        "operation",
++        "guardrail",
++    ]
++    .contains(&options.kind.as_str())
+         && !(provider_response && options.kind == "model")
+     {
+         return Err("Unsupported native tracing span kind".into());

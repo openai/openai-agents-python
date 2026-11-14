@@ -1,0 +1,24 @@
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 27e3763d..e4f95925 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -2998,7 +2998,7 @@ pub struct ThreadSettingsSnapshot {
+     pub invocation_timeout_ms: Option<u32>,
+     #[serde(
+         default,
+-        skip_serializing_if = "crate::model_request_controls::ModelRequestControls::is_empty",
++        skip_serializing_if = "persisted_request_controls::is_empty",
+         serialize_with = "persisted_request_controls::serialize",
+         deserialize_with = "persisted_request_controls::deserialize"
+     )]
+@@ -7461,6 +7461,10 @@ mod persisted_request_controls {
+     use crate::model_request_controls::ModelRequestControls;
+     use serde::{Deserialize, Deserializer, Serialize, Serializer};
+ 
++    pub fn is_empty(value: &ModelRequestControls) -> bool {
++        value.for_persistence().is_empty()
++    }
++
+     pub fn serialize<S: Serializer>(
+         value: &ModelRequestControls,
+         serializer: S,

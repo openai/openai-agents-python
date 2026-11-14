@@ -1,7 +1,7 @@
 //! Optional header-only facts on the existing managed family inbox.
 use super::{PythonTools, QueuedRequest};
 use codex_extension_api::{
-    BuiltinSandboxOperation, ToolCallOutcome, ToolFinishInput, ToolStartInput,
+    BuiltinSandboxOperation, ExtensionData, ToolCallOutcome, ToolFinishInput, ToolStartInput,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -24,6 +24,7 @@ impl PythonTools {
 fn publish(
     tools: &PythonTools,
     operation: BuiltinSandboxOperation,
+    step: Option<&ExtensionData>,
     thread: &str,
     turn: &str,
     call: &str,
@@ -39,6 +40,9 @@ fn publish(
     let Ok(permit) = capacity.clone().try_acquire_owned() else {
         return;
     };
+    let Ok(profile) = tools.source_profile(step) else {
+        return;
+    };
     let operation = match operation {
         BuiltinSandboxOperation::Exec => "exec",
         BuiltinSandboxOperation::WriteStdin => "write_stdin",
@@ -47,6 +51,10 @@ fn publish(
     let mut message = json!({"type":"_sdk_sandbox_operation", "operation":operation,
         "phase":if finish.is_some() {"finish"} else {"start"},
         "thread":thread,"turn_id":turn,"call_id":call});
+    if let Some(profile) = profile {
+        message["profile_id"] = json!(profile.profile_id);
+        message["profile_epoch"] = json!(profile.epoch);
+    }
     if let Some((ok, duration)) = finish {
         message["ok"] = json!(ok);
         message["duration_ms"] = json!(duration.as_secs_f64() * 1000.0);
@@ -72,6 +80,7 @@ pub(super) fn on_start(input: &ToolStartInput<'_>) {
         publish(
             &tools,
             operation,
+            input.step_store,
             input.thread_store.level_id(),
             input.turn_id,
             input.call_id,
@@ -90,6 +99,7 @@ pub(super) fn on_finish(input: &ToolFinishInput<'_>) {
         publish(
             &tools,
             operation,
+            input.step_store,
             input.thread_store.level_id(),
             input.turn_id,
             input.call_id,

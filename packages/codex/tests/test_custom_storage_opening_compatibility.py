@@ -1,14 +1,12 @@
 """Custom-storage admission through the public Session opening boundary."""
 
 import pytest
-from pydantic import BaseModel
 
 from agents import (
     Agent,
     CapabilityError,
     Checklist,
     CustomStorage,
-    FunctionTool,
     HttpMCP,
     NativeAgents,
     NativeProvider,
@@ -25,7 +23,6 @@ from tests.native_storage_fixtures import MemorySessionStore
         ("checklist", "CustomStorage preview does not support"),
         ("code", "CustomStorage preview does not support"),
         ("mcp", "CustomStorage preview does not support"),
-        ("manual", "CustomStorage preview does not support"),
         ("standalone-search", "CustomStorage preview does not support"),
         ("split-first", "exactly one NativeAgents"),
         ("provider-first", "Buffered Responses do not support native child agents"),
@@ -51,11 +48,6 @@ async def test_custom_storage_opening_rejection_order(responses, tmp_path, kind,
         "checklist": [Checklist()],
         "code": [],
         "mcp": [HttpMCP(name="remote", url=responses.url, tools=["lookup"])],
-        "manual": [
-            FunctionTool(
-                name="manual", description="Manual result", input_type=BaseModel, output_type=str
-            )
-        ],
         "standalone-search": [WebSearch()],
         "split-first": [NativeAgents(), NativeAgents()],
         "provider-first": [NativeAgents()],

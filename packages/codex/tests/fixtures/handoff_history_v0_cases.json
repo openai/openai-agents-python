@@ -1,0 +1,131 @@
+{
+  "records": {
+    "item_1": {
+      "content": "USER_INPUT",
+      "role": "user"
+    },
+    "item_2": {
+      "id": "msg_A",
+      "content": [
+        {
+          "annotations": [],
+          "text": "A_TEXT",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    "item_3": {
+      "arguments": "{}",
+      "call_id": "call_A",
+      "name": "transfer_to_b",
+      "type": "function_call",
+      "id": "fc_A"
+    },
+    "item_4": {
+      "call_id": "call_A",
+      "output": "{\"assistant\": \"B\"}",
+      "type": "function_call_output"
+    },
+    "item_5": {
+      "id": "msg_B",
+      "content": [
+        {
+          "annotations": [],
+          "text": "B_TEXT",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    "item_6": {
+      "arguments": "{}",
+      "call_id": "call_B",
+      "name": "transfer_to_c",
+      "type": "function_call",
+      "id": "fc_B"
+    },
+    "item_7": {
+      "call_id": "call_B",
+      "output": "{\"assistant\": \"C\"}",
+      "type": "function_call_output"
+    },
+    "item_8": {
+      "role": "assistant",
+      "content": "For context, here is the conversation so far between the user and the previous agent:\n<CONVERSATION HISTORY>\n1. user: USER_INPUT\n2. {\"id\": \"msg_A\", \"content\": [{\"annotations\": [], \"text\": \"A_TEXT\", \"type\": \"output_text\"}], \"role\": \"assistant\", \"status\": \"completed\", \"type\": \"message\"}\n3. {\"arguments\": \"{}\", \"call_id\": \"call_A\", \"name\": \"transfer_to_b\", \"type\": \"function_call\", \"id\": \"fc_A\"}\n4. {\"call_id\": \"call_A\", \"output\": \"{\\\"assistant\\\": \\\"B\\\"}\", \"type\": \"function_call_output\"}\n</CONVERSATION HISTORY>"
+    },
+    "item_9": {
+      "role": "assistant",
+      "content": "For context, here is the conversation so far between the user and the previous agent:\n<CONVERSATION HISTORY>\n1. {\"arguments\": \"{}\", \"call_id\": \"call_B\", \"name\": \"transfer_to_c\", \"type\": \"function_call\", \"id\": \"fc_B\"}\n2. {\"call_id\": \"call_B\", \"output\": \"{\\\"assistant\\\": \\\"C\\\"}\", \"type\": \"function_call_output\"}\n</CONVERSATION HISTORY>"
+    },
+    "item_10": {
+      "role": "assistant",
+      "content": "For context, here is the conversation so far between the user and the previous agent:\n<CONVERSATION HISTORY>\n1. user: USER_INPUT\n</CONVERSATION HISTORY>"
+    },
+    "item_11": {
+      "role": "assistant",
+      "content": "For context, here is the conversation so far between the user and the previous agent:\n<CONVERSATION HISTORY>\n1. {\"arguments\": \"{}\", \"call_id\": \"call_A\", \"name\": \"transfer_to_b\", \"type\": \"function_call\", \"id\": \"fc_A\"}\n2. {\"call_id\": \"call_A\", \"output\": \"{\\\"assistant\\\": \\\"B\\\"}\", \"type\": \"function_call_output\"}\n</CONVERSATION HISTORY>"
+    }
+  },
+  "source_requests": {
+    "0": [
+      "item_1"
+    ],
+    "1": [
+      "item_1",
+      "item_2",
+      "item_3",
+      "item_4"
+    ],
+    "2": [
+      "item_1",
+      "item_2",
+      "item_3",
+      "item_4",
+      "item_5",
+      "item_6",
+      "item_7"
+    ]
+  },
+  "cases": {
+    "default": [
+      "item_1",
+      "item_2",
+      "item_3",
+      "item_4",
+      "item_5",
+      "item_6",
+      "item_7"
+    ],
+    "global": [
+      "item_8",
+      "item_5",
+      "item_9"
+    ],
+    "first_opt_out": [
+      "item_8",
+      "item_5",
+      "item_9"
+    ],
+    "second_opt_out": [
+      "item_10",
+      "item_2",
+      "item_11",
+      "item_5",
+      "item_6",
+      "item_7"
+    ],
+    "first_opt_in": [
+      "item_10",
+      "item_2",
+      "item_11",
+      "item_5",
+      "item_6",
+      "item_7"
+    ]
+  }
+}

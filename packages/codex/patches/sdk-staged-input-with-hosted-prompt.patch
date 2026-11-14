@@ -1,0 +1,20 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 7d5caead..68e399af 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -3604,12 +3604,10 @@ impl ModelClientSession {
+             .and_then(|admission| admission.step_store())
+             .and_then(|store| store.get::<crate::session::staged_input_terminal::SampledSources>());
+         let websocket_enabled = self.websocket_for_prompt(prompt)?;
+-        if staged_sources.is_some()
+-            && (model_info.use_responses_lite
+-                || prompt.request_controls.hosted_prompt.as_ref().and_then(Option::as_ref).is_some())
+-        {
++        if staged_sources.is_some() && model_info.use_responses_lite {
+             return Err(CodexErr::InvalidRequest(
+-                "Selected staged input requires ordinary Responses without a hosted prompt".into()));
++                "Selected staged input requires the standard Responses formatter".into(),
++            ));
+         }
+         let mut source_origins = (0..prompt.input.len()).map(Some).collect::<Vec<_>>();
+         self.allow_http_fallback = Self::request_transport_mode(prompt) != codex_protocol::model_request_transport::RequestTransportMode::Websocket;

@@ -19,8 +19,9 @@ class ToolErrorContext(Generic[ContextT]):
 
     Agent.session(), Agent.run(), and Agent.run_sync() have been accepting
     tool_error_formatter callbacks with this context. The callback has been
-    receiving original argument or ordinary body failures, with the original
-    error and application context staying local.
+    receiving original argument or body failures, plus rejected unknown
+    direct functions when the turn permits a recovery reply. The original
+    error and application context stay local.
 
     A returned string, including an empty string, has been supplying a failed
     non-terminal tool reply. None, another return type, or a formatter exception
@@ -30,11 +31,15 @@ class ToolErrorContext(Generic[ContextT]):
     run-wide recovery. dataclasses.replace() has been carrying that original
     inheritance choice, including same-value error_function=None copies.
 
+    A default managed function denial has been receiving reason="approval_rejected"
+    and a local PermissionError. An explicit denial reason has been bypassing
+    this formatter, including a copy of the default message.
+
     Async formatters have been receiving asyncio cancellation directly. The
     owner has been joining cleanup and discarding late replies, with cleanup
-    errors retaining their original cause. Timeout, rewritten input, other
-    policies, native MCP/executor errors, and unknown names have been retaining
-    their existing behavior.
+    errors retaining their original cause. Timeouts, rewritten input, strict
+    unknown-tool rejection, and native MCP and executor failures keep their
+    own behavior.
     """
 
     context: ContextT = field(repr=False)
@@ -42,6 +47,7 @@ class ToolErrorContext(Generic[ContextT]):
     phase: Literal["arguments", "execution"]
     default_message: str
     error: Exception = field(repr=False)
+    reason: Literal["tool_not_found", "approval_rejected"] | None = None
 
 
 ToolErrorFormatter: TypeAlias = Callable[

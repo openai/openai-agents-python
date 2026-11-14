@@ -82,6 +82,9 @@ async def test_fresh_context_each_step_preserves_history_and_tools(
 
     async def transform(request: ModelRequestContext[dict[str, str]]):
         assert request.context is application
+        assert request.agent is application_agent
+        assert request.instructions == "Use the reference."
+        assert "Use the reference." not in repr(request)
         assert request.purpose == "turn" and request.subagent_id is None
         requests.append(request)
         return [
@@ -91,14 +94,15 @@ async def test_fresh_context_each_step_preserves_history_and_tools(
 
     responses.respond(function_call("refresh", {}, "refresh-call"))
     responses.respond(assistant_output("answer"))
+    application_agent = Agent(
+        instructions="Use the reference.",
+        tools=[refresh],
+        provider=provider(responses),
+        transform_context=transform,
+    )
     async with (
         timeout(20),
-        Agent(
-            instructions="Use the reference.",
-            tools=[refresh],
-            provider=provider(responses),
-            transform_context=transform,
-        ).session(context=application) as session,
+        application_agent.session(context=application) as session,
     ):
         turn = await session.submit("request-only-secret")
         assert (await turn.get_result()).final_output == "answer"
@@ -406,6 +410,8 @@ async def test_output_repair_and_compaction_use_current_application_policy(respo
 
     async def transform(request):
         assert request.context is application
+        if request.purpose == "compaction":
+            assert request.instructions is None
         purposes.append(request.purpose)
         return [*request.items, reference(request.context["reference"])]
 
@@ -550,8 +556,49 @@ async def test_native_child_inherits_policy_with_distinct_request_identity(
             assert (await child.get_result()).final_output == "child complete"
             child_requests = [request for request in calls if request.subagent_id is not None]
             assert len(child_requests) == 1
+            assert child_requests[0].agent is None
             assert child_requests[0].session_id == session.id
             assert child_requests[0].turn_id == child.turn_id
             assert child_requests[0].subagent_id == child.child_id
     assert len(calls) == len(peer.requests) >= 3
     assert all("shared reference" in json.dumps(request) for request in peer.requests)
+
+
+async def test_configured_agent_tool_keeps_its_application_owner(
+    responses: ResponsesFixture,
+) -> None:
+    requests = []
+
+    def transform(request):
+        requests.append(request)
+
+    borrowed_provider = provider(responses)
+    child = Agent(
+        name="Nested",
+        instructions="Answer the nested question.",
+        provider=borrowed_provider,
+        transform_context=transform,
+    )
+    parent = Agent(
+        name="Parent",
+        instructions="Delegate to Nested.",
+        tools=[child.as_tool("nested_child")],
+        provider=borrowed_provider,
+        transform_context=transform,
+    )
+    responses.respond(function_call("nested_child", {"input": "Nested question"}, "nested"))
+    responses.respond(assistant_output("nested complete"))
+    responses.respond(assistant_output("parent complete"))
+    async with timeout(25), parent.session() as session:
+        root_id = session.id
+        assert (await (await session.submit("Delegate.")).get_result()).final_output == (
+            "parent complete"
+        )
+    assert [request.agent for request in requests] == [parent, child, parent]
+    assert [request.instructions for request in requests] == [
+        "Delegate to Nested.",
+        "Answer the nested question.",
+        "Delegate to Nested.",
+    ]
+    assert requests[1].session_id != root_id
+    assert all(request.subagent_id is None for request in requests)

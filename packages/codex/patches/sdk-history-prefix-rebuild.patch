@@ -1,0 +1,125 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index f61696f2b5233a4041f6d9f219d0505b13e2eef4..323621534b096a2352a792b3a86f0ead6e7ce948 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1221,7 +1221,20 @@ impl CodexThread {
+         items: Vec<String>,
+     ) -> CodexResult<String> {
+         self.session
+-            .sdk_replace_history(expected_revision, keep, items)
++            .sdk_replace_history_with_context_policy(expected_revision, keep, items, false)
++            .await
++    }
++
++    /// Replace an original suffix, allowing an explicit rebuild of compacted model context.
++    #[doc(hidden)]
++    pub async fn sdk_replace_history_allow_rebuild(
++        &self,
++        expected_revision: &str,
++        keep: usize,
++        items: Vec<String>,
++    ) -> CodexResult<String> {
++        self.session
++            .sdk_replace_history_with_context_policy(expected_revision, keep, items, true)
+             .await
+     }
+ 
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index d7fba2556570747c4ba475bbc69af2b469f223e5..0584cc3b79f4d419931cf12bd52680b72422cd72 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -287,7 +287,11 @@ impl Session {
+ mod tests;
+ 
+ enum SdkHistoryEdit {
+-    Replace { keep: usize, appended: Vec<String> },
++    Replace {
++        keep: usize,
++        appended: Vec<String>,
++        allow_rebuild: bool,
++    },
+     Pop { allow_rebuild: bool },
+ }
+ 
+@@ -477,17 +481,33 @@ impl Session {
+             .collect())
+     }
+ 
+-    /// The SDK owns exclusive native ingress and the mutation permit throughout.
++    #[cfg(test)]
+     pub(crate) async fn sdk_replace_history(
+         &self,
+         expected_revision: &str,
+         keep: usize,
+         appended: Vec<String>,
++    ) -> codex_protocol::error::Result<String> {
++        self.sdk_replace_history_with_context_policy(expected_revision, keep, appended, false)
++            .await
++    }
++
++    /// The SDK owns exclusive native ingress and the mutation permit throughout.
++    pub(crate) async fn sdk_replace_history_with_context_policy(
++        &self,
++        expected_revision: &str,
++        keep: usize,
++        appended: Vec<String>,
++        allow_rebuild: bool,
+     ) -> codex_protocol::error::Result<String> {
+         let (revision, _, _) = self
+             .sdk_edit_history(
+                 expected_revision,
+-                SdkHistoryEdit::Replace { keep, appended },
++                SdkHistoryEdit::Replace {
++                    keep,
++                    appended,
++                    allow_rebuild,
++                },
+             )
+             .await?;
+         Ok(revision)
+@@ -539,7 +559,11 @@ impl Session {
+             crate::context_manager::is_sdk_model_only_instruction(&row.item, row.metadata.as_ref())
+         };
+         let (originals, envelopes, popped, rebuilt_context) = match edit {
+-            SdkHistoryEdit::Replace { keep, appended } => {
++            SdkHistoryEdit::Replace {
++                keep,
++                appended,
++                allow_rebuild,
++            } => {
+                 if keep > current.items.len() {
+                     return Err(invalid("history keep exceeds snapshot length"));
+                 }
+@@ -579,9 +603,29 @@ impl Session {
+                         projection,
+                     });
+                 }
+-                let mut envelopes = current
+-                    .retained_projection_preserving(state.history.annotated_items(), keep, model_only)
+-                    .map_err(invalid)?;
++                let mut envelopes = match current.retained_projection_preserving(
++                    state.history.annotated_items(),
++                    keep,
++                    model_only,
++                ) {
++                    Ok(envelopes) => envelopes,
++                    Err(_) if allow_rebuild => {
++                        let retained: Vec<_> = originals.items[..keep]
++                            .iter()
++                            .filter_map(|item| item.projection.clone())
++                            .collect();
++                        if retained
++                            .iter()
++                            .any(crate::context_manager::is_provider_compaction_boundary)
++                        {
++                            return Err(invalid(
++                                "cannot rebuild a retained provider compaction boundary",
++                            ));
++                        }
++                        retained
++                    }
++                    Err(error) => return Err(invalid(error)),
++                };
+                 envelopes.extend(
+                     originals.items[keep..]
+                         .iter()

@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import inspect
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from ._callback_execution import _call_callback
 from ._function_tools import FunctionTool, ToolContext
 from ._public import preserve_module_identity as _preserve_module_identity
+from .decisions import _decision_scope
 from .tools import _CapturedFunction
 
 if TYPE_CHECKING:
@@ -26,12 +28,21 @@ class DecisionHandoff:
     Named targets have been declaring the authorized roster. Decisions has been
     receiving only the model's bounded routing input and choosing one name.
     Native execution has been retaining transfer, source fencing and cancellation.
+    Callable entries have been creating fresh targets from ToolContext and routing
+    input after selection. These targets have been inheriting the current model,
+    provider, output contract and runtime grants, with ordinary Python tools.
+    Runtime-created targets have not been supporting durable storage or portable
+    checkpoints; concrete captured targets have been retaining those existing paths.
     """
 
     name: str
     description: str
     question: str
-    targets: Mapping[str, Agent[Any, Any]]
+    targets: Mapping[
+        str,
+        Agent[Any, Any]
+        | Callable[[ToolContext[Any], str], Agent[Any, Any] | Awaitable[Agent[Any, Any]]],
+    ]
 
     def __post_init__(self) -> None:
         from .agent import Agent
@@ -51,11 +62,16 @@ class DecisionHandoff:
             not isinstance(self.targets, Mapping)
             or not self.targets
             or any(
-                not isinstance(name, str) or not name.strip() or not isinstance(target, Agent)
+                not isinstance(name, str)
+                or not name.strip()
+                or not (isinstance(target, Agent) or callable(target))
                 for name, target in self.targets.items()
             )
         ):
-            raise ValueError("Decision handoff targets must map nonempty names to native Agents")
+            raise ValueError(
+                "Decision handoff targets must map nonempty names to "
+                "native Agents or application factories"
+            )
         object.__setattr__(self, "targets", MappingProxyType(dict(self.targets)))
 
 
@@ -66,7 +82,9 @@ class _RoutingInput(BaseModel):
 
 @dataclass(frozen=True)
 class _DecisionHandoffSelection:
-    target_profile_id: str
+    target_profile_id: str | None = None
+    factory: str | None = None
+    target: Agent[Any, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -75,7 +93,7 @@ class _CapturedDecisionHandoff(_CapturedFunction):
 
 
 def _decision_handoff_tool(
-    declaration: DecisionHandoff, targets: Mapping[str, str]
+    declaration: DecisionHandoff, targets: Mapping[str, Any]
 ) -> FunctionTool[Any, Any, Any]:
     captured_targets = MappingProxyType(dict(targets))
 
@@ -90,7 +108,19 @@ def _decision_handoff_tool(
             )
             if not isinstance(selected, str) or selected not in captured_targets:
                 raise ValueError("Decision handoff selected an unauthorized target")
-            return _DecisionHandoffSelection(captured_targets[selected])
+            target = captured_targets[selected]
+            if callable(target):
+                scope = _decision_scope.get()
+                assert scope is not None
+                scope.check(tool_context, after_await=True)
+                value = await _call_callback(target, scope.active, tool_context, input)
+                scope.check(tool_context, after_await=True)
+                from .agent import Agent
+
+                if not isinstance(value, Agent):
+                    raise TypeError("Decision handoff factory must return a native Agent")
+                return _DecisionHandoffSelection(factory=selected, target=value)
+            return _DecisionHandoffSelection(target)
 
         return _CapturedDecisionHandoff(
             name=declaration.name,

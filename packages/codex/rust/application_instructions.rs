@@ -691,31 +691,59 @@ pub(crate) fn captured_prompt_text(
     Ok(decode(&application.rendered)?.1.to_owned())
 }
 
+/// Append a detached directive after the captured input. Earlier accepted
+/// application text may remain in acknowledged provider context; this directive
+/// supersedes it without changing canonical ownership or private provenance.
+pub(crate) fn request_projection(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "developer".to_owned(),
+        content: vec![ContentItem::InputText {
+            text: format!("{}\n{NOTICE}{text}{}", MARKERS.0, MARKERS.1),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
 /// Remove only SDK-owned instruction parts from the detached provider projection.
 /// Accepted canonical envelopes and unrelated parts stay with their original owners.
-pub(crate) fn remove_prompt_fragments(items: &mut Vec<ResponseItem>) -> Result<()> {
+pub(crate) fn remove_prompt_fragments(
+    items: &mut Vec<ResponseItem>,
+    sources: Option<&mut Vec<Option<usize>>>,
+) -> Result<()> {
     let mut invalid_metadata = false;
+    let mut sources = sources;
+    let mut item_index = 0;
     items.retain_mut(|item| {
+        let index = item_index;
+        item_index += 1;
+        let mut record = |origin| {
+            if let Some(sources) = sources.as_deref_mut() {
+                sources.push(origin);
+            }
+            true
+        };
         let ResponseItem::Message {
             content,
             internal_chat_message_metadata_passthrough: Some(metadata),
             ..
         } = item
         else {
-            return true;
+            return record(Some(index));
         };
         let Some(kinds) = &mut metadata.content_item_kinds else {
-            return true;
+            return record(Some(index));
         };
         if !kinds
             .iter()
             .any(|kind| kind.0 == ACCEPTED || kind.0 == PROJECTED)
         {
-            return true;
+            return record(Some(index));
         }
         if kinds.len() != content.len() {
             invalid_metadata = true;
-            return true;
+            return record(Some(index));
         }
         let mut index = 0;
         content.retain(|_| {
@@ -724,7 +752,9 @@ pub(crate) fn remove_prompt_fragments(items: &mut Vec<ResponseItem>) -> Result<(
             keep
         });
         kinds.retain(|kind| !matches!(kind.0.as_str(), ACCEPTED | PROJECTED));
-        !content.is_empty()
+        // Changed fragments may be projected to the provider, but cannot
+        // claim delivery of the original canonical row.
+        !content.is_empty() && record(None)
     });
     ensure!(!invalid_metadata, "Invalid SDK instruction part metadata");
     Ok(())

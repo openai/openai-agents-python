@@ -29,6 +29,7 @@ from dataclasses import (
     replace as replace,
 )
 from pathlib import Path as Path
+from sys import implementation as _implementation
 from threading import RLock as RLock
 from time import time as _time
 from types import (
@@ -76,7 +77,7 @@ from ._trace_context import (
     TraceContext as TraceContext,
     _trace_context as _trace_context,
 )
-from .agent_lifecycle import _AgentLifecycleCallback
+from .agent_lifecycle import _AgentLifecycleCallback, _ToolLifecycleCallback
 from .compaction import ResponsesCompaction, _BeforeCompact
 from .completion import _BeforeComplete, _ToolBatchCompletion
 from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
@@ -1002,7 +1003,9 @@ class Agent(Generic[ContextT, OutputT]):
     ``after_model`` awaits the accepted provider response before direct tool dispatch.
     ``transform_context`` runs before each model request, including children,
     output repair, and model-based compaction. Return replacement input items
-    or None to keep the original input. The callback does not edit saved history.
+    or None to keep the original input. Return ModelContextProjection to replace
+    application instructions and optionally input items in one root request.
+    The callback does not edit saved history.
     Raising an exception prevents that request from reaching the provider.
 
     ``before_compact`` runs before automatic or manual native compaction,
@@ -1057,6 +1060,7 @@ class Agent(Generic[ContextT, OutputT]):
     tool_name_collision_policy: Literal["error", "warn"]
     environment: EnvironmentSource[ContextT] | None
     on_lifecycle: _AgentLifecycleCallback[ContextT] | None = field(default=None, kw_only=True)
+    on_tool_lifecycle: _ToolLifecycleCallback[ContextT] | None = field(default=None, kw_only=True)
     after_model: _AfterModel[ContextT] | None
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -1166,6 +1170,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
         on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[ContextT] | None = None,
         after_model: _AfterModel[ContextT] | None = None,
     ) -> None: ...
 
@@ -1205,6 +1210,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
         on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[ContextT] | None = None,
         after_model: _AfterModel[ContextT] | None = None,
     ) -> None: ...
 
@@ -1242,6 +1248,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
         on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[ContextT] | None = None,
         after_model: _AfterModel[ContextT] | None = None,
     ) -> None: ...
 
@@ -1279,6 +1286,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
         on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[ContextT] | None = None,
         after_model: _AfterModel[ContextT] | None = None,
     ) -> None: ...
 
@@ -1315,6 +1323,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_name_collision_policy: Literal["error", "warn"] = "error",
         environment: EnvironmentSource[ContextT] | None = None,
         on_lifecycle: _AgentLifecycleCallback[ContextT] | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[ContextT] | None = None,
         after_model: _AfterModel[ContextT] | None = None,
     ) -> None:
         if isinstance(instructions, _OmittedInstructions):
@@ -1330,6 +1339,8 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("name must be a string or None")
         if not isinstance(programmatic_tool_calling, bool):
             raise TypeError("programmatic_tool_calling must be a bool")
+        if on_tool_lifecycle is not None and not callable(on_tool_lifecycle):
+            raise TypeError("on_tool_lifecycle must be callable or None")
         if on_lifecycle is not None and not callable(on_lifecycle):
             raise TypeError("on_lifecycle must be callable or None")
         if prepare_handoff_input is not None and not callable(prepare_handoff_input):
@@ -1406,6 +1417,7 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(self, "after_model", after_model)
         object.__setattr__(self, "prepare_handoff_input", prepare_handoff_input)
         object.__setattr__(self, "on_lifecycle", on_lifecycle)
+        object.__setattr__(self, "on_tool_lifecycle", on_tool_lifecycle)
         object.__setattr__(self, "before_compact", before_compact)
         object.__setattr__(self, "before_complete", before_complete)
         object.__setattr__(self, "tool_batch_completion", tool_batch_completion)
@@ -1556,15 +1568,22 @@ class Agent(Generic[ContextT, OutputT]):
         custom_output_extractor: Callable[[Completed[OutputT]], str | Awaitable[str]] | None = None,
         on_stream: Callable[[AgentToolStreamEvent], None | Awaitable[None]] | None = None,
         on_stream_max_pending_events: int | None = 1024,
+        include_raw_provider_events: bool = False,
+        return_items: bool = False,
     ) -> _PythonTool[ContextT, object]:
         """Run this agent as a tool owned by the parent Session.
 
         The parent relays pending interactions and joins child cleanup.
-        The parent can suspend a single configured child at a supported
-        manual boundary after its other automatic callbacks have settled.
+        The parent can suspend configured children at supported manual
+        boundaries after its other automatic callbacks have settled.
         on_stream receives the child's native observations in order. The tool
         joins its callback before returning. A slow callback that exceeds
         on_stream_max_pending_events fails the tool. None removes this limit.
+        Set include_raw_provider_events=True to also receive the child's raw
+        provider frames. The observer receives the usual summaries for other
+        execution details. Set return_items=True to include the child's produced
+        items in custom_output_extractor. After restore, this includes items
+        accepted during the resumed execution.
         """
         from ._agent_tool import _create_agent_tool
 
@@ -1575,6 +1594,8 @@ class Agent(Generic[ContextT, OutputT]):
             custom_output_extractor,
             on_stream,
             on_stream_max_pending_events,
+            include_raw_provider_events,
+            return_items,
         )
 
     @overload
@@ -1600,6 +1621,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None,
         tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
@@ -1637,6 +1659,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None,
         tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
@@ -1674,6 +1697,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None,
         tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
@@ -1711,6 +1735,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None,
         tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
@@ -1897,6 +1922,7 @@ class Agent(Generic[ContextT, OutputT]):
                 parent_trace=parent_trace,
                 trace_options=trace_options,
                 on_interaction=on_interaction,
+                on_tool_lifecycle=on_tool_lifecycle,
                 tool_error_formatter=tool_error_formatter,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
@@ -1940,6 +1966,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None,
         tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
@@ -1983,6 +2010,7 @@ class Agent(Generic[ContextT, OutputT]):
             session = await Session[SessionContextT, OutputT]._open(
                 self,
                 context=context,
+                on_tool_lifecycle=on_tool_lifecycle,
                 state=state,
                 verify_remembered_approvals=verify_remembered_approvals,
                 restored_hosted_mcp=restored_hosted_mcp,
@@ -2031,15 +2059,15 @@ class Agent(Generic[ContextT, OutputT]):
             try:
                 yield session
             except BaseException as error:
-                lease = session._environment_lease
+                lease = session._environment_owner
                 await _close_after_error(error, session.aclose)
-                if not session._closed or session._environment_lease is not None:
+                if not session._closed or session._environment_owner is not None:
                     cast(Any, error).cleanup = session
                 if lease is not None:
                     lease.raise_if_interrupted(error)
                 raise
             else:
-                lease = session._environment_lease
+                lease = session._environment_owner
                 try:
                     await session.aclose()
                 except BaseException as error:
@@ -2061,6 +2089,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: None = None,
         on_interaction: _InteractionHandler | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None,
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -2101,6 +2130,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: object = None,
         on_interaction: _InteractionHandler | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None,
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -2141,6 +2171,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: ContextT,
         on_interaction: _InteractionHandler | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None,
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -2180,6 +2211,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: SessionContextT | None = None,
         on_interaction: _InteractionHandler | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None,
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -2374,6 +2406,8 @@ class Agent(Generic[ContextT, OutputT]):
                 raise TypeError("tool_error_formatter must be callable or None")
             if on_interaction is not None and not callable(on_interaction):
                 raise TypeError("on_interaction must be callable")
+            if on_tool_lifecycle is not None and not callable(on_tool_lifecycle):
+                raise TypeError("on_tool_lifecycle must be callable or None")
             if not isinstance(return_state, bool):
                 raise TypeError("return_state must be a bool")
             if state is not None:
@@ -2473,6 +2507,8 @@ class Agent(Generic[ContextT, OutputT]):
                 options["tool_error_formatter"] = tool_error_formatter
             if on_interaction is not None:
                 options["on_interaction"] = on_interaction
+            if on_tool_lifecycle is not None:
+                options["on_tool_lifecycle"] = on_tool_lifecycle
             if parent_trace is not None:
                 options["parent_trace"] = _trace_context(parent_trace)
             if trace_options is not None:
@@ -2503,8 +2539,11 @@ class Agent(Generic[ContextT, OutputT]):
                 options["max_function_concurrency"] = max_function_concurrency
             if environment is not None:
                 options["environment"] = environment
+            # PyPy uses the ordinary native Session opening. Its cpyext bridge
+            # can abort the process when creating an atomic one-shot owner.
             if (
-                isinstance(session_factory, MethodType)
+                _implementation.name == "cpython"
+                and isinstance(session_factory, MethodType)
                 and session_factory.__self__ is self
                 and session_factory.__func__ is _BUILTIN_SESSION_FACTORY
                 and provider_history is None
@@ -2517,6 +2556,7 @@ class Agent(Generic[ContextT, OutputT]):
                 and before_step is None
                 and prepare_request is None
                 and on_interaction is None
+                and on_tool_lifecycle is None
                 and budget is None
                 and not input_guardrails
                 and not output_guardrails
@@ -2808,6 +2848,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: None = None,
         on_interaction: _InteractionHandler | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None,
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -2847,6 +2888,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: object = None,
         on_interaction: _InteractionHandler | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None,
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -2886,6 +2928,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: ContextT,
         on_interaction: _InteractionHandler | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None,
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -2924,6 +2967,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: SessionContextT | None = None,
         on_interaction: _InteractionHandler | None = None,
+        on_tool_lifecycle: _ToolLifecycleCallback[Any] | None = None,
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -3011,6 +3055,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["tool_error_formatter"] = tool_error_formatter
                 if on_interaction is not None:
                     options["on_interaction"] = on_interaction
+                if on_tool_lifecycle is not None:
+                    options["on_tool_lifecycle"] = on_tool_lifecycle
                 if provider is not None:
                     options["provider"] = provider
                 if model is not None:
