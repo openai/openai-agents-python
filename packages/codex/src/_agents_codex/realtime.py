@@ -1914,6 +1914,8 @@ class RealtimeSession:
                     )
                     expected = snapshot["profile_receipt"]
 
+                environment = self._session._environment_for_profile(expected)
+
                 async def admit() -> dict[str, Any]:
                     async with self._session._catalog_publication_lock:
                         self._session._start_readers(
@@ -1963,7 +1965,9 @@ class RealtimeSession:
                             ):
                                 raise RuntimeError("Native voice graph reused a captured identity")
                             captured = replace(
-                                runtime, catalog=replace(runtime.catalog, generation=catalogs[key])
+                                runtime,
+                                catalog=replace(runtime.catalog, generation=catalogs[key]),
+                                environment=environment,
                             )
                             self._session._voice_profiles[key] = captured
                             self._session._profile_catalogs[(key, catalogs[key])] = captured.catalog

@@ -2736,6 +2736,7 @@ class _ProfileRuntime:
     catalog: _ToolCatalog
     output: _PreparedOutput
     instructions: str
+    environment: Environment[Any] | None = None
 
 
 def _native_session_config(
@@ -3012,7 +3013,8 @@ def _complete_profile_mcp(
     executor: Environment[Any] | None,
     *,
     native_responses: bool,
-) -> None:
+) -> dict[str, Environment[Any] | None]:
+    environments: dict[str, Environment[Any] | None] = {}
     graph_environments = any(profile.declaration.environment is not None for profile in profiles)
     for profile, row in zip(profiles, roster, strict=True):
         declaration = profile.declaration
@@ -3023,6 +3025,7 @@ def _complete_profile_mcp(
         )
         if selected is not None and not isinstance(selected, Environment):
             raise TypeError("Per-Agent Environment sources require joined graph acquisition")
+        environments[profile.id] = selected
         if graph_environments:
             if selected is not None and any(
                 callback is not None
@@ -3055,6 +3058,8 @@ def _complete_profile_mcp(
                 programmatic_tool_calling=declaration.programmatic_tool_calling,
             )
         )
+
+    return environments
 
 
 def _profile_fingerprint(
@@ -5074,9 +5079,13 @@ class Session(Generic[ContextT, OutputT]):
                 for profile in profiles
             ):
                 raise TypeError("Distinct Agent executors require captured sandbox source routing")
-            _complete_profile_mcp(
+            profile_environments = _complete_profile_mcp(
                 profiles, profile_roster, executor, native_responses=codex_login is None
             )
+            profile_runtimes = {
+                key: replace(runtime, environment=profile_environments[key])
+                for key, runtime in profile_runtimes.items()
+            }
             if executor is not None or profile_roster:
                 if restored_profile is not None:
                     selected_row = next(
@@ -7334,11 +7343,32 @@ class Session(Generic[ContextT, OutputT]):
                 return child
         return None
 
-    def _tool_sandbox_source(self) -> object | None:
+    def _environment_for_profile(
+        self, receipt: Mapping[str, Any] | None
+    ) -> Environment[Any] | None:
+        self._agent_for_profile(receipt)
+        if receipt is None:
+            return self._executor
+        return self._source_profile_runtime(receipt["profile_id"]).environment
+
+    def _environment_for_message(self, message: Mapping[str, Any]) -> Environment[Any] | None:
+        receipt = (
+            {"profile_id": message.get("profile_id"), "epoch": message.get("profile_epoch")}
+            if "profile_id" in message or "profile_epoch" in message
+            else None
+        )
+        return self._environment_for_profile(receipt)
+
+    def _tool_sandbox_source(self, message: Mapping[str, Any]) -> object | None:
+        environment = self._environment_for_message(message)
         borrowed = self._configured_environment_source
-        if borrowed is not None and self._executor is borrowed[0]:
+        if borrowed is not None and environment is borrowed[0]:
             return borrowed[1]
-        return self._environment_lease.source if self._environment_lease is not None else None
+        return (
+            self._environment_lease.source
+            if self._environment_lease is not None and environment is self._executor
+            else None
+        )
 
     async def _configured_requests(self, turn: Turn[Any] | None = None) -> list[Interaction]:
         requests: list[Interaction] = []
@@ -8749,11 +8779,11 @@ class Session(Generic[ContextT, OutputT]):
                 realtime_usage_accounting=self.realtime_usage_accounting,
             )
 
-            object.__setattr__(context, "_environment", self._executor)
+            object.__setattr__(context, "_environment", self._environment_for_message(message))
             object.__setattr__(
                 context,
                 "_sandbox_source",
-                self._tool_sandbox_source(),
+                self._tool_sandbox_source(message),
             )
             object.__setattr__(context, "_usage_reporter", self._tool_usage_reporter(state, admit))
 
@@ -8791,11 +8821,13 @@ class Session(Generic[ContextT, OutputT]):
                         "_usage_reporter",
                         self._tool_usage_reporter(state, admit),
                     )
-                    object.__setattr__(context, "_environment", self._executor)
+                    object.__setattr__(
+                        context, "_environment", self._environment_for_message(message)
+                    )
                     object.__setattr__(
                         context,
                         "_sandbox_source",
-                        self._tool_sandbox_source(),
+                        self._tool_sandbox_source(message),
                     )
                     object.__setattr__(request, "_effective_arguments", deepcopy(parsed))
                 elif not isinstance(decision, Allow):
@@ -17711,7 +17743,13 @@ class Session(Generic[ContextT, OutputT]):
         configured_opening = _ConfiguredOpening(
             declaration.agent,
             context._environment,
-            self._writable_roots,
+            (
+                self._writable_roots
+                if context._environment is self._executor
+                else context._environment.writable_roots
+                if context._environment is not None
+                else None
+            ),
             admitted,
             executor_tools,
         )
@@ -18197,8 +18235,12 @@ class Session(Generic[ContextT, OutputT]):
                     realtime_usage_accounting=self.realtime_usage_accounting,
                     call=call,
                 )
-                object.__setattr__(tool_context, "_environment", self._executor)
-                object.__setattr__(tool_context, "_sandbox_source", self._tool_sandbox_source())
+                object.__setattr__(
+                    tool_context, "_environment", self._environment_for_message(message)
+                )
+                object.__setattr__(
+                    tool_context, "_sandbox_source", self._tool_sandbox_source(message)
+                )
                 object.__setattr__(
                     tool_context,
                     "_usage_reporter",
@@ -18267,11 +18309,11 @@ class Session(Generic[ContextT, OutputT]):
                         effective_arguments=_snapshot_function_arguments(kwargs, ref),
                     )
             if context is not None:
-                object.__setattr__(context, "_environment", self._executor)
+                object.__setattr__(context, "_environment", self._environment_for_message(message))
                 object.__setattr__(
                     context,
                     "_sandbox_source",
-                    self._tool_sandbox_source(),
+                    self._tool_sandbox_source(message),
                 )
             if context is not None and context._usage_reporter is None:
                 object.__setattr__(
