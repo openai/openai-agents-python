@@ -12,9 +12,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from agents import CustomStorage, PendingRequests, SQLiteSessionStore
 from agents.state import SessionState
-
 from tests import test_native_configured_agent_tool as configured
 from tests._asyncio import timeout
 from tests.test_native_custom_storage_configured_child import capture, snapshot
@@ -55,14 +55,10 @@ async def worker(mode: str, urls: list[str], directory: Path):
         state = SessionState.from_json((directory / "checkpoint.json").read_text())
         storage = CustomStorage(CrashStore(directory / "canonical.sqlite"))
         try:
-            async with parent.session(
-                context=context, storage=storage, state=state
-            ) as session:
+            async with parent.session(context=context, storage=storage, state=state) as session:
                 assert session.restored_turn is not None
                 pending = await session.restored_turn.wait_for_request_or_result()
-                assert (
-                    isinstance(pending, PendingRequests) and len(pending.requests) == 1
-                )
+                assert isinstance(pending, PendingRequests) and len(pending.requests) == 1
                 if mode == "after_admission":
                     os._exit(75)
                 assert mode == "continue"
@@ -103,16 +99,12 @@ async def run_process(mode, urls, directory, expected_exit=0):
     )
 
 
-@pytest.mark.skipif(
-    os.name != "posix", reason="SQLiteSessionStore requires POSIX locking"
-)
+@pytest.mark.skipif(os.name != "posix", reason="SQLiteSessionStore requires POSIX locking")
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "phase,exit_code", [("before", 73), ("after_flush", 74), ("after_admission", 75)]
 )
-async def test_configured_child_process_death_at_claim_boundary(
-    tmp_path, phase, exit_code
-):
+async def test_configured_child_process_death_at_claim_boundary(tmp_path, phase, exit_code):
     async with timeout(45), configured.fixture() as values:
         parent, _, context, root, child, effects, _, _ = values
         parent = replace(parent, tools=[parent.tools[0]])
@@ -130,22 +122,16 @@ async def test_configured_child_process_death_at_claim_boundary(
         marker = snapshot(fresh, state.source_session_id).get("manual_checkpoint")
         if phase == "before":
             assert marker == sealed
-            assert await run_process("continue", urls, tmp_path) == {
-                "output": "parent complete"
-            }
+            assert await run_process("continue", urls, tmp_path) == {"output": "parent complete"}
             assert len(root.requests) == len(child.requests) == 2
         else:
             assert marker is None
             assert await run_process("refuse", urls, tmp_path) == {"refused": True}
             assert len(root.requests) == len(child.requests) == 1
-        assert (
-            not effects
-        )  # Child effects, if accepted, have been running only in the worker.
+        assert not effects  # Child effects, if accepted, have been running only in the worker.
 
 
-@pytest.mark.skipif(
-    os.name != "posix", reason="SQLiteSessionStore requires POSIX locking"
-)
+@pytest.mark.skipif(os.name != "posix", reason="SQLiteSessionStore requires POSIX locking")
 @pytest.mark.asyncio
 async def test_configured_child_process_death_after_accepted_child_effect(tmp_path):
     async with timeout(45), configured.fixture() as values:

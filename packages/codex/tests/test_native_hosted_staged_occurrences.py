@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+
 from agents import Agent, FunctionTool, SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call
@@ -103,9 +104,7 @@ async def test_hosted_prompt_selected_staged_row_survives_manual_capture_and_col
             assert len(staged_occurrences(saved.history)) == (1 if select_one else 2)
 
         assert select == ([2] if select_one else [])
-        assert len(staged_occurrences(model.requests[1]["input"])) == (
-            1 if select_one else 2
-        )
+        assert len(staged_occurrences(model.requests[1]["input"])) == (1 if select_one else 2)
         assert_cursor(model.requests[1], "resp_1")
         saved = SessionState.from_json(saved.to_json())
         async with agent.session(
@@ -115,35 +114,27 @@ async def test_hosted_prompt_selected_staged_row_survives_manual_capture_and_col
             assert second.call_id == "manual-two"
             await second.respond("second accepted")
             assert reopened.restored_turn is not None
-            assert (
-                await reopened.restored_turn.get_result()
-            ).final_output == "complete"
+            assert (await reopened.restored_turn.get_result()).final_output == "complete"
 
     assert len(model.requests) == 3
-    assert all(
-        request["prompt"] == {"id": "pmpt_fixture"} for request in model.requests
-    )
+    assert all(request["prompt"] == {"id": "pmpt_fixture"} for request in model.requests)
     assert len(resolutions) == (3 if dynamic_prompt else 0)
     assert select == ([2] if select_one else [])
     for call_id in ("manual-one", "manual-two"):
         assert (
             sum(
-                item.get("type") == "function_call_output"
-                and item.get("call_id") == call_id
+                item.get("type") == "function_call_output" and item.get("call_id") == call_id
                 for request in model.requests
                 for item in request["input"]
             )
             == 1
         )
     assert_cursor(model.requests[2], "resp_2")
-    assert len(staged_occurrences(model.requests[2]["input"])) == (
-        1 if select_one else 0
-    )
+    assert len(staged_occurrences(model.requests[2]["input"])) == (1 if select_one else 0)
     if history_kind == "conversation":
         assert len(reads) >= 2
         assert all(
-            read == ("/v1/conversations/conv_current", "Bearer current-owner")
-            for read in reads
+            read == ("/v1/conversations/conv_current", "Bearer current-owner") for read in reads
         )
     else:
         assert ("/v1/responses/resp_1", "Bearer current-owner") in reads
@@ -187,9 +178,7 @@ async def test_hosted_prompt_preterminal_failure_keeps_both_staged_occurrences()
             model_settings={"store": True},
             transform_context=transform,
         )
-        async with agent.session(
-            provider_history={"type": "previous_response"}
-        ) as original:
+        async with agent.session(provider_history={"type": "previous_response"}) as original:
             await original.submit("Start.")
             await next_request(original.interactions(), lookup)
             state = await original.suspend()
@@ -209,10 +198,7 @@ async def test_hosted_prompt_preterminal_failure_keeps_both_staged_occurrences()
                 await resumed.restored_turn.get_result()
             saved = await resumed.save_state()
             assert saved.pending_input == [row, row]
-            assert (
-                saved.native_continuation is not None
-                and saved.native_continuation.staged_retry
-            )
+            assert saved.native_continuation is not None and saved.native_continuation.staged_retry
             assert not staged_occurrences(saved.history)
         assert len(model.requests) == 2
         assert model.requests[-1]["prompt"] == {"id": "pmpt_fixture"}

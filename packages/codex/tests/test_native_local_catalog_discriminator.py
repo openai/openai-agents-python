@@ -1,4 +1,5 @@
 import pytest
+
 from agents import Agent, LocalStorage, NativeProvider, function_tool
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call
@@ -48,9 +49,7 @@ async def test_local_resume_catalog_follows_the_active_destination(
                     await (await session.submit("transfer")).get_result()
                 ).final_output == "done"
                 saved = await session.save_state()
-            async with source.session(
-                storage=storage, resume=saved.source_session_id
-            ) as restored:
+            async with source.session(storage=storage, resume=saved.source_session_id) as restored:
                 assert await restored.get_active_agent() is target
                 assert (
                     await (await restored.submit("continue")).get_result()
@@ -76,9 +75,7 @@ async def test_local_resume_refuses_removing_a_pinned_destination_tool(tmp_path)
         async with NativeProvider(
             base_url=wire.url, api_key="synthetic", supports_websockets=False
         ) as provider:
-            target = Agent(
-                name="B", instructions="destination", tools=[destination_only]
-            )
+            target = Agent(name="B", instructions="destination", tools=[destination_only])
             source = Agent(
                 name="A",
                 instructions="source",
@@ -102,12 +99,8 @@ async def test_local_resume_refuses_removing_a_pinned_destination_tool(tmp_path)
                 handoffs=[removed],
                 prepare_handoff_input=lambda value: value,
             )
-            with pytest.raises(
-                RuntimeError, match="exact captured Agent declaration graph"
-            ):
-                async with changed.session(
-                    storage=storage, resume=saved.source_session_id
-                ):
+            with pytest.raises(RuntimeError, match="exact captured Agent declaration graph"):
+                async with changed.session(storage=storage, resume=saved.source_session_id):
                     pytest.fail("A missing admitted destination tool reached opening")
             assert effects == []
             assert len(wire.requests) == 2

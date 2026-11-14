@@ -83,18 +83,22 @@ class _OwnedProfileWorkspace:
                 right = right.model_copy(update={"children": {}})
             if left != right:
                 raise ValueError("Captured workspace entries cannot be replaced")
-        added = tuple((Path(path), after[path]) for path in after.keys() - before.keys())
-        default_permissions = File(content=b"").permissions
-        if len(added) > 1 or any(
-            type(entry) is not File
-            or entry.group is not None
-            or entry.ephemeral
-            or entry.permissions != default_permissions
-            or len(path.parts) != 1
-            for path, entry in added
-        ):
-            raise ValueError("Captured workspace supports one new plain root file per profile")
-        return added
+        added = after.keys() - before.keys()
+        if not added:
+            return ()
+        if len(added) == 1:
+            name = next(iter(added))
+            path = Path(name)
+            entry = after[name]
+            if (
+                type(entry) is File
+                and entry.group is None
+                and not entry.ephemeral
+                and entry.permissions == File(content=b"").permissions
+                and len(path.parts) == 1
+            ):
+                return ((path, entry),)
+        raise ValueError("Captured workspace supports one new plain root file per profile")
 
     def reserve(self, resource: SandboxSession) -> None:
         if self.changed:
@@ -155,7 +159,7 @@ class _OwnedProfileWorkspace:
     def contributions(self, profile: str) -> Any:
         return self._scopes[profile].contributions
 
-    def _check(self, active: Callable[[], bool]) -> None:
+    def _check(self, active: Callable[[], bool]) -> SandboxSession:
         if self._failed or self._retired or not active() or self._resource is None:
             raise RuntimeError("Captured workspace owner is retired")
         state = self._resource.state
@@ -171,14 +175,16 @@ class _OwnedProfileWorkspace:
             or state.manifest != self._expected_manifest
         ):
             raise RuntimeError("Captured workspace resource state changed")
+        return self._resource
 
     async def prepare(self, profile: str, active: Callable[[], bool]) -> str:
-        from .sandbox import _append_skill_instructions, _render_workspace_instructions
+        from .sandbox import _render_workspace_instructions
+        from .sandbox_skills import _append_skill_instructions
 
-        self._check(active)
+        resource = self._check(active)
         scope = self._scopes[profile]
         try:
-            current = dict(self._resource.state.manifest.iter_entries())
+            current = dict(resource.state.manifest.iter_entries())
             for path, entry in scope.additions:
                 if path not in current:
                     self._check(active)
@@ -186,12 +192,10 @@ class _OwnedProfileWorkspace:
                     # Source closure joins this entered operation before disposal.
                     await run_blocking_workspace_io(self._write_file, path, entry)
                     self._check(active)
-                    updated = self._resource.state.manifest.model_copy(deep=True)
+                    updated = resource.state.manifest.model_copy(deep=True)
                     updated.entries[path] = entry.model_copy(deep=True)
-                    self._resource.state = self._resource.state.model_copy(
-                        update={"manifest": updated}
-                    )
-                    self._state = self._resource.state
+                    resource.state = resource.state.model_copy(update={"manifest": updated})
+                    self._state = resource.state
                     self._expected_manifest = updated.model_copy(deep=True)
             text = _render_workspace_instructions(self._state.manifest, self._environment)
             for capability in scope.capabilities:

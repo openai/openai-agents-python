@@ -39,9 +39,7 @@ class DecisionHandoff:
     targets: Mapping[
         str,
         Agent[Any, Any]
-        | Callable[
-            [ToolContext[Any], str], Agent[Any, Any] | Awaitable[Agent[Any, Any]]
-        ],
+        | Callable[[ToolContext[Any], str], Agent[Any, Any] | Awaitable[Agent[Any, Any]]],
     ]
 
     def __post_init__(self) -> None:
@@ -100,9 +98,7 @@ def _decision_handoff_tool(
     def bind(
         context: Any, policy_context: Any, tool: FunctionTool[Any, Any, Any]
     ) -> _CapturedFunction:
-        async def invoke(
-            tool_context: ToolContext[Any], input: str
-        ) -> _DecisionHandoffSelection:
+        async def invoke(tool_context: ToolContext[Any], input: str) -> _DecisionHandoffSelection:
             if len(input.encode("utf-8")) > 8192:
                 raise ValueError("Decision handoff input exceeds 8192 UTF-8 bytes")
             selected = await tool_context.decide(
@@ -118,9 +114,7 @@ def _decision_handoff_tool(
                 from .agent import Agent
 
                 if not isinstance(value, Agent):
-                    raise TypeError(
-                        "Decision handoff factory must return a native Agent"
-                    )
+                    raise TypeError("Decision handoff factory must return a native Agent")
                 return _DecisionHandoffSelection(factory=selected, target=value)
             return _DecisionHandoffSelection(target)
 
@@ -131,9 +125,7 @@ def _decision_handoff_tool(
             field_names=("input",),
             output_adapter=TypeAdapter(type(None)),
             callback=invoke,
-            context_parameter=inspect.Parameter(
-                "tool_context", inspect.Parameter.POSITIONAL_ONLY
-            ),
+            context_parameter=inspect.Parameter("tool_context", inspect.Parameter.POSITIONAL_ONLY),
             callback_timeout=None,
             timeout_behavior="raise_exception",
             timeout_error_function=None,

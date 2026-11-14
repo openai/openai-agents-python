@@ -7,14 +7,14 @@ import sys
 from itertools import count
 
 import pytest
+
+from agents import Agent, HttpMCP, telemetry
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output
 from tests.test_native_mcp_tools import Peer, mcp_call
 from tests.test_native_provider_lineage import history_peer
 from tests.test_native_trace_exporter import native_trace_child_env
 from tests.test_tracing_native import Recorder
-
-from agents import Agent, HttpMCP, telemetry
 
 
 @pytest.mark.parametrize("mode", ["allowed", "policy-suppressed"])

@@ -4,11 +4,11 @@ import json
 from copy import deepcopy
 
 import pytest
+
+from agents import Agent, NativeError, SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output
 from tests.test_native_provider_lineage import history_peer
-
-from agents import Agent, NativeError, SessionState
 
 ORIGINAL = "ORIGINAL_CANONICAL_USER"
 PROJECTED = "STABLE_WIRE_USER_VIEW"

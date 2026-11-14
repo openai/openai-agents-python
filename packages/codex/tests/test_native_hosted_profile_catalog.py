@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 
 import pytest
-from tests._asyncio import timeout
-from tests.native_fixtures import assistant_output, function_call, responses as responses
 
 from agents import Agent, CodeInterpreter, FileSearch, NativeProvider, SessionState, function_tool
+from tests._asyncio import timeout
+from tests.native_fixtures import assistant_output, function_call, responses as responses
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,5 @@
 """Passive pending data has been retaining ordinary state authority boundaries."""
+
 import json
 
 import pytest
@@ -14,15 +15,20 @@ async def test_passive_metadata_has_been_bound_and_removable_without_inventing_c
     async with timeout(30), history_peer() as (provider, model, _reads, _url, _wire):
         model.respond(assistant_output("settled"))
         async with Agent(
-            instructions="Answer.", provider=provider, model="gpt-5.5",
+            instructions="Answer.",
+            provider=provider,
+            model="gpt-5.5",
             model_settings={"store": True},
         ).session(provider_history={"type": "previous_response"}) as source:
             await (await source.submit("original")).get_result()
             idle = await source.save_state()
     ordinary = idle.to_json()
     assert idle.pending_input == []
-    item = {"type": "message", "role": "user",
-            "content": [{"type": "input_text", "text": "queued"}]}
+    item = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "queued"}],
+    }
     payload = json.loads(ordinary)
     payload.setdefault("agent_options", {})["_sdk_pending_input"] = {"version": 1, "items": [item]}
     passive = SessionState.model_validate(payload)

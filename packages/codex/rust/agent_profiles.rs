@@ -948,6 +948,10 @@ fn roster_fingerprint(roster: &[ProfileSpec], root_id: &str) -> Result<String> {
             fields.remove("environment");
             fields.remove("environment_tools");
             fields.remove("workspace_instructions");
+            if !profile.workspace_preparation {
+                // Keep the fingerprint of checkpoints made before workspace preparation.
+                fields.remove("workspace_preparation");
+            }
             fields.remove("workspace_identity");
             // Runtime-only policy reset; unchanged declaration compatibility.
             if let Some(controls) = descriptor

@@ -7,11 +7,11 @@ import json
 import pytest
 from aiohttp import WSMsgType, web
 from aiohttp.test_utils import TestServer
+
+from agents import Agent, FunctionTool, NativeProvider
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call
 from tests.test_native_manual_tools import LookupArgs, next_request
-
-from agents import Agent, FunctionTool, NativeProvider
 
 
 @pytest.mark.asyncio

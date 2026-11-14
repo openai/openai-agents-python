@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import pytest
+
+from agents import Agent, function_tool
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call
 from tests.test_native_provider_websockets import peer
-
-from agents import Agent, function_tool
 
 
 async def test_detached_result_keeps_repeated_provider_ids_and_source_agents() -> None:

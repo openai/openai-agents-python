@@ -6,6 +6,7 @@ import os
 from dataclasses import replace
 
 import pytest
+
 from agents import (
     CustomStorage,
     PendingRequests,
@@ -14,7 +15,6 @@ from agents import (
     function_tool,
 )
 from agents.state import SessionState
-
 from tests._asyncio import timeout
 from tests.native_fixtures import function_call
 from tests.test_native_configured_agent_tool import fixture
@@ -49,9 +49,7 @@ class ClaimFaultStore(SQLiteSessionStore):
             "native_continuation"
         ) or {}
         pending = nested.get("pending_manual") or []
-        resealing = (
-            len(pending) == 1 and pending[0].get("call_id") == "child-second-approval"
-        )
+        resealing = len(pending) == 1 and pending[0].get("call_id") == "child-second-approval"
         if resealing and self.fault == "reseal_before":
             raise RuntimeError("injected failure before child reseal commit")
         if claiming and self.fault == "before":
@@ -95,9 +93,7 @@ async def finish(parent, context, storage, state):
         pending = await session.restored_turn.wait_for_request_or_result()
         assert isinstance(pending, PendingRequests) and len(pending.requests) == 1
         await session.respond(pending.requests[0].reply(True))
-        assert (
-            await session.restored_turn.get_result()
-        ).final_output == "parent complete"
+        assert (await session.restored_turn.get_result()).final_output == "parent complete"
 
 
 @pytest.mark.asyncio
@@ -112,10 +108,7 @@ async def test_configured_child_claim_checked_fence(tmp_path, fault):
         storage = CustomStorage(backend)
         saved = await capture(parent, context, storage)
         sealed = snapshot(backend, saved.source_session_id)
-        assert (
-            sealed["manual_checkpoint"]["configured_child"]["kind"]
-            == "configured-child-v1"
-        )
+        assert sealed["manual_checkpoint"]["configured_child"]["kind"] == "configured-child-v1"
         assert not effects and len(root.requests) == len(child.requests) == 1
         backend.fault = fault
         if fault is None:
@@ -162,9 +155,7 @@ async def test_configured_child_claim_checked_fence(tmp_path, fault):
                     storage=CustomStorage(fresh),
                     resume=saved.source_session_id,
                 ):
-                    pytest.fail(
-                        "Generic reopen must refuse the uncertain outer invocation"
-                    )
+                    pytest.fail("Generic reopen must refuse the uncertain outer invocation")
             assert not effects and len(root.requests) == len(child.requests) == 1
 
 
@@ -225,15 +216,11 @@ async def test_configured_child_second_boundary_reseals_accepted_effect(tmp_path
             ],
         )
         root.replies[0] = [root.replies[0][0]]
-        child.replies.insert(
-            1, [function_call("child_effect", {}, "child-second-approval")]
-        )
+        child.replies.insert(1, [function_call("child_effect", {}, "child-second-approval")])
         backend = ClaimFaultStore(tmp_path / "canonical.sqlite")
         storage = CustomStorage(backend)
         first = await capture(parent, context, storage)
-        async with parent.session(
-            context=context, storage=storage, state=first
-        ) as resumed:
+        async with parent.session(context=context, storage=storage, state=first) as resumed:
             assert resumed.restored_turn is not None
             pending = await resumed.restored_turn.wait_for_request_or_result()
             assert isinstance(pending, PendingRequests)
@@ -266,9 +253,7 @@ async def test_configured_child_malformed_owner_preserves_seal(tmp_path, field):
         saved = await capture(parent, context, storage)
         sealed = snapshot(backend, saved.source_session_id)["manual_checkpoint"]
         payload = json.loads(saved.to_json())
-        nested = payload["native_continuation"]["pending_manual"][0]["continuation"][
-            "state"
-        ]
+        nested = payload["native_continuation"]["pending_manual"][0]["continuation"]["state"]
         if field == "source":
             nested["source_session_id"] = "invalid-native-thread-id"
         elif field == "turn":
@@ -277,9 +262,7 @@ async def test_configured_child_malformed_owner_preserves_seal(tmp_path, field):
             nested["native_continuation"]["pending_manual"][0]["call_id"] = ""
         with pytest.raises((ValueError, RuntimeError)):
             malformed = SessionState.from_json(json.dumps(payload))
-            async with parent.session(
-                context=context, storage=storage, state=malformed
-            ):
+            async with parent.session(context=context, storage=storage, state=malformed):
                 pytest.fail("Malformed owner must not acquire a child execution intent")
         assert not effects and len(root.requests) == len(child.requests) == 1
         assert snapshot(backend, saved.source_session_id)["manual_checkpoint"] == sealed
@@ -297,9 +280,7 @@ async def test_configured_child_final_receipt_failure_settles_parent(tmp_path):
         storage = CustomStorage(backend)
         saved = await capture(parent, context, storage)
         backend.fault = "result"
-        async with parent.session(
-            context=context, storage=storage, state=saved
-        ) as session:
+        async with parent.session(context=context, storage=storage, state=saved) as session:
             assert session.restored_turn is not None
             pending = await session.restored_turn.wait_for_request_or_result()
             assert isinstance(pending, PendingRequests)
@@ -332,16 +313,12 @@ async def test_configured_child_reseal_fault_boundary(tmp_path, fault):
             ],
         )
         root.replies[0] = [root.replies[0][0]]
-        child.replies.insert(
-            1, [function_call("child_effect", {}, "child-second-approval")]
-        )
+        child.replies.insert(1, [function_call("child_effect", {}, "child-second-approval")])
         backend = ClaimFaultStore(tmp_path / "canonical.sqlite")
         storage = CustomStorage(backend)
         first = await capture(parent, context, storage)
         second = None
-        async with parent.session(
-            context=context, storage=storage, state=first
-        ) as resumed:
+        async with parent.session(context=context, storage=storage, state=first) as resumed:
             assert resumed.restored_turn is not None
             pending = await resumed.restored_turn.wait_for_request_or_result()
             assert isinstance(pending, PendingRequests)
@@ -368,16 +345,12 @@ async def test_configured_child_reseal_fault_boundary(tmp_path, fault):
                 assert marker is None
             else:
                 current = marker["configured_child"]["state"]["native_continuation"]
-                assert (
-                    current["pending_manual"][0]["call_id"] == "child-second-approval"
-                )
+                assert current["pending_manual"][0]["call_id"] == "child-second-approval"
             with pytest.raises(RuntimeError):
                 async with parent.session(
                     context=context, storage=CustomStorage(fresh), state=first
                 ):
-                    pytest.fail(
-                        "Old consumed frame must remain refused after failed reseal"
-                    )
+                    pytest.fail("Old consumed frame must remain refused after failed reseal")
             assert effects == ["child-approval-call"]
             assert len(root.requests) == 1 and len(child.requests) == 2
             return

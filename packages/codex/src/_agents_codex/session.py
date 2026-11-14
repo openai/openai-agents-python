@@ -3172,10 +3172,381 @@ def _capture_profile_runtimes(
     return captured, roster
 
 
+async def _check_custom_opening_recovery(
+    opening: _OpeningOwner,
+    engine: Any,
+    storage: _state_types.LocalStorage | CustomStorage | None,
+    resume: str | None,
+) -> None:
+    if isinstance(storage, CustomStorage) and resume is not None:
+        # Inspect before Core starts, while the canonical backend's
+        # original writer still fences every other opener.
+        history, shell_calls = json.loads(
+            await opening.acquire(engine._inspect_custom_recovery(resume))
+        )
+        uncertain = [
+            UncertainCall(
+                thread_id=resume,
+                turn_id=turn_id,
+                call_id=call_id,
+                name="shell",
+                arguments=arguments,
+            )
+            for turn_id, call_id, arguments in shell_calls
+        ]
+        turns, items = project_history(history, resume, uncertain_calls=uncertain)
+        if uncertain:
+            raise LocalRecoveryRequired(tuple(uncertain), tuple(turns), tuple(items))
+
+
+async def _initialize_session_engine(
+    opening: _OpeningOwner,
+    native: Any,
+    config: dict[str, Any],
+    runtime: dict[str, Any],
+    options: dict[str, Any],
+    native_specs: str,
+    provider_lease: Any,
+    storage: _state_types.LocalStorage | CustomStorage | None,
+    checkpoint: str | None,
+    *,
+    using_codex_login: bool,
+    share_model_http: bool,
+    verify_current_default: bool,
+) -> Any:
+    create_engine = (
+        native.create_checkpoint_engine if checkpoint is not None else native.create_engine
+    )
+    return await opening.acquire(
+        create_engine(
+            json.dumps(config),
+            json.dumps(runtime),
+            # Preserve the captured environment value in API-key mode.
+            api_key=None if using_codex_login else (opening.api_key or ""),
+            provider_lease=provider_lease,
+            # One opening snapshot owns the runtime and its first thread.
+            **(
+                {
+                    "_capture_initial_config": True,
+                    "_share_model_http": share_model_http,
+                }
+                if checkpoint is None
+                else {}
+            ),
+            **({"canonical_store": storage.backend} if isinstance(storage, CustomStorage) else {}),
+            **(
+                {
+                    "initial_checkpoint": checkpoint,
+                    "initial_specs_json": native_specs,
+                    "initial_options_json": json.dumps(options),
+                    **({"_verify_current_default_model": True} if verify_current_default else {}),
+                }
+                if checkpoint is not None
+                else {}
+            ),
+        )
+    )
+
+
+async def _start_opening_thread(
+    opening: _OpeningOwner,
+    engine: Any,
+    options: dict[str, Any],
+    native_specs: str,
+    checkpoint: str | None,
+    *,
+    initial_messages_json: str | None,
+    allowed_mcp: Sequence[_tool_types._MCP[Any]],
+    tracing_context: str | None,
+    parent_trace: TraceContext | None,
+    private_http: bool,
+    owned_provider: bool,
+) -> Any:
+    opening_trace = (
+        {"_opening_trace_context": tracing_context}
+        if allowed_mcp and tracing_context is not None and parent_trace is None
+        else {}
+    )
+    return await opening.acquire(
+        engine._start_initial_replaceable_thread(
+            json.dumps(options),
+            native_specs,
+            initial_messages_json=initial_messages_json,
+            **opening_trace,
+            **({"_process_private_http": True} if private_http and owned_provider else {}),
+        )
+        if checkpoint is None
+        else engine.restore_checkpoint(
+            checkpoint, json.dumps(options), native_specs, **opening_trace
+        )
+    )
+
+
+async def _initialize_atomic_opening(
+    opening: _OpeningOwner,
+    native: Any,
+    config: dict[str, Any],
+    runtime: dict[str, Any],
+    options: dict[str, Any],
+    native_specs: str,
+    settings: dict[str, Any],
+    provider_lease: Any,
+    agent: Agent[Any, Any],
+    output: _PreparedOutput,
+    *,
+    use_completed_owner: bool,
+    completed_input: str | None,
+    private_http: bool,
+    owned_provider: bool,
+    private_function_run: bool,
+) -> tuple[Any, Any, Any] | Completed[Any] | _RunHandoff:
+    if use_completed_owner:
+        submission_id = uuid4().hex
+        owner = native._prepare_run_conversation(
+            json.dumps(config),
+            json.dumps(runtime),
+            json.dumps(options),
+            native_specs,
+            json.dumps(settings),
+            json.dumps(
+                {
+                    "mode": "start_if_idle",
+                    "input": _native_input(cast(str, completed_input)),
+                    "observation_submission_id": submission_id,
+                }
+            ),
+            api_key=opening.api_key or "",
+            provider_lease=provider_lease,
+            _share_model_http=True,
+            _private_http=private_http,
+            **({"_process_private_http": True} if private_http and owned_provider else {}),
+        )
+        return await opening.run(owner, agent, output, submission_id)
+    return cast(
+        tuple[Any, Any, Any],
+        await opening.acquire(
+            native._open_conversation(
+                json.dumps(config),
+                json.dumps(runtime),
+                json.dumps(options),
+                native_specs,
+                json.dumps(settings),
+                api_key=opening.api_key or "",
+                provider_lease=provider_lease,
+                _share_model_http=not private_function_run,
+                _private_http=private_http,
+                **({"_process_private_runtime": True} if private_function_run else {}),
+            )
+        ),
+    )
+
+
+async def _fail_session_opening(
+    error: BaseException,
+    opening: _OpeningOwner,
+    session: Session[Any, Any] | None,
+    provider: NativeProvider | None,
+    environment_owner: _EnvironmentLease | None,
+    *,
+    owned_provider: bool,
+) -> None:
+    session_cleanup = getattr(error, "cleanup", None)
+    session_owns_provider = (
+        owned_provider
+        and isinstance(session_cleanup, Session)
+        and not session_cleanup._closed
+        and session_cleanup._owned_provider is provider
+    )
+    if environment_owner is not None:
+        await _close_after_error(error, lambda: opening.fail_environment(environment_owner))
+        if opening.lease is not None and not environment_owner._retired.done():
+            # Only the native join itself can keep an admitted manager
+            # pending. Expose its existing owner to supported aclose.
+            assert provider is not None
+            provider._defer_opening(opening, environment_owner)
+    if owned_provider and not session_owns_provider:
+        assert provider is not None
+        await _close_after_error(error, provider.aclose)
+    try:
+        if environment_owner is not None:
+            try:
+                environment_owner.raise_if_interrupted(error)
+            except BaseException as interrupted:
+                # The manager's own error is the one the caller receives.
+                error = interrupted
+                raise
+    finally:
+        # A retired unpublished Session no longer needs the caller's
+        # Environment. Pending native cleanup must retain its policy owner.
+        if opening.lease is None and session is not None:
+            session._executor = None
+        # Both the original error and a manager-selected replacement
+        # must retain the same existing owner for unfinished cleanup.
+        if (
+            provider is not None
+            and not vars(provider).get("_closed", False)
+            and (owned_provider or opening.lease is not None)
+        ):
+            cast(Any, error).cleanup = session_cleanup if session_owns_provider else provider
+            if owned_provider:
+                cast(Any, error).provider = provider
+
+
+def _borrow_configured_opening(
+    policy_agent: Agent[Any, Any],
+    executor: Environment[Any] | None,
+    on_tool_lifecycle: _ToolLifecycleCallback[Any] | None,
+    *,
+    has_persistent_state: bool,
+    provider_history: ProviderHistory | None,
+    agent: Agent[Any, Any],
+    has_profiles: bool,
+) -> tuple[
+    _ConfiguredOpening | None,
+    _ToolLifecycleCallback[Any] | None,
+    str | None,
+    _OperationObserver | None,
+    _EnvironmentLease | None,
+]:
+    invocation = _invocation.get()
+    configured_opening = invocation.configured_opening if invocation is not None else None
+    if (
+        on_tool_lifecycle is None
+        and invocation is not None
+        and configured_opening is not None
+        and configured_opening.agent is policy_agent
+    ):
+        if not invocation.active or not configured_opening.admitted():
+            raise InteractionExpiredError("Configured parent invocation is expired")
+        on_tool_lifecycle = configured_opening.on_tool_lifecycle
+    if (
+        invocation is not None
+        and configured_opening is not None
+        and configured_opening.agent is policy_agent
+        and configured_opening.environment is executor
+    ):
+        invocation.configured_opening = None
+        if not invocation.active or not configured_opening.admitted():
+            raise InteractionExpiredError("Configured parent invocation is expired")
+    else:
+        configured_opening = None
+    inherited_workspace = (
+        configured_opening.workspace_instructions if configured_opening is not None else None
+    )
+    inherited_sandbox_observer = (
+        configured_opening.sandbox_observer if configured_opening is not None else None
+    )
+    if inherited_workspace is not None:
+        if has_persistent_state:
+            raise CapabilityError("Borrowed workspace guidance requires fresh native history")
+        if (
+            provider_history is not None
+            or agent.realtime is not None
+            or (agent.provider is not None and agent.provider.model_backend is not None)
+        ):
+            raise CapabilityError(
+                "Borrowed workspace guidance requires stateless native Responses HTTP"
+            )
+    borrowed_sandbox = configured_opening.sandbox_lease if configured_opening is not None else None
+    if borrowed_sandbox is not None:
+        if has_persistent_state:
+            raise CapabilityError("Borrowed sandbox capabilities require fresh native history")
+        if (
+            borrowed_sandbox.source is not policy_agent.environment
+            or borrowed_sandbox.interrupted
+            or borrowed_sandbox._owner.done()
+            or borrowed_sandbox._retired.done()
+            or not borrowed_sandbox._ready.done()
+            or borrowed_sandbox._ready.result() is not executor
+        ):
+            raise InteractionExpiredError("Configured sandbox source is retired")
+        if has_profiles:
+            raise CapabilityError("Borrowed sandbox capabilities require a single configured Agent")
+    return (
+        configured_opening,
+        on_tool_lifecycle,
+        inherited_workspace,
+        inherited_sandbox_observer,
+        borrowed_sandbox,
+    )
+
+
 def _workspace_guidance_options(instructions: str | None, scoped: bool) -> dict[str, str]:
     if scoped or instructions is None:
         return {}
     return {"user_instructions_appendix": instructions}
+
+
+def _capture_opening_workspaces(
+    profiles: tuple[_AgentProfile, ...],
+    environment: EnvironmentSource[Any] | None,
+    *,
+    has_persistent_or_provider_history: bool,
+) -> dict[int, tuple[_OwnedProfileWorkspace, list[str]]]:
+    from ._sandbox_profile_workspace import _OwnedProfileWorkspace
+
+    captured_workspaces: dict[int, tuple[_OwnedProfileWorkspace, list[str]]] = {}
+    for profile in profiles:
+        selected_source = (
+            environment
+            if profile is profiles[0] or profile.declaration.environment is None
+            else profile.declaration.environment
+        )
+        workspace = getattr(selected_source, "_sdk_owned_profile_workspace", None)
+        if isinstance(workspace, _OwnedProfileWorkspace):
+            captured_workspaces.setdefault(id(workspace), (workspace, []))[1].append(profile.id)
+    for workspace, profile_ids in captured_workspaces.values():
+        if len(profile_ids) > 1:
+            workspace.capture(tuple(profile_ids))
+            if workspace.changed and (
+                has_persistent_or_provider_history
+                or any(
+                    profile.declaration.hosted_prompt is not None
+                    or profile.declaration.programmatic_tool_calling
+                    for profile in profiles
+                )
+                or any(
+                    declaration.get("factories")
+                    for profile in profiles
+                    for declaration in profile.decision_handoffs.values()
+                )
+            ):
+                raise CapabilityError(
+                    "Captured workspace changes require fresh stateless native history"
+                )
+    return captured_workspaces
+
+
+async def _capture_portable_profile_workspaces(
+    profile_sources: Mapping[str, object | None],
+    selected_environments: Mapping[str, Environment[Any] | None],
+    lease: _EnvironmentLease | None,
+    *,
+    has_native_storage: bool,
+    has_checkpoint: bool,
+    portable_opening: bool,
+) -> tuple[bool, dict[str, str | None], bool]:
+    distinct_profile_sources = any(
+        source is not None and (lease is None or source is not lease.source)
+        for source in profile_sources.values()
+    )
+    workspace_identities: dict[str, str | None] = {}
+    if distinct_profile_sources and portable_opening:
+        from .sandbox import _portable_workspace_identity
+
+        workspace_identities = {
+            profile: await _portable_workspace_identity(source, selected_environments[profile])
+            for profile, source in profile_sources.items()
+            if source is not None
+        }
+    portable_profile_workspaces = bool(workspace_identities) and all(
+        identity is not None for identity in workspace_identities.values()
+    )
+    if distinct_profile_sources and (
+        has_native_storage or (has_checkpoint and not portable_profile_workspaces)
+    ):
+        raise CapabilityError("Per-Agent Environment sources require provider state restoration")
+    return distinct_profile_sources, workspace_identities, portable_profile_workspaces
 
 
 def _capture_profile_workspace_guidance(
@@ -4487,6 +4858,67 @@ def _opening_private_run_policy(
     return use_completed_owner, websockets_enabled, private_http, private_function_run
 
 
+def _install_opening_lifecycle_options(
+    options: dict[str, Any],
+    state: _state_types.SessionState | None,
+    agent: Agent[Any, Any],
+    profiles: Sequence[_AgentProfile],
+    on_tool_lifecycle: _ToolLifecycleCallback[Any] | None,
+) -> None:
+    if state is not None and "_sdk_runtime_enrollment" in state.agent_options:
+        options["_agent_profiles"]["runtime_enrollment"] = state.agent_options[
+            "_sdk_runtime_enrollment"
+        ]
+    if (
+        on_tool_lifecycle is not None
+        or agent.on_tool_lifecycle is not None
+        or any(profile.declaration.on_tool_lifecycle is not None for profile in profiles)
+    ):
+        options["_tool_lifecycle"] = True
+
+
+def _opening_apps_registrations(
+    allowed_mcp: Sequence[object],
+) -> tuple[_tool_types.HostedVerificationMCP | None, _tool_types.ChatGPTAppsMCP | None]:
+    hosted_verification = next(
+        (server for server in allowed_mcp if type(server) is _tool_types.HostedVerificationMCP),
+        None,
+    )
+    chatgpt_apps = next(
+        (server for server in allowed_mcp if type(server) is _tool_types.ChatGPTAppsMCP),
+        None,
+    )
+    if hosted_verification is not None and chatgpt_apps is not None:
+        raise ValueError("Select one explicit Apps registration per Session")
+    return hosted_verification, chatgpt_apps
+
+
+def _opening_apps_options(
+    hosted_verification: _tool_types.HostedVerificationMCP | None,
+    chatgpt_apps: _tool_types.ChatGPTAppsMCP | None,
+    native_agents: _tool_types.NativeAgents[Any] | None,
+) -> dict[str, Any]:
+    elicitation: dict[str, Any] = {"form": {}}
+    extensions: dict[str, Any] = {
+        "openai/form": {},
+        "openai/elicitation": elicitation,
+        "openai/sdk-root-prompts": {},
+    }
+    options: dict[str, Any] = {"client_mcp_extensions": extensions}
+    if native_agents is not None and native_agents.interactions:
+        extensions["openai/sdk-child-prompts"] = {}
+    if chatgpt_apps is not None:
+        options["_sdk_chatgpt_apps"] = {
+            "access_token": chatgpt_apps.access_token,
+            "account_id": chatgpt_apps.account_id,
+        }
+        elicitation["userVerification"] = {}
+    if hosted_verification is not None:
+        options["_sdk_hosted_verification"] = hosted_verification._config()
+        elicitation["userVerification"] = {}
+    return options
+
+
 def _opening_callback_options(
     agent: Agent[Any, Any],
     input_guardrails: Sequence[InputGuardrail[Any]],
@@ -5427,42 +5859,18 @@ class Session(Generic[ContextT, OutputT]):
             checkpoint = _without_untrusted_memory_admission(
                 checkpoint, authenticated=authenticated_memory_history
             )
-            from ._sandbox_profile_workspace import _OwnedProfileWorkspace
-
-            captured_workspaces: dict[int, tuple[_OwnedProfileWorkspace, list[str]]] = {}
-            for profile in profiles:
-                selected_source = (
-                    environment
-                    if profile is profiles[0] or profile.declaration.environment is None
-                    else profile.declaration.environment
-                )
-                workspace = getattr(selected_source, "_sdk_owned_profile_workspace", None)
-                if isinstance(workspace, _OwnedProfileWorkspace):
-                    captured_workspaces.setdefault(id(workspace), (workspace, []))[1].append(
-                        profile.id
+            captured_workspaces = _capture_opening_workspaces(
+                profiles,
+                environment,
+                has_persistent_or_provider_history=any(
+                    (
+                        storage is not None,
+                        resume is not None,
+                        state is not None,
+                        provider_history is not None,
                     )
-            for workspace, profile_ids in captured_workspaces.values():
-                if len(profile_ids) > 1:
-                    workspace.capture(tuple(profile_ids))
-                    if workspace.changed and (
-                        storage is not None
-                        or resume is not None
-                        or state is not None
-                        or provider_history is not None
-                        or any(
-                            profile.declaration.hosted_prompt is not None
-                            or profile.declaration.programmatic_tool_calling
-                            for profile in profiles
-                        )
-                        or any(
-                            declaration.get("factories")
-                            for profile in profiles
-                            for declaration in profile.decision_handoffs.values()
-                        )
-                    ):
-                        raise CapabilityError(
-                            "Captured workspace changes require fresh stateless native history"
-                        )
+                ),
+            )
             if environment is not None and not isinstance(environment, Environment):
                 if not isinstance(environment, AbstractAsyncContextManager):
                     raise TypeError("environment must be an Environment or async context manager")
@@ -5472,49 +5880,23 @@ class Session(Generic[ContextT, OutputT]):
                 environment_owner = lease
                 pending_environment = None
             executor = environment
-            invocation = _invocation.get()
-            configured_opening = invocation.configured_opening if invocation is not None else None
-            if (
-                on_tool_lifecycle is None
-                and invocation is not None
-                and configured_opening is not None
-                and configured_opening.agent is policy_agent
-            ):
-                if not invocation.active or not configured_opening.admitted():
-                    raise InteractionExpiredError("Configured parent invocation is expired")
-                on_tool_lifecycle = configured_opening.on_tool_lifecycle
-            if (
-                invocation is not None
-                and configured_opening is not None
-                and configured_opening.agent is policy_agent
-                and configured_opening.environment is executor
-            ):
-                invocation.configured_opening = None
-                if not invocation.active or not configured_opening.admitted():
-                    raise InteractionExpiredError("Configured parent invocation is expired")
-            else:
-                configured_opening = None
-            inherited_workspace = (
-                configured_opening.workspace_instructions
-                if configured_opening is not None
-                else None
+            (
+                configured_opening,
+                on_tool_lifecycle,
+                inherited_workspace,
+                inherited_sandbox_observer,
+                borrowed_sandbox,
+            ) = _borrow_configured_opening(
+                policy_agent,
+                executor,
+                on_tool_lifecycle,
+                has_persistent_state=any(
+                    (state is not None, storage is not None, resume is not None)
+                ),
+                provider_history=provider_history,
+                agent=agent,
+                has_profiles=bool(profiles),
             )
-            inherited_sandbox_observer = (
-                configured_opening.sandbox_observer if configured_opening is not None else None
-            )
-            if inherited_workspace is not None:
-                if state is not None or storage is not None or resume is not None:
-                    raise CapabilityError(
-                        "Borrowed workspace guidance requires fresh native history"
-                    )
-                if (
-                    provider_history is not None
-                    or agent.realtime is not None
-                    or (agent.provider is not None and agent.provider.model_backend is not None)
-                ):
-                    raise CapabilityError(
-                        "Borrowed workspace guidance requires stateless native Responses HTTP"
-                    )
             workspace_instructions = (
                 lease._workspace_instructions if lease is not None else inherited_workspace
             )
@@ -5524,27 +5906,6 @@ class Session(Generic[ContextT, OutputT]):
                 raise TypeError("environment must be an Environment")
             if project_guidance and executor is None:
                 raise ValueError("project_guidance requires an Environment")
-            borrowed_sandbox = (
-                configured_opening.sandbox_lease if configured_opening is not None else None
-            )
-            if borrowed_sandbox is not None:
-                if state is not None or storage is not None or resume is not None:
-                    raise CapabilityError(
-                        "Borrowed sandbox capabilities require fresh native history"
-                    )
-                if (
-                    borrowed_sandbox.source is not policy_agent.environment
-                    or borrowed_sandbox.interrupted
-                    or borrowed_sandbox._owner.done()
-                    or borrowed_sandbox._retired.done()
-                    or not borrowed_sandbox._ready.done()
-                    or borrowed_sandbox._ready.result() is not executor
-                ):
-                    raise InteractionExpiredError("Configured sandbox source is retired")
-                if profiles:
-                    raise CapabilityError(
-                        "Borrowed sandbox capabilities require a single configured Agent"
-                    )
             borrowed_contributions = False
             if not profiles and _apply_sandbox_contributions(
                 agent,
@@ -5628,39 +5989,26 @@ class Session(Generic[ContextT, OutputT]):
             ) = await _acquire_profile_environments(
                 profiles, executor, lease, inherited_workspace=inherited_workspace
             )
-            distinct_profile_sources = any(
-                source is not None and (lease is None or source is not lease.source)
-                for source in profile_sources.values()
-            )
-            workspace_identities: dict[str, str | None] = {}
-            if (
-                distinct_profile_sources
-                and storage is None
-                and resume is None
-                and not manual_restore
-                and provider_history is None
-                and inherited_workspace is None
-            ):
-                from .sandbox import _portable_workspace_identity
-
-                workspace_identities = {
-                    profile: await _portable_workspace_identity(
-                        source, selected_environments[profile]
+            (
+                distinct_profile_sources,
+                workspace_identities,
+                portable_profile_workspaces,
+            ) = await _capture_portable_profile_workspaces(
+                profile_sources,
+                selected_environments,
+                lease,
+                has_native_storage=storage is not None or resume is not None,
+                has_checkpoint=state is not None,
+                portable_opening=not any(
+                    (
+                        storage is not None,
+                        resume is not None,
+                        manual_restore,
+                        provider_history is not None,
+                        inherited_workspace is not None,
                     )
-                    for profile, source in profile_sources.items()
-                    if source is not None
-                }
-            portable_profile_workspaces = bool(workspace_identities) and all(
-                identity is not None for identity in workspace_identities.values()
+                ),
             )
-            if distinct_profile_sources and (
-                storage is not None
-                or resume is not None
-                or (state is not None and not portable_profile_workspaces)
-            ):
-                raise CapabilityError(
-                    "Per-Agent Environment sources require provider state restoration"
-                )
             profile_leases = {
                 key: environment_owner.for_source(source)
                 for key, source in profile_sources.items()
@@ -5673,7 +6021,7 @@ class Session(Generic[ContextT, OutputT]):
                 for profile_id in profile_ids
             }
             profiled_contributions = False
-            for profile in profiles:
+            for index, profile in enumerate(profiles):
                 profile_lease = profile_leases.get(profile.id)
                 declared_count = len(profile.declaration.tools)
                 changed = _apply_sandbox_contributions(
@@ -5693,7 +6041,7 @@ class Session(Generic[ContextT, OutputT]):
                     ),
                 )
                 profiled_contributions |= changed
-                if changed and profile is profiles[0]:
+                if changed and index == 0:
                     # Mirror root defaults without re-entering application contributions.
                     declaration = profile.declaration
                     object.__setattr__(agent, "model_settings", declaration.model_settings)
@@ -5927,24 +6275,7 @@ class Session(Generic[ContextT, OutputT]):
                     selected=selected,
                     captured_api_key=_captured_api_key,
                 )
-                hosted_verification = next(
-                    (
-                        server
-                        for server in allowed_mcp
-                        if type(server) is _tool_types.HostedVerificationMCP
-                    ),
-                    None,
-                )
-                chatgpt_apps = next(
-                    (
-                        server
-                        for server in allowed_mcp
-                        if type(server) is _tool_types.ChatGPTAppsMCP
-                    ),
-                    None,
-                )
-                if hosted_verification is not None and chatgpt_apps is not None:
-                    raise ValueError("Select one explicit Apps registration per Session")
+                hosted_verification, chatgpt_apps = _opening_apps_registrations(allowed_mcp)
                 options = {
                     "_hosted_tools": hosted_tools,
                     **(
@@ -5982,39 +6313,8 @@ class Session(Generic[ContextT, OutputT]):
                         parent_trace=parent_trace,
                     ),
                     "config": config,
-                    **(
-                        {
-                            "_sdk_chatgpt_apps": {
-                                "access_token": chatgpt_apps.access_token,
-                                "account_id": chatgpt_apps.account_id,
-                            }
-                        }
-                        if chatgpt_apps is not None
-                        else {}
-                    ),
-                    **(
-                        {"_sdk_hosted_verification": hosted_verification._config()}
-                        if hosted_verification is not None
-                        else {}
-                    ),
+                    **_opening_apps_options(hosted_verification, chatgpt_apps, native_agents),
                     "runtime": runtime,
-                    "client_mcp_extensions": {
-                        "openai/form": {},
-                        "openai/elicitation": {
-                            "form": {},
-                            **(
-                                {"userVerification": {}}
-                                if hosted_verification is not None or chatgpt_apps is not None
-                                else {}
-                            ),
-                        },
-                        "openai/sdk-root-prompts": {},
-                        **(
-                            {"openai/sdk-child-prompts": {}}
-                            if native_agents is not None and native_agents.interactions
-                            else {}
-                        ),
-                    },
                     **({"_sdk_resume_thread_id": resume} if resume is not None else {}),
                     **(
                         {"_sdk_prompt_cache_key": _prompt_cache_key}
@@ -6056,18 +6356,9 @@ class Session(Generic[ContextT, OutputT]):
                     profile_fingerprint,
                     distinct_file_search=distinct_file_search,
                 )
-                if state is not None and "_sdk_runtime_enrollment" in state.agent_options:
-                    options["_agent_profiles"]["runtime_enrollment"] = state.agent_options[
-                        "_sdk_runtime_enrollment"
-                    ]
-                if (
-                    on_tool_lifecycle is not None
-                    or agent.on_tool_lifecycle is not None
-                    or any(
-                        profile.declaration.on_tool_lifecycle is not None for profile in profiles
-                    )
-                ):
-                    options["_tool_lifecycle"] = True
+                _install_opening_lifecycle_options(
+                    options, state, agent, profiles, on_tool_lifecycle
+                )
                 # The private merged opener owns paths for eligible runtime scopes.
                 if not _atomic_first_turn:
                     # Every conversation uses Core for model execution and history.
@@ -6086,104 +6377,25 @@ class Session(Generic[ContextT, OutputT]):
                     if native_agents is not None:
                         _configure_child_roles(config, home, native_agents)
 
-                async def initialize_engine() -> Any:
-                    create_engine = (
-                        native.create_checkpoint_engine
-                        if checkpoint is not None
-                        else native.create_engine
-                    )
-                    return await opening.acquire(
-                        create_engine(
-                            json.dumps(config),
-                            json.dumps(runtime),
-                            # Preserve the captured environment value in API-key mode.
-                            api_key=None if codex_login is not None else (opening.api_key or ""),
-                            provider_lease=provider_lease,
-                            # One opening snapshot owns the runtime and its first thread.
-                            **(
-                                {
-                                    "_capture_initial_config": True,
-                                    "_share_model_http": not owned_provider and auth is None,
-                                }
-                                if checkpoint is None
-                                else {}
-                            ),
-                            **(
-                                {"canonical_store": storage.backend}
-                                if isinstance(storage, CustomStorage)
-                                else {}
-                            ),
-                            **(
-                                {
-                                    "initial_checkpoint": checkpoint,
-                                    "initial_specs_json": native_specs,
-                                    "initial_options_json": json.dumps(options),
-                                    **(
-                                        {"_verify_current_default_model": True}
-                                        if verify_current_default
-                                        else {}
-                                    ),
-                                }
-                                if checkpoint is not None
-                                else {}
-                            ),
-                        )
-                    )
-
-                async def initialize_atomic() -> (
-                    tuple[Any, Any, Any] | Completed[Any] | _RunHandoff
-                ):
-                    if use_completed_owner:
-                        submission_id = uuid4().hex
-                        owner = native._prepare_run_conversation(
-                            json.dumps(config),
-                            json.dumps(runtime),
-                            json.dumps(options),
-                            native_specs,
-                            json.dumps(settings),
-                            json.dumps(
-                                {
-                                    "mode": "start_if_idle",
-                                    "input": _native_input(cast(str, _completed_input)),
-                                    "observation_submission_id": submission_id,
-                                }
-                            ),
-                            api_key=opening.api_key or "",
-                            provider_lease=provider_lease,
-                            _share_model_http=True,
-                            _private_http=private_http,
-                            **(
-                                {"_process_private_http": True}
-                                if private_http and owned_provider
-                                else {}
-                            ),
-                        )
-                        return await opening.run(owner, agent, output, submission_id)
-                    return cast(
-                        tuple[Any, Any, Any],
-                        await opening.acquire(
-                            native._open_conversation(
-                                json.dumps(config),
-                                json.dumps(runtime),
-                                json.dumps(options),
-                                native_specs,
-                                json.dumps(settings),
-                                api_key=opening.api_key or "",
-                                provider_lease=provider_lease,
-                                _share_model_http=not private_function_run,
-                                _private_http=private_http,
-                                **(
-                                    {"_process_private_runtime": True}
-                                    if private_function_run
-                                    else {}
-                                ),
-                            )
-                        ),
-                    )
-
                 handoff: _RunHandoff | None = None
                 if _atomic_first_turn:
-                    acquired = await initialize_atomic()
+                    acquired = await _initialize_atomic_opening(
+                        opening,
+                        native,
+                        config,
+                        runtime,
+                        options,
+                        native_specs,
+                        settings,
+                        provider_lease,
+                        agent,
+                        output,
+                        use_completed_owner=use_completed_owner,
+                        completed_input=_completed_input,
+                        private_http=private_http,
+                        owned_provider=owned_provider,
+                        private_function_run=private_function_run,
+                    )
                     if isinstance(acquired, Completed):
                         if owned_provider:
                             await provider.aclose()
@@ -6193,27 +6405,22 @@ class Session(Generic[ContextT, OutputT]):
                         acquired = handoff.scope
                     engine, thread, home = acquired
                 else:
-                    engine = await initialize_engine()
-
-                if isinstance(storage, CustomStorage) and resume is not None:
-                    # Inspect before Core starts, while the canonical backend's
-                    # original writer still fences every other opener.
-                    history, shell_calls = json.loads(
-                        await opening.acquire(engine._inspect_custom_recovery(resume))
+                    engine = await _initialize_session_engine(
+                        opening,
+                        native,
+                        config,
+                        runtime,
+                        options,
+                        native_specs,
+                        provider_lease,
+                        storage,
+                        checkpoint,
+                        using_codex_login=codex_login is not None,
+                        share_model_http=not any((owned_provider, auth is not None)),
+                        verify_current_default=verify_current_default,
                     )
-                    uncertain = [
-                        UncertainCall(
-                            thread_id=resume,
-                            turn_id=turn_id,
-                            call_id=call_id,
-                            name="shell",
-                            arguments=arguments,
-                        )
-                        for turn_id, call_id, arguments in shell_calls
-                    ]
-                    turns, items = project_history(history, resume, uncertain_calls=uncertain)
-                    if uncertain:
-                        raise LocalRecoveryRequired(tuple(uncertain), tuple(turns), tuple(items))
+
+                await _check_custom_opening_recovery(opening, engine, storage, resume)
 
                 if selected is None and provider.api_key is not None:
                     # Match Rust's whitespace after native UTF-8 validation.
@@ -6222,27 +6429,18 @@ class Session(Generic[ContextT, OutputT]):
                     )
 
                 if not _atomic_first_turn:
-                    opening_trace = (
-                        {"_opening_trace_context": _tracing_context}
-                        if allowed_mcp and _tracing_context is not None and parent_trace is None
-                        else {}
-                    )
-                    thread = await opening.acquire(
-                        engine._start_initial_replaceable_thread(
-                            json.dumps(options),
-                            native_specs,
-                            initial_messages_json=initial_messages_json,
-                            **opening_trace,
-                            **(
-                                {"_process_private_http": True}
-                                if private_http and owned_provider
-                                else {}
-                            ),
-                        )
-                        if checkpoint is None
-                        else engine.restore_checkpoint(
-                            checkpoint, json.dumps(options), native_specs, **opening_trace
-                        )
+                    thread = await _start_opening_thread(
+                        opening,
+                        engine,
+                        options,
+                        native_specs,
+                        checkpoint,
+                        initial_messages_json=initial_messages_json,
+                        allowed_mcp=allowed_mcp,
+                        tracing_context=_tracing_context,
+                        parent_trace=parent_trace,
+                        private_http=private_http,
+                        owned_provider=owned_provider,
                     )
                 assert thread is not None
                 session = cls(
@@ -6372,112 +6570,30 @@ class Session(Generic[ContextT, OutputT]):
                     session._produced_prefix = configured_opening.checkpoint_prefix
                 if manual_restore:
                     assert continuation is not None and checkpoint is not None
-                    session._start_raw_usage_on_restore(policy_agent, state)
-                    capture = _produced_items_restore.get()
-                    if (
-                        capture is not None
-                        and capture[0] is policy_agent
-                        and (capture[1] is state or capture[1] == state)
-                        and capture[2] is asyncio.current_task()
-                    ):
-                        session._start_produced_items()
-                    session._authenticated_checkpoint = (
-                        saved._authenticated_state_digest is not None
-                    )
-                    session._manual_source_digest = hashlib.sha256(
-                        saved.to_json().encode()
-                    ).hexdigest()
-                    if continuation.pending_input:
-                        session._staged_restore_checkpoint = saved
-                    active = _Submission(
-                        restored_output,
-                        model_override=continuation.model_override,
-                        model_settings_override=continuation.model_settings_override,
-                        retry_policy_override=restored_retry_policy,
-                        raise_on_unknown_tool=session._native._manual_raises_unknown_tool(),
-                        guardrail_results=session._restore_guardrail_records(saved),
-                        run_usage=_UsageCollector(session._configured_checkpoint_usage(saved)),
-                        original_input=saved.original_input,
-                        restored_pending=True,
-                        budget=restored_budget,
-                        observation_after=session._observations.sequence,
+                    await session._restore_manual_opening(
+                        saved,
+                        continuation,
+                        policy_agent=policy_agent,
+                        state=state,
+                        restored_output=restored_output,
+                        output_override=restored_override or restored_output_type is not None,
+                        restored_retry_policy=restored_retry_policy,
+                        restored_budget=restored_budget,
                         parent_trace=parent_trace,
                         operation_slots=operation_slots,
-                        operation_mcp=mcp_tools,
-                        operation_refs=restored_operation_refs,
-                        operation_declarations=restored_operation_declarations,
-                        operation_agent=operation_declaration
-                        if saved.operation_tools and operation_source is not None
-                        else None,
-                        operation_declaration_source=operation_source,
-                    )
-                    handle = _root_turn(
-                        session,
-                        continuation.turn_id,
-                        uuid4().hex,
-                        active.completion,
-                        active.observation_after,
-                    )
-                    session._last_turn = handle
-                    session._restored_turn = handle
-                    active.output_override = restored_override or restored_output_type is not None
-                    object.__setattr__(handle, "_guardrail_results", active.guardrail_results)
-                    object.__setattr__(handle, "_run_usage", active.run_usage)
-                    object.__setattr__(handle, "_original_input", active.original_input)
-                    session._usage_roots[continuation.turn_id] = active.run_usage
-                    active.handle = handle
-                    session._register_request_observation(active, handle)
-                    active.accepted.set_result(handle)
-                    session._active = active
-                    thread._select_steps(
-                        bool(session._profiles)
-                        or bool(continuation.pending_input)
-                        or active.budget is not None
-                        or bool(session._mcp_tools)
-                        or restored_operation_refs is not None
-                        or any(
-                            isinstance(tool, FunctionTool) and tool.is_enabled is not True
-                            for tool in session._bindings
+                        mcp_tools=mcp_tools,
+                        restored_operation_refs=restored_operation_refs,
+                        restored_operation_declarations=restored_operation_declarations,
+                        operation_declaration=(
+                            operation_declaration
+                            if saved.operation_tools and operation_source is not None
+                            else None
                         ),
-                        _native_tool_refs(restored_operation_refs)
-                        if restored_operation_refs is not None
-                        else None,
-                        native_agents is not None
-                        and (
-                            native_agents.before_step is not None
-                            or session._has_child_input_guardrails()
-                            or session._has_mcp_discovery_filters()
-                            or any(
-                                isinstance(tool, FunctionTool) and tool.is_enabled is not True
-                                for tool in session._bindings
-                            )
-                        ),
+                        operation_source=operation_source,
+                        native_agents=native_agents,
+                        tracing_context=_tracing_context,
+                        tracing_context_policy_only=_tracing_context_policy_only,
                     )
-                    # The native reader can receive restored requests during preparation.
-                    active.tracing = _capture(
-                        fallback=_tracing_context,
-                        fallback_policy_only=_tracing_context_policy_only,
-                        continuation_trace_id=(
-                            saved.continuation_trace_id if parent_trace is None else None
-                        ),
-                    )
-                    if continuation.pending_mcp:
-                        # Restore validation needs the current before/approval rules.
-                        session._start_interception()
-                    await thread._prepare_manual_restore()
-                    session._validate_pending_manual(active)
-                    session._observations.append(
-                        TurnStarted(
-                            session_id=session.id,
-                            turn_id=continuation.turn_id,
-                            submission_id=handle.submission_id,
-                        )
-                    )
-                    session._start_output_acceptance(handle)
-                    active.task = _create_task(session._execute(active, [], admitted=True))
-                    if continuation.staged_retry or continuation.pending_mcp:
-                        driver = _create_task(session._continue_restored_turn(active))
-                        active.add_manual_recovery(driver)
                 if handoff is not None:
                     await session._finish_run_opening(
                         opening,
@@ -6536,49 +6652,15 @@ class Session(Generic[ContextT, OutputT]):
             runtime.pop("environment", None)
             environment = executor = None
             pending_environment = None
-            session_cleanup = getattr(error, "cleanup", None)
-            session_owns_provider = (
-                owned_provider
-                and isinstance(session_cleanup, Session)
-                and not session_cleanup._closed
-                and session_cleanup._owned_provider is provider
+            await _fail_session_opening(
+                error,
+                opening,
+                session,
+                provider,
+                environment_owner,
+                owned_provider=owned_provider,
             )
-            if environment_owner is not None:
-                await _close_after_error(error, lambda: opening.fail_environment(environment_owner))
-                if opening.lease is not None and not environment_owner._retired.done():
-                    # Only the native join itself can keep an admitted manager
-                    # pending. Expose its existing owner to supported aclose.
-                    assert provider is not None
-                    provider._defer_opening(opening, environment_owner)
-            if owned_provider and not session_owns_provider:
-                assert provider is not None
-                await _close_after_error(error, provider.aclose)
-            try:
-                if environment_owner is not None:
-                    try:
-                        environment_owner.raise_if_interrupted(error)
-                    except BaseException as interrupted:
-                        # The manager's own error is the one the caller receives.
-                        error = interrupted
-                        raise
-                raise
-            finally:
-                # A retired unpublished Session no longer needs the caller's
-                # Environment. Pending native cleanup must retain its policy owner.
-                if opening.lease is None and session is not None:
-                    session._executor = None
-                # Both the original error and a manager-selected replacement
-                # must retain the same existing owner for unfinished cleanup.
-                if (
-                    provider is not None
-                    and not vars(provider).get("_closed", False)
-                    and (owned_provider or opening.lease is not None)
-                ):
-                    cast(Any, error).cleanup = (
-                        session_cleanup if session_owns_provider else provider
-                    )
-                    if owned_provider:
-                        cast(Any, error).provider = provider
+            raise
 
     async def _reconcile_local_history(self, reconciliation: Sequence[ReconciledCall]) -> None:
         # The writer is held. Read the saved graph, including
@@ -7162,6 +7244,127 @@ class Session(Generic[ContextT, OutputT]):
             )
         finally:
             del config
+
+    async def _restore_manual_opening(
+        self,
+        saved: _state_types.SessionState,
+        continuation: _ManualContinuation,
+        *,
+        policy_agent: Agent[ContextT, OutputT],
+        state: _state_types.SessionState | None,
+        restored_output: _PreparedOutput,
+        output_override: bool,
+        restored_retry_policy: RetryPolicy | None,
+        restored_budget: _RunBudget | None,
+        parent_trace: TraceContext | None,
+        operation_slots: tuple[int, ...] | None,
+        mcp_tools: tuple[_tool_types._MCP[Any], ...],
+        restored_operation_refs: tuple[ToolRef, ...] | None,
+        restored_operation_declarations: tuple[Any, ...] | None,
+        operation_declaration: Agent[Any, Any] | None,
+        operation_source: dict[str, Any] | None,
+        native_agents: _tool_types.NativeAgents[Any] | None,
+        tracing_context: str | None,
+        tracing_context_policy_only: bool,
+    ) -> None:
+        self._start_raw_usage_on_restore(policy_agent, state)
+        capture = _produced_items_restore.get()
+        if (
+            capture is not None
+            and capture[0] is policy_agent
+            and (capture[1] is state or capture[1] == state)
+            and capture[2] is asyncio.current_task()
+        ):
+            self._start_produced_items()
+        self._authenticated_checkpoint = saved._authenticated_state_digest is not None
+        self._manual_source_digest = hashlib.sha256(saved.to_json().encode()).hexdigest()
+        if continuation.pending_input:
+            self._staged_restore_checkpoint = saved
+        active = _Submission(
+            restored_output,
+            model_override=continuation.model_override,
+            model_settings_override=continuation.model_settings_override,
+            retry_policy_override=restored_retry_policy,
+            raise_on_unknown_tool=self._native._manual_raises_unknown_tool(),
+            guardrail_results=self._restore_guardrail_records(saved),
+            run_usage=_UsageCollector(self._configured_checkpoint_usage(saved)),
+            original_input=saved.original_input,
+            restored_pending=True,
+            budget=restored_budget,
+            observation_after=self._observations.sequence,
+            parent_trace=parent_trace,
+            operation_slots=operation_slots,
+            operation_mcp=mcp_tools,
+            operation_refs=restored_operation_refs,
+            operation_declarations=restored_operation_declarations,
+            operation_agent=operation_declaration,
+            operation_declaration_source=operation_source,
+        )
+        handle = _root_turn(
+            self,
+            continuation.turn_id,
+            uuid4().hex,
+            active.completion,
+            active.observation_after,
+        )
+        self._last_turn = handle
+        self._restored_turn = handle
+        active.output_override = output_override
+        object.__setattr__(handle, "_guardrail_results", active.guardrail_results)
+        object.__setattr__(handle, "_run_usage", active.run_usage)
+        object.__setattr__(handle, "_original_input", active.original_input)
+        self._usage_roots[continuation.turn_id] = active.run_usage
+        active.handle = handle
+        self._register_request_observation(active, handle)
+        active.accepted.set_result(handle)
+        self._active = active
+        self._native._select_steps(
+            bool(self._profiles)
+            or bool(continuation.pending_input)
+            or active.budget is not None
+            or bool(self._mcp_tools)
+            or restored_operation_refs is not None
+            or any(
+                isinstance(tool, FunctionTool) and tool.is_enabled is not True
+                for tool in self._bindings
+            ),
+            _native_tool_refs(restored_operation_refs)
+            if restored_operation_refs is not None
+            else None,
+            native_agents is not None
+            and (
+                native_agents.before_step is not None
+                or self._has_child_input_guardrails()
+                or self._has_mcp_discovery_filters()
+                or any(
+                    isinstance(tool, FunctionTool) and tool.is_enabled is not True
+                    for tool in self._bindings
+                )
+            ),
+        )
+        # The native reader can receive restored requests during preparation.
+        active.tracing = _capture(
+            fallback=tracing_context,
+            fallback_policy_only=tracing_context_policy_only,
+            continuation_trace_id=(saved.continuation_trace_id if parent_trace is None else None),
+        )
+        if continuation.pending_mcp:
+            # Restore validation needs the current before/approval rules.
+            self._start_interception()
+        await self._native._prepare_manual_restore()
+        self._validate_pending_manual(active)
+        self._observations.append(
+            TurnStarted(
+                session_id=self.id,
+                turn_id=continuation.turn_id,
+                submission_id=handle.submission_id,
+            )
+        )
+        self._start_output_acceptance(handle)
+        active.task = _create_task(self._execute(active, [], admitted=True))
+        if continuation.staged_retry or continuation.pending_mcp:
+            driver = _create_task(self._continue_restored_turn(active))
+            active.add_manual_recovery(driver)
 
     async def _restore_opening_checkpoint(
         self,
@@ -21183,7 +21386,7 @@ class Session(Generic[ContextT, OutputT]):
     ) -> _state_types.SessionState:
         from .state import SessionState
 
-        phase = _phase or _CheckpointPhase()
+        phase = _phase if _phase is not None else _CheckpointPhase()
         if self._configured_capture is not None:
             phase.state = "uncertain"
             result = cast("_state_types.SessionState", await _join(self._configured_capture))

@@ -37,23 +37,17 @@ async def test_selected_empty_destination_catalog_survives_owned_json_restore(tm
                     await (await session.submit("transfer")).get_result()
                 ).final_output == "done"
                 saved = await session.save_state()
-            async with source.session(
-                storage=storage, resume=saved.source_session_id
-            ) as resumed:
+            async with source.session(storage=storage, resume=saved.source_session_id) as resumed:
                 assert await resumed.get_active_agent() is target
                 await resumed.update(tools=[])
                 saved = await resumed.save_state()
             raw = saved.to_json()
-            saved = SessionState.from_json(
-                raw, expected_sha256=sha256(raw.encode()).hexdigest()
-            )
+            saved = SessionState.from_json(raw, expected_sha256=sha256(raw.encode()).hexdigest())
             async with source.session(state=saved) as restored:
                 assert await restored.get_active_agent() is target
                 assert (
                     await (await restored.submit("continue")).get_result()
                 ).final_output == "continued"
-            assert "unused" not in [
-                tool.get("name") for tool in wire.requests[2].get("tools", [])
-            ]
+            assert "unused" not in [tool.get("name") for tool in wire.requests[2].get("tools", [])]
             assert effects == []
             assert len(wire.requests) == 3

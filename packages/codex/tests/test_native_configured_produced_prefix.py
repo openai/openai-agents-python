@@ -6,11 +6,11 @@ import json
 from hashlib import sha256
 
 import pytest
+
+from agents import Agent, NativeProvider, PendingRequests, SessionState, function_tool
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call
 from tests.test_native_configured_agent_tool import MODEL, peer
-
-from agents import Agent, NativeProvider, PendingRequests, SessionState, function_tool
 
 
 @pytest.mark.asyncio

@@ -7,15 +7,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
+
+from agents import Agent, Environment
+from agents.classic.sandbox.entries import Dir, File
+from agents.sandbox import Manifest, SandboxCapability, sandbox_environment
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import assistant_output, responses as responses
 from tests.test_environment_leases_checklist import trust
 from tests.test_native_agent import provider
 from tests.test_sandbox_environment import Client, Options
-
-from agents import Agent, Environment
-from agents.classic.sandbox.entries import Dir, File
-from agents.sandbox import Manifest, SandboxCapability, sandbox_environment
 
 
 async def test_borrowed_file_description_changes_only_the_current_native_guidance(

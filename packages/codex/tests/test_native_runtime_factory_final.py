@@ -3,6 +3,15 @@ import json
 
 import pytest
 from pydantic import BaseModel
+from tests._asyncio import timeout
+from tests.native_fixtures import (
+    assistant_output,
+    function_call,
+    responses as responses,
+)
+from tests.test_native_configured_agent_tool import peer
+from tests.test_native_decision_handoff import Decisions
+from tests.test_native_mcp_tools import Peer
 
 from agents import (
     Agent,
@@ -17,15 +26,6 @@ from agents import (
 )
 from agents.session import Session
 from agents.state import LocalStorage
-from tests._asyncio import timeout
-from tests.native_fixtures import (
-    assistant_output,
-    function_call,
-    responses as responses,
-)
-from tests.test_native_configured_agent_tool import peer
-from tests.test_native_decision_handoff import Decisions
-from tests.test_native_mcp_tools import Peer
 
 
 @pytest.mark.parametrize(
@@ -47,7 +47,7 @@ from tests.test_native_mcp_tools import Peer
         "resource-collision",
         "reserved-name",
         "namespace",
-        "approval-refusal",
+        "manual-refusal",
     ],
 )
 async def test_runtime_factory_keeps_native_selection_and_provider_authority(
@@ -116,11 +116,13 @@ async def test_runtime_factory_keeps_native_selection_and_provider_authority(
         if route == "reserved-name"
         else ("locked_resource" if route == "resource-collision" else "fresh_lookup"),
         namespace="different" if route == "namespace" else None,
-        needs_approval=route == "approval-refusal",
     )
     def fresh_lookup() -> str:
         effects.append("once")
         return "fresh result"
+
+    class ManualArgs(BaseModel):
+        pass
 
     async with (
         timeout(25),
@@ -161,6 +163,15 @@ async def test_runtime_factory_keeps_native_selection_and_provider_authority(
                 else ({"temperature": 0.2} if route == "same-settings" else {}),
                 tools=[HttpMCP(name="blocked", url=mcp_url, tools=["read"])]
                 if route == "mcp"
+                else [
+                    FunctionTool(
+                        name="fresh_lookup",
+                        description="Unbound manual tool",
+                        input_type=ManualArgs,
+                        output_type=str,
+                    )
+                ]
+                if route == "manual-refusal"
                 else [fresh_lookup],
                 provider=foreign if route == "foreign" else None,
             )
@@ -258,7 +269,7 @@ async def test_runtime_factory_keeps_native_selection_and_provider_authority(
             if not positive:
                 errors = {
                     "outside": (OutputValidationError, None),
-                    "approval-refusal": (RuntimeError, "ordinary Python tools"),
+                    "manual-refusal": (ValueError, "ordinary Python tools"),
                     "explicit-policy": (RuntimeError, "excluded by ToolPolicy"),
                     "resource-collision": (RuntimeError, "collides with a captured resource"),
                     "reserved-name": (

@@ -1,8 +1,6 @@
 """Resolve legacy File Search refs from the exact active Agent declaration."""
 
 import pytest
-from tests._asyncio import timeout
-from tests.native_fixtures import assistant_output, function_call, responses as responses
 
 from agents import (
     Agent,
@@ -13,6 +11,8 @@ from agents import (
     ToolRef,
     function_tool,
 )
+from tests._asyncio import timeout
+from tests.native_fixtures import assistant_output, function_call, responses as responses
 
 
 @pytest.mark.parametrize("mode", ["operation", "force", "step", "run_override", "idle"])

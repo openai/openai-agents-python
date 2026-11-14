@@ -3,12 +3,12 @@
 import json
 
 import pytest
+
+from agents import Agent, FunctionTool, NativeError, SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call
 from tests.test_native_manual_tools import LookupArgs, next_request
 from tests.test_native_provider_lineage import history_peer
-
-from agents import Agent, FunctionTool, NativeError, SessionState
 
 
 def assert_queue_capture_unchanged(before: str, after: SessionState) -> None:

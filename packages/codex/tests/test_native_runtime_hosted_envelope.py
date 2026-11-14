@@ -1,11 +1,11 @@
 """A runtime handoff inherits only the admitted source's provider tools."""
 
 import pytest
+
+from agents import Agent, DecisionHandoff, FileSearch, NativeProvider
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_decision_handoff import Decisions
-
-from agents import Agent, DecisionHandoff, FileSearch, NativeProvider
 
 
 @pytest.mark.asyncio

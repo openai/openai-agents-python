@@ -34,12 +34,7 @@ async def test_handoff_recorded_generated_can_omit_a_settled_tool_pair(
     head = "PRIVATE_CURRENT_HANDOFF_TOOL_HEAD"
     body = hidden
     if selection == "large-pair":
-        body = (
-            head
-            + ("head-0123456789\n" * 20_000)
-            + hidden
-            + ("tail-9876543210\n" * 20_000)
-        )
+        body = head + ("head-0123456789\n" * 20_000) + hidden + ("tail-9876543210\n" * 20_000)
 
     @function_tool
     def read_record() -> str:
@@ -47,18 +42,14 @@ async def test_handoff_recorded_generated_can_omit_a_settled_tool_pair(
         return body
 
     def prepare(value: HandoffInput[None]) -> HandoffInput[None]:
-        current_pair = [
-            item for item in value.generated if item.get("call_id") == "source-read"
-        ]
+        current_pair = [item for item in value.generated if item.get("call_id") == "source-read"]
         assert {item["type"] for item in current_pair} == {
             "function_call",
             "function_call_output",
         }
         if selection == "large-pair":
             selected_output = next(
-                item["output"]
-                for item in current_pair
-                if item["type"] == "function_call_output"
+                item["output"] for item in current_pair if item["type"] == "function_call_output"
             )
             assert head in selected_output and hidden not in selected_output
         accepted_turn.append(value.target)
@@ -74,10 +65,7 @@ async def test_handoff_recorded_generated_can_omit_a_settled_tool_pair(
             item
             for item in value.generated
             if item.get("call_id") not in omitted
-            or (
-                selection in {"output-only", "model-pair"}
-                and item.get("type") == "function_call"
-            )
+            or (selection in {"output-only", "model-pair"} and item.get("type") == "function_call")
             or (selection == "call-only" and item.get("type") == "function_call_output")
         )
         model_view = value.generated if selection == "model-pair" else recorded
@@ -91,9 +79,7 @@ async def test_handoff_recorded_generated_can_omit_a_settled_tool_pair(
     responses.respond(assistant_output("cold continued"))
     async with (
         timeout(30),
-        NativeProvider(
-            base_url=responses.url, api_key="synthetic-handoff-pair"
-        ) as provider,
+        NativeProvider(base_url=responses.url, api_key="synthetic-handoff-pair") as provider,
     ):
         destination = Agent(name="destination", instructions="Handle the transfer.")
         root = Agent(
@@ -124,9 +110,7 @@ async def test_handoff_recorded_generated_can_omit_a_settled_tool_pair(
                 for row in (await session.history_snapshot()).items
             )
             saved = (await session.save_state()).to_json()
-        detached = SessionState.from_json(
-            saved, expected_sha256=sha256(saved.encode()).hexdigest()
-        )
+        detached = SessionState.from_json(saved, expected_sha256=sha256(saved.encode()).hexdigest())
         async with root.session(state=detached) as session:
             assert await session.get_active_agent() is destination
             assert all(
@@ -150,7 +134,6 @@ async def test_handoff_recorded_generated_can_omit_a_settled_tool_pair(
             for row in request["input"]
         )
         assert all(
-            hidden not in json.dumps(request["input"])
-            and head not in json.dumps(request["input"])
+            hidden not in json.dumps(request["input"]) and head not in json.dumps(request["input"])
             for request in responses.requests[1:]
         )

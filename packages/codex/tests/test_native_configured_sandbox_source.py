@@ -5,15 +5,15 @@ import json
 from contextlib import asynccontextmanager
 
 import pytest
+
+from agents import Agent, Environment, NativeProvider, function_tool
+from agents.sandbox import Manifest, SandboxCapability, sandbox_environment
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import assistant_output, function_call
 from tests.test_environment_leases_checklist import trust
 from tests.test_native_configured_agent_tool import peer
 from tests.test_sandbox_environment import Client, Options
-
-from agents import Agent, Environment, NativeProvider, function_tool
-from agents.sandbox import Manifest, SandboxCapability, sandbox_environment
 
 
 @pytest.mark.asyncio
