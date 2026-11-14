@@ -53,6 +53,7 @@ jobs:
       native_dependency_run: ${{ steps.native-source.outputs.dependency_run }}
       native_dependencies: ${{ steps.native-source.outputs.dependencies }}
       native_provenance: ${{ steps.producer-identity.outputs.provenance }}
+      sdk_tests: ${{ steps.sdk-tests.outputs.settings }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -60,6 +61,32 @@ jobs:
           fetch-depth: 0
       - id: changes
         run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
+      - name: Read SDK test settings
+        id: sdk-tests
+        if: ${{ !inputs.native_only }}
+        # These values tune downstream SDK tests without changing native artifact identity.
+        run: |
+          python -I -S - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+
+          settings = json.loads(Path(".github/scripts/sdk-test-settings.json").read_text(encoding="utf-8"))
+          # Zero Linux workers keeps Make's existing automatic worker selection.
+          limits = {"linux_workers": (0, 64), "macos_shards": (1, 16), "windows_shards": (1, 16)}
+          if not isinstance(settings, dict) or settings.keys() != limits.keys() | {"reporting"}:
+              raise SystemExit("Invalid SDK test settings")
+          for name, (minimum, maximum) in limits.items():
+              value = settings[name]
+              if type(value) is not int or not minimum <= value <= maximum:
+                  raise SystemExit(f"{name} must be an integer from {minimum} to {maximum}")
+          if settings["reporting"] not in ("-rap", "-rA"):
+              raise SystemExit("Invalid pytest reporting mode")
+          settings["macos_indices"] = list(range(settings["macos_shards"]))
+          settings["windows_indices"] = list(range(settings["windows_shards"]))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("settings=" + json.dumps(settings, separators=(",", ":")) + "\n")
+          PYTHON
       - name: Select Windows test coverage
         id: release-windows
         env:
@@ -774,8 +801,8 @@ jobs:
           - "3.14"
     env:
       OPENAI_API_KEY: fake-for-tests
-      PYTEST_ADDOPTS: "-rap"
-      PYTEST_XDIST_AUTO_NUM_WORKERS: ${{ github.repository == 'openai/openai-agents-python' && '12' || '' }}
+      PYTEST_ADDOPTS: ${{ fromJSON(needs.changes.outputs.sdk_tests).reporting }}
+      PYTEST_XDIST_AUTO_NUM_WORKERS: ${{ github.repository == 'openai/openai-agents-python' && fromJSON(needs.changes.outputs.sdk_tests).linux_workers || '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -943,14 +970,14 @@ jobs:
 
   native-macos-sandbox-shards:
     if: ${{ !inputs.native_only }}
-    needs: native-macos
+    needs: [changes, native-macos]
     runs-on: ${{ github.repository == 'openai/openai-agents-python' && 'macos-15' || 'macos-latest' }}
     timeout-minutes: 100
     name: macOS sandbox shard (${{ matrix.shard }})
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: ${{ fromJSON(needs.changes.outputs.sdk_tests).macos_indices }}
     env:
       OPENAI_API_KEY: fake-for-tests
       PYTEST_ADDOPTS: "-rA"
@@ -1017,9 +1044,10 @@ jobs:
           PYTEST_ADDOPTS: "-ra -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0"
           PYTHONUNBUFFERED: "1"
           MACOS_TEST_SHARD: ${{ matrix.shard }}
+          MACOS_TEST_SHARD_COUNT: ${{ fromJSON(needs.changes.outputs.sdk_tests).macos_shards }}
         shell: bash
         run: |
-          SDK_TEST_SHARD_INDEX="$MACOS_TEST_SHARD" SDK_TEST_SHARD_COUNT=4 make tests-parallel
+          SDK_TEST_SHARD_INDEX="$MACOS_TEST_SHARD" SDK_TEST_SHARD_COUNT="$MACOS_TEST_SHARD_COUNT" make tests-parallel
           if [[ "$MACOS_TEST_SHARD" == 0 ]]; then
             make tests-serial
           fi
@@ -1039,7 +1067,7 @@ jobs:
 
   tests-windows-shards:
     if: ${{ !inputs.native_only }}
-    needs: native-windows
+    needs: [changes, native-windows]
     name: Windows test shard (${{ matrix.python-version }}, ${{ matrix.shard }})
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
     timeout-minutes: 100
@@ -1049,10 +1077,10 @@ jobs:
         python-version:
           - "3.10"
           - "3.14"
-        shard: [0, 1, 2]
+        shard: ${{ fromJSON(needs.changes.outputs.sdk_tests).windows_indices }}
     env:
       OPENAI_API_KEY: fake-for-tests
-      PYTEST_ADDOPTS: "-rap"
+      PYTEST_ADDOPTS: ${{ fromJSON(needs.changes.outputs.sdk_tests).reporting }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -1082,7 +1110,7 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         env:
           SDK_TEST_SHARD_INDEX: ${{ matrix.shard }}
-          SDK_TEST_SHARD_COUNT: "3"
+          SDK_TEST_SHARD_COUNT: ${{ fromJSON(needs.changes.outputs.sdk_tests).windows_shards }}
         # Native completions use loopback sockets on Windows.
         run: uv run python packages/codex/scripts/test_native.py --sdk -m pytest -n 2 --dist worksteal -m "not serial" -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
       - name: Run serial tests after all workers exit
