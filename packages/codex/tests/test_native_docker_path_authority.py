@@ -37,12 +37,14 @@ class MountedFixtureClient(FixtureClient):
             assert inspection["HostConfig"]["NetworkMode"] == "none"
             assert not inspection["HostConfig"]["Privileged"]
             assert not inspection["HostConfig"].get("CapAdd")
-            for grant, mount in zip(
-                resource.state.manifest.extra_path_grants, inspection["Mounts"], strict=True
-            ):
+            grants = resource.state.manifest.extra_path_grants
+            mounts = {mount["Destination"]: mount for mount in inspection["Mounts"]}
+            assert len(mounts) == len(inspection["Mounts"])
+            assert set(mounts) == {grant.path for grant in grants}
+            for grant in grants:
+                mount = mounts[grant.path]
                 assert mount["Type"] == "bind"
                 assert mount["Source"] == grant.host_path
-                assert mount["Destination"] == grant.path
                 assert mount["RW"] == (not grant.read_only)
             archive = await run_blocking_workspace_io(fixture_archive)
             await run_blocking_workspace_io(
@@ -127,7 +129,9 @@ async def test_native_docker_path_grants_are_mapped_and_writes_are_scoped(
         async with agent.session(state=saved, environment=source()) as session:
             result = await (await session.submit("Inspect after reopening.")).get_result()
             assert result.final_output == "restored"
-        with pytest.raises(RuntimeError, match="recorded Agent environment grants"):
+        with pytest.raises(
+            ValueError, match="Checkpoint and Environment must agree on the applied executor policy"
+        ):
             async with agent.session(state=saved, environment=source(writable=False)):
                 pytest.fail("A weaker current grant cannot reopen the recorded executor authority")
         assert len(responses.requests) == 4

@@ -21837,6 +21837,20 @@ class Session(Generic[ContextT, OutputT]):
                         raise NativeError("Staged retry does not match its original checkpoint")
                     if payload["source_session_id"] != saved.source_session_id:
                         raise NativeError("Staged retry changed its native source session")
+                    if self._provider_history is None:
+                        # Ordinary staged retry retains its unfinished source history.
+                        # Only occurrence-projected retries need newly accepted history.
+                        return saved.model_copy(
+                            update={
+                                "native_continuation": continuation,
+                                "remembered_approvals": self._current_remembered_approvals(),
+                                "remembered_mcp_approvals": remembered_mcp,
+                                "application_tool_outputs": [
+                                    record.model_copy(deep=True)
+                                    for record in self._application_tool_outputs
+                                ],
+                            }
+                        ).to_json()
                     # Preserve the operation's SDK envelope, but capture current
                     # canonical data. A terminal response can accept only some
                     # staged originals before a later observer rejects it.
