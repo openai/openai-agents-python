@@ -4,8 +4,16 @@ import asyncio
 
 import pytest
 
-from agents import Agent, AgentToolStreamEvent, NativeProvider
-from agents.observation import OutputTextDelta
+from agents import (
+    Agent,
+    AgentToolStreamEvent,
+    ApprovalRequested,
+    NativeProvider,
+    PendingRequests,
+    SessionState,
+    function_tool,
+)
+from agents.observation import AgentProfileChanged, OutputTextDelta
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, text_response
 from tests.test_native_configured_agent_tool import MODEL, peer
@@ -136,3 +144,99 @@ async def test_configured_child_stream_overflow_joins_the_active_callback():
                 await parent.run("Start.")
             assert entered.is_set() and cancelled.is_set()
             assert len(parent_model.requests) == 1
+
+
+async def test_configured_child_stream_uses_the_restored_handoff_destination():
+    async with timeout(20), peer() as parent_model, peer() as child_model:
+        parent_model.respond(function_call("specialist", {"input": "Work."}, "outer-call"))
+        parent_model.respond(assistant_output("parent complete"))
+        child_model.respond(function_call("transfer_to_destination", {}, "transfer"))
+        child_model.respond(function_call("gated", {}, "gated-call"))
+        child_model.respond(*text_response("msg_after_approval", "approved child"))
+        effects: list[str] = []
+        observed: list[AgentToolStreamEvent] = []
+
+        @function_tool(needs_approval=True)
+        async def gated() -> str:
+            effects.append("gated")
+            return "effect"
+
+        async with (
+            NativeProvider(base_url=parent_model.url, api_key="synthetic-root") as root_provider,
+            NativeProvider(base_url=child_model.url, api_key="synthetic-child") as child_provider,
+        ):
+            destination = Agent(
+                name="destination",
+                instructions="Ask for approval.",
+                model=MODEL,
+                provider=child_provider,
+                tools=[gated],
+            )
+            child = Agent(
+                name="specialist",
+                instructions="Transfer to destination.",
+                model=MODEL,
+                provider=child_provider,
+                handoffs=[destination],
+            )
+            parent = Agent(
+                instructions="Use specialist.",
+                model=MODEL,
+                provider=root_provider,
+                tools=[child.as_tool("specialist", on_stream=observed.append)],
+            )
+            async with parent.session() as source:
+                turn = await source.submit("Start.")
+                pending = await turn.wait_for_request_or_result()
+                assert isinstance(pending, PendingRequests)
+                checkpoint = await source.suspend()
+            assert not effects
+            changed = [event for event in observed if isinstance(event.event, AgentProfileChanged)]
+            assert len(changed) == 1 and changed[0].agent is destination
+            observed.clear()
+            checkpoint = SessionState.from_json(checkpoint.to_json())
+            changed_destination = Agent(
+                name="destination",
+                instructions="Changed handoff authority.",
+                model=MODEL,
+                provider=child_provider,
+                tools=[gated],
+            )
+            changed_child = Agent(
+                name="specialist",
+                instructions="Transfer to destination.",
+                model=MODEL,
+                provider=child_provider,
+                handoffs=[changed_destination],
+            )
+            changed_parent = Agent(
+                instructions="Use specialist.",
+                model=MODEL,
+                provider=root_provider,
+                tools=[changed_child.as_tool("specialist", on_stream=observed.append)],
+            )
+            async with changed_parent.session(state=checkpoint) as changed:
+                assert changed.restored_turn is not None
+                with pytest.raises(RuntimeError, match="(fingerprint|Agent declaration graph)"):
+                    await changed.restored_turn.get_result()
+            assert not effects and not observed
+            assert len(parent_model.requests) == 1
+            assert len(child_model.requests) == 2
+
+            async with parent.session(state=checkpoint) as fresh:
+                restored = fresh.restored_turn
+                assert restored is not None
+                pending = await restored.wait_for_request_or_result()
+                assert isinstance(pending, PendingRequests)
+                [request] = pending.requests
+                assert isinstance(request, ApprovalRequested)
+                await fresh.respond(request.reply(True))
+                assert (await restored.get_result()).final_output == "parent complete"
+
+            deltas = [event for event in observed if isinstance(event.event, OutputTextDelta)]
+            assert len(deltas) == 1
+            assert deltas[0].event.delta == "approved child"
+            assert deltas[0].agent is destination and deltas[0].tool_call.call_id == "outer-call"
+            assert effects == ["gated"]
+            assert len(parent_model.requests) == 2
+            assert len(child_model.requests) == 3
