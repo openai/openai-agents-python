@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from _agents_codex.manual import _is_json_value
 from _agents_codex.session import Session
 from agents import GuardrailResult
 
@@ -62,6 +63,22 @@ def test_checkpoint_detaches_json_diagnostics_and_omits_cycles():
     record.result = GuardrailResult(False, cyclic)
     assert "output_info" not in Session._checkpoint_guardrail_records(owner, state)[0]
     assert record.result.output_info is cyclic
+
+
+def test_json_value_rejects_cycles_and_accepts_shared_containers():
+    cyclic_list = []
+    cyclic_list.append(cyclic_list)
+    cyclic_dict = {}
+    cyclic_dict["self"] = cyclic_dict
+    mixed_cycle = {"child": []}
+    mixed_cycle["child"].append(mixed_cycle)
+
+    assert not _is_json_value(cyclic_list)
+    assert not _is_json_value(cyclic_dict)
+    assert not _is_json_value(mixed_cycle)
+
+    shared = ["original"]
+    assert _is_json_value({"first": shared, "second": shared})
 
 
 async def test_checkpoint_diagnostic_validation_precedes_irreversible_native_seal():

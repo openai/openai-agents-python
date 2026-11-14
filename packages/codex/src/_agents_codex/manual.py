@@ -255,14 +255,25 @@ def _general_form_validator(schema: Any) -> Validator:
     return validator
 
 
-def _is_json_value(value: Any) -> bool:
+def _is_json_value(value: Any, ancestors: set[int] | None = None) -> bool:
     if value is None or isinstance(value, (str, bool, int, float)):
         return True
-    if isinstance(value, list):
-        return all(_is_json_value(item) for item in value)
-    if isinstance(value, dict):
-        return all(isinstance(key, str) and _is_json_value(item) for key, item in value.items())
-    return False
+    if not isinstance(value, (list, dict)):
+        return False
+    if ancestors is None:
+        ancestors = set()
+    identity = id(value)
+    if identity in ancestors:
+        return False
+    ancestors.add(identity)
+    try:
+        if isinstance(value, list):
+            return all(_is_json_value(item, ancestors) for item in value)
+        return all(
+            isinstance(key, str) and _is_json_value(item, ancestors) for key, item in value.items()
+        )
+    finally:
+        ancestors.remove(identity)
 
 
 @dataclass(frozen=True, slots=True, init=False)
