@@ -11,6 +11,8 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Callable
+from functools import cache
 from pathlib import Path
 from types import ModuleType, UnionType
 from typing import Annotated, Any, Union, get_origin
@@ -112,10 +114,12 @@ def _references(declaration: ast.stmt) -> set[str]:
     return names
 
 
-def _public_type_aliases(module: ModuleType, source: ModuleType, tree: ast.Module) -> None:
+def _public_type_aliases(module: ModuleType, source: ModuleType, tree: ast.Module) -> ast.Module:
     """Read public-owner alias construction as the original type declaration."""
     if source.__name__ not in {"_agents_codex._events", "_agents_codex.subagents"}:
-        return
+        return tree
+    # Keep parsed trees available for other modules and discovery rounds.
+    tree = copy.deepcopy(tree)
     declarations = [
         node
         for node in tree.body
@@ -125,7 +129,7 @@ def _public_type_aliases(module: ModuleType, source: ModuleType, tree: ast.Modul
         and node.value.func.id == "_PublicTypeAliasType"
     ]
     if not declarations:
-        return
+        return tree
     owner = _public_owner(source.__name__)
     expected = ast.parse(
         "if TYPE_CHECKING:\n"
@@ -160,13 +164,26 @@ def _public_type_aliases(module: ModuleType, source: ModuleType, tree: ast.Modul
         assert isinstance(declaration.value.func, ast.Name)
         declaration.value.func.id = "TypeAliasType"
     tree.body.remove(guards[0])
+    return tree
+
+
+def _analyze_declaration(node: ast.stmt) -> tuple[set[str], str] | None:
+    declaration = _declaration(node)
+    if declaration is None:
+        return None
+    return _references(declaration), ast.unparse(declaration)
 
 
 def _module_contract(
-    module: ModuleType, exports: set[str] | None = None, *, include: set[str] | None = None
+    module: ModuleType,
+    exports: set[str] | None = None,
+    *,
+    include: set[str] | None = None,
+    parse: Callable[[str], ast.Module] = ast.parse,
+    analyze: Callable[[ast.stmt], tuple[set[str], str] | None] = _analyze_declaration,
 ) -> dict[str, Any]:
     assert module.__file__ is not None
-    tree = ast.parse(Path(module.__file__).read_text())
+    tree = parse(Path(module.__file__).read_text())
     source = module
     # Public modules explicitly re-export their implementation. Read declarations
     # from that one owner while checking bindings on the public module itself.
@@ -178,9 +195,9 @@ def _module_contract(
             if owner.startswith("_agents_codex.") and _public_owner(owner) == module.__name__:
                 source = importlib.import_module(owner)
                 assert source.__file__ is not None
-                tree = ast.parse(Path(source.__file__).read_text())
+                tree = parse(Path(source.__file__).read_text())
                 break
-    _public_type_aliases(module, source, tree)
+    tree = _public_type_aliases(module, source, tree)
     definitions = [(node, _names(node)) for node in tree.body if _names(node)]
     if exports is None:
         exports = (
@@ -206,7 +223,7 @@ def _module_contract(
                 else name
             )
     selected = set(exports) | (include or set())
-    declarations: list[ast.stmt] = []
+    declarations: list[tuple[set[str], str]] = []
     # Include base classes and aliases used by the public declarations. This captures
     # inherited field order/defaults without freezing unrelated private implementation.
     while True:
@@ -214,9 +231,9 @@ def _module_contract(
             declaration
             for node, names in definitions
             if names & selected
-            if (declaration := _declaration(node)) is not None
+            if (declaration := analyze(node)) is not None
         ]
-        referenced = set().union(*(_references(declaration) for declaration in declarations))
+        referenced = set().union(*(references for references, _ in declarations))
         expanded = selected | referenced
         if expanded == selected:
             break
@@ -284,7 +301,7 @@ def _module_contract(
         "exports": bindings,
         "imports": imports,
         "references": references,
-        "declarations": [ast.unparse(node) for node in declarations],
+        "declarations": [declaration for _, declaration in declarations],
     }
 
 
@@ -320,12 +337,17 @@ def public_api() -> dict[str, Any]:
     # Follow only imports used by retained declarations. A typing alias reports
     # its runtime owner as typing, so its source binding defines this boundary.
     required: dict[str, set[str]] = {name: set() for name in public_modules | {"agents"}}
+    # Cache syntax for this check while reading live bindings on every pass.
+    parse = cache(ast.parse)
+    analyze = cache(_analyze_declaration)
     while True:
         contracts = {
             name: _module_contract(
                 importlib.import_module(name),
                 explicit_exports.get(name, None if name in public_modules else set()),
                 include=names,
+                parse=parse,
+                analyze=analyze,
             )
             for name, names in sorted(required.items())
         }
