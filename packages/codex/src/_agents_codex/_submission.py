@@ -89,6 +89,8 @@ class _Submission:
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     restored_pending: bool = False
     retire_manual: bool = False
+    manual_recoveries: set[asyncio.Task[Any]] = field(default_factory=set, repr=False)
+    manual_recovery_stop: asyncio.Future[None] | None = field(default=None, repr=False)
     graceful_requested: bool = False
     unsampled_steering: bool = False
     continued_from: str | None = None
@@ -124,6 +126,11 @@ class _Submission:
     ) -> None:
         self.callbacks[task] = receipt
         task.add_done_callback(self._callback_finished)
+
+    def add_manual_recovery(self, task: asyncio.Task[None]) -> None:
+        self.add_callback(task)
+        self.manual_recoveries.add(task)
+        task.add_done_callback(self.manual_recoveries.discard)
 
     def _callback_finished(self, task: asyncio.Task[None]) -> None:
         self.changed.set()
