@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 
 import pytest
 from pydantic import BaseModel
@@ -137,9 +138,14 @@ async def test_runtime_factory_keeps_native_selection_and_provider_authority(
             supports_websockets=False,
         ) as foreign,
     ):
+        loop = asyncio.get_running_loop()
+        loop_thread = threading.get_ident()
 
         def create_target(_context, routing_input):
             assert routing_input == "Create fresh"
+            assert threading.get_ident() != loop_thread
+            ping = asyncio.run_coroutine_threadsafe(asyncio.sleep(0, result="admitted"), loop)
+            assert ping.result(timeout=3) == "admitted"
             calls.append("factory")
             if route == "cancel":
 

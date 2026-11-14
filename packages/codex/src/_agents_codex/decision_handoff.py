@@ -11,8 +11,10 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from ._callback_execution import _call_callback
 from ._function_tools import FunctionTool, ToolContext
 from ._public import preserve_module_identity as _preserve_module_identity
+from .decisions import _decision_scope
 from .tools import _CapturedFunction
 
 if TYPE_CHECKING:
@@ -108,9 +110,11 @@ def _decision_handoff_tool(
                 raise ValueError("Decision handoff selected an unauthorized target")
             target = captured_targets[selected]
             if callable(target):
-                value = target(tool_context, input)
-                if inspect.isawaitable(value):
-                    value = await value
+                scope = _decision_scope.get()
+                assert scope is not None
+                scope.check(tool_context, after_await=True)
+                value = await _call_callback(target, scope.active, tool_context, input)
+                scope.check(tool_context, after_await=True)
                 from .agent import Agent
 
                 if not isinstance(value, Agent):
