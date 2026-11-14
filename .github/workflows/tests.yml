@@ -311,8 +311,12 @@ jobs:
               return before == after
 
           def native_ready_status(run):
-              return (run['status'] == 'in_progress' or
-                      (run['status'] == 'completed' and run['conclusion'] in ('success', 'failure')))
+              # Partial reruns can report earlier jobs with the latest attempt
+              # number while their artifacts retain the original attempt.
+              return run['run_attempt'] == 1 and (
+                  run['status'] == 'in_progress' or
+                  (run['status'] == 'completed' and run['conclusion'] in ('success', 'failure'))
+              )
 
           def qualified(run, dependencies=False):
               completed = run['status'] == 'completed' and run['conclusion'] == 'success'
