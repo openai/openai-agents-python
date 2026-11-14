@@ -66,6 +66,7 @@ def callback_session(root):
     session = object.__new__(Session)
     session._profiles = runtime
     session._closing = False
+    session._on_tool_lifecycle = None
     session._output_guardrails = ()
     session._uses_siwc = False
     session._raw_usage_started = False
@@ -409,7 +410,7 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
         id = "repair-session"
         _broken = False
         _closed = False
-        _environment_lease = None
+        _environment_owner = None
 
         def __init__(self):
             self._observations = SimpleNamespace()
