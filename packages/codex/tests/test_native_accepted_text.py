@@ -1,6 +1,7 @@
 """Application-approved prefixes have been reaching callers during native generation."""
 
 import asyncio
+from contextlib import aclosing
 
 import pytest
 
@@ -311,9 +312,10 @@ async def test_reader_still_fails_closed_when_current_turn_observations_are_evic
             base_url=responses.url, api_key="synthetic", supports_websockets=False
         ) as provider,
     ):
-        async with Agent(
-            instructions="Answer.", model="fixture", provider=provider
-        ).session() as session:
+        async with (
+            Agent(instructions="Answer.", model="fixture", provider=provider).session() as session,
+            aclosing(session.events()),
+        ):
             turn = await session.submit("Current.")
             await ready.wait()
             from agents.observation import OutputTextDelta

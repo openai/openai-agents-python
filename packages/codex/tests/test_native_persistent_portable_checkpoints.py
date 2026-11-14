@@ -40,42 +40,40 @@ async def test_local_checkpoint_is_independent_and_keeps_complete_originals(
     responses.respond(assistant_output("portable later"))
     directory = tmp_path / "source-store"
     storage = LocalStorage(directory)
-    async with (
-        timeout(45),
-        NativeProvider(base_url=responses.url, api_key="synthetic-source") as provider,
-    ):
-        agent = Agent(instructions="Keep the conversation.", tools=[read], provider=provider)
-        async with agent.session(storage=storage) as source:
-            await (await source.submit("original input")).get_result()
-            current = await source.history_snapshot()
-            await source.transact_history(
-                expected_revision=current.revision,
-                keep=current.total,
-                items=[
-                    {
-                        "type": "application-audit",
-                        "payload": {"$serde_json::private::Number": "7", "kept": "😀"},
-                    }
-                ],
-            )
-            selected_id = await source.fork_stored() if referenced else source.id
-            if not referenced:
-                before = await source.history_snapshot()
-                saved = SessionState.from_json((await source.save_state()).to_json())
-                assert source.id == saved.source_session_id == selected_id
-                assert await source.history_snapshot() == before
-                assert (await source.checkpoint_status(kind="idle")).status == "ready"
-                await (await source.submit("source-only later input")).get_result()
-        if referenced:
-            if mode == "retired-reference":
-                async with agent.session(storage=storage, resume=source.id) as ancestor:
-                    await ancestor.delete_stored(preserve_descendants=True)
-            async with agent.session(storage=storage, resume=selected_id) as source:
-                before = await source.history_snapshot()
-                saved = SessionState.from_json((await source.save_state()).to_json())
-                assert source.id == saved.source_session_id == selected_id
-                assert await source.history_snapshot() == before
-                await (await source.submit("source-only later input")).get_result()
+    async with timeout(45):
+        async with NativeProvider(base_url=responses.url, api_key="synthetic-source") as provider:
+            agent = Agent(instructions="Keep the conversation.", tools=[read], provider=provider)
+            async with agent.session(storage=storage) as source:
+                await (await source.submit("original input")).get_result()
+                current = await source.history_snapshot()
+                await source.transact_history(
+                    expected_revision=current.revision,
+                    keep=current.total,
+                    items=[
+                        {
+                            "type": "application-audit",
+                            "payload": {"$serde_json::private::Number": "7", "kept": "😀"},
+                        }
+                    ],
+                )
+                selected_id = await source.fork_stored() if referenced else source.id
+                if not referenced:
+                    before = await source.history_snapshot()
+                    saved = SessionState.from_json((await source.save_state()).to_json())
+                    assert source.id == saved.source_session_id == selected_id
+                    assert await source.history_snapshot() == before
+                    assert (await source.checkpoint_status(kind="idle")).status == "ready"
+                    await (await source.submit("source-only later input")).get_result()
+            if referenced:
+                if mode == "retired-reference":
+                    async with agent.session(storage=storage, resume=source.id) as ancestor:
+                        await ancestor.delete_stored(preserve_descendants=True)
+                async with agent.session(storage=storage, resume=selected_id) as source:
+                    before = await source.history_snapshot()
+                    saved = SessionState.from_json((await source.save_state()).to_json())
+                    assert source.id == saved.source_session_id == selected_id
+                    assert await source.history_snapshot() == before
+                    await (await source.submit("source-only later input")).get_result()
         assert len(responses.requests) == 3 and effects == ["source"]
         directory.rename(tmp_path / "unavailable-source-store")
 

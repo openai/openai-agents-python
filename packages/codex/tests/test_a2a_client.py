@@ -21,6 +21,7 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse, RedirectResponse, StreamingResponse
 from starlette.routing import Route
 
+from _agents_codex.a2a import _client as a2a_client
 from agents import Agent, NativeProvider, ToolContext, function_tool
 from agents.a2a import A2AEndpoint, A2AJobProvider, A2ALimits, NativeA2ABinding, connect_a2a
 from agents.experimental.deferred import JobBinding, JobClaim
@@ -164,8 +165,23 @@ async def test_direct_client_bounds_complete_message(tmp_path, responses, stream
 
 @pytest.mark.serial
 @pytest.mark.parametrize("kind", ["deadline", "idle", "stream-idle"])
-async def test_rpc_timeout_exception_chain_does_not_expose_bearer(kind):
+async def test_rpc_timeout_exception_chain_does_not_expose_bearer(kind, monkeypatch):
     received = []
+    request_timeout = 0.3 if kind == "deadline" else 5
+    if kind != "deadline":
+        # Bound setup separately from the response-body idle timeout.
+        original_client = a2a_client._BoundedClient
+
+        async def arm_read_idle(response):
+            if response.request.url.path == "/rpc":
+                response.request.extensions["timeout"]["read"] = 0.05
+
+        def make_client(*args, **kwargs):
+            http = original_client(*args, **kwargs)
+            http.event_hooks["response"].append(arm_read_idle)
+            return http
+
+        monkeypatch.setattr(a2a_client, "_BoundedClient", make_client)
 
     def app(url):
         async def rpc(request):
@@ -187,11 +203,11 @@ async def test_rpc_timeout_exception_chain_does_not_expose_bearer(kind):
         async with connect_a2a(
             endpoint(url),
             authorization=token,
-            limits=A2ALimits(timeout=0.3),
+            limits=A2ALimits(timeout=request_timeout),
             streaming=kind == "stream-idle",
         ) as client:
             with pytest.raises(A2AClientTimeoutError) as caught:
-                context = ClientCallContext(timeout=0.05) if kind != "deadline" else None
+                context = ClientCallContext(timeout=request_timeout) if kind != "deadline" else None
                 if kind == "stream-idle":
                     async for _ in client.send_message(
                         p.SendMessageRequest(message=new_text_message("stream", role=p.ROLE_USER)),

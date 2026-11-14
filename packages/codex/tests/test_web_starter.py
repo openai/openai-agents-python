@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from xml.etree import ElementTree
 
 import aiohttp
@@ -313,7 +313,10 @@ async def test_native_gap_recovers_from_application_snapshot(tmp_path, responses
         async with NativeProvider(
             base_url=responses.url, api_key="synthetic", supports_websockets=False
         ) as provider:
-            async with Agent(instructions="Reply.", provider=provider).session() as session:
+            async with (
+                Agent(instructions="Reply.", provider=provider).session() as session,
+                aclosing(session.events()),
+            ):
                 turn = await session.submit("Flood observations")
                 assert (await turn.get_result()).final_output == "x" * 350
                 work = Work(Identity("alice"), receipt, float("inf"), asyncio.Event(), None)
