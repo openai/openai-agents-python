@@ -14,6 +14,7 @@ from typing import Literal
 from xml.etree import ElementTree
 
 from aiohttp import web
+from aiohttp.web_protocol import RequestPayloadError
 from pydantic import BaseModel, ConfigDict, Field
 
 from agents import (
@@ -429,8 +430,18 @@ def identity_for(request):
     return identity
 
 
+async def json_object(request):
+    try:
+        data = await request.json()
+    except (RecursionError, LookupError, RequestPayloadError):
+        raise web.HTTPBadRequest(text="Invalid JSON request body") from None
+    if not isinstance(data, dict):
+        raise web.HTTPBadRequest(text="Expected JSON object")
+    return data
+
+
 async def login(request):
-    data = await request.json()
+    data = await json_object(request)
     user = data.get("user")
     if user not in {"alice", "bob"}:
         raise web.HTTPBadRequest(text="Choose alice or bob")
@@ -446,7 +457,7 @@ async def login(request):
 
 async def submit(request):
     identity = identity_for(request)
-    data = await request.json()
+    data = await json_object(request)
     key, prompt = data.get("key"), data.get("prompt")
     checkpoint = data.get("checkpoint")
     if (
@@ -457,6 +468,8 @@ async def submit(request):
         or (checkpoint is not None and not isinstance(checkpoint, str))
     ):
         raise web.HTTPBadRequest(text="Expected bounded key, prompt and optional checkpoint ID")
+    # Native turns have been requiring UTF-8 text.
+    prompt.encode("utf-8")
     return web.json_response(request.app["service"].submit(identity, key, prompt, checkpoint))
 
 
@@ -484,7 +497,7 @@ async def reply(request):
     service = request.app["service"]
     receipt = request.match_info["receipt"]
     service.store.snapshot(identity.user, receipt)
-    body = await request.json()
+    body = await json_object(request)
     if not isinstance(body.get("id"), str) or type(body.get("allow")) is not bool:
         raise web.HTTPBadRequest(text="Expected approval ID and boolean decision")
     try:

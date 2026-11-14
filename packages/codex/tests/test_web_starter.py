@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
+import zlib
 from contextlib import aclosing, asynccontextmanager
 from xml.etree import ElementTree
 
@@ -11,6 +13,7 @@ import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+from aiohttp.web_protocol import RequestPayloadError
 
 from agents import Agent, Completed, InteractionExpiredError, Session, Turn
 from agents.testing import ScriptedResponses, text, tool_call
@@ -23,6 +26,30 @@ from tests.native_fixtures import responses as responses
 
 HEADERS = {"X-Web-Starter": "1"}
 TERMINAL = {"completed", "error", "cancelled", "expired", "unknown"}
+# These bodies have been exceeding Python 3.10's parser depth within the HTTP size limit.
+DEEP_JSON_ARRAY = "[" * 1500 + "0" + "]" * 1500
+INVALID_JSON_BODIES = [json.dumps(body) for body in [None, False, 7, "alice", ["alice"]]] + [
+    DEEP_JSON_ARRAY,
+    '{"nested":' + DEEP_JSON_ARRAY + "}",
+]
+INVALID_JSON_REQUESTS = (
+    [(body, {"Content-Type": "application/json"}) for body in INVALID_JSON_BODIES]
+    + [
+        ("{}", {"Content-Type": f"application/json; charset={charset}"})
+        for charset in ("x-sdk-invalid-charset", "base64_codec", "rot_13", "hex_codec")
+    ]
+    + [
+        (
+            b"invalid",
+            {
+                "Content-Type": "application/json",
+                "Content-Encoding": encoding,
+                "Connection": "close",
+            },
+        )
+        for encoding in ("gzip", "deflate")
+    ]
+)
 
 
 @asynccontextmanager
@@ -63,6 +90,136 @@ async def create(post, key="one", **changes):
     response = await post("/api/receipts", {"key": key, "prompt": "My report", **changes})
     assert response.status == 200, await response.text()
     return await response.json()
+
+
+async def test_login_rejects_invalid_json_bodies_without_creating_sessions(tmp_path):
+    async with running(tmp_path) as (service, server, client, post, get):
+        statuses = [
+            (
+                await client.post(
+                    server.make_url("/api/login"),
+                    data=body,
+                    headers=headers,
+                )
+            ).status
+            for body, headers in INVALID_JSON_REQUESTS
+        ]
+        assert statuses == [400] * len(INVALID_JSON_REQUESTS)
+        assert not service.logins
+        assert (await get("/api/receipts/missing")).status == 401
+        await login(post)
+        assert len(service.logins) == 1
+
+
+async def test_submit_rejects_invalid_json_bodies_without_creating_receipts(tmp_path):
+    async with running(tmp_path) as (service, server, client, post, get):
+        await login(post)
+        statuses = [
+            (
+                await client.post(
+                    server.make_url("/api/receipts"),
+                    data=body,
+                    headers=headers,
+                )
+            ).status
+            for body, headers in INVALID_JSON_REQUESTS
+        ]
+        assert statuses == [400] * len(INVALID_JSON_REQUESTS)
+        assert service.store.db.execute("SELECT COUNT(*) FROM receipts").fetchone()[0] == 0
+        receipt = (await create(post))["id"]
+        await state_until(get, receipt, {"pending"})
+        assert (await post(f"/api/receipts/{receipt}/stop", {})).status == 200
+        assert (await state_until(get, receipt, TERMINAL))["status"] == "cancelled"
+
+
+async def test_reply_rejects_invalid_json_bodies_without_consuming_approval(tmp_path):
+    async with running(tmp_path) as (service, server, client, post, get):
+        await login(post)
+        receipt = (await create(post))["id"]
+        pending = await state_until(get, receipt, {"pending"})
+        statuses = [
+            (
+                await client.post(
+                    server.make_url(f"/api/receipts/{receipt}/reply"),
+                    data=body,
+                    headers=headers,
+                )
+            ).status
+            for body, headers in INVALID_JSON_REQUESTS
+        ]
+        assert statuses == [400] * len(INVALID_JSON_REQUESTS)
+        assert await (await get(f"/api/receipts/{receipt}")).json() == pending
+        assert (
+            await post(
+                f"/api/receipts/{receipt}/reply",
+                {"id": pending["approval"]["id"], "allow": True},
+            )
+        ).status == 200
+        final = await state_until(get, receipt, TERMINAL)
+        assert final["status"] == "completed"
+        assert final["artifact"] is not None
+
+
+async def test_submit_rejects_unencodable_prompts_before_admission(tmp_path):
+    async with running(tmp_path) as (service, server, client, post, get):
+        await login(post)
+        for prompt in ("\ud800", "\udfff", "hello\ud801world"):
+            response = await post("/api/receipts", {"key": "encoding", "prompt": prompt})
+            assert response.status == 400
+        assert service.store.db.execute("SELECT COUNT(*) FROM receipts").fetchone()[0] == 0
+        assert not service.work and service.queue.empty()
+
+        receipt = (await create(post, key="encoding", prompt="Report \U0001f600"))["id"]
+        await state_until(get, receipt, {"pending"})
+        assert (await post(f"/api/receipts/{receipt}/stop", {})).status == 200
+        assert (await state_until(get, receipt, TERMINAL))["status"] == "cancelled"
+
+
+async def test_application_recursion_error_remains_a_server_error(tmp_path, monkeypatch):
+    async with running(tmp_path) as (service, server, client, post, get):
+        await login(post)
+
+        def fail(*args, **kwargs):
+            raise RecursionError("Application recursion")
+
+        monkeypatch.setattr(service, "submit", fail)
+        response = await post("/api/receipts", {"key": "one", "prompt": "report"})
+        assert response.status == 500
+        assert await response.text() == "Application operation failed"
+        assert service.store.db.execute("SELECT COUNT(*) FROM receipts").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("error_type", [LookupError, RequestPayloadError])
+async def test_application_input_error_remains_a_server_error(tmp_path, monkeypatch, error_type):
+    async with running(tmp_path) as (service, server, client, post, get):
+        await login(post)
+
+        def fail(*args, **kwargs):
+            raise error_type("Application failure")
+
+        monkeypatch.setattr(service, "submit", fail)
+        response = await post("/api/receipts", {"key": "one", "prompt": "report"})
+        assert response.status == 500
+        assert await response.text() == "Application operation failed"
+        assert service.store.db.execute("SELECT COUNT(*) FROM receipts").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("encoding,compress", [("gzip", gzip.compress), ("deflate", zlib.compress)])
+async def test_compressed_json_login_preserves_valid_requests_and_size_limit(
+    tmp_path, encoding, compress
+):
+    async with running(tmp_path) as (service, server, client, post, get):
+        headers = {"Content-Type": "application/json", "Content-Encoding": encoding}
+        response = await client.post(
+            server.make_url("/api/login"), data=compress(b'{"user":"alice"}'), headers=headers
+        )
+        assert response.status == 200
+        assert len(service.logins) == 1
+        response = await client.post(
+            server.make_url("/api/login"), data=compress(b" " * 9000), headers=headers
+        )
+        assert response.status == 413
+        assert len(service.logins) == 1
 
 
 async def test_http_two_users_receipts_approval_download_checkpoint_restore(tmp_path):
