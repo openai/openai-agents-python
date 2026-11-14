@@ -9,13 +9,13 @@ import pytest
 from agents import Agent, CustomStorage, Environment, NativeProvider, SQLiteSessionStore
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
-from tests.native_storage_fixtures import MemorySessionStore
 from tests.native_fixtures import (
     assistant_output,
     function_call,
     responses as responses,
     tool_output,
 )
+from tests.native_storage_fixtures import MemorySessionStore
 
 
 @pytest.mark.skipif(
