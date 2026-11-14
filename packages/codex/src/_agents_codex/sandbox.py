@@ -834,6 +834,7 @@ def sandbox_environment(
                         _SandboxContributions(tools, captured_capabilities),
                     )
                 setattr(source_manager, _WORKSPACE_INSTRUCTIONS_ATTRIBUTE, instructions)
+                source_manager._sdk_patch_workspace = selected, environment, captured_user
                 if create_memory is not None:
                     setattr(source_manager, _MEMORY_OWNER_ATTRIBUTE, create_memory(selected))
                 observer = (
@@ -847,6 +848,7 @@ def sandbox_environment(
                         setattr(managed_source, _SANDBOX_EVENTS_ATTRIBUTE, observer)
                 yield environment
             finally:
+                source_manager._sdk_patch_workspace = None
                 if observer is not None:
                     observer.active = False
                 if skill_lease is not None:

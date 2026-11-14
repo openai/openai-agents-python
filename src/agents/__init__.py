@@ -37,6 +37,7 @@ if TYPE_CHECKING:
         ApplyPatchResult as ApplyPatchResult,
         apply_patch_batch_tool as apply_patch_batch_tool,
         apply_patch_tool as apply_patch_tool,
+        sandbox_apply_patch_tool as sandbox_apply_patch_tool,
     )
     from .canonical_storage import (
         AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore,
@@ -511,6 +512,7 @@ _MODULES = {
     "ApplyPatchResult": ".apply_patch",
     "apply_patch_batch_tool": ".apply_patch",
     "apply_patch_tool": ".apply_patch",
+    "sandbox_apply_patch_tool": ".apply_patch",
     "Computer": ".computer",
     "ComputerProvider": ".computer",
     "ComputerSafetyError": ".computer",

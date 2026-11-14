@@ -148,6 +148,10 @@ class _ManagedWorkspaceSource(AbstractAsyncContextManager["Environment[Any]"]):
         return getattr(self._source, _SANDBOX_CAPABILITIES_ATTRIBUTE, None)
 
     @property
+    def _sdk_patch_workspace(self) -> Any:
+        return getattr(self._source, "_sdk_patch_workspace", None)
+
+    @property
     def skill_tools(self) -> Any:
         return getattr(self._source, "skill_tools", ())
 
