@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 
 import pytest
 
@@ -116,6 +118,33 @@ async def test_central_fanout_covers_actual_function_mcp_and_configured_child(re
             event.output["output"] = "observer mutation"
     assert "observer mutation" not in history
     assert "direct read" in json.dumps(responses.requests[1])
+
+
+async def test_sync_lifecycle_observers_can_wait_for_the_session_loop(responses):
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    observed = []
+
+    async def on_loop():
+        return threading.get_ident()
+
+    def observe(event):
+        assert threading.get_ident() != loop_thread
+        ping = asyncio.run_coroutine_threadsafe(on_loop(), loop)
+        assert ping.result(timeout=2) == loop_thread
+        observed.append(event.kind)
+
+    @function_tool
+    def read() -> str:
+        assert observed == ["start"]
+        return "read"
+
+    responses.respond(function_call("read", {}, "sync-observer"))
+    responses.respond(assistant_output("done"))
+    agent = Agent(instructions="Use read.", provider=provider(responses), tools=[read])
+    async with timeout(10), agent.session(on_tool_lifecycle=observe) as session:
+        assert (await (await session.submit("Read.")).get_result()).final_output == "done"
+    assert observed == ["start", "end"]
 
 
 class ObserverFailure(RuntimeError):

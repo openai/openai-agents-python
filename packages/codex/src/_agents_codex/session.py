@@ -16532,6 +16532,30 @@ class Session(Generic[ContextT, OutputT]):
             state, message, prepare, reply, reject, synchronous_id_policy=True
         )
 
+    @staticmethod
+    async def _notify_tool_lifecycle(
+        callbacks: Sequence[_ToolLifecycleCallback[Any]],
+        active: Callable[[], bool],
+        event: ToolLifecycleContext[Any],
+    ) -> None:
+        async def invoke(callback: _ToolLifecycleCallback[Any]) -> None:
+            if active():
+                await _call_callback(callback, active, event)
+
+        tasks = [asyncio.create_task(invoke(callback)) for callback in callbacks]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException as error:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+
+            async def join() -> None:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            await _close_after_error(error, join)
+            raise
+
     async def _managed_tool_lifecycle_start(
         self, state: _CallbackState, message: dict[str, Any], request: str
     ) -> Callable[[], None] | None:
@@ -16582,24 +16606,11 @@ class Session(Generic[ContextT, OutputT]):
             subagent_id=message.get("thread") if message.get("instance") is not None else None,
         )
 
-        async def fanout(value: ToolLifecycleContext[Any]) -> None:
-            async def invoke(callback: _ToolLifecycleCallback[Any]) -> None:
-                result = callback(value)
-                if inspect.isawaitable(result):
-                    await result
-
-            tasks = [asyncio.create_task(invoke(callback)) for callback in callbacks]
-            try:
-                await asyncio.gather(*tasks)
-            except BaseException:
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-                raise
+        def active() -> bool:
+            return self._admit_tool(state, request)
 
         await self._call_decision_callback(
-            state, message, fanout, lambda: self._admit_tool(state, request), event
+            state, message, partial(self._notify_tool_lifecycle, callbacks, active), active, event
         )
 
         def entered() -> None:
@@ -16611,7 +16622,7 @@ class Session(Generic[ContextT, OutputT]):
         return entered
 
     async def _tool_lifecycle(self, state: _CallbackState, message: dict[str, Any]) -> None:
-        def prepare(_active: Callable[[], bool]) -> tuple[Callable[..., Any], object]:
+        def prepare(active: Callable[[], bool]) -> tuple[Callable[..., Any], object]:
             if message.get("profile_id") is not None:
                 self._catalog_for_message(message, message["generation"])
             declaration = self._agent_for_message(message)
@@ -16642,23 +16653,7 @@ class Session(Generic[ContextT, OutputT]):
             if phase == "end" and (not isinstance(output, dict) or type(succeeded) is not bool):
                 raise NativeError("Invalid native tool lifecycle output")
 
-            async def fanout(event: ToolLifecycleContext[Any]) -> None:
-                async def invoke(callback: _ToolLifecycleCallback[Any]) -> None:
-                    value = callback(event)
-                    if inspect.isawaitable(value):
-                        await value
-
-                tasks = [asyncio.create_task(invoke(callback)) for callback in callbacks]
-                try:
-                    await asyncio.gather(*tasks)
-                except BaseException:
-                    for task in tasks:
-                        if not task.done():
-                            task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    raise
-
-            return fanout, ToolLifecycleContext(
+            return partial(self._notify_tool_lifecycle, callbacks, active), ToolLifecycleContext(
                 kind=cast(Any, phase),
                 context=cast(ContextT, self._context),
                 agent=self._original_agent_for_message(message),
