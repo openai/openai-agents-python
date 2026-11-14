@@ -1,5 +1,5 @@
 diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
-index 04252c2..0f1ebca 100644
+index 04252c2c3a0f4be04540912cdb3db12b0b1f3695..0f1ebca7f049500140573a3e8c47276bd8f8076d 100644
 --- a/codex-rs/core/src/session/inject.rs
 +++ b/codex-rs/core/src/session/inject.rs
 @@ -348,7 +348,10 @@ impl Session {
@@ -15,7 +15,7 @@ index 04252c2..0f1ebca 100644
              &persisted.items,
              |row| {
 diff --git a/codex-rs/thread-store/src/live_thread.rs b/codex-rs/thread-store/src/live_thread.rs
-index cfb6c52..589562a 100644
+index cfb6c5249f6baac95dcdd84c41074f753b914c5b..589562ab3c1d7e77336b8024b27643d56a24f8fb 100644
 --- a/codex-rs/thread-store/src/live_thread.rs
 +++ b/codex-rs/thread-store/src/live_thread.rs
 @@ -373,6 +373,18 @@ impl LiveThread {
@@ -38,10 +38,24 @@ index cfb6c52..589562a 100644
          &self,
          reader: Box<dyn crate::OriginalHistoryReader>,
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 45c586f..924dc47 100644
+index a0481f9a60abc6d63633757f7b6abaa0d3bbad02..67cad5fe09d64de37b3bb0599dac91d9bc432921 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
-@@ -628,73 +628,64 @@ impl ThreadStore for LocalThreadStore {
+@@ -290,6 +290,13 @@ impl LocalThreadStore {
+         self.state_db.clone()
+     }
+ 
++    /// Close an initialized pool only after all thread and history operations have joined.
++    pub async fn close_history_pool(&self) {
++        if let Some(pool) = self.thread_history_db.get() {
++            pool.close().await;
++        }
++    }
++
+     async fn thread_history_db(&self) -> ThreadStoreResult<&sqlx::SqlitePool> {
+         if self.state_db.is_none() {
+             return Err(ThreadStoreError::Unsupported {
+@@ -577,73 +584,64 @@ impl ThreadStore for LocalThreadStore {
          Box::pin(LocalThreadStore::load_history(self, params))
      }
  
@@ -163,7 +177,7 @@ index 45c586f..924dc47 100644
          })
      }
  
-@@ -2501,3 +2492,97 @@ mod tests {
+@@ -2450,3 +2448,97 @@ mod tests {
          }));
      }
  }
@@ -262,7 +276,7 @@ index 45c586f..924dc47 100644
 +    }
 +}
 diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
-index 6f5b4d0..6cec59a 100644
+index 6f5b4d01e5c5402dedd7bff07b45c0afc7ca1b33..6cec59a3788f3b36188684eb5354457230c1d8be 100644
 --- a/codex-rs/thread-store/src/store.rs
 +++ b/codex-rs/thread-store/src/store.rs
 @@ -206,6 +206,15 @@ pub trait ThreadStore: Any + Send + Sync {
