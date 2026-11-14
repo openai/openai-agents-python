@@ -12,7 +12,7 @@ from importlib.util import MAGIC_NUMBER
 from pathlib import Path
 from types import BuiltinFunctionType, CodeType, FunctionType
 from typing import TYPE_CHECKING, Any, cast
-from zipimport import ZipImportError, zipimporter
+from zipimport import zipimporter
 
 _LEGACY_BUILDERS = ("_init_fn", "_repr_fn", "_cmp_fn", "_frozen_get_del_attr", "_hash_fn")
 
@@ -99,7 +99,7 @@ def _load_factories() -> dict[bytes, FunctionType]:
         return {}
     try:
         code = zipimporter(str(path)).get_code("_dataclass_factories")
-    except (EOFError, ValueError, ZipImportError):
+    except (EOFError, ImportError, OSError, SyntaxError, TypeError, ValueError):
         return {}
     # zipimport may compile the source member if the bytecode failed validation.
     if code is None or code.co_filename != "_agents_codex/_dataclass_factories.py":

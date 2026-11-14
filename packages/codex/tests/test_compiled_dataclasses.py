@@ -1,5 +1,6 @@
 import dataclasses
 import inspect
+import marshal
 import py_compile
 import sys
 from hashlib import sha256
@@ -83,5 +84,16 @@ def test_unrecognized_factory_archive_keeps_stock(
         archive.write(cached, "_dataclass_factories.pyc")
     assert compiled._load_factories() == {}
 
-    (tmp_path / f"{name}-mismatch.zip").rename(tmp_path / f"{name}-{fingerprint}.zip")
+    expected = tmp_path / f"{name}-{fingerprint}.zip"
+    with ZipFile(expected, "w") as archive:
+        header = Path(cached).read_bytes()[:16]
+        archive.write(source, source.name)
+        archive.writestr("_dataclass_factories.pyc", header + marshal.dumps(None))
+    assert compiled._load_factories() == {}
+
+    # Use a new ZIP path because zipimport caches directory metadata by path.
+    package = tmp_path / "package"
+    package.mkdir()
+    monkeypatch.setattr(compiled, "__file__", str(package / "_compiled_dataclasses.py"))
+    (tmp_path / f"{name}-mismatch.zip").rename(package / expected.name)
     assert compiled._load_factories()[key]() == ()
