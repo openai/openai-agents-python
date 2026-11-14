@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from contextlib import aclosing
 from typing import Any
 
 import pytest
@@ -309,6 +310,7 @@ async def test_native_observation_gap_never_claims_success(responses: ResponsesF
     async with (
         timeout(30),
         Agent(instructions="Read.", provider=provider(responses)).session() as session,
+        aclosing(session.events()),
     ):
         turn = await session.submit("read")
         assert (await turn.get_result()).final_output == "x" * 350

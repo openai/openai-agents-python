@@ -96,7 +96,11 @@ async def test_agent_run_preserves_full_retained_stream_for_subclass_and_canonic
     completed = await Agent(instructions="Answer directly.", provider=provider).run("input")
     retained = [event async for event in completed.turn.events()]
     assert completed.final_output == "".join(chunks)
-    assert [event.delta for event in retained if isinstance(event, OutputTextDelta)] == list(chunks)
+    # The pre-observation contract has been allowing coalesced text.
+    # The checks below have been retaining exact native-to-public projection.
+    assert "".join(
+        event.delta for event in retained if isinstance(event, OutputTextDelta)
+    ) == "".join(chunks)
 
     class OrdinaryControl(Agent):
         pass

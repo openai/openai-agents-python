@@ -1,0 +1,1277 @@
+diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
+index a4fea21c738037be46b870ea44e15625808167f9..ae31dec555769e8cdaa8a53f4d2c8c55f62baeda 100644
+--- a/codex-rs/codex-api/src/endpoint/responses.rs
++++ b/codex-rs/codex-api/src/endpoint/responses.rs
+@@ -41,6 +41,7 @@ pub struct ResponsesOptions {
+     pub turn_state: Option<Arc<OnceLock<String>>>,
+     pub terminal_limit_errors: bool,
+     pub observe_raw_provider_events: bool,
++    pub text_demand: Option<Arc<crate::TextDeltaDemand>>,
+ }
+ 
+ impl<T: HttpTransport> ResponsesClient<T> {
+@@ -164,6 +165,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             options.turn_state,
+             options.terminal_limit_errors,
+             options.observe_raw_provider_events,
++            options.text_demand,
+         )
+         .await
+     }
+@@ -259,6 +261,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             turn_state,
+             /*terminal_limit_errors*/ false,
+             /*observe_raw_provider_events*/ false,
++            /*text_demand*/ None,
+         )
+         .await
+     }
+@@ -271,6 +274,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         turn_state: Option<Arc<OnceLock<String>>>,
+         terminal_limit_errors: bool,
+         observe_raw_provider_events: bool,
++        text_demand: Option<Arc<crate::TextDeltaDemand>>,
+     ) -> Result<ResponseStream, ApiError> {
+         let stream_response = self
+             .send_encoded(
+@@ -290,6 +294,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             turn_state,
+             terminal_limit_errors,
+             observe_raw_provider_events,
++            text_demand,
+         ))
+     }
+     async fn send_encoded(
+diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+index 5ec63a3e19ab2cbd8e020e6cf1daaa837121bb15..7b68b0415144b408c213e24bc16c56d474b731fc 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+@@ -40,6 +40,7 @@ fn from_bytes(body: Vec<u8>) -> BoxStream<'static, Result<ResponseEvent, ApiErro
+         },
+         Duration::from_secs(5),
+         None,
++        false,
+     )
+     .1
+ }
+@@ -267,6 +268,7 @@ async fn lazy_body_is_not_polled_at_headers_and_drop_releases_pending_body_direc
+             },
+             Duration::from_secs(5),
+             None,
++            false,
+         );
+         assert_eq!(polls.load(Ordering::SeqCst), 0);
+         if stage > 0 {
+@@ -305,6 +307,7 @@ async fn body_timeout_transport_error_and_truncation_are_stream_failures_without
+         },
+         Duration::from_millis(1),
+         None,
++        false,
+     );
+     let reset = pending.next().await;
+     assert!(default_header_reset(reset.as_ref()));
+@@ -323,6 +326,7 @@ async fn body_timeout_transport_error_and_truncation_are_stream_failures_without
+         },
+         Duration::from_secs(5),
+         None,
++        false,
+     );
+     let events: Events = events.collect().await;
+     assert!(default_header_reset(events.first()));
+@@ -350,6 +354,7 @@ async fn body_size_error_retains_its_nonretryable_transport_classification() {
+         },
+         Duration::from_secs(5),
+         None,
++        false,
+     );
+     let events: Events = events.collect().await;
+     assert!(default_header_reset(events.first()));
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..1bfab715e336777ebc1973e4fbd09bbe0433b9fc 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -296,6 +296,7 @@
+             turn_state,
+             observe_raw_provider_events,
+             None,
++            /*text_demand*/ None,
+         )
+         .await
+     }
+@@ -314,6 +315,7 @@
+         turn_state: Option<Arc<OnceLock<String>>>,
+         observe_raw_provider_events: bool,
+         send_observer: Option<Arc<dyn Fn() + Send + Sync>>,
++        text_demand: Option<Arc<crate::TextDeltaDemand>>,
+     ) -> Result<ResponseStream, ApiError> {
+         let (tx_event, rx_event) =
+             mpsc::channel::<std::result::Result<ResponseEvent, ApiError>>(1600);
+@@ -408,6 +410,7 @@
+                             rx_interrupt,
+                             observe_raw_provider_events && !timing_log_context.warmup,
+                             send_observer.as_deref(),
++                            text_demand.filter(|_| !observe_raw_provider_events && !timing_log_context.warmup),
+                         ) => result,
+                         _ = &mut stopped => Err(ApiError::Stream("local response invocation stopped".into())),
+                         _ = tx_event.closed() => Err(ApiError::Stream(
+@@ -892,6 +895,7 @@
+     interrupt: oneshot::Receiver<()>,
+     observe_raw_provider_events: bool,
+     send_observer: Option<&(dyn Fn() + Send + Sync)>,
++    text_demand: Option<Arc<crate::TextDeltaDemand>>,
+ ) -> Result<(), ApiError> {
+     let mut last_server_model: Option<String> = None;
+     let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
+@@ -910,10 +914,23 @@
+     // A response owns its interrupt, and create must be sent before interrupt.
+     let mut interrupt = interrupt.fuse();
+     let mut response_id = None;
++    let mut pending_text = crate::text_delta::TextDeltaBuffer::new(text_demand);
++    let demand = pending_text.demand.clone();
++    let result = async {
+     loop {
+-        let poll_start = Instant::now();
+-        let response = tokio::select! {
+-            response = websocket_phase_timeout(receive_timeout, ws_stream.next()) => {
++        let mut poll_start = Instant::now();
++        let mut expires = receive_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
++        let response = loop { break tokio::select! {
++            _ = async { if let Some(demand) = &demand { demand.cancelled().await; } }, if pending_text.enabled() => {
++                pending_text.activate(&tx_event).await.map_err(|_| ApiError::Stream("response event consumer dropped".into()))?;
++                continue;
++            }
++            response = async {
++                match expires {
++                    Some(deadline) => tokio::time::timeout_at(deadline, ws_stream.next()).await,
++                    None => Ok(ws_stream.next().await),
++                }
++            } => {
+                 response.map_err(|_| ApiError::Stream("idle timeout waiting for websocket".into()))
+             }
+             Ok(()) = &mut interrupt, if response_id.is_some() => {
+@@ -929,9 +946,11 @@
+                     timing_log_context.connection_reused,
+                 )
+                 .await?;
++                expires = receive_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
++                poll_start = Instant::now();
+                 continue;
+             }
+-        };
++        }; };
+         if let Some(t) = telemetry.as_ref() {
+             t.on_ws_event(&response, poll_start.elapsed());
+         }
+@@ -982,9 +1001,11 @@
+                             payload_bytes = text.len(),
+                             "Failed to parse WebSocket event"
+                         );
++                        pending_text.flush(&tx_event).await.map_err(|_| ApiError::Stream("response event consumer dropped".into()))?;
+                         continue;
+                     }
+                 };
++                if pending_text.push(&event, &tx_event).await.map_err(|_| ApiError::Stream("response event consumer dropped".into()))? { continue; }
+                 emit_responses_websocket_timing_event(
+                     event.kind(),
+                     text.as_str(),
+@@ -1113,6 +1134,12 @@
+     }
+ 
+     Ok(())
++    }.await;
++    pending_text
++        .flush(&tx_event)
++        .await
++        .map_err(|_| ApiError::Stream("response event consumer dropped".into()))?;
++    result
+ }
+ 
+ fn emit_responses_websocket_timing_event(
+@@ -1678,13 +1705,15 @@
+             &mut stream,
+             tx_event,
+             "{}".to_string(),
+-            Duration::from_secs(1),
++            Some(Duration::from_secs(1)),
++            Some(Duration::from_secs(1)),
+             None,
+             None,
+             &context,
+             rx_interrupt,
+             /*observe_raw_provider_events*/ false,
+             /*send_observer*/ None,
++            /*text_demand*/ None,
+         )
+         .await
+         .unwrap_err();
+@@ -2093,13 +2122,15 @@
+                 &mut stream,
+                 tx_event,
+                 "{}".to_string(),
+-                Duration::from_secs(1),
++                Some(Duration::from_secs(1)),
++                Some(Duration::from_secs(1)),
+                 None,
+                 None,
+                 &context,
+                 rx_interrupt,
+                 /*observe_raw_provider_events*/ false,
+                 /*send_observer*/ None,
++                /*text_demand*/ None,
+             )
+             .await
+             .unwrap_err();
+@@ -2129,3 +2160,206 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod text_demand_tests {
++    use super::*;
++    #[tokio::test]
++    async fn actual_websocket_parser_flushes_text_before_tool_and_terminal() {
++        let (tx_command, mut rx_command) = mpsc::channel(1);
++        let (tx_message, rx_message) = mpsc::unbounded_channel();
++        let pump_task = tokio::spawn(async move {
++            let Some(WsCommand::Send { tx_result, .. }) = rx_command.recv().await else {
++                panic!("missing create");
++            };
++            tx_result.send(Ok(())).unwrap();
++        });
++        for event in [
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"a", "logprobs":[]}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"b", "logprobs":[]}),
++            serde_json::json!({"type":"response.output_item.done", "item":{"type":"function_call", "id":"f", "call_id":"call", "name":"tool", "arguments":"{}"}}),
++            serde_json::json!({"type":"response.completed", "response":{"id":"r", "status":"completed"}}),
++        ] {
++            tx_message
++                .send(Ok(Message::Text(event.to_string().into())))
++                .unwrap();
++        }
++        drop(tx_message);
++        let mut stream = WsStream {
++            tx_command,
++            rx_message,
++            pump_task,
++            upgrade_rate_limits: None,
++        };
++        let (tx, mut rx) = mpsc::channel(32);
++        let (_interrupt, interrupted) = oneshot::channel();
++        let context = ResponsesWebsocketTimingLogContext {
++            model: "test".into(),
++            session_id: None,
++            thread_id: None,
++            turn_id: None,
++            traceparent: None,
++            previous_response_id: None,
++            request_start_ms: None,
++            warmup: false,
++            connection_reused: false,
++        };
++        run_websocket_response_stream(
++            &mut stream,
++            tx,
++            "{}".into(),
++            Some(Duration::from_secs(1)),
++            Some(Duration::from_secs(1)),
++            None,
++            None,
++            &context,
++            interrupted,
++            false,
++            None,
++            Some(Arc::default()),
++        )
++        .await
++        .unwrap();
++        let mut tags = Vec::new();
++        let mut text = String::new();
++        while let Some(event) = rx.recv().await {
++            match event.unwrap() {
++                ResponseEvent::OutputTextDelta(s) => {
++                    text.push_str(&s);
++                    tags.push("text");
++                }
++                ResponseEvent::ResponseFact(_) => tags.push("fact"),
++                ResponseEvent::OutputItemDone(
++                    codex_protocol::models::ResponseItem::FunctionCall { call_id, .. },
++                ) => {
++                    assert_eq!(call_id, "call");
++                    tags.push("tool");
++                }
++                ResponseEvent::ResponseObserved(_) => tags.push("observed"),
++                ResponseEvent::Completed { .. } => tags.push("completed"),
++                other => panic!("unexpected {other:?}"),
++            }
++        }
++        assert_eq!(text, "ab");
++        assert_eq!(
++            tags,
++            ["fact", "text", "text", "tool", "observed", "completed"]
++        );
++        (&mut stream.pump_task).await.unwrap();
++    }
++    #[tokio::test(start_paused = true)]
++    async fn demand_wakes_pending_websocket_without_restarting_idle_deadline() {
++        assert_pending_websocket_text_demand(Some(Duration::from_secs(10))).await;
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn demand_wakes_pending_websocket_with_receive_deadline_disabled() {
++        assert_pending_websocket_text_demand(None).await;
++    }
++
++    async fn assert_pending_websocket_text_demand(receive_timeout: Option<Duration>) {
++        let (tx_command, mut rx_command) = mpsc::channel(1);
++        let (tx_message, rx_message) = mpsc::unbounded_channel();
++        let pump_task = tokio::spawn(async move {
++            let Some(WsCommand::Send { tx_result, .. }) = rx_command.recv().await else {
++                panic!("missing create");
++            };
++            tx_result.send(Ok(())).unwrap();
++        });
++        for event in [
++            serde_json::json!({"type":"response.created", "response":{"id":"r"}}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"a"}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"b"}),
++        ] {
++            tx_message
++                .send(Ok(Message::Text(event.to_string().into())))
++                .unwrap();
++        }
++        let mut stream = WsStream {
++            tx_command,
++            rx_message,
++            pump_task,
++            upgrade_rate_limits: None,
++        };
++        let (tx, mut rx) = mpsc::channel(16);
++        let (_interrupt, interrupted) = oneshot::channel();
++        let demand = Arc::new(crate::TextDeltaDemand::default());
++        let producer_demand = demand.clone();
++        let producer = tokio::spawn(async move {
++            let context = ResponsesWebsocketTimingLogContext {
++                model: "test".into(),
++                session_id: None,
++                thread_id: None,
++                turn_id: None,
++                traceparent: None,
++                previous_response_id: None,
++                request_start_ms: None,
++                warmup: false,
++                connection_reused: false,
++            };
++            let result = run_websocket_response_stream(
++                &mut stream,
++                tx,
++                "{}".into(),
++                Some(Duration::from_secs(10)),
++                receive_timeout,
++                None,
++                None,
++                &context,
++                interrupted,
++                false,
++                None,
++                Some(producer_demand),
++            )
++            .await;
++            (&mut stream.pump_task).await.unwrap();
++            result
++        });
++        assert!(matches!(
++            rx.recv().await.unwrap().unwrap(),
++            ResponseEvent::Created { .. }
++        ));
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(t) if t=="a")
++        );
++        tokio::task::yield_now().await;
++        tokio::time::advance(Duration::from_secs(6)).await;
++        demand.cancel();
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(t) if t=="b")
++        );
++        tokio::time::advance(Duration::from_secs(5)).await;
++        tokio::task::yield_now().await;
++        if receive_timeout.is_some() {
++            assert!(
++                producer.is_finished(),
++                "observation demand restarted the idle deadline"
++            );
++            assert!(
++                matches!(producer.await.unwrap(), Err(ApiError::Stream(message)) if message.contains("idle timeout"))
++            );
++        } else {
++            assert!(
++                !producer.is_finished(),
++                "disabled receive deadline expired after observation demand"
++            );
++            tx_message
++                .send(Ok(Message::Text(
++                    serde_json::json!({"type":"response.completed", "response":{"id":"r", "status":"completed"}})
++                        .to_string()
++                        .into(),
++                )))
++                .unwrap();
++            assert!(matches!(
++                rx.recv().await.unwrap().unwrap(),
++                ResponseEvent::ResponseObserved(_)
++            ));
++            assert!(matches!(
++                rx.recv().await.unwrap().unwrap(),
++                ResponseEvent::Completed { response_id, .. } if response_id == "r"
++            ));
++            assert!(producer.await.unwrap().is_ok());
++        }
++        drop(tx_message);
++    }
++}
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 793d30a9d75d090699711e5837a93d1e244dfb78..02e3b376de83667f077ddc6df3eedf213fe3320c 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -184,3 +184,6 @@ pub struct SdkWebsocketTlsSelector(
+ );
+ 
+ pub use common::ProviderHistoryInputProjection;
++
++mod text_delta;
++pub use text_delta::TextDeltaDemand;
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index e480b8df4f3f4f45ef015402e9a68cc1690901b2..259185d48d0ddd0e1d1d800db74d519a59b58330 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -29,7 +29,6 @@ use std::sync::OnceLock;
+ use std::time::Duration;
+ use tokio::sync::mpsc;
+ use tokio::time::Instant;
+-use tokio::time::timeout;
+ use tracing::debug;
+ use tracing::trace;
+ 
+@@ -46,6 +45,7 @@ pub fn spawn_response_stream(
+     turn_state: Option<Arc<OnceLock<String>>>,
+     terminal_limit_errors: bool,
+     observe_raw_provider_events: bool,
++    text_demand: Option<Arc<crate::TextDeltaDemand>>,
+ ) -> ResponseStream {
+     let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
+     let api_rate_limits = parse_api_rate_limits(&stream_response.headers);
+@@ -112,6 +112,7 @@ pub fn spawn_response_stream(
+             safety_buffering_treatment,
+             terminal_limit_errors,
+             observe_raw_provider_events,
++            text_demand.filter(|_| !observe_raw_provider_events),
+         )
+         .await;
+             } => {},
+@@ -716,6 +717,7 @@ pub async fn process_sse(
+         SafetyBufferingTreatment::default(),
+         /*terminal_limit_errors*/ false,
+         /*observe_raw_provider_events*/ false,
++        /*text_demand*/ None,
+     )
+     .await;
+ }
+@@ -728,18 +730,31 @@ async fn process_sse_with_treatment(
+     safety_buffering_treatment: SafetyBufferingTreatment,
+     terminal_limit_errors: bool,
+     observe_raw_provider_events: bool,
++    text_demand: Option<Arc<crate::TextDeltaDemand>>,
+ ) {
++    let mut pending_text = crate::text_delta::TextDeltaBuffer::new(text_demand);
++    let demand = pending_text.demand.clone();
+     let mut stream = stream.eventsource();
+     let mut response_error: Option<ApiError> = None;
+     let mut last_server_model: Option<String> = None;
+ 
+     loop {
+         let start = Instant::now();
+-        let response = tokio::select! {
+-            biased;
+-            _ = tx_event.closed() => return,
+-            response = timeout(idle_timeout, stream.next()) => response,
++        let expires = Instant::now() + idle_timeout;
++        let response = loop {
++            break tokio::select! {
++                biased;
++                _ = tx_event.closed() => return,
++                _ = async { if let Some(demand) = &demand { demand.cancelled().await; } }, if pending_text.enabled() => {
++                    if pending_text.activate(&tx_event).await.is_err() { return; }
++                    continue;
++                }
++                response = tokio::time::timeout_at(expires, stream.next()) => response,
++            };
+         };
++        if !matches!(&response, Ok(Some(Ok(_)))) && pending_text.flush(&tx_event).await.is_err() {
++            return;
++        }
+         if let Some(t) = telemetry.as_ref() {
+             t.on_sse_poll(&response, start.elapsed());
+         }
+@@ -798,9 +813,17 @@ async fn process_sse_with_treatment(
+                     payload_bytes = sse.data.len(),
+                     "Failed to parse SSE event"
+                 );
++                if pending_text.flush(&tx_event).await.is_err() {
++                    return;
++                }
+                 continue;
+             }
+         };
++        match pending_text.push(&event, &tx_event).await {
++            Ok(true) => continue,
++            Ok(false) => {}
++            Err(()) => return,
++        }
+         if let Some(snapshot) = event.api_rate_limits()
+             && tx_event
+                 .send(Ok(ResponseEvent::ApiRateLimits(snapshot)))
+@@ -2041,6 +2064,7 @@ mod tests {
+             /*turn_state*/ None,
+             /*terminal_limit_errors*/ false,
+             /*observe_raw_provider_events*/ false,
++            /*text_demand*/ None,
+         );
+         assert_eq!(stream.upstream_request_id.as_deref(), Some("req-1"));
+         let event = stream
+@@ -2083,6 +2107,7 @@ mod tests {
+             /*turn_state*/ None,
+             /*terminal_limit_errors*/ false,
+             /*observe_raw_provider_events*/ false,
++            /*text_demand*/ None,
+         );
+         let mut events = Vec::new();
+         while let Some(event) = stream.rx_event.recv().await {
+@@ -2551,3 +2576,118 @@ mod tests {
+ 
+     const CYBER_RESTRICTED_MODEL_FOR_TESTS: &str = "gpt-5.3-codex";
+ }
++
++#[cfg(test)]
++mod text_demand_tests {
++    use super::*;
++    #[tokio::test]
++    async fn actual_sse_parser_keeps_raw_and_flushes_before_terminal_facts() {
++        let events = vec![
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"a", "logprobs":[]}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"b", "logprobs":[]}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"c", "logprobs":[]}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"d", "logprobs":[{"token":"d","logprob":-0.1}]}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"e", "logprobs":{"invalid":true}}),
++            serde_json::json!({"type":"response.completed", "response":{"id":"r", "status":"completed"}}),
++        ];
++        for raw in [false, true] {
++            let body = events
++                .iter()
++                .map(|e| format!("data: {e}\n\n"))
++                .collect::<String>();
++            let bytes: ByteStream = Box::pin(futures::stream::iter([Ok(bytes::Bytes::from(body))]));
++            let (tx, mut rx) = mpsc::channel(32);
++            let demand = (!raw).then(|| Arc::new(crate::TextDeltaDemand::default()));
++            process_sse_with_treatment(
++                bytes,
++                tx,
++                Duration::from_secs(1),
++                None,
++                SafetyBufferingTreatment::default(),
++                false,
++                raw,
++                demand,
++            )
++            .await;
++            let mut tags = Vec::new();
++            let mut texts = Vec::new();
++            let mut raws = Vec::new();
++            while let Some(event) = rx.recv().await {
++                match event.unwrap() {
++                    ResponseEvent::RawProvider(e) => {
++                        tags.push("raw");
++                        raws.push(e.payload);
++                    }
++                    ResponseEvent::ResponseFact(_) => tags.push("fact"),
++                    ResponseEvent::OutputTextDelta(t) => {
++                        tags.push("text");
++                        texts.push(t);
++                    }
++                    ResponseEvent::ResponseObserved(_) => tags.push("observed"),
++                    ResponseEvent::Completed { .. } => tags.push("completed"),
++                    e => panic!("unexpected {e:?}"),
++                }
++            }
++            assert_eq!(texts.concat(), "abcde");
++            if raw {
++                assert_eq!(raws, events);
++                assert_eq!(texts, ["a", "b", "c", "d", "e"]);
++            } else {
++                assert_eq!(texts, ["a", "bc", "d", "e"]);
++                assert_eq!(
++                    tags,
++                    [
++                        "fact",
++                        "text",
++                        "text",
++                        "fact",
++                        "text",
++                        "fact",
++                        "text",
++                        "observed",
++                        "completed"
++                    ]
++                );
++            }
++        }
++    }
++    #[tokio::test(start_paused = true)]
++    async fn demand_wakes_pending_sse_without_restarting_idle_deadline() {
++        let (input, mut incoming) =
++            mpsc::channel::<Result<bytes::Bytes, codex_client::TransportError>>(8);
++        let bytes: ByteStream =
++            Box::pin(futures::stream::poll_fn(move |cx| incoming.poll_recv(cx)));
++        let (tx, mut rx) = mpsc::channel(16);
++        let demand = Arc::new(crate::TextDeltaDemand::default());
++        let owner_demand = demand.clone();
++        let producer = tokio::spawn(process_sse_with_treatment(
++            bytes,
++            tx,
++            Duration::from_secs(10),
++            None,
++            SafetyBufferingTreatment::default(),
++            false,
++            false,
++            Some(owner_demand),
++        ));
++        for text in ["a", "b"] {
++            input.send(Ok(bytes::Bytes::from(format!("data: {{\"type\":\"response.output_text.delta\",\"item_id\":\"i\",\"output_index\":0,\"content_index\":0,\"delta\":\"{text}\"}}\n\n")))).await.unwrap();
++        }
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(t) if t=="a")
++        );
++        tokio::task::yield_now().await;
++        tokio::time::advance(Duration::from_secs(6)).await;
++        demand.cancel();
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(t) if t=="b")
++        );
++        tokio::time::advance(Duration::from_secs(5)).await;
++        tokio::task::yield_now().await;
++        // A reset at activation would still be pending at this point.
++        assert!(
++            matches!(rx.try_recv().unwrap(), Err(ApiError::Stream(message)) if message.contains("idle timeout"))
++        );
++        producer.await.unwrap();
++    }
++}
+diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+index 96ddb9b147037e13dc96d9163c51fa387d738181..1a9dbf1611c57ad70866a368844626dc726650fc 100644
+--- a/codex-rs/codex-api/src/sse/responses_error_tests.rs
++++ b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+@@ -44,6 +44,7 @@ async fn flex_failure_with_retry_header_ends_stream_immediately() {
+             /*turn_state*/ None,
+             /*terminal_limit_errors*/ false,
+             /*observe_raw_provider_events*/ false,
++            /*text_demand*/ None,
+         );
+         let mut observed_failures = 0;
+         let error = loop {
+diff --git a/codex-rs/codex-api/src/text_delta.rs b/codex-rs/codex-api/src/text_delta.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a4a70f18059b743bf8e4e30bae9bb8fa6a5eb520
+--- /dev/null
++++ b/codex-rs/codex-api/src/text_delta.rs
+@@ -0,0 +1,285 @@
++//! Request-local accumulation; the original parser task keeps transport ownership.
++use crate::sse::ResponsesStreamEvent;
++use crate::{ApiError, ResponseEvent};
++use std::sync::Arc;
++use tokio::sync::mpsc;
++
++/// A sticky observation-demand latch, never a task cancellation owner.
++pub type TextDeltaDemand = tokio_util::sync::CancellationToken;
++
++pub(crate) struct TextDeltaBuffer {
++    pub(crate) demand: Option<Arc<TextDeltaDemand>>,
++    identity: Option<(String, u64, u64)>,
++    text: String,
++}
++impl TextDeltaBuffer {
++    pub(crate) fn new(demand: Option<Arc<TextDeltaDemand>>) -> Self {
++        Self {
++            demand,
++            identity: None,
++            text: String::new(),
++        }
++    }
++    pub(crate) fn enabled(&self) -> bool {
++        self.demand.is_some()
++    }
++    pub(crate) async fn activate(
++        &mut self,
++        tx: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
++    ) -> Result<(), ()> {
++        self.demand = None;
++        self.flush(tx).await
++    }
++    pub(crate) async fn flush(
++        &mut self,
++        tx: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
++    ) -> Result<(), ()> {
++        if !self.text.is_empty() {
++            tx.send(Ok(ResponseEvent::OutputTextDelta(std::mem::take(
++                &mut self.text,
++            ))))
++            .await
++            .map_err(|_| ())?;
++        }
++        Ok(())
++    }
++    // The wire identity is still present here; OutputTextDelta itself has none.
++    pub(crate) async fn push(
++        &mut self,
++        event: &ResponsesStreamEvent,
++        tx: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
++    ) -> Result<bool, ()> {
++        let Some(demand) = &self.demand else {
++            return Ok(false);
++        };
++        if demand.is_cancelled() {
++            self.activate(tx).await?;
++            return Ok(false);
++        }
++        let raw = &event.raw;
++        let candidate = (|| {
++            if raw.get("type")?.as_str()? != "response.output_text.delta" {
++                return None;
++            }
++            if raw.as_object()?.keys().any(|key| {
++                !matches!(
++                    key.as_str(),
++                    "type"
++                        | "item_id"
++                        | "output_index"
++                        | "content_index"
++                        | "delta"
++                        | "logprobs"
++                        | "sequence_number"
++                        | "obfuscation"
++                )
++            }) {
++                return None;
++            }
++            let item = raw.get("item_id")?.as_str()?;
++            if item.is_empty() || item.len() > 256 {
++                return None;
++            }
++            match raw.get("logprobs") {
++                None | Some(serde_json::Value::Null) => {}
++                Some(serde_json::Value::Array(tokens)) if tokens.is_empty() => {}
++                _ => return None,
++            }
++            let delta = raw.get("delta")?.as_str()?;
++            if delta.is_empty() {
++                return None;
++            }
++            Some((
++                (
++                    item,
++                    raw.get("output_index")?.as_u64()?,
++                    raw.get("content_index")?.as_u64()?,
++                ),
++                delta,
++            ))
++        })();
++        let Some((identity, delta)) = candidate else {
++            self.flush(tx).await?;
++            self.identity = None;
++            return Ok(false);
++        };
++        if self
++            .identity
++            .as_ref()
++            .map(|(item, output, content)| (item.as_str(), *output, *content))
++            != Some(identity)
++        {
++            self.flush(tx).await?;
++            self.identity = Some((identity.0.to_owned(), identity.1, identity.2));
++            return Ok(false); // First delta for this item/content remains immediate.
++        }
++        const MAX_BYTES: usize = 16 * 1024;
++        if self.text.len().saturating_add(delta.len()) > MAX_BYTES {
++            self.flush(tx).await?;
++        }
++        if delta.len() > MAX_BYTES {
++            return Ok(false);
++        }
++        self.text.push_str(delta);
++        // Replacing sends must not remove cooperative cancellation progress.
++        tokio::task::consume_budget().await;
++        Ok(true)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn delta(text: &str, item: &str, probability: serde_json::Value) -> ResponsesStreamEvent {
++        ResponsesStreamEvent::from_wire(serde_json::json!({"type":"response.output_text.delta", "item_id":item, "output_index":0, "content_index":0, "delta":text, "logprobs":probability})).unwrap()
++    }
++    #[tokio::test]
++    async fn first_identity_probability_and_size_barriers_preserve_text() {
++        let (tx, mut rx) = mpsc::channel(32);
++        let mut buffer = TextDeltaBuffer::new(Some(Arc::default()));
++        assert!(
++            !buffer
++                .push(&delta("", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            !buffer
++                .push(&delta("first", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            buffer
++                .push(&delta("second", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            !buffer
++                .push(&delta("new", "b", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(s) if s=="second")
++        );
++        assert!(
++            buffer
++                .push(&delta("pending", "b", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        for probability in [
++            serde_json::json!([{"token":"x","logprob":-1.0}]),
++            serde_json::json!({"invalid":true}),
++        ] {
++            assert!(
++                !buffer
++                    .push(&delta("sensitive", "b", probability), &tx)
++                    .await
++                    .unwrap()
++            );
++        }
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(s) if s=="pending")
++        );
++        assert!(
++            !buffer
++                .push(&delta("first", "b", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        let block = "x".repeat(16 * 1024);
++        assert!(
++            buffer
++                .push(&delta(&block, "b", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            buffer
++                .push(&delta("tail", "b", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(s) if s==block)
++        );
++        buffer.flush(&tx).await.unwrap();
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(s) if s=="tail")
++        );
++        assert!(rx.try_recv().is_err());
++    }
++    #[tokio::test]
++    async fn observation_is_sticky_and_wakes_an_already_pending_wait() {
++        let demand = Arc::new(TextDeltaDemand::default());
++        let (tx, mut rx) = mpsc::channel(8);
++        let mut buffer = TextDeltaBuffer::new(Some(demand.clone()));
++        assert!(
++            !buffer
++                .push(&delta("a", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            buffer
++                .push(&delta("b", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        let waiter = demand.cancelled();
++        tokio::pin!(waiter);
++        assert!(futures::poll!(waiter.as_mut()).is_pending());
++        demand.cancel();
++        waiter.await;
++        buffer.activate(&tx).await.unwrap();
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(s) if s=="b")
++        );
++        assert!(
++            !buffer
++                .push(&delta("c", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        let mut next_request = TextDeltaBuffer::new(Some(demand.clone()));
++        assert!(
++            !next_request
++                .push(&delta("d", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(!next_request.enabled());
++    }
++}
++
++#[cfg(test)]
++mod cooperative_tests {
++    use super::*;
++    #[tokio::test]
++    async fn skipped_sends_yield_and_leave_the_pending_buffer_owned() {
++        let (tx, mut rx) = mpsc::channel(8);
++        let mut buffer = TextDeltaBuffer::new(Some(Arc::default()));
++        let event = ResponsesStreamEvent::from_wire(serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"x"})).unwrap();
++        assert!(!buffer.push(&event, &tx).await.unwrap());
++        let attempts = std::cell::Cell::new(0);
++        tokio::task::yield_now().await;
++        tokio::select! {
++            biased;
++            _ = async {
++                for _ in 0..4096 {
++                    attempts.set(attempts.get()+1);
++                    assert!(buffer.push(&event,&tx).await.unwrap());
++                }
++            } => panic!("ready skipped sends starved a ready sibling"),
++            _ = std::future::ready(()) => {},
++        }
++        assert!(attempts.get() > 0 && attempts.get() < 4096);
++        buffer.flush(&tx).await.unwrap();
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(),ResponseEvent::OutputTextDelta(text) if text=="x".repeat(attempts.get()))
++        );
++    }
++}
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index b6bfd1710a925092c7fc119ad3c346b121c445f8..a0cd4a6b4e33308904c8cfbac4ff0bd5910b106b 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -348,7 +348,8 @@ fn has_subagent_notification<'a>(
+             }
+             ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => false,
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => false,
+         })
+     })
+ }
+@@ -368,7 +369,8 @@ fn history_contains_text<'a>(
+             }
+             ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => false,
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => false,
+         })
+     })
+ }
+@@ -417,7 +419,8 @@ fn history_contains_assistant_inter_agent_communication<'a>(
+             ContentItem::InputText { .. }
+             | ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => false,
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => false,
+         })
+     })
+ }
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index bcb00d42509775680b81af0b6f38337f44409626..e2868b7b12ba99b4c6b937f49c84452cc11cb6e2 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -2059,6 +2059,7 @@ impl ModelClientSession {
+             turn_state: Some(Arc::clone(&self.turn_state)),
+             terminal_limit_errors: self.terminal_limit_errors(responses_metadata.request_kind),
+             observe_raw_provider_events,
++            text_demand: None,
+         }
+     }
+ 
+@@ -2623,6 +2624,11 @@ impl ModelClientSession {
+             )
+             .await
+             .map_err(CodexErr::Fatal)?;
++            options.text_demand = text_delta_demand(
++                request.request_controls.top_logprobs,
++                options.observe_raw_provider_events,
++                &interceptors,
++            );
+             let stream_result = if let Some(events) = produced {
+                 Ok((None, None, events, None, None))
+             } else if prompt.prefer_buffered_response {
+@@ -3152,6 +3158,16 @@ impl ModelClientSession {
+                     );
+                 }) as Arc<dyn Fn() + Send + Sync>
+             });
++            let ResponsesWsRequest::ResponseCreate(payload) = &ws_request;
++            let text_demand = if warmup {
++                None
++            } else {
++                text_delta_demand(
++                    payload.request_controls.top_logprobs,
++                    prompt.observe_raw_provider_events,
++                    &interceptors,
++                )
++            };
+             let stream_result = websocket_connection
+                 .stream_request_with_send_observer(
+                     ws_request,
+@@ -3159,6 +3175,7 @@ impl ModelClientSession {
+                     Some(Arc::clone(&self.turn_state)),
+                     prompt.observe_raw_provider_events,
+                     send_observer,
++                    text_demand,
+                 )
+                 .await;
+             if stream_result.is_err()
+@@ -3609,6 +3626,24 @@ fn add_responses_lite_header(headers: &mut ApiHeaderMap, use_responses_lite: boo
+ }
+ 
+ const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 1600;
++fn text_delta_demand(
++    top_logprobs: Option<u8>,
++    raw: bool,
++    interceptors: &[Box<dyn codex_extension_api::ModelResponseInterceptor>],
++) -> Option<Arc<codex_api::TextDeltaDemand>> {
++    if top_logprobs.is_some() || raw {
++        return None;
++    }
++    let demand = interceptors.first()?.text_delta_demand()?;
++    interceptors
++        .iter()
++        .all(|i| {
++            i.text_delta_demand()
++                .is_some_and(|d| Arc::ptr_eq(&d, &demand))
++        })
++        .then_some(demand)
++}
++
+ const STREAM_DROPPED_REASON: &str = "response stream dropped before provider terminal event";
+ 
+ fn map_response_stream(
+@@ -4367,3 +4402,40 @@ fn provider_window_rejects_schema_bearing_history() {
+ #[cfg(test)]
+ #[path = "client_tests.rs"]
+ mod tests;
++
++#[test]
++fn text_grouping_requires_exact_shared_capability_and_no_capture() {
++    use codex_extension_api::{ModelResponseInterceptor, ModelResponseStream};
++    struct Known(Arc<codex_api::TextDeltaDemand>);
++    impl ModelResponseInterceptor for Known {
++        fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {
++            Some(self.0.clone())
++        }
++        fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
++            stream
++        }
++    }
++    struct Unknown;
++    impl ModelResponseInterceptor for Unknown {
++        fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
++            stream
++        }
++    }
++    let signal = Arc::new(codex_api::TextDeltaDemand::default());
++    let mut interceptors: Vec<Box<dyn ModelResponseInterceptor>> = vec![
++        Box::new(Known(signal.clone())),
++        Box::new(Known(signal.clone())),
++    ];
++    assert!(Arc::ptr_eq(
++        &text_delta_demand(None, false, &interceptors).unwrap(),
++        &signal
++    ));
++    assert!(text_delta_demand(Some(0), false, &interceptors).is_none());
++    assert!(text_delta_demand(Some(3), false, &interceptors).is_none());
++    assert!(text_delta_demand(None, true, &interceptors).is_none());
++    interceptors.push(Box::new(Known(Arc::default())));
++    assert!(text_delta_demand(None, false, &interceptors).is_none());
++    interceptors.pop();
++    interceptors.push(Box::new(Unknown));
++    assert!(text_delta_demand(None, false, &interceptors).is_none());
++}
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 5b3c6147a0bdad1ceb44f88fa39122361cbe41ee..6051a0bb905ba255be402783764f103f07964a35 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -2381,6 +2381,7 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
+         attempt,
+         test_model_provider(),
+         vec![Box::new(ReplaceOutput)],
++        None,
+         false,
+     );
+     let mut delivered = Vec::new();
+diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
+index a0f475f3cc2a8f03f7e812e6dd24c48cceeb3310..20608ff2aa6bd7e2ead2ca29418de14ae5bc39a0 100644
+--- a/codex-rs/core/src/guardian/tests.rs
++++ b/codex-rs/core/src/guardian/tests.rs
+@@ -309,7 +309,8 @@ fn response_item_contains_message_text(item: &ResponseItem, needle: &str) -> boo
+         }
+         ContentItem::InputFile { .. }
+         | ContentItem::InputImage { .. }
+-        | ContentItem::InputAudio { .. } => false,
++        | ContentItem::InputAudio { .. }
++        | ContentItem::InputVideo { .. } => false,
+     })
+ }
+ 
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index ac4cd0f5a81ded0c35f7104bf3085eb38d706b1c..71e63fbc1acadf521a6d2f2985aa4fda60bc6151 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -103,6 +103,10 @@ struct BoundInterceptor {
+     admission: Option<Arc<dyn ModelToolAdmission>>,
+ }
+ impl ModelResponseInterceptor for BoundInterceptor {
++    fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {
++        self.inner.text_delta_demand()
++    }
++
+     fn preserves_provider_message_window(&self) -> bool {
+         self.inner.preserves_provider_message_window()
+     }
+diff --git a/codex-rs/core/src/session/startup_prewarm.rs b/codex-rs/core/src/session/startup_prewarm.rs
+index e0dae20e81e6aa678c447345ef3edeb2fa9c34d2..364e36811d2de4a6b973709d75f9458afb5d29f0 100644
+--- a/codex-rs/core/src/session/startup_prewarm.rs
++++ b/codex-rs/core/src/session/startup_prewarm.rs
+@@ -505,6 +505,7 @@ mod transport_boundary_tests {
+             let provider = codex_api::Provider {
+                 name: "startup-boundary".into(),
+                 base_url: format!("{}/v1", server.uri()),
++                websocket_base_url: None,
+                 query_params: None,
+                 headers: http::HeaderMap::new(),
+                 retry: codex_api::RetryConfig {
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 4a8b6f8c1add751fb32db50ed7c24eea3b6bced7..518cdfcacafb2431ebd50c57378a61a48786ddaf 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -12077,6 +12077,7 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
+         Arc::new(session.build_world_state_for_step(&fallback).await.unwrap()),
+         CompactionReason::ModelDownshift,
+         CompactionPhase::PreTurn,
++        &CancellationToken::new(),
+     )
+     .await;
+     match first_attempt {
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+index 143a279741de9c7216e6e43438705dcdd39f3d0b..f7573452bceac283113bb2e0e05076804e27ad21 100644
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -184,6 +184,7 @@ fn settled_test_calls() -> SettledDirectTools {
+                 .unwrap()
+             })
+             .collect(),
++        outcomes: vec![Some(true); 3],
+         all_succeeded: true,
+     }
+ }
+@@ -205,6 +206,7 @@ async fn terminal_policy_selects_the_first_eligible_call_in_model_order() {
+         &session,
+         &step,
+         &settled_test_calls(),
++        false,
+         &CancellationToken::new(),
+     )
+     .await
+@@ -230,8 +232,9 @@ async fn terminal_policy_never_runs_for_failed_siblings() {
+     let step = StepContext::for_test(Arc::new(turn));
+     let mut tools = settled_test_calls();
+     tools.all_succeeded = false;
++    tools.outcomes[0] = Some(false);
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, false, &CancellationToken::new())
+             .await
+             .unwrap()
+             .is_none()
+@@ -252,6 +255,7 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+             &session,
+             &step,
+             &settled_test_calls(),
++            false,
+             &CancellationToken::new(),
+         )
+         .await
+@@ -270,6 +274,7 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+         &session,
+         &step,
+         &settled_test_calls(),
++        false,
+         &CancellationToken::new(),
+     )
+     .await
+@@ -284,7 +289,7 @@ async fn terminal_policy_rejects_a_mismatched_accepted_receipt() {
+     let mut tools = settled_test_calls();
+     tools.outputs.swap(0, 1);
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, false, &CancellationToken::new())
+             .await
+             .is_err()
+     );
+@@ -523,7 +528,7 @@ async fn tool_terminal_recovery_saved_success_alone_has_no_completion_authority(
+     let (session, turn) = crate::session::tests::make_session_and_context().await;
+     let step = StepContext::for_test(Arc::new(turn));
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, false, &CancellationToken::new())
+             .await
+             .unwrap()
+             .is_none()
+diff --git a/codex-rs/core/src/tools/context_tests.rs b/codex-rs/core/src/tools/context_tests.rs
+index bd0cb0c5b57bda6b0d4c40b015d1228de40b1c82..fa6f183ac6a88ed5ea98866d0e2556a3490e508d 100644
+--- a/codex-rs/core/src/tools/context_tests.rs
++++ b/codex-rs/core/src/tools/context_tests.rs
+@@ -2,6 +2,7 @@ use super::*;
+ use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
+ use codex_protocol::models::ImageReference;
+ use codex_protocol::models::SearchToolCallParams;
++use codex_tools::LoadableToolSpec;
+ use core_test_support::assert_regex_match;
+ use pretty_assertions::assert_eq;
+ use serde_json::json;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 87cd419ed11dee6bfec3fbda6ec6f1b212c61f54..70618c291cf80f0a331f002cb7a605c4dacaf049 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -521,6 +521,12 @@ pub struct ModelAttemptInput {
+ /// Interceptors compose in registration order; dropping their stream must release unfinished work.
+ /// Trusted host implementations must bound any model-visible content they synthesize.
+ pub trait ModelResponseInterceptor: Send + Sync {
++    /// Attest safe pre-interceptor text grouping and uncaptured empty-fact omission.
++    /// Unknown/text-sensitive interceptors preserve the original stream by default.
++    fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {
++        None
++    }
++
+     /// Attest unchanged completed messages, reasoning and response IDs.
+     /// Core additionally rejects every other output kind when issuing lineage.
+     /// This native assertion must not cover application rewrites or producers.
