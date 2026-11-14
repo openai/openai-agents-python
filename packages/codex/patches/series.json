@@ -1274,7 +1274,7 @@
     },
     {
       "path": "sdk-agent-resource-grants.patch",
-      "sha256": "2b80df5fc246d5b832bac775e43621d4400d0e7f68f466b0ead29a5307c3c6a1"
+      "sha256": "c0fa74bffc3e6bb786b47ee931ef18340e7b4037c7c33f9d155af63e6cd941ec"
     },
     {
       "path": "sdk-managed-sandbox-provider-compaction.patch",
@@ -1285,5 +1285,5 @@
       "sha256": "8fd6f5d9b02da7ff5a5ec9d82f0926c7a47bc250242500b6d6c84f8c46fbe7bb"
     }
   ],
-  "result_tree": "b798027efa6b6b28fbb26ae94eab555c2f3262f3"
+  "result_tree": "3bbc991a6b0de1f64e7c4477aca7e16828afaa18"
 }
