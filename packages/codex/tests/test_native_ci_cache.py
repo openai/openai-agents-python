@@ -567,15 +567,27 @@ def test_native_publication_is_a_global_barrier() -> None:
 )
 @pytest.mark.parametrize("repository", ["openai/openai-agents-python", "contributor/fork"])
 @pytest.mark.parametrize("snapshot", ["", "123"])
+@pytest.mark.parametrize("same_repository", [False, True])
 def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
-    event: str, branch: str, code: str, pr: bool, push: bool, repository: str, snapshot: str
+    event: str,
+    branch: str,
+    code: str,
+    pr: bool,
+    push: bool,
+    repository: str,
+    snapshot: str,
+    same_repository: bool,
 ) -> None:
     jobs = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)[
         "jobs"
     ]
     values = {
         "github.repository": repository,
-        "github.event.pull_request.head.repo.full_name": "",
+        "github.event.pull_request.head.repo.full_name": (
+            repository if same_repository else "contributor/other"
+        )
+        if event == "pull_request"
+        else "",
         "github.event.pull_request.stack.base.ref": "",
         "inputs.runner": "ubuntu-24.04-arm",
         "inputs.native_source_run": snapshot,
@@ -592,7 +604,7 @@ def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
     )["jobs"]["build"]
     fast = (
         repository == "openai/openai-agents-python"
-        and event == "push"
+        and (event == "push" or (event == "pull_request" and same_repository))
         and branch == "feat/codex-harness"
         and not snapshot
     )
