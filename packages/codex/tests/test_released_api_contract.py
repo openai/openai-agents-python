@@ -429,6 +429,17 @@ def test_method_body_does_not_change_contract(candidate: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_compiled_dataclass_options_still_change_contract(candidate: Path) -> None:
+    source = implementation(candidate, "rate_limits.py")
+    text = source.read_text()
+    before = "@_sdk_dataclass(frozen=True, slots=True, kw_only=True)\nclass ApiRateLimitWindow:"
+    assert before in text
+    source.write_text(text.replace(before, before.replace("slots=True", "slots=False"), 1))
+    result = check(candidate)
+    assert result.returncode == 1, result.stderr
+    assert "Native public API differs from the reviewed snapshot." in result.stderr
+
+
 def test_unreferenced_private_signature_does_not_change_contract(candidate: Path) -> None:
     source = implementation(candidate, "tools.py")
     text = source.read_text()
