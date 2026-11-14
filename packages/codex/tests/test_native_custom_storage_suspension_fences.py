@@ -5,15 +5,16 @@ import json
 import time
 
 from _agents_codex.input import _native_input
-from agents import Agent, CustomStorage, SQLiteSessionStore, _native
+from agents import Agent, CustomStorage, _native
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
+from tests.native_storage_fixtures import MemorySessionStore
 from tests.test_native_custom_storage_manual import lookup_tool, provider_for
 from tests.test_native_manual_tools import next_request
 
 
-async def test_manual_capture_waits_for_slow_checked_fences(responses, tmp_path):
-    class Store(SQLiteSessionStore):
+async def test_manual_capture_waits_for_slow_checked_fences(responses):
+    class Store(MemorySessionStore):
         capturing = False
 
         def flush(self, session_id, token):
@@ -22,7 +23,7 @@ async def test_manual_capture_waits_for_slow_checked_fences(responses, tmp_path)
                 time.sleep(0.15)
             return super().flush(session_id, token)
 
-    backend = Store(tmp_path / "slow.sqlite")
+    backend = Store()
     lookup = lookup_tool()
     responses.respond(function_call("lookup", {"key": "A"}, "manual-A"))
     responses.respond(assistant_output("done"))

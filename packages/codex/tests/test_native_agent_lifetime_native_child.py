@@ -1,19 +1,42 @@
 """Native-only children never borrow the opening Python Agent's display label."""
 
+import subprocess
+import sys
 from dataclasses import replace
-
-import pytest
 
 from agents import NativeAgents, telemetry
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.test_native_child_agents import agent_for, child_peer, handles, trust
 from tests.test_native_executor_tools import declaration
+from tests.test_native_trace_exporter import native_trace_child_env
 from tests.test_tracing_native import Recorder
 
 
-@pytest.mark.asyncio
-async def test_native_only_child_does_not_invent_a_python_agent_span(tmp_path, monkeypatch):
+def test_native_only_child_does_not_invent_a_python_agent_span(tmp_path):
+    # Other tests may already have initialized the process-wide telemetry runtime.
+    env = native_trace_child_env()
+    env.pop("OPENAI_API_KEY", None)
+    env["CODEX_HOME"] = str(tmp_path / "codex")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import asyncio, sys; from pathlib import Path; from pytest import MonkeyPatch; "
+            "from tests.test_native_agent_lifetime_native_child import _trace_native_child\n"
+            "with MonkeyPatch.context() as patch:\n"
+            "    asyncio.run(_trace_native_child(Path(sys.argv[1]), patch))",
+            str(tmp_path),
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def _trace_native_child(tmp_path, monkeypatch):
     creation, steps = [], []
 
     class PolicyRecorder(Recorder):

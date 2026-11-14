@@ -191,10 +191,12 @@ async def test_prompt_composition_keeps_sync_callbacks_in_the_owned_worker(mode,
     called = []
 
     def sync_source(request):
+        assert request.agent is agent
         called.append(("source", threading.get_ident()))
         return reference
 
     async def async_source(request):
+        assert request.agent is agent
         called.append(("source", threading.get_ident()))
         await asyncio.sleep(0)
         return reference
@@ -203,6 +205,7 @@ async def test_prompt_composition_keeps_sync_callbacks_in_the_owned_worker(mode,
         return async_source(request)
 
     def transform(request):
+        assert request.agent is agent
         called.append(("transform", threading.get_ident()))
         reference["variables"]["value"] = "mutated"
 
@@ -224,6 +227,7 @@ async def test_prompt_composition_keeps_sync_callbacks_in_the_owned_worker(mode,
         _context_transform_purpose="turn",
         _native=native,
         _agent_for_message=lambda message: agent,
+        _original_agent_for_message=lambda message: agent,
         _run_owned_context_callback=own,
     )
     state = SimpleNamespace(stopping=False, failure=asyncio.get_running_loop().create_future())
