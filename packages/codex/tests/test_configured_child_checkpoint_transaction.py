@@ -231,6 +231,7 @@ async def test_checkpoint_phase_classifies_only_authoritative_native_refusal(res
     )
     parent = SimpleNamespace(
         _executor=None,
+        _portable_profile_workspaces={},
         _native_agents=None,
         _project_guidance=None,
         _strict_executor_writes=False,
