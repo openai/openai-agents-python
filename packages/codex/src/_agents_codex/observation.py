@@ -27,7 +27,7 @@ from typing_extensions import TypedDict as TypedDict
 
 from agents.config import JsonValue as JsonValue
 
-from . import _tool_response_types as _wire_types
+from . import _tool_response_types as _tool_response_types
 from ._tool_response_types import FunctionCallStatus as FunctionCallStatus
 
 if TYPE_CHECKING:
@@ -59,6 +59,8 @@ from .usage import TokenUsageInfo as TokenUsageInfo
 
 if TYPE_CHECKING:
     from .turn import Turn
+
+_wire_types = _tool_response_types
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -915,21 +917,28 @@ _protect_mcp_methods(EventStream, _event_stream_mcp)
 _preserve_module_identity(globals(), "agents.observation")
 
 
-def __getattr__(name: str):
-    if name not in (
-        "CodeInterpreterCallItem",
-        "ExecutionItem",
-        "FileSearchCallItem",
-        "HostedMcpCallItem",
-        "ImageGenerationCallItem",
-        "McpListToolsItem",
-        "MessageItem",
-        "ProgramCallItem",
-        "ProgramOutputItem",
-        "ReasoningItem",
-        "ShellCallItem",
-        "ShellCallOutputItem",
-        "WebSearchCallItem",
-    ):
+_WIRE_EXPORTS = (
+    "CodeInterpreterCallItem",
+    "ExecutionItem",
+    "FileSearchCallItem",
+    "HostedMcpCallItem",
+    "ImageGenerationCallItem",
+    "McpListToolsItem",
+    "MessageItem",
+    "ProgramCallItem",
+    "ProgramOutputItem",
+    "ReasoningItem",
+    "ShellCallItem",
+    "ShellCallOutputItem",
+    "WebSearchCallItem",
+)
+
+
+def __getattr__(name: str) -> Any:
+    if name not in _WIRE_EXPORTS:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     return getattr(_wire_types._events, name)
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_WIRE_EXPORTS))

@@ -10,8 +10,6 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
-import agents as _declaration_types
-
 from . import tools as _tool_types
 from ._function_tools import FunctionTool
 from .agent import Agent
@@ -34,7 +32,7 @@ class _AgentProfile:
     handoff_options: Mapping[str, RealtimeHandoff] = field(default_factory=dict)
     decision_handoffs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     native_provider_id: str | None = None
-    opening_tools: tuple[_declaration_types.Tool[Any], ...] = ()
+    opening_tools: tuple[_tool_types.Tool[Any], ...] = ()
 
 
 def _handoff_name(agent: Agent[Any, Any]) -> str:
@@ -61,8 +59,8 @@ def _python_tool_slot(tool: object) -> FunctionTool[Any, Any, Any] | None:
 
 
 def _resolve_tool_name_collisions(
-    tools: Sequence[_declaration_types.Tool[Any]], handoff_names: Sequence[str]
-) -> tuple[tuple[_declaration_types.Tool[Any], ...], tuple[int, ...]]:
+    tools: Sequence[_tool_types.Tool[Any]], handoff_names: Sequence[str]
+) -> tuple[tuple[_tool_types.Tool[Any], ...], tuple[int, ...]]:
     """Apply the opt-in winner policy only to eager application functions and handoffs."""
     function_indices: dict[str, list[int]] = {}
     handoff_indices: dict[str, list[int]] = {}

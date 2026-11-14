@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-import agents as _declaration_types
-
 from . import tools as _tool_types
 from ._function_tools import FunctionTool
 from .canonical_storage import CustomStorage
@@ -56,7 +54,7 @@ def _validate_custom_storage_capabilities(
     checklist: bool,
     mcp_tools: Sequence[_tool_types._MCP[Any]],
     environment: EnvironmentSource[Any] | None,
-    available: Sequence[_declaration_types.Tool[Any]],
+    available: Sequence[_tool_types.Tool[Any]],
     tools: Sequence[FunctionTool[Any, Any, Any]],
 ) -> None:
     if not isinstance(storage, CustomStorage):

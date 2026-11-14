@@ -17,6 +17,8 @@ from pathlib import Path
 from types import ModuleType, UnionType
 from typing import Annotated, Any, Union, get_origin
 
+from typing_extensions import TypeAliasType
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -116,7 +118,11 @@ def _references(declaration: ast.stmt) -> set[str]:
 
 def _public_type_aliases(module: ModuleType, source: ModuleType, tree: ast.Module) -> ast.Module:
     """Read public-owner alias construction as the original type declaration."""
-    if source.__name__ not in {"_agents_codex._events", "_agents_codex.subagents"}:
+    if source.__name__ not in {
+        "_agents_codex._events",
+        "_agents_codex._tool_response_types",
+        "_agents_codex.subagents",
+    }:
         return tree
     # Keep parsed trees available for other modules and discovery rounds.
     tree = copy.deepcopy(tree)
@@ -130,14 +136,36 @@ def _public_type_aliases(module: ModuleType, source: ModuleType, tree: ast.Modul
     ]
     if not declarations:
         return tree
-    owner = _public_owner(source.__name__)
+    owner = (
+        "agents._events"
+        if source.__name__ == "_agents_codex._tool_response_types"
+        else _public_owner(source.__name__)
+    )
     expected = ast.parse(
         "if TYPE_CHECKING:\n"
         "    from typing_extensions import TypeAliasType as _PublicTypeAliasType\n"
         "else:\n"
         f"    _PublicTypeAliasType = _type_alias_constructor({owner!r})\n"
     ).body[0]
-    guards = [node for node in tree.body if ast.dump(node) == ast.dump(expected)]
+    guards = []
+    for node in tree.body:
+        candidate = copy.deepcopy(node)
+        if source.__name__ == "_agents_codex._tool_response_types" and isinstance(
+            candidate, ast.If
+        ):
+            candidate.body = [
+                item
+                for item in candidate.body
+                if not (
+                    isinstance(item, ast.ImportFrom)
+                    and item.level == 1
+                    and item.module is None
+                    and [(alias.name, alias.asname) for alias in item.names]
+                    == [("_events", "_events")]
+                )
+            ]
+        if ast.dump(candidate) == ast.dump(expected):
+            guards.append(node)
     constructors = [
         alias
         for node in tree.body
@@ -156,7 +184,7 @@ def _public_type_aliases(module: ModuleType, source: ModuleType, tree: ast.Modul
         # retained call arguments below freeze the reviewed value declaration.
         if (
             value is not getattr(source, name)
-            or not isinstance(value, source.TypeAliasType)
+            or not isinstance(value, TypeAliasType)
             or value.__module__ != owner
         ):
             raise ValueError(f"Public type alias {module.__name__}.{name} differs from {owner}")
@@ -174,6 +202,235 @@ def _analyze_declaration(node: ast.stmt) -> tuple[set[str], str] | None:
     return _references(declaration), ast.unparse(declaration)
 
 
+_MANUAL_RELOCATIONS = {"InputT", "ResultT", "_DefaultApprovalReason", "_DEFAULT_APPROVAL_REASON"}
+_FUNCTION_RELOCATIONS = {"Tool", "_ClientToolSearch"}
+
+
+def _declaration_owner(owner: str, name: str) -> str:
+    if owner == "_agents_codex._tool_catalog":
+        return "agents._function_tools" if name in _FUNCTION_RELOCATIONS else "agents.tools"
+    if owner == "_agents_codex._tool_response_types":
+        return "agents._events"
+    if owner in {"agents.tools", "_agents_codex.tools"} and name in _MANUAL_RELOCATIONS:
+        return "agents.manual"
+    if owner in {"agents.manual", "_agents_codex.manual"} and name == "_InteractionHandler":
+        return "agents.session"
+    return _public_owner(owner)
+
+
+def _logical_tree(
+    module: ModuleType, source: ModuleType, tree: ast.Module, parse: Callable[[str], ast.Module]
+) -> ast.Module:
+    """Read relocated declarations under their established public source owner."""
+    owner = _public_owner(source.__name__)
+    additions: list[tuple[str, set[str] | None, set[str]]] = []
+    if owner == "agents.tools":
+        additions.append(("_tool_catalog", None, _FUNCTION_RELOCATIONS))
+    elif owner == "agents._function_tools":
+        additions.append(("_tool_catalog", _FUNCTION_RELOCATIONS, set()))
+    elif owner == "agents._events":
+        additions.append(("_tool_response_types", None, set()))
+    elif owner == "agents.manual":
+        additions.append(("tools", _MANUAL_RELOCATIONS, set()))
+    elif owner == "agents.session":
+        additions.append(("manual", {"_InteractionHandler"}, set()))
+    if not additions:
+        return tree
+    tree = copy.deepcopy(tree)
+    if owner == "agents.tools":
+        tree.body = [node for node in tree.body if not (_names(node) & _MANUAL_RELOCATIONS)]
+    elif owner == "agents.manual":
+        tree.body = [node for node in tree.body if "_InteractionHandler" not in _names(node)]
+    for leaf, include, exclude in additions:
+        implementation = importlib.import_module(f"_agents_codex.{leaf}")
+        assert implementation.__file__ is not None
+        extra = _public_type_aliases(
+            module, implementation, parse(Path(implementation.__file__).read_text())
+        )
+        if owner == "agents._events":
+            wire_order = ["InputTokensDetails", "OutputTokensDetails", "TokenUsage", "Failure"]
+            common = [node for name in wire_order for node in extra.body if name in _names(node)]
+            extra.body = [
+                node for node in extra.body if not (_names(node) & set(wire_order))
+            ] + common
+        for node in extra.body:
+            names = _names(node)
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                tree.body.append(copy.deepcopy(node))
+            elif isinstance(node, ast.If):
+                # Imports supply the declaration's type namespace, not new definitions.
+                copied = copy.deepcopy(node)
+                copied.body = [
+                    item for item in copied.body if isinstance(item, (ast.Import, ast.ImportFrom))
+                ]
+                copied.orelse = [
+                    item for item in copied.orelse if isinstance(item, (ast.Import, ast.ImportFrom))
+                ]
+                if copied.body:
+                    tree.body.append(copied)
+            elif names and not names & exclude and (include is None or names & include):
+                # Preserve the reviewed module order at the relocation boundary.
+                anchors = {
+                    "agents.tools": ("ToolRef", False),
+                    "agents._function_tools": ("_PythonTool", "Tool" in names),
+                    "agents.manual": ("ActionReply", False),
+                    "agents.session": ("_BeforeStep", False),
+                }
+                if owner == "agents._events":
+                    if names & {
+                        "InputTokensDetails",
+                        "OutputTokensDetails",
+                        "TokenUsage",
+                        "Failure",
+                    }:
+                        anchor, after = "TurnSnapshot", False
+                    elif "FunctionCallStatus" in names:
+                        anchor, after = "OutputItemStatus", True
+                    else:
+                        anchor, after = "SessionSnapshot", False
+                elif owner == "agents.tools" and "ToolSearchResult" in names:
+                    anchor, after = "ToolRef", True
+                elif owner == "agents.manual" and names & {
+                    "_DefaultApprovalReason",
+                    "_DEFAULT_APPROVAL_REASON",
+                }:
+                    anchor, after = "ApprovalDecision", False
+                else:
+                    anchor, after = anchors[owner]
+                position = next(
+                    index for index, item in enumerate(tree.body) if anchor in _names(item)
+                )
+                tree.body.insert(position + int(after), copy.deepcopy(node))
+    return tree
+
+
+def _annotation_namespaces(tree: ast.Module) -> ast.Module:
+    """Resolve only the private namespaces introduced for deferred annotations."""
+    namespace_names = {"_wire_types", "_state_types", "_tool_types", "_declaration_types"}
+    if not any(
+        isinstance(node, ast.Name) and node.id in namespace_names for node in ast.walk(tree)
+    ):
+        return tree
+    tree = copy.deepcopy(tree)
+    bindings: dict[str, str] = {}
+    statements = [
+        statement
+        for node in tree.body
+        for statement in ([node, *node.body, *node.orelse] if isinstance(node, ast.If) else [node])
+    ]
+    expected = {
+        "_wire_types": "_tool_response_types",
+        "_tool_types": "tools",
+        "_declaration_types": "tools",
+        "_state_types": "_state_types",
+    }
+    present = set()
+    imported_modules: dict[str, str] = {}
+    for statement in statements:
+        if isinstance(statement, ast.ImportFrom):
+            for alias in statement.names:
+                bound = alias.asname or alias.name
+                if statement.level == 1 and statement.module is None:
+                    imported_modules[bound] = alias.name
+                if bound in expected:
+                    leaf = alias.name if statement.module is None else statement.module
+                    if statement.level != 1 or leaf != expected[bound]:
+                        raise ValueError(f"Unexpected annotation namespace {bound}")
+                    present.add(bound)
+        elif isinstance(statement, ast.Assign) and isinstance(statement.value, ast.Name):
+            for target in statement.targets:
+                if isinstance(target, ast.Name) and target.id in expected:
+                    if imported_modules.get(statement.value.id) != expected[target.id]:
+                        raise ValueError(f"Unexpected annotation namespace {target.id}")
+                    present.add(target.id)
+    tools = importlib.import_module("_agents_codex.tools")
+    optional = getattr(tools, "_OPTIONAL_OWNERS", {})
+
+    class Normalize(ast.NodeTransformer):
+        def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
+            if ast.unparse(node.value) in {"Literal", "typing.Literal"}:
+                return node
+            return self.generic_visit(node)
+
+        def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+            path = [node.attr]
+            root = node.value
+            while isinstance(root, ast.Attribute):
+                path.append(root.attr)
+                root = root.value
+            if not isinstance(root, ast.Name) or root.id not in present:
+                return self.generic_visit(node)
+            path.append(root.id)
+            path.reverse()
+            prefix, name = path[0], path[-1]
+            owner = None
+            if prefix not in present:
+                return self.generic_visit(node)
+            if prefix == "_wire_types" and (len(path) == 2 or path[1:-1] == ["_events"]):
+                owner = "agents._events"
+            elif prefix == "_state_types" and len(path) == 2:
+                owner = "agents.state"
+            elif prefix in {"_tool_types", "_declaration_types"} and len(path) == 2:
+                if name == "Tool":
+                    owner = "agents._function_tools"
+                elif name == "Environment":
+                    owner = "agents.executor"
+                elif name == "Subagent":
+                    owner = "agents.subagents"
+                elif name in optional:
+                    leaf = optional[name]
+                    owner = (
+                        "agents.tools"
+                        if leaf == "_tool_catalog"
+                        else _public_owner(f"_agents_codex.{leaf}")
+                    )
+                elif hasattr(tools, name):
+                    owner = _public_owner(getattr(getattr(tools, name), "__module__", ""))
+            if owner:
+                bindings[name] = owner
+                return ast.copy_location(ast.Name(id=name, ctx=ast.Load()), node)
+            return self.generic_visit(node)
+
+        def visit_Constant(self, node: ast.Constant) -> ast.AST:
+            if isinstance(node.value, str) and any(
+                prefix in node.value
+                for prefix in (
+                    "_wire_types.",
+                    "_state_types.",
+                    "_tool_types.",
+                    "_declaration_types.",
+                )
+            ):
+                return ast.copy_location(self.visit(ast.parse(node.value, mode="eval").body), node)
+            return node
+
+    normalizer = Normalize()
+    # Runtime bodies are discarded first; namespace changes cannot rewrite user strings.
+    for index, node in enumerate(tree.body):
+        if isinstance(node, ast.If):
+            continue
+        declaration = _declaration(node)
+        if declaration is not None:
+            tree.body[index] = normalizer.visit(declaration)
+    for name, owner in sorted(bindings.items()):
+        tree.body.append(ast.ImportFrom(module=owner, names=[ast.alias(name=name)], level=0))
+    # Namespace imports have been replaced with precise symbol dependencies.
+    for node in statements:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            node.names = [
+                alias
+                for alias in node.names
+                if (alias.asname or alias.name)
+                not in {"_wire_types", "_state_types", "_tool_types", "_declaration_types"}
+            ]
+    tree.body = [
+        node
+        for node in tree.body
+        if not isinstance(node, (ast.Import, ast.ImportFrom)) or node.names
+    ]
+    return ast.fix_missing_locations(tree)
+
+
 def _module_contract(
     module: ModuleType,
     exports: set[str] | None = None,
@@ -181,6 +438,7 @@ def _module_contract(
     include: set[str] | None = None,
     parse: Callable[[str], ast.Module] = ast.parse,
     analyze: Callable[[ast.stmt], tuple[set[str], str] | None] = _analyze_declaration,
+    prepare: Callable[[ModuleType, ModuleType, ast.Module], ast.Module] | None = None,
 ) -> dict[str, Any]:
     assert module.__file__ is not None
     tree = parse(Path(module.__file__).read_text())
@@ -197,12 +455,17 @@ def _module_contract(
                 assert source.__file__ is not None
                 tree = parse(Path(source.__file__).read_text())
                 break
-    tree = _public_type_aliases(module, source, tree)
+    if prepare is None:
+        tree = _public_type_aliases(module, source, tree)
+        tree = _annotation_namespaces(_logical_tree(module, source, tree, parse))
+    else:
+        tree = prepare(module, source, tree)
     definitions = [(node, _names(node)) for node in tree.body if _names(node)]
     if exports is None:
         exports = (
             set(module.__all__)
             if hasattr(module, "__all__")
+            and module.__name__ not in {"agents.tools", "agents.session"}
             else {name for _, names in definitions for name in names if not name.startswith("_")}
         )
     # Import availability is part of the contract; a source-only declaration is insufficient.
@@ -223,6 +486,9 @@ def _module_contract(
                 else name
             )
     selected = set(exports) | (include or set())
+    local_names = {
+        name for node, names in definitions if not isinstance(node, ast.If) for name in names
+    }
     declarations: list[tuple[set[str], str]] = []
     # Include base classes and aliases used by the public declarations. This captures
     # inherited field order/defaults without freezing unrelated private implementation.
@@ -268,7 +534,31 @@ def _module_contract(
                     owner = importlib.util.resolve_name(
                         "." * node.level + (node.module or ""), source.__package__
                     )
-                    owner = _public_owner(owner)
+                    aliases = [
+                        alias
+                        for alias in aliases
+                        if not (
+                            (alias.asname or alias.name) in local_names
+                            and _declaration_owner(owner, alias.name)
+                            == _public_owner(source.__name__)
+                        )
+                    ]
+                    if not aliases:
+                        continue
+                    node.names = aliases
+                    owners = {_declaration_owner(owner, alias.name) for alias in aliases}
+                    if len(owners) != 1:
+                        # Relocated TypeVars can share an import with tool declarations.
+                        for alias in aliases:
+                            symbol_owner = _declaration_owner(owner, alias.name)
+                            references[alias.asname or alias.name] = f"{symbol_owner}.{alias.name}"
+                            imports.append(
+                                ast.unparse(
+                                    ast.ImportFrom(module=symbol_owner, names=[alias], level=0)
+                                )
+                            )
+                        continue
+                    owner = owners.pop()
                     if source is not module:
                         # Preserve reviewed logical imports from the public owner,
                         # including shared declarations outside the implementation.
@@ -340,6 +630,12 @@ def public_api() -> dict[str, Any]:
     # Cache syntax for this check while reading live bindings on every pass.
     parse = cache(ast.parse)
     analyze = cache(_analyze_declaration)
+
+    @cache
+    def prepare(module: ModuleType, source: ModuleType, tree: ast.Module) -> ast.Module:
+        normalized = _public_type_aliases(module, source, tree)
+        return _annotation_namespaces(_logical_tree(module, source, normalized, parse))
+
     while True:
         contracts = {
             name: _module_contract(
@@ -348,6 +644,7 @@ def public_api() -> dict[str, Any]:
                 include=names,
                 parse=parse,
                 analyze=analyze,
+                prepare=prepare,
             )
             for name, names in sorted(required.items())
         }
@@ -408,6 +705,41 @@ def _comparison_api(api: dict[str, Any] | None) -> dict[str, Any] | None:
     ]
     for declarations in declaration_lists:
         declarations[:] = [ast.unparse(ast.parse(statement)) for statement in declarations]
+    # Only cold-start relocation owners have been changing import grouping.
+    # Compare exact binding names and owners, independent of split import lines.
+    relocated = {
+        "agents.tools",
+        "agents._function_tools",
+        "agents._events",
+        "agents.manual",
+        "agents.session",
+        "agents.observation",
+        "agents.history",
+        "agents._history",
+        "agents.recovery",
+        "agents._projection",
+        "agents._web_projection",
+        "agents.agent",
+    }
+    for name, contract in {**result["modules"], **result["root_definitions"]}.items():
+        if name not in relocated:
+            continue
+        bindings = set()
+        for statement in contract.get("imports", []):
+            node = ast.parse(statement).body[0]
+            assert isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names:
+                single = copy.copy(node)
+                single.names = [alias]
+                if isinstance(single, ast.ImportFrom) and single.level:
+                    package = name.rpartition(".")[0]
+                    single.module = importlib.util.resolve_name(
+                        "." * single.level + (single.module or ""), package
+                    )
+                    single.level = 0
+                bindings.add(ast.unparse(single))
+        if "imports" in contract:
+            contract["imports"] = sorted(bindings)
     return result
 
 

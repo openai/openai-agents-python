@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING as _TYPE_CHECKING
-
-import agents as _agents
-from _agents_codex import _tool_response_types as _wire, tools as _tools
 from _agents_codex.session import (
     _CODEX_RESPONSES_BASE_URL as _CODEX_RESPONSES_BASE_URL,
     _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST as _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST,
     _NATIVE_HOME_CLOSE_TIMEOUT as _NATIVE_HOME_CLOSE_TIMEOUT,
+    TYPE_CHECKING as _TYPE_CHECKING,
     AbstractAsyncContextManager as AbstractAsyncContextManager,
     Agent as Agent,
     AgentProfileChanged as AgentProfileChanged,
@@ -99,6 +96,8 @@ from _agents_codex.session import (
     UncertainCall as UncertainCall,
     UsageUpdated as UsageUpdated,
     UserInput as UserInput,
+    __dir__ as __dir__,
+    __getattr__ as __getattr__,
     _activate as _activate,
     _api_rate_limits as _api_rate_limits,
     _BeforeStep as _BeforeStep,
@@ -123,6 +122,7 @@ from _agents_codex.session import (
     _configure_storage_runtime as _configure_storage_runtime,
     _copy_model_settings as _copy_model_settings,
     _create_task as _create_task,
+    _declaration_types as _declaration_types,
     _EnvironmentLease as _EnvironmentLease,
     _error_code as _error_code,
     _error_contexts as _error_contexts,
@@ -165,13 +165,16 @@ from _agents_codex.session import (
     _selected_tool_refs as _selected_tool_refs,
     _SelectionContextT_contra as _SelectionContextT_contra,
     _split_tools as _split_tools,
+    _state_types as _state_types,
     _Submission as _Submission,
     _SyncRun as _SyncRun,
     _token_usage_info as _token_usage_info,
+    _tool_types as _tool_types,
     _ToolCatalog as _ToolCatalog,
     _trace_context as _trace_context,
     _TurnT as _TurnT,
     _validate_storage_opening as _validate_storage_opening,
+    _wire_types as _wire_types,
     _writable_roots as _writable_roots,
     asdict as asdict,
     asyncio as asyncio,
@@ -202,20 +205,6 @@ from _agents_codex.session import (
     weakref as weakref,
 )
 
-from .state import (
-    ChecklistState as ChecklistState,
-    CheckpointStatus as CheckpointStatus,
-    LocalStorage as LocalStorage,
-    NativeGoal as NativeGoal,
-    SessionState as SessionState,
-)
-
-# Class annotations resolve in this public module's namespace.
-_declaration_types = _agents
-_state_types = _agents
-_tool_types = _tools
-_wire_types = _wire
-
 if _TYPE_CHECKING:
     from _agents_codex.session import (
         _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
@@ -224,17 +213,23 @@ if _TYPE_CHECKING:
         _URL_ACCEPT as _URL_ACCEPT,
         ActionReply as ActionReply,
         ActionRequested as ActionRequested,
+        ApplicationToolOutput as ApplicationToolOutput,
         ChatGPTAppsMCP as ChatGPTAppsMCP,
         Checklist as Checklist,
+        ChecklistState as ChecklistState,
+        CheckpointStatus as CheckpointStatus,
         ChildInvocation as ChildInvocation,
         ElicitationRequest as ElicitationRequest,
         HostedVerificationMCP as HostedVerificationMCP,
         HttpMCP as HttpMCP,
         Interaction as Interaction,
+        LocalStorage as LocalStorage,
         MCPResultContext as MCPResultContext,
         NativeAgents as NativeAgents,
+        NativeGoal as NativeGoal,
         NativeGoals as NativeGoals,
         SessionItem as SessionItem,
+        SessionState as SessionState,
         StdioMCP as StdioMCP,
         Subagent as Subagent,
         Tool as Tool,
@@ -251,56 +246,146 @@ if _TYPE_CHECKING:
         _tool_names as _tool_names,
     )
 
-_OPTIONAL_EXPORTS = (
-    "SessionItem",
-    "Subagent",
-    "_subagent",
-    "_COLLABORATION_TOOLS",
-    "_FORM_MODES",
-    "_MCP",
-    "_URL_ACCEPT",
+
+__all__ = [
+    "annotations",
+    "AbstractAsyncContextManager",
     "ActionReply",
     "ActionRequested",
+    "Agent",
+    "AgentProfileChanged",
+    "Allow",
+    "Any",
+    "ApiRateLimits",
+    "ApiRateLimitsUpdated",
+    "AsyncIterator",
+    "Awaitable",
+    "Callable",
+    "Capabilities",
+    "CapabilityError",
     "ChatGPTAppsMCP",
     "Checklist",
+    "ChecklistState",
+    "CheckpointStatus",
     "ChildInvocation",
+    "CodexAccount",
+    "Completed",
+    "ContextCompacted",
+    "ContextT",
+    "ContextVar",
+    "Coroutine",
+    "CustomStorage",
+    "Deny",
     "ElicitationRequest",
+    "Environment",
+    "EnvironmentSource",
+    "EventStream",
+    "ExecutionItemCompleted",
+    "ExecutorContext",
+    "FeatureName",
+    "FeatureSupport",
+    "FunctionTool",
+    "Future",
+    "Generic",
     "HostedVerificationMCP",
     "HttpMCP",
     "Interaction",
+    "InteractionExpiredError",
+    "InteractionRequired",
+    "Iterator",
+    "Literal",
+    "LocalRecoveryRequired",
+    "LocalStorage",
+    "ManagedAgentToolOrigin",
+    "Mapping",
+    "MappingProxyType",
     "MCPResultContext",
+    "ModelSettings",
     "NativeAgents",
+    "NativeError",
+    "NativeGoal",
     "NativeGoals",
+    "NativeProvider",
+    "OutputSpec",
+    "OutputT",
+    "OutputTextDelta",
+    "OutputValidationError",
+    "Path",
+    "PathLike",
+    "PendingRequests",
+    "PreparedRequest",
+    "ProducedItem",
+    "Protocol",
+    "ReconciledCall",
+    "RecordedTurn",
+    "RecoverRun",
+    "ReplaceArguments",
+    "ResponseIntegrityReason",
+    "RunDiagnosticError",
+    "RunErrorDetails",
+    "RunFailure",
+    "Sequence",
+    "Session",
+    "SessionBusyError",
+    "SessionItem",
+    "SessionState",
+    "SessionStoreCleanup",
+    "SpanContext",
+    "StaleTurnError",
     "StdioMCP",
+    "SteeringReceipt",
+    "StopTurn",
+    "Subagent",
+    "SubagentLifecycle",
+    "TemporaryDirectory",
+    "TokenUsageInfo",
     "Tool",
+    "ToolCallInfo",
+    "ToolContext",
+    "ToolFinished",
+    "ToolOutput",
+    "ToolRef",
+    "ToolStarted",
+    "TraceContext",
+    "TraceOptions",
+    "TraceScope",
+    "Turn",
+    "TurnFinished",
+    "TurnStarted",
+    "TurnStoppedError",
+    "TurnT",
+    "TypeAlias",
+    "TypeVar",
+    "UncertainCall",
+    "UsageUpdated",
+    "UserInput",
     "VerificationRequest",
     "WebSearch",
-    "_CapturedManual",
-    "_InteractionHandler",
-    "_NativeQuestion",
-    "_PreparedManualResult",
-    "_question",
-    "_ready",
-    "_result_policies",
-    "_tool_names",
-)
-
-
-def __getattr__(name: str) -> Any:
-    if name not in _OPTIONAL_EXPORTS:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    from importlib import import_module
-
-    implementation = import_module("_agents_codex.session")
-    value = getattr(implementation, name)
-    globals()[name] = value
-    return value
-
-
-def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(_OPTIONAL_EXPORTS))
-
-
-__all__ = tuple(name for name in globals() if not name.startswith("_")) + tuple(
-    name for name in _OPTIONAL_EXPORTS if not name.startswith("_")
-)
+    "asdict",
+    "asyncio",
+    "cancel_once",
+    "cast",
+    "contextmanager",
+    "copy_context",
+    "dataclass",
+    "deepcopy",
+    "deque",
+    "field",
+    "get_args",
+    "get_cleanup",
+    "hashlib",
+    "importlib",
+    "inspect",
+    "json",
+    "math",
+    "os",
+    "overload",
+    "project_execution_completion",
+    "project_history",
+    "re",
+    "replace",
+    "suppress",
+    "sys",
+    "uuid4",
+    "weakref",
+]

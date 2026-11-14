@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import agents as _agents
 from _agents_codex._function_tools import (
     TYPE_CHECKING as TYPE_CHECKING,
     Allow as Allow,
@@ -49,7 +48,10 @@ from _agents_codex._function_tools import (
     TypeVar as TypeVar,
     Union as Union,
     UnionType as UnionType,
+    __dir__ as __dir__,
+    __getattr__ as __getattr__,
     _CapturedFunction as _CapturedFunction,
+    _declaration_types as _declaration_types,
     _function_parameters as _function_parameters,
     _policy_hints as _policy_hints,
     _PythonTool as _PythonTool,
@@ -70,9 +72,6 @@ from _agents_codex._function_tools import (
     sys as sys,
 )
 
-# Class annotations resolve in this public module's namespace.
-_declaration_types = _agents
-
 if TYPE_CHECKING:
     from _agents_codex._function_tools import (
         ActionRequested as ActionRequested,
@@ -88,39 +87,71 @@ if TYPE_CHECKING:
         _CapturedManual as _CapturedManual,
     )
 
-_OPTIONAL_EXPORTS = (
+
+__all__ = [
+    "annotations",
+    "TYPE_CHECKING",
     "ActionRequested",
+    "Allow",
+    "Annotated",
+    "Any",
+    "Awaitable",
+    "BackgroundResult",
+    "BaseModel",
+    "BinderT_co",
+    "Callable",
     "Checklist",
     "ChildInvocation",
     "ChildStepContext",
+    "Concatenate",
+    "ContextT_co",
+    "Coroutine",
+    "Deny",
+    "FunctionTool",
+    "Generic",
     "HttpMCP",
+    "InputT",
+    "Literal",
+    "Mapping",
     "NativeAgents",
     "NativeGoals",
+    "ParametersT",
+    "ParamSpec",
+    "Protocol",
+    "PydanticSchemaGenerationError",
+    "ReplaceArguments",
+    "ResultT",
     "StdioMCP",
     "Tool",
+    "ToolCaller",
+    "ToolCallInfo",
+    "ToolContext",
+    "ToolContextT",
+    "ToolInputErrorContext",
+    "ToolInvocationContext",
+    "ToolInvocationInputContext",
+    "ToolOutput",
+    "ToolRef",
+    "ToolTimeoutBehavior",
+    "ToolTimeoutError",
+    "TraceContext",
+    "Turn",
+    "TypeAdapter",
+    "TypeAlias",
+    "TypeVar",
+    "Union",
+    "UnionType",
     "WebSearch",
-    "_CapturedManual",
-)
-_CATALOG_EXPORTS = ("Checklist", "NativeGoals", "Tool", "WebSearch")
-
-
-def __getattr__(name: str) -> Any:
-    if name not in _OPTIONAL_EXPORTS:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    from importlib import import_module
-
-    implementation = import_module("_agents_codex._function_tools")
-    if name in _CATALOG_EXPORTS:
-        globals().update({key: getattr(implementation, key) for key in _CATALOG_EXPORTS})
-    else:
-        globals()[name] = getattr(implementation, name)
-    return globals()[name]
-
-
-def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(_OPTIONAL_EXPORTS))
-
-
-__all__ = tuple(name for name in globals() if not name.startswith("_")) + tuple(
-    name for name in _OPTIONAL_EXPORTS if not name.startswith("_")
-)
+    "cast",
+    "dataclass",
+    "field",
+    "function_tool",
+    "get_args",
+    "get_origin",
+    "get_type_hints",
+    "inspect",
+    "json",
+    "overload",
+    "partial",
+    "sys",
+]

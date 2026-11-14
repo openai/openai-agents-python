@@ -40,12 +40,12 @@ from pydantic import (
 )
 from typing_extensions import ParamSpec as ParamSpec, TypeVar as TypeVar
 
-import agents as _declaration_types
 from _agents_shared.strict_schema import (
     _normalize_function_tool_output_json_schema,
     ensure_strict_json_schema,
 )
 
+from . import tools as tools
 from ._callback_execution import (
     _call_application_callback,
     _FunctionBodyFailure,
@@ -106,6 +106,8 @@ if TYPE_CHECKING:
         ChildStepContext as ChildStepContext,
         NativeAgents as NativeAgents,
     )
+
+_declaration_types = tools
 
 ToolContextT = TypeVar("ToolContextT")
 _DecisionT = TypeVar("_DecisionT")
@@ -1599,3 +1601,7 @@ def __getattr__(name: str) -> Any:
         }
     )
     return globals()[name]
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_OPTIONAL_EXPORTS))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect as inspect
 import json as json
+import sys
 from collections.abc import (
     Awaitable as Awaitable,
     Callable as Callable,
@@ -22,8 +23,6 @@ from pydantic import (
     TypeAdapter as TypeAdapter,
     create_model as create_model,
 )
-
-import agents as _declaration_types
 
 from ._media import ImageDetail as ImageDetail, _capture_file, _capture_image, _capture_tool_part
 from ._public import preserve_module_identity as _preserve_module_identity
@@ -55,7 +54,6 @@ if TYPE_CHECKING:
     from ._agent_tool import _ConfiguredAgentTool
     from ._function_tools import (
         FunctionTool,
-        Tool,
         ToolContext,
         ToolInputErrorContext,
         ToolTimeoutBehavior,
@@ -83,6 +81,7 @@ if TYPE_CHECKING:
         ImageGenerationSvg as ImageGenerationSvg,
         ImageGenerationSvgReasoning as ImageGenerationSvgReasoning,
         NativeGoals as NativeGoals,
+        Tool as Tool,
         ToolSearch as ToolSearch,
         ToolSearchResult as ToolSearchResult,
         WebSearch as WebSearch,
@@ -92,7 +91,7 @@ if TYPE_CHECKING:
         _hosted_tool_spec as _hosted_tool_spec,
     )
     from .agent import ContextT
-    from .executor import Environment
+    from .executor import Environment as Environment
     from .hosted_mcp import HostedMCP as HostedMCP
     from .manual import (
         _FORM_MODES as _FORM_MODES,
@@ -145,11 +144,12 @@ if TYPE_CHECKING:
         NativeRoleToolStreamEvent as NativeRoleToolStreamEvent,
     )
     from .native_interception import Allow, Deny, ReplaceArguments
+    from .subagents import Subagent as Subagent
 
 _TOOL_RESPONSE = TypeAdapter(FunctionCallResponse)
 
 
-def _capture_web_search_config(search: _declaration_types.WebSearch | None) -> dict[str, Any]:
+def _capture_web_search_config(search: WebSearch | None) -> dict[str, Any]:
     if search is None:
         return {}
     from ._tool_catalog import _capture_web_search_config as capture
@@ -823,6 +823,7 @@ _CATALOG_EXPORTS = (
     "_capture_hosted_tools",
     "_HOSTED_TOOLS",
     "ToolSearchResult",
+    "Tool",
 )
 
 
@@ -842,8 +843,16 @@ def __getattr__(name: str) -> Any:
         if module == "_tool_catalog"
         else tuple(key for key, owner in _OPTIONAL_OWNERS.items() if owner == module)
     )
-    globals().update({key: getattr(implementation, key) for key in names})
-    return globals()[name]
+    values = {key: getattr(implementation, key) for key in names}
+    globals().update(values)
+    if module == "_tool_catalog":
+        # Public dataclass hints resolve bare sibling names in the facade.
+        facade = sys.modules.get("agents.tools")
+        if facade is not None:
+            vars(facade).update(
+                (key, value) for key, value in values.items() if key in facade.__all__
+            )
+    return values[name]
 
 
 def _tool_names(servers: Any) -> list[dict[str, str]]:
@@ -863,6 +872,8 @@ def _native_agent_options(declaration: Any) -> dict[str, Any]:
 
 
 _OPTIONAL_OWNERS = {
+    "Environment": "executor",
+    "Subagent": "subagents",
     "_MCP": "mcp",
     "ChatGPTAppsMCP": "mcp",
     "HostedVerificationMCP": "mcp",
@@ -911,3 +922,7 @@ _OPTIONAL_OWNERS = {
     "_question": "manual",
     "_InteractionHandler": "manual",
 }
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_CATALOG_EXPORTS) | set(_OPTIONAL_OWNERS))

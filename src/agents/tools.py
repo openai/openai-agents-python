@@ -25,6 +25,8 @@ from _agents_codex.tools import (
     ToolOutputText as ToolOutputText,
     ToolRef as ToolRef,
     TypeAdapter as TypeAdapter,
+    __dir__ as __dir__,
+    __getattr__ as __getattr__,
     _CapturedFunction as _CapturedFunction,
     _function_parameters as _function_parameters,
     _ToolCatalog as _ToolCatalog,
@@ -65,10 +67,19 @@ if TYPE_CHECKING:
         _CapturedManual as _CapturedManual,
     )
 
-_OPTIONAL_EXPORTS = (
+
+__all__ = [
+    "annotations",
+    "TYPE_CHECKING",
+    "Any",
+    "Awaitable",
+    "BackgroundResult",
+    "BaseModel",
+    "Callable",
     "Checklist",
     "CodeInterpreter",
     "CodeInterpreterAutoContainer",
+    "ConfigDict",
     "ContainerDomainSecret",
     "ContainerNetworkAllowlist",
     "ContainerNetworkDisabled",
@@ -77,68 +88,37 @@ _OPTIONAL_EXPORTS = (
     "FileSearchCompoundFilter",
     "FileSearchHybridRanking",
     "FileSearchRanking",
+    "FunctionCallResponse",
     "HostedProgrammaticToolCalling",
     "HostedShell",
     "HostedShellAutoEnvironment",
     "HostedShellReferenceEnvironment",
+    "ImageDetail",
     "ImageGeneration",
     "ImageGenerationMask",
     "ImageGenerationSvg",
     "ImageGenerationSvgReasoning",
+    "JsonValue",
+    "Literal",
     "NativeGoals",
+    "Sequence",
+    "ToolCaller",
+    "ToolCallInfo",
+    "ToolNotFoundBehavior",
+    "ToolOutput",
+    "ToolOutputFile",
+    "ToolOutputImage",
+    "ToolOutputText",
+    "ToolRef",
     "ToolSearch",
     "ToolSearchResult",
+    "TypeAdapter",
     "WebSearch",
     "WebSearchImageSettings",
     "WebSearchLocation",
-    "_CapturedManual",
-)
-_CATALOG_EXPORTS = (
-    "Checklist",
-    "CodeInterpreter",
-    "CodeInterpreterAutoContainer",
-    "ContainerDomainSecret",
-    "ContainerNetworkAllowlist",
-    "ContainerNetworkDisabled",
-    "FileSearch",
-    "FileSearchComparisonFilter",
-    "FileSearchCompoundFilter",
-    "FileSearchHybridRanking",
-    "FileSearchRanking",
-    "HostedProgrammaticToolCalling",
-    "HostedShell",
-    "HostedShellAutoEnvironment",
-    "HostedShellReferenceEnvironment",
-    "ImageGeneration",
-    "ImageGenerationMask",
-    "ImageGenerationSvg",
-    "ImageGenerationSvgReasoning",
-    "NativeGoals",
-    "ToolSearch",
-    "ToolSearchResult",
-    "WebSearch",
-    "WebSearchImageSettings",
-    "WebSearchLocation",
-)
-
-
-def __getattr__(name: str) -> Any:
-    if name not in _OPTIONAL_EXPORTS:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    from importlib import import_module
-
-    implementation = import_module("_agents_codex.tools")
-    if name in _CATALOG_EXPORTS:
-        globals().update({key: getattr(implementation, key) for key in _CATALOG_EXPORTS})
-    else:
-        globals()[name] = getattr(implementation, name)
-    return globals()[name]
-
-
-def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(_OPTIONAL_EXPORTS))
-
-
-__all__ = tuple(name for name in globals() if not name.startswith("_")) + tuple(
-    name for name in _OPTIONAL_EXPORTS if not name.startswith("_")
-)
+    "create_model",
+    "dataclass",
+    "field",
+    "inspect",
+    "json",
+]

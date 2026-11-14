@@ -66,10 +66,11 @@ from pydantic import (
     ValidationError,
 )
 
-import agents as _declaration_types
-import agents as _state_types
-
-from . import _tool_response_types as _wire_types, tools as _tool_types
+from . import (
+    _state_types as _state_types,
+    _tool_response_types as _tool_response_types,
+    tools as tools,
+)
 from ._agent_profiles import (
     _AgentProfile,
     _capture_agent_graph,
@@ -380,6 +381,9 @@ from .usage import (
     _UsageCollector,
 )
 
+_declaration_types = _tool_types = tools
+_wire_types = _tool_response_types
+
 if TYPE_CHECKING:
     from ._sandbox_events import _OperationObserver
     from .hosted_mcp import HostedMCP
@@ -387,6 +391,12 @@ if TYPE_CHECKING:
     from .realtime import RealtimeConfig, RealtimeSession, _RealtimePolicySource
     from .realtime_usage import RealtimeUsage, RealtimeUsageAccounting
     from .state import (
+        ApplicationToolOutput as ApplicationToolOutput,
+        ChecklistState as ChecklistState,
+        CheckpointStatus as CheckpointStatus,
+        LocalStorage as LocalStorage,
+        NativeGoal as NativeGoal,
+        SessionState as SessionState,
         _ManualContinuation,
         _RememberedApproval,
         _RequestRunBudgetCheckpoint,
@@ -20688,6 +20698,12 @@ _preserve_module_identity(globals(), "agents.session")
 
 
 _COMPATIBILITY_OWNERS = {
+    "ApplicationToolOutput": "state",
+    "ChecklistState": "state",
+    "CheckpointStatus": "state",
+    "LocalStorage": "state",
+    "NativeGoal": "state",
+    "SessionState": "state",
     "CodeInterpreterCallItem": "_events",
     "FileSearchCallItem": "_events",
     "HostedMcpCallItem": "_events",
@@ -20778,3 +20794,7 @@ def __getattr__(name: str) -> Any:
         }
     )
     return globals()[name]
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_COMPATIBILITY_OWNERS))

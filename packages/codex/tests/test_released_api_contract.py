@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 import os
@@ -118,16 +119,16 @@ def implementation(candidate: Path, name: str) -> Path:
             "class ModelSettings(TypedDict, total=False, closed=True):",
             "class ModelSettings(TypedDict, total=True, closed=True):",
         ),
-        ("_function_tools.py", " | HttpMCP[object]", " | int"),
-        ("_function_tools.py", " | StdioMCP[object]", " | str"),
+        ("_tool_catalog.py", " | HttpMCP[object]", " | int"),
+        ("_tool_catalog.py", " | StdioMCP[object]", " | str"),
         ("tools.py", "    field_names: tuple[str, ...]", "    field_names: tuple[int, ...]"),
         (
-            "_events.py",
+            "_tool_response_types.py",
             "class Failure(TypedDict):\n    code: str",
             "class Failure(TypedDict):\n    code: bytes",
         ),
         (
-            "_events.py",
+            "_tool_response_types.py",
             'Literal["in_progress", "completed", "failed", "incomplete"]',
             'Literal["in_progress", "completed", "incomplete"]',
         ),
@@ -142,7 +143,7 @@ def implementation(candidate: Path, name: str) -> Path:
             "_CapturedFunction]",
             "Callable[[ToolContextT, PolicyContextT, FunctionTool[Any, Any, Any]], Any]",
         ),
-        ("_function_tools.py", "    | FunctionTool[Any, Any]\n", ""),
+        ("_tool_catalog.py", "    | FunctionTool[Any, Any]\n", ""),
         (
             "_function_tools.py",
             'ToolContextT = TypeVar("ToolContextT")',
@@ -334,6 +335,32 @@ def test_public_type_alias_must_keep_its_runtime_identity(candidate: Path) -> No
     result = check(candidate)
     assert result.returncode != 0
     assert "Public type alias agents._events.EnvironmentStatus differs" in result.stderr
+
+
+def test_annotation_namespace_normalization_preserves_unrelated_type_imports() -> None:
+    normalize = runpy.run_path(str(SCRIPT))["_annotation_namespaces"]
+    source = (
+        "if TYPE_CHECKING:\n"
+        "    from typing_extensions import Omit\n"
+        "    from somewhere import McpContentBlock\n"
+    )
+    tree = ast.parse(source)
+    assert ast.dump(normalize(tree)) == ast.dump(tree)
+
+
+def test_annotation_namespace_normalization_keeps_literals_and_checks_owner() -> None:
+    normalize = runpy.run_path(str(SCRIPT))["_annotation_namespaces"]
+    source = (
+        "from . import _tool_response_types as _wire_types\n"
+        "class Example:\n"
+        "    value: _wire_types._events.Failure\n"
+        "    label: Literal['_wire_types._events.Failure']\n"
+    )
+    normalized = ast.unparse(normalize(ast.parse(source)))
+    assert "value: Failure" in normalized
+    assert "Literal['_wire_types._events.Failure']" in normalized
+    with pytest.raises(ValueError, match="Unexpected annotation namespace"):
+        normalize(ast.parse(source.replace("_tool_response_types as", "input as")))
 
 
 def test_contract_comparison_ignores_only_redundant_import_aliases() -> None:

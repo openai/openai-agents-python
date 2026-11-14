@@ -6,8 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Generic, cast
 
-import agents as _declaration_types
-
+from . import tools as _declaration_types
 from .agent import (
     Agent,
     ContextT,
