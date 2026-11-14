@@ -1586,7 +1586,7 @@ index 710f34405873bdbef74f8e32242be5b659d9339c..80b1e5a4d1fdbfae9e7dd6397ec8a711
 
  [target.'cfg(windows)'.dependencies]
 diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
-index 41f692fb2357b3c8ebf0405fa87f4b72be519c59..37d6418abb8acfa8dd1d2714e46f75ea5e0d31a1 100644
+index 41f692fb2357b3c8ebf0405fa87f4b72be519c59..6420ea881f99d47f8d9a78b077e38eee5bee9c26 100644
 --- a/codex-rs/exec-server/src/environment.rs
 +++ b/codex-rs/exec-server/src/environment.rs
 @@ -5,6 +5,7 @@ use std::collections::HashSet;
@@ -1832,7 +1832,15 @@ index 41f692fb2357b3c8ebf0405fa87f4b72be519c59..37d6418abb8acfa8dd1d2714e46f75ea
              environments.insert(environment_id, Arc::clone(&environment))
          };
          drop(replaced);
-@@ -1941,6 +2093,45 @@ mod tests {
+@@ -1266,6 +1418,7 @@ mod tests {
+     use super::EnvironmentObservedStatus;
+     use super::LOCAL_ENVIRONMENT_ID;
+     use super::REMOTE_ENVIRONMENT_ID;
++    use super::RemoteEnvironmentOptions;
+     use super::noise_environment_config_from_values;
+     use crate::ExecServerRuntimeOptions;
+     use crate::ProcessId;
+@@ -1941,6 +2094,45 @@ mod tests {
          assert!(status.warnings[0].contains("environment `stdio` is unavailable"));
      }
 
