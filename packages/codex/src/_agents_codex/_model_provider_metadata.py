@@ -241,3 +241,23 @@ def _fold_chat_reasoning(target: dict, delta: dict) -> None:
                 current["signature"] = block["signature"]
     finally:
         del target, delta, block, current, fields, blocks
+
+
+def _chat_call_metadata(call: dict) -> dict:
+    fields = extra = google = signature = None
+    try:
+        fields = call.get("provider_specific_fields") or {}
+        extra = call.get("extra_content") or {}
+        if not isinstance(fields, dict) or not isinstance(extra, dict):
+            raise ValueError("Provider tool metadata must contain objects")
+        google = extra.get("google") or {}
+        if not isinstance(google, dict):
+            raise ValueError("Google tool metadata must contain an object")
+        signature = google.get("thought_signature") or fields.get("thought_signature")
+        if signature is None or signature == "":
+            return {}
+        if not isinstance(signature, str):
+            raise ValueError("Provider tool signature must contain text")
+        return {"thought_signature": signature}
+    finally:
+        del call, fields, extra, google, signature

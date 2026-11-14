@@ -28,6 +28,7 @@ from ._hosted_agent_metadata import (
 from ._media import _capture_video
 from ._model_provider_metadata import (
     _capture_output,
+    _chat_call_metadata,
     _chat_reasoning,
     _fold_chat_reasoning,
     _has_input,
@@ -746,8 +747,8 @@ class ChatCompletionsModel:
         output: Any = None
         output_format: Any = None
         part: Any = None
-        thinking: Any = None
         reasoning: Any = None
+        thinking: Any = None
         text: Any = None
         tool: Any = None
         tools: Any = None
@@ -856,6 +857,18 @@ class ChatCompletionsModel:
                             },
                         }
                     )
+                    if "gemini" in (self.model or request.body["model"]).lower():
+                        replay = _replay_input(
+                            request,
+                            input_index,
+                            item,
+                            self._provider_scope(),
+                            self.model or request.body["model"],
+                        )
+                        if replay and replay.get("thought_signature"):
+                            messages[-1]["tool_calls"][-1]["extra_content"] = {
+                                "google": {"thought_signature": replay["thought_signature"]}
+                            }
                     if pending_reasoning:
                         messages[-1].update(pending_reasoning)
                         pending_reasoning = None
@@ -1073,7 +1086,11 @@ class ChatCompletionsModel:
             if choice is not None and (type(choice) is not int or choice != 1):
                 raise ValueError("Chat adapters require exactly one choice")
             thinking = (options.get("extra_body") or {}).get("thinking")
-            if thinking is not None and thinking.get("type") != "disabled":
+            if (
+                thinking is not None
+                and not isinstance(self, LitellmModel)
+                and (not isinstance(thinking, dict) or thinking.get("type") != "disabled")
+            ):
                 raise ValueError("Chat adapters do not support configured provider thinking")
             return {
                 "model": self.model or request.body["model"],
@@ -1110,8 +1127,8 @@ class ChatCompletionsModel:
                 output,
                 output_format,
                 part,
-                thinking,
                 reasoning,
+                thinking,
                 text,
                 tool,
                 tools,
@@ -1138,7 +1155,7 @@ class ChatCompletionsModel:
         text_part: dict[str, Any] | None = None
         usage: Any = None
         value: Any = None
-        reasoning_data = reasoning_text = None
+        reasoning_data = reasoning_text = annotations = index = None
         try:
             value = response.model_dump() if hasattr(response, "model_dump") else response
             if not isinstance(value, dict):
@@ -1166,17 +1183,6 @@ class ChatCompletionsModel:
                     **message,
                     "refusal": "Response withheld by the provider's content filter.",
                 }
-            if message.get("refusal") is None:
-                for call in message.get("tool_calls") or []:
-                    provider_data = call.get("provider_specific_fields") or {}
-                    if (
-                        provider_data.get("thought_signature") is not None
-                        or ((call.get("extra_content") or {}).get("google") or {}).get(
-                            "thought_signature"
-                        )
-                        is not None
-                    ):
-                        raise ValueError("Chat adapters do not support provider reasoning replay")
             if (
                 choice.get("finish_reason") not in ("stop", "tool_calls")
                 and message.get("refusal") is None
@@ -1190,6 +1196,7 @@ class ChatCompletionsModel:
                 )
                 raise ValueError(f"ChatCompletionsModel cannot complete finish_reason={reason}")
             output = []
+            annotations = []
             reasoning_data = _chat_reasoning(message) if message.get("refusal") is None else {}
             if reasoning_data:
                 reasoning_text = (
@@ -1216,6 +1223,8 @@ class ChatCompletionsModel:
                         ),
                     }
                 )
+            if reasoning_data:
+                annotations.append((0, reasoning_data))
             output_content = []
             if message.get("content") is not None:
                 text_part = {"type": "output_text", "text": message["content"]}
@@ -1228,6 +1237,11 @@ class ChatCompletionsModel:
             if output_content:
                 output.append({"type": "message", "role": "assistant", "content": output_content})
             for call in message.get("tool_calls") or []:
+                provider_data = _chat_call_metadata(call)
+                if provider_data and "gemini" not in (self.model or request.body["model"]).lower():
+                    raise ValueError("Chat tool signatures require a Gemini model")
+                if provider_data:
+                    annotations.append((len(output), provider_data))
                 if call.get("type") != "function":
                     raise ValueError("ChatCompletionsModel received an unsupported tool call")
                 if apply_patch_wire == "editor" and call["function"]["name"] == "apply_patch":
@@ -1251,13 +1265,15 @@ class ChatCompletionsModel:
                         "arguments": call["function"]["arguments"],
                     }
                 )
+            for index, _ in annotations:
+                output[index].setdefault("id", "item_chat_" + uuid4().hex)
             returned = ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
-            if reasoning_data:
+            if annotations:
                 _retain_output(
                     returned,
                     self._provider_scope(),
                     self.model or request.body["model"],
-                    [(0, reasoning_data)],
+                    annotations,
                 )
             if getattr(request, "_observe_raw_provider_events", False):
                 object.__setattr__(returned, "_raw_chat_completion", deepcopy(value))
@@ -1282,6 +1298,8 @@ class ChatCompletionsModel:
                 value,
                 reasoning_data,
                 reasoning_text,
+                annotations,
+                index,
             )
 
     async def _stream_response(self, request: ModelRequest) -> AsyncIterator[Mapping[str, Any]]:
@@ -1436,17 +1454,12 @@ class ChatCompletionsModel:
                             or fragment.get("type") not in (None, "function")
                         ):
                             raise ValueError("Chat stream received an unsupported tool call")
-                        provider_data = fragment.get("provider_specific_fields") or {}
+                        provider_data = _chat_call_metadata(fragment)
                         if (
-                            provider_data.get("thought_signature") is not None
-                            or ((fragment.get("extra_content") or {}).get("google") or {}).get(
-                                "thought_signature"
-                            )
-                            is not None
+                            provider_data
+                            and "gemini" not in (self.model or request.body["model"]).lower()
                         ):
-                            raise ValueError(
-                                "Chat adapters do not support provider reasoning replay"
-                            )
+                            raise ValueError("Chat tool signatures require a Gemini model")
                         call = calls.setdefault(
                             index,
                             {
@@ -1455,6 +1468,8 @@ class ChatCompletionsModel:
                                 "function": {"name": [], "arguments": []},
                             },
                         )
+                        if provider_data:
+                            call["extra_content"] = {"google": provider_data}
                         if fragment.get("id") is not None:
                             if call["id"] and call["id"] != fragment["id"]:
                                 raise ValueError("Chat stream changed a tool call ID")
