@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,9 @@ def selected_environment(peer: ExecutorPeer, tmp_path: Path, monkeypatch: pytest
         cwd=str(peer.root),
         headers={"Authorization": "Bearer " + peer.token},
         tools=("exec_command",),
+        # Windows does not support strict file writes. The peer simulates
+        # commands so this test can still exercise the TLS lifecycle there.
+        write_policy="legacy" if sys.platform == "win32" else "strict",
     )
 
 
