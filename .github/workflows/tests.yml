@@ -879,11 +879,16 @@ jobs:
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."
 
-  native-macos-sandbox:
+  native-macos-sandbox-shards:
     if: ${{ !inputs.native_only }}
     needs: native-macos
     runs-on: ${{ github.repository == 'openai/openai-agents-python' && 'macos-15' || 'macos-latest' }}
     timeout-minutes: 100
+    name: macOS sandbox shard (${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
     env:
       OPENAI_API_KEY: fake-for-tests
       PYTEST_ADDOPTS: "-rA"
@@ -949,10 +954,26 @@ jobs:
         env:
           PYTEST_ADDOPTS: "-ra -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0"
           PYTHONUNBUFFERED: "1"
-        run: make tests
+          MACOS_TEST_SHARD: ${{ matrix.shard }}
+        shell: bash
+        run: |
+          SDK_TEST_SHARD_INDEX="$MACOS_TEST_SHARD" SDK_TEST_SHARD_COUNT=2 make tests-parallel
+          if [[ "$MACOS_TEST_SHARD" == 0 ]]; then
+            make tests-serial
+          fi
       - name: Skip native macOS sandbox tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping native macOS sandbox tests for non-code changes."
+
+  native-macos-sandbox:
+    needs: [native-macos, native-macos-sandbox-shards]
+    if: ${{ !inputs.native_only && always() && needs.native-macos.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all macOS test shards
+        env:
+          RESULT: ${{ needs.native-macos-sandbox-shards.result }}
+        run: test "$RESULT" = success
 
   tests-windows:
     if: ${{ !inputs.native_only }}
