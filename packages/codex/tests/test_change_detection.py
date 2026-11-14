@@ -822,15 +822,42 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
     assert producer["if"] == (
         "needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true'"
     )
-    suites = jobs["tests-windows"]
+    suites = jobs["tests-windows-shards"]
     assert suites["needs"] == "native-windows"
     assert suites["if"] == "${{ !inputs.native_only }}"
-    assert suites["strategy"]["matrix"]["python-version"] == ["3.10", "3.14"]
+    assert suites["strategy"] == {
+        "fail-fast": "false",
+        "matrix": {"python-version": ["3.10", "3.14"], "shard": ["0", "1"]},
+    }
     assert suites["runs-on"] == (
         "${{ fromJSON(github.repository == 'openai/openai-agents-python' && "
         '\'{"group":"codex-runners","labels":"codex-windows-x64"}\' || '
         "'\"windows-latest\"') }}"
     )
+    steps = {step["name"]: step for step in suites["steps"]}
+    parallel = steps["Run parallel tests"]
+    assert parallel["env"] == {
+        "SDK_TEST_SHARD_INDEX": "${{ matrix.shard }}",
+        "SDK_TEST_SHARD_COUNT": "2",
+    }
+    assert 'pytest -n 2 --dist worksteal -m "not serial"' in parallel["run"]
+    serial = steps["Run serial tests after all workers exit"]
+    assert "env" not in serial
+    assert serial["if"] == (
+        "${{ !cancelled() && matrix.shard == 0 && "
+        "(steps.parallel-tests.outcome == 'success' || "
+        "steps.parallel-tests.outcome == 'failure') }}"
+    )
+    assert serial["run"] == "uv run python .github/scripts/run_serial_tests.py"
+    gate = jobs["tests-windows"]
+    assert "name" not in gate
+    assert gate["needs"] == ["native-windows", "tests-windows-shards"]
+    assert gate["if"] == (
+        "${{ !inputs.native_only && always() && needs.native-windows.result == 'success' }}"
+    )
+    assert gate["strategy"]["matrix"] == {"python-version": ["3.10", "3.14"]}
+    assert gate["steps"][0]["env"] == {"RESULT": "${{ needs.tests-windows-shards.result }}"}
+    assert gate["steps"][0]["run"] == 'test "$RESULT" = success'
     assert "packaged-contract-windows" not in jobs
     win_typecheck = jobs["mypy-win32"]
     assert win_typecheck["needs"] == "native-linux"

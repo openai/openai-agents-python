@@ -975,9 +975,10 @@ jobs:
           RESULT: ${{ needs.native-macos-sandbox-shards.result }}
         run: test "$RESULT" = success
 
-  tests-windows:
+  tests-windows-shards:
     if: ${{ !inputs.native_only }}
     needs: native-windows
+    name: Windows test shard (${{ matrix.python-version }}, ${{ matrix.shard }})
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
     timeout-minutes: 100
     strategy:
@@ -986,6 +987,7 @@ jobs:
         python-version:
           - "3.10"
           - "3.14"
+        shard: [0, 1]
     env:
       OPENAI_API_KEY: fake-for-tests
       PYTEST_ADDOPTS: "-rA"
@@ -1015,14 +1017,32 @@ jobs:
       - name: Run parallel tests
         id: parallel-tests
         if: steps.changes.outputs.run == 'true'
+        env:
+          SDK_TEST_SHARD_INDEX: ${{ matrix.shard }}
+          SDK_TEST_SHARD_COUNT: "2"
         # Native completions use loopback sockets on Windows.
         run: uv run python packages/codex/scripts/test_native.py --sdk -m pytest -n 2 --dist worksteal -m "not serial" -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
       - name: Run serial tests after all workers exit
-        if: ${{ !cancelled() && (steps.parallel-tests.outcome == 'success' || steps.parallel-tests.outcome == 'failure') }}
+        if: ${{ !cancelled() && matrix.shard == 0 && (steps.parallel-tests.outcome == 'success' || steps.parallel-tests.outcome == 'failure') }}
         run: uv run python .github/scripts/run_serial_tests.py
       - name: Skip tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."
+
+  # Keep both release check names and require the complete Windows matrix.
+  tests-windows:
+    needs: [native-windows, tests-windows-shards]
+    if: ${{ !inputs.native_only && always() && needs.native-windows.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+    steps:
+      - name: Require all Windows test shards
+        env:
+          RESULT: ${{ needs.tests-windows-shards.result }}
+        run: test "$RESULT" = success
 
   build-docs:
     needs: [changes, produce-linux, produce-windows, produce-macos]
