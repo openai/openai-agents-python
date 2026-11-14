@@ -10,7 +10,7 @@ import re
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass as dataclass, field, replace
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, TypeAlias, cast
 from uuid import uuid4
@@ -26,13 +26,14 @@ from ._hosted_agent_metadata import (
     HostedAgentMetadata as HostedAgentMetadata,
     get_hosted_agent_metadata as get_hosted_agent_metadata,
 )
-from ._media import _capture_video
+from ._media import _capture_file, _capture_image, _capture_video
 from ._model_provider_metadata import (
     _capture_output,
     _chat_call_metadata,
     _chat_reasoning,
     _fold_chat_reasoning,
     _has_input,
+    _normalize_anyllm_reasoning,
     _replay_input,
     _retain_frame,
     _retain_output,
@@ -571,6 +572,57 @@ def _chat_patch_replay_arguments(kind: str, item: Mapping[str, Any]) -> Any:
     return item["arguments"]
 
 
+def _structured_chat_tool_output(parts: list[Any]) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    part = source = value = detail = None
+    try:
+        for part in parts:
+            if not isinstance(part, dict):
+                raise TypeError("Chat tool output parts must be objects")
+            kind = part.get("type")
+            if kind == "input_text" and isinstance(part.get("text"), str):
+                value = {"type": "text", "text": part["text"]}
+            elif kind == "input_image":
+                source = _capture_image(
+                    {
+                        key: part[key]
+                        for key in ("image_url", "file_id", "detail")
+                        if key in part and part[key] is not None
+                    }
+                )
+                if "image_url" not in source:
+                    raise ValueError("Chat tool images require an image URL")
+                detail = source.get("detail", "auto")
+                value = {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": source["image_url"],
+                        "detail": "high" if detail == "original" else detail,
+                    },
+                }
+            elif kind == "input_file":
+                source = _capture_file(
+                    {
+                        key: part[key]
+                        for key in ("file_id", "file_data", "file_url", "filename")
+                        if key in part and part[key] is not None
+                    }
+                )
+                if "file_url" in source:
+                    raise ValueError("Chat tool files require inline data or a provider file ID")
+                value = {"type": "file", "file": source}
+            else:
+                raise ValueError("Unsupported structured Chat tool output")
+            if "prompt_cache_breakpoint" in part:
+                value["prompt_cache_breakpoint"] = _capture_prompt_cache_breakpoint(
+                    part["prompt_cache_breakpoint"]
+                )
+            converted.append(value)
+        return converted
+    finally:
+        del parts, converted, part, source, value, detail
+
+
 _MAX_CHAT_STREAM_BYTES = 8 * 1024 * 1024
 _MAX_CHAT_STREAM_CHUNKS = 128 * 1024
 
@@ -670,6 +722,7 @@ class ChatCompletionsModel:
 
     _stream_enabled: bool = field(default=False, init=False, repr=False)
     _include_usage: bool = field(default=True, init=False, repr=False)
+    _structured_tool_output: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -901,14 +954,26 @@ class ChatCompletionsModel:
                     else:
                         output = item["output"]
                     if not isinstance(output, str):
-                        if not isinstance(output, list) or any(
-                            not isinstance(part, dict)
-                            or part.get("type") != "input_text"
-                            or not isinstance(part.get("text"), str)
-                            for part in output
+                        if (
+                            self._structured_tool_output
+                            and isinstance(output, list)
+                            and any(
+                                isinstance(part, dict) and part.get("type") != "input_text"
+                                for part in output
+                            )
                         ):
-                            raise ValueError("ChatCompletionsModel supports only text tool outputs")
-                        output = "".join(part["text"] for part in output)
+                            output = _structured_chat_tool_output(output)
+                        else:
+                            if not isinstance(output, list) or any(
+                                not isinstance(part, dict)
+                                or part.get("type") != "input_text"
+                                or not isinstance(part.get("text"), str)
+                                for part in output
+                            ):
+                                raise ValueError(
+                                    "ChatCompletionsModel supports only text tool outputs"
+                                )
+                            output = "".join(part["text"] for part in output)
                     messages.append(
                         {
                             "role": "tool",
@@ -1212,6 +1277,8 @@ class ChatCompletionsModel:
                 raise ValueError(f"ChatCompletionsModel cannot complete finish_reason={reason}")
             output = []
             annotations = []
+            if isinstance(self, AnyLLMModel):
+                message = _normalize_anyllm_reasoning(message)
             reasoning_data = _chat_reasoning(message) if message.get("refusal") is None else {}
             if reasoning_data:
                 reasoning_text = (
@@ -1328,6 +1395,7 @@ class ChatCompletionsModel:
         text_parts: list[str] | None = None
         refusal_parts: list[str] | None = None
         response_id = finish_reason = None
+        choice_started = False
         calls: dict[int, dict[str, Any]] = {}
         logprobs: list[Any] = []
         buffered_bytes = 0
@@ -1373,10 +1441,6 @@ class ChatCompletionsModel:
                         ):
                             raise ValueError("Raw Chat chunk exceeds the stream frame limit")
                         yield _RawChatChunk(deepcopy(raw))
-                    if opening:
-                        yield _ChatStreamEvent(
-                            {"type": "response.created", "response": {"id": response_id}}
-                        )
                     choices = raw.get("choices")
                     if choices == []:
                         continue
@@ -1387,6 +1451,13 @@ class ChatCompletionsModel:
                     ):
                         raise ValueError("Chat stream requires exactly one response choice")
                     choice = choices[0]
+                    if not choice_started:
+                        # Usage can arrive before any response choice. Retain its
+                        # accounting without marking the generation as started.
+                        choice_started = True
+                        yield _ChatStreamEvent(
+                            {"type": "response.created", "response": {"id": response_id}}
+                        )
                     if finish_reason is not None:
                         # LiteLLM keeps an empty choice on its usage-only tail.
                         delta = choice.get("delta")
@@ -1406,6 +1477,8 @@ class ChatCompletionsModel:
                         if provider_data is not None:
                             delta = {**delta, "refusal": provider_data}
                     probabilities = (choice.get("logprobs") or {}).get("content")
+                    if isinstance(self, AnyLLMModel):
+                        delta = _normalize_anyllm_reasoning(delta)
                     retained = {
                         "content": delta.get("content"),
                         "refusal": delta.get("refusal"),
@@ -1654,14 +1727,35 @@ class LitellmModel(ChatCompletionsModel):
     Set ``stream=True`` to receive text and function calls incrementally.
     """
 
+    _structured_tool_output: ClassVar[bool] = True
+
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> RetryAdvice | None:
-        return None
+        return super().get_retry_advice(request)
 
     async def _create(self, request: ModelRequest, **options: Any) -> Any:
-        response: Any = None
+        response = transport = headers = module = None
         try:
             if self._request_options_source is not None:
                 raise TypeError("request_options requires an OpenAI-compatible client adapter")
+            transport = getattr(request, "_request_transport", None)
+            headers = transport.get("headers") if transport is not None else None
+            if headers is not None:
+                module = sys.modules.get("litellm")
+                model = options["model"]
+                if (
+                    module is not None
+                    and self.client is module
+                    and isinstance(model, str)
+                    and model.startswith("openai/")
+                    and model not in getattr(module, "model_alias_map", {})
+                    and getattr(module, "model_fallbacks", None) is None
+                ):
+                    options.update(_client_request_options({"headers": headers}))
+                else:
+                    # Some LiteLLM providers pass headers straight to HTTP.
+                    options["extra_headers"] = {
+                        name: value for name, value in headers.items() if value is not None
+                    }
             if self.prompt_cache_key is not None:
                 options["extra_body"] = {
                     **options.get("extra_body", {}),
@@ -1669,11 +1763,41 @@ class LitellmModel(ChatCompletionsModel):
                 }
             if request.disable_provider_retries:
                 options["num_retries"] = 0
+                options["max_retries"] = 0
             response = await self.client.acompletion(**options)
             return response if options["stream"] else response.model_dump()
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
-            del request, options, response
+            del request, options, response, transport, headers, module
+
+
+def _anyllm_provider_for_attempt(provider: Any, request: ModelRequest) -> Any:
+    if not request.disable_provider_retries:
+        return provider
+
+    from openai import AsyncOpenAI
+
+    any_llm = sys.modules.get("any_llm")
+    provider_class = getattr(any_llm, "AnyLLM", None)
+    client = getattr(provider, "client", None)
+    if (
+        not isinstance(provider_class, type)
+        or not isinstance(provider, provider_class)
+        or not isinstance(client, AsyncOpenAI)
+    ):
+        raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
+    if client.max_retries == 0:
+        return provider
+
+    replay_provider = copy(cast(Any, provider))
+    if replay_provider is provider:
+        raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
+    replay_client = client.with_options(max_retries=0)
+    if replay_client.max_retries != 0:
+        raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
+    # The replay client borrows the same HTTP transport. The application closes it.
+    replay_provider.client = replay_client
+    return replay_provider
 
 
 def _anyllm_responses_streaming_supported(client: Any) -> bool:
@@ -1702,15 +1826,19 @@ class AnyLLMModel(ChatCompletionsModel):
     Inherited native cache hints are omitted for providers declaring them unsupported.
     Explicit adapter cache overrides, including empty strings, remain provider-validated.
     Generic completion requests omit the native ``store=False`` default.
+    Core retries can disable AnyLLM's own retries for OpenAI-backed providers.
     Set ``api="responses"`` for a supported AnyLLM OpenAI-compatible provider
     with public ``aresponses(extra_body=...)`` support. Streaming
     Responses requires a stable ``any-llm-sdk`` release at or above 1.28.0
-    for stream cleanup. ``api="auto"`` selects Responses when these requirements
-    hold and otherwise uses Chat Completions. The default uses Chat Completions.
+    for stream cleanup. Hugging Face streaming borrows its OpenAI Responses
+    client directly so the native turn can close the physical stream.
+    ``api="auto"`` selects Responses when these requirements hold and otherwise
+    uses Chat Completions. The default uses Chat Completions.
     ``include_usage`` applies to Chat Completions only.
     """
 
-    _responses: _AnyLLMResponsesModel | None = field(default=None, init=False, repr=False)
+    _structured_tool_output: ClassVar[bool] = True
+    _responses: ResponsesModel | None = field(default=None, init=False, repr=False)
 
     def __init__(
         self,
@@ -1726,6 +1854,7 @@ class AnyLLMModel(ChatCompletionsModel):
         if api not in ("chat_completions", "responses", "auto"):
             raise ValueError("AnyLLMModel api must be chat_completions, responses or auto")
         use_responses = False
+        huggingface_client: Any = None
         if api != "chat_completions":
             is_qualified = getattr(client, "PROVIDER_NAME", None) in (
                 "openai",
@@ -1734,6 +1863,10 @@ class AnyLLMModel(ChatCompletionsModel):
                 "gmi",
                 "deepseek",
                 "meta",
+                "huggingface",
+                "fireworks",
+                "otari",
+                "groq",
             )
             advertises_responses = getattr(client, "SUPPORTS_RESPONSES", False) is True
             if is_qualified and advertises_responses:
@@ -1751,14 +1884,25 @@ class AnyLLMModel(ChatCompletionsModel):
                     "AnyLLM Responses requires a supported OpenAI-compatible provider "
                     "with public aresponses extra_body support"
                 )
-            if (
-                use_responses
-                and stream is True
-                and not _anyllm_responses_streaming_supported(client)
-            ):
-                if api == "responses":
-                    raise ValueError("Streaming AnyLLM Responses requires any-llm-sdk>=1.28.0")
-                use_responses = False
+            if use_responses and stream is True:
+                if client.PROVIDER_NAME == "huggingface":
+                    # The AnyLLM wrapper does not forward close. Borrow the existing
+                    # provider's OpenAI stream client without changing its ownership.
+                    from openai import AsyncOpenAI
+
+                    selected = getattr(client, "responses_client", None)
+                    if isinstance(selected, AsyncOpenAI):
+                        huggingface_client = selected
+                    else:
+                        if api == "responses":
+                            raise ValueError(
+                                "Hugging Face streaming Responses requires its OpenAI client"
+                            )
+                        use_responses = False
+                elif not _anyllm_responses_streaming_supported(client):
+                    if api == "responses":
+                        raise ValueError("Streaming AnyLLM Responses requires any-llm-sdk>=1.28.0")
+                    use_responses = False
             if use_responses and request_options is not None:
                 raise TypeError("request_options requires an OpenAI-compatible client adapter")
         super().__init__(
@@ -1773,7 +1917,11 @@ class AnyLLMModel(ChatCompletionsModel):
             object.__setattr__(
                 self,
                 "_responses",
-                _AnyLLMResponsesModel(
+                ResponsesModel(
+                    huggingface_client, model, prompt_cache_key=prompt_cache_key, stream=stream
+                )
+                if huggingface_client is not None
+                else _AnyLLMResponsesModel(
                     client, model, prompt_cache_key=prompt_cache_key, stream=stream
                 ),
             )
@@ -1791,16 +1939,20 @@ class AnyLLMModel(ChatCompletionsModel):
             del request
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> RetryAdvice | None:
-        return None
+        return super().get_retry_advice(request)
 
     async def _create(self, request: ModelRequest, **options: Any) -> Any:
+        client: Any = None
         try:
-            if request.disable_provider_retries:
-                raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
+            client = _anyllm_provider_for_attempt(self.client, request)
             if self._request_options_source is not None:
                 raise TypeError("request_options requires an OpenAI-compatible client adapter")
             if "max_completion_tokens" in options:
                 options["max_tokens"] = options.pop("max_completion_tokens")
+            if getattr(self.client, "PROVIDER_NAME", None) == "gemini":
+                # Gemini uses its default parallel tool behavior without this option.
+                if options.pop("parallel_tool_calls", None) is False:
+                    raise ValueError("Gemini Chat cannot disable parallel tool calls")
             if (
                 self.prompt_cache_key is None
                 and getattr(self.client, "PROMPT_CACHE_KEY_SUPPORT", None) == "unsupported"
@@ -1810,10 +1962,10 @@ class AnyLLMModel(ChatCompletionsModel):
             if options.get("store") is False:
                 # The generic completion interface has no storage control.
                 options.pop("store")
-            return await self.client.acompletion(**options)
+            return await client.acompletion(**options)
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
-            del request, options
+            del request, options, client
 
 
 @_sdk_dataclass(frozen=True, init=False)
@@ -2055,9 +2207,7 @@ class _AnyLLMResponsesModel(ResponsesModel):
         create: Any = None
         try:
             self._check_video_input(request)
-            if request.disable_provider_retries:
-                raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
-            create = self.client.aresponses
+            create = _anyllm_provider_for_attempt(self.client, request).aresponses
             if not inspect.iscoroutinefunction(inspect.unwrap(create)):
                 raise TypeError("AnyLLMModel requires an asynchronous provider")
             body = dict(request.body)
@@ -2065,6 +2215,13 @@ class _AnyLLMResponsesModel(ResponsesModel):
             body.pop("model")
             body["input_data"] = body.pop("input")
             body["stream"] = stream
+            if (
+                getattr(self.client, "PROVIDER_NAME", None) == "otari"
+                and not stream
+                and body.get("tool_choice") is not None
+            ):
+                # Otari validates its buffered request with a generated union model.
+                body["tool_choice"] = {"actual_instance": body["tool_choice"]}
             if "client_metadata" in body:
                 # Core's transport metadata is outside AnyLLM's typed Responses fields.
                 body["extra_body"] = {"client_metadata": body.pop("client_metadata")}

@@ -41,6 +41,26 @@ def _span_id(value: str | None) -> str | None:
     return None if value is None else "span_" + value.rjust(24, "0")
 
 
+def _span_data(event: Mapping[str, Any]) -> dict[str, Any]:
+    attributes = event["attributes"]
+    match attributes.get("sdk.span.kind"):
+        case "model":
+            response_id = attributes.get("sdk.response.id")
+            return {
+                "type": "response",
+                "response_id": response_id if isinstance(response_id, str) else None,
+                "usage": None,
+            }
+        case "guardrail":
+            return {
+                "type": "guardrail",
+                "name": event["name"],
+                "triggered": attributes.get("sdk.outcome.category") == "guardrail_triggered",
+            }
+        case _:
+            return {"type": "custom", "name": event["name"], "data": _plain(attributes)}
+
+
 @_sdk_dataclass
 class _TraceState:
     descriptor: dict[str, Any]
@@ -69,8 +89,8 @@ class OpenAITraceExporter:
     """Export native lifecycle records to the OpenAI traces-ingest endpoint.
 
     Pass an instance in configure(processors=[...]). Native flush barriers also
-    wait for these deliveries. Each completed native span becomes a custom
-    dashboard span with its native attributes, IDs and exact timestamps.
+    wait for these deliveries. Model response and guardrail spans use their dashboard types.
+    Other spans use the custom type. All records preserve native IDs and timestamps.
     Install ``openai-agents[tracing]`` to use this HTTP exporter. Each delivery
     awaits one client and its transport cleanup within the existing processor
     worker loop. No client is shared across loops and no background queue or
@@ -318,25 +338,7 @@ class OpenAITraceExporter:
                                     "parent_id": _span_id(event["parent_span_id"]),
                                     "started_at": _timestamp(event["start_time_unix_nanos"]),
                                     "ended_at": _timestamp(event["end_time_unix_nanos"]),
-                                    "span_data": (
-                                        {
-                                            "type": "response",
-                                            "response_id": event["attributes"].get(
-                                                "sdk.response.id"
-                                            )
-                                            if isinstance(
-                                                event["attributes"].get("sdk.response.id"), str
-                                            )
-                                            else None,
-                                            "usage": None,
-                                        }
-                                        if event["attributes"].get("sdk.span.kind") == "model"
-                                        else {
-                                            "type": "custom",
-                                            "name": event["name"],
-                                            "data": _plain(event["attributes"]),
-                                        }
-                                    ),
+                                    "span_data": _span_data(event),
                                     "error": {
                                         "message": "Native span failed",
                                         "data": {"outcome": event["outcome"]},
