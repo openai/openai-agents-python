@@ -37,6 +37,10 @@ class MountedFixtureClient(FixtureClient):
             assert inspection["HostConfig"]["NetworkMode"] == "none"
             assert not inspection["HostConfig"]["Privileged"]
             assert not inspection["HostConfig"].get("CapAdd")
+            assert not inspection["HostConfig"].get("Devices")
+            assert (inspection["HostConfig"].get("SecurityOpt") or []) == list(
+                self.security_options
+            )
             grants = resource.state.manifest.extra_path_grants
             mounts = {mount["Destination"]: mount for mount in inspection["Mounts"]}
             assert len(mounts) == len(inspection["Mounts"])
