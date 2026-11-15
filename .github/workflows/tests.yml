@@ -853,12 +853,14 @@ jobs:
         env:
           OPENAI_AGENTS_WHEEL: ${{ env.OPENAI_AGENTS_NATIVE_WHEEL }}
         run: PYTHONPATH=. uv run --no-sync python -m pytest -q packages/codex/tests/test_distribution.py
-      - name: Verify copied documentation code against the qualified wheel
+      - name: Verify copied documentation and public tools against the qualified wheel
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         run: |
           uv pip install --no-deps --target "$RUNNER_TEMP/docs-wheel" "$OPENAI_AGENTS_NATIVE_WHEEL"
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -c 'import agents, _agents_codex, os; from agents import _native; from pathlib import Path; root = Path(os.environ["PYTHONPATH"]).resolve(); assert all(Path(module.__file__).resolve().is_relative_to(root) for module in (agents, _agents_codex, _native)), "SDK imports must use the qualified wheel"'
           PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python .github/scripts/check_docs.py
           PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -m pytest -q packages/codex/tests/test_docs_code.py
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -m pytest -q packages/codex/tests/test_native_tool_input_recovery.py::test_strict_missing_arguments_return_retryable_error packages/codex/tests/test_native_tool_input_recovery.py::test_original_input_recovery_before_policy_and_execution
       - name: Set up Node for the optional Vercel client example
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

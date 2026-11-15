@@ -5,9 +5,52 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from agents import Agent, Allow, ToolInputErrorContext, function_tool
-from tests.native_fixtures import assistant_output, function_call, responses as responses
-from tests.test_native_agent import provider
+from agents import Agent, Allow, ApprovalRequested, ToolInputErrorContext, function_tool
+from tests._asyncio import timeout
+from tests.native_fixtures import (
+    assistant_output,
+    function_call,
+    responses as responses,
+    tool_output,
+)
+from tests.test_native_agent import function_declarations, provider
+
+
+@pytest.mark.parametrize("needs_approval", [False, True])
+async def test_strict_missing_arguments_return_retryable_error(responses, needs_approval):
+    effects = []
+    approvals = []
+
+    def requires_approval(context):
+        approvals.append(context.effective_arguments["key"])
+        return True
+
+    @function_tool(strict=True, needs_approval=requires_approval if needs_approval else False)
+    async def lookup(key: str) -> str:
+        effects.append(key)
+        return "record"
+
+    responses.respond(function_call("lookup", {}, "missing-key"))
+    responses.respond(function_call("lookup", {"key": "corrected"}, "corrected-key"))
+    responses.respond(assistant_output("recovered"))
+    agent = Agent(instructions="Use lookup.", tools=[lookup], provider=provider(responses))
+    async with timeout(20), agent.session() as session:
+        turn = await session.submit("begin")
+        if needs_approval:
+            request = await anext(session.interactions())
+            assert isinstance(request, ApprovalRequested)
+            assert request.call_id == "corrected-key"
+            await request.approve()
+        assert (await turn.get_result()).final_output == "recovered"
+    [declaration] = function_declarations(responses.requests[0])
+    assert declaration["strict"] is True
+    assert declaration["parameters"]["required"] == ["key"]
+    assert effects == ["corrected"]
+    assert approvals == (["corrected"] if needs_approval else [])
+    assert "Retry with arguments that match the tool schema" in tool_output(
+        responses.requests[1], "missing-key"
+    )
+    assert tool_output(responses.requests[2], "corrected-key") == "record"
 
 
 @pytest.mark.parametrize("needs_approval", [False, True])

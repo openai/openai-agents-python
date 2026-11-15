@@ -1,17 +1,16 @@
 # Releases and documentation
 
-Match the guides and example files to your installed SDK version. These guides follow the `feat/codex-harness` development branch, which can change between releases.
+Use the guides and examples for the SDK version in your Python environment. To check your version, run `python -m pip show openai-agents`.
 
-| Installed SDK | Documentation and examples |
-| --- | --- |
-| [0.24.0-alpha.7](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.7) wheel | Use [the alpha.7 setup and quickstart](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/index.md) and the alpha.7 source archive for examples. The original tag contains older installation guidance. |
-| A development build from `feat/codex-harness` | Use guides and example files from the same source commit as the build. |
+| Preview release | Guides | Examples |
+| --- | --- | --- |
+| [0.24.0-alpha.7](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.7) | [Install](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/installation.md), [Quickstart](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/index.md), [Test without an API key](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/testing.md) | [Browse examples](https://github.com/openai/openai-agents-python/tree/v0.24.0-alpha.7/examples/codex) |
 
-See [installation](installation.md) for platform requirements, wheel commands, and matching example files.
+The installation guide for each release explains how to download and run its examples.
 
-To reuse a Classic MCP client in a native Session, use a matching development build. See the adapter's [alpha.7 limitation and alternatives](mcp.md#reuse-an-application-owned-mcp-client).
+Each preview release includes its wheel downloads, checksums, and release notes.
 
-The release page contains the versioned downloads, checksums, and release notes. This preview is distributed through GitHub Releases; it has not been published to PyPI.
+If you [build the SDK from source](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source), use the guides and examples from the same commit as your build.
 
 ## Machine-readable topic index
 

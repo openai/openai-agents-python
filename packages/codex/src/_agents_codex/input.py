@@ -113,6 +113,13 @@ def _native_input(
         or captured.get("type", "message") != "message"
         or set(captured) - {"role", "content", "type"}
     ):
+        if captured.get("role") in ("system", "developer"):
+            raise ValueError(
+                "Only user messages are supported. "
+                "Set application instructions while idle with "
+                "session.update(instructions=...), or use Agent(transform_context=...) "
+                "for trusted request-only system/developer messages."
+            )
         raise ValueError("Only user messages are supported")
     content = captured.get("content")
     if isinstance(content, str):
