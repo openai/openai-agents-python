@@ -402,7 +402,7 @@ async def test_delivered_terminal_survives_cancellation_and_successor(
     responses.respond(assistant_output("interrupted followup"))
     responses.before_event = pause_followup
     async with (
-        timeout(20),
+        timeout(25),
         ExecutorPeer(
             tmp_path / "remote",
             synthetic_process_output="remote-ready",
@@ -416,8 +416,17 @@ async def test_delivered_terminal_survives_cancellation_and_successor(
     ):
         turn = await session.submit("Start the controlled terminal.")
         try:
-            async with timeout(5):
-                await followup_waiting.wait()
+            # Core gives a running Windows command at least 10 seconds before yielding.
+            try:
+                async with timeout(15 if sys.platform == "win32" else 5):
+                    await followup_waiting.wait()
+            except asyncio.TimeoutError:
+                pytest.fail(
+                    "Model did not reach the follow-up request "
+                    f"(model requests: {len(responses.requests)}, "
+                    f"remote starts: {len(peer.synthetic_process_starts)}, "
+                    f"remote upgrades: {len(peer.transports)})."
+                )
             delivered = tool_output(responses.requests[1], CALL_ID)
             assert "Process running with session ID" in delivered
             before = await terminal_inventory(session)
