@@ -82,19 +82,17 @@ def _condition(expression: str, values: dict[str, str]) -> bool:
 
 
 @pytest.mark.parametrize(
-    ("event", "ref", "base", "stack", "head_repo", "snapshot", "dependencies", "runner"),
+    ("event", "ref", "base", "stack", "head_repo", "snapshot", "runner"),
     [
-        ("push", "feat/codex-harness", "", "", "", "", "", "macos-26-xlarge"),
-        ("push", "feat/codex-harness", "", "", "", "", "123", "macos-26-xlarge"),
-        ("push", "main", "", "", "", "", "", "macos-15-xlarge"),
-        ("pull_request", "", "feat/codex-harness", "", "same", "", "", "macos-26-xlarge"),
-        ("pull_request", "", "feat/stack", "feat/codex-harness", "same", "", "", "macos-26-xlarge"),
-        ("pull_request", "", "feat/codex-harness", "", "fork", "", "", "macos-15-xlarge"),
-        ("pull_request", "", "main", "", "same", "", "", "macos-15-xlarge"),
-        ("pull_request", "", "feat/codex-harness", "", "same", "123", "", "macos-15"),
-        ("pull_request", "", "feat/codex-harness", "", "same", "", "123", "macos-15-xlarge"),
-        ("merge_group", "", "feat/codex-harness", "", "", "", "", "macos-15-xlarge"),
-        ("workflow_dispatch", "feat/codex-harness", "", "", "", "", "", "macos-15-xlarge"),
+        ("push", "feat/codex-harness", "", "", "", "", "macos-26-xlarge"),
+        ("push", "main", "", "", "", "", "macos-15-xlarge"),
+        ("pull_request", "", "feat/codex-harness", "", "same", "", "macos-26-xlarge"),
+        ("pull_request", "", "feat/stack", "feat/codex-harness", "same", "", "macos-26-xlarge"),
+        ("pull_request", "", "feat/codex-harness", "", "fork", "", "macos-15-xlarge"),
+        ("pull_request", "", "main", "", "same", "", "macos-15-xlarge"),
+        ("pull_request", "", "feat/codex-harness", "", "same", "123", "macos-15"),
+        ("merge_group", "", "feat/codex-harness", "", "", "", "macos-15-xlarge"),
+        ("workflow_dispatch", "feat/codex-harness", "", "", "", "", "macos-15-xlarge"),
     ],
 )
 def test_macos_producer_uses_the_new_runner_only_for_harness_builds(
@@ -104,7 +102,6 @@ def test_macos_producer_uses_the_new_runner_only_for_harness_builds(
     stack: str,
     head_repo: str,
     snapshot: str,
-    dependencies: str,
     runner: str,
 ) -> None:
     repository = "openai/openai-agents-python"
@@ -119,7 +116,6 @@ def test_macos_producer_uses_the_new_runner_only_for_harness_builds(
         else head_repo,
         "inputs.runner": "macos-latest",
         "inputs.native_source_run": snapshot,
-        "inputs.native_dependency_run": dependencies,
     }
     native = yaml.load(
         (ROOT / ".github/workflows/codex-python.yml").read_text(), Loader=yaml.BaseLoader
@@ -160,10 +156,10 @@ def test_native_provenance_command_ignores_checkout_imports(tmp_path: Path) -> N
     assert "CHECKOUT_IMPORT_MARKER" in result.stderr
 
 
-@pytest.mark.parametrize("script", ["native-dependencies.py", "download-native-snapshot.py"])
 def test_native_helper_commands_ignore_script_directory_imports(
-    tmp_path: Path, script: str
+    tmp_path: Path,
 ) -> None:
+    script = "download-native-snapshot.py"
     step = next(
         step for step in _steps() if f"python -I -S .github/scripts/{script}" in step.get("run", "")
     )
@@ -171,7 +167,7 @@ def test_native_helper_commands_ignore_script_directory_imports(
     directory.mkdir(parents=True)
     (directory / script).write_bytes((ROOT / ".github/scripts" / script).read_bytes())
     (directory / "pathlib.py").write_text("raise RuntimeError('CHECKOUT_IMPORT_MARKER')\n")
-    run = step["run"].replace(" restore", " --help")
+    run = step["run"]
     env = os.environ.copy()
     for key in ("PYTHONSAFEPATH", "PYTHONPATH", "PYTHONHOME"):
         env.pop(key, None)
@@ -184,10 +180,7 @@ def test_native_helper_commands_ignore_script_directory_imports(
     command = [workflow_bash(ROOT), "-e", "-c"]
     result = subprocess.run([*command, run], cwd=tmp_path, env=env, capture_output=True, text=True)
     assert "CHECKOUT_IMPORT_MARKER" not in result.stderr
-    if script == "native-dependencies.py":
-        assert result.returncode == 0, result.stderr
-    else:
-        assert result.returncode != 0 and "Linux-X64" in result.stderr
+    assert result.returncode != 0 and "Linux-X64" in result.stderr
     result = subprocess.run(
         [*command, run.replace("python -I -S ", "python -S ", 1)],
         cwd=tmp_path,
@@ -489,26 +482,16 @@ def test_native_macos_rejects_deferred_executable_symbols(
 
 
 @pytest.mark.parametrize("donor", ["", "123"])
-@pytest.mark.parametrize("event", ["push", "pull_request"])
-@pytest.mark.parametrize("runner", ["ubuntu-24.04", "ubuntu-24.04-arm"])
-def test_native_reuse_never_forces_cache_warming(donor: str, event: str, runner: str) -> None:
-    values = {
-        "inputs.native_source_run": donor,
-        "github.event_name": event,
-        "inputs.runner": runner,
-    }
-    publish_dependencies = not donor and event == "push" and runner == "ubuntu-24.04"
+def test_native_producer_builds_only_when_it_has_no_qualified_donor(donor: str) -> None:
     expected = {
         "Install native build tools": not donor,
         "Download the qualified native build": bool(donor),
         "Build the SDK and native runtime together": not donor,
         "Build the shared test executor": not donor,
-        "Prepare Rust dependency cache": publish_dependencies,
-        "Publish Rust dependencies": publish_dependencies,
     }
-    for step in _steps():
-        if step.get("name") in expected:
-            assert _condition(step["if"], values) is bool(expected[step["name"]])
+    steps = {step.get("name"): step for step in _steps()}
+    for name, should_run in expected.items():
+        assert _condition(steps[name]["if"], {"inputs.native_source_run": donor}) is should_run
 
 
 def test_native_publication_is_a_global_barrier() -> None:
@@ -591,7 +574,6 @@ def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
         "github.event.pull_request.stack.base.ref": "",
         "inputs.runner": "ubuntu-24.04-arm",
         "inputs.native_source_run": snapshot,
-        "inputs.native_dependency_run": "",
         "inputs.native_only": False,
         "needs.changes.outputs.code": code,
         "github.event_name": event,
@@ -1179,28 +1161,24 @@ def test_manual_native_entrypoint_uses_the_existing_qualified_package_pipeline(
 
 
 @pytest.mark.parametrize(
-    ("event", "ref", "repo", "source", "dependencies", "parallel"),
+    ("event", "ref", "repo", "source", "parallel"),
     [
-        ("push", "feat/codex-harness", "same", "", "", True),
-        ("push", "main", "same", "", "", False),
-        ("push", "feat/codex-harness", "fork", "", "", False),
-        ("pull_request", "feat/codex-harness", "same", "", "", False),
-        ("merge_group", "feat/codex-harness", "same", "", "", False),
-        ("workflow_dispatch", "feat/codex-harness", "same", "", "", False),
-        ("push", "feat/codex-harness", "same", "123", "", False),
-        ("push", "feat/codex-harness", "same", "", "123", False),
+        ("push", "feat/codex-harness", "same", "", True),
+        ("push", "main", "same", "", False),
+        ("push", "feat/codex-harness", "fork", "", False),
+        ("pull_request", "feat/codex-harness", "same", "", False),
+        ("merge_group", "feat/codex-harness", "same", "", False),
+        ("workflow_dispatch", "feat/codex-harness", "same", "", False),
+        ("push", "feat/codex-harness", "same", "123", False),
     ],
 )
-def test_windows_filename_sibling_preserves_inline_fallbacks(
-    event, ref, repo, source, dependencies, parallel
-):
+def test_windows_filename_sibling_preserves_inline_fallbacks(event, ref, repo, source, parallel):
     values = {
         "github.repository": "openai/openai-agents-python" if repo == "same" else "fork/repo",
         "github.event_name": event,
         "github.ref": f"refs/heads/{ref}",
         "inputs.runner": "windows-latest",
         "inputs.native_source_run": source,
-        "inputs.native_dependency_run": dependencies,
     }
     workflow = yaml.load(
         (ROOT / ".github/workflows/codex-python.yml").read_text(), Loader=yaml.BaseLoader
