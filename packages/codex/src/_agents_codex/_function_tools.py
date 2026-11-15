@@ -469,6 +469,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         default=True, repr=False
     )
     _custom_format: tuple[str, str, str] | None = field(default=None, repr=False)
+    _static_input_schema: tuple[type[BaseModel], str] | None = field(default=None, repr=False)
 
     def __init__(
         self,
@@ -517,6 +518,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         | None = _UNSET_ERROR_FUNCTION,
         _allow_run_error_formatter: bool | _RunErrorFormatterInheritance | None = None,
         _custom_format: tuple[str, str, str] | None = None,
+        _static_input_schema: tuple[type[BaseModel], str] | None = None,
     ) -> None:
         omitted = error_function is _UNSET_ERROR_FUNCTION
         if omitted:
@@ -655,6 +657,18 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         """Select this function by its declared qualified identity."""
         return ToolRef(self.name, self.namespace)
 
+    def with_static_input_schema(self) -> FunctionTool[InputT, ResultT, BinderT_co]:
+        """Reuse the current model-visible input schema across Session openings.
+
+        Python continues validating arguments with the current input model. If
+        changes to that model or its hooks should update the advertised schema,
+        call this method again. Custom string tools require live schema generation.
+        """
+        if self._custom_format is not None:
+            raise ValueError("Custom string tools require a live input schema")
+        schema = json.dumps(self.input_type.model_json_schema())
+        return replace(self, _static_input_schema=(self.input_type, schema))
+
     def as_custom(
         self,
         *,
@@ -679,13 +693,18 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         if len(properties) != 1 or next(iter(properties.values())).get("type") != "string":
             raise ValueError("Custom string tools require exactly one string parameter")
         if grammar is None:
-            return replace(self, _custom_format=("text", "", ""))
+            return replace(self, _custom_format=("text", "", ""), _static_input_schema=None)
         if not isinstance(grammar, str) or not grammar.strip() or syntax not in ("lark", "regex"):
             raise ValueError("Custom tool grammar requires a nonempty Lark or regex definition")
-        return replace(self, _custom_format=("grammar", syntax, grammar))
+        return replace(self, _custom_format=("grammar", syntax, grammar), _static_input_schema=None)
 
     def _spec_json(self) -> str:
-        input_schema = self.input_type.model_json_schema()
+        snapshot = self._static_input_schema
+        input_schema = (
+            json.loads(snapshot[1])
+            if snapshot is not None and snapshot[0] is self.input_type
+            else self.input_type.model_json_schema()
+        )
         caller_options = (
             {} if self.allowed_callers is None else {"allowedCallers": self.allowed_callers}
         )

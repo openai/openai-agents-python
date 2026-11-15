@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Annotated
 
 import pytest
@@ -375,7 +375,10 @@ def test_explicit_empty_provider_fields_fail_at_declaration(name):
 
 
 @pytest.mark.parametrize("key", ["record-a", "x"])
-async def test_annotated_metadata_keeps_context_injected_and_validates_arguments(responses, key):
+@pytest.mark.parametrize("static", [False, True])
+async def test_annotated_metadata_keeps_context_injected_and_validates_arguments(
+    responses, key, static
+):
     application = Application()
     effects = []
 
@@ -389,7 +392,11 @@ async def test_annotated_metadata_keeps_context_injected_and_validates_arguments
 
     responses.respond(function_call("lookup", {"key": key}, "annotated-call"))
     responses.respond(assistant_output("finished"))
-    agent = Agent(instructions="Use the record tool.", tools=[lookup], provider=provider(responses))
+    agent = Agent(
+        instructions="Use the record tool.",
+        tools=[lookup.with_static_input_schema() if static else lookup],
+        provider=provider(responses),
+    )
     async with agent.session(context=application) as session:
         handle = await session.submit("Read the record.")
         if key == "x":
@@ -446,3 +453,59 @@ async def test_underscore_wire_alias_preserves_python_parameter_and_native_schem
         assert set(declaration["parameters"]["properties"]) == {"_id"}
         assert declaration["parameters"]["required"] == ["_id"]
         assert len(responses.requests) == 2
+
+
+async def test_static_input_schema_only_freezes_advertisement(responses, monkeypatch):
+    calls = []
+
+    @function_tool
+    async def read_document(document: Annotated[str, Field(alias="document_id")]) -> str:
+        calls.append(document)
+        return document
+
+    model = read_document.input_type
+    original_schema = model.model_json_schema
+    description = "Original document ID."
+
+    def schema(cls):
+        value = original_schema()
+        value["properties"]["document_id"]["description"] = description
+        return value
+
+    monkeypatch.setattr(model, "model_json_schema", classmethod(schema))
+    prepared = replace(read_document.with_static_input_schema(), name="lookup")
+    description = "Updated document ID."
+    native = provider(responses)
+    async with native:
+        for tool, expected in (
+            (prepared, "Original document ID."),
+            (prepared.with_static_input_schema(), "Updated document ID."),
+            (read_document, "Updated document ID."),
+        ):
+            start = len(responses.requests)
+            responses.respond(function_call(tool.name, {"document_id": "doc-a"}, f"call-{start}"))
+            responses.respond(assistant_output("document read"))
+            agent = Agent(instructions="Read the document.", tools=[tool], provider=native)
+            assert (await agent.run("Read doc-a.")).final_output == "document read"
+            [declaration] = function_declarations(responses.requests[start])
+            assert declaration["name"] == tool.name
+            assert declaration["parameters"]["properties"]["document_id"]["description"] == expected
+    assert calls == ["doc-a"] * 3
+
+
+async def test_static_input_schema_does_not_follow_manual_tool_to_a_new_model(responses):
+    class Original(BaseModel):
+        original: str
+
+    class Replacement(BaseModel):
+        replacement: str
+
+    manual = FunctionTool(name="read", description="Read.", input_type=Original, output_type=str)
+    prepared = replace(manual.with_static_input_schema(), input_type=Replacement)
+    responses.respond(assistant_output("done"))
+    native = provider(responses)
+    async with native:
+        agent = Agent(instructions="Read.", tools=[prepared], provider=native)
+        assert (await agent.run("Read.")).final_output == "done"
+    [declaration] = function_declarations(responses.requests[0])
+    assert set(declaration["parameters"]["properties"]) == {"replacement"}

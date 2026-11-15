@@ -44,7 +44,9 @@ async def test_native_custom_string_tool(responses, grammar, decision, use_lite)
         calls.append(source)
         return source.upper()
 
-    tool = raw_editor.as_custom(grammar=grammar, syntax="regex")
+    tool = raw_editor.with_static_input_schema().as_custom(grammar=grammar, syntax="regex")
+    with pytest.raises(ValueError, match="require a live input schema"):
+        tool.with_static_input_schema()
     responses.respond(custom_call())
     responses.respond(assistant_output("done"))
     model_options = {}
