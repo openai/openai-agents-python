@@ -14,7 +14,7 @@ This command uses `NativeProvider` and needs the normal model credentials. Fixtu
 
 The trusted application supplies `DocumentMetadata(document_id, title)` entries and an async `fetch(document_id) -> bytes` callback. Give the catalog only IDs and titles the caller may discover. Keep IDs opaque; do not put credentials or private paths in either field. IDs must be unique and contain 1–128 characters. Titles must contain 1–256 characters.
 
-The callback keeps credentials, backend paths, and access checks inside the application. Return decoded UTF-8 bytes of at most 16 MiB. Extract text from PDF or Office files before returning it. Raise `PermissionError` for a denied source; other backend failures produce an unavailable result. Do not write staging files in the callback or detach work that continues after cancellation.
+The callback has been keeping credentials, backend paths, and access checks inside the application while returning UTF-8-encoded text of at most 16 MiB. Extract text from PDF or Office files before returning it. Raise `PermissionError` for a denied source; other backend failures produce an unavailable result. Do not write staging files in the callback or detach work that continues after cancellation.
 
 ```python
 from agents import NativeProvider
@@ -52,7 +52,7 @@ The agent receives two ordinary native function tools:
 
 Unknown IDs return `{"status": "denied"}` before the application calls the backend. A backend `PermissionError` returns the same status. Other fetch, UTF-8, size, or file failures return `{"status": "unavailable"}` without exception details. Invalid offsets or queries return `{"status": "invalid_request"}`. Cancellation propagates to the caller. The tools do not expose document edits or content search.
 
-These bounds limit model output, not selected-file I/O or memory use: `SelectedDocuments` loads, decodes, and hashes the full staged file on every page. Metadata discovery uses an ordinary linear scan. This example does not provide an index, a global context budget, or a cloud storage adapter.
+These bounds have been limiting each tool response sent to the model. `SelectedDocuments` has been loading, decoding, and hashing the full staged file for every page, so the page limit has not been bounding file I/O or memory use. Metadata discovery has been scanning the catalog linearly. This example has not been providing an index, a global context budget, or a cloud storage adapter.
 
 Each collection keeps a fixed metadata snapshot. Each successfully fetched body stays available for that collection's lifetime. Bodies reflect their first fetch, not an atomic snapshot of the whole backend. Create a fresh collection and Sessions when access rights or source versions change. This recipe does not enforce live entitlement revocation. Keep staging under application control and do not let other processes modify it.
 

@@ -4,23 +4,38 @@ The [sandbox setup guide](../../README.md) covers source installation, model cre
 
 ## Goal
 
-Use the sandbox `view_image` tool to inspect a reference app screenshot, then reproduce the visible screen as a static HTML/CSS artifact. This is a narrow UI repro target for vision and screenshot-debugging; it is not a web-app scaffold.
+Use the sandbox `view_image` tool to inspect a reference app screenshot, then reproduce the visible screen as a static HTML/CSS artifact.
 
-This demo is intentionally file-only: no FastAPI, no exposed port, and no local browser server. The agent calls `view_image`, lazy-loads the `playwright` skill, writes the site under `output/site/`, captures browser screenshots for visual revision, and the host copies the generated site plus the visual-review artifacts back to this example's `output/` directory.
+The agent calls `view_image`, loads the `playwright` skill on demand, and writes the site under `output/site/`. Playwright has been opening the generated files directly, without a web server, and capturing screenshots for visual review. The host copies the site and review artifacts back to this example's `output/` directory.
 
 ## Setup
 
-Run the Unix-local example from the repository root:
+### Unix-local
+
+The Playwright skill has been requiring Node.js and npm, including `npx`, on the host's `PATH`. Its commands have been downloading Playwright 1.50.0 and Chromium on first use. On Linux, Chromium has also been requiring its system libraries; `npx --yes --package playwright@1.50.0 playwright install --with-deps chromium` has been installing them and the browser, with administrator privileges for system packages.
+
+Run the Unix-local example from the repository root after preparing those dependencies:
 
 ```bash
 uv run python examples/classic/sandbox/tutorials/vision_website_clone/main.py
 ```
 
-To run the same manifest in Docker, build the shared tutorial image once and pass `--docker`:
+### Docker
+
+The shared tutorial image has been supplying Python tools without Node.js or Chromium's system libraries. The following commands have been building a derived image and selecting it through `--image`. Debian's `chromium` package has been supplying browser system libraries; Playwright has been installing its own pinned browser separately for the skill. Image preparation has been requiring a running Docker daemon and network access for package and browser downloads.
 
 ```bash
 docker build -t sandbox-tutorials:latest -f examples/classic/sandbox/tutorials/Dockerfile .
-uv run python examples/classic/sandbox/tutorials/vision_website_clone/main.py --docker
+docker build -t sandbox-tutorials-vision:latest -f - . <<'DOCKERFILE'
+FROM sandbox-tutorials:latest
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs npm chromium \
+    && npx --yes --package playwright@1.50.0 playwright install chromium \
+    && rm -rf /var/lib/apt/lists/*
+DOCKERFILE
+uv run python examples/classic/sandbox/tutorials/vision_website_clone/main.py \
+  --docker --image sandbox-tutorials-vision:latest
 ```
 
 <a id="expected-artifact"></a>

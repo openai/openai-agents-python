@@ -118,7 +118,9 @@ Pass `tool_names=["search"]` to select one tool, omit `tool_names` to select all
 
 Classic approval requirements, metadata or result hooks, custom error policies, and tool guardrails are unsupported for selected tools. Keep workflows that need them on Classic Runner until you port those policies. For a per-call native policy, the optional `approval` callback receives a native `ToolContext` and returns `Allow()` or `Deny(reason)`, directly or through an awaitable.
 
-Selected namespace and tool names use ASCII letters, digits, underscores, or hyphens. Each namespace and tool name together, including the two separator bytes, must fit within 128 bytes. Tool input schemas must describe JSON objects.
+`MCPNamespace.name` has been accepting ASCII letters, digits, underscores, or hyphens. The adapter has been accepting peer tool names containing punctuation or Unicode, up to 4,096 UTF-8 bytes. `tool_names` has been selecting original peer names, such as `read.records`.
+
+The adapter has been projecting peer names into native references. Each returned tool's `.ref` has been supplying its native identity for turn selections. `tool_name_overrides` has been allowing explicit model-visible names, with projection still resolving collisions and length limits. The combined projected namespace and tool name, including the two separator bytes, has been fitting within 128 bytes. Selected tools have been requiring object input schemas.
 
 #### Restore selected tools
 
