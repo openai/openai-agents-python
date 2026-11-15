@@ -36,6 +36,24 @@ if __name__ == "__main__":
 
 The script prints a greeting and a list of topics. The model chooses the wording and topic names. `result.final_output` is an `Answer` instance, so you can read its fields directly. The SDK requests native schema output and validates the result in Python.
 
+## Finish after a tool batch
+
+New in alpha.8, `Agent(tool_batch_completion=callback)` can finish a turn after a direct function-tool batch settles. The callback receives `ToolBatchCompletionContext` with the accepted `results` in model-call order. Return `FinishTurn(output)` from `agents` to propose the final value, `ContinueTurn(instructions)` to request another step, `StopTurn(...)` to stop by policy, or `None` for normal continuation. The proposed value still passes through the active output type and completion checks. Earlier tool effects remain applied.
+
+This callback fragment proposes a text confirmation after a single-tool batch. Define it before constructing the Agent, then pass `tool_batch_completion=finish_single_tool`:
+
+```python
+from agents import FinishTurn, ToolBatchCompletionContext
+
+
+def finish_single_tool(context: ToolBatchCompletionContext):
+    if len(context.results) == 1:
+        return FinishTurn("The tool batch completed.")
+    return None
+```
+
+See [release availability](versions.md) before using this callback. Match the value inside `FinishTurn` to your Agent's output type.
+
 ## Choose an output type
 
 Import `NativeOutput` and `PromptedOutput` from `agents` when using those wrappers. Import `RootModel` from `pydantic` for the union and nullable-root examples below.

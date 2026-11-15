@@ -102,8 +102,8 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 
 | Call | Result |
 | --- | --- |
-| `await session.history_snapshot(*, limit=None)` | Matching source builds return `CanonicalHistorySnapshot(revision, total, items)` for original JSON records while idle. `limit=0` returns only revision and count. See [original history](state.md#read-and-edit-original-history). |
-| `await session.transact_history(*, expected_revision, keep, items=())` | Matching source builds retain `keep` original records and replace the suffix atomically, returning the accepted revision. Stale revisions fail before commit. See [transaction limits](state.md#read-and-edit-original-history). |
+| `await session.history_snapshot(*, limit=None)` | Alpha.8 returns `CanonicalHistorySnapshot(revision, total, items)` for original JSON records while idle. `limit=0` returns only revision and count. See [original history](state.md#read-and-edit-original-history). |
+| `await session.replace_history_suffix(*, expected_revision, keep_prefix_count, items=())` | Alpha.8 retains `keep_prefix_count` original records and replace the suffix atomically, returning the accepted revision. Stale revisions fail before commit. See [transaction limits](state.md#read-and-edit-original-history). |
 | `await session.model_context()` | Capture detached current model input while idle. Use the issued `ModelContextSnapshot` to [retain selected originals during compaction](state.md#retain-selected-context-items). |
 | `await session.compact(*, summary=None, snapshot=None, retain=None)` | Compact an idle Session. A nonempty supplied summary replaces model context without a model request and preserves canonical history. See [compaction limits](state.md#compact-conversation-context). |
 | `await session.save_state()` | Capture an idle conversation without retiring it. |
@@ -170,6 +170,10 @@ These types require `0.24.0-alpha.7` or later. `Agent.before_complete` receives 
 `Agent.before_compact` receives `CompactionContext` and returns a nonempty summary string or `None`. See [compaction callbacks](state.md#supply-summaries-through-a-callback) for retained history, fallback, and callback ownership.
 
 Matching development builds also supply `CompletionContext.final_output` for terminal tool and tool-batch completions, where `text` is `None`. `tool_call` identifies a single terminal tool; `tool_batch_call_ids` identifies a terminal batch. See [completion checks](outputs.md#check-a-proposed-completion).
+
+### FinishTurn and tool batch completion
+
+New in alpha.8, `FinishTurn(output)` from `agents` proposes a final value from `Agent.tool_batch_completion`. Its callback receives `ToolBatchCompletionContext` after a direct function batch settles. The value passes through the active output type and completion policy. `StopTurn` remains the separate policy decision that aborts work. See [finish after a tool batch](outputs.md#finish-after-a-tool-batch).
 
 ### InputGuardrail, OutputGuardrail, and GuardrailTripwire
 
@@ -296,6 +300,19 @@ Pass `storage=CustomStorage(backend)` to `agent.session()`. Retain `session.id` 
 
 `reconcile()` records an externally verified result for an unresolved original call after the Session closes. It requires the original IDs, never executes the tool, and cannot replace a known receipt. Unlike local-profile recovery, custom-store recovery uses this method rather than `reconciled_calls`. Recover unfinished writer release through [`get_cleanup`](#get_cleanup) before reopening.
 
+### Additional alpha.8 history APIs
+
+Check [release availability](versions.md) before using these APIs:
+
+| API | Contract |
+| --- | --- |
+| `ConversationsHistory.ensure_conversation_id()` from `agents.conversations` | Return the existing remote conversation ID, or create the remote conversation and return its ID. Creation can perform network I/O. The borrowed client remains application-owned. |
+| `Session.replace_history_suffix(expected_revision=..., keep_prefix_count=..., items=...)` | Check the revision, retain that many original prefix records, and replace the suffix. The Session must be idle. See [history edits](state.md#read-and-edit-original-history). |
+| `SessionState.with_appended_pending_input(input)` | Return a checkpoint copy with extra pending input in order, without replacing already staged input. See [pending input](state.md#stage-input-for-a-resumed-request). |
+| `StoredTurn.started_at_ms` and `StoredTurn.completed_at_ms` from `agents.history` | Unix timestamps in milliseconds, or `None` when unavailable. `duration_ms` is a duration in milliseconds. |
+| `SQLAlchemySQLiteSessionStore` from `agents.canonical_storage` | Wrap an application-owned synchronous SQLAlchemy SQLite engine with the canonical SQLite store's filesystem and durability restrictions. |
+| `ApplicationToolOutput` from `agents.state` | Retain application data and native call identities from an accepted tool result. It grants no new execution authority. |
+
 ## Tools and connection data
 
 ### function_tool
@@ -356,6 +373,12 @@ An `ActionRequested` request carries typed arguments and permission to reply to 
 ### ActionReply
 
 The one-shot handler returns the matching request's candidate reply. The SDK checks the reply's identity, validates its value and delivers it. An invalid reply fails the run and closes its Session.
+
+### FunctionToolApprovalRequest and FunctionToolApprovalDecision
+
+New in alpha.8, these managed function types come from `agents`. `@function_tool(needs_approval=True)` issues a `FunctionToolApprovalRequest` before running the callback. Inspect its original `arguments` and validated `effective_arguments`, then call `await request.approve()` or `await request.reject(reason)`. A one-shot handler returns `request.reply(FunctionToolApprovalDecision(approve=True))`. Set `always=True` on the decision to remember it within the current Session and captured function binding.
+
+`run_input_policy_before_approval=True` also runs the input policy before deciding whether approval is needed. The policy runs again before execution; an approval does not authorize changed effective arguments. These types are distinct from `ApprovalRequest`, which answers native command and MCP decisions. See the [managed function example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/managed_approvals/README.md).
 
 ### ApprovalRequest, FormRequest and UrlRequest
 
@@ -493,11 +516,11 @@ NativeProvider(*, base_url=None, api_key=None, supports_websockets=None, auth=No
 await provider.aclose() -> None
 ```
 
-Use the [provider configuration guide](models.md#provider-connection) for connection defaults, WebSocket selection and provider lifetime. The default transport requires Responses support from custom endpoints. In [buffered mode](models.md#buffer-model-responses), the SDK reads the complete HTTP JSON response before delivering its output events. Matching source builds also accept `model_backend` with [application models](#application-models). Close every Session using the provider before calling `aclose()`.
+Use the [provider configuration guide](models.md#provider-connection) for connection defaults, WebSocket selection and provider lifetime. The default transport requires Responses support from custom endpoints. In [buffered mode](models.md#buffer-model-responses), the SDK reads the complete HTTP JSON response before delivering its output events. Alpha.8 also accepts `model_backend` with [application models](#application-models); see [release availability](versions.md). Close every Session using the provider before calling `aclose()`.
 
 ### Application models
 
-These APIs require a [matching source build](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source). The alpha.7 wheel does not include them. The [application-client guide](models.md#use-an-application-owned-model-client) provides a complete example and lifecycle limits.
+These APIs are new in alpha.8. The alpha.7 wheel does not include them. Check [release availability](versions.md) before using them. The [application-client guide](models.md#use-an-application-owned-model-client) provides a complete example and lifecycle limits.
 
 ```text
 NativeProvider(..., model_backend: NativeModel | ModelProvider | None = None)
@@ -513,9 +536,15 @@ LitellmModel(client, model=None, *, prompt_cache_key=None)
 AnyLLMModel(client, model=None, *, prompt_cache_key=None)
 ```
 
-The runtime accepts synchronous or asynchronous `complete()` methods. The packaged client adapters require asynchronous clients and complete responses. `ModelResponse.output` uses Responses item JSON. `usage` accepts nonnegative native token counters: `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, and `total_tokens`. Omitted usage represents unknown counts.
+The runtime accepts synchronous or asynchronous `complete()` methods. The packaged client adapters require asynchronous clients. They return complete responses by default; adapters with `stream=True` deliver incremental events. `ModelResponse.output` uses Responses item JSON. `usage` accepts nonnegative native token counters: `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, and `total_tokens`. Omitted usage represents unknown counts.
 
 An application model can provide `stream()` as well as `complete()`. Yield Responses events in provider order, including finished output items and one terminal event with its response ID. A turn emits text deltas as they arrive. Core admits tool calls after the iterator has finished with a valid completion. Cancellation closes the iterator before the session accepts another turn.
+
+### Model run ownership and WebSocket options
+
+New in alpha.8, `ModelRunOwner` from `agents.models` identifies one live native run and its owned continuations. `ModelRequest.run_owner` supplies that identity when the native callback owns one. It is not a saved conversation or a value to construct as replacement execution authority.
+
+`ResponsesWebSocketModel` accepts `websocket_options: ResponsesWebSocketOptions` for `ping_interval`, `ping_timeout`, and `max_size`. A custom `ResponsesSocketFactory` receives `ResponsesSocketFactoryOptions`, containing the resolved `url`, `headers`, `open_timeout`, and `websocket_options`. Import these types from `agents.models`. The factory's connection options are distinct from the WebSocket tuning options. The application still owns the borrowed model client; the adapter owns and closes the sockets it opens.
 
 ### CodexLogin
 
@@ -533,7 +562,7 @@ Import `CodexLogin` from `agents` and pass it as `NativeProvider(auth=CodexLogin
 
 Supports `reasoning_effort`, `reasoning_summary`, `service_tier`, and, in `0.24.0-alpha.7` or later, `tool_choice`. Omitted settings keep native defaults. `service_tier=None` clears that override. `tool_choice` accepts `"auto"`, `"none"`, or `"required"`; see [model settings](models.md#model-and-session-settings).
 
-Matching development builds also accept a `ToolRef` to require one selected tool with `defer_loading=False`. They add sampling, cache, storage, and model invocation controls. `None` clears these SDK overrides. See [development model controls](models.md#additional-controls-in-development-builds) for supported values and provider restrictions. These additions do not establish alpha.7 wheel availability.
+Alpha.8 also accepts a `ToolRef` to require one selected tool with `defer_loading=False`. It adds sampling, cache, storage, and model invocation controls. `None` clears these SDK overrides. See [alpha.8 model controls](models.md#additional-controls-in-alpha8) for supported values and provider restrictions. These additions do not establish alpha.7 wheel availability.
 
 ## Tracing
 
