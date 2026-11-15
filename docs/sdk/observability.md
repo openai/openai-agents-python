@@ -130,12 +130,6 @@ For `agent.session(trace_options=...)`, `agent.run(trace_options=...)`, or `sess
 
 `SpanContext` is process-local and can outlive the recording scope through captured work. Do not serialize it or send it to another process. W3C [trace headers](#continue-a-trace-across-workers) transfer ancestry only. They do not transfer local workflow policy or exporter credentials. `TraceOptions` can also set a trace ID, group ID, application metadata, and private per-trace export headers through `TraceExportCredentials`. Keep credentials out of metadata and header carriers.
 
-### Prompt-cache routing for fresh Sessions
-
-New in alpha.8, an explicit `TraceOptions(group_id="workflow-id")` also selects prompt-cache affinity for fresh Sessions opened with those options. The same explicit group can route matching prompts together without sharing Session IDs or conversation history. It does not guarantee a cache hit. Restored Sessions retain their saved cache key instead of adopting a new group key.
-
-For borrowed model clients, the adapter's `prompt_cache_key` overrides only that adapter's outgoing routing key. Omitting it preserves the native request key. See [application-owned model clients](models.md#use-an-application-owned-model-client) for the adapter setup and [release availability](versions.md) for alpha.8 status.
-
 ## Send native traces to an application sink
 
 This section uses the same [matching preview wheel](installation.md) as local trace scopes. Supply an object with `on_trace_event(event)` through `telemetry.configure(processors=[...])` before opening Sessions. A processor can receive native trace records without an OTLP collector. The interface is separate from classic SDK trace processors.
