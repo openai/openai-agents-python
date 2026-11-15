@@ -59,6 +59,7 @@ async def test_native_docker_mapped_shell_and_patch_after_cold_reopen(
     requested_image, socket = docker_inputs
     read_target = "/mnt/native-readonly"
     write_target = "/mnt/native-writable"
+    runner_user = f"{os.getuid()}:{os.getgid()}"
     daemon = docker.DockerClient(base_url="unix://" + socket)
     client = MountedFixtureClient(daemon)
     try:
@@ -67,8 +68,9 @@ async def test_native_docker_mapped_shell_and_patch_after_cold_reopen(
         def source(phase: str):
             read_root = tmp_path / f"{phase}-readonly"
             write_root = tmp_path / f"{phase}-writable"
-            read_root.mkdir()
-            write_root.mkdir()
+            for directory in (read_root, write_root):
+                directory.mkdir()
+                directory.chmod(0o755)
             (read_root / "marker.txt").write_bytes(f"{phase}\n".encode())
             environment = sandbox_environment(
                 client,
@@ -80,7 +82,9 @@ async def test_native_docker_mapped_shell_and_patch_after_cold_reopen(
                     ),
                 ),
                 options=DockerSandboxClientOptions(image=image, network_mode="none"),
-                connect=DockerGateway(client, tools=("exec_command", "apply_patch")),
+                connect=DockerGateway(
+                    client, tools=("exec_command", "apply_patch"), run_as=runner_user
+                ),
             )
             return environment, read_root, write_root
 
@@ -132,6 +136,9 @@ async def test_native_docker_mapped_shell_and_patch_after_cold_reopen(
             assert not (read_root / "forbidden.txt").exists()
             assert (write_root / "shell.txt").read_bytes() == f"{phase}\n".encode()
             assert (write_root / "patch.txt").read_bytes() == f"patch-{phase}\n".encode()
+            for name in ("shell.txt", "patch.txt"):
+                receipt = (write_root / name).stat()
+                assert (receipt.st_uid, receipt.st_gid) == (os.getuid(), os.getgid())
 
         async with timeout(60), provider(responses) as native:
             agent = Agent(instructions="Use the selected native tools.", provider=native)

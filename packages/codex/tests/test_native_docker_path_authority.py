@@ -4,8 +4,10 @@ Set CODEX_DOCKER_TEST_MISSING_BWRAP=1 only for the explicit fail-closed
 probe on an image without bubblewrap. The hosted check requires mapped writes.
 """
 
+import io
 import json
 import os
+import tarfile
 
 import pytest
 
@@ -13,6 +15,7 @@ from agents import Agent, SessionState
 from agents.classic.sandbox.entries import File
 from agents.classic.sandbox.util.blocking_io import run_blocking_workspace_io
 from agents.sandbox import DockerGateway, Manifest, sandbox_environment
+from tests.native_docker_profiles import record_isolation
 from tests.native_fixtures import (
     assistant_output,
     function_call,
@@ -33,6 +36,17 @@ from tests.test_native_docker_gateway import (
 )
 
 
+def mapped_fixture_archive():
+    # Keep writable roots owned by the selected runner identity, without DAC overrides.
+    data = io.BytesIO(fixture_archive())
+    with tarfile.open(fileobj=data, mode="a") as archive:
+        workspace = tarfile.TarInfo("workspace")
+        workspace.type, workspace.mode = tarfile.DIRTYPE, 0o755
+        workspace.uid, workspace.gid = os.getuid(), os.getgid()
+        archive.addfile(workspace)
+    return data.getvalue()
+
+
 class MountedFixtureClient(FixtureClient):
     async def create(self, **options):
         resource = await DockerSandboxClient.create(self, **options)
@@ -47,7 +61,8 @@ class MountedFixtureClient(FixtureClient):
             assert host["Privileged"] is False
             assert not host.get("CapAdd")
             assert not host.get("Devices")
-            assert not host.get("SecurityOpt")
+            assert not host.get("DeviceRequests")
+            assert (host.get("SecurityOpt") or []) == list(self.security_options)
             grants = resource.state.manifest.extra_path_grants
             mounts = {mount["Destination"]: mount for mount in inspection["Mounts"]}
             assert len(mounts) == len(inspection["Mounts"])
@@ -57,10 +72,11 @@ class MountedFixtureClient(FixtureClient):
                 assert mount["Type"] == "bind"
                 assert mount["Source"] == grant.host_path
                 assert mount["RW"] == (not grant.read_only)
-            archive = await run_blocking_workspace_io(fixture_archive)
+            archive = await run_blocking_workspace_io(mapped_fixture_archive)
             await run_blocking_workspace_io(
                 lambda: self.docker_client.api.put_archive(cid, "/", archive)
             )
+            record_isolation(inspection, self.security_options)
             return resource
         except BaseException:
             await resource.aclose()
@@ -80,8 +96,10 @@ async def test_native_docker_path_grants_survive_restore(responses, monkeypatch,
 
     read_dir = tmp_path / "readonly"
     write_dir = tmp_path / "writable"
-    read_dir.mkdir()
-    write_dir.mkdir()
+    for directory in (read_dir, write_dir):
+        directory.mkdir()
+        directory.chmod(0o755)
+    runner_user = f"{os.getuid()}:{os.getgid()}"
     (read_dir / "original").write_text("SYNTHETIC_READONLY_MOUNT")
     assert IMAGE and SOCKET
     daemon = docker.DockerClient(base_url="unix://" + SOCKET)
@@ -109,7 +127,7 @@ async def test_native_docker_path_grants_survive_restore(responses, monkeypatch,
                     ),
                 ),
                 options=DockerSandboxClientOptions(image=image, network_mode="none"),
-                connect=DockerGateway(client, tools=("exec_command",)),
+                connect=DockerGateway(client, tools=("exec_command",), run_as=runner_user),
             )
 
         def respond(label):
@@ -140,7 +158,7 @@ async def test_native_docker_path_grants_survive_restore(responses, monkeypatch,
             result = await (await session.submit("Inspect after reopening.")).get_result()
             assert result.final_output == "restored"
         with pytest.raises(
-            ValueError, match="Checkpoint and Environment must agree on the applied executor policy"
+            RuntimeError, match="Restore requires the recorded Agent environment grants"
         ):
             async with agent.session(state=saved, environment=source(writable=False)):
                 pytest.fail("A weaker current grant cannot reopen the recorded executor authority")
@@ -157,6 +175,8 @@ async def test_native_docker_path_grants_survive_restore(responses, monkeypatch,
                 )
                 assert "SELECTED_CWD=/workspace" in output, output
                 assert (write_dir / label).read_text() == label
+                receipt = (write_dir / label).stat()
+                assert (receipt.st_uid, receipt.st_gid) == (os.getuid(), os.getgid())
         assert not (read_dir / "forbidden").exists()
         assert client.created_ids == client.deleted_ids and len(client.created_ids) == 3
         for container_id in client.created_ids:
@@ -179,8 +199,10 @@ async def test_docker_resource_keeps_read_and_write_grants_under_native_session(
     monkeypatch.setenv("NETRC", str(netrc))
     read_dir = tmp_path / "readonly"
     write_dir = tmp_path / "writable"
-    read_dir.mkdir()
-    write_dir.mkdir()
+    for directory in (read_dir, write_dir):
+        directory.mkdir()
+        directory.chmod(0o755)
+    runner_user = f"{os.getuid()}:{os.getgid()}"
     (read_dir / "original").write_text("SYNTHETIC_READONLY_MOUNT")
     assert IMAGE and SOCKET
     daemon = docker.DockerClient(base_url="unix://" + SOCKET)
@@ -203,7 +225,7 @@ async def test_docker_resource_keeps_read_and_write_grants_under_native_session(
                 ),
             ),
             options=DockerSandboxClientOptions(image=image, network_mode="none"),
-            connect=DockerGateway(client, tools=("project_grep",)),
+            connect=DockerGateway(client, tools=("project_grep",), run_as=runner_user),
         )
         responses.respond(
             function_call(
@@ -230,11 +252,13 @@ async def test_docker_resource_keeps_read_and_write_grants_under_native_session(
                 "printf SYNTHETIC_WRITABLE_MOUNT >/mnt/native-writable/receipt",
             ]
             result = await run_blocking_workspace_io(
-                lambda: container.exec_run(cmd, workdir="/workspace")
+                lambda: container.exec_run(cmd, workdir="/workspace", user=runner_user)
             )
             assert result.exit_code == 0 and b"SYNTHETIC_READONLY_MOUNT" in result.output
             assert not (read_dir / "forbidden").exists()
             assert (write_dir / "receipt").read_text() == "SYNTHETIC_WRITABLE_MOUNT"
+            receipt = (write_dir / "receipt").stat()
+            assert (receipt.st_uid, receipt.st_gid) == (os.getuid(), os.getgid())
         assert client.created_ids == client.deleted_ids and len(client.created_ids) == 1
         with pytest.raises(NotFound):
             daemon.api.inspect_container(client.created_ids[0])
