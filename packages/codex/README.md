@@ -4,13 +4,13 @@ Build Python agents that call your functions, use MCP tools, and keep a conversa
 
 ## Install
 
-Use the [preview release index](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/versions.md) to find installation instructions, guides, and examples for your wheel version.
+Follow the [installation guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/installation.md) to install a preview wheel from GitHub Releases. Find the [guides and examples for your installed version](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/versions.md).
 
 For an existing v0 application, prefer a [direct migration to native v1](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/MIGRATION.md) when you choose to upgrade. You can stay on v0. The SDK also retains [classic](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CLASSIC.md) for workflows that need a staged package upgrade.
 
 ## Development guides
 
-Use these guides with a build from the development branch. Start with the [development quickstart](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/index.md).
+If you build the SDK from source, use the guides and examples from the same commit as your build. Start with the [development quickstart](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/index.md).
 
 | Guide | Use it to |
 | --- | --- |
