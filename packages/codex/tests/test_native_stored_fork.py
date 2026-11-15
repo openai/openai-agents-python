@@ -35,8 +35,8 @@ async def test_stored_fork_preserves_complete_originals_and_source_reference(res
         async with agent.session(storage=storage) as source:
             original_id = source.id
             before = await source.history_snapshot()
-            await source.transact_history(
-                expected_revision=before.revision, keep=0, items=originals
+            await source.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0, items=originals
             )
             retained = await source.history_snapshot()
             fork_id = await source.fork_stored()
@@ -54,14 +54,14 @@ async def test_stored_fork_preserves_complete_originals_and_source_reference(res
                 revision=complete.revision, total=complete.total, items=()
             )
             audit = {"type": "application-branch-audit", "value": "branch-only"}
-            await branch.transact_history(
-                expected_revision=complete.revision, keep=complete.total, items=[audit]
+            await branch.replace_history_suffix(
+                expected_revision=complete.revision, keep_prefix_count=complete.total, items=[audit]
             )
             updated = await branch.history_snapshot()
             assert updated.items == (*complete.items, audit)
             with pytest.raises(RuntimeError, match="(?i)revision"):
-                await branch.transact_history(
-                    expected_revision=complete.revision, keep=complete.total, items=[]
+                await branch.replace_history_suffix(
+                    expected_revision=complete.revision, keep_prefix_count=complete.total, items=[]
                 )
             assert await branch.history_snapshot() == updated
         async with agent.session(storage=storage, resume=original_id) as source:

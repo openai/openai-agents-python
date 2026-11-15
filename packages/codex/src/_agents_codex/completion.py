@@ -170,13 +170,13 @@ class ToolBatchCompletionContext(Generic[ContextT]):
 
 
 @_sdk_dataclass(frozen=True)
-class FinishToolBatch(Generic[OutputT]):
+class FinishTurn(Generic[OutputT]):
     """Propose an application value as the turn's final output."""
 
     output: OutputT = field(repr=False)
 
 
-_ToolBatchDecision: TypeAlias = FinishToolBatch[OutputT] | ContinueTurn | StopTurn | None
+_ToolBatchDecision: TypeAlias = FinishTurn[OutputT] | ContinueTurn | StopTurn | None
 _ToolBatchCompletion: TypeAlias = Callable[
     [ToolBatchCompletionContext[ContextT]],
     _ToolBatchDecision[OutputT] | Awaitable[_ToolBatchDecision[OutputT]],

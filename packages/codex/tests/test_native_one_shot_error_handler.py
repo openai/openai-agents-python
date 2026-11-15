@@ -352,9 +352,9 @@ async def test_error_recovery_rejects_an_advanced_session(responses, persist, ch
                     await queued.get_result()
             elif change == "history":
                 before = await session.history_snapshot()
-                await session.transact_history(
+                await session.replace_history_suffix(
                     expected_revision=before.revision,
-                    keep=before.total,
+                    keep_prefix_count=before.total,
                     items=[{"type": "review_marker", "marker": "other caller"}],
                 )
             else:

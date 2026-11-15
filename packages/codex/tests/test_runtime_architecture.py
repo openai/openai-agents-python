@@ -191,7 +191,8 @@ import agents.canonical_storage as public
 import _agents_codex.canonical_storage as runtime
 
 for name in (
-    "EncryptedSessionStore", "MongoDBSessionStore", "RedisSessionStore", "SQLAlchemySessionStore"
+    "EncryptedSessionStore", "MongoDBSessionStore", "RedisSessionStore",
+    "SQLAlchemySQLiteSessionStore",
 ):
     adapter = getattr(public, name)
     assert adapter is getattr(runtime, name), name

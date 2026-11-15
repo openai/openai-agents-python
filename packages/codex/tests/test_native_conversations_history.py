@@ -346,7 +346,7 @@ async def test_run_rejects_remote_import_before_native_serialization(
         reached.append("serialization")
         raise AssertionError("oversized history reached native serialization")
 
-    monkeypatch.setattr(Session, "transact_history", serialization_boundary)
+    monkeypatch.setattr(Session, "replace_history_suffix", serialization_boundary)
     history = ConversationsHistory(client, conversation_id="conv_existing")
     async with NativeProvider(base_url=responses.url, api_key="synthetic") as provider:
         agent = Agent(instructions="Reply.", provider=provider, model="gpt-5")

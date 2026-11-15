@@ -53,7 +53,7 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         "set_stored_name",
         "items",
         "history_snapshot",
-        "transact_history",
+        "replace_history_suffix",
         "pop_history",
         "turns",
         "rate_limits",

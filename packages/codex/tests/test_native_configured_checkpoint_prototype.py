@@ -5,7 +5,12 @@ from dataclasses import replace
 
 import pytest
 
-from agents import ApprovalRequested, InteractionExpiredError, PendingRequests, SessionState
+from agents import (
+    FunctionToolApprovalRequest,
+    InteractionExpiredError,
+    PendingRequests,
+    SessionState,
+)
 from tests._asyncio import timeout
 from tests.test_native_configured_agent_tool import fixture
 
@@ -18,7 +23,7 @@ async def test_entered_configured_call_parks_once_after_owned_child_seal():
             boundary = await turn.wait_for_request_or_result()
             assert isinstance(boundary, PendingRequests)
             approval = boundary.requests[0]
-            assert isinstance(approval, ApprovalRequested)
+            assert isinstance(approval, FunctionToolApprovalRequest)
             await sibling.wait()
             [child] = session._configured_children
             child.sealing = True
@@ -62,7 +67,7 @@ async def test_entered_configured_call_parks_once_after_owned_child_seal():
                 resumed = await restored.restored_turn.wait_for_request_or_result()
                 assert isinstance(resumed, PendingRequests)
                 [current] = resumed.requests
-                assert isinstance(current, ApprovalRequested)
+                assert isinstance(current, FunctionToolApprovalRequest)
                 assert current.call_id == approval.call_id
                 assert current.session_id == approval.session_id
                 assert current.submission_id != approval.submission_id
@@ -89,7 +94,7 @@ async def test_public_parent_checkpoint_resumes_configured_child_and_held_siblin
             boundary = await turn.wait_for_request_or_result()
             assert isinstance(boundary, PendingRequests)
             [original] = boundary.requests
-            assert isinstance(original, ApprovalRequested)
+            assert isinstance(original, FunctionToolApprovalRequest)
             await sibling.wait()
             saved = await source.suspend()
             assert (turn.run_usage.requests, turn.run_usage.total_tokens) == (2, 28)
@@ -129,7 +134,7 @@ async def test_public_parent_checkpoint_resumes_configured_child_and_held_siblin
             pending = await restored.restored_turn.wait_for_request_or_result()
             assert isinstance(pending, PendingRequests)
             [current] = pending.requests
-            assert isinstance(current, ApprovalRequested)
+            assert isinstance(current, FunctionToolApprovalRequest)
             assert current.call_id == original.call_id
             assert effects == ["accepted-sibling"]
             with pytest.raises(InteractionExpiredError):
@@ -159,7 +164,7 @@ async def test_parent_preseal_refusal_rolls_back_owned_child_without_repeating_s
             original = await turn.wait_for_request_or_result()
             assert isinstance(original, PendingRequests)
             original_request = original.requests[0]
-            assert isinstance(original_request, ApprovalRequested)
+            assert isinstance(original_request, FunctionToolApprovalRequest)
             await sibling.wait()
 
             def refuse():
@@ -173,7 +178,7 @@ async def test_parent_preseal_refusal_rolls_back_owned_child_without_repeating_s
             current = await turn.wait_for_request_or_result()
             assert isinstance(current, PendingRequests)
             [request] = current.requests
-            assert isinstance(request, ApprovalRequested)
+            assert isinstance(request, FunctionToolApprovalRequest)
             assert request.call_id == original_request.call_id
             assert effects == ["accepted-sibling"]
             with pytest.raises(InteractionExpiredError):
@@ -203,7 +208,7 @@ async def test_configured_child_denial_keeps_admitted_usage():
             await sibling.wait()
             assert isinstance(pending, PendingRequests)
             [request] = pending.requests
-            assert isinstance(request, ApprovalRequested)
+            assert isinstance(request, FunctionToolApprovalRequest)
             await source.respond(request.reply(False))
             completed = await turn.get_result()
             assert completed.final_output == "parent complete"

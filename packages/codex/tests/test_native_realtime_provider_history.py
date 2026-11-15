@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from agents import Agent, NativeProvider, function_tool
-from agents.realtime import (
+from agents.realtime.native import (
     RealtimeConfig,
     RealtimeConversationItemDeleted,
     RealtimeConversationItemObserved,
@@ -718,7 +718,7 @@ async def test_native_reordering_text_before_audio_preserves_unchanged_items(
 async def test_native_history_response_race_fails_edit_and_keeps_call_open(
     realtime_peer: RealtimePeer,
 ) -> None:
-    from agents.realtime import RealtimeResponse
+    from agents.realtime.native import RealtimeResponse
 
     peer = realtime_peer
     original = {
@@ -884,7 +884,7 @@ async def test_native_cumulative_history_media_budget_preserves_live_connection(
 async def test_native_response_interrupts_create_and_drains_late_ack_without_next_edit(
     realtime_peer: RealtimePeer,
 ) -> None:
-    from agents.realtime import RealtimeHistory, RealtimeResponse
+    from agents.realtime.native import RealtimeHistory, RealtimeResponse
 
     peer = realtime_peer
     old = {
@@ -1144,7 +1144,7 @@ async def test_native_sip_history_preserves_unobserved_provider_prefix(
 async def test_native_vad_item_interrupts_history_edit_before_response_without_closing_call(
     realtime_peer: RealtimePeer,
 ) -> None:
-    from agents.realtime import RealtimeHistory, RealtimeResponse
+    from agents.realtime.native import RealtimeHistory, RealtimeResponse
 
     peer = realtime_peer
     original = {
@@ -1277,7 +1277,7 @@ async def test_native_vad_item_interrupts_history_edit_before_response_without_c
 async def test_native_history_read_timeout_drains_late_receipt_before_same_id_reuse(
     realtime_peer: RealtimePeer,
 ) -> None:
-    from agents.realtime import RealtimeResponse
+    from agents.realtime.native import RealtimeResponse
 
     peer = realtime_peer
     original = {
@@ -1416,7 +1416,7 @@ async def test_native_history_uses_provider_predecessors_and_rejects_unresolved_
                 await voice.aclose()
             await asyncio.gather(retrieving, return_exceptions=True)
         if unknown_position == "done_only":
-            from agents.realtime import RealtimeResponse
+            from agents.realtime.native import RealtimeResponse
 
             assert peer.socket is not None
             await peer.socket.send_json({"type": "conversation.item.done", "item": unknown})
@@ -1467,7 +1467,7 @@ async def test_native_history_uses_provider_predecessors_and_rejects_unresolved_
 async def test_native_deleted_item_retrieval_rejects_locally_and_preserves_audit(
     realtime_peer: RealtimePeer,
 ) -> None:
-    from agents.realtime import RealtimeHistory
+    from agents.realtime.native import RealtimeHistory
 
     peer = realtime_peer
     item = {
@@ -1675,7 +1675,7 @@ async def test_native_self_predecessor_blocks_ordered_history_but_keeps_direct_r
 async def test_native_deleted_id_eviction_keeps_deleted_reads_local_and_live_rows_usable(
     realtime_peer: RealtimePeer,
 ) -> None:
-    from agents.realtime import RealtimeHistory
+    from agents.realtime.native import RealtimeHistory
 
     peer = realtime_peer
     oldest_id = "evicted-deletion-0"
@@ -1786,7 +1786,7 @@ async def test_native_deleted_id_eviction_keeps_deleted_reads_local_and_live_row
 async def test_native_interrupted_history_delete_preserves_same_id_restoration(
     realtime_peer: RealtimePeer,
 ) -> None:
-    from agents.realtime import RealtimeHistory, RealtimeResponse
+    from agents.realtime.native import RealtimeHistory, RealtimeResponse
 
     peer = realtime_peer
     old = {
@@ -2335,7 +2335,7 @@ async def test_native_history_image_decoder_limits_precede_mutation_and_allow_4k
 async def test_native_malformed_retrieval_keeps_read_receipt_until_matching_late_item(
     realtime_peer: RealtimePeer, malformed: str
 ) -> None:
-    from agents.realtime import RealtimeResponse
+    from agents.realtime.native import RealtimeResponse
 
     peer = realtime_peer
     original = {

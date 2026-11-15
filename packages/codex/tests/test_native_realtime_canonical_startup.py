@@ -1,7 +1,7 @@
 """The actual V2 startup frame and readiness share one settings contract."""
 
 from agents import Agent, NativeProvider
-from agents.realtime import RealtimeConfig
+from agents.realtime.native import RealtimeConfig
 from agents.testing import RealtimeStep, ScriptedRealtimeAdapter
 from tests._asyncio import timeout
 

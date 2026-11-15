@@ -86,12 +86,14 @@ async def test_detached_result_keeps_repeated_provider_ids_and_source_agents() -
         async with destination_run.session() as fresh:
             before = await fresh.history_snapshot()
             with pytest.raises(RuntimeError, match="canonical history item IDs must be unique"):
-                await fresh.transact_history(
-                    expected_revision=before.revision, keep=0, items=repeated
+                await fresh.replace_history_suffix(
+                    expected_revision=before.revision, keep_prefix_count=0, items=repeated
                 )
             assert (await fresh.history_snapshot()).revision == before.revision
             copied = [{**item, "id": f"replay-{i}"} for i, item in enumerate(originals)]
-            await fresh.transact_history(expected_revision=before.revision, keep=0, items=copied)
+            await fresh.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0, items=copied
+            )
             target.respond(assistant_output("historical context used"))
             result = await (await fresh.submit("Use copied context.")).get_result()
             assert result.final_output == "historical context used"

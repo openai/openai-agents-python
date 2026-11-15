@@ -11,7 +11,7 @@ from typing import cast
 import pytest
 
 from agents import Agent, Interaction, InteractionExpiredError, NativeProvider, function_tool
-from agents.realtime import RealtimeAudio, RealtimeConfig, RealtimeToolCall
+from agents.realtime.native import RealtimeAudio, RealtimeConfig, RealtimeToolCall
 from tests._asyncio import timeout
 from tests.test_native_manual_tools import next_request
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer

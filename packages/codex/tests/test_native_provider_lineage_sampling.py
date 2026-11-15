@@ -119,9 +119,9 @@ async def test_lineage_sampling_full_idless_group_with_prefix_and_initial_reorde
             provider_history={"type": "conversation", "id": "conv_current"}
         ) as session:
             snap = await session.history_snapshot()
-            await session.transact_history(
+            await session.replace_history_suffix(
                 expected_revision=snap.revision,
-                keep=snap.total,
+                keep_prefix_count=snap.total,
                 items=[
                     {"type": "item_reference", "id": "provider_item"},
                     {"type": "item_reference", "id": "provider_item"},
@@ -159,9 +159,9 @@ async def test_lineage_sampling_reduced_idless_group_refuses_before_dispatch():
             provider_history={"type": "conversation", "id": "conv_current"}
         ) as session:
             snap = await session.history_snapshot()
-            await session.transact_history(
+            await session.replace_history_suffix(
                 expected_revision=snap.revision,
-                keep=snap.total,
+                keep_prefix_count=snap.total,
                 items=[
                     {"type": "item_reference", "id": "provider_item"},
                     {"type": "item_reference", "id": "provider_item"},

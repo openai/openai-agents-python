@@ -55,9 +55,9 @@ async def test_idle_replacement_preserves_active_destination_across_restore(
                 "role": "user",
                 "content": [{"type": "input_text", "text": "canonical replacement"}],
             }
-            revision = await session.transact_history(
+            revision = await session.replace_history_suffix(
                 expected_revision=before.revision,
-                keep=before.total if retained else 0,
+                keep_prefix_count=before.total if retained else 0,
                 items=[replacement],
             )
             after = await session.history_snapshot()

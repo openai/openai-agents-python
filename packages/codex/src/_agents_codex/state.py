@@ -588,7 +588,9 @@ class SessionState(BaseModel):
             return deepcopy(_passive_pending_items(value)) if value is not None else []
         return deepcopy(self.native_continuation.pending_input)
 
-    def with_pending_input(self, input: str | Sequence[dict[str, JsonValue]]) -> "SessionState":
+    def with_appended_pending_input(
+        self, input: str | Sequence[dict[str, JsonValue]]
+    ) -> "SessionState":
         """Return a manual checkpoint with additional ordered input for its next request."""
         continuation = self.native_continuation
         if continuation is None:

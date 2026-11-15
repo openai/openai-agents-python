@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from agents import ApprovalRequested, Environment, PendingRequests, SessionState, ToolRef
+from agents import Environment, FunctionToolApprovalRequest, PendingRequests, SessionState, ToolRef
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call
 from tests.test_native_configured_agent_tool import fixture
@@ -64,7 +64,7 @@ async def test_configured_reentry_respects_current_parent_executor_selection(
                 pending = await restored.restored_turn.wait_for_request_or_result()
                 assert isinstance(pending, PendingRequests)
                 [request] = pending.requests
-                assert isinstance(request, ApprovalRequested)
+                assert isinstance(request, FunctionToolApprovalRequest)
                 [child] = restored._configured_children
                 options = child.session._native_options
                 assert options is not None

@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from agents import Agent, HttpMCP, MCPResultContext, NativeProvider, Turn
-from agents.realtime import RealtimeConfig
+from agents.realtime.native import RealtimeConfig
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.test_native_mcp_tools import Peer

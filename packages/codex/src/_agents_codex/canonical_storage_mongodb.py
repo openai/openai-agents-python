@@ -327,7 +327,7 @@ class MongoDBSessionStore:
         """Read the active v0 generation and its items in insertion order.
 
         Finish writes to the v0 session before reading. Import the items with
-        the current revision of an empty native Session's `transact_history`.
+        the current revision of an empty native Session's `replace_history_suffix`.
         Both limits apply to individual items, including items in v0 batches.
         """
         from pymongo import ReadPreference

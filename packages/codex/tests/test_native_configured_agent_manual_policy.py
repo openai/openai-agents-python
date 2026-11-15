@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 from pydantic import BaseModel
 
-from agents import ApprovalRequested, FunctionTool, InteractionRequired, PendingRequests
+from agents import FunctionTool, FunctionToolApprovalRequest, InteractionRequired, PendingRequests
 from tests._asyncio import timeout
 from tests.test_native_configured_agent_tool import fixture
 
@@ -44,7 +44,9 @@ async def test_live_child_keeps_root_reply_owner_with_unused_manual_tool():
             turn = await session.submit("begin joint witness")
             boundary = await turn.wait_for_request_or_result()
             assert isinstance(boundary, PendingRequests)
-            request = next(x for x in boundary.requests if isinstance(x, ApprovalRequested))
+            request = next(
+                x for x in boundary.requests if isinstance(x, FunctionToolApprovalRequest)
+            )
             assert request.call_id == "child-approval-call"
             await session.respond(request.reply(True))
             assert (await turn.get_result()).final_output == "parent complete"

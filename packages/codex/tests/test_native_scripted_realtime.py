@@ -1,7 +1,7 @@
 """Scripted canonical frames exercise the real native realtime owner."""
 
 from agents import Agent, NativeProvider, function_tool
-from agents.realtime import RealtimeConfig, RealtimeText
+from agents.realtime.native import RealtimeConfig, RealtimeText
 from agents.testing import RealtimeStep, ScriptedRealtimeAdapter
 from tests._asyncio import timeout
 from tests.test_native_realtime_adapter import translated_reply
@@ -55,7 +55,7 @@ async def test_scripted_native_session_ack_history_and_completion():
 async def test_scripted_matching_snapshots_and_errors():
     import pytest
 
-    from agents.realtime import RealtimeAdapterContext
+    from agents.realtime.native import RealtimeAdapterContext
 
     adapter = ScriptedRealtimeAdapter(
         [
@@ -103,7 +103,7 @@ async def test_scripted_connection_error_survives_native_cleanup():
 async def test_scripted_predicate_cannot_change_emitted_acknowledgement():
     import json
 
-    from agents.realtime import RealtimeAdapterContext
+    from agents.realtime.native import RealtimeAdapterContext
 
     def matches(frame):
         frame["session"]["instructions"] = "Matcher-modified instructions"

@@ -28,7 +28,7 @@ from agents import (
     Tool,
     TurnStoppedError,
 )
-from agents.realtime import realtime_handoff
+from agents.realtime.native import realtime_handoff
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,
@@ -1170,8 +1170,8 @@ async def test_native_hosted_mcp_history_transaction_archives_approval_without_a
         )
         async with agent.session() as session:
             before = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=before.revision, keep=0, items=[approval_item, tail]
+            await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0, items=[approval_item, tail]
             )
             after = await session.history_snapshot()
             assert list(after.items) == [approval_item, tail]

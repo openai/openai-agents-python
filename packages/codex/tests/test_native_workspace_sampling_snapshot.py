@@ -108,9 +108,9 @@ async def test_workspace_sampling_has_only_current_resource_and_preserves_policy
         root.session(environment=workspace_source(tmp_path, monkeypatch, root_marker)) as session,
     ):
         before = await session.history_snapshot()
-        await session.transact_history(
+        await session.replace_history_suffix(
             expected_revision=before.revision,
-            keep=before.total,
+            keep_prefix_count=before.total,
             items=[
                 {
                     "type": "message",

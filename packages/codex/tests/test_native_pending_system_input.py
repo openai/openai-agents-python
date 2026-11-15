@@ -52,7 +52,7 @@ async def test_staged_caller_instruction_stays_data_and_keeps_wire_role(response
             await source.submit("initial")
             await next_request(source.interactions(), lookup)
             saved = await source.suspend()
-        staged = SessionState.from_json(saved.with_pending_input([item]).to_json())
+        staged = SessionState.from_json(saved.with_appended_pending_input([item]).to_json())
         assert staged.pending_input == [item]
         async with agent.session(state=staged) as restored:
             pending = await next_request(restored.interactions(), lookup)
@@ -93,7 +93,9 @@ async def test_new_caller_system_import_uses_native_retention_without_hidden_aut
         source = await leases.enter_async_context(agent.session(storage=CustomStorage(backend)))
         try:
             snapshot = await source.history_snapshot()
-            await source.transact_history(expected_revision=snapshot.revision, keep=0, items=[item])
+            await source.replace_history_suffix(
+                expected_revision=snapshot.revision, keep_prefix_count=0, items=[item]
+            )
             identity = source.id
             if cold:
                 await source.aclose()

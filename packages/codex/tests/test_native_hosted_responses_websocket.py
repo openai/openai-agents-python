@@ -782,7 +782,8 @@ async def test_hosted_send_failure_releases_private_locals_and_keeps_cause(
 
 
 async def test_hosted_reconnects_closed_peer_with_the_same_native_run_owner() -> None:
-    from agents import ModelRequest, ModelRunOwner
+    from agents import ModelRequest
+    from agents.models import ModelRunOwner
 
     sockets = []
     owner = ModelRunOwner("session", "turn")

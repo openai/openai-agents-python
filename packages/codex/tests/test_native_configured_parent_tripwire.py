@@ -4,7 +4,7 @@ from dataclasses import replace
 import pytest
 
 from agents import (
-    ApprovalRequested,
+    FunctionToolApprovalRequest,
     GuardrailResult,
     GuardrailTripwire,
     OutputGuardrail,
@@ -61,7 +61,7 @@ async def test_parent_guardrail_withholds_after_restored_child_approval(trailing
             boundary = await turn.wait_for_request_or_result()
             assert isinstance(boundary, PendingRequests)
             [approval] = boundary.requests
-            assert isinstance(approval, ApprovalRequested)
+            assert isinstance(approval, FunctionToolApprovalRequest)
             await session.respond(approval.reply(True))
             with pytest.raises(GuardrailTripwire) as error:
                 await turn.get_result()

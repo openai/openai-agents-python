@@ -83,9 +83,9 @@ async def test_memory_flush_retains_the_source_tool_exchange_without_replaying_i
         )
         async with agent.session(environment=environment) as session:
             history = await session.history_snapshot()
-            await session.transact_history(
+            await session.replace_history_suffix(
                 expected_revision=history.revision,
-                keep=history.total,
+                keep_prefix_count=history.total,
                 items=[
                     {
                         "type": "application_note",
@@ -376,9 +376,9 @@ async def test_memory_retains_admitted_user_media_and_known_records(
             environment=environment
         ) as session:
             before = await session.history_snapshot()
-            await session.transact_history(
+            await session.replace_history_suffix(
                 expected_revision=before.revision,
-                keep=before.total,
+                keep_prefix_count=before.total,
                 items=[
                     {
                         "type": "file_search_call",

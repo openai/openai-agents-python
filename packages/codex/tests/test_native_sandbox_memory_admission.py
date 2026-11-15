@@ -290,8 +290,8 @@ async def test_imported_turn_id_does_not_authorize_changed_memory_content(
             else:
                 imported["id"] = "msg_synthetic_unadmitted_import"
                 keep, items = before.total, [imported]
-            await session.transact_history(
-                expected_revision=before.revision, keep=keep, items=items
+            await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=keep, items=items
             )
             await (await session.submit("SYNTHETIC_FRESH_ACCEPTED_SOURCE")).get_result()
             assert marker in json.dumps((await session.history_snapshot()).items)

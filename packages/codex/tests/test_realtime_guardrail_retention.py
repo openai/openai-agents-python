@@ -11,7 +11,11 @@ import pytest
 
 from _agents_codex.realtime import RealtimeConfig, RealtimeSession
 from agents import Session
-from agents.realtime import RealtimeGuardrailInput, RealtimeGuardrailResult, RealtimeOutputGuardrail
+from agents.realtime.native import (
+    RealtimeGuardrailInput,
+    RealtimeGuardrailResult,
+    RealtimeOutputGuardrail,
+)
 
 
 def owner_for(callback: Any, threshold: int | None = 1) -> RealtimeSession:

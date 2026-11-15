@@ -74,7 +74,7 @@ async def test_terminal_pending_queue_has_been_reopening_after_success(kind, cle
             await source.submit("original user")
             await next_request(source.interactions(), lookup)
             saved = await source.suspend()
-        staged = saved.with_pending_input(marker).with_pending_input(marker)
+        staged = saved.with_appended_pending_input(marker).with_appended_pending_input(marker)
         async with agent.session(
             state=SessionState.from_json(staged.to_json()),
             provider_history=history("resp_1"),
@@ -95,7 +95,7 @@ async def test_terminal_pending_queue_has_been_reopening_after_success(kind, cle
                 await resumed.compact(summary="must not consume pending data")
             assert_queue_capture_unchanged(before, await resumed.save_state())
             with pytest.raises(ValueError, match="manual continuation"):
-                passive.with_pending_input("terminal append")
+                passive.with_appended_pending_input("terminal append")
         assert len(model.requests) == 2
         assert sum(marker in json.dumps(row) for row in model.requests[1]["input"]) == 1
         state = SessionState.from_json(
@@ -159,7 +159,9 @@ async def test_two_terminal_pending_cycles_have_been_retaining_each_new_mask():
             await source.submit("first cycle")
             await next_request(source.interactions(), lookup)
             saved = await source.suspend()
-        first = saved.with_pending_input(markers[0]).with_pending_input(markers[0])
+        first = saved.with_appended_pending_input(markers[0]).with_appended_pending_input(
+            markers[0]
+        )
         async with agent.session(
             state=SessionState.from_json(first.to_json()), provider_history=history("resp_1")
         ) as active:
@@ -172,7 +174,9 @@ async def test_two_terminal_pending_cycles_have_been_retaining_each_new_mask():
             request = await next_request(active.interactions(), lookup)
             assert request.call_id == "cycle-two-call"
             second_saved = await active.suspend()
-        second = second_saved.with_pending_input(markers[1]).with_pending_input(markers[1])
+        second = second_saved.with_appended_pending_input(markers[1]).with_appended_pending_input(
+            markers[1]
+        )
         async with agent.session(
             state=SessionState.from_json(second.to_json()), provider_history=history("resp_4")
         ) as active:

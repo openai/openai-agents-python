@@ -11,7 +11,7 @@ import pytest
 from agents import (
     Agent,
     ContinueTurn,
-    FinishToolBatch,
+    FinishTurn,
     FunctionTool,
     NativeProvider,
     SessionState,
@@ -58,11 +58,11 @@ async def test_recovered_batch_requires_fresh_acceptance_for_each_result(
         name="approve", description="Current approval", input_type=LookupArgs, output_type=str
     )
 
-    def complete(context: ToolBatchCompletionContext[Any]) -> FinishToolBatch[str]:
+    def complete(context: ToolBatchCompletionContext[Any]) -> FinishTurn[str]:
         proposals.append(
             [(result.call.call_id, result.output.success) for result in context.results]
         )
-        return FinishToolBatch("REDUCED")
+        return FinishTurn("REDUCED")
 
     agent = Agent(
         instructions="Synthetic authority control",
@@ -126,9 +126,9 @@ async def test_consumed_recovery_receipts_do_not_block_a_later_profile_batch(
         root_proposals.append([result.call.call_id for result in context.results])
         return ContinueTurn("Continue with the declared destination.")
 
-    def destination_complete(context: ToolBatchCompletionContext[Any]) -> FinishToolBatch[str]:
+    def destination_complete(context: ToolBatchCompletionContext[Any]) -> FinishTurn[str]:
         destination_proposals.append([result.call.call_id for result in context.results])
-        return FinishToolBatch("DESTINATION REDUCED")
+        return FinishTurn("DESTINATION REDUCED")
 
     manual = FunctionTool(
         name="approve", description="Current approval", input_type=LookupArgs, output_type=str

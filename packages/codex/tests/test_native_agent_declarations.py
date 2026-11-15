@@ -15,7 +15,7 @@ from agents import (
     NativeProvider,
     function_tool,
 )
-from agents.realtime import RealtimeAgentConfig
+from agents.realtime.native import RealtimeAgentConfig
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses  # noqa: F401
 from tests.test_native_agent_checkpoints import message, peer

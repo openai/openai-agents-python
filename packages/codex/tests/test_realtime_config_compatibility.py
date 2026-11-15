@@ -2,7 +2,7 @@
 
 import pytest
 
-from agents.realtime import RealtimeConfig
+from agents.realtime.native import RealtimeConfig
 
 
 @pytest.mark.parametrize("include_raw", [False, True])
