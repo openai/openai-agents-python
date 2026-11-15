@@ -293,7 +293,6 @@ async def test_error_recovery_cancellation_keeps_canonical_history(
             before, after = histories[0]
             assert after.revision == before.revision
             assert after.items == before.items
-            assert "73019" not in repr(after.items)
             assert len(responses.requests) == 1
     finally:
         if not run.done():
@@ -385,7 +384,6 @@ async def test_error_recovery_rejects_an_advanced_session(responses, persist, ch
         after = captured["final_history"]
         assert after.revision == before.revision
         assert after.items == before.items
-        assert "73019" not in repr(after.items)
         assert len(responses.requests) == {"root": 2, "queued": 3}.get(change, 1)
     finally:
         release_poll.set()

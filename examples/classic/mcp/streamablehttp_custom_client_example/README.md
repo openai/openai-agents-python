@@ -2,7 +2,7 @@
 
 This repository example targets MCP Python SDK v2 and `httpx2`, and is intended to run with the repository's locked development environment. The Agents SDK client itself supports MCP v1 with `httpx` and MCP v2 with `httpx2`.
 
-This example demonstrates how to use the new `httpx_client_factory` parameter in `MCPServerStreamableHttp` to configure custom HTTP client behavior for MCP StreamableHTTP connections.
+This example has been using `httpx_client_factory` in `MCPServerStreamableHttp` to set headers, timeouts, and authentication for Streamable HTTP connections.
 
 ## Client configuration
 
@@ -23,6 +23,8 @@ The factory preserves TLS certificate verification for HTTPS servers. If your se
    cd examples/classic/mcp/streamablehttp_custom_client_example
    uv run main.py
    ```
+
+The example has been choosing a free localhost port unless `STREAMABLE_HTTP_PORT` has been selecting a fixed port. `STREAMABLE_HTTP_HOST` has been selecting the bind address.
 
 ## Code Examples
 
@@ -70,19 +72,3 @@ asyncio.run(main())
 ```
 
 Start a Streamable HTTP MCP server on port `8000` before running this snippet, or change the URL to your server's address.
-
-## Use Cases
-
-- **Corporate Networks**: Configure proxy settings for corporate environments
-- **SSL/TLS Requirements**: Use custom SSL certificates for secure connections
-- **Custom Authentication**: Add custom headers for API authentication
-- **Network Optimization**: Configure timeouts and connection pooling
-
-## Benefits
-
-- **Flexibility**: Configure HTTP client behavior to match your network requirements
-- **Security**: Use custom SSL certificates and authentication methods
-- **Performance**: Optimize timeouts and connection settings for your use case
-- **Compatibility**: Work with corporate proxies and network restrictions
-
-This example will auto-pick a free localhost port unless you set `STREAMABLE_HTTP_PORT`; use `STREAMABLE_HTTP_HOST` to change the bind address.

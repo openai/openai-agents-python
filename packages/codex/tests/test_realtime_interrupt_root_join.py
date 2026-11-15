@@ -21,6 +21,7 @@ async def test_interrupt_joins_only_receipted_root_after_admission_cleanup(
     root_entered = asyncio.Event()
     release_a, release_b, release_c = asyncio.Event(), asyncio.Event(), asyncio.Event()
     acknowledged = asyncio.Event()
+    admission_cleaned = asyncio.Event()
 
     async def result_a() -> None:
         root_entered.set()
@@ -55,6 +56,14 @@ async def test_interrupt_joins_only_receipted_root_after_admission_cleanup(
     await voice._monitor_function_root(b)
     owned = _FunctionCall("response-a", {"call-a": "lookup"})
     voice._functions["call-a"] = owned
+    finish_request = voice._finish_request
+
+    def observe_cleanup(call_id: str) -> None:
+        finish_request(call_id)
+        if call_id == "call-a":
+            admission_cleaned.set()
+
+    monkeypatch.setattr(voice, "_finish_request", observe_cleanup)
     if not late_admission:
         release_admission.set()
     owned.task = asyncio.create_task(voice._run_functions(owned))
@@ -84,10 +93,11 @@ async def test_interrupt_joins_only_receipted_root_after_admission_cleanup(
             await acknowledged.wait()
             release_admission.set()
             await root_entered.wait()
+            await admission_cleaned.wait()
+            assert not voice._functions
             # Native completion precedes the managed Turn's final cleanup.
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(stopping), 0.05)
-            assert not voice._functions
             release_a.set()
             await stopping
             assert voice._function_roots["root-a"].done()
