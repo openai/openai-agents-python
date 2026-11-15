@@ -175,7 +175,7 @@ manifest = {
         "path": "/etc/openai-agents-native-docker/apparmor.profile",
         "sha256": digest(apparmor),
     },
-    "diagnosticOnly": True,
+    "diagnosticOnly": False,
 }
 (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 print(out / "manifest.json")
