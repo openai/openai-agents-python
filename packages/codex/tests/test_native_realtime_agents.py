@@ -18,7 +18,12 @@ from agents import (
     function_tool,
 )
 from agents.observation import AgentProfileChanged
-from agents.realtime import RealtimeAgentConfig, RealtimeConfig, RealtimeSession, realtime_handoff
+from agents.realtime.native import (
+    RealtimeAgentConfig,
+    RealtimeConfig,
+    RealtimeSession,
+    realtime_handoff,
+)
 from tests._asyncio import timeout
 from tests.native_fixtures import function_call, text_response
 from tests.test_native_realtime import realtime_peer as realtime_peer
@@ -120,7 +125,7 @@ async def test_native_voice_resolves_contextual_instructions_and_tool_predicate(
             realtime=RealtimeAgentConfig(
                 instructions=async_resolve if asynchronous else resolve,
                 prompt={"id": "synthetic-voice-prompt"},
-                tool_enabled=lambda context, tool: (
+                is_tool_enabled=lambda context, tool: (
                     tool.name != "hidden" and context.context["enabled"]
                 ),
             ),
@@ -196,7 +201,7 @@ async def test_native_voice_rechecks_source_predicate_after_dispatch_hook(realti
             if handoff
             else [],
             realtime=RealtimeAgentConfig(
-                tool_enabled=lambda context, tool: context.context["enabled"]
+                is_tool_enabled=lambda context, tool: context.context["enabled"]
             ),
         )
         async with (
@@ -278,7 +283,7 @@ async def test_native_voice_rechecks_handoff_grants_after_awaited_policy(
                     on_handoff=on_handoff,
                 )
             ],
-            realtime=RealtimeAgentConfig(tool_enabled=source_enabled),
+            realtime=RealtimeAgentConfig(is_tool_enabled=source_enabled),
         )
         async with (
             source.session(context=application) as session,
@@ -1174,7 +1179,7 @@ async def test_native_structured_handoff_interrupt_retires_callback_without_targ
 
 
 async def test_native_voice_combines_agent_and_session_speech_guards_across_handoff(realtime_peer):
-    from agents.realtime import RealtimeGuardrailResult, RealtimeOutputGuardrail
+    from agents.realtime.native import RealtimeGuardrailResult, RealtimeOutputGuardrail
 
     peer = realtime_peer
     observed = []

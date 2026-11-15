@@ -376,7 +376,7 @@ async def test_rejected_staged_search_stays_off_semantic_stream():
         async with agent.session(provider_history={"type": "previous_response"}) as original:
             await original.submit("Initial input")
             await next_request(original.interactions(), lookup)
-            saved = (await original.suspend()).with_pending_input("staged user message")
+            saved = (await original.suspend()).with_appended_pending_input("staged user message")
 
         async with agent.session(
             state=saved,

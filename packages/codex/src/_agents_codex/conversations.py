@@ -102,7 +102,8 @@ class ConversationsHistory:
         assert self._conversation_id is not None
         return self._conversation_id
 
-    async def get_conversation_id(self) -> str:
+    async def ensure_conversation_id(self) -> str:
+        """Return the current conversation ID, creating the conversation if needed."""
         async with self._operation():
             return await self._id()
 
@@ -241,8 +242,8 @@ class ConversationsHistory:
                     )
                     before = await session.history_snapshot()
                     if items:
-                        await session.transact_history(
-                            expected_revision=before.revision, keep=0, items=items
+                        await session.replace_history_suffix(
+                            expected_revision=before.revision, keep_prefix_count=0, items=items
                         )
                     loaded = await session.history_snapshot()
                     try:

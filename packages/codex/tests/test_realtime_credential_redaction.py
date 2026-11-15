@@ -222,7 +222,7 @@ async def test_startup_releases_owned_static_credentials_and_keeps_caller_config
 
 
 def test_webrtc_offer_credentials_are_hidden_from_direct_and_nested_repr() -> None:
-    from agents.realtime import RealtimeWebRTC
+    from agents.realtime.native import RealtimeWebRTC
 
     offer = "v=0\r\na=ice-ufrag:synthetic-ice-user\r\na=ice-pwd:synthetic-ice-password\r\n"
     transport = RealtimeWebRTC(offer)
@@ -240,7 +240,7 @@ def test_webrtc_offer_credentials_are_hidden_from_direct_and_nested_repr() -> No
     [("prepare", False), ("activate", False), ("prepare", True), ("activate", True)],
 )
 async def test_failed_webrtc_startup_releases_sdk_owned_offer(phase: str, cancel: bool) -> None:
-    from agents.realtime import RealtimeWebRTC
+    from agents.realtime.native import RealtimeWebRTC
 
     offer = "v=0\r\na=ice-ufrag:synthetic-startup-user\r\na=ice-pwd:synthetic-startup-password\r\n"
     transport = RealtimeWebRTC(offer)
@@ -300,7 +300,7 @@ async def test_failed_webrtc_startup_releases_sdk_owned_offer(phase: str, cancel
 
 
 async def test_successful_webrtc_startup_preserves_public_answer() -> None:
-    from agents.realtime import RealtimeWebRTC
+    from agents.realtime.native import RealtimeWebRTC
 
     offer = "v=0\r\na=ice-pwd:synthetic-success-offer\r\n"
     answer = "v=0\r\na=ice-pwd:synthetic-success-answer\r\n"

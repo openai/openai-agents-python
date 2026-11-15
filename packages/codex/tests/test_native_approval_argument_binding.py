@@ -2,7 +2,7 @@ from typing import Any
 
 import pytest
 
-from agents import Agent, Allow, ApprovalRequested, ReplaceArguments, function_tool
+from agents import Agent, Allow, FunctionToolApprovalRequest, ReplaceArguments, function_tool
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     assistant_output,
@@ -35,7 +35,7 @@ async def test_approved_arguments_bind_the_effect(responses, mode, restored):
             context.effective_arguments["payload"]["value"] = 2
         return Allow()
 
-    @function_tool(needs_approval=True, run_before_approval=True, before=before)
+    @function_tool(needs_approval=True, run_input_policy_before_approval=True, before=before)
     def risky(payload: dict[str, Any], order: dict[str, int]) -> str:
         effects.append(payload["value"])
         return "accepted"
@@ -49,13 +49,13 @@ async def test_approved_arguments_bind_the_effect(responses, mode, restored):
             async with agent.session() as source:
                 turn = await source.submit("begin")
                 original = await anext(source.interactions())
-                assert isinstance(original, ApprovalRequested)
+                assert isinstance(original, FunctionToolApprovalRequest)
                 assert original.effective_arguments.payload["value"] == 1
                 state = await source.suspend()
         async with agent.session(state=state) as session:
             turn = session.restored_turn if restored else await session.submit("begin")
             request = await anext(session.interactions())
-            assert isinstance(request, ApprovalRequested)
+            assert isinstance(request, FunctionToolApprovalRequest)
             assert request.effective_arguments.payload["value"] == 1
             assert len(guards) == 1
             await request.approve()
@@ -98,7 +98,7 @@ async def test_approved_opaque_values_keep_supported_copy_behavior(responses, re
             turn = await session.submit("begin")
             if required:
                 request = await anext(session.interactions())
-                assert isinstance(request, ApprovalRequested)
+                assert isinstance(request, FunctionToolApprovalRequest)
                 assert request.effective_arguments.value.value == 2
                 await request.approve()
             assert (await turn.get_result()).final_output == "done"
@@ -169,7 +169,7 @@ async def test_pending_predicate_cannot_publish_an_approval(responses):
                 assert effects == []
                 release.set()
                 request = await pending
-                assert isinstance(request, ApprovalRequested)
+                assert isinstance(request, FunctionToolApprovalRequest)
                 await request.approve()
                 assert (await turn.get_result()).final_output == "done"
             finally:

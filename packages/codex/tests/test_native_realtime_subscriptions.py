@@ -6,7 +6,7 @@ from contextlib import aclosing
 import pytest
 
 from agents import Agent, NativeProvider
-from agents.realtime import (
+from agents.realtime.native import (
     RealtimeConfig,
     RealtimeLifecycle,
     RealtimePlaybackInterrupted,

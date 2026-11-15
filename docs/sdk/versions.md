@@ -12,6 +12,10 @@ Each preview release includes its wheel downloads, checksums, and release notes.
 
 If you [build the SDK from source](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source), use the guides and examples from the same commit as your build.
 
+## Alpha.8 API availability
+
+This branch documents APIs planned for alpha.8. Alpha.7 remains the published preview listed above. Sections marked "new in alpha.8" require a matching source build until the alpha.8 wheels are published and verified. Do not use those APIs with alpha.7. After publication, use guides and examples from the same alpha.8 revision as the wheel.
+
 ## Machine-readable topic index
 
 [topics.json](topics.json) lists package metadata and task aliases for coding agents. File paths are relative to this SDK guide's directory. `package_version` and `release` identify the version targeted by these source files; check `status` before treating that version as published. `published_release` links to the available release's downloads and notes, and `published_guide` links to its corrected setup and quickstart. The original release tag remains unchanged.

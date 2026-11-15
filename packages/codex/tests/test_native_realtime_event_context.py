@@ -6,7 +6,7 @@ import json
 import pytest
 
 from agents import Agent, Allow, NativeProvider, ToolOutput, function_tool
-from agents.realtime import RealtimeConfig, RealtimeResponse, RealtimeToolCall
+from agents.realtime.native import RealtimeConfig, RealtimeResponse, RealtimeToolCall
 from tests._asyncio import timeout
 from tests.test_native_manual_tools import next_request
 from tests.test_native_realtime import realtime_peer as realtime_peer

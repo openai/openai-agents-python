@@ -6,6 +6,14 @@ Release notes for previews of the OpenAI Agents SDK. Versions alpha.5 and earlie
 
 - Add managed native function approvals with callable policies, Session-scoped remembered decisions, guarded execution, live voice decisions, and portable pending approval restore.
 
+### Added
+
+- **Keep Classic and native Realtime imports separate.** In alpha.8, `agents.realtime` exposes the complete retained Classic/v0 API. Native Session voice APIs use `agents.realtime.native`, including `RealtimeAgentConfig(is_tool_enabled=...)`. [Native voice](examples/codex/native_voice.md) · [Classic imports](CLASSIC.md#compatible-voice-and-realtime-imports)
+- **Approve function calls and finish tool batches.** Use `FunctionToolApprovalRequest` and `FunctionToolApprovalDecision` for managed function approvals. `run_input_policy_before_approval=True` runs the input policy before the approval predicate as well as before execution. `FinishTurn(output)` lets `tool_batch_completion` propose the final value while retaining output validation and completion checks. [Managed approvals](examples/codex/managed_approvals/README.md) · [Finish a tool batch](docs/sdk/outputs.md#finish-after-a-tool-batch)
+- **Control conversation history explicitly.** `ConversationsHistory.ensure_conversation_id()` creates a remote conversation only when needed. `Session.replace_history_suffix(keep_prefix_count=...)` preserves a checked history prefix. `SessionState.with_appended_pending_input()` appends staged input without replacing it. `StoredTurn.started_at_ms` and `completed_at_ms` use Unix milliseconds. [History APIs](docs/sdk/reference.md#additional-alpha8-history-apis) · [History edits](docs/sdk/state.md#read-and-edit-original-history)
+- **Choose the matching storage and transport types.** `SQLAlchemySQLiteSessionStore` supports an application-owned synchronous SQLite engine. `ResponsesSocketFactoryOptions` describes a WebSocket factory's resolved connection parameters. `TextLogprobsFact`, `TokenLogprob`, `TokenLogprobAlternative`, and `MalformedLogprobsFact` describe received logprob data without changing serialized record kinds. Import `ModelRunOwner` from `agents.models` and `ApplicationToolOutput` from `agents.state`. [Storage](docs/sdk/state.md#sqlalchemy-sqlite-storage) · [Socket options](docs/sdk/reference.md#model-run-ownership-and-websocket-options) · [Logprob facts](docs/sdk/streaming.md#inspect-provider-logprobs)
+- **Group prompt-cache routing.** An explicit `TraceOptions.group_id` also selects prompt-cache affinity for fresh Sessions in alpha.8. Restored Sessions keep their saved key. A borrowed model adapter's `prompt_cache_key` overrides only that adapter's outgoing key; neither option guarantees a cache hit. [Prompt-cache routing](docs/sdk/observability.md#prompt-cache-routing-for-fresh-sessions)
+
 ## 0.24.0-alpha.7 (2026-11-08)
 
 ### Highlights

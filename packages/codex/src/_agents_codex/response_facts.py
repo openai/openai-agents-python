@@ -15,14 +15,14 @@ from typing_extensions import NotRequired, TypedDict
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
-class ProbabilityAlternative(TypedDict):
+class TokenLogprobAlternative(TypedDict):
     token: str
     bytes: NotRequired[list[int]]
     logprob: float
 
 
-class ProbabilityToken(ProbabilityAlternative):
-    top_logprobs: NotRequired[list[ProbabilityAlternative]]
+class TokenLogprob(TokenLogprobAlternative):
+    top_logprobs: NotRequired[list[TokenLogprobAlternative]]
 
 
 class RefusalFact(TypedDict):
@@ -34,14 +34,14 @@ class RefusalFact(TypedDict):
     capture_complete: bool
 
 
-class TextProbabilitiesFact(TypedDict):
+class TextLogprobsFact(TypedDict):
     kind: Literal["text_probabilities"]
     item_id: str | None
     output_index: int | None
     content_index: int | None
     snapshot: bool
     delta: str | None
-    tokens: list[ProbabilityToken]
+    tokens: list[TokenLogprob]
     capture_complete: bool
 
 
@@ -60,16 +60,16 @@ class CaptureTruncatedFact(TypedDict):
     kind: Literal["capture_truncated"]
 
 
-class MalformedProbabilitiesFact(TypedDict):
+class MalformedLogprobsFact(TypedDict):
     kind: Literal["malformed_probabilities"]
 
 
 ResponseFact: TypeAlias = (
     RefusalFact
-    | TextProbabilitiesFact
+    | TextLogprobsFact
     | HostedAgentAttributionFact
     | CaptureTruncatedFact
-    | MalformedProbabilitiesFact
+    | MalformedLogprobsFact
 )
 
 
@@ -92,7 +92,7 @@ ResponseFactSummary: TypeAlias = (
     ResponseFactContentSummary
     | HostedAgentAttributionSummary
     | CaptureTruncatedFact
-    | MalformedProbabilitiesFact
+    | MalformedLogprobsFact
 )
 
 
@@ -118,7 +118,7 @@ def _summarize_response_fact(
     return cast(RecordedResponseFactSummary, result)
 
 
-def _alternative(value: Any) -> ProbabilityAlternative | None:
+def _alternative(value: Any) -> TokenLogprobAlternative | None:
     if not isinstance(value, dict) or not isinstance(value.get("token"), str):
         return None
     logprob = value.get("logprob")
@@ -129,7 +129,7 @@ def _alternative(value: Any) -> ProbabilityAlternative | None:
         or not math.isfinite(logprob)
     ):
         return None
-    result: ProbabilityAlternative = {"token": value["token"], "logprob": logprob}
+    result: TokenLogprobAlternative = {"token": value["token"], "logprob": logprob}
     if value.get("bytes") is not None:
         values = value["bytes"]
         if not isinstance(values, list) or any(
@@ -140,13 +140,13 @@ def _alternative(value: Any) -> ProbabilityAlternative | None:
     return result
 
 
-def _tokens(values: list[Any]) -> list[ProbabilityToken] | None:
-    result: list[ProbabilityToken] = []
+def _tokens(values: list[Any]) -> list[TokenLogprob] | None:
+    result: list[TokenLogprob] = []
     for value in values:
         item = _alternative(value)
         if item is None:
             return None
-        token = cast(ProbabilityToken, item)
+        token = cast(TokenLogprob, item)
         if value.get("top_logprobs") is not None:
             alternatives = value["top_logprobs"]
             if not isinstance(alternatives, list):
@@ -154,7 +154,7 @@ def _tokens(values: list[Any]) -> list[ProbabilityToken] | None:
             projected = [_alternative(alt) for alt in alternatives]
             if any(alt is None for alt in projected):
                 return None
-            token["top_logprobs"] = cast(list[ProbabilityAlternative], projected)
+            token["top_logprobs"] = cast(list[TokenLogprobAlternative], projected)
         result.append(token)
     return result
 

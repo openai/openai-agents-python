@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from agents import Agent, NativeProvider, ToolContext, function_tool
-from agents.realtime import RealtimeAudio, RealtimeConfig, RealtimeResponse
+from agents.realtime.native import RealtimeAudio, RealtimeConfig, RealtimeResponse
 from tests._asyncio import timeout
 from tests.native_fixtures import function_call, text_response
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
@@ -319,7 +319,7 @@ async def test_speech_only_interrupt_does_not_start_an_unowned_legacy_request(
 async def test_speech_only_interrupt_keeps_exact_handoff_target_acknowledgement(
     realtime_peer: RealtimePeer, late_admission: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from agents.realtime import realtime_handoff
+    from agents.realtime.native import realtime_handoff
 
     peer = realtime_peer
     entered, release = asyncio.Event(), asyncio.Event()

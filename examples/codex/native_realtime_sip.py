@@ -17,7 +17,7 @@ from urllib.parse import quote
 import httpx
 
 from agents import Agent
-from agents.realtime import RealtimeConfig, RealtimeSIP
+from agents.realtime.native import RealtimeConfig, RealtimeSIP
 
 
 async def main(call_id: str, seconds: float, drop_message_id: str | None) -> None:

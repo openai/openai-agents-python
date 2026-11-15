@@ -41,7 +41,7 @@ async def test_staged_manual_input_keeps_provider_cursor_and_occurrences(kind, c
             "role": role,
             "content": [{"type": "input_text", "text": "DUPLICATE_STAGED_OCCURRENCE"}],
         }
-        staged = saved.with_pending_input([item, item])
+        staged = saved.with_appended_pending_input([item, item])
         assert saved.pending_input == []
         assert staged.pending_input == [item, item]
         detached = staged.pending_input

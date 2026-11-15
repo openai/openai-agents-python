@@ -67,10 +67,12 @@ async def test_future_raw_age_cannot_extend_ttl_or_refresh_retained_prefix(
         async with agent.session(storage=storage) as source:
             identity = source.id
             before = await source.history_snapshot()
-            await source.transact_history(expected_revision=before.revision, keep=0, items=[old])
+            await source.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0, items=[old]
+            )
             before = await source.history_snapshot()
-            await source.transact_history(
-                expected_revision=before.revision, keep=before.total, items=[future]
+            await source.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=before.total, items=[future]
             )
             accepted_second = int(time.time())
             admitted_document = documents[-1]
@@ -132,7 +134,9 @@ async def test_enabling_ttl_does_not_trust_a_previously_imported_future_age(
         ) as source:
             identity = source.id
             before = await source.history_snapshot()
-            await source.transact_history(expected_revision=before.revision, keep=0, items=[item])
+            await source.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0, items=[item]
+            )
         storage = CustomStorage(
             EncryptedSessionStore(
                 SQLiteSessionStore(database), encryption_key="synthetic-upgrade", ttl=0

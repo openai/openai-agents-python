@@ -8,9 +8,9 @@ import pytest
 
 from agents import (
     Agent,
-    ApprovalRequested,
     CapabilityError,
     Environment,
+    FunctionToolApprovalRequest,
     PendingRequests,
     SessionState,
     ToolTimeoutError,
@@ -76,7 +76,7 @@ async def test_configured_capture_joins_child_seal_before_waiter_or_close(monkey
             pending = await restored.restored_turn.wait_for_request_or_result()
             assert isinstance(pending, PendingRequests)
             [request] = pending.requests
-            assert isinstance(request, ApprovalRequested)
+            assert isinstance(request, FunctionToolApprovalRequest)
             await restored.respond(request.reply(True))
             assert (await restored.restored_turn.get_result()).final_output == "parent complete"
         assert effects == ["accepted-sibling", "child-effect"]
@@ -113,7 +113,7 @@ async def test_configured_capture_leaves_child_readiness_cancellable(monkeypatch
             pending = await turn.wait_for_request_or_result()
             assert isinstance(pending, PendingRequests)
             [request] = pending.requests
-            assert isinstance(request, ApprovalRequested)
+            assert isinstance(request, FunctionToolApprovalRequest)
             [owner] = source._configured_children
             wait_manual = owner.session._wait_manual_boundary
             waiting = asyncio.Event()
@@ -164,7 +164,7 @@ async def test_configured_capture_restores_handoff_profiles_without_repeating_ef
             boundary = await turn.wait_for_request_or_result()
             assert isinstance(boundary, PendingRequests)
             [request] = boundary.requests
-            assert isinstance(request, ApprovalRequested)
+            assert isinstance(request, FunctionToolApprovalRequest)
             await sibling.wait()
             saved = await source.suspend()
         assert effects == ["accepted-sibling"]
@@ -175,7 +175,7 @@ async def test_configured_capture_restores_handoff_profiles_without_repeating_ef
             boundary = await restored.restored_turn.wait_for_request_or_result()
             assert isinstance(boundary, PendingRequests)
             [request] = boundary.requests
-            assert isinstance(request, ApprovalRequested)
+            assert isinstance(request, FunctionToolApprovalRequest)
             assert effects == ["accepted-sibling"]
             assert len(root_model.requests) == len(child_model.requests) == 1
             await restored.respond(request.reply(True))
@@ -208,7 +208,7 @@ async def test_configured_capture_rejects_graph_executor_before_retiring_child(
                 boundary = await turn.wait_for_request_or_result()
                 assert isinstance(boundary, PendingRequests)
                 [request] = boundary.requests
-                assert isinstance(request, ApprovalRequested)
+                assert isinstance(request, FunctionToolApprovalRequest)
                 await sibling.wait()
                 [child] = source._configured_children
                 with pytest.raises(CapabilityError, match="parent graph with an executor"):
@@ -264,7 +264,7 @@ async def test_configured_rollback_keeps_issuing_executor_tool_ceiling(
                 pending = await turn.wait_for_request_or_result()
                 assert isinstance(pending, PendingRequests)
                 [request] = pending.requests
-                assert isinstance(request, ApprovalRequested)
+                assert isinstance(request, FunctionToolApprovalRequest)
                 await source.respond(request.reply(True))
                 assert (await turn.get_result()).final_output == "parent complete"
                 assert "exec_command" not in str(child_model.requests[-1].get("tools", []))

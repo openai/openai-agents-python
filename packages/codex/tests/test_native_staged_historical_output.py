@@ -36,7 +36,7 @@ async def test_detached_staged_output_is_history_only(kind, item_type):
             await source.submit("Initial input")
             await next_request(source.interactions(), manual)
             saved = await source.suspend()
-        state = SessionState.from_json(saved.with_pending_input([historical]).to_json())
+        state = SessionState.from_json(saved.with_appended_pending_input([historical]).to_json())
         live_selection = {
             "type": kind,
             "id": "resp_1" if kind == "previous_response" else "conv_current",

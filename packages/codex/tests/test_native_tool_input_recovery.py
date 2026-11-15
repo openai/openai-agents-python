@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from agents import Agent, Allow, ApprovalRequested, ToolInputErrorContext, function_tool
+from agents import Agent, Allow, FunctionToolApprovalRequest, ToolInputErrorContext, function_tool
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     assistant_output,
@@ -38,7 +38,7 @@ async def test_strict_missing_arguments_return_retryable_error(responses, needs_
         turn = await session.submit("begin")
         if needs_approval:
             request = await anext(session.interactions())
-            assert isinstance(request, ApprovalRequested)
+            assert isinstance(request, FunctionToolApprovalRequest)
             assert request.call_id == "corrected-key"
             await request.approve()
         assert (await turn.get_result()).final_output == "recovered"
@@ -127,7 +127,7 @@ async def test_policy_replacement_validation_stays_outside_recovery(responses, n
     @function_tool(
         input_error_function=recover,
         needs_approval=needs_approval,
-        run_before_approval=needs_approval,
+        run_input_policy_before_approval=needs_approval,
         before=lambda context: ReplaceArguments({"key": 7}),
     )
     async def lookup(key: str) -> str:

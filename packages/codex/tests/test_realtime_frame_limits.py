@@ -6,7 +6,7 @@ import pytest
 
 import _agents_codex.realtime as realtime
 from agents import Agent
-from agents.realtime import (
+from agents.realtime.native import (
     RealtimeConfig,
     RealtimeConversationItemObserved,
     RealtimeProviderRequestError,

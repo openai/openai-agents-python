@@ -38,8 +38,8 @@ async def test_retirement_preserves_cold_descendants_and_portable_copies(
             ]
             async with agent.session() as memory:
                 current = await memory.history_snapshot()
-                await memory.transact_history(
-                    expected_revision=current.revision, keep=0, items=items
+                await memory.replace_history_suffix(
+                    expected_revision=current.revision, keep_prefix_count=0, items=items
                 )
                 return SessionState.from_json((await memory.save_state()).to_json())
 
@@ -49,9 +49,9 @@ async def test_retirement_preserves_cold_descendants_and_portable_copies(
             await (await source.submit("source-only-marker")).get_result()
             turn_ids = [turn["id"] async for turn in source.turns()]
             current = await source.history_snapshot()
-            await source.transact_history(
+            await source.replace_history_suffix(
                 expected_revision=current.revision,
-                keep=current.total,
+                keep_prefix_count=current.total,
                 items=[{"type": "application-audit", "payload": {"kept": "😀"}}],
             )
             saved_source = await portable_data_copy((await source.history_snapshot()).items)

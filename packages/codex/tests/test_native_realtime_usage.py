@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from agents import Agent, NativeProvider, ToolContext, function_tool
-from agents.realtime import RealtimeConfig, RealtimeResponse, RealtimeUsage
+from agents.realtime.native import RealtimeConfig, RealtimeResponse, RealtimeUsage
 from agents.testing import RealtimeStep, ScriptedRealtimeAdapter
 from tests._asyncio import timeout
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
@@ -124,7 +124,7 @@ async def test_missing_zero_detailed_usage_and_duplicate_completion():
 def test_usage_public_import():
     usage = RealtimeUsage(input_tokens=0)
     assert usage.input_tokens == 0
-    assert usage.__class__.__module__ == "agents.realtime"
+    assert usage.__class__.__module__ == "agents.realtime.native"
 
 
 @pytest.mark.parametrize("managed", [False, True])

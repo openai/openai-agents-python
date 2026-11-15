@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from agents import Agent, NativeProvider, function_tool
-from agents.realtime import (
+from agents.realtime.native import (
     RealtimeAgentConfig,
     RealtimeConfig,
     RealtimeConversationItemObserved,

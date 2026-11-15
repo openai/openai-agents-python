@@ -191,7 +191,7 @@ async def controlled_realtime_peer():
 async def test_native_two_audio_turns_interrupt_first_and_correlate_second_tool(
     controlled_realtime_peer,
 ) -> None:
-    from agents.realtime import (
+    from agents.realtime.native import (
         RealtimeAudio,
         RealtimeAudioInput,
         RealtimeConfig,

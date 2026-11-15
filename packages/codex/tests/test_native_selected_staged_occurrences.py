@@ -80,7 +80,7 @@ async def test_selected_staged_row_survives_next_manual_capture_and_cold_reopen(
             "role": "user",
             "content": [{"type": "input_text", "text": STAGED}],
         }
-        state = SessionState.from_json(state.with_pending_input([row, row]).to_json())
+        state = SessionState.from_json(state.with_appended_pending_input([row, row]).to_json())
         async with agent.session(
             state=state, provider_history=provider_history("resp_1")
         ) as resumed:
@@ -171,7 +171,7 @@ async def test_preterminal_transport_failure_keeps_both_staged_occurrences():
             "role": "user",
             "content": [{"type": "input_text", "text": STAGED}],
         }
-        state = state.with_pending_input([row, row])
+        state = state.with_appended_pending_input([row, row])
         async with agent.session(
             state=state, provider_history={"type": "previous_response", "id": "resp_1"}
         ) as resumed:
@@ -237,7 +237,7 @@ async def test_terminal_accepts_selected_rows_before_failing_observer():
             "role": "user",
             "content": [{"type": "input_text", "text": STAGED}],
         }
-        state = state.with_pending_input([row, row])
+        state = state.with_appended_pending_input([row, row])
         async with agent.session(
             state=state, provider_history={"type": "previous_response", "id": "resp_1"}
         ) as resumed:

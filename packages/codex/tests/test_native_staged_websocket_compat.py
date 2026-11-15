@@ -95,7 +95,7 @@ async def test_staged_provider_input_can_continue_a_stored_http_anchor_over_webs
                 saved = await original.suspend()
             assert len(http.requests) == 1
             allow_websocket = True
-            saved = saved.with_pending_input("WS_STAGED_ORIGINAL")
+            saved = saved.with_appended_pending_input("WS_STAGED_ORIGINAL")
             try:
                 async with agent.session(
                     state=saved, provider_history={"type": "previous_response", "id": "resp_1"}

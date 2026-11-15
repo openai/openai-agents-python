@@ -60,7 +60,7 @@ async def test_filter_rewrites_same_staged_occurrence(kind, same_object):
             await source.submit("Initial input")
             await next_request(source.interactions(), manual)
             saved = await source.suspend()
-        saved = SessionState.from_json(saved.with_pending_input(original).to_json())
+        saved = SessionState.from_json(saved.with_appended_pending_input(original).to_json())
         restored_selection = {
             "type": kind,
             "id": "resp_1" if kind == "previous_response" else "conv_current",

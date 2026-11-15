@@ -4,7 +4,7 @@ from contextlib import aclosing
 import pytest
 
 from agents import Agent, NativeProvider, function_tool
-from agents.realtime import NativeRealtimeToolChoice, RealtimeConfig
+from agents.realtime.native import NativeRealtimeToolChoice, RealtimeConfig
 from tests._asyncio import timeout
 from tests.native_fixtures import function_call, text_response
 from tests.test_native_agent import function_declarations
@@ -66,7 +66,7 @@ async def test_background_realtime_tool_ceiling(realtime_peer, mode):
 async def test_realtime_capture_keeps_ceiling_after_source_change(realtime_peer, change):
     from dataclasses import replace
 
-    from agents.realtime import RealtimeDelegation
+    from agents.realtime.native import RealtimeDelegation
 
     peer = realtime_peer
     effects = []

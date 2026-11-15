@@ -318,4 +318,4 @@ class _RealtimeAdapterDriver:
             await self._cleanup()
 
 
-_preserve_module_identity(globals(), "agents.realtime")
+_preserve_module_identity(globals(), "agents.realtime.native")

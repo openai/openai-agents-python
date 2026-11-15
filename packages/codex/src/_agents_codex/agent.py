@@ -1033,7 +1033,7 @@ class Agent(Generic[ContextT, OutputT]):
 
     ``before_complete`` checks proposed completion for roots and native children.
     ``tool_batch_completion`` can propose a final value once a direct function
-    batch has settled. A ``FinishToolBatch`` value passes through the active
+    batch has settled. A ``FinishTurn`` value passes through the active
     output type and completion policy. Returning ``None`` lets the turn continue.
     Return None to accept, ContinueTurn with instructions to keep the same turn
     running, or StopTurn to abort by policy. Rejected text may already have
@@ -2334,7 +2334,8 @@ class Agent(Generic[ContextT, OutputT]):
         Pass the current HostedMCP declarations in restored_hosted_mcp to
         authorize selected hosted servers for the pending turn.
         return_history=True captures conversation records before close for replay
-        through another Session's transact_history. That Session supplies its own instructions.
+        through another Session's replace_history_suffix. The receiving Session supplies its
+        own instructions.
         History above 4,096 original records or 8 MiB raises NativeError after completion.
 
         return_raw_usage=True returns original usage from accepted Responses requests

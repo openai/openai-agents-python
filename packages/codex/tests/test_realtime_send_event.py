@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from agents import Agent, NativeProvider, function_tool
-from agents.realtime import (
+from agents.realtime.native import (
     RealtimeAudio,
     RealtimeConfig,
     RealtimeDetachedFunctionCall,
@@ -862,7 +862,7 @@ async def test_raw_session_tools_replace_exact_declarations_and_preserve_sparse_
 async def test_raw_session_caller_function_uses_public_notice_and_exact_output_ack(
     realtime_peer: RealtimePeer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from agents.realtime import RealtimeConversationItemObserved
+    from agents.realtime.native import RealtimeConversationItemObserved
 
     peer = realtime_peer
     declaration = {

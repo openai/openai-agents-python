@@ -18,7 +18,7 @@ from _agents_codex.canonical_storage import (
     RedisSessionStore as RedisSessionStore,
     SessionStore as SessionStore,
     SessionStoreCleanup as SessionStoreCleanup,
-    SQLAlchemySessionStore as SQLAlchemySessionStore,
+    SQLAlchemySQLiteSessionStore as SQLAlchemySQLiteSessionStore,
     SQLiteSessionStore as SQLiteSessionStore,
     ToolOutput as ToolOutput,
     _after_fork_child as _after_fork_child,

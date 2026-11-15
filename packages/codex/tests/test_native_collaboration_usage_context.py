@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from agents import NativeAgents, NativeError, ToolContext
-from agents.realtime import RealtimeConfig, RealtimeResponse
+from agents.realtime.native import RealtimeConfig, RealtimeResponse
 from agents.testing import RealtimeStep, ScriptedRealtimeAdapter
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
