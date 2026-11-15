@@ -3,6 +3,7 @@
 import hashlib
 import json
 import runpy
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -408,6 +409,7 @@ WORKFLOW_AUTHORITY_STUB = (
 )
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux AppArmor workflow shell")
 @pytest.mark.parametrize(
     "case",
     [
