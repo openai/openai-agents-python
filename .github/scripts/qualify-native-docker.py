@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+from collections import Counter
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -65,27 +66,38 @@ def live_context(env=os.environ, git=None):
     }
 
 
+# Exact pytest case and number of inspected, separately owned containers.
 NATIVE_CASES = {
-    "test_native_docker_path_grants_are_mapped_and_writes_are_scoped": (
-        "test_native_docker_path_authority"
-    ),
+    "test_native_docker_path_grants_survive_restore": ("test_native_docker_path_authority", 3),
     "test_docker_resource_keeps_read_and_write_grants_under_native_session": (
-        "test_native_docker_path_authority"
+        "test_native_docker_path_authority",
+        1,
+    ),
+    "test_native_docker_mapped_shell_and_patch_after_cold_reopen": (
+        "test_native_docker_mapped_tools",
+        2,
     ),
     "test_native_selected_docker_users_have_distinct_current_resources": (
-        "test_native_docker_run_as"
+        "test_native_docker_run_as",
+        2,
     ),
-    "test_native_selected_docker_user_does_not_add_executor_grants": "test_native_docker_run_as",
+    "test_native_selected_docker_user_does_not_add_executor_grants": (
+        "test_native_docker_run_as",
+        1,
+    ),
     "test_native_missing_docker_user_fails_before_sampling_and_retires_resource": (
-        "test_native_docker_run_as"
+        "test_native_docker_run_as",
+        1,
     ),
     "test_native_docker_file_reads_follow_selected_process_user[0:0-True]": (
-        "test_native_docker_run_as"
+        "test_native_docker_run_as",
+        1,
     ),
     "test_native_docker_file_reads_follow_selected_process_user[10001:10001-False]": (
-        "test_native_docker_run_as"
+        "test_native_docker_run_as",
+        1,
     ),
-    "test_native_plain_docker_identity_rebinds_on_cold_restore": "test_native_docker_run_as",
+    "test_native_plain_docker_identity_rebinds_on_cold_restore": ("test_native_docker_run_as", 3),
 }
 SYSCALLS = {
     "uts-clone-denied",
@@ -177,11 +189,14 @@ def qualify(evidence, current, image):
     )
     check_probes(data("probes.json"), profile)
     xml = ElementTree.parse(evidence / "native-docker.xml")
-    expected = {("packages.codex.tests." + module, name) for name, module in NATIVE_CASES.items()}
+    expected = {
+        ("packages.codex.tests." + module, name) for name, (module, _) in NATIVE_CASES.items()
+    }
     cases = xml.findall(".//testcase")
     require(
-        len(cases) == 8 and {(c.get("classname"), c.get("name")) for c in cases} == expected,
-        "Wrong exact eight native cases",
+        len(cases) == len(expected)
+        and {(c.get("classname"), c.get("name")) for c in cases} == expected,
+        "Wrong exact native cases",
     )
     require(
         not any(xml.findall(".//" + tag) for tag in ("skipped", "failure", "error")),
@@ -200,11 +215,12 @@ def qualify(evidence, current, image):
         json.loads(line)
         for line in (evidence / "inspection-receipts.jsonl").read_text().splitlines()
     ]
-    expected_ids = {
-        "packages/codex/tests/" + module + ".py::" + name for name, module in NATIVE_CASES.items()
+    expected_inspections = {
+        "packages/codex/tests/" + module + ".py::" + name: count
+        for name, (module, count) in NATIVE_CASES.items()
     }
     require(
-        {r["case"] for r in receipts} == expected_ids
+        Counter(r["case"] for r in receipts) == expected_inspections
         and len({r["containerId"] for r in receipts}) == len(receipts),
         "Incomplete owner inspections",
     )
@@ -240,7 +256,13 @@ def qualify(evidence, current, image):
         "No protected writable-remount denial",
     )
     require(manifest["diagnosticOnly"] is False, "Diagnostic profile has not been promoted")
-    return {**current, "qualified": True, "nativeCases": 8, "classifiedProbes": 18}
+    return {
+        **current,
+        "qualified": True,
+        "nativeCases": len(NATIVE_CASES),
+        "inspectedContainers": len(receipts),
+        "classifiedProbes": 18,
+    }
 
 
 if __name__ == "__main__":

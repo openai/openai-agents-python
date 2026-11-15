@@ -1737,6 +1737,9 @@ def _project_progress(
                 or item["type"]
                 in {
                     "web_search_call",
+                    "tool_search_call",
+                    "tool_search_output",
+                    "mcp_approval_response",
                     "mcp_list_tools",
                     "mcp_call",
                     "program",

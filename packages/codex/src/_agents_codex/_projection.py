@@ -215,7 +215,7 @@ def project_model_output_item(
     native: dict[str, Any], done: bool, turn_id: str | None
 ) -> dict[str, Any] | None:
     if native["type"] == "hosted_tool_call":
-        return project_hosted_response_item(native["item"], turn_id)
+        return project_hosted_response_item(native["item"], turn_id, live_item_id=native["id"])
     if native["type"] == "ImageGeneration":
         raw = native.get("provider_data")
         if not isinstance(raw, dict):

@@ -1,12 +1,18 @@
-"""Run real mapped Docker path grants through the native process tool."""
+"""Qualify mapped Docker grants and native executor confinement.
+
+Set CODEX_DOCKER_TEST_MISSING_BWRAP=1 only for the explicit fail-closed
+probe on an image without bubblewrap. The hosted check requires mapped writes.
+"""
 
 import io
+import json
 import os
 import tarfile
 
 import pytest
 
 from agents import Agent, SessionState
+from agents.classic.sandbox.entries import File
 from agents.classic.sandbox.util.blocking_io import run_blocking_workspace_io
 from agents.sandbox import DockerGateway, Manifest, sandbox_environment
 from tests.native_docker_profiles import record_isolation
@@ -50,14 +56,13 @@ class MountedFixtureClient(FixtureClient):
             inspection = await run_blocking_workspace_io(
                 lambda: self.docker_client.api.inspect_container(cid)
             )
-            assert inspection["HostConfig"]["NetworkMode"] == "none"
-            assert not inspection["HostConfig"]["Privileged"]
-            assert not inspection["HostConfig"].get("CapAdd")
-            assert not inspection["HostConfig"].get("Devices")
-            assert not inspection["HostConfig"].get("DeviceRequests")
-            assert (inspection["HostConfig"].get("SecurityOpt") or []) == list(
-                self.security_options
-            )
+            host = inspection["HostConfig"]
+            assert host["NetworkMode"] == "none"
+            assert host["Privileged"] is False
+            assert not host.get("CapAdd")
+            assert not host.get("Devices")
+            assert not host.get("DeviceRequests")
+            assert (host.get("SecurityOpt") or []) == list(self.security_options)
             grants = resource.state.manifest.extra_path_grants
             mounts = {mount["Destination"]: mount for mount in inspection["Mounts"]}
             assert len(mounts) == len(inspection["Mounts"])
@@ -79,9 +84,8 @@ class MountedFixtureClient(FixtureClient):
             raise
 
 
-async def test_native_docker_path_grants_are_mapped_and_writes_are_scoped(
-    responses, monkeypatch, tmp_path
-):
+async def test_native_docker_path_grants_survive_restore(responses, monkeypatch, tmp_path):
+    missing_bwrap = os.environ.get("CODEX_DOCKER_TEST_MISSING_BWRAP") == "1"
     config = tmp_path / "docker-config"
     config.mkdir()
     (config / "config.json").write_text("{}")
@@ -161,11 +165,18 @@ async def test_native_docker_path_grants_are_mapped_and_writes_are_scoped(
         assert len(responses.requests) == 4
         for index, label in ((1, "first"), (3, "restored")):
             output = tool_output(responses.requests[index], label)
-            assert "SYNTHETIC_READONLY_MOUNT" in output and "WRITE_ESCAPED" not in output, output
-            assert "SELECTED_CWD=/workspace" in output, output
-            assert (write_dir / label).read_text() == label
-            receipt = (write_dir / label).stat()
-            assert (receipt.st_uid, receipt.st_gid) == (os.getuid(), os.getgid())
+            if missing_bwrap:
+                assert "bubblewrap is unavailable:" in output, output
+                assert "Process exited with code 101" in output, output
+                assert not (write_dir / label).exists()
+            else:
+                assert "SYNTHETIC_READONLY_MOUNT" in output and "WRITE_ESCAPED" not in output, (
+                    output
+                )
+                assert "SELECTED_CWD=/workspace" in output, output
+                assert (write_dir / label).read_text() == label
+                receipt = (write_dir / label).stat()
+                assert (receipt.st_uid, receipt.st_gid) == (os.getuid(), os.getgid())
         assert not (read_dir / "forbidden").exists()
         assert client.created_ids == client.deleted_ids and len(client.created_ids) == 3
         for container_id in client.created_ids:
@@ -176,7 +187,6 @@ async def test_native_docker_path_grants_are_mapped_and_writes_are_scoped(
         daemon.close()
 
 
-@pytest.mark.asyncio
 async def test_docker_resource_keeps_read_and_write_grants_under_native_session(
     responses, monkeypatch, tmp_path
 ):
@@ -204,6 +214,7 @@ async def test_docker_resource_keeps_read_and_write_grants_under_native_session(
             client,
             manifest=Manifest(
                 root="/workspace",
+                entries={"native-root-proof.txt": File(content=b"SYNTHETIC_SELECTED_WORKSPACE")},
                 extra_path_grants=(
                     {"path": "/mnt/native-readonly", "host_path": str(read_dir), "read_only": True},
                     {
@@ -214,25 +225,34 @@ async def test_docker_resource_keeps_read_and_write_grants_under_native_session(
                 ),
             ),
             options=DockerSandboxClientOptions(image=image, network_mode="none"),
-            connect=DockerGateway(client, tools=("project_glob",), run_as=runner_user),
+            connect=DockerGateway(client, tools=("project_grep",), run_as=runner_user),
         )
-        responses.respond(function_call("project_glob", {"pattern": "*"}, "list-current"))
+        responses.respond(
+            function_call(
+                "project_grep", {"pattern": "SYNTHETIC_SELECTED_WORKSPACE"}, "inspect-current"
+            )
+        )
         responses.respond(assistant_output("done"))
         async with Agent(instructions="Use the assigned workspace.", provider=native).session(
             environment=source
         ) as session:
             assert (await (await session.submit("Inspect.")).get_result()).final_output == "done"
+            output = json.loads(tool_output(responses.requests[-1], "inspect-current"))
+            assert [(item["path"], item["line"]) for item in output["matches"]] == [
+                ("native-root-proof.txt", "SYNTHETIC_SELECTED_WORKSPACE")
+            ]
+            assert output["errors"] == []
             cid = client.created_ids[0]
             container = daemon.containers.get(cid)
             cmd = [
                 "/bin/sh",
                 "-c",
-                "cat /mnt/native-readonly/original && "
+                'test "$(pwd)" = /workspace && cat /mnt/native-readonly/original && '
                 "! touch /mnt/native-readonly/forbidden && "
                 "printf SYNTHETIC_WRITABLE_MOUNT >/mnt/native-writable/receipt",
             ]
             result = await run_blocking_workspace_io(
-                lambda: container.exec_run(cmd, user=runner_user)
+                lambda: container.exec_run(cmd, workdir="/workspace", user=runner_user)
             )
             assert result.exit_code == 0 and b"SYNTHETIC_READONLY_MOUNT" in result.output
             assert not (read_dir / "forbidden").exists()

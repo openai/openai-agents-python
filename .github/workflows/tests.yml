@@ -968,8 +968,11 @@ jobs:
         if: ${{ !cancelled() && steps.profiles.outcome == 'success' }}
         env:
           CODEX_DOCKER_TEST_PROFILE_MANIFEST: /etc/openai-agents-native-docker/manifest.json
+          CODEX_DOCKER_STRICT_POSITIVE_TEST: "1"
+          CODEX_DOCKER_TEST_MISSING_BWRAP: "0"
         run: |
           uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q \
+            packages/codex/tests/test_native_docker_mapped_tools.py::test_native_docker_mapped_shell_and_patch_after_cold_reopen \
             packages/codex/tests/test_native_docker_path_authority.py \
             packages/codex/tests/test_native_docker_run_as.py \
             --junitxml="$NATIVE_DOCKER_EVIDENCE/native-docker.xml"

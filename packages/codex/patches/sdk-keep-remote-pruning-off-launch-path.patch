@@ -1,0 +1,25 @@
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -1634,11 +1634,7 @@
+         // network-approval cleanup only after dropping that lock.
+         if let Some(pruned_entry) = pruned_entry {
+             unregister_network_approval_for_entry(&pruned_entry).await;
+-            if pruned_entry.process.owns_remote_termination() {
+-                // The store keeps any outstanding stop visible to checked close.
+-                pruned_entry.process.join_remote_termination().await;
+-                Self::settle_remote_retirements(&mut *self.process_store.lock().await);
+-            } else if pruned_entry.process.uses_darwin_supervisor() {
++            if pruned_entry.process.uses_darwin_supervisor() {
+                 #[cfg(target_os = "macos")]
+                 if pruned_entry.process.terminate_and_join().await {
+                     self.process_store
+@@ -1647,7 +1643,7 @@
+                         .retiring_darwin_processes
+                         .retain(|process| !Arc::ptr_eq(process, &pruned_entry.process));
+                 }
+-            } else {
++            } else if !pruned_entry.process.owns_remote_termination() {
+                 pruned_entry.process.terminate();
+             }
+         }

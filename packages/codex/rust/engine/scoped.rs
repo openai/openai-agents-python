@@ -44,6 +44,7 @@ impl EngineState {
             config_json,
             runtime_json,
             closed: AtomicBool::new(false),
+            unconfirmed_process_shutdown: AtomicBool::new(false),
             lifecycle: Mutex::new(()),
             event_owners: Mutex::new(HashMap::new()),
             managed_thread_ids: Mutex::new(HashSet::new()),
