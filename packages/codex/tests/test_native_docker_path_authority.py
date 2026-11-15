@@ -1,5 +1,10 @@
 """Run real mapped Docker path grants through the native process tool."""
 
+import json
+import os
+import stat
+from pathlib import Path
+
 import pytest
 
 from agents import Agent, SessionState
@@ -50,6 +55,54 @@ class MountedFixtureClient(FixtureClient):
                 assert mount["Type"] == "bind"
                 assert mount["Source"] == grant.host_path
                 assert mount["RW"] == (not grant.read_only)
+            if os.environ.get("AGENTS_RECORD_DOCKER_BIND_METADATA") == "1":
+                targets = ("/mnt/native-readonly", "/mnt/native-writable")
+                host = {}
+                for target in targets:
+                    source = Path(mounts[target]["Source"])
+                    info = source.stat()
+                    host[target] = {
+                        "uid": info.st_uid,
+                        "gid": info.st_gid,
+                        "mode": stat.S_IMODE(info.st_mode),
+                        "has_git": (source / ".git").exists(),
+                        "mount_rw": mounts[target]["RW"],
+                    }
+                capture = await run_blocking_workspace_io(
+                    lambda: self.docker_client.containers.get(cid).exec_run(
+                        [
+                            "python3",
+                            "-c",
+                            "import json,os,pathlib,stat,sys;"
+                            "mounts={p:os.stat(p) for p in sys.argv[1:]};"
+                            "print(json.dumps({'uid':os.getuid(),'gid':os.getgid(),"
+                            "'uid_map':[[int(n) for n in l.split()] for l in "
+                            "pathlib.Path('/proc/self/uid_map').read_text().splitlines()],"
+                            "'gid_map':[[int(n) for n in l.split()] for l in "
+                            "pathlib.Path('/proc/self/gid_map').read_text().splitlines()],"
+                            "'mounts':{p:{'uid':s.st_uid,'gid':s.st_gid,"
+                            "'mode':stat.S_IMODE(s.st_mode),"
+                            "'has_git':os.path.exists(p+'/.git')} for p,s in mounts.items()}}))",
+                            *targets,
+                        ],
+                    ),
+                )
+                print(
+                    "Docker fixture bind metadata "
+                    + json.dumps(
+                        {
+                            "resource_number": len(self.created_ids),
+                            "config_uses_default_user": not inspection["Config"].get("User"),
+                            "host": host,
+                            "outer_container": json.loads(capture.output)
+                            if capture.exit_code == 0
+                            else None,
+                            "inspect_ok": capture.exit_code == 0,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
             archive = await run_blocking_workspace_io(fixture_archive)
             await run_blocking_workspace_io(
                 lambda: self.docker_client.api.put_archive(cid, "/", archive)
@@ -141,6 +194,20 @@ async def test_native_docker_path_grants_are_mapped_and_writes_are_scoped(
         assert len(responses.requests) == 4
         for index, label in ((1, "first"), (3, "restored")):
             output = tool_output(responses.requests[index], label)
+            if os.environ.get("AGENTS_RECORD_DOCKER_BIND_METADATA") == "1":
+                print(
+                    "Docker fixture synthetic tool response "
+                    + json.dumps(
+                        {
+                            "stage": label,
+                            "positive_marker": "SYNTHETIC_READONLY_MOUNT" in output,
+                            "git_permission_denied": ".git: Permission denied" in output,
+                            "read_only_escape_marker": "WRITE_ESCAPED" in output,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
             assert "SYNTHETIC_READONLY_MOUNT" in output and "WRITE_ESCAPED" not in output, output
             assert "SELECTED_CWD=/workspace" in output, output
             assert (write_dir / label).read_text() == label
