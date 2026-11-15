@@ -4,15 +4,15 @@ Publish SDK previews from `feat/codex-harness` as GitHub prereleases in `openai/
 
 Use `X.Y.Z-alpha.N` in source metadata and `vX.Y.Z-alpha.N` for the Git tag. Wheel filenames use the equivalent PEP 440 spelling, `X.Y.ZaN`. Never move a published tag or replace released assets. Publish a new version instead.
 
-Run the commands below from the repository root with Git, Python, and an authenticated GitHub CLI (`gh`) on `PATH`. Your GitHub account needs access to the Actions artifacts and permission to create the release. Python 3.10 also requires `tomli==2.2.1` for the release verifier; Python 3.11 and later need no extra TOML package.
+Run the commands below from the repository root with Git, Python, and an authenticated GitHub CLI (`gh`) on `PATH`. Use an account with access to the Actions artifacts and push access to the repository. The qualifier uses your push access to see draft releases. Publishing also requires permission to create the release. Python 3.10 also requires `tomli==2.2.1` for the release verifier; Python 3.11 and later need no extra TOML package.
 
 ## Prepare the candidate
 
-1. Start from the current `feat/codex-harness` head. Confirm the proposed tag and GitHub release do not already exist. Use the [release-notes skill](../.agents/skills/release-notes/SKILL.md) to audit changes since the previous published preview and draft highlights first. Include `CHANGELOG-alpha.md` in the audit and retain the draft outside the source tree for review.
+1. Start from the current `feat/codex-harness` head. Confirm that the Git tag and GitHub release are both unused under the canonical spelling (`vX.Y.Z-alpha.N`) and the older spelling (`vX.Y.ZaN`). Check for draft releases too. Use the [release-notes skill](../.agents/skills/release-notes/SKILL.md) to audit changes since the previous published preview and draft highlights first. Include `CHANGELOG-alpha.md` in the audit and retain the draft outside the source tree for review.
 2. Run `make check-released-api-contract VERSION=<current-source-version>` before changing release metadata. Investigate any API mismatch. Do not regenerate the snapshot to hide one.
-3. Update the version in `pyproject.toml`, the editable project entry in `uv.lock`, `.release-please-manifest.json`, `src/agents/version.py`, and `docs/sdk/topics.json`. Keep the topic index marked `unreleased` until publication is verified.
-4. Run `make update-released-api-contract VERSION=<new-source-version>`, then the matching check command. A version-only update changes only `baseline` and `baseline_commit` in the API snapshot. Keep its public API and native revision unchanged. The source commit identifies the candidate's parent.
-5. Complete the repository's applicable independent review and verification. Push the candidate to `feat/codex-harness`. The release commit must advance `.release-please-manifest.json`. A later documentation-only commit is not a release candidate.
+3. Keep the prepared source version if the metadata already agrees on the intended unpublished preview. When preparing a new version, update `pyproject.toml`, the editable project entry in `uv.lock`, `.release-please-manifest.json`, `src/agents/version.py`, and `docs/sdk/topics.json`. Keep the topic index marked `unreleased` until publication is verified.
+4. For a new version, run `make update-released-api-contract VERSION=<new-source-version>`, then the matching check command. A version-only update changes only `baseline` and `baseline_commit` in the API snapshot. Keep its public API and native revision unchanged. The source commit identifies the candidate's parent.
+5. Complete the repository's applicable independent review and verification and qualify the resulting `feat/codex-harness` head. Fixes can land after the version is prepared. Qualify the commit containing those fixes with its own full Tests push run.
 
 The historical private-preview preparation skills do not apply to this public branch. Use the existing checks and explicit version edits above. No release bot or new build system is needed.
 
@@ -22,7 +22,7 @@ The historical private-preview preparation skills do not apply to this public br
 
 Wait for the candidate's **Tests** push run to complete successfully. It must include successful native qualification for Linux x86_64, Linux ARM64, macOS ARM64, and Windows x64. It also requires all Python test matrices, native macOS sandbox tests, lint, and type checks. A skipped build or a successful documentation-only run cannot qualify a release.
 
-The distribution qualifier requires the latest Tests push run for the exact commit and source branch. It checks the version change, every required job's latest execution, artifact producer times, commit identities, and archive digests. It then validates wheel names, native platform tags, and package versions. Unless you explicitly select the preview branch, the qualifier preserves the existing `main` behavior.
+The distribution qualifier requires the latest Tests push run for the exact commit and source branch. For a preview, it verifies that the tag matches the source version and that both spellings are unused. It checks every required job's latest execution, artifact producer times, commit identities, and archive digests. It then validates wheel names, native platform tags, and package versions. Qualification for `main` requires the commit to advance the manifest version.
 
 ### Collect the distributions
 
@@ -86,7 +86,7 @@ Show the complete assembled notes to the release owner and obtain review before 
 
 ### Publish the reviewed tag and assets
 
-Recheck that the tag and release are absent. Confirm that the source branch, reviewed commit, and qualification record still agree. Create and validate the local tag before pushing it:
+Recheck that the tag and release are absent under both spellings, including drafts. Confirm that the source branch, reviewed commit, and qualification record still agree. Create and validate the local tag before pushing it:
 
 ```sh
 git tag -a "$RELEASE_TAG" "$RELEASE_SHA" -m "Agents SDK preview $RELEASE_TAG"

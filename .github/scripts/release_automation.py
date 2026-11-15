@@ -129,6 +129,22 @@ def release_timestamp(value: str) -> datetime:
     return result
 
 
+def require_unused_preview_version(release_version: str) -> None:
+    repository = api(f"repos/{REPO}")
+    permissions = repository.get("permissions") or {}
+    if permissions.get("push") is not True:
+        raise ValueError(
+            "Preview qualification requires GitHub push access to check draft releases"
+        )
+    tags = (f"v{release_version}", f"v{normalized_version(release_version)}")
+    for tag in tags:
+        if repo_api(f"git/ref/tags/{tag}", missing_ok=True) is not None:
+            raise ValueError(f"Preview tag already exists: {tag}")
+    for release in pages("releases"):
+        if release["tag_name"] in tags:
+            raise ValueError(f"Preview release already exists: {release['tag_name']}")
+
+
 def qualified_distributions(head: str, *, source_branch: str = "main") -> dict[str, Any]:
     """Select the latest exact-commit push run; never fall back to an older success."""
     head = sha(head)
@@ -157,16 +173,20 @@ def qualified_distributions(head: str, *, source_branch: str = "main") -> dict[s
         or run["conclusion"] != "success"
     ):
         raise ValueError("Release requires a successful exact-commit source-branch Tests run")
-    commit = repo_api(f"git/commits/{head}")
     manifest = ".release-please-manifest.json"
     release_version = json.loads(content(manifest, head))["."]
-    if (
-        not commit["parents"]
-        or release_version == json.loads(content(manifest, sha(commit["parents"][0]["sha"])))["."]
-    ):
-        raise ValueError("The qualified release commit must advance the release version")
+    if source_branch == "main":
+        commit = repo_api(f"git/commits/{head}")
+        if (
+            not commit["parents"]
+            or release_version
+            == json.loads(content(manifest, sha(commit["parents"][0]["sha"])))["."]
+        ):
+            raise ValueError("The qualified release commit must advance the release version")
     if os.environ["RELEASE_TAG"] != f"v{release_version}":
         raise ValueError("Release version manifest does not match the validated tag")
+    if source_branch != "main":
+        require_unused_preview_version(release_version)
     run_path = f"actions/runs/{int(run['id'])}"
     jobs = records(run_path + "/jobs?filter=all", "jobs")
     expected_artifacts = RELEASE_ARTIFACTS[source_branch]
