@@ -38,7 +38,7 @@ jobs:
     name: Native snapshot (${{ inputs.runner }})
     runs-on: &native_snapshot_runner >-
       ${{ fromJSON(
-        github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64-xl"}' ||
+        github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && inputs.native_source_run == '' && '{"group":"codex-runners","labels":"codex-linux-x64-xl"}' ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04-arm' && inputs.native_source_run == '' &&
           ((github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness') ||
            (github.event_name == 'pull_request' &&

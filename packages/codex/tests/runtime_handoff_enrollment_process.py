@@ -14,7 +14,7 @@ from tests.test_native_decision_handoff import Decisions
 from tests.test_native_manual_tools import next_request
 
 
-async def run(mode: str, url: str, directory: Path, variant: str) -> None:
+async def run(mode: str, url: str, directory: Path, variant: str, invocation: str) -> None:
     effects = directory / "effects.jsonl"
     factory_calls = 0
     targets = []
@@ -122,9 +122,9 @@ async def run(mode: str, url: str, directory: Path, variant: str) -> None:
                         assert (await turn.get_result()).final_output == "done again"
         assert factory_calls == (1 if mode == "write" else 0)
         (directory / f"{mode}-{variant}.receipt.json").write_text(
-            json.dumps({"factory_calls": factory_calls, "pid": __import__("os").getpid()})
+            json.dumps({"factory_calls": factory_calls, "invocation": invocation})
         )
 
 
 if __name__ == "__main__":
-    asyncio.run(run(sys.argv[1], sys.argv[2], Path(sys.argv[3]), sys.argv[4]))
+    asyncio.run(run(sys.argv[1], sys.argv[2], Path(sys.argv[3]), sys.argv[4], sys.argv[5]))

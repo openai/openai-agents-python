@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 from tests.native_fixtures import (
     assistant_output,
@@ -23,6 +24,7 @@ async def child(mode: str, url: str, path: Path, variant: str = "current") -> No
         if "proxy" not in key.lower() and key != "OPENAI_API_KEY"
     }
     environment["PYTHONPATH"] = os.pathsep.join(path for path in sys.path if path)
+    invocation = uuid4().hex
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
@@ -31,6 +33,7 @@ async def child(mode: str, url: str, path: Path, variant: str = "current") -> No
         url,
         str(path),
         variant,
+        invocation,
         env=environment,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -43,6 +46,10 @@ async def child(mode: str, url: str, path: Path, variant: str = "current") -> No
         await process.wait()
         raise
     assert process.returncode == 0, output.decode()
+
+    # A Windows virtualenv launcher can have a different PID from its interpreter.
+    receipt = json.loads((path / f"{mode}-{variant}.receipt.json").read_text())
+    assert receipt == {"invocation": invocation, "factory_calls": int(mode == "write")}
 
 
 async def test_explicit_enrollment_restores_current_owner_without_factory_replay(
@@ -74,8 +81,6 @@ async def test_explicit_enrollment_restores_current_owner_without_factory_replay
         {"owner": "read", "value": "first"},
         {"owner": "again", "value": "second"},
     ]
-    receipts = [json.loads(p.read_text()) for p in tmp_path.glob("*.receipt.json")]
-    assert len(receipts) == 6 and len({receipt["pid"] for receipt in receipts}) == 6
 
 
 async def test_enrollment_refuses_opening_name_collision_before_capture(responses, tmp_path):

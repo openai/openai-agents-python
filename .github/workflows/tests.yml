@@ -51,6 +51,7 @@ jobs:
       native_source_run: ${{ steps.native-source.outputs.run_id }}
       native_artifacts: ${{ steps.native-source.outputs.artifacts }}
       native_provenance: ${{ steps.producer-identity.outputs.provenance }}
+      sdk_tests: ${{ steps.sdk-tests.outputs.settings }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -58,6 +59,32 @@ jobs:
           fetch-depth: 0
       - id: changes
         run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
+      - name: Read SDK test settings
+        id: sdk-tests
+        if: ${{ !inputs.native_only }}
+        # These values tune downstream SDK tests without changing native artifact identity.
+        run: |
+          python -I -S - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+
+          settings = json.loads(Path(".github/scripts/sdk-test-settings.json").read_text(encoding="utf-8"))
+          # Zero Linux workers keeps Make's existing automatic worker selection.
+          limits = {"linux_workers": (0, 64), "macos_shards": (1, 16), "windows_shards": (1, 16)}
+          if not isinstance(settings, dict) or settings.keys() != limits.keys() | {"reporting"}:
+              raise SystemExit("Invalid SDK test settings")
+          for name, (minimum, maximum) in limits.items():
+              value = settings[name]
+              if type(value) is not int or not minimum <= value <= maximum:
+                  raise SystemExit(f"{name} must be an integer from {minimum} to {maximum}")
+          if settings["reporting"] not in ("-rap", "-rA"):
+              raise SystemExit("Invalid pytest reporting mode")
+          settings["macos_indices"] = list(range(settings["macos_shards"]))
+          settings["windows_indices"] = list(range(settings["windows_shards"]))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("settings=" + json.dumps(settings, separators=(",", ":")) + "\n")
+          PYTHON
       - name: Select Windows test coverage
         id: release-windows
         env:
@@ -747,8 +774,8 @@ jobs:
           - "3.14"
     env:
       OPENAI_API_KEY: fake-for-tests
-      PYTEST_ADDOPTS: "-rap"
-      PYTEST_XDIST_AUTO_NUM_WORKERS: ${{ github.repository == 'openai/openai-agents-python' && '12' || '' }}
+      PYTEST_ADDOPTS: ${{ fromJSON(needs.changes.outputs.sdk_tests).reporting }}
+      PYTEST_XDIST_AUTO_NUM_WORKERS: ${{ github.repository == 'openai/openai-agents-python' && fromJSON(needs.changes.outputs.sdk_tests).linux_workers || '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -879,7 +906,8 @@ jobs:
     timeout-minutes: 25
     env:
       CODEX_DOCKER_TEST_SOCKET: /var/run/docker.sock
-      CODEX_DOCKER_TEST_IMAGE: docker.io/library/python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
+      CODEX_DOCKER_TEST_IMAGE: agents-native-docker:${{ github.run_id }}-${{ github.run_attempt }}
+      NATIVE_DOCKER_EVIDENCE: ${{ github.workspace }}/native-docker-evidence
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -893,37 +921,124 @@ jobs:
         uses: ./.github/actions/use-native
       - name: Install dependencies
         run: make sync
-      - name: Test strict Docker path and identity grants
+      - name: Prepare the pinned Docker test image
         run: |
           test "$(uname -m)" = x86_64
           test -S "$CODEX_DOCKER_TEST_SOCKET"
           test -x "$CODEX_EXEC_SERVER_TEST_BINARY"
-          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" pull "$CODEX_DOCKER_TEST_IMAGE"
+          mkdir -m 0700 "$NATIVE_DOCKER_EVIDENCE"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" version \
+            --format 'client={{.Client.Version}} server={{.Server.Version}}' \
+            > "$NATIVE_DOCKER_EVIDENCE/docker-version.txt"
+          uname -r > "$NATIVE_DOCKER_EVIDENCE/kernel-version.txt"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" build --pull \
+            --file packages/codex/tests/fixtures/native-docker.Dockerfile \
+            --tag "$CODEX_DOCKER_TEST_IMAGE" packages/codex/tests/fixtures
+          image_id=$(docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" image inspect \
+            --format '{{.Id}}' "$CODEX_DOCKER_TEST_IMAGE")
+          echo "CODEX_DOCKER_TEST_IMAGE=$image_id" >> "$GITHUB_ENV"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" image inspect "$image_id" \
+            > "$NATIVE_DOCKER_EVIDENCE/image.json"
+          sha256sum "$CODEX_EXEC_SERVER_TEST_BINARY" "$OPENAI_AGENTS_NATIVE_WHEEL" \
+            "$OPENAI_AGENTS_NATIVE_WHEEL.pristine.json" \
+            packages/codex/tests/fixtures/native-docker.Dockerfile \
+            > "$NATIVE_DOCKER_EVIDENCE/inputs.sha256"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" run --rm --network none \
+            "$image_id" /usr/bin/bwrap --version \
+            > "$NATIVE_DOCKER_EVIDENCE/bwrap-version.txt"
+      - name: Install the confined diagnostic runner profiles
+        id: profiles
+        env:
+          NATIVE_DOCKER_RECIPE: packages/codex/tests/fixtures/native-docker.Dockerfile
+        run: bash .github/scripts/install-native-docker-profiles.sh
+      - name: Probe enforced runner policy denials
+        if: ${{ !cancelled() && steps.profiles.outcome == 'success' }}
+        run: |
+          profile_name="agents-native-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" run --rm --interactive --network none \
+            --label "openai-agents.native-ci-profile=$profile_name" \
+            --security-opt "apparmor=$profile_name" \
+            --security-opt seccomp=/etc/openai-agents-native-docker/seccomp.json \
+            "$CODEX_DOCKER_TEST_IMAGE" python3 - "$profile_name" \
+            < .github/scripts/probe-native-docker-profiles.py \
+            > "$NATIVE_DOCKER_EVIDENCE/probes.json"
+      - name: Test strict Docker path and identity grants
+        if: ${{ !cancelled() && steps.profiles.outcome == 'success' }}
+        env:
+          CODEX_DOCKER_TEST_PROFILE_MANIFEST: /etc/openai-agents-native-docker/manifest.json
+        run: |
           uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q \
             packages/codex/tests/test_native_docker_path_authority.py \
             packages/codex/tests/test_native_docker_run_as.py \
-            --junitxml="$RUNNER_TEMP/native-docker.xml"
-          python3 - "$RUNNER_TEMP/native-docker.xml" <<'PYTHON'
-          from pathlib import Path
+            --junitxml="$NATIVE_DOCKER_EVIDENCE/native-docker.xml"
+      - name: Collect audit evidence and finalize owned isolation
+        if: ${{ always() }}
+        run: |
+          # No artifact parsing or writes before owned cleanup and profile removal.
+          profile_name="agents-native-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          set +e
+          sudo grep -Fx "$profile_name (enforce)" /sys/kernel/security/apparmor/profiles >/dev/null
+          loaded_status=$?
+          cleanup_result=$(python3 .github/scripts/cleanup-native-docker-containers.py)
+          cleanup_status=$?
+          remove_status=1
+          # A missing/malformed manifest must not suppress revocation. Authorize only
+          # this run's non-symlink, root-owned exact profile; never another profile.
+          profile_path=/etc/openai-agents-native-docker/apparmor.profile
+          profile_names=$(sudo apparmor_parser --names --skip-cache "$profile_path")
+          names_status=$?
+          profile_owner=$(sudo stat --format='%u:%a' "$profile_path")
+          sudo test ! -L "$profile_path"
+          path_status=$?
+          if (( cleanup_status == 0 && names_status == 0 && path_status == 0 )) && [[ "$profile_owner" == '0:444' && "$profile_names" == "$profile_name" ]]; then
+            sudo apparmor_parser --remove --skip-cache /etc/openai-agents-native-docker/apparmor.profile
+            remove_status=$?
+          fi
+          sudo grep -E "^$profile_name(//[^ ]+)? \\([^)]*\\)$" /sys/kernel/security/apparmor/profiles >/dev/null
+          absent_status=$?
+          mkdir -p "$NATIVE_DOCKER_EVIDENCE"
+          sudo journalctl -k --since "$(cat "$NATIVE_DOCKER_EVIDENCE/start-time" 2>/dev/null || date --iso-8601=seconds)" \
+            --no-pager | grep -E "profile=\"$profile_name([\"/])" \
+            > "$NATIVE_DOCKER_EVIDENCE/profile-audit.log"
+          audit_status=("${PIPESTATUS[@]}")
+          printf '%s\n' "$cleanup_result" > "$NATIVE_DOCKER_EVIDENCE/container-cleanup.json"
+          python3 - "$cleanup_status" "$loaded_status" "$remove_status" "$absent_status" \
+            "${audit_status[0]}" "${audit_status[1]}" "$NATIVE_DOCKER_EVIDENCE" <<'PYTHON'
+          import json
           import sys
-          from xml.etree import ElementTree
+          from pathlib import Path
 
-          suite = ElementTree.parse(Path(sys.argv[1]))
-          cases = suite.findall(".//testcase")
-          assert cases and not suite.findall(".//skipped"), "Native Docker cases must run"
-          assert any(case.get("name", "").startswith("test_native_docker_path_grants") for case in cases)
+          keys = ("ownedCleanup", "loadedEnforce", "profileRemove", "profileAbsent", "journal", "filter")
+          result = dict(zip(keys, map(int, sys.argv[1:7])))
+          (Path(sys.argv[7]) / "finalization.json").write_text(json.dumps(result) + "\n")
           PYTHON
+          record_status=$?
+          set -e
+          if (( record_status != 0 || cleanup_status != 0 || loaded_status != 0 || remove_status != 0 || absent_status != 1 || audit_status[0] != 0 || audit_status[1] != 0 )); then
+            echo "Owned isolation finalization or audit collection failed." >&2
+            exit 1
+          fi
+      - name: Require complete native qualification after cleanup
+        if: ${{ !cancelled() }}
+        run: python3 .github/scripts/qualify-native-docker.py
+      - name: Publish confined-runner diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-docker-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.NATIVE_DOCKER_EVIDENCE }}
+          if-no-files-found: error
 
   native-macos-sandbox-shards:
     if: ${{ !inputs.native_only }}
-    needs: native-macos
+    needs: [changes, native-macos]
     runs-on: ${{ github.repository == 'openai/openai-agents-python' && 'macos-15' || 'macos-latest' }}
     timeout-minutes: 100
     name: macOS sandbox shard (${{ matrix.shard }})
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: ${{ fromJSON(needs.changes.outputs.sdk_tests).macos_indices }}
     env:
       OPENAI_API_KEY: fake-for-tests
       PYTEST_ADDOPTS: "-rA"
@@ -990,9 +1105,10 @@ jobs:
           PYTEST_ADDOPTS: "-ra -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0"
           PYTHONUNBUFFERED: "1"
           MACOS_TEST_SHARD: ${{ matrix.shard }}
+          MACOS_TEST_SHARD_COUNT: ${{ fromJSON(needs.changes.outputs.sdk_tests).macos_shards }}
         shell: bash
         run: |
-          SDK_TEST_SHARD_INDEX="$MACOS_TEST_SHARD" SDK_TEST_SHARD_COUNT=4 make tests-parallel
+          SDK_TEST_SHARD_INDEX="$MACOS_TEST_SHARD" SDK_TEST_SHARD_COUNT="$MACOS_TEST_SHARD_COUNT" make tests-parallel
           if [[ "$MACOS_TEST_SHARD" == 0 ]]; then
             make tests-serial
           fi
@@ -1012,7 +1128,7 @@ jobs:
 
   tests-windows-shards:
     if: ${{ !inputs.native_only }}
-    needs: native-windows
+    needs: [changes, native-windows]
     name: Windows test shard (${{ matrix.python-version }}, ${{ matrix.shard }})
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
     timeout-minutes: 100
@@ -1022,10 +1138,10 @@ jobs:
         python-version:
           - "3.10"
           - "3.14"
-        shard: [0, 1, 2]
+        shard: ${{ fromJSON(needs.changes.outputs.sdk_tests).windows_indices }}
     env:
       OPENAI_API_KEY: fake-for-tests
-      PYTEST_ADDOPTS: "-rap"
+      PYTEST_ADDOPTS: ${{ fromJSON(needs.changes.outputs.sdk_tests).reporting }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -1055,7 +1171,7 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         env:
           SDK_TEST_SHARD_INDEX: ${{ matrix.shard }}
-          SDK_TEST_SHARD_COUNT: "3"
+          SDK_TEST_SHARD_COUNT: ${{ fromJSON(needs.changes.outputs.sdk_tests).windows_shards }}
         # Native completions use loopback sockets on Windows.
         run: uv run python packages/codex/scripts/test_native.py --sdk -m pytest -n 2 --dist worksteal -m "not serial" -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
       - name: Run serial tests after all workers exit

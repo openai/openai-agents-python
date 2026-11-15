@@ -139,6 +139,7 @@ def test_manual_verification_checks_unchanged_tree_without_deploying(
         (".github/scripts/detect-changes.sh", True, False, False, False),
         (".github/scripts/check_optional_truthiness.py", True, False, False, False),
         (".github/scripts/run_serial_tests.py", True, False, False, False),
+        (".github/scripts/sdk-test-settings.json", True, False, False, False),
         (
             ".github/scripts/run-asyncio-teardown-stability.sh",
             True,
@@ -823,11 +824,14 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
         "needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true'"
     )
     suites = jobs["tests-windows-shards"]
-    assert suites["needs"] == "native-windows"
+    assert suites["needs"] == ["changes", "native-windows"]
     assert suites["if"] == "${{ !inputs.native_only }}"
     assert suites["strategy"] == {
         "fail-fast": "false",
-        "matrix": {"python-version": ["3.10", "3.14"], "shard": ["0", "1", "2"]},
+        "matrix": {
+            "python-version": ["3.10", "3.14"],
+            "shard": "${{ fromJSON(needs.changes.outputs.sdk_tests).windows_indices }}",
+        },
     }
     assert suites["runs-on"] == (
         "${{ fromJSON(github.repository == 'openai/openai-agents-python' && "
@@ -838,7 +842,7 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
     parallel = steps["Run parallel tests"]
     assert parallel["env"] == {
         "SDK_TEST_SHARD_INDEX": "${{ matrix.shard }}",
-        "SDK_TEST_SHARD_COUNT": "3",
+        "SDK_TEST_SHARD_COUNT": "${{ fromJSON(needs.changes.outputs.sdk_tests).windows_shards }}",
     }
     assert 'pytest -n 2 --dist worksteal -m "not serial"' in parallel["run"]
     serial = steps["Run serial tests after all workers exit"]
@@ -1054,6 +1058,7 @@ def test_native_selection_routes_stack_sources_and_pr_provenance(
         "new_build_module",
         "build_bytecode_noise",
         "python_fixture_changed",
+        "sdk_test_settings_changed",
         "native_fixture_data_changed",
         "hatch_controls_changed",
         "uv_build_controls_changed",
@@ -1457,6 +1462,9 @@ def test_native_build_selection(
             retired_demo.write_text("# Demo or fixture present in the qualified source\n")
     (repo / "pyproject.toml").write_text(project)
     (repo / "uv.lock").write_text(lock)
+    sdk_settings = ".github/scripts/sdk-test-settings.json"
+    if scenario == "sdk_test_settings_changed":
+        (repo / sdk_settings).write_bytes((ROOT / sdk_settings).read_bytes())
     if scenario == "pre_native":
         native_workflow.unlink()
     base = _commit(repo)
@@ -1547,6 +1555,10 @@ def test_native_build_selection(
         path = repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('{"new": "fixture data"}\n')
+    elif scenario == "sdk_test_settings_changed":
+        (repo / sdk_settings).write_text(
+            '{"linux_workers": 8, "macos_shards": 2, "windows_shards": 2, "reporting": "-rA"}\n'
+        )
     elif scenario == "native_setup_changed":
         path = repo / ".github/actions/setup-native/action.yml"
         path.write_text(path.read_text() + "\n# New toolchain setup\n")
@@ -1654,20 +1666,24 @@ def test_native_build_selection(
             _commit(repo, "packages/codex/Cargo.toml")
         else:
             _commit(repo, "src/agents/parent.py")
-    head = _commit(
-        repo,
-        "packages/codex/Cargo.toml"
-        if scenario
-        in {
-            "native_changed",
-            "push_package_demos_native_changed",
-            "push_native_config_native_changed",
-            "build_payload_changed_native_changed",
-            "retired_realtime_extra_native_changed",
-        }
-        else "src/agents/agent.py",
-        *additional_paths,
-    )
+    if scenario == "sdk_test_settings_changed":
+        head = _commit(repo)
+        assert _git(repo, "diff", "--name-only", base, head) == sdk_settings
+    else:
+        head = _commit(
+            repo,
+            "packages/codex/Cargo.toml"
+            if scenario
+            in {
+                "native_changed",
+                "push_package_demos_native_changed",
+                "push_native_config_native_changed",
+                "build_payload_changed_native_changed",
+                "retired_realtime_extra_native_changed",
+            }
+            else "src/agents/agent.py",
+            *additional_paths,
+        )
     if scenario == "unrelated_source":
         _git(repo, "checkout", "-b", "unrelated", initial)
         donor = _commit(repo, "unrelated.txt")
@@ -2406,6 +2422,7 @@ def test_native_build_selection(
                 "python_dependencies_changed",
                 "build_bytecode_noise",
                 "python_fixture_changed",
+                "sdk_test_settings_changed",
                 "old_snapshot_after_docs",
                 "snapshot_index_filtered",
                 "snapshot_index_duplicate_runs",
