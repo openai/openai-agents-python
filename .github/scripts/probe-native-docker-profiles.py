@@ -148,6 +148,18 @@ def check(name, operation):
         checks.append({"name": name, "passed": False, "error": str(error)})
 
 
+def is_alias_mount_denial(result, source, alias):
+    prefix = (
+        f"bwrap: Can't bind mount {os.path.realpath(source)} on {alias}: "
+        "Unable to mount source on destination: "
+    )
+    return result.returncode != 0 and any(
+        line.removeprefix(prefix) in ("Permission denied", "Operation not permitted", "Read-only file system")
+        for line in result.stderr.splitlines()
+        if line.startswith(prefix)
+    )
+
+
 def denied_syscall(number, *arguments):
     ctypes.set_errno(0)
     result = libc.syscall(number, *arguments)
@@ -226,7 +238,8 @@ with (
     inner = r"""
 import ctypes,errno,json,os,sys
 from pathlib import Path
-workspace,metadata=map(Path,sys.argv[1:])
+workspace,metadata=map(Path,sys.argv[1:3])
+outer_pid,outer_fd=sys.argv[3:]
 def need(condition,message):
  if not condition: raise RuntimeError(message)
 need((metadata/'marker').read_text()=='protected synthetic metadata','Synthetic source changed')
@@ -272,21 +285,39 @@ for metadata_name in ('.git','.agents','.codex'):
   result=libc.mount(None,os.fsencode(path),None,0x9020,None)
   need(result==-1 and ctypes.get_errno() in (errno.EPERM,errno.EACCES,errno.EROFS),
        'Workspace metadata remount succeeded: '+str(path))
+outer = Path('/proc')/outer_pid
+need(Path('/proc/self/status').is_file(),'Missing current proc status')
+need((outer/'status').is_file(),'Missing synthetic outer process')
+for relative in ('root','cwd','fd/'+outer_fd):
+ try: os.readlink(outer/relative)
+ except OSError as error:
+  need(error.errno in (errno.EACCES,errno.EPERM),'Unproven outer proc denial: '+relative)
+ else: raise RuntimeError('Outer proc link accessible: '+relative)
+print('outer proc links denied')
 print('positive read/write and canonical/symlink/remount denials passed')
 """
 
     def sandbox_controls():
-        result = run_sandbox(
-            [
-                *base,
-                "--",
-                "/usr/local/bin/python",
-                "-c",
-                handshake + inner,
-                str(workspace),
-                str(metadata),
-            ]
-        )
+        with (metadata / "marker").open("rb") as outer_file:
+            parent = Path("/proc") / str(os.getpid())
+            parent_fd = str(outer_file.fileno())
+            os.readlink(parent / "root")
+            os.readlink(parent / "cwd")
+            if os.readlink(parent / "fd" / parent_fd) != str(metadata / "marker"):
+                raise RuntimeError("Synthetic outer descriptor is unavailable")
+            result = run_sandbox(
+                [
+                    *base,
+                    "--",
+                    "/usr/local/bin/python",
+                    "-c",
+                    handshake + inner,
+                    str(workspace),
+                    str(metadata),
+                    parent.name,
+                    parent_fd,
+                ]
+            )
         if result.returncode:
             raise RuntimeError(result.stdout + result.stderr)
         if (metadata / "marker").read_text() != "protected synthetic metadata":
@@ -298,9 +329,12 @@ print('positive read/write and canonical/symlink/remount denials passed')
                 raise RuntimeError("Protected workspace metadata creation succeeded")
         if result.inner is None:
             raise RuntimeError("Missing trusted inner process witness")
-        return {"inner": result.inner, "procMode": "inherited"}
+        if "outer proc links denied" not in result.stdout.splitlines():
+            raise RuntimeError("The inner process did not confirm outer proc link denials")
+        return {"inner": result.inner, "procMode": "inherited", "outerProcLinks": "denied"}
 
     check("bwrap-positive-and-protected-access", sandbox_controls)
+    positive_passed = checks[-1]["passed"]
     cases = [("metadata-within-root", metadata, tools / "metadata-alias", "marker")]
     for label, root in (
         ("workspace", workspace),
@@ -317,6 +351,8 @@ print('positive read/write and canonical/symlink/remount denials passed')
         alias.mkdir(exist_ok=True)
 
         def alias_denied(source=source, alias=alias, relative=relative):
+            if not positive_passed:
+                raise RuntimeError("Alias control requires a successful positive sandbox")
             code = r"""
 import ctypes,errno,os,sys
 from pathlib import Path
@@ -361,24 +397,9 @@ print('ALIAS-DENIALS-PASSED')
                     raise RuntimeError(result.stdout + result.stderr)
                 stage = "inner-access-and-remount-denied"
             else:
-                # A namespace/startup failure cannot count as an alias denial.
-                error = result.stderr.lower()
-                if (
-                    result.returncode == 0
-                    or "bind mount" not in error
-                    or not any(
-                        term in error
-                        for term in (
-                            "permission denied",
-                            "operation not permitted",
-                            "read-only file system",
-                        )
-                    )
-                    or not any(str(path) in result.stderr for path in (source, alias))
-                ):
-                    raise RuntimeError(
-                        "Unclassified alias startup failure: " + result.stdout + result.stderr
-                    )
+                if not is_alias_mount_denial(result, source, alias):
+                    stderr = result.stderr.strip()[:800]
+                    raise RuntimeError("The requested alias mount denial was not observed: " + stderr)
                 stage = "alias-bind-mount-denied"
             if (metadata / "marker").read_text() != "protected synthetic metadata":
                 raise RuntimeError("Protected source changed through alias")
