@@ -131,7 +131,6 @@ rules = (
 # Every pair keeps its top-level identity; proc/sys receive no generic pair.
 for root in (
     "workspace",
-    "tools",
     "data-write",
     "mnt/native-readonly",
     "mnt/native-writable",
@@ -147,8 +146,10 @@ for root in (
             f"  mount options=(rw,{option},silent) /oldroot/{root}{{,/**}}"
             f" -> /newroot/{root}{{,/**}},\n"
         )
+for option in ("bind", "rbind"):
+    rules += f"  mount options=(rw,{option},silent) /oldroot/tools/ -> /newroot/tools/,\n"
 for device in ("null", "zero", "full", "random", "urandom", "tty"):
-    rules += f"  mount options=(rw,bind,silent) /oldroot/dev/{device} -> /newroot/dev/{device},\n"
+    rules += f"  mount options=(rw,rbind,silent) /oldroot/dev/{device} -> /newroot/dev/{device},\n"
 apparmor = template.replace("  deny mount,", rules.rstrip()).encode()
 (out / "apparmor.profile").write_bytes(apparmor)
 manifest = {

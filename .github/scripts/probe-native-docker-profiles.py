@@ -6,11 +6,13 @@ import json
 import os
 import platform
 import re
+import selectors
 import signal
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 if platform.machine() != "x86_64":
     raise RuntimeError("These syscall probes require x86_64")
@@ -40,6 +42,102 @@ outer = {
         for name in ("user", "mnt", "pid", "net", "uts", "ipc", "cgroup")
     },
 }
+
+
+def process_snapshot(pid):
+    root = Path("/proc") / str(pid)
+    before = (root / "stat").read_text().rsplit(")", 1)[1].split()
+    fields = dict(
+        line.split(":", 1) for line in (root / "status").read_text().splitlines() if ":" in line
+    )
+    snapshot = {
+        "pid": pid,
+        "startTimeTicks": int(before[19]),
+        "apparmor": (root / "attr/current").read_text().strip(),
+        "seccomp": int(fields["Seccomp"]),
+        "NoNewPrivs": int(fields["NoNewPrivs"]),
+        **{
+            name: fields[name].strip()
+            for name in ("CapEff", "CapPrm", "CapInh", "CapAmb", "CapBnd")
+        },
+        "namespaces": {name: os.readlink(root / "ns" / name) for name in outer["namespaces"]},
+    }
+    if (root / "stat").read_text().rsplit(")", 1)[1].split()[19] != before[19]:
+        raise RuntimeError("Inner process identity changed during inspection")
+    return snapshot
+
+
+def inspect_inner(pid, bwrap_pid):
+    if pid == bwrap_pid:
+        raise RuntimeError("The bubblewrap monitor is not the inner command")
+    before = process_snapshot(pid)
+    parent = pid
+    for _ in range(8):
+        if parent == bwrap_pid:
+            break
+        stat = (Path("/proc") / str(parent) / "stat").read_text().rsplit(")", 1)[1].split()
+        parent = int(stat[1])
+    else:
+        raise RuntimeError("Inner process is not a live bubblewrap descendant")
+    snapshot = process_snapshot(pid)
+    if snapshot["startTimeTicks"] != before["startTimeTicks"]:
+        raise RuntimeError("Inner process identity changed during ancestry inspection")
+    if (
+        snapshot["apparmor"] != outer["apparmor"]
+        or snapshot["seccomp"] != 2
+        or snapshot["NoNewPrivs"] != 1
+    ):
+        raise RuntimeError("Inner profile, seccomp or no-new-privileges changed")
+    if any(int(snapshot[name], 16) for name in ("CapEff", "CapPrm", "CapInh", "CapAmb")):
+        raise RuntimeError("Inner process retained executable capabilities")
+    for name in ("user", "mnt", "pid", "net", "ipc"):
+        if snapshot["namespaces"][name] == outer["namespaces"][name]:
+            raise RuntimeError("Inner namespace was inherited: " + name)
+    for name in ("uts", "cgroup"):
+        if snapshot["namespaces"][name] != outer["namespaces"][name]:
+            raise RuntimeError("Unexpected inner namespace: " + name)
+    # Fresh user namespaces can reset CapBnd; bwrap tolerates failed bound drops
+    # and relies on NNP plus zero executable capability sets (v0.12.0 source).
+    return snapshot
+
+
+# Inherited-proc observer-visible PID; os.getpid() identifies the new PID namespace.
+handshake = r"""
+import os,sys
+print('INNER-READY '+os.readlink('/proc/self'),flush=True)
+if sys.stdin.readline() != 'inspection-complete\n':
+ raise RuntimeError('Trusted parent inspection did not complete')
+"""
+
+
+def run_sandbox(arguments):
+    process = subprocess.Popen(
+        arguments, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        with selectors.DefaultSelector() as ready:
+            ready.register(process.stdout, selectors.EVENT_READ)
+            if not ready.select(timeout=15):
+                raise RuntimeError("Timed out waiting for the inner process")
+        line = process.stdout.readline()
+        match = re.fullmatch(r"INNER-READY ([1-9][0-9]*)\n", line)
+        witness = None
+        if match:
+            if process.poll() is not None:
+                raise RuntimeError("Bubblewrap exited before inner inspection")
+            witness = inspect_inner(int(match[1]), process.pid)
+            if process.poll() is not None:
+                raise RuntimeError("Bubblewrap exited during inner inspection")
+        stdout, stderr = process.communicate(
+            "inspection-complete\n" if witness else None, timeout=15
+        )
+        return SimpleNamespace(
+            returncode=process.returncode, stdout=line + stdout, stderr=stderr, inner=witness
+        )
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
 
 
 def check(name, operation):
@@ -96,6 +194,7 @@ with (
     metadata.mkdir()
     (metadata / "marker").write_text("protected synthetic metadata")
     (workspace / "metadata-link").symlink_to(metadata, target_is_directory=True)
+    # Match native proc fallback: retain every namespace flag and inherited proc.
     base = [
         "/usr/bin/bwrap",
         "--unshare-user",
@@ -109,10 +208,8 @@ with (
         str(workspace),
         str(workspace),
         "--ro-bind",
-        str(tools),
-        str(tools),
-        "--proc",
-        "/proc",
+        "/tools",
+        "/tools",
         "--dev",
         "/dev",
         "--cap-drop",
@@ -154,23 +251,36 @@ print('positive read/write and canonical/symlink/remount denials passed')
 """
 
     def sandbox_controls():
-        result = subprocess.run(
-            [*base, "--", "/usr/local/bin/python", "-c", inner, str(workspace), str(metadata)],
-            capture_output=True,
-            text=True,
+        result = run_sandbox(
+            [
+                *base,
+                "--",
+                "/usr/local/bin/python",
+                "-c",
+                handshake + inner,
+                str(workspace),
+                str(metadata),
+            ]
         )
         if result.returncode:
             raise RuntimeError(result.stdout + result.stderr)
         if (metadata / "marker").read_text() != "protected synthetic metadata":
             raise RuntimeError("Protected source changed")
+        if result.inner is None:
+            raise RuntimeError("Missing trusted inner process witness")
+        return {"inner": result.inner, "procMode": "inherited"}
 
     check("bwrap-positive-and-protected-access", sandbox_controls)
     cases = [("metadata-within-root", metadata, tools / "metadata-alias", "marker")]
-    for root in (workspace, Path("/oldroot"), Path("/newroot")):
+    for label, root in (
+        ("workspace", workspace),
+        ("oldroot", Path("/oldroot")),
+        ("newroot", Path("/newroot")),
+    ):
         cases.extend(
             [
-                (str(root) + "-proc", Path("/proc"), root / "proc", "sys/kernel/hostname"),
-                (str(root) + "-sys", Path("/sys"), root / "sys", "kernel/notes"),
+                (label + "-proc", Path("/proc"), root / "proc", "sys/kernel/hostname"),
+                (label + "-sys", Path("/sys"), root / "sys", "kernel/notes"),
             ]
         )
     for name, source, alias, relative in cases:
@@ -199,7 +309,7 @@ if (
  raise RuntimeError('Protected alias remount succeeded')
 print('ALIAS-DENIALS-PASSED')
 """
-            result = subprocess.run(
+            result = run_sandbox(
                 [
                     *base,
                     "--bind",
@@ -208,15 +318,15 @@ print('ALIAS-DENIALS-PASSED')
                     "--",
                     "/usr/local/bin/python",
                     "-c",
-                    code,
+                    handshake + code,
                     str(alias),
                     str(alias / relative),
                     str(source),
-                ],
-                capture_output=True,
-                text=True,
+                ]
             )
             if "ALIAS-COMMAND-STARTED" in result.stdout:
+                if result.inner is None:
+                    raise RuntimeError("Missing trusted alias process witness")
                 if result.returncode or "ALIAS-DENIALS-PASSED" not in result.stdout:
                     raise RuntimeError(result.stdout + result.stderr)
                 stage = "inner-access-and-remount-denied"
@@ -242,7 +352,12 @@ print('ALIAS-DENIALS-PASSED')
                 stage = "alias-bind-mount-denied"
             if (metadata / "marker").read_text() != "protected synthetic metadata":
                 raise RuntimeError("Protected source changed through alias")
-            return {"denialStage": stage, "source": str(source), "alias": str(alias)}
+            return {
+                "denialStage": stage,
+                "source": str(source),
+                "alias": str(alias),
+                "inner": result.inner,
+            }
 
         check(name + "-bind-write-denied", alias_denied)
 
