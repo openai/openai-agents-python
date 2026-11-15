@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import runpy
 from pathlib import Path
 from types import SimpleNamespace
@@ -408,6 +409,7 @@ WORKFLOW_AUTHORITY_STUB = (
 )
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Workflow cleanup uses POSIX executable fixtures")
 @pytest.mark.parametrize(
     "case",
     [
