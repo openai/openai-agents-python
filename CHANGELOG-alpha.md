@@ -4,7 +4,22 @@ Release notes for previews of the OpenAI Agents SDK. Versions alpha.5 and earlie
 
 ## Unreleased
 
+### Upgrading from 0.24.0-alpha.7
+
+- **Keep a rollback copy.** Keep the alpha.7 wheel and a copy of your saved state. Alpha.7 cannot open the new pending-tool checkpoints with request or token budgets. If you roll back, restore your pre-upgrade copy. [Checkpoint compatibility](https://github.com/openai/openai-agents-python/blob/5b9094014f143d2e079c1ca48458ec02d171d12a/docs/sdk/state.md#check-checkpoint-compatibility)
+- **Review network rules.** Replace bare `"*"` with exact hosts or scoped patterns such as `"*.example.org"`. Use `NetworkPolicy.allow_all()` only when the executor needs access to outbound public hosts. [Network policy and platform limits](https://github.com/openai/openai-agents-python/blob/5b9094014f143d2e079c1ca48458ec02d171d12a/docs/sdk/execution.md#network-and-local-socket-access)
+- **Register ChatGPT Apps explicitly.** Add `ChatGPTAppsMCP` to the Agent's tools with the provisioned Apps token, account ID, and selected tool names. A saved Codex login supplies model authentication only. [ChatGPT Apps setup](https://github.com/openai/openai-agents-python/blob/5b9094014f143d2e079c1ca48458ec02d171d12a/docs/sdk/mcp.md#connect-personal-chatgpt-apps)
+- **Count tool executions once.** `session.items()` can return provider call and result rows alongside a typed record for the same execution. Use the native thread, turn, and call IDs to correlate those records. [Execution history](https://github.com/openai/openai-agents-python/blob/5b9094014f143d2e079c1ca48458ec02d171d12a/docs/sdk/streaming.md#inspect-completed-execution)
+- **Set a workspace log budget.** Classic `WorkspaceJsonlSink` now defaults to 8 MiB and stops delivering events if it exceeds that budget. Use a larger finite `max_bytes` or log outside the workspace with `JsonlOutboxSink` or `HttpProxySink`. [Workspace sink limits](https://github.com/openai/openai-agents-python/blob/5b9094014f143d2e079c1ca48458ec02d171d12a/src/agents/classic/sandbox/session/sinks.py#L143-L186)
+- **Update Classic sandbox integrations.** The `classic-blaxel` extra requires Blaxel `0.2.51` or later. When your provider rejects a saved sandbox because its network settings conflict with the current policy, create a fresh sandbox with the required settings. [Blaxel dependency](https://github.com/openai/openai-agents-python/blob/5b9094014f143d2e079c1ca48458ec02d171d12a/pyproject.toml#L113-L117) · [Example restore check](https://github.com/openai/openai-agents-python/blob/5b9094014f143d2e079c1ca48458ec02d171d12a/src/agents/classic/extensions/sandbox/blaxel/sandbox.py#L1095-L1102)
+
+### Added
+
 - Add managed native function approvals with callable policies, Session-scoped remembered decisions, guarded execution, live voice decisions, and portable pending approval restore.
+
+### Fixed
+
+- Preserve the backing store's configured history limit when a Classic compaction wrapper has no explicit settings. Explicit wrapper and per-run limits still take precedence.
 
 ## 0.24.0-alpha.7 (2026-11-08)
 
