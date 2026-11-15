@@ -1064,7 +1064,9 @@ async def test_environment_concurrent_stdin_input_owned_through_approval(
         )
         responses.respond(assistant_output("done"))
         async with Agent(
-            instructions="Run stdin", provider=provider(responses), programmatic_tool_calling=True
+            instructions="Run stdin. Unrelated instruction marker: 55555.",
+            provider=provider(responses),
+            programmatic_tool_calling=True,
         ).session(
             environment=declaration(peer, transform_arguments=before, approval=approval)
         ) as session:
@@ -1072,7 +1074,7 @@ async def test_environment_concurrent_stdin_input_owned_through_approval(
             assert (await turn.get_result()).final_output == "done"
         assert len(original) == len(approval_inputs) == 2
         assert approval_inputs == original
-        text = json.dumps(responses.requests[-1])
+        text = tool_output(responses.requests[-1], "concurrent-stdin", "custom_tool_call_output")
         assert "739101" in text and "739102" in text
         assert "55555" not in text
         assert not any(request.get("method") == "process/start" for request in peer.requests)

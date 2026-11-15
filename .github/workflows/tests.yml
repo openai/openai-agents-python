@@ -906,7 +906,8 @@ jobs:
     timeout-minutes: 25
     env:
       CODEX_DOCKER_TEST_SOCKET: /var/run/docker.sock
-      CODEX_DOCKER_TEST_IMAGE: docker.io/library/python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
+      CODEX_DOCKER_TEST_IMAGE: agents-native-docker:${{ github.run_id }}-${{ github.run_attempt }}
+      NATIVE_DOCKER_EVIDENCE: ${{ runner.temp }}/native-docker-evidence
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -920,25 +921,104 @@ jobs:
         uses: ./.github/actions/use-native
       - name: Install dependencies
         run: make sync
-      - name: Test strict Docker path and identity grants
+      - name: Prepare the pinned Docker test image
         run: |
           test "$(uname -m)" = x86_64
           test -S "$CODEX_DOCKER_TEST_SOCKET"
           test -x "$CODEX_EXEC_SERVER_TEST_BINARY"
-          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" pull "$CODEX_DOCKER_TEST_IMAGE"
+          mkdir -m 0700 "$NATIVE_DOCKER_EVIDENCE"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" version \
+            --format 'client={{.Client.Version}} server={{.Server.Version}}' \
+            > "$NATIVE_DOCKER_EVIDENCE/docker-version.txt"
+          uname -r > "$NATIVE_DOCKER_EVIDENCE/kernel-version.txt"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" build --pull \
+            --file packages/codex/tests/fixtures/native-docker.Dockerfile \
+            --tag "$CODEX_DOCKER_TEST_IMAGE" packages/codex/tests/fixtures
+          image_id=$(docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" image inspect \
+            --format '{{.Id}}' "$CODEX_DOCKER_TEST_IMAGE")
+          echo "CODEX_DOCKER_TEST_IMAGE=$image_id" >> "$GITHUB_ENV"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" image inspect "$image_id" \
+            > "$NATIVE_DOCKER_EVIDENCE/image.json"
+          sha256sum "$CODEX_EXEC_SERVER_TEST_BINARY" "$OPENAI_AGENTS_NATIVE_WHEEL" \
+            "$OPENAI_AGENTS_NATIVE_WHEEL.pristine.json" \
+            packages/codex/tests/fixtures/native-docker.Dockerfile \
+            > "$NATIVE_DOCKER_EVIDENCE/inputs.sha256"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" run --rm --network none \
+            "$image_id" /usr/bin/bwrap --version \
+            > "$NATIVE_DOCKER_EVIDENCE/bwrap-version.txt"
+      - name: Install the confined diagnostic runner profiles
+        id: profiles
+        env:
+          NATIVE_DOCKER_RECIPE: packages/codex/tests/fixtures/native-docker.Dockerfile
+        run: bash .github/scripts/install-native-docker-profiles.sh
+      - name: Probe enforced runner policy denials
+        if: ${{ !cancelled() && steps.profiles.outcome == 'success' }}
+        run: |
+          profile_name="agents-native-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" run --rm --interactive --network none \
+            --label "openai-agents.native-ci-profile=$profile_name" \
+            --security-opt "apparmor=$profile_name" \
+            --security-opt seccomp=/etc/openai-agents-native-docker/seccomp.json \
+            "$CODEX_DOCKER_TEST_IMAGE" python3 - "$profile_name" \
+            < .github/scripts/probe-native-docker-profiles.py \
+            > "$NATIVE_DOCKER_EVIDENCE/probes.json"
+      - name: Test strict Docker path and identity grants
+        if: ${{ !cancelled() && steps.profiles.outcome == 'success' }}
+        env:
+          CODEX_DOCKER_TEST_PROFILE_MANIFEST: /etc/openai-agents-native-docker/manifest.json
+        run: |
           uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q \
             packages/codex/tests/test_native_docker_path_authority.py \
             packages/codex/tests/test_native_docker_run_as.py \
-            --junitxml="$RUNNER_TEMP/native-docker.xml"
-          python3 - "$RUNNER_TEMP/native-docker.xml" <<'PYTHON'
-          from pathlib import Path
+            --junitxml="$NATIVE_DOCKER_EVIDENCE/native-docker.xml"
+      - name: Collect synthetic audit evidence and unload the diagnostic profile
+        if: ${{ always() }}
+        run: |
+          mkdir -p "$NATIVE_DOCKER_EVIDENCE"
+          profile_name="agents-native-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          set +e
+          sudo journalctl --kernel --since "$(cat "$NATIVE_DOCKER_EVIDENCE/start-time" 2>/dev/null || date --iso-8601=seconds)" \
+            --no-pager | grep -E "profile=\"$profile_name([\"/])" \
+            > "$NATIVE_DOCKER_EVIDENCE/profile-audit.log"
+          audit_status=("${PIPESTATUS[@]}")
+          set -e
+          printf 'journal_status=%s profile_match_status=%s\n' "${audit_status[0]}" "${audit_status[1]}" \
+            > "$NATIVE_DOCKER_EVIDENCE/audit-status.txt"
+          if sudo test -f /etc/openai-agents-native-docker/apparmor.profile; then
+            python3 .github/scripts/cleanup-native-docker-containers.py \
+              > "$NATIVE_DOCKER_EVIDENCE/container-cleanup.json"
+            sudo grep -E "^$profile_name \\((enforce|complain)\\)$" /sys/kernel/security/apparmor/profiles \
+              > "$NATIVE_DOCKER_EVIDENCE/profile-status.txt" || true
+            sudo apparmor_parser --remove --skip-cache /etc/openai-agents-native-docker/apparmor.profile
+            ! sudo grep -E "^$profile_name \\((enforce|complain)\\)$" /sys/kernel/security/apparmor/profiles
+          fi
+      - name: Publish confined-runner diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-docker-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.NATIVE_DOCKER_EVIDENCE }}
+          if-no-files-found: error
+      - name: Require reviewed policy promotion and complete qualification
+        if: ${{ !cancelled() }}
+        run: |
+          python3 - "$NATIVE_DOCKER_EVIDENCE" <<'PYTHON'
+          import json
           import sys
+          from pathlib import Path
           from xml.etree import ElementTree
 
-          suite = ElementTree.parse(Path(sys.argv[1]))
+          evidence = Path(sys.argv[1])
+          manifest = json.loads((evidence / "manifest.json").read_text())
+          if manifest["diagnosticOnly"]:
+              raise SystemExit("Diagnostic runner profiles have not been promoted; qualification remains red.")
+          probes = json.loads((evidence / "probes.json").read_text())
+          if probes.get("passed") is not True:
+              raise SystemExit("Enforced runner policy probes failed.")
+          suite = ElementTree.parse(evidence / "native-docker.xml")
           cases = suite.findall(".//testcase")
-          assert cases and not suite.findall(".//skipped"), "Native Docker cases must run"
-          assert any(case.get("name", "").startswith("test_native_docker_path_grants") for case in cases)
+          if len(cases) != 8 or any(suite.findall(".//" + tag) for tag in ("skipped", "failure", "error")):
+              raise SystemExit("All eight native Docker cases must pass without skips.")
           PYTHON
 
   native-macos-sandbox-shards:
