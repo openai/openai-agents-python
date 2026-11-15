@@ -1527,7 +1527,15 @@
     {
       "path": "sdk-settle-rejected-remote-start.patch",
       "sha256": "0fc2a64c33f3457067ae8e4e3f0a8d59db84b8a60f993e3116d03be84ddc42c3"
+    },
+    {
+      "path": "sdk-reconcile-remote-exit-receipt.patch",
+      "sha256": "f3afb5a21a7d5aaef8f7376d35068c3f96ed3c99a0a30269169f6af058ffe5cd"
+    },
+    {
+      "path": "sdk-continue-remote-exit-after-read-gap.patch",
+      "sha256": "8594a384d284ef2ea4de94f461c324ad0a22e627926db1dabdf593f316fa6639"
     }
   ],
-  "result_tree": "1b27034645b2848ac8458fbd60281df4404f72e1"
+  "result_tree": "2b35d96a8146c992fee32dbe76050edf5bfd5403"
 }
