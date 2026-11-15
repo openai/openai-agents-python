@@ -124,6 +124,7 @@ def check_probes(probes, profile):
     positive = rows["bwrap-positive-and-protected-access"]
     require(
         positive.get("procMode") == "inherited"
+        and positive.get("outerProcLinks") == "denied"
         and positive.get("inner", {}).get("apparmor") == profile + " (enforce)",
         "Missing trusted positive witness",
     )

@@ -154,7 +154,8 @@ def is_alias_mount_denial(result, source, alias):
         "Unable to mount source on destination: "
     )
     return result.returncode != 0 and any(
-        line.removeprefix(prefix) in ("Permission denied", "Operation not permitted", "Read-only file system")
+        line.removeprefix(prefix)
+        in ("Permission denied", "Operation not permitted", "Read-only file system")
         for line in result.stderr.splitlines()
         if line.startswith(prefix)
     )
@@ -399,7 +400,9 @@ print('ALIAS-DENIALS-PASSED')
             else:
                 if not is_alias_mount_denial(result, source, alias):
                     stderr = result.stderr.strip()[:800]
-                    raise RuntimeError("The requested alias mount denial was not observed: " + stderr)
+                    raise RuntimeError(
+                        "The requested alias mount denial was not observed: " + stderr
+                    )
                 stage = "alias-bind-mount-denied"
             if (metadata / "marker").read_text() != "protected synthetic metadata":
                 raise RuntimeError("Protected source changed through alias")
