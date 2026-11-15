@@ -48,7 +48,7 @@ An open Session keeps its captured configuration. Change instructions or native 
 
 ### Additional controls in alpha.8
 
-The controls in this section are new in alpha.8. The alpha.7 wheel does not include them. Check [release availability](versions.md); use matching source while alpha.8 is unreleased.
+These controls require alpha.8 or later. See [releases and documentation](versions.md).
 
 Pass these fields through `model_settings` on the Agent, when opening a Session, or in an idle `session.update(model_settings=...)`. Omitted keys preserve the accepted settings. `None` clears the corresponding SDK override. Providers still determine which settings their models support and which numeric ranges they accept.
 
@@ -87,7 +87,7 @@ Alpha.8 also accepts a `ToolRef` for `tool_choice`, such as a declared function 
 
 New in alpha.8, `NativeProvider(model_backend=...)` accepts an application-owned model adapter. Check [release availability](versions.md) before using it. The `0.24.0-alpha.7` wheel does not include this option. The native runtime retains ownership of the tool loop and conversation history while the application supplies each completed model response.
 
-Install a matching alpha.8 wheel, or build from matching source while alpha.8 is unreleased. The script also needs the `openai` package for `AsyncOpenAI`; install that client with `python -m pip install openai`. Set `OPENAI_API_KEY`, then save this complete script as `borrowed_client.py` and run `python borrowed_client.py`. The script uses an asynchronous OpenAI client through `ChatCompletionsModel` and makes live model requests that can incur charges.
+Use alpha.8 or later. The script also needs the `openai` package for `AsyncOpenAI`; install that client with `python -m pip install openai`. Set `OPENAI_API_KEY`, then save this complete script as `borrowed_client.py` and run `python borrowed_client.py`. The script uses an asynchronous OpenAI client through `ChatCompletionsModel` and makes live model requests that can incur charges.
 
 ```python
 import asyncio

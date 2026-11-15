@@ -103,7 +103,7 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 | Call | Result |
 | --- | --- |
 | `await session.history_snapshot(*, limit=None)` | Alpha.8 returns `CanonicalHistorySnapshot(revision, total, items)` for original JSON records while idle. `limit=0` returns only revision and count. See [original history](state.md#read-and-edit-original-history). |
-| `await session.replace_history_suffix(*, expected_revision, keep_prefix_count, items=())` | Alpha.8 retains `keep_prefix_count` original records and replace the suffix atomically, returning the accepted revision. Stale revisions fail before commit. See [transaction limits](state.md#read-and-edit-original-history). |
+| `await session.replace_history_suffix(*, expected_revision, keep_prefix_count, items=(), rebuild_model_context=False)` | Retain `keep_prefix_count` original records and replace the suffix atomically. Return the accepted revision. Stale revisions fail before commit. See [transaction limits](state.md#read-and-edit-original-history). |
 | `await session.model_context()` | Capture detached current model input while idle. Use the issued `ModelContextSnapshot` to [retain selected originals during compaction](state.md#retain-selected-context-items). |
 | `await session.compact(*, summary=None, snapshot=None, retain=None)` | Compact an idle Session. A nonempty supplied summary replaces model context without a model request and preserves canonical history. See [compaction limits](state.md#compact-conversation-context). |
 | `await session.save_state()` | Capture an idle conversation without retiring it. |
@@ -562,7 +562,7 @@ Import `CodexLogin` from `agents` and pass it as `NativeProvider(auth=CodexLogin
 
 Supports `reasoning_effort`, `reasoning_summary`, `service_tier`, and, in `0.24.0-alpha.7` or later, `tool_choice`. Omitted settings keep native defaults. `service_tier=None` clears that override. `tool_choice` accepts `"auto"`, `"none"`, or `"required"`; see [model settings](models.md#model-and-session-settings).
 
-Alpha.8 also accepts a `ToolRef` to require one selected tool with `defer_loading=False`. It adds sampling, cache, storage, and model invocation controls. `None` clears these SDK overrides. See [alpha.8 model controls](models.md#additional-controls-in-alpha8) for supported values and provider restrictions. These additions do not establish alpha.7 wheel availability.
+Alpha.8 also accepts a `ToolRef` to require one selected tool with `defer_loading=False`. It adds sampling, cache, storage, and model invocation controls. `None` clears these SDK overrides. See [model controls](models.md#additional-controls-in-alpha8) for supported values and provider restrictions.
 
 ## Tracing
 
