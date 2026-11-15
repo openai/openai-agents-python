@@ -85,7 +85,7 @@ Public `Session.items()` returns a filtered history rather than a complete trans
 The live approval registry binds an opaque token to the original `ActionRequested`, receipt, and identity. Replies from another identity, duplicate replies, and stale replies cannot publish. The handler:
 
 1. Validates XML and consumes the token.
-2. Awaits `request.respond(FunctionToolApprovalDecision(...))` before any artifact write. A cancelled native grant fails here.
+2. Awaits `request.respond(ApprovalDecision(...))` before any artifact write. A cancelled native grant fails here.
 3. Checks local revocation, Stop, and the deadline again after native acceptance, then writes synchronously.
 4. Wakes the worker after the write finishes.
 
