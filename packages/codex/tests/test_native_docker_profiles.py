@@ -1,7 +1,9 @@
 """Runner profiles stay inside the trusted Docker fixture creation boundary."""
 
+import ast
 import hashlib
 import json
+import os
 import runpy
 import sys
 from pathlib import Path
@@ -344,7 +346,8 @@ def qualification_evidence(tmp_path):
         "slot",
         "missing-inspection",
         "extra-inspection",
-        "missing-outer-proc-denial",
+        "missing-outer-proc-links",
+        "wrong-outer-proc-links",
     ],
 )
 def test_qualification_requires_complete_current_postcleanup_owners(
@@ -360,16 +363,19 @@ def test_qualification_requires_complete_current_postcleanup_owners(
     elif failure == "skip":
         path = tmp_path / "native-docker.xml"
         path.write_text(path.read_text().replace('skipped="0"', 'skipped="1"'))
-    elif failure == "stage":
-        data = json.loads((tmp_path / "probes.json").read_text())
-        data["checks"][-1]["denialStage"] = "namespace-startup-failed"
-        save("probes.json", data)
-    elif failure == "missing-outer-proc-denial":
+    elif failure in {"missing-outer-proc-links", "wrong-outer-proc-links"}:
         data = json.loads((tmp_path / "probes.json").read_text())
         positive = next(
             row for row in data["checks"] if row["name"] == "bwrap-positive-and-protected-access"
         )
-        del positive["outerProcLinks"]
+        if failure == "missing-outer-proc-links":
+            del positive["outerProcLinks"]
+        else:
+            positive["outerProcLinks"] = "accessible"
+        save("probes.json", data)
+    elif failure == "stage":
+        data = json.loads((tmp_path / "probes.json").read_text())
+        data["checks"][-1]["denialStage"] = "namespace-startup-failed"
         save("probes.json", data)
     elif failure == "slot":
         data = json.loads((tmp_path / "probes.json").read_text())
@@ -544,3 +550,45 @@ def test_qualification_uses_live_hosted_raw_merge_context(tmp_path, wrong):
             context(env, git)
     else:
         assert context(env, git)["checkoutParents"] == [base, head]
+
+
+@pytest.mark.parametrize(
+    "error", ["Permission denied", "Operation not permitted", "Read-only file system"]
+)
+def test_alias_mount_denial_requires_exact_mount_and_permission_error(tmp_path, error):
+    script = Path(__file__).resolve().parents[3] / ".github/scripts/probe-native-docker-profiles.py"
+    tree = ast.parse(script.read_text(), filename=str(script))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "is_alias_mount_denial"
+    )
+    namespace = {"os": os}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(script), "exec"), namespace)
+    classify = namespace["is_alias_mount_denial"]
+    source = tmp_path / "source"
+    source.mkdir()
+    link = tmp_path / "source-link"
+    link.symlink_to(source, target_is_directory=True)
+    alias = "/workspace/policy-probe-unit/proc"
+
+    def result(source_name=source, destination=alias, message=error, returncode=1):
+        return SimpleNamespace(
+            returncode=returncode,
+            stderr=(
+                f"bwrap: Can't bind mount {source_name} on {destination}: "
+                f"Unable to mount source on destination: {message}\n"
+            ),
+        )
+
+    assert classify(result(), str(link), alias)
+    assert not classify(result(source_name=link), str(link), alias)
+    assert not classify(result(source_name="/unrelated"), str(link), alias)
+    assert not classify(result(destination=alias + "-other"), str(link), alias)
+    assert not classify(result(message="No such file or directory"), str(link), alias)
+    assert not classify(result(returncode=0), str(link), alias)
+    assert not classify(
+        SimpleNamespace(returncode=1, stderr=f"bwrap: Creating new namespace failed: {error}\n"),
+        str(link),
+        alias,
+    )
