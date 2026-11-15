@@ -907,7 +907,7 @@ jobs:
     env:
       CODEX_DOCKER_TEST_SOCKET: /var/run/docker.sock
       CODEX_DOCKER_TEST_IMAGE: agents-native-docker:${{ github.run_id }}-${{ github.run_attempt }}
-      NATIVE_DOCKER_EVIDENCE: ${{ runner.temp }}/native-docker-evidence
+      NATIVE_DOCKER_EVIDENCE: ${{ github.workspace }}/native-docker-evidence
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
