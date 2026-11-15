@@ -129,6 +129,9 @@ async def test_native_docker_path_grants_are_mapped_and_writes_are_scoped(
     write_dir = tmp_path / "writable"
     read_dir.mkdir()
     write_dir.mkdir()
+    # Only the private fixture's writable bind needs to work from the nested
+    # user namespace, where the runner's UID and GID are unmapped.
+    write_dir.chmod(0o1777)
     (read_dir / "original").write_text("SYNTHETIC_READONLY_MOUNT")
     assert IMAGE and SOCKET
     daemon = docker.DockerClient(base_url="unix://" + SOCKET)
