@@ -1,0 +1,176 @@
+name: Native Docker restore contract (diagnostic)
+on:
+  push:
+    branches: [ci/hillclimb/python-docker-restore-contract]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  observe:
+    if: >-
+      github.repository == 'openai/openai-agents-python' &&
+      github.ref == 'refs/heads/ci/hillclimb/python-docker-restore-contract' &&
+      !github.event.deleted
+    # Scope access to the Docker daemon to a dedicated, ephemeral GitHub-hosted VM.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      UV_FROZEN: "1"
+      CODEX_DOCKER_TEST_SOCKET: /var/run/docker.sock
+      CODEX_DOCKER_TEST_IMAGE: agents-native-docker:${{ github.run_id }}-${{ github.run_attempt }}
+      NATIVE_DOCKER_EVIDENCE: ${{ github.workspace }}/native-docker-evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Setup uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          version: "0.11.14"
+          python-version: "3.11"
+      - name: Restore the three exact inputs from the v4 hosted qualification job
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="$RUNNER_TEMP/previous-diagnostic.zip"
+          staged="$RUNNER_TEMP/previous-diagnostic-native"
+          gh api repos/openai/openai-agents-python/actions/artifacts/14144807950/zip > "$archive"
+          ARCHIVE="$archive" STAGED="$staged" python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          archive = Path(os.environ["ARCHIVE"])
+          assert archive.stat().st_size == 174628175
+          with archive.open("rb") as f:
+              assert hashlib.file_digest(f, "sha256").hexdigest() == '01a0b62cf0a4380ca68f6dd772cccecd56740f1a9d6e7b9811b03669b481217b'
+
+          target = Path(os.environ["STAGED"])
+          target.mkdir()
+          expected = {"exec-server-fixture": "79232efdb8292c0d727452d906ca3ef7bb285d62171e3a2b43f11f81d68655bc", "openai_agents-0.24.0a8-cp310-abi3-manylinux_2_28_x86_64.whl": "570a8a99683bcf84b1aaf9696dacce8cae2f1f6921b9e4c30663ba404fdf6046", "openai_agents-0.24.0a8-cp310-abi3-manylinux_2_28_x86_64.whl.pristine.json": "b453733492f6ba0621ee906e55cd6913b8a686f5ad39b5212fcdacafd53e9402"}
+          with ZipFile(archive) as source:
+              for name, digest in expected.items():
+                  with source.open(name) as f:
+                      assert hashlib.file_digest(f, "sha256").hexdigest() == digest
+                  (target / name).write_bytes(source.read(name))
+          executor = target / "exec-server-fixture"
+          executor.chmod(0o755)
+          wheel, = target.glob("*.whl")
+          with Path(os.environ["GITHUB_ENV"]).open("a") as env:
+              env.write(f"OPENAI_AGENTS_NATIVE_WHEEL={wheel}\n")
+              env.write(f"CODEX_EXEC_SERVER_TEST_BINARY={executor}\n")
+          PY
+      - name: Install dependencies
+        run: make sync
+      - name: Prepare the pinned Docker test image
+        run: |
+          test "$(uname -m)" = x86_64
+          test -S "$CODEX_DOCKER_TEST_SOCKET"
+          test -x "$CODEX_EXEC_SERVER_TEST_BINARY"
+          mkdir -m 0700 "$NATIVE_DOCKER_EVIDENCE"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" version \
+            --format 'client={{.Client.Version}} server={{.Server.Version}}' \
+            > "$NATIVE_DOCKER_EVIDENCE/docker-version.txt"
+          uname -r > "$NATIVE_DOCKER_EVIDENCE/kernel-version.txt"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" build --pull \
+            --file packages/codex/tests/fixtures/native-docker.Dockerfile \
+            --tag "$CODEX_DOCKER_TEST_IMAGE" packages/codex/tests/fixtures
+          image_id=$(docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" image inspect \
+            --format '{{.Id}}' "$CODEX_DOCKER_TEST_IMAGE")
+          echo "CODEX_DOCKER_TEST_IMAGE=$image_id" >> "$GITHUB_ENV"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" image inspect "$image_id" \
+            > "$NATIVE_DOCKER_EVIDENCE/image.json"
+          sha256sum "$CODEX_EXEC_SERVER_TEST_BINARY" "$OPENAI_AGENTS_NATIVE_WHEEL" \
+            "$OPENAI_AGENTS_NATIVE_WHEEL.pristine.json" \
+            packages/codex/tests/fixtures/native-docker.Dockerfile \
+            > "$NATIVE_DOCKER_EVIDENCE/inputs.sha256"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" run --rm --network none \
+            "$image_id" /usr/bin/bwrap --version \
+            > "$NATIVE_DOCKER_EVIDENCE/bwrap-version.txt"
+      - name: Install the confined diagnostic runner profiles
+        id: profiles
+        env:
+          NATIVE_DOCKER_RECIPE: packages/codex/tests/fixtures/native-docker.Dockerfile
+        run: bash .github/scripts/install-native-docker-profiles.sh
+      - name: Probe enforced runner policy denials
+        if: ${{ !cancelled() && steps.profiles.outcome == 'success' }}
+        run: |
+          profile_name="agents-native-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" run --rm --interactive --network none \
+            --label "openai-agents.native-ci-profile=$profile_name" \
+            --security-opt "apparmor=$profile_name" \
+            --security-opt seccomp=/etc/openai-agents-native-docker/seccomp.json \
+            "$CODEX_DOCKER_TEST_IMAGE" python3 - "$profile_name" \
+            < .github/scripts/probe-native-docker-profiles.py \
+            > "$NATIVE_DOCKER_EVIDENCE/probes.json"
+      - name: Test strict Docker path and identity grants
+        if: ${{ !cancelled() && steps.profiles.outcome == 'success' }}
+        env:
+          CODEX_DOCKER_TEST_PROFILE_MANIFEST: /etc/openai-agents-native-docker/manifest.json
+        run: |
+          uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q \
+            packages/codex/tests/test_native_docker_path_authority.py \
+            packages/codex/tests/test_native_docker_run_as.py \
+            --junitxml="$NATIVE_DOCKER_EVIDENCE/native-docker.xml"
+      - name: Collect audit evidence and finalize owned isolation
+        if: ${{ always() }}
+        run: |
+          # No artifact parsing or writes before owned cleanup and profile removal.
+          profile_name="agents-native-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          set +e
+          sudo grep -Fx "$profile_name (enforce)" /sys/kernel/security/apparmor/profiles >/dev/null
+          loaded_status=$?
+          cleanup_result=$(python3 .github/scripts/cleanup-native-docker-containers.py)
+          cleanup_status=$?
+          remove_status=1
+          # A missing/malformed manifest must not suppress revocation. Authorize only
+          # this run's non-symlink, root-owned exact profile; never another profile.
+          profile_path=/etc/openai-agents-native-docker/apparmor.profile
+          profile_names=$(sudo apparmor_parser --names --skip-cache "$profile_path")
+          names_status=$?
+          profile_owner=$(sudo stat --format='%u:%a' "$profile_path")
+          sudo test ! -L "$profile_path"
+          path_status=$?
+          if (( cleanup_status == 0 && names_status == 0 && path_status == 0 )) && [[ "$profile_owner" == '0:444' && "$profile_names" == "$profile_name" ]]; then
+            sudo apparmor_parser --remove --skip-cache /etc/openai-agents-native-docker/apparmor.profile
+            remove_status=$?
+          fi
+          sudo grep -E "^$profile_name(//[^ ]+)? \\([^)]*\\)$" /sys/kernel/security/apparmor/profiles >/dev/null
+          absent_status=$?
+          mkdir -p "$NATIVE_DOCKER_EVIDENCE"
+          sudo journalctl -k --since "$(cat "$NATIVE_DOCKER_EVIDENCE/start-time" 2>/dev/null || date --iso-8601=seconds)" \
+            --no-pager | grep -E "profile=\"$profile_name([\"/])" \
+            > "$NATIVE_DOCKER_EVIDENCE/profile-audit.log"
+          audit_status=("${PIPESTATUS[@]}")
+          printf '%s\n' "$cleanup_result" > "$NATIVE_DOCKER_EVIDENCE/container-cleanup.json"
+          python3 - "$cleanup_status" "$loaded_status" "$remove_status" "$absent_status" \
+            "${audit_status[0]}" "${audit_status[1]}" "$NATIVE_DOCKER_EVIDENCE" <<'PYTHON'
+          import json
+          import sys
+          from pathlib import Path
+
+          keys = ("ownedCleanup", "loadedEnforce", "profileRemove", "profileAbsent", "journal", "filter")
+          result = dict(zip(keys, map(int, sys.argv[1:7])))
+          (Path(sys.argv[7]) / "finalization.json").write_text(json.dumps(result) + "\n")
+          PYTHON
+          record_status=$?
+          set -e
+          if (( record_status != 0 || cleanup_status != 0 || loaded_status != 0 || remove_status != 0 || absent_status != 1 || audit_status[0] != 0 || audit_status[1] != 0 )); then
+            echo "Owned isolation finalization or audit collection failed." >&2
+            exit 1
+          fi
+      - name: Publish confined-runner diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-docker-restore-contract-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.NATIVE_DOCKER_EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Keep this observation out of qualification
+        if: ${{ !cancelled() }}
+        run: |
+          echo "Diagnostic only. This job never qualifies a native artifact."
+          exit 1
