@@ -262,6 +262,7 @@ def qualification_evidence(tmp_path):
             "name": "bwrap-positive-and-protected-access",
             "passed": True,
             "procMode": "inherited",
+            "outerProcLinks": "denied",
             "inner": {"apparmor": profile + " (enforce)"},
         }
     ]
@@ -343,6 +344,7 @@ def qualification_evidence(tmp_path):
         "slot",
         "missing-inspection",
         "extra-inspection",
+        "missing-outer-proc-denial",
     ],
 )
 def test_qualification_requires_complete_current_postcleanup_owners(
@@ -361,6 +363,13 @@ def test_qualification_requires_complete_current_postcleanup_owners(
     elif failure == "stage":
         data = json.loads((tmp_path / "probes.json").read_text())
         data["checks"][-1]["denialStage"] = "namespace-startup-failed"
+        save("probes.json", data)
+    elif failure == "missing-outer-proc-denial":
+        data = json.loads((tmp_path / "probes.json").read_text())
+        positive = next(
+            row for row in data["checks"] if row["name"] == "bwrap-positive-and-protected-access"
+        )
+        del positive["outerProcLinks"]
         save("probes.json", data)
     elif failure == "slot":
         data = json.loads((tmp_path / "probes.json").read_text())
