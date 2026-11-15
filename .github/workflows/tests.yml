@@ -977,7 +977,7 @@ jobs:
           mkdir -p "$NATIVE_DOCKER_EVIDENCE"
           profile_name="agents-native-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           set +e
-          sudo journalctl --kernel --since "$(cat "$NATIVE_DOCKER_EVIDENCE/start-time" 2>/dev/null || date --iso-8601=seconds)" \
+          sudo journalctl -k --since "$(cat "$NATIVE_DOCKER_EVIDENCE/start-time" 2>/dev/null || date --iso-8601=seconds)" \
             --no-pager | grep -E "profile=\"$profile_name([\"/])" \
             > "$NATIVE_DOCKER_EVIDENCE/profile-audit.log"
           audit_status=("${PIPESTATUS[@]}")
@@ -991,6 +991,10 @@ jobs:
               > "$NATIVE_DOCKER_EVIDENCE/profile-status.txt" || true
             sudo apparmor_parser --remove --skip-cache /etc/openai-agents-native-docker/apparmor.profile
             ! sudo grep -E "^$profile_name \\((enforce|complain)\\)$" /sys/kernel/security/apparmor/profiles
+          fi
+          if (( audit_status[0] != 0 || audit_status[1] != 0 )); then
+            echo "Synthetic profile audit collection failed." >&2
+            exit 1
           fi
       - name: Publish confined-runner diagnostic evidence
         if: always()

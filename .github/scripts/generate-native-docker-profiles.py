@@ -122,7 +122,7 @@ rules = (
   mount options=(rw,bind,silent) /bindfile?????? -> /newroot/**,
 """
     "  remount options in (ro,rw,remount,bind,silent,nosuid,nodev,noexec,"
-    "noatime,nodiratime,relatime,strictatime) /newroot/**,\n"
+    "noatime,nodiratime,relatime,strictatime) /newroot/{,**},\n"
     """  mount options=(rw,rprivate,silent) -> /oldroot/,
   pivot_root oldroot=/newroot/ /newroot/,
 """
