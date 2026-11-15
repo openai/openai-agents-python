@@ -485,6 +485,17 @@ class NativeProvider:
     Native auth/protocol/private-hop headers remain reserved. Construct a new
     provider to refresh these captured values.
 
+    ``tool_output_token_limit`` has been selecting an approximate local token
+    budget for text tool results recorded in model context for Sessions opened
+    with this provider. ``None`` has
+    been preserving the model catalog default. The opening provider's budget
+    has been applying throughout each Session, including handoffs and native
+    children; destination provider budgets have not been replacing it. Individual
+    tools have been retaining their own output budgets. Core has been estimating
+    four UTF-8 bytes per token for truncation. This setting has
+    not been changing Realtime tool replies or the model's final-answer
+    ``max_output_tokens`` limit.
+
     Explicit providers are borrowed by Sessions. Close those Sessions before
     leaving the provider's async context or awaiting ``aclose()``.
 
@@ -523,6 +534,7 @@ class NativeProvider:
     # their phase when explicitly None. Ping durations have been using positive ms.
     websocket_options: Mapping[str, int | None] | None = field(default=None, repr=False, hash=False)
     agent_harness_id: str | None = field(default=None, repr=False)
+    tool_output_token_limit: int | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         from .telemetry import _normalize_agent_harness_id, get_default_agent_harness_id
@@ -543,6 +555,13 @@ class NativeProvider:
                 isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**63 - 1
             ):
                 raise ValueError(f"{name} must be a non-negative signed 64-bit integer or None")
+        if self.tool_output_token_limit is not None and (
+            type(self.tool_output_token_limit) is not int
+            or not 1 <= self.tool_output_token_limit <= 2**63 - 1
+        ):
+            raise ValueError(
+                "tool_output_token_limit must be a positive signed 64-bit integer or None"
+            )
         if self.websocket_options is not None:
             if not isinstance(self.websocket_options, Mapping):
                 raise TypeError("websocket_options must be a mapping")
@@ -1828,6 +1847,9 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options captures native tracing defaults before opening. Every
         submission inherits its disabled/content restrictions, including when
         another ambient scope or explicit parent changes the trace linkage.
+        For a fresh Session, an explicit group_id also groups provider prompt
+        cache routing across Sessions. Reuse a stable group ID for requests with
+        a common prefix. The provider determines whether a request hits its cache.
         Tracing context and export credentials never enter SessionState.
 
         project_guidance loads native workspace instructions and enables native
@@ -1987,13 +2009,21 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("tool_error_formatter must be callable or None")
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
-        from ._cache_affinity import _claim_cache_affinity
+        from ._cache_affinity import _cache_key, _claim_cache_affinity
         from .session import Completed, Session
-        from .telemetry import _capture, get_default_agent_harness_id
+        from .telemetry import _capture, _options, get_default_agent_harness_id
 
         prompt_cache_key = _claim_cache_affinity(self)
 
         try:
+            if (
+                prompt_cache_key is None
+                and trace_options is not None
+                and state is None
+                and resume is None
+            ):
+                trace_options = _options(trace_options)
+                prompt_cache_key = _cache_key("group", trace_options.group_id)
             parent_trace = _trace_context(parent_trace)
             harness_id = None
             if parent_trace is None:

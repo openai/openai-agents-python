@@ -6,9 +6,9 @@ Your application runs the agent and owns its workers, storage, and credentials. 
 
 ## Install
 
-The commands below install the published preview. Use [documentation and example files from that release](docs/sdk/versions.md); branch guides can change between releases.
+The commands below install the published preview. Start with the [alpha.7 quickstart](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/index.md#run-your-first-agent) and the [alpha.7 examples](https://github.com/openai/openai-agents-python/tree/v0.24.0-alpha.7/examples/codex).
 
-Install [0.24.0-alpha.7](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.7) from a prebuilt Python wheel. Use standard CPython 3.10–3.14 and [create a virtual environment](docs/sdk/installation.md#create-a-python-environment), then run the command for your platform. The wheel includes the native runtime, so you do not need a compiler or Rust toolchain.
+Install [0.24.0-alpha.7](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.7) from a prebuilt Python wheel. Use standard CPython 3.10–3.14 and [create a virtual environment](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/installation.md#create-a-python-environment), then run the command for your platform. The wheel includes the native runtime, so you do not need a compiler or Rust toolchain.
 
 **Linux x86_64 (glibc 2.39 or newer)**
 
@@ -28,13 +28,13 @@ python -m pip install "https://github.com/openai/openai-agents-python/releases/d
 python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.7/openai_agents-0.24.0a7-cp310-abi3-win_amd64.whl"
 ```
 
-This preview is distributed through GitHub Releases. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API shown here. See the [installation guide](docs/sdk/installation.md) for setup, supported platforms, and troubleshooting.
+This preview is distributed through GitHub Releases. The `openai-agents` package currently on PyPI is the previous SDK. See the [alpha.7 installation guide](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/installation.md) for setup, supported platforms, and troubleshooting.
 
 <a id="example"></a>
 
 ## Run your first agent
 
-With the SDK installed, save this script as `agent.py` in your project directory. It makes live model requests and can incur charges. For a test that needs no API key, use the [scripted testing guide](docs/sdk/testing.md) for your SDK version.
+With the SDK installed, save this script as `agent.py` in your project directory. It makes live model requests and can incur charges. For a test that needs no API key, use the [alpha.7 scripted testing guide](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/testing.md).
 
 ```python
 import asyncio
@@ -63,13 +63,13 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Set an [OpenAI API key](docs/sdk/index.md#2-set-your-api-key-and-run-the-script), then run `python agent.py` in your activated environment.
+Set an [OpenAI API key](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/index.md#run-your-first-agent), then run `python agent.py` in your activated environment.
 
 The example prints a greeting for Ada, such as `Hello, Ada!`. The wording can vary. The `@function_tool` decorator exposes the function's name and typed arguments to the model. When the model requests `greeting`, the SDK calls your Python function and sends its result back to the model.
 
-## SDK guides
+## Development guides
 
-The [quickstart](docs/sdk/index.md) explains the first run and links to the next tasks. Use [core concepts](docs/sdk/concepts.md) to understand Agent, Session and Turn, or choose a task below. Follow the [guides for your installed version](docs/sdk/versions.md).
+The guides below follow this branch and include APIs added since alpha.7. Follow the [source-build instructions](CONTRIBUTING.md#build-the-sdk-from-source) to use them with a matching SDK build. For an installed preview wheel, see [releases and documentation](docs/sdk/versions.md).
 
 | Guide | What you can do |
 | --- | --- |
@@ -91,13 +91,13 @@ The [quickstart](docs/sdk/index.md) explains the first run and links to the next
 
 ## More examples
 
-Download the [matching source archive](docs/sdk/installation.md#examples-and-upgrades). With your SDK environment active, run `python -m examples.codex.basic` from the archive root. The four scripts below need an [OpenAI API key](docs/sdk/index.md#2-set-your-api-key-and-run-the-script). The example index also includes tests that run without a key.
+Download and extract the [alpha.7 source archive](https://github.com/openai/openai-agents-python/archive/refs/tags/v0.24.0-alpha.7.zip). With your SDK environment active, run `python -m examples.codex.basic` from the archive root. The four scripts below need the API key from the [quickstart](#run-your-first-agent). The example index also includes tests that run without a key.
 
-- [Function tools](examples/codex/basic.py): Call a Python greeting tool.
-- [Typed application context](examples/codex/typed_context.py): Return structured output using application context.
-- [Conversation and streaming](examples/codex/conversation.py): Stream a conversation and restore saved state.
-- [Validated artifacts](examples/codex/validated_artifact.py): Validate an artifact before writing it.
-- [All examples](examples/codex/README.md): Find workflow recipes and their setup requirements.
+- [Function tools](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.7/examples/codex/basic.py) for calling a Python greeting tool.
+- [Typed application context](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.7/examples/codex/typed_context.py) for returning structured output.
+- [Conversation and streaming](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.7/examples/codex/conversation.py) for streaming and restoring a Session.
+- [Validated artifacts](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.7/examples/codex/validated_artifact.py) for checking an artifact before writing it.
+- [All alpha.7 examples](https://github.com/openai/openai-agents-python/tree/v0.24.0-alpha.7/examples/codex).
 
 ## Existing v0 applications
 

@@ -281,12 +281,14 @@ from .observation import (
     EventGap,
     EventStream as EventStream,
     ExecutionItemCompleted as ExecutionItemCompleted,
+    FunctionCallArgumentsDelta,
     HostedToolCallProgress,
     ModelOutputItemCompleted,
     Observation,
     OutputAccepted as OutputAccepted,
     OutputTextDelta as OutputTextDelta,
     RawProviderEvent as RawProviderEvent,
+    ReasoningSummaryTextDelta,
     ResponseFactReceived as ResponseFactReceived,
     SubagentLifecycle as SubagentLifecycle,
     ToolFinished as ToolFinished,
@@ -1627,6 +1629,25 @@ def _project_progress(
                 payload=message["payload"],
             )
         )
+        payload = message["payload"]
+        if (
+            message["source"] == "responses"
+            and payload.get("type") == "response.function_call_arguments.delta"
+            and isinstance(payload.get("item_id"), str)
+            and type(payload.get("output_index")) is int
+            and payload["output_index"] >= 0
+            and isinstance(payload.get("delta"), str)
+        ):
+            buffer.append(
+                FunctionCallArgumentsDelta(
+                    session_id=buffer.session_id,
+                    turn_id=turn_id,
+                    submission_id=submission_id,
+                    item_id=payload["item_id"],
+                    output_index=payload["output_index"],
+                    delta=payload["delta"],
+                )
+            )
     elif kind == "hosted_tool_call_progress" and event["id"] == turn_id:
         buffer.append(
             HostedToolCallProgress(
@@ -1686,6 +1707,17 @@ def _project_progress(
                     turn_id=turn_id,
                     submission_id=submission_id,
                     item_id=message["item_id"],
+                    delta=message["delta"],
+                )
+            )
+        elif kind == "reasoning_content_delta" and buffer.include_model_output_items:
+            buffer.append(
+                ReasoningSummaryTextDelta(
+                    session_id=buffer.session_id,
+                    turn_id=turn_id,
+                    submission_id=submission_id,
+                    item_id=message["item_id"],
+                    summary_index=message["summary_index"],
                     delta=message["delta"],
                 )
             )
@@ -1809,6 +1841,7 @@ def _project_run_prefix(
                 "token_count",
                 "hosted_tool_call_progress",
                 "agent_message_content_delta",
+                "reasoning_content_delta",
                 "item_completed",
                 "response_fact",
             }
@@ -6255,6 +6288,8 @@ class Session(Generic[ContextT, OutputT]):
                     programmatic_tool_calling=programmatic_tool_calling,
                 )
 
+                if provider.tool_output_token_limit is not None:
+                    config["tool_output_token_limit"] = provider.tool_output_token_limit
                 if any(row.get("environment") is not None for row in profile_roster):
                     config["sandbox_mode"] = "read-only"
                 _configure_session_features(
@@ -9704,6 +9739,14 @@ class Session(Generic[ContextT, OutputT]):
     ) -> str | None:
         callback = entry.input_error_function
         if callback is None:
+            if entry._recover_strict_input and not (
+                self._tool_error_formatter is not None and entry._allow_run_error_formatter
+            ):
+                if admit():
+                    return (
+                        "Invalid tool arguments. Retry with arguments that match the tool schema."
+                    )
+                return None
             return await self._format_run_tool_error(
                 state, message, entry, error, "arguments", call, admit
             )
@@ -9787,12 +9830,8 @@ class Session(Generic[ContextT, OutputT]):
                     _OriginalToolArgumentsError,
                 ) as error:
                     if (
-                        (
-                            entry.function.input_error_function is None
-                            and not (
-                                self._tool_error_formatter is not None
-                                and entry.function._allow_run_error_formatter
-                            )
+                        not entry.function._can_recover_input(
+                            run_formatter=self._tool_error_formatter is not None
                         )
                         or message.get("_sdk_restored_approval")
                         or "_sdk_effective_arguments" in message
@@ -15656,6 +15695,7 @@ class Session(Generic[ContextT, OutputT]):
             return
         if kind in {
             "token_count",
+            "reasoning_content_delta",
             "hosted_tool_call_progress",
             "raw_response_item",
             "raw_response_completed",
@@ -18845,6 +18885,7 @@ class Session(Generic[ContextT, OutputT]):
                             state.last_assistant_had_blank_final = blank
                 elif kind in {
                     "agent_message_content_delta",
+                    "reasoning_content_delta",
                     "item_completed",
                     "response_fact",
                     "sdk_raw_provider_event",

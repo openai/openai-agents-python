@@ -1394,13 +1394,14 @@ def function_tool(
     advertised schema remains closed, and declared fields still use their
     normal validation. ToolContext.original_arguments retains the raw keys.
 
-    Optional input_error_function: initial JSON syntax or argument-validation recovery,
-    with ToolInputErrorContext, the original error, and detached original input.
-    Native JSON syntax errors: ValueError with the exact original raw string.
-    No validated arguments on this context. A string failure result, before
-    approval, before/execute/after, and output validation; default validation turn
-    failure without this formatter. Replacement/restored input and callback exceptions
-    outside recovery. Default native failed result for malformed JSON.
+    Initial model argument failures for strict tools return a tool error before
+    approval or execution. A configured ``input_error_function`` or applicable
+    ``tool_error_formatter`` takes precedence. Without recovery, non-strict
+    validation errors fail the turn. Malformed JSON uses the native failure result.
+    ``input_error_function`` receives a ``ToolInputErrorContext``, the error, and
+    detached original input, including the raw string for malformed JSON. It
+    returns a string without receiving validated arguments. Replacement or
+    restored inputs and callback exceptions follow their existing error paths.
 
     Model arguments must have type annotations and accept keyword arguments.
     Use names supported by Pydantic model fields, with Field(alias=...) when
@@ -1522,6 +1523,7 @@ def function_tool(
                 _allow_run_error_formatter=bool(declaration._allow_run_error_formatter),
                 _reparse_error_arguments=declaration.error_function is not None
                 and _can_reparse_error_arguments(model),
+                _recover_strict_input=declaration.strict,
                 before=declaration.before,
                 after=declaration.after,
                 namespace=declaration.namespace,
