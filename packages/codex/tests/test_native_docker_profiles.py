@@ -87,6 +87,7 @@ def test_profiled_runner_preserves_restricted_arguments(profile_manifest, monkey
         {"Privileged": True},
         {"CapAdd": ["SYS_ADMIN"]},
         {"Devices": ["/dev/fuse"]},
+        {"DeviceRequests": [{"Count": -1, "Capabilities": [["gpu"]]}]},
         {"SecurityOpt": ["seccomp=unconfined"]},
     ],
 )
@@ -226,3 +227,285 @@ def test_cleanup_propagates_removal_failure_before_profile_unload():
     with pytest.raises(RuntimeError, match="removal failed"):
         cleanup_function()("/run/owned-test.sock", profile, IMAGE, removal_failed)
     assert present
+
+
+@pytest.fixture
+def qualification_evidence(tmp_path):
+    """A small positive owner receipt; hostile mutations exercise the terminal gate."""
+    gate = runpy.run_path(
+        str(Path(__file__).resolve().parents[3] / ".github/scripts/qualify-native-docker.py")
+    )
+    current = {
+        "GITHUB_SHA": "a" * 40,
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_REPOSITORY": "openai/openai-agents-python",
+    }
+    profile = "agents-native-ci-123-1"
+
+    def save(name, value):
+        (tmp_path / name).write_text(json.dumps(value))
+
+    manifest = {
+        "sourceCommit": current["GITHUB_SHA"],
+        "runId": "123",
+        "runAttempt": "1",
+        "imageId": IMAGE,
+        "apparmor": {"name": profile},
+        "diagnosticOnly": False,
+    }
+    save("manifest.json", manifest)
+    checks = [{"name": n, "passed": True} for n in sorted(gate["SYSCALLS"])]
+    checks += [
+        {
+            "name": "bwrap-positive-and-protected-access",
+            "passed": True,
+            "procMode": "inherited",
+            "inner": {"apparmor": profile + " (enforce)"},
+        }
+    ]
+    checks += [
+        {
+            "name": n,
+            "passed": True,
+            "denialStage": "alias-bind-mount-denied",
+            "inner": None,
+            "source": "/tools/policy-probe-unit/metadata"
+            if n.startswith("metadata-")
+            else "/" + n.split("-")[1],
+            "alias": (
+                "/tools/policy-probe-unit/metadata-alias"
+                if n.startswith("metadata-")
+                else "/workspace/policy-probe-unit/" + n.split("-")[1]
+                if n.startswith("workspace-")
+                else "/" + n.split("-")[0] + "/" + n.split("-")[1]
+            ),
+        }
+        for n in sorted(gate["ALIASES"])
+    ]
+    save(
+        "probes.json",
+        {"passed": True, "outer": {"apparmor": profile + " (enforce)"}, "checks": checks},
+    )
+    from xml.etree import ElementTree
+
+    suite = ElementTree.Element("testsuite", tests="8", errors="0", failures="0", skipped="0")
+    receipts = []
+    for i, (name, module) in enumerate(gate["NATIVE_CASES"].items()):
+        ElementTree.SubElement(
+            suite, "testcase", name=name, classname="packages.codex.tests." + module
+        )
+        receipts.append(
+            {
+                "case": "packages/codex/tests/" + module + ".py::" + name,
+                "containerId": f"{i + 1:064x}",
+                "imageId": IMAGE,
+                "profile": profile,
+            }
+        )
+    ElementTree.ElementTree(suite).write(tmp_path / "native-docker.xml")
+    (tmp_path / "inspection-receipts.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in receipts)
+    )
+    save(
+        "finalization.json",
+        {
+            "ownedCleanup": 0,
+            "loadedEnforce": 0,
+            "profileRemove": 0,
+            "profileAbsent": 1,
+            "journal": 0,
+            "filter": 0,
+        },
+    )
+    (tmp_path / "profile-audit.log").write_text(
+        'apparmor="DENIED" operation="mount" profile="'
+        + profile
+        + '" name="/proc/sys/" flags="rw, remount, bind, silent"\n'
+    )
+    return gate, current, save
+
+
+@pytest.mark.parametrize(
+    "failure", [None, "diagnostic", "skip", "stage", "cleanup", "source", "audit", "slot"]
+)
+def test_qualification_requires_complete_current_postcleanup_owners(
+    tmp_path, qualification_evidence, failure
+):
+    gate, current, save = qualification_evidence
+    if failure in {"diagnostic", "source"}:
+        data = json.loads((tmp_path / "manifest.json").read_text())
+        data["diagnosticOnly" if failure == "diagnostic" else "sourceCommit"] = (
+            True if failure == "diagnostic" else "f" * 40
+        )
+        save("manifest.json", data)
+    elif failure == "skip":
+        path = tmp_path / "native-docker.xml"
+        path.write_text(path.read_text().replace('skipped="0"', 'skipped="1"'))
+    elif failure == "stage":
+        data = json.loads((tmp_path / "probes.json").read_text())
+        data["checks"][-1]["denialStage"] = "namespace-startup-failed"
+        save("probes.json", data)
+    elif failure == "slot":
+        data = json.loads((tmp_path / "probes.json").read_text())
+        data["checks"][-1]["source"] = "/unrelated"
+        save("probes.json", data)
+    elif failure == "cleanup":
+        data = json.loads((tmp_path / "finalization.json").read_text())
+        data["ownedCleanup"] = 1
+        save("finalization.json", data)
+    elif failure == "audit":
+        (tmp_path / "profile-audit.log").write_text('apparmor="DENIED" profile="unrelated"')
+    if failure:
+        with pytest.raises(ValueError):
+            gate["qualify"](tmp_path, current, IMAGE)
+    else:
+        assert gate["qualify"](tmp_path, current, IMAGE)["qualified"]
+
+
+WORKFLOW_AUTHORITY_STUB = (
+    "#!/usr/bin/python3\n"
+    "import os,sys,json,subprocess\n"
+    "from pathlib import Path\n"
+    "name=Path(sys.argv[0]).name;args=sys.argv[1:];case=os.environ['MATRIX_CASE'"
+    "];root=Path(os.environ['MATRIX_ROOT']);profile='agents-native-ci-123-1'\n"
+    "def event(x):\n"
+    " with (root/'events').open('a') as out:out.write(x+'\\n')\n"
+    "if name=='python3':\n"
+    " if args and args[0]=='.github/scripts/cleanup-native-docker-containers.py'"
+    ":\n"
+    "  event('cleanup');print('{\"removedOwnedContainers\":[],\"ownedContainersRema"
+    "in\":false}');sys.exit(7 if case=='cleanup' else 0)\n"
+    " if case=='record':event('record-failed');sys.exit(9)\n"
+    " os.execv('/usr/bin/python3',['/usr/bin/python3',*args])\n"
+    "if name=='sudo':\n"
+    " if args[0]=='grep':\n"
+    "  if '-Fx' in args:event('loaded');sys.exit(1 if case=='partial-install' el"
+    "se 0)\n"
+    "  event('absent');line='' if (root/'removed').exists() or case=='partial-in"
+    "stall' else profile+' (enforce)\\n';sys.exit(subprocess.run(['/usr/bin/grep'"
+    ",*args[1:-1]],input=line,text=True).returncode)\n"
+    " if args[0]=='apparmor_parser':\n"
+    "  if '--names' in args:\n"
+    "   event('names')\n"
+    "   if case=='malformed-profile':sys.exit(2)\n"
+    "   print('unrelated-profile' if case=='unrelated-profile' else profile);sys"
+    ".exit(0)\n"
+    "  event('unload')\n"
+    "  if case=='unload':sys.exit(3)\n"
+    "  (root/'removed').touch();sys.exit(0)\n"
+    " if args[0]=='stat':event('owner');print('1000:444' if case=='unowned-profi"
+    "le' else '0:444');sys.exit(0)\n"
+    " if args[0]=='test':event('path');sys.exit(1 if case=='symlink-profile' els"
+    "e 0)\n"
+    " if args[0]=='journalctl':\n"
+    "  event('audit');assert args[1]=='-k'\n"
+    "  if case=='journal':sys.exit(4)\n"
+    '  if case!=\'empty\':print(\'audit apparmor="DENIED" operation="mount" profile'
+    '="\'+profile+\'" name="/proc/sys/"\')\n'
+    "  print('audit profile=\"unrelated-profile\"');sys.exit(0)\n"
+    "raise SystemExit('Unexpected mock invocation '+repr([name,*args]))\n"
+)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "success",
+        "empty",
+        "journal",
+        "cleanup",
+        "unload",
+        "record",
+        "malformed-manifest",
+        "unrelated-profile",
+    ],
+)
+def test_workflow_revokes_before_evidence_and_refuses_other_profiles(tmp_path, monkeypatch, case):
+    import subprocess
+    import textwrap
+
+    workflow = (Path(__file__).resolve().parents[3] / ".github/workflows/tests.yml").read_text()
+    owner = workflow.split(
+        "      - name: Collect audit evidence and finalize owned isolation\n", 1
+    )[1]
+    script = textwrap.dedent(owner.split("        run: |\n", 1)[1].split("      - name:", 1)[0])
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    (evidence / "manifest.json").write_text("{")
+    for name in ("sudo", "python3"):
+        path = binary / name
+        path.write_text(WORKFLOW_AUTHORITY_STUB)
+        path.chmod(0o755)
+    for key, value in {
+        "PATH": str(binary) + ":/usr/bin:/bin",
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "NATIVE_DOCKER_EVIDENCE": str(evidence),
+        "MATRIX_CASE": case,
+        "MATRIX_ROOT": str(tmp_path),
+    }.items():
+        monkeypatch.setenv(key, value)
+    result = subprocess.run(
+        ["/bin/bash", "-e", "-o", "pipefail", "-c", script], capture_output=True, text=True
+    )
+    events = (tmp_path / "events").read_text().splitlines()
+    assert (result.returncode == 0) == (case in {"success", "malformed-manifest"}), result.stderr
+    assert "cleanup" in events and "audit" in events
+    assert ("unload" in events) == (case not in {"cleanup", "unrelated-profile"})
+    if "unload" in events:
+        assert events.index("cleanup") < events.index("unload") < events.index("audit")
+
+
+@pytest.mark.parametrize("wrong", [None, "checkout", "runner", "repository", "parent"])
+def test_qualification_uses_live_hosted_raw_merge_context(tmp_path, wrong):
+    script = Path(__file__).resolve().parents[3] / ".github/scripts/qualify-native-docker.py"
+    context = runpy.run_path(str(script))["live_context"]
+    merge, base, head = "a" * 40, "b" * 40, "c" * 40
+    repository = {"full_name": "openai/openai-agents-python"}
+    event = {
+        "repository": repository,
+        "number": 6020,
+        "pull_request": {
+            "base": {"ref": "feat/codex-harness", "sha": base, "repo": repository},
+            "head": {"sha": head, "repo": repository},
+        },
+    }
+    path = tmp_path / "event.json"
+    path.write_text(json.dumps(event))
+    env = {
+        "GITHUB_ACTIONS": "true",
+        "RUNNER_ENVIRONMENT": "github-hosted",
+        "GITHUB_REPOSITORY": repository["full_name"],
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_EVENT_PATH": str(path),
+        "GITHUB_REF": "refs/pull/6020/merge",
+        "GITHUB_SHA": head if wrong == "checkout" else merge,
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_RUN_ATTEMPT": "1",
+    }
+    if wrong == "runner":
+        env["RUNNER_ENVIRONMENT"] = "self-hosted"
+    if wrong == "repository":
+        env["GITHUB_REPOSITORY"] = "another/repository"
+    answers = {
+        ("rev-parse", "HEAD"): merge,
+        ("cat-file", "-p", "HEAD"): "tree "
+        + "d" * 40
+        + "\nparent "
+        + base
+        + "\nparent "
+        + (base if wrong == "parent" else head)
+        + "\n\nmerge",
+    }
+
+    def git(*args):
+        return answers[args]
+
+    if wrong:
+        with pytest.raises(ValueError):
+            context(env, git)
+    else:
+        assert context(env, git)["checkoutParents"] == [base, head]

@@ -52,6 +52,7 @@ def configure_runner_profiles(api: Any) -> tuple[str, ...]:
             or config.get("Privileged")
             or config.get("CapAdd")
             or config.get("Devices")
+            or config.get("DeviceRequests")
             or config.get("SecurityOpt")
             or not isinstance(labels, dict)
             or owner_label in labels
@@ -63,3 +64,28 @@ def configure_runner_profiles(api: Any) -> tuple[str, ...]:
 
     api.create_container = create_with_profiles
     return options
+
+
+def record_isolation(inspection: dict[str, Any], security_options: tuple[str, ...]) -> None:
+    """Persist only after the owning fixture's existing isolation/grant assertions."""
+    if not security_options:
+        return
+    profile = security_options[0].removeprefix("apparmor=")
+    if (
+        inspection["AppArmorProfile"] != profile
+        or inspection["Image"] != os.environ["CODEX_DOCKER_TEST_IMAGE"]
+        or inspection["Config"]["Labels"].get("openai-agents.native-ci-profile") != profile
+    ):
+        raise ValueError("Inspection receipt differs from the selected image/profile/owner")
+    row = {
+        "case": os.environ["PYTEST_CURRENT_TEST"].split(" (", 1)[0],
+        "containerId": inspection["Id"],
+        "profile": profile,
+        "imageId": inspection["Image"],
+    }
+    path = Path(os.environ["NATIVE_DOCKER_EVIDENCE"]) / "inspection-receipts.jsonl"
+    descriptor = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        output.write(json.dumps(row) + "\n")
+        output.flush()
+        os.fsync(output.fileno())

@@ -46,6 +46,7 @@ def cleanup(socket, profile, image, run=subprocess.run):
             or host.get("Privileged")
             or host.get("CapAdd")
             or host.get("Devices")
+            or host.get("DeviceRequests")
         ):
             raise ValueError("Refusing cleanup of a container outside this diagnostic run")
         invoke("container", "rm", "--force", identifier)

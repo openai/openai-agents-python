@@ -194,6 +194,12 @@ with (
     metadata.mkdir()
     (metadata / "marker").write_text("protected synthetic metadata")
     (workspace / "metadata-link").symlink_to(metadata, target_is_directory=True)
+    # Match native read-only metadata submounts inside a writable workspace.
+    workspace_metadata = [workspace / name for name in (".git", ".agents", ".codex")]
+    for directory in workspace_metadata:
+        directory.mkdir()
+        (directory / "marker").write_text("protected workspace metadata")
+        (workspace / (directory.name + "-link")).symlink_to(directory, target_is_directory=True)
     # Match native proc fallback: retain every namespace flag and inherited proc.
     base = [
         "/usr/bin/bwrap",
@@ -215,6 +221,8 @@ with (
         "--cap-drop",
         "ALL",
     ]
+    for directory in workspace_metadata:
+        base[-2:-2] = ["--ro-bind", str(directory), str(directory)]
     inner = r"""
 import ctypes,errno,json,os,sys
 from pathlib import Path
@@ -247,6 +255,23 @@ for path in (metadata,Path('/proc/sys'),Path('/sys')):
   result==-1 and ctypes.get_errno() in (errno.EPERM,errno.EACCES,errno.EROFS),
   'Protected remount succeeded'
  )
+for metadata_name in ('.git','.agents','.codex'):
+ directory=workspace/metadata_name
+ need((directory/'marker').read_text()=='protected workspace metadata','Workspace metadata changed')
+ for path in (directory,workspace/(metadata_name+'-link')):
+  attempts=((path/'marker',os.O_WRONLY),
+            (path/'forbidden',os.O_WRONLY|os.O_CREAT|os.O_EXCL))
+  for target,flags in attempts:
+   try:
+    fd=os.open(target,flags,0o600)
+    os.close(fd)
+   except OSError as error:
+    need(error.errno in (errno.EACCES,errno.EPERM,errno.EROFS),str(error))
+   else: raise RuntimeError('Protected workspace metadata opened: '+str(target))
+  ctypes.set_errno(0)
+  result=libc.mount(None,os.fsencode(path),None,0x9020,None)
+  need(result==-1 and ctypes.get_errno() in (errno.EPERM,errno.EACCES,errno.EROFS),
+       'Workspace metadata remount succeeded: '+str(path))
 print('positive read/write and canonical/symlink/remount denials passed')
 """
 
@@ -266,6 +291,11 @@ print('positive read/write and canonical/symlink/remount denials passed')
             raise RuntimeError(result.stdout + result.stderr)
         if (metadata / "marker").read_text() != "protected synthetic metadata":
             raise RuntimeError("Protected source changed")
+        for directory in workspace_metadata:
+            if (directory / "marker").read_text() != "protected workspace metadata":
+                raise RuntimeError("Protected workspace metadata changed")
+            if (directory / "forbidden").exists():
+                raise RuntimeError("Protected workspace metadata creation succeeded")
         if result.inner is None:
             raise RuntimeError("Missing trusted inner process witness")
         return {"inner": result.inner, "procMode": "inherited"}
