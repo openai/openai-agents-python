@@ -8,7 +8,7 @@ The classic source comes from v0 `main` commit `814de8b1cfdaf6c70212dca9ca23563d
 
 ## Install the classic extra
 
-Download the wheel for your platform from the [alpha.7 release](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.7). Follow the [installation guide](docs/sdk/installation.md) to create and activate a Python environment. From the directory containing the downloaded wheel, replace `WHEEL.whl` below with its full filename:
+Download the wheel for your platform from the [preview release](docs/sdk/installation.md#preview-availability) and create a [Python environment](docs/sdk/installation.md#create-a-python-environment). From the directory containing the downloaded wheel, replace `WHEEL.whl` below with its full filename:
 
 ```sh
 python -m pip install './WHEEL.whl[classic]'
