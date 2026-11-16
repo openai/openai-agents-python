@@ -157,6 +157,7 @@ from .model_retry import (
     _StreamAttemptSkipped,
     apply_retry_attempt_usage,
     get_response_with_retry,
+    record_failed_attempt_usage_on_error,
     stream_response_with_retry,
 )
 from .oai_conversation import OpenAIServerConversationTracker
@@ -2678,10 +2679,13 @@ async def run_single_turn_streamed(
             elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
                 event_type = cast(str, event.type)
                 maybe_response = getattr(event, "response", None)
-                raise response_terminal_failure_error(
+                terminal_error = response_terminal_failure_error(
                     event_type,
                     maybe_response if isinstance(maybe_response, Response) else None,
                 )
+                if terminal_error._terminal_usage is not None:
+                    context_wrapper.usage.add(terminal_error._terminal_usage)
+                raise terminal_error
             elif getattr(event, "type", None) in {"error", "response.error"}:
                 raise response_error_event_failure_error(cast(str, event.type), event)
 
@@ -3049,7 +3053,10 @@ async def get_new_response(
     compaction_input_digests = prepare_compaction_model_input(
         session, context_wrapper, filtered.input
     )
-    with model_run_context(tool_use_tracker):
+    with (
+        model_run_context(tool_use_tracker),
+        record_failed_attempt_usage_on_error(context_wrapper.usage) as reported_usage,
+    ):
         new_response = await get_response_with_retry(
             get_response=lambda: model.get_response(
                 system_instructions=filtered.instructions,
@@ -3067,6 +3074,7 @@ async def get_new_response(
             ),
             rewind=rewind_model_request,
             retry_settings=model_settings.retry,
+            reported_usage=reported_usage,
             get_retry_advice=model.get_retry_advice,
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
