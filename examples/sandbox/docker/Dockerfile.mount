@@ -43,8 +43,6 @@ RUN set -eux \
     && if [ "$size" -lt 100000 ]; then echo "download too small: $size bytes from $url" >&2; exit 1; fi \
     && apt-get install -y /tmp/mount-s3.deb || (apt-get -f install -y && apt-get install -y /tmp/mount-s3.deb) \
     && mount-s3 --version \
-    && curl -fsSL https://amazon-efs-utils.aws.com/efs-utils-installer.sh | sh -s -- --install \
-    && mount.s3files --version \
     && arch="$(dpkg --print-architecture)" \
     && case "$arch" in \
         amd64) rclone_arch="amd64"; rclone_sha256="$RCLONE_SHA256_LINUX_AMD64" ;; \
