@@ -8,7 +8,7 @@ from contextlib import aclosing
 import pytest
 
 from agents import Agent, NativeProvider, function_tool
-from agents.realtime import (
+from agents.realtime.native import (
     RealtimeConfig,
     RealtimeConversationItemDeleted,
     RealtimeHistory,

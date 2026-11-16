@@ -86,8 +86,15 @@ def _require_mcp_tasks() -> None:
         pytest.skip("Requires the qualified MCP 2.0.0 packages")
 
 
+def _native_runtime_module(module: str) -> str:
+    if module == "realtime.native":
+        return "_agents_codex.realtime"
+    return "_agents_codex." + module
+
+
 @pytest.mark.parametrize("module", _PUBLIC_MODULES)
 def test_public_modules_only_forward_to_the_runtime(module: str) -> None:
+    native_target = _native_runtime_module(module)
     path = _PACKAGE.joinpath(*module.split(".")).with_suffix(".py")
     tree = ast.parse(path.read_text())
     forwarded = False
@@ -118,17 +125,17 @@ def test_public_modules_only_forward_to_the_runtime(module: str) -> None:
                     ("_mcp_tasks_wire", "wire")
                 ]
                 continue
-            assert target == "__future__" or target == "_agents_codex." + module, (
+            assert target == "__future__" or target == native_target, (
                 path,
                 target,
             )
-            forwarded |= target == "_agents_codex." + module
+            forwarded |= target == native_target
         elif isinstance(statement, ast.If):
             assert isinstance(statement.test, ast.Name), path
             assert any(
                 isinstance(declaration, ast.ImportFrom)
                 and declaration.level == 0
-                and declaration.module == "_agents_codex." + module
+                and declaration.module == native_target
                 and any(
                     alias.name == "TYPE_CHECKING" and alias.asname == statement.test.id
                     for alias in declaration.names
@@ -139,7 +146,7 @@ def test_public_modules_only_forward_to_the_runtime(module: str) -> None:
             for declaration in statement.body:
                 assert isinstance(declaration, ast.ImportFrom), path
                 assert declaration.level == 0, path
-                assert declaration.module == "_agents_codex." + module or (
+                assert declaration.module == native_target or (
                     module == "testing" and declaration.module == "_agents_codex.testing_sandbox"
                 ), path
                 assert all(
@@ -191,7 +198,8 @@ import agents.canonical_storage as public
 import _agents_codex.canonical_storage as runtime
 
 for name in (
-    "EncryptedSessionStore", "MongoDBSessionStore", "RedisSessionStore", "SQLAlchemySessionStore"
+    "EncryptedSessionStore", "MongoDBSessionStore", "RedisSessionStore",
+    "SQLAlchemySQLiteSessionStore",
 ):
     adapter = getattr(public, name)
     assert adapter is getattr(runtime, name), name
@@ -330,7 +338,9 @@ def test_facades_preserve_public_object_identity(module: str) -> None:
         _require_mcp_tasks()
     public = importlib.import_module("agents." + module)
     runtime = importlib.import_module(
-        ("agents.classic." if module in _CLASSIC_VOICE_MODULES else "_agents_codex.") + module
+        "agents.classic." + module
+        if module in _CLASSIC_VOICE_MODULES
+        else _native_runtime_module(module)
     )
     generated_bases = {}
     if module == "experimental._mcp_tasks_wire":

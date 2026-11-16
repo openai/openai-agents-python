@@ -81,7 +81,7 @@ async def test_selected_staged_opaque_file_survives_next_manual_capture_and_cold
             "role": "user",
             "content": [{"type": "input_file", "file_id": STAGED, "filename": "user.pdf"}],
         }
-        state = SessionState.from_json(state.with_pending_input([row, row]).to_json())
+        state = SessionState.from_json(state.with_appended_pending_input([row, row]).to_json())
         async with agent.session(
             state=state, provider_history=provider_history("resp_1")
         ) as resumed:

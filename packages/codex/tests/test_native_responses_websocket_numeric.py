@@ -10,7 +10,8 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from openai import AsyncOpenAI
 
-from agents import Agent, ModelRequest, ModelRunOwner, NativeProvider, ResponsesWebSocketModel
+from agents import Agent, ModelRequest, NativeProvider, ResponsesWebSocketModel
+from agents.models import ModelRunOwner
 from tests._asyncio import timeout
 from tests.test_native_responses_websocket_review import _diagnostics
 

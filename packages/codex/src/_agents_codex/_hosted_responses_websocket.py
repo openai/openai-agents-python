@@ -18,7 +18,7 @@ from ._lifecycle import _clear_error_frames
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._responses_websocket import (
     ResponsesSocketFactory,
-    ResponsesSocketOptions,
+    ResponsesSocketFactoryOptions,
     ResponsesWebSocketModel,
     ResponsesWebSocketOptions,
     _check_socket_json_structure,
@@ -109,7 +109,7 @@ class HostedResponsesWebSocketModel:
         self._runs: WeakKeyDictionary[ModelRunOwner, _Run] = WeakKeyDictionary()
         factory = socket_factory or _connect
 
-        async def connect(request: ModelRequest, options: ResponsesSocketOptions) -> Any:
+        async def connect(request: ModelRequest, options: ResponsesSocketFactoryOptions) -> Any:
             assert request.run_owner is not None
             run = self._runs.setdefault(request.run_owner, _Run())
             if run.retired:

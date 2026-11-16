@@ -114,6 +114,7 @@ class ExecutorPeer:
     synthetic_process_output: str | None = field(default=None, repr=False)
     synthetic_sandbox_denied: bool = False
     synthetic_process_stays_running: bool = False
+    synthetic_exit_on_terminate: bool = True
     before_synthetic_process_reply: Callable[[str], Awaitable[None]] | None = field(
         default=None, repr=False
     )
@@ -224,6 +225,8 @@ class ExecutorPeer:
                         async with client.ws_connect(address.replace("http:", "ws:")) as upstream:
                             methods: dict[str | int, str] = {}
                             synthetic_processes: set[str] = set()
+                            processes_started_running: set[str] = set()
+                            terminated_processes: set[str] = set()
 
                             async def forward(source: Any, destination: Any, record: bool) -> None:
                                 async for message in source:
@@ -300,6 +303,7 @@ class ExecutorPeer:
                                                         ),
                                                     )
                                                     if self.synthetic_process_stays_running:
+                                                        processes_started_running.add(process_id)
                                                         notifications = notifications[:1]
                                                     for notification, payload in notifications:
                                                         await downstream.send_json(
@@ -313,7 +317,19 @@ class ExecutorPeer:
                                                         await downstream.send_json(start_reply)
                                                     # Never forward a synthetic process/start.
                                                     continue
-                                                if process_id in synthetic_processes:
+                                                if process_id in synthetic_processes and not (
+                                                    method == "process/terminate"
+                                                    and (
+                                                        self.deny_terminate
+                                                        or self.drop_terminate_reply
+                                                    )
+                                                ):
+                                                    running = (
+                                                        self.synthetic_process_stays_running
+                                                        and process_id not in terminated_processes
+                                                    )
+                                                    if process_id in terminated_processes:
+                                                        exit_code = 137
                                                     if method == "process/read":
                                                         process_chunks = (
                                                             self._synthetic_process_chunks[
@@ -334,9 +350,6 @@ class ExecutorPeer:
                                                             if index + 1
                                                             > (params.get("afterSeq") or 0)
                                                         ]
-                                                        running = (
-                                                            self.synthetic_process_stays_running
-                                                        )
                                                         reply = {
                                                             "chunks": chunks,
                                                             "nextSeq": len(process_chunks)
@@ -350,10 +363,7 @@ class ExecutorPeer:
                                                             "failure": None,
                                                             "sandboxDenied": sandbox_denied,
                                                         }
-                                                    elif (
-                                                        method == "process/write"
-                                                        and self.synthetic_process_stays_running
-                                                    ):
+                                                    elif method == "process/write" and running:
                                                         reply = {"status": "accepted"}
                                                     elif method == "process/terminate":
                                                         reply = {"running": False}
@@ -364,6 +374,40 @@ class ExecutorPeer:
                                                     await downstream.send_json(
                                                         {"id": value["id"], "result": reply}
                                                     )
+                                                    if (
+                                                        method == "process/terminate"
+                                                        and process_id in processes_started_running
+                                                        and process_id not in terminated_processes
+                                                        and self.synthetic_exit_on_terminate
+                                                    ):
+                                                        terminated_processes.add(process_id)
+                                                        seq = (
+                                                            len(
+                                                                self._synthetic_process_chunks[
+                                                                    process_id
+                                                                ]
+                                                            )
+                                                            + 1
+                                                        )
+                                                        await downstream.send_json(
+                                                            {
+                                                                "method": "process/exited",
+                                                                "params": {
+                                                                    "processId": process_id,
+                                                                    "seq": seq,
+                                                                    "exitCode": 137,
+                                                                },
+                                                            }
+                                                        )
+                                                        await downstream.send_json(
+                                                            {
+                                                                "method": "process/closed",
+                                                                "params": {
+                                                                    "processId": process_id,
+                                                                    "seq": seq + 1,
+                                                                },
+                                                            }
+                                                        )
                                                     continue
                                             if (
                                                 self.drop_terminate_reply

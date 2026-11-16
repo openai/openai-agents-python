@@ -225,7 +225,7 @@ from .compaction import (
 from .completion import (
     CompletionContext,
     ContinueTurn,
-    FinishToolBatch,
+    FinishTurn,
     ToolBatchCompletionContext,
     ToolBatchResult,
 )
@@ -281,12 +281,14 @@ from .observation import (
     EventGap,
     EventStream as EventStream,
     ExecutionItemCompleted as ExecutionItemCompleted,
+    FunctionCallArgumentsDelta,
     HostedToolCallProgress,
     ModelOutputItemCompleted,
     Observation,
     OutputAccepted as OutputAccepted,
     OutputTextDelta as OutputTextDelta,
     RawProviderEvent as RawProviderEvent,
+    ReasoningSummaryTextDelta,
     ResponseFactReceived as ResponseFactReceived,
     SubagentLifecycle as SubagentLifecycle,
     ToolFinished as ToolFinished,
@@ -1627,6 +1629,25 @@ def _project_progress(
                 payload=message["payload"],
             )
         )
+        payload = message["payload"]
+        if (
+            message["source"] == "responses"
+            and payload.get("type") == "response.function_call_arguments.delta"
+            and isinstance(payload.get("item_id"), str)
+            and type(payload.get("output_index")) is int
+            and payload["output_index"] >= 0
+            and isinstance(payload.get("delta"), str)
+        ):
+            buffer.append(
+                FunctionCallArgumentsDelta(
+                    session_id=buffer.session_id,
+                    turn_id=turn_id,
+                    submission_id=submission_id,
+                    item_id=payload["item_id"],
+                    output_index=payload["output_index"],
+                    delta=payload["delta"],
+                )
+            )
     elif kind == "hosted_tool_call_progress" and event["id"] == turn_id:
         buffer.append(
             HostedToolCallProgress(
@@ -1689,6 +1710,17 @@ def _project_progress(
                     delta=message["delta"],
                 )
             )
+        elif kind == "reasoning_content_delta" and buffer.include_model_output_items:
+            buffer.append(
+                ReasoningSummaryTextDelta(
+                    session_id=buffer.session_id,
+                    turn_id=turn_id,
+                    submission_id=submission_id,
+                    item_id=message["item_id"],
+                    summary_index=message["summary_index"],
+                    delta=message["delta"],
+                )
+            )
         elif kind == "item_completed" and message["item"]["type"] == "ContextCompaction":
             buffer.append(
                 ContextCompacted(
@@ -1705,6 +1737,9 @@ def _project_progress(
                 or item["type"]
                 in {
                     "web_search_call",
+                    "tool_search_call",
+                    "tool_search_output",
+                    "mcp_approval_response",
                     "mcp_list_tools",
                     "mcp_call",
                     "program",
@@ -1809,6 +1844,7 @@ def _project_run_prefix(
                 "token_count",
                 "hosted_tool_call_progress",
                 "agent_message_content_delta",
+                "reasoning_content_delta",
                 "item_completed",
                 "response_fact",
             }
@@ -6255,6 +6291,8 @@ class Session(Generic[ContextT, OutputT]):
                     programmatic_tool_calling=programmatic_tool_calling,
                 )
 
+                if provider.tool_output_token_limit is not None:
+                    config["tool_output_token_limit"] = provider.tool_output_token_limit
                 if any(row.get("environment") is not None for row in profile_roster):
                     config["sandbox_mode"] = "read-only"
                 _configure_session_features(
@@ -7872,20 +7910,20 @@ class Session(Generic[ContextT, OutputT]):
         from .realtime_agents import RealtimeAgentContext
 
         defaults = self._agent_for_message(message).realtime
-        if defaults is None or defaults.tool_enabled is None:
+        if defaults is None or defaults.is_tool_enabled is None:
             return True
         profile = message.get("profile_id")
         original = self._source_profile_runtime(profile).profile.agent if profile else self._agent
         if original is None:
             raise NativeError("Realtime tool has no source Agent")
         enabled = await _call_callback(
-            defaults.tool_enabled,
+            defaults.is_tool_enabled,
             admitted,
             RealtimeAgentContext(context, original),
             tool,
         )
         if type(enabled) is not bool:
-            raise TypeError("Realtime tool_enabled must return a bool")
+            raise TypeError("Realtime is_tool_enabled must return a bool")
         return enabled
 
     def _source_profile_runtime(self, profile_id: str) -> _ProfileRuntime:
@@ -9460,7 +9498,7 @@ class Session(Generic[ContextT, OutputT]):
                         "Saved managed approval requires an approval-enabled callback"
                     )
                 if isinstance(entry, _tool_types._CapturedApproval):
-                    assert isinstance(request, _tool_types.ApprovalRequested)
+                    assert isinstance(request, _tool_types.FunctionToolApprovalRequest)
                     if message.get("_sdk_restored_approval") and not message.get(
                         "_sdk_approval_required"
                     ):
@@ -9704,6 +9742,14 @@ class Session(Generic[ContextT, OutputT]):
     ) -> str | None:
         callback = entry.input_error_function
         if callback is None:
+            if entry._recover_strict_input and not (
+                self._tool_error_formatter is not None and entry._allow_run_error_formatter
+            ):
+                if admit():
+                    return (
+                        "Invalid tool arguments. Retry with arguments that match the tool schema."
+                    )
+                return None
             return await self._format_run_tool_error(
                 state, message, entry, error, "arguments", call, admit
             )
@@ -9730,7 +9776,7 @@ class Session(Generic[ContextT, OutputT]):
         self,
         state: _CallbackState,
         entry: _tool_types._CapturedApproval,
-        request: _tool_types.ApprovalRequested[Any],
+        request: _tool_types.FunctionToolApprovalRequest[Any],
         message: dict[str, Any],
     ) -> None:
         scope = _Invocation(self)
@@ -9787,12 +9833,8 @@ class Session(Generic[ContextT, OutputT]):
                     _OriginalToolArgumentsError,
                 ) as error:
                     if (
-                        (
-                            entry.function.input_error_function is None
-                            and not (
-                                self._tool_error_formatter is not None
-                                and entry.function._allow_run_error_formatter
-                            )
+                        not entry.function._can_recover_input(
+                            run_formatter=self._tool_error_formatter is not None
                         )
                         or message.get("_sdk_restored_approval")
                         or "_sdk_effective_arguments" in message
@@ -9855,7 +9897,7 @@ class Session(Generic[ContextT, OutputT]):
                 "_sdk_effective_arguments" in message
             )
             if (
-                entry.declaration.run_before_approval
+                entry.declaration.run_input_policy_before_approval
                 and function.before is not None
                 and not preapproval_complete
             ):
@@ -10020,7 +10062,7 @@ class Session(Generic[ContextT, OutputT]):
                     "predicate"
                     if callable(declaration.needs_approval)
                     else declaration.needs_approval,
-                    declaration.run_before_approval,
+                    declaration.run_input_policy_before_approval,
                     declaration.before is not None,
                     declaration.after is not None,
                     declaration.finish_turn,
@@ -10085,7 +10127,7 @@ class Session(Generic[ContextT, OutputT]):
                     self._restored_approval_slots[(profile_id, catalog.generation, slot)] = record
 
     async def _format_approval_rejection(
-        self, request: _tool_types.ApprovalRequested[Any], default: str
+        self, request: _tool_types.FunctionToolApprovalRequest[Any], default: str
     ) -> str:
         state = self._active
         formatter = self._tool_error_formatter
@@ -10149,7 +10191,7 @@ class Session(Generic[ContextT, OutputT]):
 
     async def _decide_approval(
         self,
-        request: _tool_types.ApprovalRequested[Any],
+        request: _tool_types.FunctionToolApprovalRequest[Any],
         approve: bool,
         *,
         reason: str = _tool_types._DEFAULT_APPROVAL_REASON,
@@ -10284,7 +10326,7 @@ class Session(Generic[ContextT, OutputT]):
         if (
             invocation is not None
             and invocation.active
-            and not (isinstance(request, _tool_types.ApprovalRequested))
+            and not (isinstance(request, _tool_types.FunctionToolApprovalRequest))
         ):
             raise RuntimeError("A callback must return its reply; it cannot respond directly")
         state: _CallbackState | None = (
@@ -10370,10 +10412,12 @@ class Session(Generic[ContextT, OutputT]):
         else:
             assert state.handle is not None
             handle = state.handle
-        if (isinstance(request, _tool_types.ApprovalRequested)) and not _approval_rejection:
+        if (
+            isinstance(request, _tool_types.FunctionToolApprovalRequest)
+        ) and not _approval_rejection:
             if not (
                 type(result) is not _CapturedFunction
-                and isinstance(result, _tool_types.ApprovalDecision)
+                and isinstance(result, _tool_types.FunctionToolApprovalDecision)
             ):
                 raise TypeError("A managed function reply requires an approval decision")
             await self._decide_approval(
@@ -10909,20 +10953,20 @@ class Session(Generic[ContextT, OutputT]):
             if item.get("type") != "message" or item.get("role") not in ("developer", "system")
         )
 
-    async def transact_history(
+    async def replace_history_suffix(
         self,
         *,
         expected_revision: str,
-        keep: int,
+        keep_prefix_count: int,
         items: Sequence[Mapping[str, Any]] = (),
         rebuild_model_context: bool = False,
     ) -> str:
         """Atomic original-prefix retention and suffix replacement with JSON objects.
 
         ``expected_revision``: current ``history_snapshot().revision``.
-        ``keep``: original-record count, including audit-only rows.
-        Positive ``keep=snapshot.total``: append with current model context preserved.
-        ``keep=0``: explicit whole-history and model-context replacement, even if empty.
+        ``keep_prefix_count``: original-record count, including audit-only rows.
+        Positive ``keep_prefix_count=snapshot.total``: append with current model context preserved.
+        ``keep_prefix_count=0``: replace the whole history and model context, even if empty.
         Other prefixes retain exact model projections by default. Set
         ``rebuild_model_context=True`` to discard the compacted projection when
         it cannot be mapped to the retained originals and replay their admitted
@@ -10939,8 +10983,12 @@ class Session(Generic[ContextT, OutputT]):
         self._check_idle_update()
         if not isinstance(expected_revision, str) or not expected_revision:
             raise ValueError("expected_revision must be nonempty text")
-        if isinstance(keep, bool) or not isinstance(keep, int) or keep < 0:
-            raise ValueError("keep must be a nonnegative integer")
+        if (
+            isinstance(keep_prefix_count, bool)
+            or not isinstance(keep_prefix_count, int)
+            or keep_prefix_count < 0
+        ):
+            raise ValueError("keep_prefix_count must be a nonnegative integer")
         if not isinstance(rebuild_model_context, bool):
             raise TypeError("rebuild_model_context must be a bool")
         captured = json.dumps([json.dumps(item) for item in items])
@@ -10948,7 +10996,7 @@ class Session(Generic[ContextT, OutputT]):
         async def replace() -> str:
             value = self._history_mutation_value(
                 await self._native._transact_history(
-                    expected_revision, keep, captured, rebuild_model_context
+                    expected_revision, keep_prefix_count, captured, rebuild_model_context
                 )
             )
             self._model_context_snapshots.clear()
@@ -15656,6 +15704,7 @@ class Session(Generic[ContextT, OutputT]):
             return
         if kind in {
             "token_count",
+            "reasoning_content_delta",
             "hosted_tool_call_progress",
             "raw_response_item",
             "raw_response_completed",
@@ -17500,7 +17549,7 @@ class Session(Generic[ContextT, OutputT]):
             if isinstance(decision, StopTurn):
                 return {"action": "stop"}
             if not isinstance(decision, ContinueTurn):
-                allowed = "FinishToolBatch, " if name == "tool_batch_completion" else ""
+                allowed = "FinishTurn, " if name == "tool_batch_completion" else ""
                 raise TypeError(f"{name} must return {allowed}ContinueTurn, StopTurn or None")
             if not isinstance(decision.instructions, str) or not decision.instructions.strip():
                 raise ValueError("ContinueTurn instructions must be a nonempty string")
@@ -17579,7 +17628,7 @@ class Session(Generic[ContextT, OutputT]):
                         model=message["model"],
                     ),
                 )
-                if not isinstance(decision, FinishToolBatch):
+                if not isinstance(decision, FinishTurn):
                     return continuation(decision, "tool_batch_completion")
                 value, wire = output.terminal_application_value(decision.output)
             else:
@@ -18845,6 +18894,7 @@ class Session(Generic[ContextT, OutputT]):
                             state.last_assistant_had_blank_final = blank
                 elif kind in {
                     "agent_message_content_delta",
+                    "reasoning_content_delta",
                     "item_completed",
                     "response_fact",
                     "sdk_raw_provider_event",
@@ -20327,7 +20377,7 @@ class Session(Generic[ContextT, OutputT]):
 
                 if isinstance(entry, _CapturedHandoff):
                     source = self._agent_for_message(message).realtime
-                    if source is not None and source.tool_enabled is not None:
+                    if source is not None and source.is_tool_enabled is not None:
                         # The source grant can suspend after the initial handoff check.
                         assert context is not None
                         handoff_decision = await self._call_decision_callback(
@@ -22617,9 +22667,9 @@ _COMPATIBILITY_OWNERS = {
     "_URL_ACCEPT": "manual",
     "ActionReply": "manual",
     "ActionRequested": "manual",
-    "ApprovalDecision": "manual",
+    "FunctionToolApprovalDecision": "manual",
     "ApprovalRequest": "manual",
-    "ApprovalRequested": "manual",
+    "FunctionToolApprovalRequest": "manual",
     "ElicitationRequest": "manual",
     "FormRequest": "manual",
     "Interaction": "manual",

@@ -23,7 +23,7 @@ from agents import (
     TurnStoppedError,
     function_tool,
 )
-from agents.realtime import realtime_handoff
+from agents.realtime.native import realtime_handoff
 from examples.codex.validated_artifact import ArtifactContext, publish_xml
 from tests._asyncio import timeout
 from tests.native_fixtures import (

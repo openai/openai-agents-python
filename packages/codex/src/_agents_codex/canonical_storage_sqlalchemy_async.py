@@ -146,7 +146,7 @@ class AsyncSQLAlchemySessionStore:
         """Read one v0 session's items in the order used by its source.
 
         Finish writes to the v0 session before reading. Use the returned items
-        with an empty native Session's `transact_history` and its current revision.
+        with an empty native Session's `replace_history_suffix` and its current revision.
         The application can retain the mapping from its v0 ID to the native ID.
         By default, items follow Classic's timestamp order with ID as the tie
         breaker. Pass `order_by="id"` if the source orders items by append ID.

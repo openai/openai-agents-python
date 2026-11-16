@@ -343,7 +343,7 @@ class SQLiteSessionStore:
         """Read a v0 SQLite file in insertion order for native history import.
 
         Finish writes to the v0 session before reading. Import the items with
-        the current revision of an empty native Session's `transact_history`.
+        the current revision of an empty native Session's `replace_history_suffix`.
         Histories above either limit raise ValueError before item decoding.
         """
         _validate_legacy_history_limits(max_items, max_bytes)
@@ -540,7 +540,7 @@ class SQLiteSessionStore:
                     os.close(descriptor)
 
 
-class SQLAlchemySessionStore(SQLiteSessionStore):
+class SQLAlchemySQLiteSessionStore(SQLiteSessionStore):
     """Use a caller-owned synchronous SQLAlchemy SQLite Engine and its pool.
 
     This adapter preserves SQLiteSessionStore's canonical schema, fencing, file
@@ -560,12 +560,14 @@ class SQLAlchemySessionStore(SQLiteSessionStore):
         if not isinstance(engine, Engine) or engine.dialect.is_async:
             raise TypeError("engine must be a synchronous SQLAlchemy Engine")
         if engine.url.get_backend_name() != "sqlite":
-            raise ValueError("SQLAlchemySessionStore currently supports SQLite only")
+            raise ValueError("SQLAlchemySQLiteSessionStore currently supports SQLite only")
         database = engine.url.database
         if not database or database == ":memory:" or database.startswith("file:"):
-            raise ValueError("SQLAlchemySessionStore requires a file-backed SQLite database")
+            raise ValueError("SQLAlchemySQLiteSessionStore requires a file-backed SQLite database")
         if not Path(database).is_absolute():
-            raise ValueError("SQLAlchemySessionStore requires an absolute SQLite database path")
+            raise ValueError(
+                "SQLAlchemySQLiteSessionStore requires an absolute SQLite database path"
+            )
         self.engine = engine
         super().__init__(Path(database))
 
@@ -576,7 +578,7 @@ class SQLAlchemySessionStore(SQLiteSessionStore):
         try:
             connection = pooled.driver_connection
             if not isinstance(connection, sqlite3.Connection):
-                raise TypeError("SQLAlchemySessionStore requires the sqlite3 DBAPI driver")
+                raise TypeError("SQLAlchemySQLiteSessionStore requires the sqlite3 DBAPI driver")
             connection.execute("PRAGMA synchronous=FULL")
             with connection:
                 yield connection
@@ -597,7 +599,7 @@ async def read_dapr_legacy_history(
 
     Finish writes to the v0 session before reading from its original Dapr
     application and state store. Import the items with the current revision
-    of an empty native Session's `transact_history`.
+    of an empty native Session's `replace_history_suffix`.
     Dapr returns the stored value as one message. Configure the client's
     receive limit for transport and use these limits for history decoding.
     """

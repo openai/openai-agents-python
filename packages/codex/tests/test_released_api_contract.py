@@ -197,8 +197,9 @@ def test_supported_submodule_removal_fails(candidate: Path) -> None:
 def test_public_owner_maps_only_existing_facades(candidate: Path) -> None:
     owner = runpy.run_path(str(SCRIPT))["_public_owner"]
     owner.__globals__["ROOT"] = candidate
-    for name in ("agent", "_events", "_function_tools", "realtime", "voice.workflow"):
+    for name in ("agent", "_events", "_function_tools", "voice.workflow"):
         assert owner(f"_agents_codex.{name}") == f"agents.{name}"
+    assert owner("_agents_codex.realtime") == "agents.realtime.native"
     for name in ("realtime_adapter", "realtime_guardrails", "realtime_result", "realtime_settings"):
         assert owner(f"_agents_codex.{name}") == f"_agents_codex.{name}"
     assert owner("typing") == "typing"
@@ -207,11 +208,13 @@ def test_public_owner_maps_only_existing_facades(candidate: Path) -> None:
 def test_realtime_facade_captures_exports_and_actual_leaf_references(candidate: Path) -> None:
     contract = runpy.run_path(str(SCRIPT))["_module_contract"]
     contract.__globals__["ROOT"] = candidate
-    facade = importlib.import_module("agents.realtime")
+    facade = importlib.import_module("agents.realtime.native")
     result = contract(facade)
     assert set(result["exports"]) == set(facade.__all__)
-    assert result["exports"]["background_result"] == "agents.realtime.background_result"
-    assert result["exports"]["NativeRealtimeAdapter"] == "agents.realtime.NativeRealtimeAdapter"
+    assert result["exports"]["background_result"] == "agents.realtime.native.background_result"
+    assert (
+        result["exports"]["NativeRealtimeAdapter"] == "agents.realtime.native.NativeRealtimeAdapter"
+    )
     assert result["references"]["NativeRealtimeAdapter"] == (
         "_agents_codex.realtime_adapter.NativeRealtimeAdapter"
     )
@@ -472,7 +475,10 @@ def test_current_snapshot_covers_native_methods_and_types(candidate: Path) -> No
     assert "agents.observation" in api["modules"]
     assert "agents.state" in api["modules"]
     assert {"background_result", "NativeRealtimeAdapter", "RealtimeConfig"} <= set(
-        api["modules"]["agents.realtime"]["exports"]
+        api["modules"]["agents.realtime.native"]["exports"]
+    )
+    assert api["modules"]["agents.realtime"]["exports"]["RealtimeSession"] == (
+        "agents.classic.realtime.session.RealtimeSession"
     )
     for leaf, declaration in (
         ("realtime_adapter", "class NativeRealtimeAdapter("),

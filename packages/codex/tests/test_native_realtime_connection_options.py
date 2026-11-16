@@ -10,7 +10,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from agents import Agent, NativeProvider
-from agents.realtime import RealtimeConfig, RealtimeSIP, RealtimeWebRTC
+from agents.realtime.native import RealtimeConfig, RealtimeSIP, RealtimeWebRTC
 from tests._asyncio import timeout
 from tests.native_fixtures import text_response
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer

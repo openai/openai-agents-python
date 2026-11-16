@@ -7,7 +7,7 @@ import pytest
 
 from agents import Agent, Deny, NativeProvider, function_tool
 from agents.observation import ToolFinished, ToolStarted
-from agents.realtime import RealtimeConfig
+from agents.realtime.native import RealtimeConfig
 from tests._asyncio import timeout
 from tests.test_native_manual_tools import next_request
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
@@ -337,7 +337,7 @@ async def test_native_remembered_rejection_preserves_formatter_omission(
     @function_tool(
         needs_approval=True,
         before=before if reason == "input_policy" else None,
-        run_before_approval=True,
+        run_input_policy_before_approval=True,
     )
     def risky() -> str:
         effects.append("forbidden")

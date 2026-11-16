@@ -2,7 +2,7 @@
 
 import asyncio
 
-from agents import Agent, ApprovalRequested, function_tool
+from agents import Agent, FunctionToolApprovalRequest, function_tool
 from agents.testing import ScriptedResponses, text, tool_call
 
 
@@ -24,7 +24,7 @@ async def main() -> None:
             turn = await session.submit("Record the synthetic value.")
             approved = False
             async for request in session.interactions():
-                if isinstance(request, ApprovalRequested):
+                if isinstance(request, FunctionToolApprovalRequest):
                     assert effects == []
                     assert request.effective_arguments.value == "synthetic"
                     await request.approve()

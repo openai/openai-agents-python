@@ -4,7 +4,7 @@ import pytest
 
 from _agents_codex._agent_profiles import _capture_agent_graph
 from agents import Agent, DecisionHandoff, Handoff, function_tool
-from agents.realtime import RealtimeAgentConfig
+from agents.realtime.native import RealtimeAgentConfig
 
 
 @pytest.mark.parametrize("callback_handoff", [False, True])

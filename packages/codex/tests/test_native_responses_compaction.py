@@ -469,7 +469,9 @@ async def test_compaction_retains_only_captured_reference_occurrences(responses,
         ).session() as session,
     ):
         snapshot = await session.history_snapshot()
-        await session.transact_history(expected_revision=snapshot.revision, keep=0, items=captured)
+        await session.replace_history_suffix(
+            expected_revision=snapshot.revision, keep_prefix_count=0, items=captured
+        )
         await (await session.submit("original request")).get_result()
         original = (await session.history_snapshot()).items
         if mode in ("duplicate", "reordered"):
@@ -512,8 +514,8 @@ async def test_unverified_compactor_cannot_introduce_opaque_context(responses, c
     ).session() as session:
         if captured:
             snapshot = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=snapshot.revision, keep=0, items=[opaque]
+            await session.replace_history_suffix(
+                expected_revision=snapshot.revision, keep_prefix_count=0, items=[opaque]
             )
         await (await session.submit("original request")).get_result()
         before = (await session.history_snapshot()).items
@@ -662,7 +664,9 @@ async def test_compaction_preserves_captured_noninstruction_window_data(response
         instructions="Current instructions.", provider=provider(responses), compaction=factory
     ).session() as session:
         snapshot = await session.history_snapshot()
-        await session.transact_history(expected_revision=snapshot.revision, keep=0, items=[item])
+        await session.replace_history_suffix(
+            expected_revision=snapshot.revision, keep_prefix_count=0, items=[item]
+        )
         await (await session.submit("original request")).get_result()
         await session.compact()
         saved = await session.save_state()

@@ -34,7 +34,7 @@ async def test_pending_local_shell_output_keeps_historical_identity(responses, r
         }
         if reuse_current_call == "misleading-call-id":
             historical["call_id"] = "unrelated-ignored-field"
-        staged = SessionState.from_json(saved.with_pending_input([historical]).to_json())
+        staged = SessionState.from_json(saved.with_appended_pending_input([historical]).to_json())
         assert staged.pending_input == [historical]
         if reuse_current_call:
             with pytest.raises(RuntimeError, match="Staged input cannot reuse a call"):

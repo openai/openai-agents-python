@@ -27,8 +27,8 @@ async def test_cold_limited_history_keeps_complete_metadata_and_stale_cas(
         async with agent.session(storage=storage) as session:
             identity = session.id
             before = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=before.revision, keep=0, items=originals
+            await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0, items=originals
             )
             state = None if durable else await session.save_state()
         reopen = {"storage": storage, "resume": identity} if durable else {"state": state}
@@ -44,12 +44,12 @@ async def test_cold_limited_history_keeps_complete_metadata_and_stale_cas(
                 assert limited.total == complete.total
                 assert limited.items == (complete.items[-size:] if size else ())
             later = {"type": "future_history_record", "order": "appended"}
-            revision = await restored.transact_history(
-                expected_revision=tail.revision, keep=tail.total, items=[later]
+            revision = await restored.replace_history_suffix(
+                expected_revision=tail.revision, keep_prefix_count=tail.total, items=[later]
             )
             with pytest.raises(RuntimeError, match="revision"):
-                await restored.transact_history(
-                    expected_revision=tail.revision, keep=tail.total, items=[]
+                await restored.replace_history_suffix(
+                    expected_revision=tail.revision, keep_prefix_count=tail.total, items=[]
                 )
             current = await restored.history_snapshot(limit=1)
             assert current.revision == revision

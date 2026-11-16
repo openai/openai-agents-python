@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from agents import Agent, ApprovalRequested, LocalStorage, NativeProvider, function_tool
+from agents import Agent, FunctionToolApprovalRequest, LocalStorage, NativeProvider, function_tool
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_manual_tools import next_request
@@ -27,6 +27,10 @@ async def test_indexed_pages_search_and_cold_reopen(responses, tmp_path):
             first = await session.stored_turns(limit=1)
             assert [turn["id"] for turn in first["turns"]] == expected[:1]
             assert first["turns"][0]["summary_items"] == []
+            assert first["turns"][0]["started_at_ms"] is not None
+            assert first["turns"][0]["completed_at_ms"] is not None
+            assert "started_at" not in first["turns"][0]
+            assert "completed_at" not in first["turns"][0]
             assert first["next_cursor"] is not None
             with pytest.raises(ValueError, match="limit"):
                 await session.stored_turns(limit=0)
@@ -110,7 +114,7 @@ async def test_indexed_reads_during_callback_and_approval(responses, tmp_path, a
         try:
             if approval:
                 request = await next_request(session.interactions(), gate)
-                assert isinstance(request, ApprovalRequested)
+                assert isinstance(request, FunctionToolApprovalRequest)
             else:
                 await entered.wait()
             page = await session.stored_turns(include_summary=True)

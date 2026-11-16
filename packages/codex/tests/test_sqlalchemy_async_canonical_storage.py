@@ -131,8 +131,8 @@ async def test_async_sqlalchemy_imports_v0_items_and_restores_native_history(
             async with agent.session(storage=CustomStorage(store)) as session:
                 identity = session.id
                 snapshot = await session.history_snapshot()
-                await session.transact_history(
-                    expected_revision=snapshot.revision, keep=0, items=imported
+                await session.replace_history_suffix(
+                    expected_revision=snapshot.revision, keep_prefix_count=0, items=imported
                 )
             async with agent.session(storage=CustomStorage(store), resume=identity) as restored:
                 assert (await restored.history_snapshot()).items[: len(items)] == tuple(imported)

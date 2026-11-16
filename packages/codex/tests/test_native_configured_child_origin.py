@@ -118,7 +118,7 @@ async def test_configured_child_items_keep_the_admitted_origin():
 
 
 async def test_reopened_configured_child_attributes_the_new_result() -> None:
-    from agents import ApprovalRequested, PendingRequests
+    from agents import FunctionToolApprovalRequest, PendingRequests
     from tests._asyncio import timeout
     from tests.test_native_configured_agent_tool import fixture
 
@@ -136,7 +136,7 @@ async def test_reopened_configured_child_attributes_the_new_result() -> None:
             pending = await turn.wait_for_request_or_result()
             assert isinstance(pending, PendingRequests)
             (request,) = pending.requests
-            assert isinstance(request, ApprovalRequested)
+            assert isinstance(request, FunctionToolApprovalRequest)
             await restored.respond(request.reply(True))
             assert (await turn.get_result()).final_output == "parent complete"
             (entry,) = [

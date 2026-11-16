@@ -21,7 +21,7 @@ from agents import (
     function_tool,
 )
 from agents.native_agents import ChildInvocation
-from agents.realtime import RealtimeConfig
+from agents.realtime.native import RealtimeConfig
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import (

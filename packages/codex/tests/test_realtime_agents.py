@@ -13,7 +13,7 @@ from typing_extensions import TypedDict
 from _agents_codex._agent_profiles import _capture_agent_graph
 from _agents_codex.realtime_agents import _capture_voice_graph, _resolve_realtime_configuration
 from agents import Agent, function_tool
-from agents.realtime import RealtimeAgentConfig, RealtimeConfig, realtime_handoff
+from agents.realtime.native import RealtimeAgentConfig, RealtimeConfig, realtime_handoff
 
 
 @pytest.mark.parametrize("prompt", [{"id": "explicit-connection-prompt"}, None])
@@ -206,7 +206,7 @@ async def test_contextual_instructions_and_predicates_bind_exact_source(asynchro
         realtime=RealtimeAgentConfig(
             instructions=async_resolve if asynchronous else resolve,
             prompt={"id": "voice-prompt"},
-            tool_enabled=lambda context, tool: (
+            is_tool_enabled=lambda context, tool: (
                 tool.name == "visible" or (tool.name, tool.namespace) == ("read", "mcp__records")
             ),
         ),
@@ -270,7 +270,7 @@ async def test_callback_failure_and_invalid_result_prevent_configuration():
         with pytest.raises(TypeError, match="must return a string"):
             await _resolve_realtime_configuration(source_session(agent, []), None, {}, None)
     agent = Agent(
-        instructions="Backend", realtime=RealtimeAgentConfig(tool_enabled=lambda *_: "yes")
+        instructions="Backend", realtime=RealtimeAgentConfig(is_tool_enabled=lambda *_: "yes")
     )
     with pytest.raises(TypeError, match="must return a bool"):
         await _resolve_realtime_configuration(
@@ -404,7 +404,7 @@ async def test_agent_guardrail_defaults_follow_issuing_receipt_after_source_chan
     from contextvars import copy_context
 
     from _agents_codex.realtime import RealtimeSession
-    from agents.realtime import RealtimeGuardrailResult, RealtimeOutputGuardrail
+    from agents.realtime.native import RealtimeGuardrailResult, RealtimeOutputGuardrail
     from tests.test_realtime_guardrail_retention import output, settle
 
     seen = []

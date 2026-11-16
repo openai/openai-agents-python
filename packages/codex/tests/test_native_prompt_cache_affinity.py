@@ -24,7 +24,7 @@ from tests.native_fixtures import (
 from tests.test_conversations_history import endpoint as endpoint
 
 
-@pytest.mark.parametrize("case", ["session", "manual", "chat", "responses"])
+@pytest.mark.parametrize("case", ["session", "session_group", "manual", "chat", "responses"])
 def test_native_prompt_cache_trace_affinity(case: str, tmp_path: Path) -> None:
     # Native telemetry must be configured before the first SDK client in this process.
     env = {**os.environ, "CODEX_HOME": str(tmp_path)}
@@ -56,6 +56,8 @@ async def _trace_affinity_case(case: str) -> None:
         fixture.url = str(server.make_url("/v1"))
         if case == "session":
             await _session_affinity(fixture)
+        elif case == "session_group":
+            await _session_group_affinity(fixture)
         elif case == "manual":
             await _manual_affinity(fixture)
         else:
@@ -99,6 +101,36 @@ async def _session_affinity(responses: ResponsesFixture) -> None:
     assert keys[0] == keys[2]
     assert keys[3] == keys[4]
     assert keys[4] != keys[5]
+
+
+async def _session_group_affinity(responses: ResponsesFixture) -> None:
+    for _ in range(4):
+        responses.respond(assistant_output("accepted"))
+
+    async with NativeProvider(
+        base_url=responses.url,
+        api_key="synthetic-loopback",
+        supports_websockets=False,
+    ) as provider:
+        agent = Agent(model="gpt-5", instructions="Answer.", provider=provider)
+        options = TraceOptions(group_id="synthetic-client-agent")
+        async with agent.session(trace_options=options) as first:
+            assert (await (await first.submit("First")).get_result()).final_output == "accepted"
+            saved = await first.save_state()
+        async with agent.session(trace_options={"group_id": "synthetic-client-agent"}) as second:
+            assert first.id != second.id
+            assert (await (await second.submit("Second")).get_result()).final_output == "accepted"
+
+        other_options = TraceOptions(group_id="synthetic-other-client-agent")
+        async with agent.session(trace_options=other_options) as other:
+            assert (await (await other.submit("Other")).get_result()).final_output == "accepted"
+        async with agent.session(state=saved, trace_options=other_options) as restored:
+            turn = await restored.submit("Restored")
+            assert (await turn.get_result()).final_output == "accepted"
+
+    keys = [request["prompt_cache_key"] for request in responses.requests]
+    assert keys[0] == keys[1] == keys[3]
+    assert keys[0] != keys[2]
 
 
 async def test_current_native_conversation_affinity(responses, endpoint) -> None:

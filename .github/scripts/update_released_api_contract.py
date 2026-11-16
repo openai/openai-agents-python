@@ -294,7 +294,7 @@ def _logical_tree(
                     "_DefaultApprovalReason",
                     "_DEFAULT_APPROVAL_REASON",
                 }:
-                    anchor, after = "ApprovalDecision", False
+                    anchor, after = "FunctionToolApprovalDecision", False
                 else:
                     anchor, after = anchors[owner]
                 position = next(
@@ -614,6 +614,8 @@ def _module_contract(
 def _public_owner(name: str) -> str:
     if not name.startswith("_agents_codex."):
         return name
+    if name == "_agents_codex.realtime":
+        return "agents.realtime.native"
     public = name.replace("_agents_codex.", "agents.", 1)
     path = ROOT / "src" / Path(*public.split("."))
     if path.with_suffix(".py").is_file() or (path / "__init__.py").is_file():
@@ -626,7 +628,6 @@ def _public_owner(name: str) -> str:
 def public_api() -> dict[str, Any]:
     sys.path[:0] = [str(ROOT / "src"), str(ROOT / "packages/codex/src")]
     import agents
-    from agents import realtime
 
     root_exports = sorted(agents.__all__)
     public_modules = {
@@ -634,12 +635,8 @@ def public_api() -> dict[str, Any]:
         for path in sorted((ROOT / "src/agents").glob("*.py"))
         if not path.stem.startswith("_") and path.stem != "version"
     }
-    # The Realtime snapshot also covers Classic names available by explicit import.
-    public_modules.add("agents.realtime")
-    explicit_exports = {
-        "agents": set(root_exports),
-        "agents.realtime": set(realtime.__all__) | set(realtime._CLASSIC_EXPORTS),
-    }
+    public_modules.update(("agents.realtime", "agents.realtime.native"))
+    explicit_exports = {"agents": set(root_exports)}
     # Follow only imports used by retained declarations. A typing alias reports
     # its runtime owner as typing, so its source binding defines this boundary.
     required: dict[str, set[str]] = {name: set() for name in public_modules | {"agents"}}

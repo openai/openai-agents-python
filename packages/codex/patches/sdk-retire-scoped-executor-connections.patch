@@ -1,0 +1,181 @@
+diff --git a/codex-rs/exec-server/src/client_refresh.rs b/codex-rs/exec-server/src/client_refresh.rs
+--- a/codex-rs/exec-server/src/client_refresh.rs
++++ b/codex-rs/exec-server/src/client_refresh.rs
+@@ -32,7 +32,7 @@
+ use super::ExecServerError;
+ use super::Inner;
+ use super::LazyRemoteExecServerClient;
+-use super::fail_all_in_flight_work;
++use super::fail_all_sessions;
+ use crate::EnvironmentConnectionState;
+ use crate::NoiseChannelPublicKey;
+ use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT;
+@@ -257,33 +257,56 @@
+ }
+ 
+ impl LazyRemoteExecServerClient {
++    fn fence_current_connection(&self) -> Option<ExecServerClient> {
++        let reconnect = self
++            .reconnect
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        let current = self
++            .current_client
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        // Use the same lock order as attempt admission and installation.
++        self.retired.cancel();
++        self.startup.cancelled.cancel();
++        if let Some(attempt) = reconnect.as_ref() {
++            attempt.cancelled.cancel();
++        }
++        current.clone()
++    }
++
+     pub(crate) async fn retire_current_connection(&self) {
+-        let client = {
+-            let reconnect = self
+-                .reconnect
+-                .lock()
+-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+-            let current = self
+-                .current_client
+-                .lock()
+-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+-            // Use the same lock order as attempt admission and installation.
+-            self.retired.cancel();
+-            self.startup.cancelled.cancel();
+-            if let Some(attempt) = reconnect.as_ref() {
+-                attempt.cancelled.cancel();
+-            }
+-            current.clone()
+-        };
+-        if let Some(client) = client {
++        if let Some(client) = self.fence_current_connection() {
+             client.inner.retire().await;
+         }
+     }
+-}
++
++    pub(crate) fn retire_on_scope_drop(&self) {
++        if let Some(client) = self.fence_current_connection() {
++            client.inner.begin_retirement();
++            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
++                runtime.spawn(async move {
++                    client
++                        .inner
++                        .fail_all_http_body_streams(RETIRED_MESSAGE.to_owned())
++                        .await;
++                });
++            }
++        }
++    }
++}
++
++const RETIRED_MESSAGE: &str = "exec-server executor was replaced";
+ 
+ impl Inner {
+     async fn retire(self: &Arc<Self>) {
+-        let message = "exec-server executor was replaced".to_string();
++        self.begin_retirement();
++        self.fail_all_http_body_streams(RETIRED_MESSAGE.to_owned())
++            .await;
++    }
++
++    fn begin_retirement(self: &Arc<Self>) {
++        let message = RETIRED_MESSAGE.to_owned();
+         let rpc_client = {
+             let mut connection = self
+                 .connection
+@@ -305,9 +328,9 @@
+         self.connection_changed.send_replace(());
+         // Drain pending RPCs before stream cleanup, which may wait for other work.
+         if let Some(rpc_client) = rpc_client {
+-            rpc_client.close_transport().await;
++            rpc_client.close_transport_now();
+         }
+-        fail_all_in_flight_work(self, message).await;
++        fail_all_sessions(self, message);
+     }
+ }
+ 
+diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
+--- a/codex-rs/exec-server/src/environment.rs
++++ b/codex-rs/exec-server/src/environment.rs
+@@ -127,6 +127,9 @@
+                 scoped.remove(&self.id);
+             }
+         }
++        if let Some(client) = &self.environment.remote_client {
++            client.retire_on_scope_drop();
++        }
+     }
+ }
+ 
+@@ -465,6 +468,35 @@
+             .unwrap_or_else(std::sync::PoisonError::into_inner)
+             .get(environment_id)
+             .and_then(Weak::upgrade)
++    }
++
++    /// Retires this runtime's remote connections after all managed work stops.
++    ///
++    /// Call only from the owner of this manager. Explicit scopes own their
++    /// registrations even when their connection refers to a borrowed sandbox.
++    #[doc(hidden)]
++    pub async fn retire_owned_executor_connections(&self) {
++        let environments = {
++            let configured = self
++                .environments
++                .read()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            let scoped = self
++                .scoped_environments
++                .read()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            configured
++                .values()
++                .cloned()
++                .chain(scoped.values().filter_map(Weak::upgrade))
++                .collect::<Vec<_>>()
++        };
++        futures::future::join_all(
++            environments
++                .iter()
++                .map(|environment| environment.retire_current_connection()),
++        )
++        .await;
+     }
+ 
+     /// Registers a host-owned local executor without selecting it by default.
+@@ -2132,8 +2164,16 @@
+                 .upsert_environment(id.to_owned(), url.clone(), None)
+                 .is_err()
+         );
++        let scope = Arc::new(scope);
++        let retained_owner = Arc::clone(&scope);
+         drop(scope);
++        assert!(manager.get_environment(id).is_some());
++        drop(retained_owner);
+         assert!(manager.get_environment(id).is_none());
++        assert!(matches!(
++            retained.wait_until_ready().await,
++            Err(crate::ExecServerError::Disconnected(_))
++        ));
+         let next = attach().expect("scope can register again after retirement");
+         let current = manager.get_environment(id).expect("fresh scoped executor");
+         assert!(!Arc::ptr_eq(&retained, &current));
+diff --git a/codex-rs/exec-server/src/rpc.rs b/codex-rs/exec-server/src/rpc.rs
+--- a/codex-rs/exec-server/src/rpc.rs
++++ b/codex-rs/exec-server/src/rpc.rs
+@@ -521,6 +521,10 @@
+     }
+ 
+     pub(crate) async fn close_transport(&self) {
++        self.close_transport_now();
++    }
++
++    pub(crate) fn close_transport_now(&self) {
+         self.closed.store(true, Ordering::Release);
+         self.transport.terminate();
+         for task in &self.transport_tasks {

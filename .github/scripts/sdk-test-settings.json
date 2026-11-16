@@ -1,0 +1,6 @@
+{
+  "linux_workers": 12,
+  "macos_shards": 4,
+  "windows_shards": 3,
+  "reporting": "-rap"
+}

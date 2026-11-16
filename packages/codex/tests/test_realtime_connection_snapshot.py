@@ -5,7 +5,7 @@ from dataclasses import asdict
 
 import pytest
 
-from agents.realtime import RealtimeAdapterContext
+from agents.realtime.native import RealtimeAdapterContext
 from agents.testing import RealtimeConnectCall, ScriptedRealtimeAdapter
 
 

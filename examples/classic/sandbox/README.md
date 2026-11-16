@@ -1,6 +1,6 @@
 # Sandbox examples
 
-These examples run agents with a managed workspace. Complete [Classic source setup](../../../CLASSIC.md#install-from-the-matching-source) before running the commands from the repository root. Start with `basic.py` to create a workspace and run one sandbox agent, or choose a tutorial for a complete task with generated artifacts.
+These examples run agents with a managed workspace. Complete [Classic source setup](../../../CLASSIC.md#install-from-the-matching-source) before running the commands from the repository root. The starting example, `basic.py`, has been using Docker by default and requiring a running Docker daemon. It creates a workspace and runs one sandbox agent. The tutorials demonstrate complete tasks with generated artifacts.
 
 Unix-local examples run commands as host processes. On Linux, `UnixLocalSandboxClient` adds no OS-level confinement; on macOS, it applies filesystem restrictions through `sandbox-exec` without providing network isolation. Use these examples for trusted local development or within external isolation. For untrusted commands, including commands influenced by untrusted inputs, choose an appropriately configured Docker or hosted backend, or provide external isolation. Separate Unix-local workspaces or sessions do not establish an OS isolation boundary.
 
@@ -18,7 +18,7 @@ Some examples also load `.env` files, but the supported locations vary. The tuto
 
 | Example | Run | What it shows |
 | --- | --- | --- |
-| [`basic.py`](basic.py) | `uv run python examples/classic/sandbox/basic.py` | Creates a sandbox session from a manifest, runs a `SandboxAgent`, and streams the result. |
+| [`basic.py`](basic.py) | `uv run python examples/classic/sandbox/basic.py` | Creates a Docker sandbox session from a manifest, runs a `SandboxAgent`, and streams the result. A running Docker daemon has been providing the required backend. |
 | [`handoffs.py`](handoffs.py) | `uv run python examples/classic/sandbox/handoffs.py` | Uses handoffs with sandbox-backed agents. |
 | [`sandbox_agent_capabilities.py`](sandbox_agent_capabilities.py) | `uv run python examples/classic/sandbox/sandbox_agent_capabilities.py` | Configures a sandbox agent with workspace capabilities. |
 | [`sandbox_agent_with_tools.py`](sandbox_agent_with_tools.py) | `uv run python examples/classic/sandbox/sandbox_agent_with_tools.py` | Combines sandbox capabilities with host-defined tools. |

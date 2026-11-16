@@ -12,7 +12,7 @@ import wave
 from pathlib import Path
 
 from agents import Agent
-from agents.realtime import RealtimeAudio, RealtimeConfig
+from agents.realtime.native import RealtimeAudio, RealtimeConfig
 
 
 async def main(prompt: str, destination: Path, seconds: float) -> None:

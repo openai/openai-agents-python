@@ -10,15 +10,6 @@ import pytest
 
 from tests.test_classic_imports import run_isolated
 
-CONFLICTS = {
-    "RealtimeSession",
-    "realtime_handoff",
-    "RealtimeAudio",
-    "RealtimeResponse",
-    "RealtimeUserInput",
-    "RealtimeUserInputMessage",
-    "RealtimeUserInputText",
-}
 MODULE_CASES = [
     ("voice.input", "AudioInput"),
     ("voice.model", "STTModel"),
@@ -55,21 +46,18 @@ def test_voice_workflow_exports_have_classic_identity(name):
     assert name in voice.__all__
 
 
-def test_realtime_aliases_preserve_native_names_and_classic_identity():
+def test_realtime_facade_preserves_every_classic_export():
     import agents
     from agents import realtime
-
-    before = {name: getattr(realtime, name) for name in CONFLICTS}
-    public_names = set(dir(realtime))
     from agents.classic import realtime as classic
+    from agents.realtime import native
 
+    assert realtime.__all__ == classic.__all__
     for name in classic.__all__:
-        if name not in CONFLICTS:
-            assert getattr(realtime, name) is getattr(classic, name), name
-            assert name in public_names
-            assert name not in realtime.__all__
-    assert {name: getattr(realtime, name) for name in CONFLICTS} == before
-    assert realtime.RealtimeSession is not classic.RealtimeSession
+        assert getattr(realtime, name) is getattr(classic, name), name
+        assert name in dir(realtime)
+    assert native.RealtimeSession is not classic.RealtimeSession
+    assert native.RealtimeSession.__module__ == "agents.realtime.native"
     assert agents.Agent is not importlib.import_module("agents.classic").Agent
     assert not hasattr(agents, "Runner")
 
@@ -81,11 +69,11 @@ def test_native_realtime_import_does_not_load_classic():
 import sys
 sys.path.insert(0, {private!r})
 sys.modules['griffe'] = None
-import agents.realtime as realtime
+import agents.realtime.native as realtime
 
-assert 'RealtimeAgent' in dir(realtime)
+assert 'RealtimeSession' in dir(realtime)
 assert not any(n.startswith('agents.classic') for n in sys.modules)
-from agents.realtime import *
+from agents.realtime.native import *
 assert RealtimeSession is realtime.RealtimeSession
 assert 'RealtimeAgent' not in globals()
 assert not any(n.startswith('agents.classic') for n in sys.modules)
@@ -135,7 +123,8 @@ async def test_original_voice_workflow_runs_classic_without_native(monkeypatch):
 async def test_realtime_factory_keeps_classic_session_and_audio(monkeypatch):
     from agents.classic.realtime import RealtimeSession as ClassicSession
     from agents.classic.realtime.testing import ScriptedRealtimeModel
-    from agents.realtime import RealtimeAgent, RealtimeRunner, RealtimeSession as NativeSession
+    from agents.realtime import RealtimeAgent, RealtimeRunner, RealtimeSession
+    from agents.realtime.native import RealtimeSession as NativeSession
 
     monkeypatch.setitem(sys.modules, "agents._native", None)
     model = ScriptedRealtimeModel(strict=False)
@@ -145,7 +134,8 @@ async def test_realtime_factory_keeps_classic_session_and_audio(monkeypatch):
         config={"tracing_disabled": True},
     )
     session = await runner.run()
-    assert type(session) is ClassicSession
+    assert RealtimeSession is ClassicSession
+    assert type(session) is RealtimeSession
     assert not isinstance(session, NativeSession)
     async with session:
         await session.send_audio(b"\x01\x00", commit=True)

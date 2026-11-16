@@ -46,9 +46,9 @@ async def test_local_checkpoint_is_independent_and_keeps_complete_originals(
             async with agent.session(storage=storage) as source:
                 await (await source.submit("original input")).get_result()
                 current = await source.history_snapshot()
-                await source.transact_history(
+                await source.replace_history_suffix(
                     expected_revision=current.revision,
-                    keep=current.total,
+                    keep_prefix_count=current.total,
                     items=[
                         {
                             "type": "application-audit",

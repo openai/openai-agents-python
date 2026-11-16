@@ -56,7 +56,7 @@ Change imports for each existing workflow together:
 | `from agents.models import ...` | `from agents.classic.models import ...` |
 | `from agents.tracing import ...` | `from agents.classic.tracing import ...` |
 | `from agents.mcp import ...` | `from agents.classic.mcp import ...` |
-| `from agents.realtime import ...` | Non-conflicting Classic names at the original path; `agents.classic.realtime` for a wholly Classic namespace |
+| `from agents.realtime import ...` | The retained Classic Realtime API in alpha.8; `agents.classic.realtime` is also available |
 | `from agents.voice import ...` | Original Voice paths, including Classic single-agent workflows |
 | `from agents.extensions import ...` | `from agents.classic.extensions import ...` |
 | `from agents.testing import ...` | `from agents.classic.testing import ...` |
@@ -104,15 +104,14 @@ workflow = SingleAgentVoiceWorkflow(Agent(name="Assistant", instructions="Help."
 pipeline = VoicePipeline(workflow=workflow)
 ```
 
-Non-conflicting `agents.realtime` names, including `RealtimeAgent` and `RealtimeRunner`, load their retained Classic objects only when requested. `RealtimeRunner.run()` returns a Classic session. Original module-specific imports such as `agents.realtime.model` and `agents.realtime.session` retain Classic ownership. Wildcard imports from `agents.realtime` expose the native API with the base installation.
+In alpha.8, `agents.realtime` exposes the complete retained Classic/v0 Realtime API, including `RealtimeSession`, `realtime_handoff`, and wildcard imports. `agents.classic.realtime` exposes the same Classic API. Install the matching wheel with the `classic-realtime` extra for those workflows.
 
 ```python
-from agents.realtime import RealtimeAgent, RealtimeRunner
-from agents.realtime.session import RealtimeSession  # Retained Classic type.
+from agents.realtime import RealtimeAgent, RealtimeRunner, RealtimeSession
 
 runner = RealtimeRunner(RealtimeAgent(name="Assistant", instructions="Help."))
 ```
 
-The top-level `agents.realtime` names `RealtimeSession`, `realtime_handoff`, `RealtimeAudio`, `RealtimeResponse`, `RealtimeUserInput`, `RealtimeUserInputMessage`, and `RealtimeUserInputText` retain their existing native identities. For a wholly Classic flow, import these names from `agents.classic.realtime`.
+New native Session Realtime APIs use `agents.realtime.native`. For example, import `RealtimeAgentConfig`, `RealtimeConfig`, and `RealtimeSession` from that module when calling a native Session's `realtime()` method. Keep Classic and native objects within their respective workflows. See the [native voice guide](examples/codex/native_voice.md) for alpha.8 availability and setup.
 
 The package root retains native ownership. These aliases do not restore Classic root `Agent` or `Runner`, rewrite dependent-library imports, or route unsupported native operations through Classic.

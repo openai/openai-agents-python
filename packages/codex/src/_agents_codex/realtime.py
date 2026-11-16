@@ -3946,4 +3946,4 @@ class RealtimeSession:
                     self._record_history(replace(pending, session_id=item.session_id))
 
 
-_preserve_module_identity(globals(), "agents.realtime")
+_preserve_module_identity(globals(), "agents.realtime.native")
