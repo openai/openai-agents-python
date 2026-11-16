@@ -16,6 +16,8 @@ import agents._debug as _debug
 from agents import (
     Agent,
     AgentBase,
+    AgentHookContext,
+    AgentHooks,
     AgentToolStreamEvent,
     FunctionTool,
     MessageOutputItem,
@@ -1222,6 +1224,49 @@ async def test_agent_as_tool_structured_input_sets_tool_input(
     assert nested_context.usage is run_context.usage
     assert nested_context.tool_input == args
     assert run_context.tool_input is None
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_agent_as_tool_lifecycle_hooks_receive_structured_input(streamed: bool) -> None:
+    class Purchase(BaseModel):
+        quantity: int
+        unit_price: int
+
+    starts: list[tuple[str, Any]] = []
+    ends: list[tuple[str, Any, Any]] = []
+
+    class PurchaseHooks(AgentHooks[Any]):
+        async def on_start(self, context: AgentHookContext[Any], agent: Agent) -> None:
+            starts.append((agent.name, context.tool_input))
+
+        async def on_end(self, context: AgentHookContext[Any], agent: Agent, output: Any) -> None:
+            ends.append((agent.name, context.tool_input, output))
+
+    hooks = PurchaseHooks()
+    calculator = Agent(
+        name="Calculator", model=ScriptedModel([[get_text_message("50")]]), hooks=hooks
+    )
+    purchase = {"quantity": 2, "unit_price": 25}
+    buyer = Agent(
+        name="Buyer",
+        model=ScriptedModel([[get_function_tool_call("calculate", json.dumps(purchase))]]),
+        hooks=hooks,
+        tools=[
+            calculator.as_tool(
+                "calculate",
+                "Calculate the total",
+                parameters=Purchase,
+                on_stream=(lambda _event: None) if streamed else None,
+            )
+        ],
+        tool_use_behavior="stop_on_first_tool",
+    )
+
+    await Runner.run(buyer, "Calculate the purchase total.")
+
+    assert starts == [("Buyer", None), ("Calculator", purchase)]
+    assert ends == [("Calculator", purchase, "50"), ("Buyer", None, "50")]
 
 
 @pytest.mark.asyncio

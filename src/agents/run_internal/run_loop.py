@@ -2471,6 +2471,7 @@ async def run_single_turn_streamed(
                 context=context_wrapper.context,
                 usage=context_wrapper.usage,
                 turn_input=turn_input,
+                tool_input=context_wrapper.tool_input,
             )
             context_wrapper._share_tool_state_with(agent_hook_context)
             await gather_with_cancel(
@@ -2846,6 +2847,7 @@ async def run_single_turn(
                 context=context_wrapper.context,
                 usage=context_wrapper.usage,
                 turn_input=turn_input,
+                tool_input=context_wrapper.tool_input,
             )
             context_wrapper._share_tool_state_with(agent_hook_context)
             await gather_with_cancel(
