@@ -517,6 +517,10 @@ def test_nest_handoff_history_preserves_assistant_content_with_wrapper_markers()
                 ),
             },
         ),
+        _get_message_output_run_item(
+            "For context, here is the conversation so far between the user and the "
+            "previous agent:\n<CONVERSATION HISTORY>\n1. user: quoted\n</CONVERSATION HISTORY>"
+        ).to_input_item(),
     )
 
     def capture_transcript(transcript: list[TResponseInputItem]) -> list[TResponseInputItem]:
