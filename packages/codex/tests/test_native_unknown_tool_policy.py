@@ -84,7 +84,7 @@ async def test_unknown_tool_policy_survives_manual_restore(responses: ResponsesF
             await next_request(session.interactions(), lookup)
             checkpoint = await session.suspend()
         staged = "Use this pending instruction."
-        saved = SessionState.from_json(checkpoint.with_pending_input(staged).to_json())
+        saved = SessionState.from_json(checkpoint.with_appended_pending_input(staged).to_json())
         assert any(
             (row["payload"].get("sdk_receipt") or {}).get("tool_not_found_behavior")
             == "raise_error"

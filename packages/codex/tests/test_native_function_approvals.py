@@ -17,9 +17,9 @@ from pydantic import BaseModel, field_validator, model_validator
 from agents import (
     Agent,
     Allow,
-    ApprovalRequested,
     Deny,
     FunctionTool,
+    FunctionToolApprovalRequest,
     InteractionExpiredError,
     ReplaceArguments,
     RunBudget,
@@ -103,7 +103,7 @@ async def test_approval_preserves_raw_input_for_schema_transforms(responses, rep
     @function_tool(
         needs_approval=True,
         before=before if replace_input else None,
-        run_before_approval=replace_input,
+        run_input_policy_before_approval=replace_input,
     )
     def risky(item: TransformedInput) -> str:
         effects.append(item.value)
@@ -143,7 +143,7 @@ async def test_managed_decision_gates_callback_and_consumes_exact_grant(response
         turn = await session.submit("begin")
         request = await next_request(session.interactions(), risky)
         alias = await next_request(session.interactions(), risky)
-        assert isinstance(request, ApprovalRequested)
+        assert isinstance(request, FunctionToolApprovalRequest)
         assert request.call_id == "approval-A" and request.turn_id == turn.turn_id
         assert effects == [] and len(responses.requests) == 1
         assert not await foreign._native._approve_manual_tool(request._grant)
@@ -197,7 +197,9 @@ async def test_input_policy_rechecks_and_exposes_detached_effective_arguments(
         calls.append(("predicate", context.effective_arguments["value"]))
         return True
 
-    @function_tool(needs_approval=predicate, run_before_approval=run_before, before=before)
+    @function_tool(
+        needs_approval=predicate, run_input_policy_before_approval=run_before, before=before
+    )
     def increment(context: ToolContext, value: int) -> str:
         calls.append(("body", value))
         assert context.original_arguments["value"] == 1
@@ -209,7 +211,7 @@ async def test_input_policy_rechecks_and_exposes_detached_effective_arguments(
     async with timeout(20), agent.session() as session:
         turn = await session.submit("begin")
         request = await next_request(session.interactions(), increment)
-        assert isinstance(request, ApprovalRequested)
+        assert isinstance(request, FunctionToolApprovalRequest)
         assert request.arguments.value == 1
         assert request.effective_arguments.value == (2 if run_before else 1)
         detached = request.effective_arguments
@@ -258,7 +260,7 @@ async def test_remembered_decision_is_session_and_binding_scoped(responses, appr
         async with agent.session() as fresh:
             turn = await fresh.submit("begin")
             request = await next_request(fresh.interactions(), risky)
-            assert isinstance(request, ApprovalRequested)
+            assert isinstance(request, FunctionToolApprovalRequest)
             await request.reject()
             await turn.get_result()
     assert effects == (["0", "1"] if approve else [])
@@ -904,7 +906,9 @@ async def test_preapproval_denial_skips_predicate_body_and_after(responses):
         calls.append("after")
         return Allow()
 
-    @function_tool(needs_approval=predicate, run_before_approval=True, before=before, after=after)
+    @function_tool(
+        needs_approval=predicate, run_input_policy_before_approval=True, before=before, after=after
+    )
     def risky(value: str) -> str:
         calls.append("body")
         return value
@@ -943,7 +947,7 @@ async def test_fresh_process_restore_keeps_required_decision_and_accepted_siblin
         description="Synthetic effect",
         needs_approval=True,
         before=before if guarded else None,
-        run_before_approval=guarded,
+        run_input_policy_before_approval=guarded,
     )
     def risky(value: str) -> str:
         with effects_path.open("a") as out:
@@ -1029,7 +1033,7 @@ async def test_one_shot_exports_required_approval_before_callback_effects(respon
         assert interrupted.value.state is not None and effects == []
         async with agent.session(state=interrupted.value.state) as restored:
             request = await next_request(restored.interactions(), risky)
-            assert isinstance(request, ApprovalRequested)
+            assert isinstance(request, FunctionToolApprovalRequest)
             await request.approve()
             turn = restored.restored_turn
             assert turn is not None
@@ -1063,7 +1067,7 @@ async def test_remembered_approval_does_not_follow_another_agents_callback(respo
         await session.update(agent=other)
         turn = await session.submit("second")
         request = await next_request(session.interactions(), second)
-        assert isinstance(request, ApprovalRequested) and effects == ["old"]
+        assert isinstance(request, FunctionToolApprovalRequest) and effects == ["old"]
         await request.approve()
         await turn.get_result()
     assert effects == ["old", "new"]
@@ -1180,7 +1184,7 @@ async def test_managed_preparation_rejects_callback_self_close(responses, phase)
     @function_tool(
         needs_approval=predicate if phase == "predicate" else (lambda _: False),
         before=before if phase == "before" else None,
-        run_before_approval=phase == "before",
+        run_input_policy_before_approval=phase == "before",
     )
     def risky(value: str) -> str:
         return value
@@ -1231,7 +1235,7 @@ async def test_managed_preparation_shares_function_admission_and_releases_before
             all_prepared.set()
         return True
 
-    @function_tool(needs_approval=predicate, before=guard, run_before_approval=True)
+    @function_tool(needs_approval=predicate, before=guard, run_input_policy_before_approval=True)
     def risky(payload: AdmissionInput) -> str:
         effects.append(payload.value)
         return str(payload.value)
@@ -1311,7 +1315,7 @@ async def test_raw_preparation_input_survives_mutating_validators(responses, aut
 async def test_supported_decision_replies_reach_managed_callback_owner(
     responses, delivery, structured
 ):
-    from agents import ApprovalDecision
+    from agents import FunctionToolApprovalDecision
 
     effects = []
 
@@ -1323,13 +1327,13 @@ async def test_supported_decision_replies_reach_managed_callback_owner(
     responses.respond(function_call("risky", {"value": "A"}, "decision-reply"))
     responses.respond(assistant_output("done"))
     agent = Agent(instructions="Use risky.", tools=[risky], provider=provider(responses))
-    decision = ApprovalDecision(False, reason="explicit denial") if structured else True
+    decision = FunctionToolApprovalDecision(False, reason="explicit denial") if structured else True
     async with timeout(20):
         if delivery == "handler":
 
             def handler(event):
                 request = risky.match(event)
-                assert isinstance(request, ApprovalRequested)
+                assert isinstance(request, FunctionToolApprovalRequest)
                 return request.reply(decision)
 
             assert (await agent.run("begin", on_interaction=handler)).final_output == "done"

@@ -51,7 +51,7 @@ from agents.agent import (
     SignInWithChatGPT as AgentSignInWithChatGPT,
     SignInWithChatGPTCredentials as AgentSignInWithChatGPTCredentials,
 )
-from agents.realtime import RealtimeConfig, RealtimeSession
+from agents.realtime.native import RealtimeConfig, RealtimeSession
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,

@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from agents import Agent, ApprovalRequested, LocalStorage, NativeProvider, function_tool
+from agents import Agent, FunctionToolApprovalRequest, LocalStorage, NativeProvider, function_tool
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_manual_tools import next_request
@@ -88,7 +88,7 @@ async def test_stored_sessions_during_callback_and_approval(responses, tmp_path,
         try:
             if approval:
                 request = await next_request(session.interactions(), gate)
-                assert isinstance(request, ApprovalRequested)
+                assert isinstance(request, FunctionToolApprovalRequest)
             else:
                 await entered.wait()
             page = await session.stored_sessions()

@@ -103,12 +103,12 @@ async def test_stored_middle_filter_pair_delete_and_clear_keep_identity(response
         async with agent.session(storage=storage) as session:
             identity = session.id
             initial = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=initial.revision, keep=0, items=originals()
+            await session.replace_history_suffix(
+                expected_revision=initial.revision, keep_prefix_count=0, items=originals()
             )
             before = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=before.revision, keep=0, items=retained
+            await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0, items=retained
             )
             assert session.id == identity
             assert (await session.history_snapshot()).items == tuple(retained)
@@ -130,13 +130,15 @@ async def test_stored_middle_filter_pair_delete_and_clear_keep_identity(response
             assert "KEEP_CALLER_DEVELOPER" in wire
             current = await session.history_snapshot()
             without_pair = [item for item in current.items if item.get("call_id") != "old-call"]
-            await session.transact_history(
-                expected_revision=current.revision, keep=0, items=without_pair
+            await session.replace_history_suffix(
+                expected_revision=current.revision, keep_prefix_count=0, items=without_pair
             )
             assert (await session.history_snapshot()).items == tuple(without_pair)
             assert "KEEP_RECEIPT" not in json.dumps((await session.model_context()).items)
             filtered = await session.history_snapshot()
-            await session.transact_history(expected_revision=filtered.revision, keep=0)
+            await session.replace_history_suffix(
+                expected_revision=filtered.revision, keep_prefix_count=0
+            )
             assert (await session.history_snapshot()).items == ()
         async with agent.session(storage=storage, resume=identity) as session:
             assert session.id == identity
@@ -164,13 +166,17 @@ async def test_clearing_stored_branch_keeps_parent_materialized_history(response
         async with agent.session(storage=storage) as source:
             parent_id = source.id
             initial = await source.history_snapshot()
-            await source.transact_history(expected_revision=initial.revision, keep=0, items=values)
+            await source.replace_history_suffix(
+                expected_revision=initial.revision, keep_prefix_count=0, items=values
+            )
             branch_id = await source.fork_stored()
             assert branch_id != parent_id
         async with agent.session(storage=storage, resume=branch_id) as branch:
             current = await branch.history_snapshot()
             assert_original_prefix(current, values)
-            await branch.transact_history(expected_revision=current.revision, keep=0)
+            await branch.replace_history_suffix(
+                expected_revision=current.revision, keep_prefix_count=0
+            )
             assert (await branch.history_snapshot()).items == ()
         async with agent.session(storage=storage, resume=parent_id) as parent:
             assert_original_prefix(await parent.history_snapshot(), values)
@@ -216,7 +222,9 @@ async def test_bounded_originals_exclude_standalone_native_instruction_receipts(
         agent = Agent(instructions="Opening configuration.", provider=provider)
         async with agent.session(storage=storage) as session:
             initial = await session.history_snapshot()
-            await session.transact_history(expected_revision=initial.revision, keep=0, items=items)
+            await session.replace_history_suffix(
+                expected_revision=initial.revision, keep_prefix_count=0, items=items
+            )
             before = await session.history_snapshot()
             assert before.items == tuple(items)
             await session.update(instructions="Current native configuration.")

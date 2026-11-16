@@ -37,13 +37,13 @@ class StoredItem(TypedDict):
 
 
 class StoredTurn(TypedDict):
-    """Native turn metadata; Unix-second timestamps and millisecond durations."""
+    """Native turn metadata; Unix timestamps and durations use milliseconds."""
 
     id: str
     status: Literal["completed", "interrupted", "failed", "in_progress"]
     error: dict[str, Any] | None
-    started_at: int | None
-    completed_at: int | None
+    started_at_ms: int | None
+    completed_at_ms: int | None
     duration_ms: int | None
     summary_items: list[StoredItem]
 
@@ -131,6 +131,9 @@ def _item(raw: dict[str, Any]) -> StoredItem:
 
 def _turn_page(raw: dict[str, Any]) -> StoredTurnPage:
     for turn in raw["turns"]:
+        for name in ("started_at", "completed_at"):
+            seconds = turn.pop(name)
+            turn[f"{name}_ms"] = None if seconds is None else seconds * 1000
         turn["summary_items"] = [_item(item) for item in turn.pop("items")]
     return cast(StoredTurnPage, raw)
 

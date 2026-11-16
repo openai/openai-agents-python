@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     )
     from ._responses_websocket import (
         ResponsesSocketFactory as ResponsesSocketFactory,
-        ResponsesSocketOptions as ResponsesSocketOptions,
+        ResponsesSocketFactoryOptions as ResponsesSocketFactoryOptions,
         ResponsesWebSocketModel as ResponsesWebSocketModel,
         ResponsesWebSocketOptions as ResponsesWebSocketOptions,
     )
@@ -2261,7 +2261,7 @@ def __getattr__(name: str) -> Any:
         value = _hosted_responses_websocket.HostedResponsesWebSocketModel
     elif name in {
         "ResponsesSocketFactory",
-        "ResponsesSocketOptions",
+        "ResponsesSocketFactoryOptions",
         "ResponsesWebSocketModel",
         "ResponsesWebSocketOptions",
     }:

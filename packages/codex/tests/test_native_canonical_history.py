@@ -35,12 +35,12 @@ async def test_provider_item_references_survive_native_history_restore(responses
                 {"type": "item_reference", "id": 17},
             ]:
                 with pytest.raises(RuntimeError, match="Invalid canonical history item"):
-                    await session.transact_history(
-                        expected_revision=snapshot.revision, keep=0, items=[invalid]
+                    await session.replace_history_suffix(
+                        expected_revision=snapshot.revision, keep_prefix_count=0, items=[invalid]
                     )
                 assert (await session.history_snapshot()).revision == snapshot.revision
-            await session.transact_history(
-                expected_revision=snapshot.revision, keep=0, items=references
+            await session.replace_history_suffix(
+                expected_revision=snapshot.revision, keep_prefix_count=0, items=references
             )
             assert (await session.history_snapshot()).items == tuple(references)
         async with agent.session(storage=storage, resume=session_id) as restored:
@@ -97,8 +97,8 @@ async def test_replay_capture_ignores_discarded_oversized_tool_output(responses)
                 await (await session.submit("read the document")).get_result()
             ).final_output == ("large tool result settled")
             before = await session.history_snapshot(limit=0)
-            await session.transact_history(
-                expected_revision=before.revision, keep=0, items=[retained]
+            await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0, items=[retained]
             )
             state = await session.save_state()
         result = await agent.run("continue", state=state, return_history=True)
@@ -137,8 +137,8 @@ async def test_one_shot_history_can_continue_in_another_session(responses, retur
         consumer = Agent(instructions="Use the previous record.", provider=provider)
         async with consumer.session() as session:
             before = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=before.revision, keep=0, items=result.history
+            await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0, items=result.history
             )
             continued = await (await session.submit("continue")).get_result()
             assert continued.final_output == "continued with the record"
@@ -225,9 +225,9 @@ async def test_committed_history_flush_failure_retires_live_session(responses):
             before = await session.history_snapshot()
             backend.armed = True
             with pytest.raises(RuntimeError, match="flush|persistence|commit"):
-                await session.transact_history(
+                await session.replace_history_suffix(
                     expected_revision=before.revision,
-                    keep=0,
+                    keep_prefix_count=0,
                     items=[
                         {
                             "type": "message",
@@ -285,19 +285,21 @@ async def test_atomic_canonical_history_replacement_and_restore(responses):
                 "output": "imported result",
             },
         ]
-        revision = await session.transact_history(
-            expected_revision=before.revision, keep=0, items=replacement
+        revision = await session.replace_history_suffix(
+            expected_revision=before.revision, keep_prefix_count=0, items=replacement
         )
         current = await session.history_snapshot()
         assert current.revision == revision and current.total == 2
         assert [item["type"] for item in current.items] == ["function_call", "function_call_output"]
         with pytest.raises(RuntimeError, match="revision conflict"):
-            await session.transact_history(expected_revision=before.revision, keep=0)
+            await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0
+            )
         assert (await session.history_snapshot()).revision == revision
         with pytest.raises(RuntimeError, match="Invalid canonical history item"):
-            await session.transact_history(
+            await session.replace_history_suffix(
                 expected_revision=revision,
-                keep=0,
+                keep_prefix_count=0,
                 items=[{"type": "function_call", "arguments": 17}],
             )
         assert (await session.history_snapshot()).revision == revision
@@ -338,8 +340,8 @@ async def test_history_transactions_reject_split_or_unpaired_client_tools(respon
     ) as provider:
         async with Agent(instructions="Answer.", provider=provider).session() as session:
             initial = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=initial.revision, keep=0, items=[call, output]
+            await session.replace_history_suffix(
+                expected_revision=initial.revision, keep_prefix_count=0, items=[call, output]
             )
             retained = await session.history_snapshot()
             for keep, appended in [
@@ -350,8 +352,8 @@ async def test_history_transactions_reject_split_or_unpaired_client_tools(respon
                 (0, [output, call]),
             ]:
                 with pytest.raises(RuntimeError, match="complete tool call/result pairs"):
-                    await session.transact_history(
-                        expected_revision=retained.revision, keep=keep, items=appended
+                    await session.replace_history_suffix(
+                        expected_revision=retained.revision, keep_prefix_count=keep, items=appended
                     )
                 assert await session.history_snapshot() == retained
                 assert responses.requests == []
@@ -386,7 +388,9 @@ async def test_history_transactions_preserve_self_contained_provider_hosted_reco
     ) as provider:
         async with Agent(instructions="Answer.", provider=provider).session() as session:
             before = await session.history_snapshot()
-            await session.transact_history(expected_revision=before.revision, keep=0, items=items)
+            await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0, items=items
+            )
             retained = await session.history_snapshot()
             assert [item["type"] for item in retained.items] == [
                 "web_search_call",
@@ -441,8 +445,8 @@ async def test_original_values_survive_restore_without_becoming_model_work(respo
         agent = Agent(instructions="Answer briefly.", provider=provider)
         async with agent.session() as session:
             before = await session.history_snapshot()
-            revision = await session.transact_history(
-                expected_revision=before.revision, keep=0, items=originals
+            revision = await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0, items=originals
             )
             current = await session.history_snapshot()
             assert current.items == tuple(originals)
@@ -482,19 +486,25 @@ async def test_audit_rows_count_in_keep_but_cannot_complete_an_executable_pair(r
         async with Agent(instructions="Answer.", provider=provider).session() as session:
             initial = await session.history_snapshot()
             with pytest.raises(RuntimeError, match="complete tool call/result pairs"):
-                await session.transact_history(
-                    expected_revision=initial.revision, keep=0, items=[call, audit]
+                await session.replace_history_suffix(
+                    expected_revision=initial.revision, keep_prefix_count=0, items=[call, audit]
                 )
             assert await session.history_snapshot() == initial
-            await session.transact_history(
-                expected_revision=initial.revision, keep=0, items=[audit, call, output, audit]
+            await session.replace_history_suffix(
+                expected_revision=initial.revision,
+                keep_prefix_count=0,
+                items=[audit, call, output, audit],
             )
             complete = await session.history_snapshot()
             assert complete.total == 4
             with pytest.raises(RuntimeError, match="complete tool call/result pairs"):
-                await session.transact_history(expected_revision=complete.revision, keep=2)
+                await session.replace_history_suffix(
+                    expected_revision=complete.revision, keep_prefix_count=2
+                )
             assert await session.history_snapshot() == complete
-            await session.transact_history(expected_revision=complete.revision, keep=1)
+            await session.replace_history_suffix(
+                expected_revision=complete.revision, keep_prefix_count=1
+            )
             assert (await session.history_snapshot()).items == (audit,)
             assert responses.requests == []
 
@@ -522,8 +532,8 @@ async def test_original_catalog_survives_supplied_compaction_and_rejects_ambiguo
         agent = Agent(instructions="Answer briefly.", provider=provider)
         async with agent.session() as session:
             initial = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=initial.revision, keep=0, items=originals
+            await session.replace_history_suffix(
+                expected_revision=initial.revision, keep_prefix_count=0, items=originals
             )
             before = await session.history_snapshot()
             await session.compact(summary="application summary only")
@@ -534,13 +544,15 @@ async def test_original_catalog_survives_supplied_compaction_and_rejects_ambiguo
             with pytest.raises(
                 RuntimeError, match="cannot shorten original history across model compaction"
             ):
-                await session.transact_history(expected_revision=before.revision, keep=1)
+                await session.replace_history_suffix(
+                    expected_revision=before.revision, keep_prefix_count=1
+                )
             assert await session.history_snapshot() == before
             assert (await session.model_context()).items == model.items
             assert responses.requests == []
             audit = {"type": "application_note", "value": "after compaction"}
-            await session.transact_history(
-                expected_revision=before.revision, keep=before.total, items=[audit]
+            await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=before.total, items=[audit]
             )
             appended = await session.history_snapshot()
             assert appended.items == (*before.items, audit)
@@ -560,8 +572,8 @@ async def test_original_catalog_survives_supplied_compaction_and_rejects_ambiguo
                 "role": "user",
                 "content": [{"type": "input_text", "text": "explicit replacement"}],
             }
-            await restored.transact_history(
-                expected_revision=current.revision, keep=0, items=[replacement]
+            await restored.replace_history_suffix(
+                expected_revision=current.revision, keep_prefix_count=0, items=[replacement]
             )
             assert (await restored.history_snapshot()).items == (replacement,)
             assert (
@@ -597,14 +609,16 @@ async def test_explicit_positive_prefix_rebuilds_compacted_model_context(respons
         agent = Agent(instructions="Retained agent instructions.", provider=provider)
         async with agent.session() as session:
             initial = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=initial.revision, keep=0, items=[first, audit, removed]
+            await session.replace_history_suffix(
+                expected_revision=initial.revision,
+                keep_prefix_count=0,
+                items=[first, audit, removed],
             )
             before = await session.history_snapshot()
             await session.compact(summary="deleted and retained compacted summary")
-            await session.transact_history(
+            await session.replace_history_suffix(
                 expected_revision=before.revision,
-                keep=2,
+                keep_prefix_count=2,
                 items=[replacement],
                 rebuild_model_context=True,
             )
@@ -645,15 +659,17 @@ async def test_explicit_prefix_rebuild_rejects_retained_opaque_compaction(respon
     ) as provider:
         async with Agent(instructions="Answer.", provider=provider).session() as session:
             initial = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=initial.revision, keep=0, items=[original, tail]
+            await session.replace_history_suffix(
+                expected_revision=initial.revision, keep_prefix_count=0, items=[original, tail]
             )
             before = await session.history_snapshot()
             await session.compact(summary="opaque history summary")
             model = await session.model_context()
             with pytest.raises(RuntimeError, match="cannot rebuild a retained provider compaction"):
-                await session.transact_history(
-                    expected_revision=before.revision, keep=1, rebuild_model_context=True
+                await session.replace_history_suffix(
+                    expected_revision=before.revision,
+                    keep_prefix_count=1,
+                    rebuild_model_context=True,
                 )
             assert await session.history_snapshot() == before
             assert (await session.model_context()).items == model.items
@@ -695,8 +711,8 @@ async def test_native_original_tool_result_survives_prefix_edit_without_untrunca
             )
             assert len(json.dumps(projected)) < len(full)
             audit = {"type": "application_note", "value": "retained prefix"}
-            await session.transact_history(
-                expected_revision=before.revision, keep=index + 1, items=[audit]
+            await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=index + 1, items=[audit]
             )
             retained = await session.history_snapshot()
             assert retained.items == (*before.items[: index + 1], audit)
@@ -739,8 +755,8 @@ async def test_raw_original_objects_survive_custom_storage_reopen(responses, tmp
         agent = Agent(instructions="Answer.", provider=provider)
         async with agent.session(storage=storage) as session:
             initial = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=initial.revision, keep=0, items=originals
+            await session.replace_history_suffix(
+                expected_revision=initial.revision, keep_prefix_count=0, items=originals
             )
             retained = await session.history_snapshot()
             assert retained.items == tuple(originals)
@@ -790,8 +806,8 @@ async def test_function_call_fields_survive_native_acceptance_and_replay(
             snapshot = await source.history_snapshot()
         async with agent.session() as target:
             initial = await target.history_snapshot()
-            await target.transact_history(
-                expected_revision=initial.revision, keep=0, items=snapshot.items
+            await target.replace_history_suffix(
+                expected_revision=initial.revision, keep_prefix_count=0, items=snapshot.items
             )
             await (await target.submit("continue from the replay")).get_result()
 

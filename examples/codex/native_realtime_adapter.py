@@ -15,7 +15,7 @@ from pathlib import Path
 from websockets.asyncio.client import ClientConnection, connect
 
 from agents import Agent
-from agents.realtime import (
+from agents.realtime.native import (
     NativeRealtimeConnection,
     RealtimeAdapterContext,
     RealtimeAudio,

@@ -46,7 +46,7 @@ class RealtimeAgentConfig:
     instructions: str | Callable[[RealtimeAgentContext], str | Awaitable[str]] | None = None
     prompt: NativeRealtimePrompt | None = None
     output_guardrails: tuple[RealtimeOutputGuardrail, ...] = ()
-    tool_enabled: Callable[[RealtimeAgentContext, ToolRef], bool | Awaitable[bool]] | None = None
+    is_tool_enabled: Callable[[RealtimeAgentContext, ToolRef], bool | Awaitable[bool]] | None = None
 
     def __post_init__(self) -> None:
         if self.instructions is not None and not (
@@ -59,8 +59,8 @@ class RealtimeAgentConfig:
             raise TypeError(
                 "Realtime output_guardrails must contain RealtimeOutputGuardrail objects"
             )
-        if self.tool_enabled is not None and not callable(self.tool_enabled):
-            raise TypeError("Realtime tool_enabled must be callable or None")
+        if self.is_tool_enabled is not None and not callable(self.is_tool_enabled):
+            raise TypeError("Realtime is_tool_enabled must be callable or None")
 
     def _capture(self) -> RealtimeAgentConfig:
         return replace(
@@ -234,12 +234,12 @@ async def _resolve_instructions(
 async def _enabled(
     config: RealtimeAgentConfig, context: RealtimeAgentContext, tool: ToolRef
 ) -> bool:
-    if config.tool_enabled is None:
+    if config.is_tool_enabled is None:
         return True
-    value = config.tool_enabled(context, tool)
+    value = config.is_tool_enabled(context, tool)
     result = await value if inspect.isawaitable(value) else value
     if type(result) is not bool:
-        raise TypeError("Realtime tool_enabled must return a bool")
+        raise TypeError("Realtime is_tool_enabled must return a bool")
     return result
 
 
@@ -330,7 +330,7 @@ async def _resolve_realtime_configuration(
     selected = []
     for definition in definitions:
         name = definition["name"]
-        if defaults is not None and defaults.tool_enabled is not None:
+        if defaults is not None and defaults.is_tool_enabled is not None:
             with _configuration_callback_scope(session):
                 enabled_tool = await _enabled(defaults, context, ToolRef(**refs[name]))
             if not enabled_tool:
@@ -432,4 +432,4 @@ def _capture_voice_graph(
     return runtimes, roster
 
 
-_preserve_module_identity(globals(), "agents.realtime")
+_preserve_module_identity(globals(), "agents.realtime.native")

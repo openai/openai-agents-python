@@ -8,7 +8,7 @@ acceptance. Set ``NativeSessionVoiceWorkflow(..., early_speech=True)`` to stream
 text before validation. Playback can include text that later fails validation.
 Install the ``voice`` extra from the matching SDK source or preview wheel.
 For a native two-way speech session, use ``Session.realtime()`` and the types
-in ``agents.realtime``.
+in ``agents.realtime.native``.
 """
 
 from ..classic.voice import (

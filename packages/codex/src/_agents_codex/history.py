@@ -38,16 +38,16 @@ from ._tool_response_types import Failure as Failure, TokenUsage as TokenUsage
 from .input import UserInput
 from .response_facts import (
     CaptureTruncatedFact as CaptureTruncatedFact,
-    MalformedProbabilitiesFact as MalformedProbabilitiesFact,
-    ProbabilityAlternative as ProbabilityAlternative,
-    ProbabilityToken as ProbabilityToken,
+    MalformedLogprobsFact as MalformedLogprobsFact,
     RecordedResponseFact as RecordedResponseFact,
     RecordedResponseFactSummary as RecordedResponseFactSummary,
     RefusalFact as RefusalFact,
     ResponseFact as ResponseFact,
     ResponseFactContentSummary as ResponseFactContentSummary,
     ResponseFactSummary as ResponseFactSummary,
-    TextProbabilitiesFact as TextProbabilitiesFact,
+    TextLogprobsFact as TextLogprobsFact,
+    TokenLogprob as TokenLogprob,
+    TokenLogprobAlternative as TokenLogprobAlternative,
 )
 from .turn_receipt import TurnReceipt as TurnReceipt
 

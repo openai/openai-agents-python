@@ -5,12 +5,12 @@ import pytest
 from agents import (
     Agent,
     Allow,
-    ApprovalRequested,
+    FunctionToolApprovalRequest,
     InteractionExpiredError,
     NativeProvider,
     function_tool,
 )
-from agents.realtime import RealtimeConfig
+from agents.realtime.native import RealtimeConfig
 from tests._asyncio import timeout
 from tests.native_fixtures import text_response
 from tests.test_native_manual_tools import next_request
@@ -33,7 +33,9 @@ async def test_realtime_managed_decision_cache_and_guard_scheduling(
         predicates.append(context.effective_arguments["key"])
         return True
 
-    @function_tool(before=before, needs_approval=predicate, run_before_approval=run_before)
+    @function_tool(
+        before=before, needs_approval=predicate, run_input_policy_before_approval=run_before
+    )
     def risky(key: str) -> str:
         effects.append(key)
         return "accepted-" + key
@@ -53,7 +55,7 @@ async def test_realtime_managed_decision_cache_and_guard_scheduling(
         ):
             await peer.function("risky", {"key": "first"}, "voice-first")
             request = await next_request(session.interactions(), risky)
-            assert isinstance(request, ApprovalRequested)
+            assert isinstance(request, FunctionToolApprovalRequest)
             assert request.session_id == session.id and request.turn_id is not None
             assert effects == []
             assert guards == (["first"] if run_before else [])

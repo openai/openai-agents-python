@@ -453,7 +453,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     namespace_description: str | None = None
     finish_turn: bool = False
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False
-    run_before_approval: bool = False
+    run_input_policy_before_approval: bool = False
     approval_key: str | None = None
     is_enabled: (
         bool
@@ -507,7 +507,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         namespace_description: str | None = None,
         finish_turn: bool = False,
         needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
-        run_before_approval: bool = False,
+        run_input_policy_before_approval: bool = False,
         approval_key: str | None = None,
         is_enabled: bool
         | Callable[
@@ -557,10 +557,10 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             not isinstance(self.approval_key, str) or not self.approval_key
         ):
             raise TypeError("approval_key must be a nonempty string or None")
-        if not isinstance(self.run_before_approval, bool):
-            raise TypeError("run_before_approval must be a bool")
-        if self.run_before_approval and self.needs_approval is False:
-            raise ValueError("run_before_approval requires needs_approval")
+        if not isinstance(self.run_input_policy_before_approval, bool):
+            raise TypeError("run_input_policy_before_approval must be a bool")
+        if self.run_input_policy_before_approval and self.needs_approval is False:
+            raise ValueError("run_input_policy_before_approval requires needs_approval")
         if not isinstance(self.needs_approval, bool) and not callable(self.needs_approval):
             raise TypeError("needs_approval must be a bool or callable")
         if self.needs_approval is not False and (self._bind is None or self.namespace is not None):
@@ -1063,7 +1063,7 @@ def function_tool(
     namespace_description: str | None = None,
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
-    run_before_approval: bool = False,
+    run_input_policy_before_approval: bool = False,
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[PolicyContextT],
     is_enabled: bool
@@ -1084,7 +1084,7 @@ def function_tool(
     namespace_description: str | None = None,
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
-    run_before_approval: bool = False,
+    run_input_policy_before_approval: bool = False,
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[ToolContextT] | None = None,
     is_enabled: bool
@@ -1105,7 +1105,7 @@ def function_tool(
     namespace_description: str | None = None,
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
-    run_before_approval: bool = False,
+    run_input_policy_before_approval: bool = False,
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[PolicyContextT],
     is_enabled: bool
@@ -1126,7 +1126,7 @@ def function_tool(
     namespace_description: str | None = None,
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
-    run_before_approval: bool = False,
+    run_input_policy_before_approval: bool = False,
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[PolicyContextT] | None = None,
     is_enabled: bool
@@ -1147,7 +1147,7 @@ def function_tool(
     namespace_description: str | None = None,
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
-    run_before_approval: bool = False,
+    run_input_policy_before_approval: bool = False,
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
@@ -1177,7 +1177,7 @@ def function_tool(
     namespace_description: str | None = None,
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
-    run_before_approval: bool = False,
+    run_input_policy_before_approval: bool = False,
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
@@ -1207,7 +1207,7 @@ def function_tool(
     namespace_description: str | None = None,
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
-    run_before_approval: bool = False,
+    run_input_policy_before_approval: bool = False,
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[object]
     | _InputErrorFormatter[PolicyContextT]
@@ -1239,7 +1239,7 @@ def function_tool(
     namespace_description: str | None = None,
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
-    run_before_approval: bool = False,
+    run_input_policy_before_approval: bool = False,
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
@@ -1269,7 +1269,7 @@ def function_tool(
     namespace_description: str | None = None,
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
-    run_before_approval: bool = False,
+    run_input_policy_before_approval: bool = False,
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[object]
     | _InputErrorFormatter[PolicyContextT]
@@ -1301,7 +1301,7 @@ def function_tool(
     namespace_description: str | None = None,
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
-    run_before_approval: bool = False,
+    run_input_policy_before_approval: bool = False,
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
@@ -1333,7 +1333,7 @@ def function_tool(
     namespace_description: str | None = None,
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
-    run_before_approval: bool = False,
+    run_input_policy_before_approval: bool = False,
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[object]
     | _InputErrorFormatter[PolicyContextT]
@@ -1377,7 +1377,7 @@ def function_tool(
     namespace_description: str | None = None,
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
-    run_before_approval: bool = False,
+    run_input_policy_before_approval: bool = False,
     approval_key: str | None = None,
     input_error_function: _InputErrorFormatter[Any] | None = None,
     is_enabled: bool
@@ -1546,7 +1546,7 @@ def function_tool(
             output_schema=output_schema,
             finish_turn=finish_turn,
             needs_approval=needs_approval,
-            run_before_approval=run_before_approval,
+            run_input_policy_before_approval=run_input_policy_before_approval,
             approval_key=approval_key,
             is_enabled=is_enabled,
             timeout_behavior=timeout_behavior,

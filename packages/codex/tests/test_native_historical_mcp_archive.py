@@ -61,7 +61,9 @@ async def test_historical_approval_import_restore_and_safe_provider_presentation
         agent = Agent(instructions="Answer.", provider=provider)
         async with agent.session() as source:
             before = await source.history_snapshot()
-            await source.transact_history(expected_revision=before.revision, keep=0, items=records)
+            await source.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0, items=records
+            )
             assert (await source.history_snapshot()).items == tuple(records)
             state = SessionState.from_json((await source.save_state()).to_json())
         async with agent.session(state=state) as restored:
@@ -102,8 +104,8 @@ async def test_orphan_pending_protocol_records_still_reject_before_mutation(resp
         async with Agent(instructions="Answer.", provider=provider).session() as session:
             before = await session.history_snapshot()
             with pytest.raises(RuntimeError, match="complete tool call/result pairs"):
-                await session.transact_history(
-                    expected_revision=before.revision, keep=0, items=records
+                await session.replace_history_suffix(
+                    expected_revision=before.revision, keep_prefix_count=0, items=records
                 )
             assert await session.history_snapshot() == before
     assert responses.requests == []
@@ -126,9 +128,9 @@ async def test_imported_approval_cannot_resolve_active_pending_work(responses):
             turn = await session.submit("Request work.")
             request = await next_request(session.interactions(), hold)
             with pytest.raises(RuntimeError, match="Session is busy"):
-                await session.transact_history(
+                await session.replace_history_suffix(
                     expected_revision="idle-only-probe",
-                    keep=0,
+                    keep_prefix_count=0,
                     items=records_for("pair"),
                 )
             assert effects == [] and len(responses.requests) == 1
@@ -163,8 +165,10 @@ async def test_imported_approval_cannot_answer_a_live_hosted_mcp_request(respons
             request = await next_request(session.interactions(), tool)
             assert request.call_id == "approval-history"
             with pytest.raises(RuntimeError, match="Session is busy"):
-                await session.transact_history(
-                    expected_revision="idle-only-probe", keep=0, items=records_for("pair")
+                await session.replace_history_suffix(
+                    expected_revision="idle-only-probe",
+                    keep_prefix_count=0,
+                    items=records_for("pair"),
                 )
             assert len(responses.requests) == 1
             await request.respond({"approve": False})

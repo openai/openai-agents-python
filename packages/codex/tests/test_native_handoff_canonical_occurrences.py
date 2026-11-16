@@ -58,9 +58,9 @@ async def test_handoff_generated_occurrence_filter_distinguishes_canonical_stora
         )
         async with timeout(30), source.session(storage=storage) as session:
             snapshot = await session.history_snapshot()
-            await session.transact_history(
+            await session.replace_history_suffix(
                 expected_revision=snapshot.revision,
-                keep=snapshot.total,
+                keep_prefix_count=snapshot.total,
                 items=[
                     {
                         "type": "message",

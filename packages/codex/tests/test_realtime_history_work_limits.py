@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agents.realtime import RealtimeGuardrailResult, RealtimeHistory
+from agents.realtime.native import RealtimeGuardrailResult, RealtimeHistory
 from tests.test_realtime_guardrail_retention import owner_for
 
 

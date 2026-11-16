@@ -149,7 +149,7 @@ def _validate_output_guardrails(guardrails: list[Any]) -> None:
             raise TypeError(
                 "Classic Realtime output guardrails require a callable run() method. "
                 "Use agents.classic.OutputGuardrail or agents.classic.output_guardrail. "
-                "Native RealtimeOutputGuardrail belongs to agents.realtime.RealtimeSession."
+                "Native RealtimeOutputGuardrail belongs to agents.realtime.native.RealtimeSession."
             )
 
 

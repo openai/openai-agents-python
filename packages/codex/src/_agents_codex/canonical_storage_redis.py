@@ -189,7 +189,7 @@ class RedisSessionStore:
         """Read v0 Redis list items in insertion order for native history import.
 
         Finish writes to the v0 session before reading. Import the items with
-        the current revision of an empty native Session's `transact_history`.
+        the current revision of an empty native Session's `replace_history_suffix`.
         Redis checks both limits before sending the history to the importer.
         """
         validate_legacy_history_limits(max_items, max_bytes)
