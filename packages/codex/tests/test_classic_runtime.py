@@ -38,7 +38,9 @@ CONFIG = RunConfig(tracing_disabled=True)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("store_kind", ["custom", "sqlite"])
-@pytest.mark.parametrize("settings", ["omitted", "unlimited", "wrapper_limit", "run_limit"])
+@pytest.mark.parametrize(
+    "settings", ["omitted", "reset", "unlimited", "wrapper_limit", "run_limit"]
+)
 async def test_classic_compaction_preserves_retrieval_settings(
     store_kind: str, settings: str
 ) -> None:
@@ -50,8 +52,7 @@ async def test_classic_compaction_preserves_retrieval_settings(
             self.items: list[TResponseInputItem] = []
 
         async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
-            # SessionABC defines None as all items. Runner applies retrieval metadata
-            # when this store is used directly; its wrapper has independent settings.
+            # SessionABC defines None as all items. Runner passes any configured limit.
             return list(self.items if limit is None else self.items[-limit:])
 
         async def add_items(self, items: list[TResponseInputItem]) -> None:
@@ -78,12 +79,15 @@ async def test_classic_compaction_preserves_retrieval_settings(
         session = OpenAIResponsesCompactionSession(
             backing.session_id, backing, should_trigger_compaction=lambda _: False
         )
-        if settings == "unlimited":
+        if settings == "reset":
+            session.session_settings = SessionSettings(limit=1)
+            session.session_settings = None
+        elif settings == "unlimited":
             session.session_settings = SessionSettings(limit=None)
-        elif settings == "wrapper_limit":
+        elif settings in ("wrapper_limit", "run_limit"):
             session.session_settings = SessionSettings(limit=1)
         config = (
-            RunConfig(tracing_disabled=True, session_settings=SessionSettings(limit=1))
+            RunConfig(tracing_disabled=True, session_settings=SessionSettings(limit=2))
             if settings == "run_limit"
             else CONFIG
         )
@@ -92,9 +96,9 @@ async def test_classic_compaction_preserves_retrieval_settings(
             Agent(name="compaction", model=model), "next", session=session, run_config=config
         )
         expected = history
-        if settings in ("wrapper_limit", "run_limit"):
+        if settings == "wrapper_limit":
             expected = history[-1:]
-        elif store_kind == "sqlite":
+        elif settings != "unlimited" or store_kind == "sqlite":
             expected = history[-2:]
         assert model.calls[0].input == [*expected, {"role": "user", "content": "next"}]
         assert result.final_output == "answer"
