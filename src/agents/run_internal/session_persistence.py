@@ -583,6 +583,7 @@ async def prepare_input_with_session(
         prepared_as_inputs,
         pruning_indexes=prune_history_indexes,
         output_pruning_indexes=output_pruning_indexes,
+        preserve_pending_async_calls=True,
     )
     normalized = normalize_input_items_for_api(filtered)
     deduplicated = deduplicate_input_items_preferring_latest(normalized)

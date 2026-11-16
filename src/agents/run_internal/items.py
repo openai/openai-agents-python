@@ -213,6 +213,7 @@ def drop_orphan_function_calls(
     *,
     pruning_indexes: set[int] | None = None,
     output_pruning_indexes: set[int] | None = None,
+    preserve_pending_async_calls: bool = False,
 ) -> list[TResponseInputItem]:
     """
     Remove tool and program call items that do not have corresponding outputs so resumptions or
@@ -223,6 +224,10 @@ def drop_orphan_function_calls(
     immediately precede a call dropped by this pass are also removed, since the Responses API
     rejects reasoning items that are not followed by their associated model-emitted item (``Item
     'rs_...' of type 'reasoning' was provided without its required following item``).
+
+    Committed session reads may opt into preserving completed external function/custom calls
+    marked ``async: true``: their emission is complete even while the external result is pending.
+    Keep this disabled for SDK-generated history, retry cleanup, and unsettled session writes.
     """
 
     completed_call_ids = _completed_call_ids_by_type(items)
@@ -273,6 +278,15 @@ def drop_orphan_function_calls(
         if entry_type == "program" and call_id in active_program_call_ids:
             continue
         if isinstance(call_id, str) and call_id in completed_call_ids.get(output_type, set()):
+            continue
+        if (
+            preserve_pending_async_calls
+            and entry_type in {"function_call", "custom_tool_call"}
+            and entry.get("async") is True
+            and entry.get("status") == "completed"
+            and isinstance(call_id, str)
+            and bool(call_id)
+        ):
             continue
         if (
             entry_type == "tool_search_call"
