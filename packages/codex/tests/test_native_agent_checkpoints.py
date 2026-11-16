@@ -111,6 +111,16 @@ def test_checkpoint_parse_errors_do_not_echo_stored_values(malformed_json):
     assert error.value.errors(include_input=False)
 
 
+def token_counts(checkpoint: dict) -> list[dict]:
+    return [
+        row["payload"]
+        for row in checkpoint["history"]
+        if row["type"] == "event_msg"
+        and row["payload"].get("type") == "token_count"
+        and "sdk_record" not in row
+    ]
+
+
 @pytest.mark.parametrize("percent", [None, "37", "37.5"], ids=["no-header", "whole", "fractional"])
 async def test_native_checkpoint_roundtrips_rate_usage_without_losing_integer_precision(percent):
     async with timeout(30), peer() as provider:
@@ -130,11 +140,7 @@ async def test_native_checkpoint_roundtrips_rate_usage_without_losing_integer_pr
             assert (await (submitted).get_result()).final_output == "before"
             saved = await original.save_state()
         encoded = json.loads(saved.to_json())
-        counts = [
-            item["payload"]
-            for item in encoded["history"]
-            if item["type"] == "event_msg" and item["payload"].get("type") == "token_count"
-        ]
+        counts = token_counts(encoded)
         assert len(counts) == 1
         rate = counts[0]["rate_limits"]
         if percent is None:
@@ -147,11 +153,7 @@ async def test_native_checkpoint_roundtrips_rate_usage_without_losing_integer_pr
         state = SessionState.from_json(json.dumps(encoded))
         async with agent.session(state=state) as restored:
             resaved = json.loads((await restored.save_state()).to_json())
-            restored_counts = [
-                item["payload"]
-                for item in resaved["history"]
-                if item["type"] == "event_msg" and item["payload"].get("type") == "token_count"
-            ]
+            restored_counts = token_counts(resaved)
             assert restored_counts
             assert restored_counts[0]["info"]["total_token_usage"]["input_tokens"] == exact
             assert restored_counts[0]["rate_limits"] == rate
@@ -177,20 +179,12 @@ async def test_native_checkpoint_preserves_rate_headers_after_rejected_output():
             assert failure.value.raw_output == '{"unexpected": true}'
             saved = await original.save_state()
         encoded = json.loads(saved.to_json())
-        counts = [
-            item["payload"]
-            for item in encoded["history"]
-            if item["type"] == "event_msg" and item["payload"].get("type") == "token_count"
-        ]
+        counts = token_counts(encoded)
         assert len(counts) == 1
         assert counts[0]["rate_limits"]["primary"]["used_percent"] == 37.5
         async with agent.session(state=saved) as restored:
             resaved = json.loads((await restored.save_state()).to_json())
-        restored_counts = [
-            item["payload"]
-            for item in resaved["history"]
-            if item["type"] == "event_msg" and item["payload"].get("type") == "token_count"
-        ]
+        restored_counts = token_counts(resaved)
         assert restored_counts == counts
         assert len(provider.requests) == 1
 
@@ -230,11 +224,7 @@ async def test_native_checkpoint_rejects_non_numeric_rate_without_model_request(
             assert (await (handle).get_result()).final_output == "before"
             saved = await original.save_state()
         changed = json.loads(saved.to_json())
-        count = next(
-            item["payload"]
-            for item in changed["history"]
-            if item["type"] == "event_msg" and item["payload"].get("type") == "token_count"
-        )
+        count = token_counts(changed)[0]
         assert count["rate_limits"][window]["used_percent"] == 37.5
         count["rate_limits"][window]["used_percent"] = bad_percent
         with pytest.raises(RuntimeError, match="invalid type"):
