@@ -132,9 +132,9 @@ For `agent.session(trace_options=...)`, `agent.run(trace_options=...)`, or `sess
 
 ### Prompt-cache routing for fresh Sessions
 
-New in alpha.8, an explicit `TraceOptions(group_id="workflow-id")` also selects prompt-cache affinity for fresh Sessions opened with those options. The same explicit group can route matching prompts together without sharing Session IDs or conversation history. It does not guarantee a cache hit. Restored Sessions retain their saved cache key instead of adopting a new group key.
+An explicit `TraceOptions(group_id="workflow-id")` also selects prompt-cache affinity for fresh Sessions opened with those options. The same explicit group can route matching prompts together without sharing Session IDs or conversation history. It does not guarantee a cache hit. Restored Sessions retain their saved cache key instead of adopting a new group key.
 
-For borrowed model clients, the adapter's `prompt_cache_key` overrides only that adapter's outgoing routing key. Omitting it preserves the native request key. See [application-owned model clients](models.md#use-an-application-owned-model-client) for the adapter setup and [release availability](versions.md) for alpha.8 status.
+For borrowed model clients, the adapter's `prompt_cache_key` overrides only that adapter's outgoing routing key. Omitting it preserves the native request key. See [application-owned model clients](models.md#use-an-application-owned-model-client) for the adapter setup.
 
 ## Send native traces to an application sink
 

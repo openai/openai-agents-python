@@ -38,7 +38,7 @@ The script prints a greeting and a list of topics. The model chooses the wording
 
 ## Finish after a tool batch
 
-New in alpha.8, `Agent(tool_batch_completion=callback)` can finish a turn after a direct function-tool batch settles. The callback receives `ToolBatchCompletionContext` with the accepted `results` in model-call order. Return `FinishTurn(output)` from `agents` to propose the final value, `ContinueTurn(instructions)` to request another step, `StopTurn(...)` to stop by policy, or `None` for normal continuation. The proposed value still passes through the active output type and completion checks. Earlier tool effects remain applied.
+`Agent(tool_batch_completion=callback)` can finish a turn after a direct function-tool batch settles. The callback receives `ToolBatchCompletionContext` with the accepted `results` in model-call order. Return `FinishTurn(output)` from `agents` to propose the final value, `ContinueTurn(instructions)` to request another step, `StopTurn(...)` to stop by policy, or `None` for normal continuation. The proposed value still passes through the active output type and completion checks. Earlier tool effects remain applied.
 
 This callback fragment proposes a text confirmation after a single-tool batch. Define it before constructing the Agent, then pass `tool_batch_completion=finish_single_tool`:
 
@@ -52,7 +52,7 @@ def finish_single_tool(context: ToolBatchCompletionContext):
     return None
 ```
 
-See [release availability](versions.md) before using this callback. Match the value inside `FinishTurn` to your Agent's output type.
+Match the value inside `FinishTurn` to your Agent's output type.
 
 ## Choose an output type
 
@@ -114,7 +114,7 @@ for repair in result.repair_attempts:
 
 Corrections receive the invalid output, schema and effective model connection. They receive none of the original tools, application context or instructions. `final_output` may come from a correction, while the original native history stays intact. `session.turns()` and `session.items()` retain correction records beside their parent.
 
-Corrections retain the accepted model, reasoning effort, reasoning summary and service tier. Matching development builds also apply the accepted `invocation_timeout_ms` afresh to each correction. The alpha.7 preview does not include this timeout setting. Corrections do not inherit the other [development model controls](models.md#additional-controls-in-development-builds), including output caps, sampling controls, metadata, provider storage and prompt-cache settings.
+Corrections retain the accepted model, reasoning effort, reasoning summary and service tier. Matching development builds also apply the accepted `invocation_timeout_ms` afresh to each correction. The alpha.7 preview does not include this timeout setting. Corrections do not inherit the other [model request controls](models.md#model-request-controls), including output caps, sampling controls, metadata, provider storage and prompt-cache settings.
 
 Live manual replies and idle restore support structured output. An explicit Session can suspend a settled manual turn with `NativeOutput`, a bare structured output type, or `PromptedOutput`. Restore must match the saved output mode and schema, including the retry setting for prompted output.
 

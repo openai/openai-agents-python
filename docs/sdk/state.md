@@ -122,7 +122,7 @@ For the synchronous `SessionStore` contract, persistent SQLite adapter, and reco
 
 ### SQLAlchemy SQLite storage
 
-New in alpha.8, `SQLAlchemySQLiteSessionStore` from `agents.canonical_storage` uses an application-owned synchronous SQLAlchemy SQLite `Engine`. Pass the store to `CustomStorage`. It supports file-backed SQLite with an absolute database path on a local POSIX filesystem. It does not support other SQL dialects, `AsyncEngine`, in-memory databases, or Classic session tables. The application owns and disposes the engine. See [release availability](versions.md) before using this store.
+`SQLAlchemySQLiteSessionStore` from `agents.canonical_storage` uses an application-owned synchronous SQLAlchemy SQLite `Engine`. Pass the store to `CustomStorage`. It supports file-backed SQLite with an absolute database path on a local POSIX filesystem. It does not support other SQL dialects, `AsyncEngine`, in-memory databases, or Classic session tables. The application owns and disposes the engine.
 
 ## Save and restore a portable checkpoint
 
@@ -144,7 +144,7 @@ async with agent.session(state=state) as restored:
 
 ### Stage input for a resumed request
 
-New in alpha.8, `state.with_appended_pending_input(input)` returns a copy of a supported manual checkpoint with extra input after any input already staged for the next resumed request. It does not replace existing pending input or start work. Read `state.pending_input` to inspect a detached copy, or call `state.without_pending_input()` to clear it. The SDK checks the checkpoint's remaining budget before staging input.
+`state.with_appended_pending_input(input)` returns a copy of a supported manual checkpoint with extra input after any input already staged for the next resumed request. It does not replace existing pending input or start work. Read `state.pending_input` to inspect a detached copy, or call `state.without_pending_input()` to clear it. The SDK checks the checkpoint's remaining budget before staging input.
 
 Import `ApplicationToolOutput` from `agents.state` when reading application data from an accepted native tool result. It carries the submission, turn, and call identities alongside the application data; it does not authorize another execution.
 
@@ -366,7 +366,7 @@ Async callbacks run on the Session loop; sync callbacks run in a worker. Cancell
 
 ## Read and edit original history
 
-New in alpha.8, `session.history_snapshot()` and `session.replace_history_suffix()` read and edit original history records. See [release availability](versions.md) before using them. The `0.24.0-alpha.7` wheel does not include these methods. Both require an idle Session with current application bindings. To reduce model input without editing original records, use [compaction](#compact-conversation-context).
+Use `session.history_snapshot()` to read original history records and `session.replace_history_suffix()` to edit them. Both require an idle Session with current application bindings. To reduce model input without editing original records, use [compaction](#compact-conversation-context).
 
 `history_snapshot()` returns a `CanonicalHistorySnapshot` from `agents.history`:
 
@@ -376,7 +376,7 @@ New in alpha.8, `session.history_snapshot()` and `session.replace_history_suffix
 
 The read preserves unknown fields and leaves missing IDs absent.
 
-Save the following complete script as `edit_history.py`, then run `python edit_history.py` with the matching alpha.8 SDK. It replaces history with one user message, appends an application note, verifies rejection of a stale revision, and checks that save and restore preserve accepted history. It uses a synthetic credential and makes no model requests. Expected output: `History replacement, append, revision check, and restore passed.`
+Save the following complete script as `edit_history.py`, then run `python edit_history.py` in the environment where you [installed the SDK](installation.md). It replaces history with one user message, appends an application note, verifies rejection of a stale revision, and checks that save and restore preserve accepted history. It uses a synthetic credential and makes no model requests. Expected output: `History replacement, append, revision check, and restore passed.`
 
 ```python
 import asyncio

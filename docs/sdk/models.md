@@ -1,6 +1,6 @@
 # Models and authentication
 
-Choose the model connection and credentials for Agent runs. Use an API key with the default Responses connection, connect a compatible custom endpoint, or supply an application-owned model client in alpha.8.
+Choose the model connection and credentials for Agent runs. Use an API key with the default Responses connection, connect a compatible custom endpoint, or supply an application-owned model client.
 
 [Install the SDK](installation.md) before opening a Session. Complete the [first agent](index.md#run-your-first-agent) for the default API-key path. Examples with `await` or `async with` belong inside an async application unless the page labels a complete script.
 
@@ -17,7 +17,7 @@ The decision provider used by `Agent.decide()` is separate from this model conne
 
 ## Provider connection
 
-Pass `NativeProvider(base_url=..., api_key=...)` to configure the native Responses connection for model requests. The SDK uses Codex's built-in model client. The default transport accepts endpoint settings rather than an OpenAI client instance. Alpha.8 also accepts [application-owned model clients](#use-an-application-owned-model-client) through an adapter.
+Pass `NativeProvider(base_url=..., api_key=...)` to configure the native Responses connection for model requests. The SDK uses Codex's built-in model client. The default transport accepts endpoint settings rather than an OpenAI client instance. To use an existing client, [supply an adapter](#use-an-application-owned-model-client).
 
 The default transport requires Responses support from custom endpoints. The [endpoint checks](providers.md) exercise that transport. The application-model route below supports Chat Completions separately.
 
@@ -46,9 +46,7 @@ An open Session keeps its captured configuration. Change instructions or native 
 
 <a id="additional-controls-in-development-builds"></a>
 
-### Additional controls in alpha.8
-
-These controls require alpha.8 or later. See [releases and documentation](versions.md).
+### Model request controls
 
 Pass these fields through `model_settings` on the Agent, when opening a Session, or in an idle `session.update(model_settings=...)`. Omitted keys preserve the accepted settings. `None` clears the corresponding SDK override. Providers still determine which settings their models support and which numeric ranges they accept.
 
@@ -81,13 +79,13 @@ Use a standard Responses model for the additional wire controls; known Responses
 
 An invocation deadline raises `NativeError` with `code="model_invocation_deadline_exceeded"`. It is separate from an application deadline for an entire turn: Python tool execution and application waits can outlast a model invocation. Cleanup can also finish after the deadline. An accepted terminal response disarms that invocation's clock before Python result settlement. Check earlier tool effects before retrying. To limit the whole wait, see [bound a wait and stop owned work](troubleshooting.md#bound-a-wait-and-stop-owned-work).
 
-Alpha.8 also accepts a `ToolRef` for `tool_choice`, such as a declared function tool's `tool.ref`. This narrows sampling to one currently admitted eager tool and requires it. It cannot add a tool, restore one removed by `tools` or `before_step`, or select a deferred tool. Set `tool_choice="auto"` or `None` to clear a named target. A required choice can request the same tool on later sampling steps, so bound repeated work with a [run budget](observability.md#limit-a-runs-model-requests-and-usage) or change the selection when idle.
+Pass a `ToolRef` as `tool_choice`, such as a declared function tool's `tool.ref`. This narrows sampling to one currently admitted eager tool and requires it. It cannot add a tool, restore one removed by `tools` or `before_step`, or select a deferred tool. Set `tool_choice="auto"` or `None` to clear a named target. A required choice can request the same tool on later sampling steps, so bound repeated work with a [run budget](observability.md#limit-a-runs-model-requests-and-usage) or change the selection when idle.
 
 ## Use an application-owned model client
 
-New in alpha.8, `NativeProvider(model_backend=...)` accepts an application-owned model adapter. Check [release availability](versions.md) before using it. The `0.24.0-alpha.7` wheel does not include this option. The native runtime retains ownership of the tool loop and conversation history while the application supplies each completed model response.
+Pass an application-owned model adapter to `NativeProvider(model_backend=...)`. The native runtime retains ownership of the tool loop and conversation history while the application supplies each completed model response.
 
-Use alpha.8 or later. The script also needs the `openai` package for `AsyncOpenAI`; install that client with `python -m pip install openai`. Set `OPENAI_API_KEY`, then save this complete script as `borrowed_client.py` and run `python borrowed_client.py`. The script uses an asynchronous OpenAI client through `ChatCompletionsModel` and makes live model requests that can incur charges.
+[Install SDK version 0.24.0-alpha.8 or later](installation.md) for this example. Install the `openai` package with `python -m pip install openai` to use `AsyncOpenAI`. Set `OPENAI_API_KEY`, then save this complete script as `borrowed_client.py` and run `python borrowed_client.py`. The script uses an asynchronous OpenAI client through `ChatCompletionsModel` and makes live model requests that can incur charges.
 
 ```python
 import asyncio

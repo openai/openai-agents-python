@@ -160,9 +160,9 @@ Execution items carry a call ID and a status when the runtime records them. Comm
 
 ### Inspect provider logprobs
 
-New in alpha.8, `ResponseFactReceived` from `agents.observation` can carry private received facts separately from accepted output. With `include_execution_details=True` on the event reader, its `record["fact"]` can be a `TextLogprobsFact` from `agents.history`. Each `TokenLogprob` contains a `logprob` and optional `top_logprobs` entries of type `TokenLogprobAlternative`. These are logarithms, not probabilities between zero and one. `MalformedLogprobsFact` reports malformed logprob data instead of supplying invented values.
+`ResponseFactReceived` from `agents.observation` can carry private received facts separately from accepted output. With `include_execution_details=True` on the event reader, its `record["fact"]` can be a `TextLogprobsFact` from `agents.history`. Each `TokenLogprob` contains a `logprob` and optional `top_logprobs` entries of type `TokenLogprobAlternative`. These are logarithms, not probabilities between zero and one. `MalformedLogprobsFact` reports malformed logprob data instead of supplying invented values.
 
-The serialized `kind` values remain `"text_probabilities"` and `"malformed_probabilities"`. They identify the received record; they do not establish that the SDK accepted a final answer. Respect the configured content visibility and retention limits. See [release availability](versions.md) before using these alpha.8 types.
+The serialized `kind` values remain `"text_probabilities"` and `"malformed_probabilities"`. They identify the received record; they do not establish that the SDK accepted a final answer. Respect the configured content visibility and retention limits.
 
 ### Inspect response attempts
 
