@@ -405,7 +405,7 @@ def _publish_resumed_stream_turn(
     streamed_result.input = turn_result.original_input
     streamed_result._original_input = copy_input_items(turn_result.original_input)
     streamed_result.new_items = session_items
-    streamed_result._model_input_items = generated_items
+    streamed_result._model_input_items = list(generated_items)
     if turn_result.nested_history_owned_items is not None:
         owned_refs = reconcile_nested_history_owned_session_item_refs(
             streamed_result.new_items,
