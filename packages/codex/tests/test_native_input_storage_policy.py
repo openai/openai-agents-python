@@ -305,7 +305,9 @@ async def test_policy_history_limits_reject_before_callback_and_native_admission
 
     async with Agent(instructions="Answer.", provider=provider(responses)).session() as session:
         opening = await session.history_snapshot()
-        await session.transact_history(expected_revision=opening.revision, keep=0, items=items)
+        await session.replace_history_suffix(
+            expected_revision=opening.revision, keep_prefix_count=0, items=items
+        )
         before = await session.history_snapshot(limit=0)
         with pytest.raises(NativeError, match="Input storage policy history exceeds"):
             await (

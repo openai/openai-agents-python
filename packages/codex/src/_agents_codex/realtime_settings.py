@@ -225,4 +225,4 @@ def serialize_realtime_session_update(update: NativeRealtimeSessionUpdate) -> di
     return serialize_realtime_settings(update)
 
 
-_preserve_module_identity(globals(), "agents.realtime")
+_preserve_module_identity(globals(), "agents.realtime.native")

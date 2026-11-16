@@ -105,4 +105,4 @@ def _usage_snapshot(value: dict[str, Any] | None) -> RealtimeUsage | None:
     )
 
 
-_preserve_module_identity(globals(), "agents.realtime")
+_preserve_module_identity(globals(), "agents.realtime.native")

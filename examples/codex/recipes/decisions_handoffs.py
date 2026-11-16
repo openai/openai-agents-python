@@ -21,7 +21,7 @@ from agents import (
     TurnStoppedError,
     function_tool,
 )
-from agents.realtime import realtime_handoff
+from agents.realtime.native import realtime_handoff
 from agents.testing import ScriptedResponses, text, tool_call
 
 MAIN_MODEL = "gpt-5.5"

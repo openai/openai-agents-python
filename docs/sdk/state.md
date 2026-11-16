@@ -120,6 +120,10 @@ In `0.24.0-alpha.7` or later, if reconciliation fails or is cancelled, use `get_
 
 For the synchronous `SessionStore` contract, persistent SQLite adapter, and recovery of calls with unknown outcomes, see the [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/codex/canonical_storage). Storage does not guarantee exactly-once external actions.
 
+### SQLAlchemy SQLite storage
+
+`SQLAlchemySQLiteSessionStore` from `agents.canonical_storage` uses an application-owned synchronous SQLAlchemy SQLite `Engine`. Pass the store to `CustomStorage`. It supports file-backed SQLite with an absolute database path on a local POSIX filesystem. It does not support other SQL dialects, `AsyncEngine`, in-memory databases, or Classic session tables. The application owns and disposes the engine.
+
 ## Save and restore a portable checkpoint
 
 Restore a portable checkpoint with an SDK pinned to the same Codex revision that saved it. The SDK rejects a different revision for both idle checkpoints and pending manual continuations, even when it recognizes the checkpoint JSON format. Keep the matching SDK wheel available for saved conversations you need to resume. Changing the checkpoint's `codex_revision` field does not migrate its contents.
@@ -137,6 +141,12 @@ async with agent.session(state=state) as restored:
     handle = await restored.submit("What label did I give you?")
     result = await handle.get_result()
 ```
+
+### Stage input for a resumed request
+
+`state.with_appended_pending_input(input)` returns a copy of a supported manual checkpoint with extra input after any input already staged for the next resumed request. It does not replace existing pending input or start work. Read `state.pending_input` to inspect a detached copy, or call `state.without_pending_input()` to clear it. The SDK checks the checkpoint's remaining budget before staging input.
+
+Import `ApplicationToolOutput` from `agents.state` when reading application data from an accepted native tool result. It carries the submission, turn, and call identities alongside the application data; it does not authorize another execution.
 
 ### Check checkpoint compatibility
 
@@ -356,7 +366,7 @@ Async callbacks run on the Session loop; sync callbacks run in a worker. Cancell
 
 ## Read and edit original history
 
-Matching [source builds](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source) provide `session.history_snapshot()` and `session.transact_history()` to read and edit original history records. The `0.24.0-alpha.7` wheel does not include these methods. Both require an idle Session with current application bindings. To reduce model input without editing original records, use [compaction](#compact-conversation-context).
+Use `session.history_snapshot()` to read original history records and `session.replace_history_suffix()` to edit them. Both require an idle Session with current application bindings. To reduce model input without editing original records, use [compaction](#compact-conversation-context).
 
 `history_snapshot()` returns a `CanonicalHistorySnapshot` from `agents.history`:
 
@@ -366,7 +376,7 @@ Matching [source builds](https://github.com/openai/openai-agents-python/blob/fea
 
 The read preserves unknown fields and leaves missing IDs absent.
 
-Save the following complete script as `edit_history.py`, then run `python edit_history.py` with the matching source build. It replaces history with one user message, appends an application note, verifies rejection of a stale revision, and checks that save and restore preserve accepted history. It uses a synthetic credential and makes no model requests. Expected output: `History replacement, append, revision check, and restore passed.`
+Save the following complete script as `edit_history.py`, then run `python edit_history.py` in the environment where you [installed the SDK](installation.md). It replaces history with one user message, appends an application note, verifies rejection of a stale revision, and checks that save and restore preserve accepted history. It uses a synthetic credential and makes no model requests. Expected output: `History replacement, append, revision check, and restore passed.`
 
 ```python
 import asyncio
@@ -384,22 +394,22 @@ async def main() -> None:
                 "role": "user",
                 "content": [{"type": "input_text", "text": "Use the label atlas."}],
             }
-            await session.transact_history(
+            await session.replace_history_suffix(
                 expected_revision=before.revision,
-                keep=0,
+                keep_prefix_count=0,
                 items=[message],
             )
             current = await session.history_snapshot(limit=0)
             note = {"type": "application_note", "value": "Reviewed by the application"}
-            revision = await session.transact_history(
+            revision = await session.replace_history_suffix(
                 expected_revision=current.revision,
-                keep=current.total,
+                keep_prefix_count=current.total,
                 items=[note],
             )
             try:
-                await session.transact_history(
+                await session.replace_history_suffix(
                     expected_revision=current.revision,
-                    keep=0,
+                    keep_prefix_count=0,
                 )
             except RuntimeError:
                 assert (await session.history_snapshot(limit=0)).revision == revision
@@ -415,13 +425,13 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`transact_history()` checks `expected_revision` before keeping the first `keep` original records and replacing the rest with `items`:
+`replace_history_suffix()` checks `expected_revision` before keeping the first `keep_prefix_count` original records and replacing the rest with `items`:
 
 | Selection | Effect |
 | --- | --- |
-| `keep=snapshot.total`, when the total is positive | Append records and preserve current model context. |
-| `keep=0` | Replace all original history and model context. With `items=()`, clear both. |
-| Another prefix | Rebuild model context from only the retained original records and the supplied new records. |
+| `keep_prefix_count=snapshot.total`, when the total is positive | Append records and preserve current model context. |
+| `keep_prefix_count=0` | Replace all original history and model context. With `items=()`, clear both. |
+| Another prefix | Preserve exact model projections for the retained records. Set `rebuild_model_context=True` to rebuild from admitted model items when a compacted projection cannot be mapped to the prefix. |
 
 The runtime rejects ambiguous partial edits across a compaction summary before committing. A stale revision leaves accepted history unchanged. Read a fresh snapshot and reconsider the edit before retrying.
 

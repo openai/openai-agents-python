@@ -30,4 +30,4 @@ def background_result(value: _ResultT) -> BackgroundResult[_ResultT]:
     return BackgroundResult(value)
 
 
-_preserve_module_identity(globals(), "agents.realtime")
+_preserve_module_identity(globals(), "agents.realtime.native")

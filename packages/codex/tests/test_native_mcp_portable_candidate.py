@@ -13,8 +13,8 @@ import pytest
 from agents import (
     Agent,
     Allow,
-    ApprovalDecision,
     ApprovalRequest,
+    FunctionToolApprovalDecision,
     HttpMCP,
     InteractionExpiredError,
     PendingRequests,
@@ -137,7 +137,7 @@ async def test_portable_ordinary_mcp_candidate_fresh_exact_decision(
                     with pytest.raises((ValueError, RuntimeError)):
                         await wrong_owner.respond(fresh.reply("allow_once"))
                 with pytest.raises(ValueError, match="allow_once.*deny"):
-                    await fresh.respond(ApprovalDecision(True, always=True))  # type: ignore[arg-type]
+                    await fresh.respond(FunctionToolApprovalDecision(True, always=True))  # type: ignore[arg-type]
                 assert peer.calls == []
                 await fresh.respond(decision)  # type: ignore[arg-type]
                 assert (

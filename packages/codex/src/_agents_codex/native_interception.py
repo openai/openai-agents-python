@@ -102,7 +102,9 @@ def _has_realtime_predicates(
     session: Session[Any, Any], pending: Sequence[Agent[Any, Any]]
 ) -> bool:
     return any(
-        agent is not None and agent.realtime is not None and agent.realtime.tool_enabled is not None
+        agent is not None
+        and agent.realtime is not None
+        and agent.realtime.is_tool_enabled is not None
         for agent in (
             session._opening_agent,
             *(profile.profile.declaration for profile in session._profiles.values()),

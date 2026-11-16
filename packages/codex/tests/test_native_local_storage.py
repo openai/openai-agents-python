@@ -107,9 +107,9 @@ async def _worker() -> None:
                 saved = await session.save_state()
                 async with agent.session(context=mode, state=saved) as isolated:
                     revision = await isolated.history_snapshot(limit=0)
-                    await isolated.transact_history(
+                    await isolated.replace_history_suffix(
                         expected_revision=revision.revision,
-                        keep=revision.total,
+                        keep_prefix_count=revision.total,
                         items=[
                             {
                                 "type": "message",

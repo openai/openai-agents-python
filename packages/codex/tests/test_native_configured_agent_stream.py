@@ -7,7 +7,7 @@ import pytest
 from agents import (
     Agent,
     AgentToolStreamEvent,
-    ApprovalRequested,
+    FunctionToolApprovalRequest,
     NativeProvider,
     PendingRequests,
     SessionState,
@@ -248,7 +248,7 @@ async def test_configured_child_stream_uses_the_restored_handoff_destination(par
                 pending = await restored.wait_for_request_or_result()
                 assert isinstance(pending, PendingRequests)
                 [request] = pending.requests
-                assert isinstance(request, ApprovalRequested)
+                assert isinstance(request, FunctionToolApprovalRequest)
                 await fresh.respond(request.reply(True))
                 assert (await restored.get_result()).final_output == "parent complete"
 

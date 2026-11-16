@@ -82,9 +82,9 @@ async def test_instruction_projection_preserves_native_base_and_cold_cursor(
             provider_history={"type": "previous_response", "id": "resp_external"}
         ) as source:
             snapshot = await source.history_snapshot()
-            await source.transact_history(
+            await source.replace_history_suffix(
                 expected_revision=snapshot.revision,
-                keep=snapshot.total,
+                keep_prefix_count=snapshot.total,
                 items=[
                     {
                         "type": "message",
@@ -175,7 +175,7 @@ async def test_projection_preserves_selected_staged_occurrence_identity(history_
             await source.submit("original user")
             await next_request(source.interactions(), lookup)
             saved = await source.suspend()
-        staged = saved.with_pending_input(marker).with_pending_input(marker)
+        staged = saved.with_appended_pending_input(marker).with_appended_pending_input(marker)
         async with agent.session(
             state=SessionState.from_json(staged.to_json()), provider_history=history("resp_1")
         ) as resumed:

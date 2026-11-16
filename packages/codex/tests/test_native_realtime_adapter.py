@@ -13,7 +13,7 @@ from aiohttp import ClientSession, ClientWebSocketResponse, WSMsgType, web
 from aiohttp.test_utils import TestServer
 
 from agents import Agent, NativeProvider
-from agents.realtime import RealtimeAdapterContext, RealtimeConfig, RealtimeText
+from agents.realtime.native import RealtimeAdapterContext, RealtimeConfig, RealtimeText
 from tests._asyncio import timeout
 from tests.test_native_realtime import RealtimePeer
 

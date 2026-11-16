@@ -14,7 +14,7 @@ from tests.native_fixtures import assistant_output, function_call, responses as 
 async def test_nested_decision_graph_rejects_realtime_before_provider_acquisition(
     responses, monkeypatch, realtime
 ):
-    from agents.realtime import RealtimeAgentConfig
+    from agents.realtime.native import RealtimeAgentConfig
 
     target = Agent(name="target", instructions="Target.")
     child = Agent(

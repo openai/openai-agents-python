@@ -158,7 +158,7 @@ async def test_lazy_create_chunked_append_pop_clear_and_recreate(endpoint):
     assert await history.get_items(1) == [message(39)]
     await history.clear()
     assert history.conversation_id is None and not peer.items
-    assert await history.get_conversation_id() == "conv_2"
+    assert await history.ensure_conversation_id() == "conv_2"
     assert not transport.is_closed and client.max_retries == 3
 
 
@@ -203,7 +203,7 @@ async def test_create_callback_reentry_rejects_before_waiting_for_owned_lock(end
             await asyncio.wait_for(history.get_items(), 0.2)
 
     peer.on_create = during_create
-    assert await asyncio.wait_for(history.get_conversation_id(), 2) == "conv_1"
+    assert await asyncio.wait_for(history.ensure_conversation_id(), 2) == "conv_1"
     assert peer.creates == 1
     assert len(peer.requests) == 1
 
@@ -222,7 +222,7 @@ async def test_retired_create_descendant_can_use_history(endpoint):
         descendants.append(asyncio.create_task(later()))
 
     peer.on_create = during_create
-    assert await history.get_conversation_id() == "conv_1"
+    assert await history.ensure_conversation_id() == "conv_1"
     released.set()
     assert await asyncio.wait_for(descendants[0], 2) == []
     assert peer.creates == 1

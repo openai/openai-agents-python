@@ -7,7 +7,6 @@ from pydantic import JsonValue
 
 from agents import (
     Agent,
-    ApplicationToolOutput,
     FunctionTool,
     HttpMCP,
     InteractionExpiredError,
@@ -18,6 +17,7 @@ from agents import (
     function_tool,
 )
 from agents.observation import ToolFinished
+from agents.state import ApplicationToolOutput
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,

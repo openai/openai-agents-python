@@ -17,8 +17,8 @@ from aiohttp.test_utils import TestServer
 
 from agents import (
     Agent,
-    ApprovalRequested,
     Environment,
+    FunctionToolApprovalRequest,
     GuardrailResult,
     InputGuardrail,
     InteractionExpiredError,
@@ -492,7 +492,7 @@ async def test_configured_child_approval_and_held_sibling_owners(approve):
             boundary = await turn.wait_for_request_or_result()
             assert isinstance(boundary, PendingRequests)
             request = next(
-                item for item in boundary.requests if isinstance(item, ApprovalRequested)
+                item for item in boundary.requests if isinstance(item, FunctionToolApprovalRequest)
             )
             await sibling.wait()
             assert request.session_id != session.id

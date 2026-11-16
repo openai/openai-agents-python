@@ -288,7 +288,7 @@ async def test_async_cancellation_is_joined_without_recovery_publication(respons
 
 
 async def test_managed_failure_waits_for_approval_before_body_and_formatter(responses):
-    from agents import ApprovalRequested
+    from agents import FunctionToolApprovalRequest
 
     effects = []
     formatted = []
@@ -310,7 +310,7 @@ async def test_managed_failure_waits_for_approval_before_body_and_formatter(resp
         turn = await session.submit("begin")
         approved = False
         async for request in session.interactions():
-            if isinstance(request, ApprovalRequested):
+            if isinstance(request, FunctionToolApprovalRequest):
                 assert effects == [] and formatted == []
                 await request.approve()
                 approved = True

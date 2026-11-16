@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from agents import Agent, CustomStorage, NativeProvider, SQLAlchemySessionStore
+from agents import Agent, CustomStorage, NativeProvider, SQLAlchemySQLiteSessionStore
 from tests.native_fixtures import assistant_output, responses as responses
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="SQLite adapter requires POSIX locks")
@@ -22,7 +22,7 @@ def test_sqlalchemy_pool_persists_canonical_snapshot_and_excludes_competing_writ
     checkouts = []
     event.listen(engine, "checkout", lambda *args: checkouts.append(True))
     try:
-        first, second = SQLAlchemySessionStore(engine), SQLAlchemySessionStore(engine)
+        first, second = SQLAlchemySQLiteSessionStore(engine), SQLAlchemySQLiteSessionStore(engine)
         assert CustomStorage(first).backend is first
         token = first.acquire("thread")
         payload = json.dumps({"revision": 1, "write_id": "one", "items": ["saved"]})
@@ -57,11 +57,11 @@ def test_sqlalchemy_adapter_rejects_async_and_nonpersistent_engines(tmp_path: Pa
     async_engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'async.sqlite'}")
     try:
         with pytest.raises(ValueError, match="file-backed"):
-            SQLAlchemySessionStore(memory)
+            SQLAlchemySQLiteSessionStore(memory)
         with pytest.raises(TypeError, match="synchronous"):
-            SQLAlchemySessionStore(async_engine)
+            SQLAlchemySQLiteSessionStore(async_engine)
         with pytest.raises(TypeError, match="synchronous"):
-            SQLAlchemySessionStore(async_engine.sync_engine)
+            SQLAlchemySQLiteSessionStore(async_engine.sync_engine)
     finally:
         memory.dispose()
 
@@ -69,7 +69,7 @@ def test_sqlalchemy_adapter_rejects_async_and_nonpersistent_engines(tmp_path: Pa
 async def test_sqlalchemy_pool_is_usable_on_native_style_worker_threads(tmp_path: Path) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'threaded.sqlite'}")
     try:
-        store = SQLAlchemySessionStore(engine)
+        store = SQLAlchemySQLiteSessionStore(engine)
         token = await asyncio.to_thread(store.acquire, "thread")
         try:
             payload = json.dumps({"revision": 1, "write_id": "one", "items": ["saved"]})
@@ -85,7 +85,7 @@ async def test_sqlalchemy_native_session_restores_canonical_context(
     tmp_path: Path, responses
 ) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'native.sqlite'}")
-    store = SQLAlchemySessionStore(engine)
+    store = SQLAlchemySQLiteSessionStore(engine)
     responses.respond(assistant_output("first answer"))
     responses.respond(assistant_output("second answer"))
     provider = NativeProvider(base_url=responses.url, api_key="synthetic-native-store")

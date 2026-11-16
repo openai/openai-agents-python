@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from agents import Agent, NativeProvider
-from agents.realtime import RealtimeAudioInput, RealtimeConfig
+from agents.realtime.native import RealtimeAudioInput, RealtimeConfig
 from tests._asyncio import timeout
 from tests.test_native_realtime import realtime_peer as realtime_peer
 from tests.test_native_realtime_adapter import SocketAdapter
@@ -396,7 +396,7 @@ async def test_cancelled_pending_commit_joins_before_later_text(realtime_peer, m
 
 
 async def test_sip_commit_controls_provider_buffer_without_client_media(call_peer):
-    from agents.realtime import RealtimeSIP, RealtimeWebRTC
+    from agents.realtime.native import RealtimeSIP, RealtimeWebRTC
     from tests.test_native_realtime_transports import OFFER_SDP
 
     peer = call_peer

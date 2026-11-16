@@ -26,9 +26,9 @@ async def test_history_exhaustion_rejects_before_dispatch_and_further_growth(quo
             if quota == "records":
                 initial = await session.history_snapshot()
                 model_window = await session.model_context()
-                await session.transact_history(
+                await session.replace_history_suffix(
                     expected_revision=initial.revision,
-                    keep=initial.total,
+                    keep_prefix_count=initial.total,
                     items=[
                         {
                             "type": "message",
@@ -179,9 +179,9 @@ async def test_output_admission_preserves_receipt_and_fences_accepted_effects(ou
             else:
                 initial = await session.history_snapshot()
                 model_window = await session.model_context()
-                await session.transact_history(
+                await session.replace_history_suffix(
                     expected_revision=initial.revision,
-                    keep=initial.total,
+                    keep_prefix_count=initial.total,
                     items=[
                         {
                             "type": "message",

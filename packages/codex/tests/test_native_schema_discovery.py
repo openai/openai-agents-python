@@ -18,7 +18,7 @@ from agents import (
     Turn,
     function_tool,
 )
-from agents.realtime import realtime_handoff
+from agents.realtime.native import realtime_handoff
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import (

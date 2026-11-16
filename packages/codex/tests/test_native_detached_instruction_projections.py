@@ -32,8 +32,10 @@ async def test_detached_original_projection_requires_its_own_admitted_provenance
         async with timeout(30), agent.session() as source:
             await (await source.submit("initial input")).get_result()
             snapshot = await source.history_snapshot()
-            await source.transact_history(
-                expected_revision=snapshot.revision, keep=0, items=[caller, audit, tail]
+            await source.replace_history_suffix(
+                expected_revision=snapshot.revision,
+                keep_prefix_count=0,
+                items=[caller, audit, tail],
             )
             expected = await source.history_snapshot()
             assert list(expected.items) == [caller, audit, tail]
@@ -135,7 +137,9 @@ async def test_top_level_projected_instructions_require_an_accepted_publication(
         else:
             async with agent.session(state=state) as restored:
                 snapshot = await restored.history_snapshot()
-                await restored.transact_history(expected_revision=snapshot.revision, keep=0)
+                await restored.replace_history_suffix(
+                    expected_revision=snapshot.revision, keep_prefix_count=0
+                )
                 result = await (await restored.submit("continue")).get_result()
                 assert result.final_output == "restored answer"
             assert len(responses.requests) == 2

@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from agents import Agent, NativeProvider
-from agents.realtime import RealtimeConfig, RealtimeResponse
+from agents.realtime.native import RealtimeConfig, RealtimeResponse
 from tests._asyncio import timeout
 from tests.test_native_realtime import realtime_peer as realtime_peer
 from tests.test_native_realtime_manual_audio import SendHookAdapter
@@ -314,7 +314,7 @@ async def test_message_is_captured_before_waiting_for_audio_commit(realtime_peer
 async def test_provider_deletion_keeps_canonical_target_audit(realtime_peer, observed):
     from contextlib import aclosing
 
-    from agents.realtime import (
+    from agents.realtime.native import (
         RealtimeConversationItemDeleted,
         RealtimeConversationItemObserved,
         RealtimeHistory,

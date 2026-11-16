@@ -371,7 +371,7 @@ async def test_manual_resume_retains_sampling_but_rebinds_transport(monkeypatch,
             state = await session.suspend()
         staged_text = "Keep this staged input across restore."
         if stage_input:
-            state = state.with_pending_input(staged_text)
+            state = state.with_appended_pending_input(staged_text)
         encoded = state.to_json()
         assert "SYNTHETIC_MANUAL_SOURCE" not in encoded
         assert "SYNTHETIC_MANUAL_QUERY" not in encoded

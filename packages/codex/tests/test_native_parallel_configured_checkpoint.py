@@ -5,7 +5,7 @@ from contextlib import aclosing
 import pytest
 
 from _agents_codex.session import Session
-from agents import Agent, ApprovalRequested, NativeProvider, SessionState, function_tool
+from agents import Agent, FunctionToolApprovalRequest, NativeProvider, SessionState, function_tool
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call
 from tests.test_native_configured_agent_tool import MODEL, peer
@@ -15,7 +15,7 @@ async def pending_two(session):
     captured = []
     async with aclosing(session.interactions()) as interactions:
         async for request in interactions:
-            assert isinstance(request, ApprovalRequested)
+            assert isinstance(request, FunctionToolApprovalRequest)
             captured.append(request)
             if len(captured) == 2:
                 assert {item.call_id for item in captured} == {"inner_left", "inner_right"}

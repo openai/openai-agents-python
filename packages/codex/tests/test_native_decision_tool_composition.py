@@ -52,7 +52,7 @@ async def test_managed_before_and_approval_predicate_inherit_live_decision_owner
     @function_tool(
         before=before,
         needs_approval=needs_approval,
-        run_before_approval=True,
+        run_input_policy_before_approval=True,
     )
     async def risky(context: ToolContext[None], value: str) -> str:
         effects.append((context.call_id, value))

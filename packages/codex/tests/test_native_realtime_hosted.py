@@ -13,7 +13,7 @@ import pytest
 from aiohttp import web
 
 from agents import Agent, NativeProvider, function_tool
-from agents.realtime import (
+from agents.realtime.native import (
     NativeRealtimeHostedMcpTool,
     RealtimeConfig,
     RealtimeHostedMcpApprovalRequested,

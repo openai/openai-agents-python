@@ -16,7 +16,7 @@ from agents import (
     Turn,
     function_tool,
 )
-from agents.realtime import RealtimeAgentConfig, RealtimeConfig
+from agents.realtime.native import RealtimeAgentConfig, RealtimeConfig
 from tests._asyncio import timeout
 from tests.native_fixtures import function_call, text_response
 from tests.test_native_mcp_tools import Peer
@@ -49,7 +49,7 @@ async def test_realtime_rechecks_source_predicate_before_native_mcp(
             instructions="Read selected records.",
             tools=[HttpMCP(name="records", url=url, tools=["lookup"])],
             provider=provider,
-            realtime=RealtimeAgentConfig(tool_enabled=enabled),
+            realtime=RealtimeAgentConfig(is_tool_enabled=enabled),
         )
         opening = (
             Agent(name="Backend", instructions="Backend", provider=provider)
@@ -99,7 +99,7 @@ async def test_realtime_rechecks_mcp_revocation_after_dispatch_hook(
     release = asyncio.Event()
     predicate_tools = []
 
-    def tool_enabled(context, tool):
+    def is_tool_enabled(context, tool):
         assert context.agent is agent
         predicate_tools.append(tool)
         return context.context["enabled"]
@@ -140,7 +140,7 @@ async def test_realtime_rechecks_mcp_revocation_after_dispatch_hook(
                 )
             ],
             provider=provider,
-            realtime=RealtimeAgentConfig(tool_enabled=tool_enabled),
+            realtime=RealtimeAgentConfig(is_tool_enabled=is_tool_enabled),
         )
         async with (
             agent.session(context=application) as session,

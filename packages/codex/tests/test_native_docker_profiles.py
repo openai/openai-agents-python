@@ -293,20 +293,23 @@ def qualification_evidence(tmp_path):
     )
     from xml.etree import ElementTree
 
-    suite = ElementTree.Element("testsuite", tests="8", errors="0", failures="0", skipped="0")
+    suite = ElementTree.Element(
+        "testsuite", tests=str(len(gate["NATIVE_CASES"])), errors="0", failures="0", skipped="0"
+    )
     receipts = []
-    for i, (name, module) in enumerate(gate["NATIVE_CASES"].items()):
+    for name, (module, count) in gate["NATIVE_CASES"].items():
         ElementTree.SubElement(
             suite, "testcase", name=name, classname="packages.codex.tests." + module
         )
-        receipts.append(
-            {
-                "case": "packages/codex/tests/" + module + ".py::" + name,
-                "containerId": f"{i + 1:064x}",
-                "imageId": IMAGE,
-                "profile": profile,
-            }
-        )
+        for _ in range(count):
+            receipts.append(
+                {
+                    "case": "packages/codex/tests/" + module + ".py::" + name,
+                    "containerId": f"{len(receipts) + 1:064x}",
+                    "imageId": IMAGE,
+                    "profile": profile,
+                }
+            )
     ElementTree.ElementTree(suite).write(tmp_path / "native-docker.xml")
     (tmp_path / "inspection-receipts.jsonl").write_text(
         "".join(json.dumps(r) + "\n" for r in receipts)
@@ -341,6 +344,8 @@ def qualification_evidence(tmp_path):
         "source",
         "audit",
         "slot",
+        "missing-inspection",
+        "extra-inspection",
         "missing-outer-proc-links",
         "wrong-outer-proc-links",
     ],
@@ -380,6 +385,15 @@ def test_qualification_requires_complete_current_postcleanup_owners(
         data = json.loads((tmp_path / "finalization.json").read_text())
         data["ownedCleanup"] = 1
         save("finalization.json", data)
+    elif failure in {"missing-inspection", "extra-inspection"}:
+        path = tmp_path / "inspection-receipts.jsonl"
+        rows = path.read_text().splitlines()
+        if failure == "missing-inspection":
+            del rows[0]
+        else:
+            extra = {**json.loads(rows[0]), "containerId": "f" * 64}
+            rows.append(json.dumps(extra))
+        path.write_text("\n".join(rows) + "\n")
     elif failure == "audit":
         (tmp_path / "profile-audit.log").write_text('apparmor="DENIED" profile="unrelated"')
     if failure:

@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from agents import Agent, CapabilityError, NativeProvider, function_tool
-from agents.realtime import RealtimeConfig, RealtimeDelegation
+from agents.realtime.native import RealtimeConfig, RealtimeDelegation
 from agents.voice import NativeSessionVoiceWorkflow
 from tests._asyncio import timeout
 from tests.native_fixtures import function_call, text_response

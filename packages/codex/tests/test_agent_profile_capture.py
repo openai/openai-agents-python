@@ -7,7 +7,7 @@ import pytest
 
 from _agents_codex._agent_profiles import _capture_agent_graph
 from agents import Agent, NativeAgents, NativeOutput, NativeRole, PromptedOutput
-from agents.realtime import realtime_handoff
+from agents.realtime.native import realtime_handoff
 
 
 def test_no_handoff_capture_preserves_native_defaults_and_identity():

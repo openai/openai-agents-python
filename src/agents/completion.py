@@ -3,7 +3,7 @@
 from _agents_codex.completion import (
     CompletionContext as CompletionContext,
     ContinueTurn as ContinueTurn,
-    FinishToolBatch as FinishToolBatch,
+    FinishTurn as FinishTurn,
     ToolBatchCompletionContext as ToolBatchCompletionContext,
     ToolBatchResult as ToolBatchResult,
 )
@@ -11,7 +11,7 @@ from _agents_codex.completion import (
 __all__ = [
     "CompletionContext",
     "ContinueTurn",
-    "FinishToolBatch",
+    "FinishTurn",
     "ToolBatchCompletionContext",
     "ToolBatchResult",
 ]
