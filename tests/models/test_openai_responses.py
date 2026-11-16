@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from dataclasses import asdict, fields, replace
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import httpx2
 import pytest
@@ -29,6 +30,7 @@ from agents import (
     ModelSettings,
     ModelTracing,
     ProgrammaticToolCallingTool,
+    RunConfig,
     Runner,
     ShellTool,
     Tool,
@@ -2828,6 +2830,98 @@ async def test_get_response_rejects_failed_terminal_response_status(status: str)
             handoffs=[],
             tracing=ModelTracing.DISABLED,
         )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transport", "stream", "status", "has_usage"),
+    [
+        pytest.param("http", False, "incomplete", True, id="http-incomplete"),
+        pytest.param("http", True, "incomplete", True, id="http-stream-incomplete"),
+        pytest.param("websocket", False, "failed", True, id="websocket-failed"),
+        pytest.param("websocket", True, "incomplete", True, id="websocket-stream-incomplete"),
+        pytest.param("http", False, "failed", False, id="http-without-usage"),
+    ],
+)
+async def test_runner_accounts_for_terminal_responses_usage(
+    monkeypatch: pytest.MonkeyPatch, transport: str, stream: bool, status: str, has_usage: bool
+) -> None:
+    # Exercise the Responses transport parsers before the runner sees the terminal failure.
+    payload = _response_with_terminal_status(status).model_dump()
+    if has_usage:
+        payload["usage"] = {
+            "input_tokens": 12,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 16,
+            "output_tokens_details": {"reasoning_tokens": 16},
+            "total_tokens": 28,
+        }
+    terminal = f"response.{status}"
+    frame = json.dumps({"type": terminal, "response": payload, "sequence_number": 0})
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if stream:
+            return httpx2.Response(
+                200,
+                content=f"event: {terminal}\ndata: {frame}\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx2.Response(200, json=payload)
+
+    async with AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://provider.example/v1",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+    ) as client:
+        if transport == "websocket":
+            model = OpenAIResponsesWSModel(model="fake", openai_client=client)
+            monkeypatch.setattr(
+                model,
+                "_open_websocket_connection",
+                AsyncMock(return_value=DummyWSConnection([frame])),
+            )
+        else:
+            model = OpenAIResponsesModel(model="fake", openai_client=client)
+        agent = Agent(name="test", model=model)
+        run_config = RunConfig(trace_include_sensitive_data=False)
+
+        if stream:
+            result = Runner.run_streamed(agent, "hi", run_config=run_config)
+            raw_event_types = []
+            with pytest.raises(ModelBehaviorError, match=terminal) as exc:
+                async for event in result.stream_events():
+                    if event.type == "raw_response_event":
+                        raw_event_types.append(event.data.type)
+            assert raw_event_types == [terminal]
+            assert result.final_output is None
+            assert result.raw_responses == []
+            assert exc.value.run_data is not None
+            assert result.context_wrapper.usage == exc.value.run_data.context_wrapper.usage
+        else:
+            with pytest.raises(ModelBehaviorError, match=terminal) as exc:
+                await Runner.run(agent, "hi", run_config=run_config)
+
+    assert exc.value.run_data is not None
+    assert exc.value.run_data.raw_responses == []
+    usage = exc.value.run_data.context_wrapper.usage
+    (span,) = [span for span in fetch_ordered_spans() if span.span_data.type == "response"]
+    assert span.error is not None
+    assert span.span_data.response is None
+    assert span.span_data.input is None
+    if has_usage:
+        assert usage.requests == 1
+        assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (12, 16, 28)
+        assert usage.output_tokens_details.reasoning_tokens == 16
+        (entry,) = usage.request_usage_entries
+        assert (entry.input_tokens, entry.output_tokens, entry.total_tokens) == (12, 16, 28)
+        assert entry.output_tokens_details.reasoning_tokens == 16
+        assert span.span_data.usage["requests"] == 1
+        assert span.span_data.usage["total_tokens"] == 28
+        assert span.span_data.usage["output_tokens_details"]["reasoning_tokens"] == 16
+    else:
+        assert usage == Usage()
+        assert span.span_data.usage is None
 
 
 @pytest.mark.allow_call_model_methods

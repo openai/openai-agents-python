@@ -652,6 +652,8 @@ class OpenAIResponsesModel(Model):
                 )
                 raise
             except Exception as e:
+                if isinstance(e, ModelBehaviorError) and e._terminal_usage is not None:
+                    span_response.span_data.usage = model_usage_to_span_usage(e._terminal_usage)
                 span_response.set_error(
                     SpanError(
                         message="Error getting response",
@@ -754,6 +756,10 @@ class OpenAIResponsesModel(Model):
                                 if isinstance(terminal_response, Response)
                                 else None,
                             )
+                            if terminal_failure_error._terminal_usage is not None:
+                                span_response.span_data.usage = model_usage_to_span_usage(
+                                    terminal_failure_error._terminal_usage
+                                )
                         elif chunk_type in {"error", "response.error"}:
                             terminal_failure_error = response_error_event_failure_error(
                                 cast(str, chunk_type),

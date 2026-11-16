@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
 from inspect import isawaitable
 from typing import Any, TypeVar
 
@@ -10,7 +11,7 @@ import httpx2
 from openai import APIConnectionError, APITimeoutError, BadRequestError
 
 from .._httpx_compat import is_legacy_httpx_instance
-from ..exceptions import ModelTimeoutError
+from ..exceptions import ModelBehaviorError, ModelTimeoutError
 from ..items import ModelResponse, TResponseStreamEvent
 from ..logger import log_model_action_debug, logger
 from ..models._retry_runtime import (
@@ -323,16 +324,6 @@ async def _await_model_attempt(
     raise timeout_error from None
 
 
-def _build_zero_request_usage_entry() -> RequestUsage:
-    return RequestUsage(
-        input_tokens=0,
-        output_tokens=0,
-        total_tokens=0,
-        input_tokens_details=Usage().input_tokens_details,
-        output_tokens_details=Usage().output_tokens_details,
-    )
-
-
 def _build_request_usage_entry_from_usage(usage: Usage) -> RequestUsage:
     return RequestUsage(
         input_tokens=usage.input_tokens,
@@ -343,19 +334,43 @@ def _build_request_usage_entry_from_usage(usage: Usage) -> RequestUsage:
     )
 
 
-def apply_retry_attempt_usage(usage: Usage, failed_attempts: int) -> Usage:
+def apply_retry_attempt_usage(
+    usage: Usage, failed_attempts: int, reported_usage: Mapping[int, Usage] | None = None
+) -> Usage:
     if failed_attempts <= 0:
         return usage
 
-    successful_request_entries = list(usage.request_usage_entries)
-    if not successful_request_entries:
-        successful_request_entries.append(_build_request_usage_entry_from_usage(usage))
-
-    usage.requests = max(usage.requests, 1) + failed_attempts
-    usage.request_usage_entries = [
-        _build_zero_request_usage_entry() for _ in range(failed_attempts)
-    ] + successful_request_entries
+    successful_entries = usage.request_usage_entries or [
+        _build_request_usage_entry_from_usage(usage)
+    ]
+    usage.requests = max(usage.requests, 1)
+    usage.request_usage_entries = []
+    for attempt in range(1, failed_attempts + 1):
+        attempt_usage = reported_usage.get(attempt) if reported_usage else None
+        if attempt_usage is None:
+            usage.requests += 1
+            usage.request_usage_entries.append(_build_request_usage_entry_from_usage(Usage()))
+        else:
+            previous_entries = len(usage.request_usage_entries)
+            usage.add(attempt_usage)
+            if len(usage.request_usage_entries) == previous_entries:
+                usage.request_usage_entries.append(
+                    _build_request_usage_entry_from_usage(attempt_usage)
+                )
+    usage.request_usage_entries.extend(successful_entries)
     return usage
+
+
+@contextmanager
+def record_failed_attempt_usage_on_error(run_usage: Usage) -> Iterator[dict[int, Usage]]:
+    """Keep provider-reported usage when the retry loop exits without a model response."""
+    reported_usage: dict[int, Usage] = {}
+    try:
+        yield reported_usage
+    except BaseException:
+        for usage in reported_usage.values():
+            run_usage.add(usage)
+        raise
 
 
 async def _close_async_iterator(iterator: Any) -> None:
@@ -589,10 +604,12 @@ async def get_response_with_retry(
     conversation_id: str | None,
     timeout: float | None = None,
     replay_unsafe_request: bool = False,
+    reported_usage: dict[int, Usage] | None = None,
 ) -> ModelResponse:
     request_attempt = 1
     policy_attempt = 1
-    failed_policy_attempts = 0
+    if reported_usage is None:
+        reported_usage = {}
     compatibility_retries_taken = 0
     disable_websocket_pre_event_retry = replay_unsafe_request or (
         _should_disable_websocket_pre_event_retry(retry_settings)
@@ -619,11 +636,12 @@ async def get_response_with_retry(
             ):
                 response = await _await_model_attempt(get_response(), timeout)
             response.usage = apply_retry_attempt_usage(
-                response.usage,
-                failed_policy_attempts + compatibility_retries_taken,
+                response.usage, request_attempt - 1, reported_usage
             )
             return response
         except Exception as error:
+            if isinstance(error, ModelBehaviorError) and error._terminal_usage is not None:
+                reported_usage[request_attempt] = error._terminal_usage
             if (
                 not replay_unsafe_request
                 and _is_conversation_locked_error(error)
@@ -686,7 +704,6 @@ async def get_response_with_retry(
             await _sleep_for_retry(decision.delay or 0.0)
             request_attempt += 1
             policy_attempt += 1
-            failed_policy_attempts += 1
 
 
 async def stream_response_with_retry(

@@ -5,6 +5,7 @@ from typing import Any
 from openai.types.responses import Response
 
 from ..exceptions import ModelBehaviorError, _mark_error_to_drain_stream_events
+from ..usage import _response_usage_to_usage
 
 
 def format_response_terminal_failure(
@@ -54,6 +55,8 @@ def response_terminal_failure_error(
     response: Response | None,
 ) -> ModelBehaviorError:
     error = ModelBehaviorError(format_response_terminal_failure(event_type, response))
+    if response is not None and response.usage is not None:
+        error._terminal_usage = _response_usage_to_usage(response.usage)
     _mark_error_to_drain_stream_events(error)
     return error
 
