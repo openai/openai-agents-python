@@ -12,7 +12,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from agents import Agent, NativeError, NativeProvider
+from agents import Agent, LocalStorage, NativeError, NativeProvider
 from agents.observation import ResponseFactReceived
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output
@@ -260,6 +260,40 @@ async def test_refusal_content_survives_failure_privately_without_a_fake_termina
                 "response_facts"
             ]
         assert len(peer.requests) == 2
+
+
+async def test_local_storage_retains_private_facts_and_usage_in_rollback_carriers(tmp_path) -> None:
+    async with fact_peer() as peer:
+        peer.replies.extend([(True, False), (False, False)])
+        provider = NativeProvider(base_url=peer.url, api_key="synthetic-local-rollback")
+        agent = Agent(instructions="Answer.", model="gpt-5.2", provider=provider)
+        storage = LocalStorage(tmp_path / "profile")
+        async with timeout(30), agent.session(storage=storage) as session:
+            turn = await session.submit("answer")
+            with pytest.raises(NativeError):
+                await turn.get_result()
+            recorded = [value async for value in session.turns()][0]
+            assert recorded["run_usage"]["requests"] == 1
+            assert any(row["fact"].get("text") == PRIVATE for row in recorded["response_facts"])
+            identity = session.id
+        (rollout,) = (tmp_path / "profile").rglob(f"*{identity}.jsonl")
+        rows = [json.loads(line) for line in rollout.read_text().splitlines()]
+        carriers = [row for row in rows if "sdk_record" in row]
+        assert {row["sdk_record"]["kind"] for row in carriers} == {"model_attempt", "response_fact"}
+        assert all(
+            row["type"] == "event_msg"
+            and row["payload"] == {"type": "token_count", "info": None, "rate_limits": None}
+            for row in carriers
+        )
+        assert not any(row["type"] == "response_fact_record" for row in rows)
+        async with timeout(30), agent.session(storage=storage, resume=identity) as restored:
+            reopened = [value async for value in restored.turns()][0]
+            assert reopened["response_facts"] == recorded["response_facts"]
+            assert reopened["run_usage"] == recorded["run_usage"]
+            assert reopened["request_usage_entries"] == recorded["request_usage_entries"]
+            await (await restored.submit("continue")).get_result()
+        assert len(peer.requests) == 2
+        assert PRIVATE not in json.dumps(peer.requests[-1])
 
 
 async def test_unsolicited_probabilities_are_not_retained_or_published() -> None:

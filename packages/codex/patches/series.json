@@ -1535,7 +1535,11 @@
     {
       "path": "sdk-continue-remote-exit-after-read-gap.patch",
       "sha256": "8594a384d284ef2ea4de94f461c324ad0a22e627926db1dabdf593f316fa6639"
+    },
+    {
+      "path": "sdk-alpha7-readable-rollout-facts.patch",
+      "sha256": "679171c5eac3280fd27442dcce28382972b8d3644b2a4adbc3b8547ced404e4a"
     }
   ],
-  "result_tree": "2b35d96a8146c992fee32dbe76050edf5bfd5403"
+  "result_tree": "8d63d41f500c8c1899c949781528e4e2a82f7c74"
 }

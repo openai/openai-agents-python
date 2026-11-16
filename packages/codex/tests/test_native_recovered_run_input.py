@@ -73,12 +73,13 @@ async def test_original_input_after_manual_recovery(responses, kind, capture, le
         )
         assert isinstance(interrupted, InteractionRequired)
         assert interrupted.state is not None
-        payload = json.loads(interrupted.state.to_json())
+        encoded = interrupted.state.to_json()
         if legacy:
-            payload.pop("original_input", None)
-        else:
-            assert ("original_input" in payload) is capture
-        state = SessionState.from_json(json.dumps(payload))
+            payload = interrupted.state.model_dump(mode="json", exclude_defaults=True)
+            del payload["original_input"]
+            encoded = json.dumps(payload)
+        state = SessionState.from_json(encoded)
+        assert state.original_input == (expected if capture and not legacy else None)
         responses.respond(assistant_output("resumed answer"))
         with pytest.raises(RunDiagnosticError if expose else ValueError) as failed:
             await agent.run(None, state=state, capture_error_details=expose, on_interaction=answer)

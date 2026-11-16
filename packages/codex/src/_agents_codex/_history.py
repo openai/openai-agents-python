@@ -528,6 +528,20 @@ def project_history(
 
     for record_index, record in enumerate(history):
         kind, payload = record["type"], record["payload"]
+        # Native storage carries new facts on an empty token-count record so
+        # older readers can skip them without losing the rest of the history.
+        if kind == "event_msg" and payload["type"] == "token_count":
+            sdk_record = record.get("sdk_record")
+            if (
+                isinstance(sdk_record, dict)
+                and payload.get("info") is None
+                and payload.get("rate_limits") is None
+                and payload.get("api_rate_limits") is None
+            ):
+                if sdk_record.get("kind") == "model_attempt":
+                    payload = {**sdk_record["data"], "type": "_sdk_model_attempt"}
+                elif sdk_record.get("kind") == "response_fact":
+                    kind, payload = "response_fact_record", sdk_record["data"]
         if kind in {"compacted", "session_meta"}:
             pending_user = None
         if kind == "turn_context":

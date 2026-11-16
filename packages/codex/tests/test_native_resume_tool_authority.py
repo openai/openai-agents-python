@@ -85,7 +85,7 @@ async def test_recovered_batch_requires_fresh_acceptance_for_each_result(
         await next_request(source.interactions(), manual)
         state = json.loads((await source.suspend()).to_json())
     if mixed:
-        outcomes = state["native_continuation"]["tool_outcomes"]["outcomes"]
+        outcomes = state["agent_options"]["_sdk_checkpoint_receipts"]["tool_outcomes"]["outcomes"]
         outcomes[:] = [
             [call_id, True if call_id == "automatic" else succeeded]
             for call_id, succeeded in outcomes

@@ -47,7 +47,11 @@ def saved(**extra):
 def test_original_input_round_trip(input):
     state = SessionState.from_json(json.dumps(saved(original_input=input)))
     assert state.original_input == input
-    assert json.loads(state.to_json())["original_input"] == input
+    encoded = state.to_json()
+    wire = json.loads(encoded)
+    assert "original_input" not in wire
+    assert wire["agent_options"]["_sdk_checkpoint_receipts"]["original_input"] == input
+    assert SessionState.from_json(encoded) == state
 
 
 @pytest.mark.parametrize(
@@ -56,6 +60,21 @@ def test_original_input_round_trip(input):
 def test_invalid_original_input_is_rejected(input):
     with pytest.raises((ValidationError, TypeError)):
         SessionState.from_json(json.dumps(saved(original_input=input)))
+
+
+def test_checkpoint_receipts_cannot_override_flat_values():
+    payload = saved(
+        original_input="flat value",
+        agent_options={"_sdk_checkpoint_receipts": {"original_input": "second value"}},
+    )
+    with pytest.raises(ValueError, match="Duplicate checkpoint field"):
+        SessionState.from_json(json.dumps(payload))
+
+
+def test_checkpoint_receipts_cannot_hide_unrecognized_fields():
+    payload = saved(agent_options={"_sdk_checkpoint_receipts": {"run_budget": {}}})
+    with pytest.raises(ValueError, match="Invalid checkpoint receipts"):
+        SessionState.from_json(json.dumps(payload))
 
 
 def test_pre_change_state_has_no_invented_input():
@@ -85,7 +104,11 @@ def test_original_input_round_trip_with_request_budget(version):
             )
         )
     )
-    restored = SessionState.from_json(state.to_json())
+    encoded = state.to_json()
+    assert json.loads(encoded)["format_version"] == version
+    assert json.loads(encoded)["original_input"] == state.original_input
+    assert "_sdk_checkpoint_receipts" not in encoded
+    restored = SessionState.from_json(encoded)
     assert restored.original_input == "original budgeted request"
     assert restored.run_budget is not None
     assert restored.run_budget.admitted_requests == 1

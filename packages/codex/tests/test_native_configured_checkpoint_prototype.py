@@ -112,10 +112,13 @@ async def test_public_parent_checkpoint_resumes_configured_child_and_held_siblin
                 for entry in value["native_continuation"]["pending_manual"]
                 if entry.get("continuation")
             ]
-            child_usage = continuation["state"]["run_usage"]
+            child_usage = SessionState.from_json(json.dumps(continuation["state"])).run_usage
+            assert child_usage is not None
             continuation.pop("usage_in_parent")
-            value["run_usage"] = {
-                key: count - child_usage[key] for key, count in value["run_usage"].items()
+            receipts = value["agent_options"]["_sdk_checkpoint_receipts"]
+            receipts["run_usage"] = {
+                key: count - getattr(child_usage, key)
+                for key, count in receipts["run_usage"].items()
             }
             saved = SessionState.from_json(json.dumps(value))
         with pytest.raises((ValueError, RuntimeError), match="tool|decl|operation"):

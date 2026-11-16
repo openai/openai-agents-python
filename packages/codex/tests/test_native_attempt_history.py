@@ -60,6 +60,19 @@ def test_legacy_history_without_native_attempt_facts_keeps_its_existing_record_s
     assert turns[0]["usage"]["input_tokens"] == 5
 
 
+def test_legacy_readable_history_keeps_model_attempt_accounting():
+    attempt = fact("owner", 2, 7)["payload"]
+    attempt.pop("type")
+    carrier = {
+        "type": "event_msg",
+        "payload": {"type": "token_count", "info": None, "rate_limits": None},
+        "sdk_record": {"kind": "model_attempt", "data": attempt},
+    }
+    turns, _ = project_history([event("turn_started"), carrier, event("turn_complete")], "session")
+    assert turns[0]["run_usage"]["requests"] == 2
+    assert turns[0]["run_usage"]["total_tokens"] == 7
+
+
 def test_latest_owner_snapshots_preserve_legacy_and_compaction_without_counting_raw_copies():
     records = [
         event("turn_started"),
