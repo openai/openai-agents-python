@@ -98,7 +98,7 @@ In the source archive, native examples live under `examples/codex/`. Run their m
 
 Development-branch examples can require APIs added after a release. Keep the example files and installed build on the same version. To run unreleased examples, follow the [source-build instructions](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source).
 
-The current [v0-to-native migration guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/MIGRATION.md) and [migration tutorial](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/migration/README.md) describe the current development branch. For the preview wheel, use the [migration guide](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.8/MIGRATION.md) and [migration tutorial](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.8/examples/codex/migration/README.md) from the release tag.
+The [v0-to-native migration guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/MIGRATION.md) and [migration tutorial](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/migration/README.md) use a matching source build. Keep the SDK, examples, and guides on the same source commit.
 
 ### Upgrade an installed preview
 

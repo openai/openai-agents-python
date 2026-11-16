@@ -4,9 +4,10 @@ Use the guides and examples for the SDK version in your Python environment. To c
 
 | Preview release | Guides | Examples |
 | --- | --- | --- |
+| [0.24.0-alpha.8](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.8) | [Wheels and checksums](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.8), [Quickstart](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.8/README.md#run-your-first-agent), [Test without an API key](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.8/docs/sdk/testing.md#write-a-tool-test) | [Browse examples](https://github.com/openai/openai-agents-python/tree/v0.24.0-alpha.8/examples/codex) |
 | [0.24.0-alpha.7](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.7) | [Install](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/installation.md), [Quickstart](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/index.md), [Test without an API key](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/testing.md) | [Browse examples](https://github.com/openai/openai-agents-python/tree/v0.24.0-alpha.7/examples/codex) |
 
-The installation guide for each release explains how to download and run its examples.
+For alpha.8, use the wheel links in the release and the examples from its tag. For platform requirements and installation steps for the current preview, see the [installation guide](installation.md).
 
 Each preview release includes its wheel downloads, checksums, and release notes.
 
@@ -14,6 +15,6 @@ If you [build the SDK from source](https://github.com/openai/openai-agents-pytho
 
 ## Machine-readable topic index
 
-[topics.json](topics.json) lists package metadata and task aliases for coding agents. File paths are relative to this SDK guide's directory. `package_version` and `release` identify the version targeted by these source files; check `status` before treating that version as published. `published_release` links to the available release's downloads and notes, and `published_guide` links to its corrected setup and quickstart. The original release tag remains unchanged.
+[topics.json](topics.json) lists package metadata and task aliases for coding agents. File paths are relative to this SDK guide's directory. `package_version` and `release` identify the version targeted by these source files; check `status` before treating that version as published. `published_release` links to the available release's downloads and notes, and `published_guide` links to the quickstart for that version.
 
 `source_ref` identifies the development branch. Fetch the index and linked files from one pinned commit to keep them consistent. Contributor build instructions are in [CONTRIBUTING.md](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md).
