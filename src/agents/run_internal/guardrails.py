@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, TypeVar
 
 from ..agent import Agent
 from ..exceptions import InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered
@@ -52,12 +52,15 @@ async def run_single_output_guardrail(
         return result
 
 
-def _unreported_input_guardrail_results(
-    tasks: list[asyncio.Task[InputGuardrailResult]], recorded: list[InputGuardrailResult]
-) -> list[InputGuardrailResult]:
+TGuardrailResult = TypeVar("TGuardrailResult", InputGuardrailResult, OutputGuardrailResult)
+
+
+def _unreported_guardrail_results(
+    tasks: list[asyncio.Task[TGuardrailResult]], recorded: list[TGuardrailResult]
+) -> list[TGuardrailResult]:
     """Collect successful siblings that as_completed has not yielded yet."""
     recorded_ids = {id(result) for result in recorded}
-    missing = []
+    missing: list[TGuardrailResult] = []
     for task in tasks:
         if task.done() and not task.cancelled() and task.exception() is None:
             result = task.result()
@@ -93,7 +96,7 @@ async def run_input_guardrails_with_queue(
             if result.output.tripwire_triggered:
                 streamed_result.input_guardrail_results = (
                     streamed_result.input_guardrail_results
-                    + _unreported_input_guardrail_results(
+                    + _unreported_guardrail_results(
                         guardrail_tasks, streamed_result.input_guardrail_results
                     )
                 )
@@ -166,9 +169,7 @@ async def run_input_guardrails(
             result = await done
             if result.output.tripwire_triggered:
                 record(result)
-                for sibling in _unreported_input_guardrail_results(
-                    guardrail_tasks, guardrail_results
-                ):
+                for sibling in _unreported_guardrail_results(guardrail_tasks, guardrail_results):
                     record(sibling)
                 for t in guardrail_tasks:
                     t.cancel()
@@ -226,6 +227,8 @@ async def run_output_guardrails(
             result = await done
             if result.output.tripwire_triggered:
                 record(result)
+                for sibling in _unreported_guardrail_results(guardrail_tasks, guardrail_results):
+                    record(sibling)
                 for t in guardrail_tasks:
                     t.cancel()
                 await asyncio.gather(*guardrail_tasks, return_exceptions=True)
