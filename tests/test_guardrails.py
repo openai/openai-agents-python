@@ -2267,6 +2267,51 @@ def test_output_guardrail_tripwire_reports_results_sync():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_output_guardrail_tripwire_snapshot(streamed: bool) -> None:
+    """Both immediate output checks finish before the runner consumes the first verdict."""
+
+    cleanup_finished = asyncio.Event()
+
+    async def finish_during_cleanup(ctx, agent, agent_output):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_finished.set()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel()
+    model.enqueue([get_text_message("hello")])
+    agent = Agent(
+        name="billing",
+        model=model,
+        output_guardrails=[
+            OutputGuardrail(
+                guardrail_function=get_sync_output_guardrail(True), name="refund_policy"
+            ),
+            OutputGuardrail(guardrail_function=get_sync_output_guardrail(False), name="tone"),
+            OutputGuardrail(guardrail_function=finish_during_cleanup, name="late"),
+        ],
+    )
+
+    if streamed:
+        result = Runner.run_streamed(agent, "Refund request without an order number")
+        with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
+            async for _ in result.stream_events():
+                pass
+        assert sorted(_result_names(result.output_guardrail_results)) == ["refund_policy", "tone"]
+    else:
+        with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
+            await Runner.run(agent, "Refund request without an order number")
+
+    exc = exc_info.value
+    assert cleanup_finished.is_set()
+    assert exc.guardrail_result.guardrail.get_name() == "refund_policy"
+    assert exc.run_data is not None
+    assert sorted(_result_names(exc.run_data.output_guardrail_results)) == ["refund_policy", "tone"]
+
+
+@pytest.mark.asyncio
 async def test_output_guardrail_results_reported_on_success():
     """Passing output guardrails still land on the successful result exactly once."""
     model = ScriptedModel()
