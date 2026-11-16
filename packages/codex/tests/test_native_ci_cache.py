@@ -1172,7 +1172,7 @@ def test_manual_native_entrypoint_uses_the_existing_qualified_package_pipeline(
         ("push", "feat/codex-harness", "same", "123", False),
     ],
 )
-def test_windows_filename_sibling_preserves_inline_fallbacks(event, ref, repo, source, parallel):
+def test_windows_regression_sibling_preserves_inline_fallbacks(event, ref, repo, source, parallel):
     values = {
         "github.repository": "openai/openai-agents-python" if repo == "same" else "fork/repo",
         "github.event_name": event,
@@ -1184,13 +1184,19 @@ def test_windows_filename_sibling_preserves_inline_fallbacks(event, ref, repo, s
         (ROOT / ".github/workflows/codex-python.yml").read_text(), Loader=yaml.BaseLoader
     )
     sibling = workflow["jobs"]["windows-filename"]
-    filename = next(
-        step
-        for step in _steps()
-        if step.get("name") == "Test Windows project-search filename handling"
-    )
     assert _condition(sibling["if"], values) is parallel
-    assert _condition(filename["if"].replace("runner.os", "'Windows'"), values) is (
-        not source and not parallel
-    )
-    assert sibling["steps"][-2]["run"] == filename["run"]
+    assert sibling["if"] == workflow["jobs"]["build"]["env"]["WINDOWS_REGRESSIONS_IN_SIBLING"]
+    values["env.WINDOWS_REGRESSIONS_IN_SIBLING"] = "true" if parallel else "false"
+    steps = {step.get("name"): step for step in workflow["jobs"]["build"]["steps"]}
+    sibling_steps = {step.get("name"): step for step in sibling["steps"]}
+    for name in (
+        "Test Windows project-search filename handling",
+        "Run the native binding admission regression",
+    ):
+        assert _condition(steps[name]["if"].replace("runner.os", "'Windows'"), values) is (
+            not source and not parallel
+        )
+        assert sibling_steps[name]["run"] == steps[name]["run"]
+    copy_fixture = "Copy the shared test executor source"
+    assert sibling_steps[copy_fixture]["run"] == steps[copy_fixture]["run"]
+    assert _condition(steps["Build the shared test executor"]["if"], values) is (not source)

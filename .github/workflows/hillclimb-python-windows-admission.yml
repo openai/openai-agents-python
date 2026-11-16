@@ -1,0 +1,50 @@
+name: Measure Windows native admission overlap
+
+on:
+  push:
+    branches: [ci/hillclimb/python-windows-admission-trial]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    outputs:
+      provenance: ${{ steps.source.outputs.provenance }}
+    steps:
+      - name: Record the benchmark push identity
+        id: source
+        run: |
+          python3 -I -S - <<'PYTHON'
+          import json
+          import os
+
+          provenance = {
+              "repository_id": os.environ["GITHUB_REPOSITORY_ID"],
+              "source_sha": os.environ["GITHUB_SHA"],
+              "head_ref": os.environ["GITHUB_REF_NAME"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "pull_request": None,
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("provenance=" + json.dumps(provenance) + "\n")
+          PYTHON
+
+  produce-windows:
+    needs: source
+    uses: ./.github/workflows/codex-python.yml
+    with:
+      runner: windows-latest
+      native_provenance: ${{ needs.source.outputs.provenance }}
+
+  native-windows:
+    needs: [source, produce-windows]
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with:
+      runner: windows-latest
+      artifact_id: ${{ needs.produce-windows.outputs.artifact_id }}
+      artifact_digest: ${{ needs.produce-windows.outputs.artifact_digest }}
+      native_provenance: ${{ needs.source.outputs.provenance }}
