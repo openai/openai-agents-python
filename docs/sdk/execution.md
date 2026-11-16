@@ -19,6 +19,8 @@ Use an SDK wheel and native helpers that match the documented API, then [configu
 
 Use `Environment.local()` to run selected tools with the SDK's native sandbox on a supported Linux or macOS host. The matching wheel supplies the local executor helper. Give the executor an existing absolute working directory and select the tools the model may call. Use a workspace your application owns.
 
+For Linux local execution, the published wheel has been relying on a compatible `bwrap` binary in `/usr/bin` or `/bin`. The host has been needing the `bubblewrap` package and permission to create sandbox namespaces.
+
 For platform-specific setup failures, see [Platform troubleshooting](#platform-troubleshooting).
 
 On macOS, local execution needs a usable per-user `launchd` domain and OS support for signaling a specific process instance. If either capability is unavailable, the SDK fails before running local commands. You can import the wheel and use model-only or WSS sessions on supported hosts that lack either capability.
@@ -377,7 +379,7 @@ Use the [Docker gateway helper](https://github.com/openai/openai-agents-python/b
 
 The application owns the Docker daemon, image, container ID and authenticated gateway route. Keep that job record outside conversation checkpoints. The gateway stays outside the offline container and sends the exec-server protocol through standard input and output; the example publishes no container port. Closing a gateway attachment does not end the job. Keep the container for restore and remove it when the job finishes.
 
-The image and host must support the native executor and its Linux sandbox. Docker's network setting alone does not establish that support. The example's network checks do not attest an arbitrary WSS URL or prevent a Docker administrator from changing the job later. Native macOS executors and Windows named pipes use their separate platform paths; a Docker Linux guest uses the Linux path regardless of the controller's OS.
+The image and host must support the native executor and its Linux sandbox. The executor has been needing a compatible `bwrap` inside the container, supplied in the image or bundled with the executor. Docker's network setting alone does not establish that support. The example's network checks do not attest an arbitrary WSS URL or prevent a Docker administrator from changing the job later. Native macOS executors and Windows named pipes use their separate platform paths; a Docker Linux guest uses the Linux path regardless of the controller's OS.
 
 ### Windows named pipes in an offline job
 
