@@ -799,14 +799,23 @@ def publication(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest)
         "old_version": "0.24.0-alpha.2",
         "linux_floor": linux_floor,
         "reads": [],
+        "tags": {},
+        "releases": [],
+        "repository": {"permissions": {"push": True}},
     }
 
-    def api(path: str) -> Any:
+    def api(path: str, *, missing_ok: bool = False) -> Any:
         state["reads"].append(path)
         if path.startswith("actions/workflows/tests.yml/runs?"):
             return {"total_count": len(state["runs"]), "workflow_runs": state["runs"]}
         if path.startswith("git/commits/"):
             return {"parents": [{"sha": "c" * 40}]}
+        if path.startswith("git/ref/tags/"):
+            assert missing_ok
+            return state["tags"].get(path.removeprefix("git/ref/tags/"))
+        if path.startswith("releases?"):
+            page = int(path.rsplit("page=", 1)[1])
+            return state["releases"][(page - 1) * 100 : page * 100]
         if "/jobs?" in path:
             return {"total_count": len(jobs), "jobs": jobs}
         if "/artifacts?" in path:
@@ -816,6 +825,12 @@ def publication(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest)
         raise AssertionError(path)
 
     monkeypatch.setattr(automation, "repo_api", api)
+
+    def repository_api(endpoint: str) -> Any:
+        assert endpoint == f"repos/{automation.REPO}"
+        return state["repository"]
+
+    monkeypatch.setattr(automation, "api", repository_api)
     monkeypatch.setattr(
         automation,
         "content",
@@ -852,6 +867,52 @@ def test_preview_distribution_requires_explicit_source_branch(publication: dict[
     windows = next(job for job in publication["jobs"] if job["name"] == "tests-windows (3.14)")
     windows["conclusion"] = "failure"
     with pytest.raises(ValueError, match="test gates"):
+        automation.qualified_distributions("b" * 40, source_branch="feat/codex-harness")
+
+
+def test_preview_qualifies_after_version_preparation(publication: dict[str, Any]) -> None:
+    publication["run"]["head_branch"] = "feat/codex-harness"
+    publication["old_version"] = "0.24.0-alpha.3"
+    publication["releases"] = [{"tag_name": "v0.24.0-alpha.2", "draft": False}]
+
+    qualified = automation.qualified_distributions("b" * 40, source_branch="feat/codex-harness")
+
+    assert qualified["version"] == "0.24.0-alpha.3"
+    assert qualified["run"]["head_sha"] == "b" * 40
+    assert qualified["artifacts"] == publication["artifacts"]
+
+
+@pytest.mark.parametrize("permissions", [None, {"push": False}])
+def test_preview_requires_draft_visibility(
+    publication: dict[str, Any], permissions: dict[str, bool] | None
+) -> None:
+    publication["run"]["head_branch"] = "feat/codex-harness"
+    publication["repository"] = {} if permissions is None else {"permissions": permissions}
+
+    with pytest.raises(ValueError, match="requires GitHub push access to check draft releases"):
+        automation.qualified_distributions("b" * 40, source_branch="feat/codex-harness")
+
+
+@pytest.mark.parametrize("tag", ["v0.24.0-alpha.3", "v0.24.0a3"])
+def test_preview_rejects_existing_tags(publication: dict[str, Any], tag: str) -> None:
+    publication["run"]["head_branch"] = "feat/codex-harness"
+    publication["tags"][tag] = {"ref": f"refs/tags/{tag}"}
+
+    with pytest.raises(ValueError, match="Preview tag already exists"):
+        automation.qualified_distributions("b" * 40, source_branch="feat/codex-harness")
+
+
+@pytest.mark.parametrize("tag", ["v0.24.0-alpha.3", "v0.24.0a3"])
+@pytest.mark.parametrize("draft", [False, True])
+def test_preview_rejects_existing_releases(
+    publication: dict[str, Any], tag: str, draft: bool
+) -> None:
+    publication["run"]["head_branch"] = "feat/codex-harness"
+    publication["releases"] = [
+        {"tag_name": f"v0.23.0-alpha.{index}", "draft": False} for index in range(100)
+    ] + [{"tag_name": tag, "draft": draft}]
+
+    with pytest.raises(ValueError, match="Preview release already exists"):
         automation.qualified_distributions("b" * 40, source_branch="feat/codex-harness")
 
 
