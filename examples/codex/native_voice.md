@@ -1,6 +1,6 @@
 # Native voice
 
-This guide describes the current source branch. Use a matching source build, or examples from the exact preview release you installed. Do not assume that current branch APIs exist in an older wheel. These examples make live API requests.
+Native Session Realtime APIs are new in alpha.8 and use `agents.realtime.native`. The alpha.7 wheel does not include these APIs. Check [release availability](../../docs/sdk/versions.md) and use example files from the same version as your SDK. These examples make live API requests.
 
 Choose the task that matches your input and application:
 
@@ -14,7 +14,7 @@ Choose the task that matches your input and application:
 
 ## Prepare the SDK
 
-Follow [Build the SDK from source](../../CONTRIBUTING.md#build-the-sdk-from-source) for the supported Python runtime, native build tools, and wheel installation. Use the wheel built from the same checkout as these examples. For the speech pipeline and the custom WebSocket adapter below, install that wheel with its `voice` extra. Replace the path in this command with the actual wheel under `dist/`:
+Install a matching alpha.8 wheel when available, or follow [Build the SDK from source](../../CONTRIBUTING.md#build-the-sdk-from-source) while alpha.8 is unreleased. For the speech pipeline and custom WebSocket adapter below, install the wheel with its `voice` extra. Replace the path in this command with the downloaded or built wheel:
 
 ```sh
 python -m pip install '/absolute/path/to/your-built-wheel.whl[voice]'
@@ -60,7 +60,7 @@ Pass `NativeSessionVoiceWorkflow(session, tools=[lookup])` to limit every transc
 
 ## Choose a connection
 
-Import the native types from `agents.realtime`.
+Import the native types from `agents.realtime.native`.
 
 | Path | Configuration and ownership |
 | --- | --- |
@@ -77,7 +77,7 @@ Repeat the builder's `model`, `voice`, `instructions`, `settings`, and `tools` w
 
 ```python
 from dataclasses import replace
-from agents.realtime import RealtimeConfig, RealtimeSIP
+from agents.realtime.native import RealtimeConfig, RealtimeSIP
 
 config = RealtimeConfig(
     model="gpt-realtime",
@@ -107,7 +107,7 @@ This server recipe publishes an SDP answer without closing its native owner. The
 ```python
 from collections.abc import Awaitable, Callable
 from agents import Agent
-from agents.realtime import RealtimeConfig, RealtimeSession, RealtimeWebRTC
+from agents.realtime.native import RealtimeConfig, RealtimeSession, RealtimeWebRTC
 
 
 async def serve_webrtc(
@@ -169,7 +169,7 @@ import sys
 from pathlib import Path
 
 from agents import Agent
-from agents.realtime import (
+from agents.realtime.native import (
     RealtimeConfig,
     RealtimeConversationItemObserved,
     RealtimeResponse,
@@ -300,7 +300,11 @@ The connection retains 128 recent deletion receipts. Within this window, you can
 
 Once the receipt window evicts any deletion, individual item lookup requires a current live provider observation. An arbitrary or unobserved ID, including one from before SIP attachment, then rejects locally. This restriction lasts until a new voice connection. Further pruning and history editing remain available.
 
-Created or changed messages use the provider's role-specific content types: `input_text` for system messages; `input_text`, `input_audio`, or `input_image` for user messages; and `output_text` for assistant messages. For images, pass a PNG or JPEG base64 data URI. New or recreated images must be no larger than 4,096 pixels per side. Validation sets a 64 MiB decoder allocation allowance; decoder overhead can use more memory. Ordinary 3,840×2,160 RGBA8 images fit these decoding limits if their encoded payload fits the input budget. Existing image items can remain unchanged. Validation and recreation share a 64 MiB budget for decoded pixel data across all rows and image parts; repeated checks count again. Exceeding this budget rejects the whole edit before writes. Base64-encode audio bytes in the session's input audio format. Existing assistant audio can be retained but cannot be created through this API. Keep existing provider item IDs and give new messages unique IDs.
+Created or changed messages use the provider's role-specific content types: `input_text` for system messages; `input_text`, `input_audio`, or `input_image` for user messages; and `output_text` for assistant messages.
+
+For images, pass a PNG or JPEG base64 data URI. New or recreated images must be no larger than 4,096 pixels per side. Validation sets a 64 MiB decoder allocation allowance; decoder overhead can use more memory. Ordinary 3,840×2,160 RGBA8 images fit these decoding limits if their encoded payload fits the input budget. Existing image items can remain unchanged. Validation and recreation share a 64 MiB budget for decoded pixel data across all rows and image parts; repeated checks count again. Exceeding this budget rejects the whole edit before writes.
+
+Base64-encode audio bytes in the session's input audio format. Existing assistant audio can be retained but cannot be created through this API. Keep existing provider item IDs and give new messages unique IDs.
 
 Edits preserve known provider predecessors. An edit that needs an unknown insertion position fails before sending changes. If provider events leave the order incomplete, ordered history retrieval and replacement are unavailable. You can still retrieve a known item by ID. Adding items to an empty observed history appends them to the provider conversation.
 
@@ -322,7 +326,7 @@ For backend turns, `Agent.handoffs` defines the graph before Session opening. `a
 
 ### Contextual voice Agents and structured handoffs
 
-`Agent(realtime=RealtimeAgentConfig(...))` supplies voice-specific instructions, prompt defaults, output guardrails, and tool predicates. Sync and async instruction callbacks receive `RealtimeAgentContext`, containing the application context and issuing Agent. Explicit `RealtimeConfig.instructions` and prompt settings override Agent defaults. Agent output guardrails run alongside connection guardrails against the response's captured source.
+`Agent(realtime=RealtimeAgentConfig(...))` supplies voice-specific instructions, prompt defaults, output guardrails, and tool predicates. Set `is_tool_enabled(context, tool)` to decide whether a tool is available for that voice request; a predicate does not grant new capabilities. Sync and async instruction callbacks receive `RealtimeAgentContext`, containing the application context and issuing Agent. Explicit `RealtimeConfig.instructions` and prompt settings override Agent defaults. Agent output guardrails run alongside connection guardrails against the response's captured source.
 
 `realtime_handoff()` captures a target, custom tool name and description, enable predicate, and optional application callback. Structured `input_type` declarations accept Pydantic models, dataclasses, and TypedDict classes. Validation precedes the callback; callback completion precedes target acceptance. Callback return values do not select another target. Failed validation or callbacks leave the target unactivated.
 
@@ -331,7 +335,7 @@ import asyncio
 from dataclasses import dataclass
 
 from agents import Agent, NativeProvider
-from agents.realtime import RealtimeAgentConfig, RealtimeConfig, realtime_handoff
+from agents.realtime.native import RealtimeAgentConfig, RealtimeConfig, realtime_handoff
 
 
 @dataclass
@@ -356,7 +360,7 @@ async def main():
             provider=provider,
             realtime=RealtimeAgentConfig(
                 instructions=instructions,
-                tool_enabled=lambda context, tool: context.context["allow_tools"],
+                is_tool_enabled=lambda context, tool: context.context["allow_tools"],
             ),
             handoffs=[
                 realtime_handoff(

@@ -14,7 +14,7 @@ from aiohttp import WSMsgType, web
 from aiohttp.test_utils import TestServer
 
 from agents import Agent, NativeProvider, PromptedOutput
-from agents.realtime import RealtimeConfig, RealtimeSIP, RealtimeWebRTC
+from agents.realtime.native import RealtimeConfig, RealtimeSIP, RealtimeWebRTC
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, text_response
 

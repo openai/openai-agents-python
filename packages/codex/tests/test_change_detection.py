@@ -139,6 +139,7 @@ def test_manual_verification_checks_unchanged_tree_without_deploying(
         (".github/scripts/detect-changes.sh", True, False, False, False),
         (".github/scripts/check_optional_truthiness.py", True, False, False, False),
         (".github/scripts/run_serial_tests.py", True, False, False, False),
+        (".github/scripts/sdk-test-settings.json", True, False, False, False),
         (
             ".github/scripts/run-asyncio-teardown-stability.sh",
             True,
@@ -823,11 +824,14 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
         "needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true'"
     )
     suites = jobs["tests-windows-shards"]
-    assert suites["needs"] == "native-windows"
+    assert suites["needs"] == ["changes", "native-windows"]
     assert suites["if"] == "${{ !inputs.native_only }}"
     assert suites["strategy"] == {
         "fail-fast": "false",
-        "matrix": {"python-version": ["3.10", "3.14"], "shard": ["0", "1", "2"]},
+        "matrix": {
+            "python-version": ["3.10", "3.14"],
+            "shard": "${{ fromJSON(needs.changes.outputs.sdk_tests).windows_indices }}",
+        },
     }
     assert suites["runs-on"] == (
         "${{ fromJSON(github.repository == 'openai/openai-agents-python' && "
@@ -838,7 +842,7 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
     parallel = steps["Run parallel tests"]
     assert parallel["env"] == {
         "SDK_TEST_SHARD_INDEX": "${{ matrix.shard }}",
-        "SDK_TEST_SHARD_COUNT": "3",
+        "SDK_TEST_SHARD_COUNT": "${{ fromJSON(needs.changes.outputs.sdk_tests).windows_shards }}",
     }
     assert 'pytest -n 2 --dist worksteal -m "not serial"' in parallel["run"]
     serial = steps["Run serial tests after all workers exit"]
@@ -1054,6 +1058,7 @@ def test_native_selection_routes_stack_sources_and_pr_provenance(
         "new_build_module",
         "build_bytecode_noise",
         "python_fixture_changed",
+        "sdk_test_settings_changed",
         "native_fixture_data_changed",
         "hatch_controls_changed",
         "uv_build_controls_changed",
@@ -1138,7 +1143,6 @@ def test_native_selection_routes_stack_sources_and_pr_provenance(
         "harness_pr_arm64_late",
         "harness_pr_arm64_qualifier_failed",
         "harness_pr_arm64_branch",
-        "dependencies_harness_push_arm64_reuse",
         "current_run",
         "unrelated_source",
         "native_changed",
@@ -1227,29 +1231,6 @@ def test_native_selection_routes_stack_sources_and_pr_provenance(
         "release_split_donors",
         "unknown_two_platforms",
         "unknown_complete",
-        "dependencies_reuse",
-        "dependencies_prefer_wheel",
-        "dependencies_missing_cleanup",
-        "dependencies_build_payload_changed_modified",
-        "dependencies_native_changed",
-        "dependencies_build_metadata_changed",
-        "dependencies_dependency_lock_changed",
-        "dependencies_native_workflow_changed",
-        "dependencies_selector_changed",
-        "dependencies_detector_changed",
-        "dependencies_untrusted",
-        "dependencies_failed_run",
-        "dependencies_in_progress",
-        "dependencies_missing_artifact",
-        "dependencies_expired",
-        "dependencies_cross_platform_interleaving",
-        "dependencies_replacement_artifact",
-        "dependencies_earlier_attempt_sdk",
-        "dependencies_qualification_failed",
-        "dependencies_invalid_snapshot_digest",
-        "dependencies_branch_same",
-        "dependencies_branch_other_pr",
-        "dependencies_branch_copied",
     ],
 )
 def test_native_build_selection(
@@ -1261,12 +1242,6 @@ def test_native_build_selection(
     import urllib.parse
     import urllib.request
 
-    dependency_cache = scenario.startswith("dependencies_")
-    prefer_wheel = scenario == "dependencies_prefer_wheel"
-    missing_cleanup = scenario == "dependencies_missing_cleanup"
-    scenario = scenario.removeprefix("dependencies_")
-    if prefer_wheel or missing_cleanup:
-        scenario = "reuse"
     harness_pr = scenario.startswith("harness_pr_")
     harness_push = scenario.startswith("harness_push_")
     scenario = scenario.removeprefix("harness_pr_").removeprefix("harness_push_")
@@ -1326,7 +1301,6 @@ def test_native_build_selection(
     for name in (
         ".github/actions/setup-native/action.yml",
         ".github/scripts/install-linux-native-build-tools.sh",
-        ".github/scripts/native-dependencies.py",
         ".github/scripts/use-ubuntu-archive-if-needed.sh",
         ".github/scripts/detect-changes.sh",
     ):
@@ -1488,6 +1462,9 @@ def test_native_build_selection(
             retired_demo.write_text("# Demo or fixture present in the qualified source\n")
     (repo / "pyproject.toml").write_text(project)
     (repo / "uv.lock").write_text(lock)
+    sdk_settings = ".github/scripts/sdk-test-settings.json"
+    if scenario == "sdk_test_settings_changed":
+        (repo / sdk_settings).write_bytes((ROOT / sdk_settings).read_bytes())
     if scenario == "pre_native":
         native_workflow.unlink()
     base = _commit(repo)
@@ -1578,6 +1555,10 @@ def test_native_build_selection(
         path = repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('{"new": "fixture data"}\n')
+    elif scenario == "sdk_test_settings_changed":
+        (repo / sdk_settings).write_text(
+            '{"linux_workers": 8, "macos_shards": 2, "windows_shards": 2, "reporting": "-rA"}\n'
+        )
     elif scenario == "native_setup_changed":
         path = repo / ".github/actions/setup-native/action.yml"
         path.write_text(path.read_text() + "\n# New toolchain setup\n")
@@ -1685,22 +1666,24 @@ def test_native_build_selection(
             _commit(repo, "packages/codex/Cargo.toml")
         else:
             _commit(repo, "src/agents/parent.py")
-    if dependency_cache and not prefer_wheel:
-        additional_paths += ("packages/codex/rust/lib.rs",)
-    head = _commit(
-        repo,
-        "packages/codex/Cargo.toml"
-        if scenario
-        in {
-            "native_changed",
-            "push_package_demos_native_changed",
-            "push_native_config_native_changed",
-            "build_payload_changed_native_changed",
-            "retired_realtime_extra_native_changed",
-        }
-        else "src/agents/agent.py",
-        *additional_paths,
-    )
+    if scenario == "sdk_test_settings_changed":
+        head = _commit(repo)
+        assert _git(repo, "diff", "--name-only", base, head) == sdk_settings
+    else:
+        head = _commit(
+            repo,
+            "packages/codex/Cargo.toml"
+            if scenario
+            in {
+                "native_changed",
+                "push_package_demos_native_changed",
+                "push_native_config_native_changed",
+                "build_payload_changed_native_changed",
+                "retired_realtime_extra_native_changed",
+            }
+            else "src/agents/agent.py",
+            *additional_paths,
+        )
     if scenario == "unrelated_source":
         _git(repo, "checkout", "-b", "unrelated", initial)
         donor = _commit(repo, "unrelated.txt")
@@ -1950,18 +1933,6 @@ def test_native_build_selection(
             ("macos", "macos-latest"),
         )
     ]
-    if dependency_cache:
-        for job in jobs:
-            if prefer_wheel:
-                job["steps"].append(dict(job["steps"][-1]))
-            job["steps"][-1]["name"] = "Publish Rust dependencies"
-            job["steps"].insert(
-                -1,
-                {
-                    "name": "Prepare Rust dependency cache",
-                    "conclusion": "skipped" if missing_cleanup else "success",
-                },
-            )
     if scenario == "producer_failed":
         jobs[0]["conclusion"] = "failure"
     if scenario == "producer_in_progress":
@@ -1989,17 +1960,6 @@ def test_native_build_selection(
             )
         )
     ]
-    if prefer_wheel:
-        artifacts.extend(dict(artifact, id=artifact["id"] + 1000) for artifact in list(artifacts))
-    if dependency_cache:
-        for artifact in artifacts:
-            if prefer_wheel and artifact["id"] < 2000:
-                continue
-            artifact["name"] = (
-                artifact["name"]
-                .removesuffix("-" + native_identity)
-                .replace("native-snapshot-", "native-dependencies-")
-            )
     if scenario == "missing_artifact":
         artifacts.pop()
     if scenario in {
@@ -2233,40 +2193,7 @@ def test_native_build_selection(
         requests.append(url)
         if scenario == "api_error":
             raise urllib.error.URLError("API unavailable")
-        if "/workflows/" in url:
-            if scenario == "old_snapshot_after_docs":
-                pytest.fail(
-                    "Exact matching snapshots must survive a recent history of docs-only runs"
-                )
-            query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
-            assert query["event"] in [["push"], ["pull_request"]]
-            if scenario in {"branch_running", "branch_queued"}:
-                assert query.get("status") == ["success"]
-            status_matches = (
-                "status" not in query
-                or source["status"] in query["status"]
-                or source["conclusion"] in query["status"]
-            )
-            # Return PR runs even for a filtered search to exercise the trust gate itself.
-            response = {
-                "workflow_runs": [] if scenario == "no_history" or not status_matches else [source]
-            }
-            if scenario == "release_split_donors":
-                response["workflow_runs"].append({**source, "id": 124})
-            if scenario == "branch_completed_precedence":
-                active = {
-                    **source,
-                    "id": 124,
-                    "head_sha": head,
-                    "status": "in_progress",
-                    "conclusion": None,
-                    "referenced_workflows": [
-                        {**ref, "sha": head, "path": ref["path"].split("@", 1)[0] + "@" + head}
-                        for ref in source["referenced_workflows"]
-                    ],
-                }
-                response["workflow_runs"].insert(0, active)
-        elif "/actions/artifacts?" in url:
+        if "/actions/artifacts?" in url:
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
             assert query["name"] == ["native-snapshot-Linux-X64-" + native_identity]
             assert query["per_page"] == ["100"]
@@ -2283,7 +2210,7 @@ def test_native_build_selection(
                 for artifact in artifacts
                 if artifact["name"] == query["name"][0]
             ]
-            if scenario == "no_history" or dependency_cache and not prefer_wheel:
+            if scenario == "no_history":
                 matches = []
             if scenario in {"snapshot_index_filtered", "snapshot_index_page_bound"}:
                 rejected = (
@@ -2462,29 +2389,20 @@ def test_native_build_selection(
             }[scenario]
         )
     assert (output.read_text() if output.exists() else "") == (
-        (
-            "dependency_run=123\ndependencies="
-            if dependency_cache and not prefer_wheel
-            else "run_id=123\nartifacts="
-        )
+        "run_id=123\nartifacts="
         + json.dumps(
             {
                 identity: {
                     "id": index + 1000,
                     "digest": "sha256:" + "a" * 64,
                     "provenance": provenance,
-                    **(
-                        {}
-                        if dependency_cache and not prefer_wheel
-                        else {"name": "native-snapshot-" + identity + "-" + native_identity}
-                    ),
+                    "name": "native-snapshot-" + identity + "-" + native_identity,
                 }
                 for index, identity in enumerate(
                     ("Linux-X64", "Windows-X64", "macOS-ARM64")
                     + (
                         ("Linux-ARM64",)
                         if (harness_push or harness_pr)
-                        and not dependency_cache
                         and arm64_case in {"reuse", "copied", "completed"}
                         else ()
                     )
@@ -2495,8 +2413,6 @@ def test_native_build_selection(
         )
         + "\n"
         if arm64_case != "invalid_digest"
-        and not missing_cleanup
-        and not (dependency_cache and scenario == "branch_copied")
         and (
             harness_pr
             and scenario in {"in_progress", "failed_run", "completed_during_selection"}
@@ -2506,6 +2422,7 @@ def test_native_build_selection(
                 "python_dependencies_changed",
                 "build_bytecode_noise",
                 "python_fixture_changed",
+                "sdk_test_settings_changed",
                 "old_snapshot_after_docs",
                 "snapshot_index_filtered",
                 "snapshot_index_duplicate_runs",

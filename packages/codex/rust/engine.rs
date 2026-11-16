@@ -65,6 +65,7 @@ pub struct EngineState {
     config_json: String,
     runtime_json: String,
     pub(crate) closed: AtomicBool,
+    unconfirmed_process_shutdown: AtomicBool,
     pub(crate) lifecycle: Mutex<()>,
     event_owners: Mutex<HashMap<ThreadId, ThreadId>>,
     // MemoryThreadStore cannot persist extension mode. Retain only provenance
@@ -688,6 +689,7 @@ impl EngineState {
             config_json,
             runtime_json,
             closed: AtomicBool::new(false),
+            unconfirmed_process_shutdown: AtomicBool::new(false),
             native_threads: std::sync::Mutex::new(Vec::new()),
             lifecycle: Mutex::new(()),
             event_owners: Mutex::new(HashMap::new()),
@@ -1836,6 +1838,14 @@ impl EngineState {
             tokio::time::timeout_at(deadline, auth.wait_for_saved_chatgpt_refresh())
                 .await
                 .context("Codex shutdown incomplete: saved login refresh timed out")?;
+        }
+        if self.unconfirmed_process_shutdown.load(Ordering::Acquire) {
+            // The owning manager includes explicit profile executors. A pending
+            // start can still hold one after its thread has stopped.
+            self.manager
+                .environment_manager()
+                .retire_owned_executor_connections()
+                .await;
         }
         self.interception.check_code_import_cleanup()?;
         if let Some(store) = self.store.as_any().downcast_ref::<LocalThreadStore>() {
@@ -3608,6 +3618,9 @@ impl ThreadState {
             .clear();
         self.closed.store(true, Ordering::Release);
         if let Some(error) = process_shutdown_error {
+            self.engine
+                .unconfirmed_process_shutdown
+                .store(true, Ordering::Release);
             return Err(error.into());
         }
         if let Some(store) = &self.engine.local_checklist_store {

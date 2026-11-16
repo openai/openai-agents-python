@@ -6,7 +6,7 @@ import pytest
 
 from agents import (
     Agent,
-    ApprovalRequested,
+    FunctionToolApprovalRequest,
     InteractionExpiredError,
     NativeProvider,
     PendingRequests,
@@ -69,7 +69,7 @@ async def test_restored_parent_reseal_retains_second_child_approval_without_repe
                 first = await turn.wait_for_request_or_result()
                 assert isinstance(first, PendingRequests)
                 [original] = first.requests
-                assert isinstance(original, ApprovalRequested)
+                assert isinstance(original, FunctionToolApprovalRequest)
                 assert original.call_id == "child-first"
                 await sibling_done.wait()
                 saved_first = await source.suspend()
@@ -81,12 +81,12 @@ async def test_restored_parent_reseal_retains_second_child_approval_without_repe
                 first = await turn.wait_for_request_or_result()
                 assert isinstance(first, PendingRequests)
                 [reentered] = first.requests
-                assert isinstance(reentered, ApprovalRequested)
+                assert isinstance(reentered, FunctionToolApprovalRequest)
                 await resumed.respond(reentered.reply(True))
                 second = await turn.wait_for_request_or_result()
                 assert isinstance(second, PendingRequests)
                 [next_approval] = second.requests
-                assert isinstance(next_approval, ApprovalRequested)
+                assert isinstance(next_approval, FunctionToolApprovalRequest)
                 assert next_approval.call_id == "child-second"
                 assert effects == ["sibling", "child-first"]
                 saved_second = await resumed.suspend()
@@ -100,7 +100,7 @@ async def test_restored_parent_reseal_retains_second_child_approval_without_repe
                 pending = await turn.wait_for_request_or_result()
                 assert isinstance(pending, PendingRequests)
                 [current] = pending.requests
-                assert isinstance(current, ApprovalRequested)
+                assert isinstance(current, FunctionToolApprovalRequest)
                 assert current.call_id == "child-second"
                 with pytest.raises(InteractionExpiredError):
                     await final.respond(original.reply(True))

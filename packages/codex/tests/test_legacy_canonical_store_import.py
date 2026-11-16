@@ -57,7 +57,9 @@ async def verify_import(
         ) as session,
     ):
         before = await session.history_snapshot()
-        await session.transact_history(expected_revision=before.revision, keep=0, items=items)
+        await session.replace_history_suffix(
+            expected_revision=before.revision, keep_prefix_count=0, items=items
+        )
         assert (await session.history_snapshot()).items[: len(items)] == tuple(items)
         turn = await session.submit("Continue.")
         assert (await turn.get_result()).final_output == "restored"

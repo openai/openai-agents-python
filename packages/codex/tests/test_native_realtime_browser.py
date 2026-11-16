@@ -24,7 +24,7 @@ CLIENT = Path(__file__).resolve().parents[3] / "examples" / "codex" / "web_start
 )
 async def test_native_webrtc_browser_microphone_and_playback() -> None:
     # This public API belongs to the separately coordinated native voice change.
-    from agents.realtime import RealtimeConfig, RealtimeWebRTC
+    from agents.realtime.native import RealtimeConfig, RealtimeWebRTC
 
     node = shutil.which("node")
     assert node is not None and (CLIENT / "node_modules/playwright").exists(), (

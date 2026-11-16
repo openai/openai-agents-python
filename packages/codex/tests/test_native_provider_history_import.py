@@ -50,9 +50,9 @@ async def test_transact_history_replays_portable_parts_of_foreign_items(
             instructions="Respond.", model="gpt-5.2", provider=provider
         ).session() as session:
             before = await session.history_snapshot()
-            await session.transact_history(
+            await session.replace_history_suffix(
                 expected_revision=before.revision,
-                keep=0,
+                keep_prefix_count=0,
                 items=[foreign_text, foreign_reasoning, portable_reasoning],
             )
             after = await session.history_snapshot()
@@ -106,7 +106,9 @@ async def test_history_accepts_repeated_classic_placeholder_ids(
             instructions="Respond.", model="gpt-5.2", provider=provider
         ).session() as session:
             before = await session.history_snapshot()
-            await session.transact_history(expected_revision=before.revision, keep=0, items=items)
+            await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=0, items=items
+            )
             stored = await session.history_snapshot()
             result = await (await session.submit("Continue.")).get_result()
     assert result.final_output == "Continued."

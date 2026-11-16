@@ -67,7 +67,7 @@ daytona/usaspending_text2sql/
 1. **Connection-level**: SQLite opened with `?mode=ro` URI (read-only)
 2. **PRAGMA**: `query_only = ON` prevents writes even if validation is bypassed
 3. **Statement validation**: Only `SELECT`, `WITH`, `EXPLAIN`, `PRAGMA` are allowed
-4. **Row limit**: Hard cap (default 100 rows) with truncation detection
+4. **Row limits**: The tool has been displaying up to 100 rows to the model and saving up to 10,000 rows to a downloadable CSV by default. The `truncated` field has been reporting whether results exceed the CSV cap; results exceeding only the display limit have been keeping `truncated=false`.
 5. **Timeout**: Queries killed after 30 seconds
 
 <a id="audit-log"></a>

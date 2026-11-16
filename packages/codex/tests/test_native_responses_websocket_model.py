@@ -11,12 +11,16 @@ from _agents_codex._responses_websocket import _limited
 from agents import (
     Agent,
     ModelRequest,
-    ModelRunOwner,
     NativeProvider,
     ResponsesWebSocketModel,
     function_tool,
 )
-from agents.models import ModelRetryAdviceRequest, ResponsesWebSocketOptions
+from agents.models import (
+    ModelRetryAdviceRequest,
+    ModelRunOwner,
+    ResponsesSocketFactoryOptions,
+    ResponsesWebSocketOptions,
+)
 from agents.observation import RawProviderEvent
 from tests._asyncio import timeout
 
@@ -86,7 +90,7 @@ async def test_socket_factory_captures_options_and_detaches_request() -> None:
         "max_size": 4096,
     }
 
-    async def factory(current, selected):
+    async def factory(current: ModelRequest, selected: ResponsesSocketFactoryOptions) -> Socket:
         made.append((current, selected))
         current.body["model"] = "caller mutation"
         return socket

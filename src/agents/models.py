@@ -20,7 +20,7 @@ from _agents_codex.models import (
     ProviderResponseChain as ProviderResponseChain,
     ResponsesModel as ResponsesModel,
     ResponsesSocketFactory as ResponsesSocketFactory,
-    ResponsesSocketOptions as ResponsesSocketOptions,
+    ResponsesSocketFactoryOptions as ResponsesSocketFactoryOptions,
     ResponsesWebSocketModel as ResponsesWebSocketModel,
     ResponsesWebSocketOptions as ResponsesWebSocketOptions,
     get_hosted_agent_metadata as get_hosted_agent_metadata,

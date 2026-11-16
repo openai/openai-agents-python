@@ -167,7 +167,7 @@ async def test_handoff_input_restores_presentation_after_settled_sibling_effects
                     pytest.fail("Imported presentation must not acquire a live session")
             assert len(responses.requests) == 2
             assert effects == ["sibling"]
-        staged = saved.with_pending_input("extra authorized input")
+        staged = saved.with_appended_pending_input("extra authorized input")
         cleared = staged.without_pending_input()
         assert cleared.pending_input == []
         async with source.session(context=application, state=cleared) as restored:

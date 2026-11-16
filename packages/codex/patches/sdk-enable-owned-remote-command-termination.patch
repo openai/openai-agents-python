@@ -1,0 +1,126 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -249,6 +249,11 @@
+     pub cwd: PathUri,
+ }
+ 
++/// Require confirmed remote command cleanup for this SDK-owned thread.
++#[doc(hidden)]
++#[derive(Default)]
++pub struct ConfirmRemoteProcessTermination;
++
+ /// The SDK-local command cleanup could not prove that the named turn stopped.
+ #[derive(Clone, Debug)]
+ pub struct ManagedLocalExecCancelFailure(pub(crate) String);
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -57,6 +57,7 @@
+ pub use codex_protocol::protocol::EnvironmentConfig;
+ pub use codex_thread::BackgroundTerminalInfo;
+ pub use codex_thread::CodexThread;
++pub use codex_thread::ConfirmRemoteProcessTermination;
+ pub use codex_thread::ManagedLocalExecCancelFailure;
+ mod owned_question;
+ pub use codex_thread::CodexThreadSettingsOverrides;
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -1566,16 +1566,21 @@
+             .extension_data
+             .get::<Arc<crate::session::model_invocation_deadline::ModelInvocationDeadline>>();
+         let join_local_commands = reason == TurnAbortReason::Interrupted
+-            && self
++            && (self
+                 .services
+-                .turn_environments
+-                .environment_manager()
+-                .try_local_environment()
+-                .is_some_and(|environment| {
+-                    environment
+-                        .local_runtime_paths()
+-                        .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
+-                });
++                .thread_extension_data
++                .get::<crate::ConfirmRemoteProcessTermination>()
++                .is_some()
++                || self
++                    .services
++                    .turn_environments
++                    .environment_manager()
++                    .try_local_environment()
++                    .is_some_and(|environment| {
++                        environment
++                            .local_runtime_paths()
++                            .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
++                    }));
+         // Tools roots own source-specific batch futures and physical callback
+         // release receipts. Their cancellation must drain beyond the ordinary
+         // 100ms grace rather than dropping the owner and certifying a false join.
+diff --git a/codex-rs/core/src/tools/builtin_result_policy.rs b/codex-rs/core/src/tools/builtin_result_policy.rs
+--- a/codex-rs/core/src/tools/builtin_result_policy.rs
++++ b/codex-rs/core/src/tools/builtin_result_policy.rs
+@@ -144,14 +144,20 @@
+     invocation
+         .session
+         .services
+-        .turn_environments
+-        .environment_manager()
+-        .try_local_environment()
+-        .is_some_and(|environment| {
+-            environment
+-                .local_runtime_paths()
+-                .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
+-        })
++        .thread_extension_data
++        .get::<crate::ConfirmRemoteProcessTermination>()
++        .is_some()
++        || invocation
++            .session
++            .services
++            .turn_environments
++            .environment_manager()
++            .try_local_environment()
++            .is_some_and(|environment| {
++                environment
++                    .local_runtime_paths()
++                    .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
++            })
+ }
+ 
+ pub(crate) async fn pending_local_exec(
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -1794,10 +1794,16 @@
+                 }
+             };
+             if environment.is_remote()
+-                && environment
+-                    .local_runtime_paths()
+-                    .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
+                 && let Some(context) = tool_ctx
++                && (context
++                    .session
++                    .services
++                    .thread_extension_data
++                    .get::<crate::ConfirmRemoteProcessTermination>()
++                    .is_some()
++                    || environment
++                        .local_runtime_paths()
++                        .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt))
+             {
+                 let started = {
+                     let turn = &context.step_context.turn.extension_data;
+diff --git a/codex-rs/core-api/src/lib.rs b/codex-rs/core-api/src/lib.rs
+--- a/codex-rs/core-api/src/lib.rs
++++ b/codex-rs/core-api/src/lib.rs
+@@ -32,6 +32,7 @@
+ pub use codex_core::CodexAppsToolsCache;
+ pub use codex_core::CodexThread;
+ pub use codex_core::CodexThreadSettingsOverrides;
++pub use codex_core::ConfirmRemoteProcessTermination;
+ pub use codex_core::EnvironmentConfig;
+ pub use codex_core::EnvironmentMcpPolicy;
+ pub use codex_core::EnvironmentNetworkPolicy;

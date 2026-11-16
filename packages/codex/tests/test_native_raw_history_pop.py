@@ -18,7 +18,9 @@ async def test_raw_pop_empty_stale_and_exact_original(responses):
         async with Agent(instructions="Answer.", provider=provider).session() as session:
             opening = await session.history_snapshot()
             assert_only_collaboration_rows(opening.items)
-            await session.transact_history(expected_revision=opening.revision, keep=0)
+            await session.replace_history_suffix(
+                expected_revision=opening.revision, keep_prefix_count=0
+            )
             empty = await session.history_snapshot()
             assert empty.items == () and empty.total == 0
             result = await session.pop_history(expected_revision=empty.revision)
@@ -26,8 +28,8 @@ async def test_raw_pop_empty_stale_and_exact_original(responses):
             assert result.revision == empty.revision
             assert result.rebuilt_model_context is False
             assert await session.history_snapshot() == empty
-            await session.transact_history(
-                expected_revision=empty.revision, keep=0, items=[original]
+            await session.replace_history_suffix(
+                expected_revision=empty.revision, keep_prefix_count=0, items=[original]
             )
             before = await session.history_snapshot()
             with pytest.raises(RuntimeError, match="revision conflict"):
@@ -64,8 +66,8 @@ async def test_raw_pop_tool_output_cold_restore_repair_and_stored_sibling(respon
         async with agent.session(storage=storage) as source:
             identity = source.id
             initial = await source.history_snapshot()
-            await source.transact_history(
-                expected_revision=initial.revision, keep=0, items=[call, output]
+            await source.replace_history_suffix(
+                expected_revision=initial.revision, keep_prefix_count=0, items=[call, output]
             )
             before = await source.history_snapshot()
             sibling_id = await source.fork_stored()
@@ -94,8 +96,10 @@ async def test_raw_pop_tool_output_cold_restore_repair_and_stored_sibling(respon
                 item.get("call_id") == "pop-pair" for item in responses.requests[-1]["input"]
             )
             current = await restored.history_snapshot()
-            await restored.transact_history(
-                expected_revision=current.revision, keep=0, items=[call, output, *current.items[1:]]
+            await restored.replace_history_suffix(
+                expected_revision=current.revision,
+                keep_prefix_count=0,
+                items=[call, output, *current.items[1:]],
             )
             assert (
                 await (await restored.submit("continue after repair")).get_result()
@@ -130,8 +134,8 @@ async def test_raw_pop_covered_summary_requires_explicit_rebuild(responses):
         agent = Agent(instructions="Answer.", provider=provider)
         async with agent.session() as session:
             initial = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=initial.revision, keep=0, items=originals
+            await session.replace_history_suffix(
+                expected_revision=initial.revision, keep_prefix_count=0, items=originals
             )
             await session.compact(summary="covered summary marker")
             before = await session.history_snapshot()
@@ -174,9 +178,9 @@ async def test_raw_pop_keeps_summary_through_successive_cold_pops(
         )
         async with agent.session() as source:
             initial = await source.history_snapshot()
-            await source.transact_history(
+            await source.replace_history_suffix(
                 expected_revision=initial.revision,
-                keep=0,
+                keep_prefix_count=0,
                 items=[
                     {
                         "type": "message",
@@ -248,8 +252,8 @@ async def test_pop_preserves_acknowledged_provider_prefix_even_with_explicit_reb
                 "role": "user",
                 "content": [{"type": "input_text", "text": "Unsent draft."}],
             }
-            revision = await session.transact_history(
-                expected_revision=before.revision, keep=before.total, items=[draft]
+            revision = await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=before.total, items=[draft]
             )
             removed = await session.pop_history(expected_revision=revision)
             assert removed.item == draft

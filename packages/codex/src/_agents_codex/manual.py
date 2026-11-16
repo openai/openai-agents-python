@@ -351,7 +351,7 @@ class ActionRequested(Generic[InputT, ResultT]):
 
 
 @dataclass(frozen=True)
-class ApprovalDecision:
+class FunctionToolApprovalDecision:
     """A managed function decision; always applies within this Session and agent."""
 
     approve: bool
@@ -367,7 +367,7 @@ class ApprovalDecision:
             raise TypeError("Approval decisions require boolean approve/always and a string reason")
 
 
-class ApprovalRequested(ActionRequested[InputT, Any]):
+class FunctionToolApprovalRequest(ActionRequested[InputT, Any]):
     """A managed function awaiting a decision; approval executes its registered callback.
 
     A decision is valid only for this live invocation. Remembered decisions are
@@ -383,10 +383,10 @@ class ApprovalRequested(ActionRequested[InputT, Any]):
         """Detached validated arguments after the pre-approval input policy."""
         return deepcopy(self._effective_arguments)
 
-    def reply(self, value: bool | ApprovalDecision) -> ActionReply[Any]:
+    def reply(self, value: bool | FunctionToolApprovalDecision) -> ActionReply[Any]:
         """Return a decision from on_interaction without executing the callback here."""
-        decision = ApprovalDecision(value) if isinstance(value, bool) else value
-        if not isinstance(decision, ApprovalDecision):
+        decision = FunctionToolApprovalDecision(value) if isinstance(value, bool) else value
+        if not isinstance(decision, FunctionToolApprovalDecision):
             raise TypeError("A managed function reply requires an approval decision")
         return _reply(self, decision)
 
@@ -1146,9 +1146,9 @@ class _CapturedApproval(_CapturedManual):
     def _requires_live_manual_session(self) -> bool:
         return self.function._requires_live_manual_session
 
-    def request(self, *args: Any, **kwargs: Any) -> ApprovalRequested[Any]:
+    def request(self, *args: Any, **kwargs: Any) -> FunctionToolApprovalRequest[Any]:
         manual = super().request(*args, **kwargs)
-        request = object.__new__(ApprovalRequested)
+        request = object.__new__(FunctionToolApprovalRequest)
         for name in ActionRequested.__dataclass_fields__:
             object.__setattr__(request, name, getattr(manual, name))
         return request

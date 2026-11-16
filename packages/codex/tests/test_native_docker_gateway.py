@@ -22,6 +22,7 @@ from agents import Agent
 from agents.classic.sandbox.entries import File
 from agents.classic.sandbox.util.blocking_io import run_blocking_workspace_io
 from agents.sandbox import DockerGateway, Manifest, sandbox_environment
+from tests.native_docker_profiles import configure_runner_profiles, record_isolation
 from tests.native_fixtures import (
     assistant_output,
     function_call,
@@ -87,6 +88,7 @@ def owned_cli_pids(cid):
 class FixtureClient(DockerSandboxClient):
     def __init__(self, connection):
         super().__init__(connection)
+        self.security_options = configure_runner_profiles(connection.api)
         self.created_ids = []
         self.deleted_ids = []
         self.helper_pids = set()
@@ -106,13 +108,15 @@ class FixtureClient(DockerSandboxClient):
         assert inspected["HostConfig"]["Privileged"] is False
         assert not inspected["HostConfig"].get("CapAdd")
         assert not inspected["HostConfig"].get("Devices")
-        assert not inspected["HostConfig"].get("SecurityOpt")
+        assert not inspected["HostConfig"].get("DeviceRequests")
+        assert (inspected["HostConfig"].get("SecurityOpt") or []) == list(self.security_options)
         assert inspected["Mounts"] == []
         try:
             payload = await run_blocking_workspace_io(fixture_archive)
             await run_blocking_workspace_io(
                 lambda: self.docker_client.api.put_archive(cid, "/", payload)
             )
+            record_isolation(inspected, self.security_options)
             return resource
         except BaseException:
             await resource.aclose()

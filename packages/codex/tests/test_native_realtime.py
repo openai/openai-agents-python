@@ -28,7 +28,7 @@ from agents import (
     function_tool,
 )
 from agents.native_interception import Deny, ReplaceArguments
-from agents.realtime import (
+from agents.realtime.native import (
     BackgroundResult,
     RealtimeConfig,
     RealtimeDelegation,
@@ -214,7 +214,7 @@ async def realtime_peer() -> AsyncIterator[RealtimePeer]:
 async def test_entered_tool_can_defer_public_media_without_stopping_native_reader(
     realtime_peer: RealtimePeer, defer: bool
 ) -> None:
-    from agents.realtime import RealtimeAudio
+    from agents.realtime.native import RealtimeAudio
 
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -1109,7 +1109,7 @@ async def test_native_session_close_joins_active_realtime_work(
 async def test_native_guardrail_delayed_old_response_cannot_stop_new_response(
     realtime_peer: RealtimePeer, raises: bool
 ) -> None:
-    from agents.realtime import (
+    from agents.realtime.native import (
         RealtimeGuardrailEvent,
         RealtimeGuardrailInput,
         RealtimeGuardrailResult,
@@ -1210,7 +1210,7 @@ async def test_native_guardrail_delayed_old_response_cannot_stop_new_response(
 
 
 async def test_native_guardrail_close_joins_blocked_callback(realtime_peer: RealtimePeer) -> None:
-    from agents.realtime import (
+    from agents.realtime.native import (
         RealtimeGuardrailInput,
         RealtimeGuardrailResult,
         RealtimeOutputGuardrail,
@@ -1267,7 +1267,7 @@ async def test_native_guardrail_close_joins_blocked_callback(realtime_peer: Real
 async def test_native_guardrail_expired_playback_rejection_closes_voice_only(
     realtime_peer: RealtimePeer,
 ) -> None:
-    from agents.realtime import (
+    from agents.realtime.native import (
         RealtimeAudio,
         RealtimeGuardrailInput,
         RealtimeGuardrailResult,
@@ -1384,7 +1384,7 @@ async def test_native_guardrail_expired_playback_rejection_closes_voice_only(
 async def test_native_realtime_guardrail_cannot_join_its_own_lifecycle(
     realtime_peer: RealtimePeer, operation: str
 ) -> None:
-    from agents.realtime import (
+    from agents.realtime.native import (
         RealtimeGuardrailEvent,
         RealtimeGuardrailInput,
         RealtimeGuardrailResult,
@@ -1449,7 +1449,7 @@ async def test_native_realtime_encoded_audio_and_actual_playback(
 ) -> None:
     import base64
 
-    from agents.realtime import RealtimeAudio, RealtimeAudioInput, RealtimePlaybackPosition
+    from agents.realtime.native import RealtimeAudio, RealtimeAudioInput, RealtimePlaybackPosition
 
     peer = realtime_peer
     async with (
@@ -1585,7 +1585,7 @@ async def test_native_realtime_batch_runs_calls_concurrently_and_publishes_each_
 async def test_interrupt_retires_pending_function_intake_before_response_done(
     realtime_peer: RealtimePeer,
 ) -> None:
-    from agents.realtime import RealtimeText
+    from agents.realtime.native import RealtimeText
 
     peer = realtime_peer
     effects: list[str] = []
@@ -1651,7 +1651,7 @@ async def test_guardrail_joins_only_its_old_delegation_and_keeps_new_voice_open(
     realtime_peer: RealtimePeer,
     notify_new_response: bool,
 ) -> None:
-    from agents.realtime import (
+    from agents.realtime.native import (
         RealtimeGuardrailInput,
         RealtimeGuardrailResult,
         RealtimeOutputGuardrail,
@@ -1985,7 +1985,7 @@ async def test_new_speech_without_response_id_fences_old_response_feedback(
 ) -> None:
     import base64
 
-    from agents.realtime import (
+    from agents.realtime.native import (
         RealtimeAudio,
         RealtimeLifecycle,
         RealtimePlaybackPosition,
@@ -2081,7 +2081,7 @@ async def test_new_speech_without_response_id_fences_old_response_feedback(
 async def test_speech_interrupts_native_work_only_under_its_accepted_policy(
     realtime_peer: RealtimePeer, policy: str
 ) -> None:
-    from agents.realtime import RealtimeLifecycle
+    from agents.realtime.native import RealtimeLifecycle
 
     peer = realtime_peer
     entered = asyncio.Event()
@@ -2230,7 +2230,7 @@ async def test_speech_interrupts_native_work_only_under_its_accepted_policy(
 async def test_noninterrupting_speech_preserves_native_function_continuation_until_committed_input(
     realtime_peer: RealtimePeer, detection: str, committed: bool
 ) -> None:
-    from agents.realtime import RealtimeLifecycle
+    from agents.realtime.native import RealtimeLifecycle
 
     peer = realtime_peer
     entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -2518,7 +2518,7 @@ async def test_entered_realtime_body_orders_later_response_callback(
 async def test_deferred_media_release_allows_small_active_subscriber_to_drain(
     realtime_peer: RealtimePeer,
 ) -> None:
-    from agents.realtime import RealtimeAudio
+    from agents.realtime.native import RealtimeAudio
 
     entered, release, media_queued = asyncio.Event(), asyncio.Event(), asyncio.Event()
 

@@ -9,7 +9,7 @@ import pytest
 
 from _agents_codex.realtime import RealtimeConfig, RealtimeEvent, RealtimeSession
 from agents import Session
-from agents.realtime import RealtimeLifecycle, RealtimeText
+from agents.realtime.native import RealtimeLifecycle, RealtimeText
 from tests._asyncio import timeout
 
 

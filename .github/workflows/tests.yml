@@ -50,9 +50,8 @@ jobs:
       windows: ${{ steps.release-windows.outputs.run }}
       native_source_run: ${{ steps.native-source.outputs.run_id }}
       native_artifacts: ${{ steps.native-source.outputs.artifacts }}
-      native_dependency_run: ${{ steps.native-source.outputs.dependency_run }}
-      native_dependencies: ${{ steps.native-source.outputs.dependencies }}
       native_provenance: ${{ steps.producer-identity.outputs.provenance }}
+      sdk_tests: ${{ steps.sdk-tests.outputs.settings }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -60,6 +59,32 @@ jobs:
           fetch-depth: 0
       - id: changes
         run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
+      - name: Read SDK test settings
+        id: sdk-tests
+        if: ${{ !inputs.native_only }}
+        # These values tune downstream SDK tests without changing native artifact identity.
+        run: |
+          python -I -S - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+
+          settings = json.loads(Path(".github/scripts/sdk-test-settings.json").read_text(encoding="utf-8"))
+          # Zero Linux workers keeps Make's existing automatic worker selection.
+          limits = {"linux_workers": (0, 64), "macos_shards": (1, 16), "windows_shards": (1, 16)}
+          if not isinstance(settings, dict) or settings.keys() != limits.keys() | {"reporting"}:
+              raise SystemExit("Invalid SDK test settings")
+          for name, (minimum, maximum) in limits.items():
+              value = settings[name]
+              if type(value) is not int or not minimum <= value <= maximum:
+                  raise SystemExit(f"{name} must be an integer from {minimum} to {maximum}")
+          if settings["reporting"] not in ("-rap", "-rA"):
+              raise SystemExit("Invalid pytest reporting mode")
+          settings["macos_indices"] = list(range(settings["macos_shards"]))
+          settings["windows_indices"] = list(range(settings["windows_shards"]))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("settings=" + json.dumps(settings, separators=(",", ":")) + "\n")
+          PYTHON
       - name: Select Windows test coverage
         id: release-windows
         env:
@@ -239,7 +264,7 @@ jobs:
                   raise SystemExit('Incomplete native publication timestamp')
               return parsed
 
-          def compatible(run, dependencies=False):
+          def compatible(run):
               if (repo != 'openai/openai-agents-python' or run['event'] != 'push'
                       or run['repository']['full_name'] != repo
                       or str(run['repository']['id']) != os.environ['GITHUB_REPOSITORY_ID']
@@ -281,7 +306,6 @@ jobs:
               controls = ('.github/actions/setup-native/action.yml',
                           '.github/scripts/download-native-snapshot.py',
                           '.github/scripts/install-linux-native-build-tools.sh',
-                          '.github/scripts/native-dependencies.py',
                           '.github/scripts/use-ubuntu-archive-if-needed.sh',
                           '.github/scripts/detect-changes.sh',
                           'packages/codex/tests/fixtures/exec_server.rs')
@@ -303,11 +327,6 @@ jobs:
                       after = native_inputs(Path('packages/codex').resolve())
                   except (OSError, ValueError, KeyError):
                       return False
-              if dependencies:
-                  before = {path: digest for path, digest in before.items()
-                            if not (path.startswith('packages/codex/rust/') and path.endswith('.rs'))}
-                  after = {path: digest for path, digest in after.items()
-                           if not (path.startswith('packages/codex/rust/') and path.endswith('.rs'))}
               return before == after
 
           def native_ready_status(run):
@@ -318,16 +337,16 @@ jobs:
                   (run['status'] == 'completed' and run['conclusion'] in ('success', 'failure'))
               )
 
-          def qualified(run, dependencies=False):
+          def qualified(run):
               completed = run['status'] == 'completed' and run['conclusion'] == 'success'
               # Harness PRs re-run the SDK suite on the repacked wheel. Once a canonical
               # push has qualified all native products, its later SDK results are separate.
-              native_ready = (not dependencies and os.environ['GITHUB_EVENT_NAME'] == 'pull_request'
+              native_ready = (os.environ['GITHUB_EVENT_NAME'] == 'pull_request'
                               and os.environ['REQUIRE_WINDOWS'] == 'true'
                               and run['path'] == '.github/workflows/tests.yml'
                               and run['head_branch'] == 'feat/codex-harness'
                               and not completed and native_ready_status(run))
-              if not (completed or native_ready) or not compatible(run, dependencies):
+              if not (completed or native_ready) or not compatible(run):
                   return None
               required_attempt = run['run_attempt'] if native_ready else None
               run_api = api + '/runs/' + str(run['id'])
@@ -417,23 +436,20 @@ jobs:
                       copied = (steps.get('Build the SDK and native runtime together', {}).get('conclusion') == 'skipped'
                                 and steps.get('Build the shared test executor', {}).get('conclusion') == 'skipped'
                                 and steps.get('Download the qualified native build', {}).get('conclusion') == 'success')
-                      if not (fresh or (copied and not dependencies)):
+                      if not (fresh or copied):
                           continue
-                      publication = steps.get('Publish Rust dependencies' if dependencies else 'Publish the native snapshot', {})
-                      if dependencies and steps.get('Prepare Rust dependency cache', {}).get('conclusion') != 'success':
-                          continue
+                      publication = steps.get('Publish the native snapshot', {})
                       if publication.get('conclusion') != 'success':
                           continue
                       for artifact in artifacts:
-                          expected_name = ('native-dependencies-' + identity if dependencies else
-                                           'native-snapshot-' + identity + '-' + native_identity)
+                          expected_name = 'native-snapshot-' + identity + '-' + native_identity
                           if (artifact['name'] == expected_name and not artifact['expired']
                                   and timestamp(publication['started_at']) <= timestamp(artifact['created_at'])
                                   <= timestamp(publication['completed_at']) < earliest_sdk):
                               if not re.fullmatch(r'sha256:[0-9a-f]{64}', artifact['digest']):
                                   raise SystemExit('Invalid native snapshot digest')
                               valid.append({'id': artifact['id'], 'digest': artifact['digest'], 'provenance': provenance,
-                                            **({} if dependencies else {'name': artifact['name']})})
+                                            'name': artifact['name']})
                   if len(valid) != 1:
                       return None
                   return valid[0]
@@ -446,7 +462,7 @@ jobs:
                   selected[identity] = artifact
               # Preserve the chosen three-platform donor when its ARM64 snapshot
               # cannot pass the same publication bound. Never mix donor runs.
-              if (not dependencies and os.environ.get('REUSE_ARM64') == 'true'
+              if (os.environ.get('REUSE_ARM64') == 'true'
                       and run['path'] == '.github/workflows/tests.yml'
                       and run['head_branch'] == 'feat/codex-harness'):
                   artifact = qualified_platform('linux-arm64', 'ubuntu-24.04-arm', 'Linux-ARM64')
@@ -481,26 +497,16 @@ jobs:
                   seen.add(run_id)
                   yield get(api + '/runs/' + str(run_id))
 
-          def dependency_candidates():
-              if os.environ.get('CURRENT_PR'):
-                  query = urllib.parse.urlencode({'branch': os.environ['CURRENT_HEAD_REF'], 'event': 'push', 'status': 'success', 'per_page': 20})
-                  yield from get(api + '/workflows/native-python-push.yml/runs?' + query)['workflow_runs']
-              query = urllib.parse.urlencode({'branch': os.environ['SOURCE_BRANCH'], 'event': 'push', 'status': 'success', 'per_page': 20})
-              yield from get(api + '/workflows/tests.yml/runs?' + query)['workflow_runs']
-
-          # Prefer ready native products; use the existing bounded dependency fallback on a miss.
           def select():
-              for dependencies, runs in ((False, candidates()), (True, dependency_candidates())):
-                  for run in runs:
-                      selected = qualified(run, dependencies)
-                      if selected:
-                          run_key, artifact_key = ('dependency_run', 'dependencies') if dependencies else ('run_id', 'artifacts')
-                          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-                              output.write(f"{run_key}={run['id']}\n")
-                              output.write(artifact_key + '=' + json.dumps(selected, sort_keys=True) + '\n')
-                          print(f"Reusing {'Rust dependencies' if dependencies else 'native build'} from {repo} push run {run['id']} at {run['head_sha']}")
-                          return
-              print('No qualified native build or dependencies are available. Building from source now.')
+              for run in candidates():
+                  selected = qualified(run)
+                  if selected:
+                      with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                          output.write(f"run_id={run['id']}\n")
+                          output.write("artifacts=" + json.dumps(selected, sort_keys=True) + '\n')
+                      print(f"Reusing native build from {repo} push run {run['id']} at {run['head_sha']}")
+                      return
+              print('No qualified native build is available. Building from source now.')
           select()
           PYTHON
 
@@ -512,8 +518,6 @@ jobs:
       runner: ubuntu-24.04
       native_source_run: ${{ needs.changes.outputs.native_source_run }}
       native_artifacts: ${{ needs.changes.outputs.native_artifacts }}
-      native_dependency_run: ${{ needs.changes.outputs.native_dependency_run }}
-      native_dependencies: ${{ needs.changes.outputs.native_dependencies }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
   produce-windows:
@@ -524,8 +528,6 @@ jobs:
       runner: windows-latest
       native_source_run: ${{ needs.changes.outputs.native_source_run }}
       native_artifacts: ${{ needs.changes.outputs.native_artifacts }}
-      native_dependency_run: ${{ needs.changes.outputs.native_dependency_run }}
-      native_dependencies: ${{ needs.changes.outputs.native_dependencies }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
   produce-macos:
@@ -536,8 +538,6 @@ jobs:
       runner: macos-latest
       native_source_run: ${{ needs.changes.outputs.native_source_run }}
       native_artifacts: ${{ needs.changes.outputs.native_artifacts }}
-      native_dependency_run: ${{ needs.changes.outputs.native_dependency_run }}
-      native_dependencies: ${{ needs.changes.outputs.native_dependencies }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
   produce-linux-arm64:
@@ -774,8 +774,8 @@ jobs:
           - "3.14"
     env:
       OPENAI_API_KEY: fake-for-tests
-      PYTEST_ADDOPTS: "-rap"
-      PYTEST_XDIST_AUTO_NUM_WORKERS: ${{ github.repository == 'openai/openai-agents-python' && '12' || '' }}
+      PYTEST_ADDOPTS: ${{ fromJSON(needs.changes.outputs.sdk_tests).reporting }}
+      PYTEST_XDIST_AUTO_NUM_WORKERS: ${{ github.repository == 'openai/openai-agents-python' && fromJSON(needs.changes.outputs.sdk_tests).linux_workers || '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -853,12 +853,14 @@ jobs:
         env:
           OPENAI_AGENTS_WHEEL: ${{ env.OPENAI_AGENTS_NATIVE_WHEEL }}
         run: PYTHONPATH=. uv run --no-sync python -m pytest -q packages/codex/tests/test_distribution.py
-      - name: Verify copied documentation code against the qualified wheel
+      - name: Verify copied documentation and public tools against the qualified wheel
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         run: |
           uv pip install --no-deps --target "$RUNNER_TEMP/docs-wheel" "$OPENAI_AGENTS_NATIVE_WHEEL"
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -c 'import agents, _agents_codex, os; from agents import _native; from pathlib import Path; root = Path(os.environ["PYTHONPATH"]).resolve(); assert all(Path(module.__file__).resolve().is_relative_to(root) for module in (agents, _agents_codex, _native)), "SDK imports must use the qualified wheel"'
           PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python .github/scripts/check_docs.py
           PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -m pytest -q packages/codex/tests/test_docs_code.py
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -m pytest -q packages/codex/tests/test_native_tool_input_recovery.py::test_strict_missing_arguments_return_retryable_error packages/codex/tests/test_native_tool_input_recovery.py::test_original_input_recovery_before_policy_and_execution
       - name: Set up Node for the optional Vercel client example
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -906,7 +908,8 @@ jobs:
     timeout-minutes: 25
     env:
       CODEX_DOCKER_TEST_SOCKET: /var/run/docker.sock
-      CODEX_DOCKER_TEST_IMAGE: docker.io/library/python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
+      CODEX_DOCKER_TEST_IMAGE: agents-native-docker:${{ github.run_id }}-${{ github.run_attempt }}
+      NATIVE_DOCKER_EVIDENCE: ${{ github.workspace }}/native-docker-evidence
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -920,37 +923,127 @@ jobs:
         uses: ./.github/actions/use-native
       - name: Install dependencies
         run: make sync
-      - name: Test strict Docker path and identity grants
+      - name: Prepare the pinned Docker test image
         run: |
           test "$(uname -m)" = x86_64
           test -S "$CODEX_DOCKER_TEST_SOCKET"
           test -x "$CODEX_EXEC_SERVER_TEST_BINARY"
-          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" pull "$CODEX_DOCKER_TEST_IMAGE"
+          mkdir -m 0700 "$NATIVE_DOCKER_EVIDENCE"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" version \
+            --format 'client={{.Client.Version}} server={{.Server.Version}}' \
+            > "$NATIVE_DOCKER_EVIDENCE/docker-version.txt"
+          uname -r > "$NATIVE_DOCKER_EVIDENCE/kernel-version.txt"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" build --pull \
+            --file packages/codex/tests/fixtures/native-docker.Dockerfile \
+            --tag "$CODEX_DOCKER_TEST_IMAGE" packages/codex/tests/fixtures
+          image_id=$(docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" image inspect \
+            --format '{{.Id}}' "$CODEX_DOCKER_TEST_IMAGE")
+          echo "CODEX_DOCKER_TEST_IMAGE=$image_id" >> "$GITHUB_ENV"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" image inspect "$image_id" \
+            > "$NATIVE_DOCKER_EVIDENCE/image.json"
+          sha256sum "$CODEX_EXEC_SERVER_TEST_BINARY" "$OPENAI_AGENTS_NATIVE_WHEEL" \
+            "$OPENAI_AGENTS_NATIVE_WHEEL.pristine.json" \
+            packages/codex/tests/fixtures/native-docker.Dockerfile \
+            > "$NATIVE_DOCKER_EVIDENCE/inputs.sha256"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" run --rm --network none \
+            "$image_id" /usr/bin/bwrap --version \
+            > "$NATIVE_DOCKER_EVIDENCE/bwrap-version.txt"
+      - name: Install the confined diagnostic runner profiles
+        id: profiles
+        env:
+          NATIVE_DOCKER_RECIPE: packages/codex/tests/fixtures/native-docker.Dockerfile
+        run: bash .github/scripts/install-native-docker-profiles.sh
+      - name: Probe enforced runner policy denials
+        if: ${{ !cancelled() && steps.profiles.outcome == 'success' }}
+        run: |
+          profile_name="agents-native-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker --host "unix://$CODEX_DOCKER_TEST_SOCKET" run --rm --interactive --network none \
+            --label "openai-agents.native-ci-profile=$profile_name" \
+            --security-opt "apparmor=$profile_name" \
+            --security-opt seccomp=/etc/openai-agents-native-docker/seccomp.json \
+            "$CODEX_DOCKER_TEST_IMAGE" python3 - "$profile_name" \
+            < .github/scripts/probe-native-docker-profiles.py \
+            > "$NATIVE_DOCKER_EVIDENCE/probes.json"
+      - name: Test strict Docker path and identity grants
+        if: ${{ !cancelled() && steps.profiles.outcome == 'success' }}
+        env:
+          CODEX_DOCKER_TEST_PROFILE_MANIFEST: /etc/openai-agents-native-docker/manifest.json
+          CODEX_DOCKER_STRICT_POSITIVE_TEST: "1"
+          CODEX_DOCKER_TEST_MISSING_BWRAP: "0"
+        run: |
           uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q \
+            packages/codex/tests/test_native_docker_mapped_tools.py::test_native_docker_mapped_shell_and_patch_after_cold_reopen \
             packages/codex/tests/test_native_docker_path_authority.py \
             packages/codex/tests/test_native_docker_run_as.py \
-            --junitxml="$RUNNER_TEMP/native-docker.xml"
-          python3 - "$RUNNER_TEMP/native-docker.xml" <<'PYTHON'
-          from pathlib import Path
+            --junitxml="$NATIVE_DOCKER_EVIDENCE/native-docker.xml"
+      - name: Collect audit evidence and finalize owned isolation
+        if: ${{ always() }}
+        run: |
+          # No artifact parsing or writes before owned cleanup and profile removal.
+          profile_name="agents-native-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          set +e
+          sudo grep -Fx "$profile_name (enforce)" /sys/kernel/security/apparmor/profiles >/dev/null
+          loaded_status=$?
+          cleanup_result=$(python3 .github/scripts/cleanup-native-docker-containers.py)
+          cleanup_status=$?
+          remove_status=1
+          # A missing/malformed manifest must not suppress revocation. Authorize only
+          # this run's non-symlink, root-owned exact profile; never another profile.
+          profile_path=/etc/openai-agents-native-docker/apparmor.profile
+          profile_names=$(sudo apparmor_parser --names --skip-cache "$profile_path")
+          names_status=$?
+          profile_owner=$(sudo stat --format='%u:%a' "$profile_path")
+          sudo test ! -L "$profile_path"
+          path_status=$?
+          if (( cleanup_status == 0 && names_status == 0 && path_status == 0 )) && [[ "$profile_owner" == '0:444' && "$profile_names" == "$profile_name" ]]; then
+            sudo apparmor_parser --remove --skip-cache /etc/openai-agents-native-docker/apparmor.profile
+            remove_status=$?
+          fi
+          sudo grep -E "^$profile_name(//[^ ]+)? \\([^)]*\\)$" /sys/kernel/security/apparmor/profiles >/dev/null
+          absent_status=$?
+          mkdir -p "$NATIVE_DOCKER_EVIDENCE"
+          sudo journalctl -k --since "$(cat "$NATIVE_DOCKER_EVIDENCE/start-time" 2>/dev/null || date --iso-8601=seconds)" \
+            --no-pager | grep -E "profile=\"$profile_name([\"/])" \
+            > "$NATIVE_DOCKER_EVIDENCE/profile-audit.log"
+          audit_status=("${PIPESTATUS[@]}")
+          printf '%s\n' "$cleanup_result" > "$NATIVE_DOCKER_EVIDENCE/container-cleanup.json"
+          python3 - "$cleanup_status" "$loaded_status" "$remove_status" "$absent_status" \
+            "${audit_status[0]}" "${audit_status[1]}" "$NATIVE_DOCKER_EVIDENCE" <<'PYTHON'
+          import json
           import sys
-          from xml.etree import ElementTree
+          from pathlib import Path
 
-          suite = ElementTree.parse(Path(sys.argv[1]))
-          cases = suite.findall(".//testcase")
-          assert cases and not suite.findall(".//skipped"), "Native Docker cases must run"
-          assert any(case.get("name", "").startswith("test_native_docker_path_grants") for case in cases)
+          keys = ("ownedCleanup", "loadedEnforce", "profileRemove", "profileAbsent", "journal", "filter")
+          result = dict(zip(keys, map(int, sys.argv[1:7])))
+          (Path(sys.argv[7]) / "finalization.json").write_text(json.dumps(result) + "\n")
           PYTHON
+          record_status=$?
+          set -e
+          if (( record_status != 0 || cleanup_status != 0 || loaded_status != 0 || remove_status != 0 || absent_status != 1 || audit_status[0] != 0 || audit_status[1] != 0 )); then
+            echo "Owned isolation finalization or audit collection failed." >&2
+            exit 1
+          fi
+      - name: Require complete native qualification after cleanup
+        if: ${{ !cancelled() }}
+        run: python3 .github/scripts/qualify-native-docker.py
+      - name: Publish confined-runner diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-docker-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.NATIVE_DOCKER_EVIDENCE }}
+          if-no-files-found: error
 
   native-macos-sandbox-shards:
     if: ${{ !inputs.native_only }}
-    needs: native-macos
+    needs: [changes, native-macos]
     runs-on: ${{ github.repository == 'openai/openai-agents-python' && 'macos-15' || 'macos-latest' }}
     timeout-minutes: 100
     name: macOS sandbox shard (${{ matrix.shard }})
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: ${{ fromJSON(needs.changes.outputs.sdk_tests).macos_indices }}
     env:
       OPENAI_API_KEY: fake-for-tests
       PYTEST_ADDOPTS: "-rA"
@@ -1017,9 +1110,10 @@ jobs:
           PYTEST_ADDOPTS: "-ra -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0"
           PYTHONUNBUFFERED: "1"
           MACOS_TEST_SHARD: ${{ matrix.shard }}
+          MACOS_TEST_SHARD_COUNT: ${{ fromJSON(needs.changes.outputs.sdk_tests).macos_shards }}
         shell: bash
         run: |
-          SDK_TEST_SHARD_INDEX="$MACOS_TEST_SHARD" SDK_TEST_SHARD_COUNT=4 make tests-parallel
+          SDK_TEST_SHARD_INDEX="$MACOS_TEST_SHARD" SDK_TEST_SHARD_COUNT="$MACOS_TEST_SHARD_COUNT" make tests-parallel
           if [[ "$MACOS_TEST_SHARD" == 0 ]]; then
             make tests-serial
           fi
@@ -1039,7 +1133,7 @@ jobs:
 
   tests-windows-shards:
     if: ${{ !inputs.native_only }}
-    needs: native-windows
+    needs: [changes, native-windows]
     name: Windows test shard (${{ matrix.python-version }}, ${{ matrix.shard }})
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
     timeout-minutes: 100
@@ -1049,10 +1143,10 @@ jobs:
         python-version:
           - "3.10"
           - "3.14"
-        shard: [0, 1, 2]
+        shard: ${{ fromJSON(needs.changes.outputs.sdk_tests).windows_indices }}
     env:
       OPENAI_API_KEY: fake-for-tests
-      PYTEST_ADDOPTS: "-rap"
+      PYTEST_ADDOPTS: ${{ fromJSON(needs.changes.outputs.sdk_tests).reporting }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -1082,7 +1176,7 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         env:
           SDK_TEST_SHARD_INDEX: ${{ matrix.shard }}
-          SDK_TEST_SHARD_COUNT: "3"
+          SDK_TEST_SHARD_COUNT: ${{ fromJSON(needs.changes.outputs.sdk_tests).windows_shards }}
         # Native completions use loopback sockets on Windows.
         run: uv run python packages/codex/scripts/test_native.py --sdk -m pytest -n 2 --dist worksteal -m "not serial" -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
       - name: Run serial tests after all workers exit

@@ -415,17 +415,17 @@ async def test_native_history_replacement_preserves_acknowledged_lineage(restore
                 )
                 before = await session.history_snapshot()
                 with pytest.raises(RuntimeError, match="acknowledged provider history"):
-                    await session.transact_history(
-                        expected_revision=before.revision, keep=0, items=[]
+                    await session.replace_history_suffix(
+                        expected_revision=before.revision, keep_prefix_count=0, items=[]
                     )
                 after = await session.history_snapshot()
                 assert after.items == before.items
                 assert after.revision == before.revision
                 # An unsent addition may be appended and removed without rewriting
                 # the acknowledged provider window.
-                revision = await session.transact_history(
+                revision = await session.replace_history_suffix(
                     expected_revision=after.revision,
-                    keep=after.total,
+                    keep_prefix_count=after.total,
                     items=[
                         {
                             "type": "message",
@@ -439,12 +439,12 @@ async def test_native_history_replacement_preserves_acknowledged_lineage(restore
                 assert appended.revision == revision
                 if legacy:
                     with pytest.raises(RuntimeError, match="acknowledged provider history"):
-                        await session.transact_history(
-                            expected_revision=revision, keep=before.total, items=[]
+                        await session.replace_history_suffix(
+                            expected_revision=revision, keep_prefix_count=before.total, items=[]
                         )
                 else:
-                    await session.transact_history(
-                        expected_revision=revision, keep=before.total, items=[]
+                    await session.replace_history_suffix(
+                        expected_revision=revision, keep_prefix_count=before.total, items=[]
                     )
                     assert (await session.history_snapshot()).items == before.items
                 await (await session.submit("After.")).get_result()
@@ -472,8 +472,8 @@ async def test_native_history_append_preserves_metadata_filtered_from_provider_i
             provider_history={"type": "conversation", "id": "conv_current"}
         ) as session:
             initial = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=initial.revision, keep=initial.total, items=[prior]
+            await session.replace_history_suffix(
+                expected_revision=initial.revision, keep_prefix_count=initial.total, items=[prior]
             )
             await (await session.submit("Before.")).get_result()
             before = await session.history_snapshot()
@@ -486,9 +486,9 @@ async def test_native_history_append_preserves_metadata_filtered_from_provider_i
                 item for item in model.requests[0]["input"] if item.get("id") == "msg_prior"
             )
             assert wire_prior["content"][0].get("annotations", []) == []
-            await session.transact_history(
+            await session.replace_history_suffix(
                 expected_revision=before.revision,
-                keep=before.total,
+                keep_prefix_count=before.total,
                 items=[
                     {
                         "type": "message",

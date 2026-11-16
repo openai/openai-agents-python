@@ -7,12 +7,12 @@ import pytest
 
 from agents.realtime import (
     RealtimeAgent,
-    RealtimeOutputGuardrail,
     RealtimeRunConfig,
     RealtimeRunner,
 )
 from agents.realtime.model_events import RealtimeModelToolCallEvent
 from agents.realtime.model_inputs import RealtimeModelSendInterrupt, RealtimeModelSendSessionUpdate
+from agents.realtime.native import RealtimeOutputGuardrail
 from agents.realtime.testing import ScriptedRealtimeModel
 from tests._asyncio import timeout
 

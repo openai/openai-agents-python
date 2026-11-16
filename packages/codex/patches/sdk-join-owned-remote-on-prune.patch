@@ -1,0 +1,232 @@
+diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
+--- a/codex-rs/core/src/unified_exec/mod.rs
++++ b/codex-rs/core/src/unified_exec/mod.rs
+@@ -157,6 +157,8 @@
+ pub(crate) struct ProcessStore {
+     processes: HashMap<i32, ProcessEntry>,
+     starting_remote_processes: HashMap<i32, process_manager::StartingRemoteProcess>,
++    retiring_remote_processes: Vec<Arc<UnifiedExecProcess>>,
++    remote_retirement_failed: bool,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     starting_processes: HashMap<i32, StartingManagedProcess>,
+     #[cfg(target_os = "macos")]
+diff --git a/codex-rs/core/src/unified_exec/process.rs b/codex-rs/core/src/unified_exec/process.rs
+--- a/codex-rs/core/src/unified_exec/process.rs
++++ b/codex-rs/core/src/unified_exec/process.rs
+@@ -426,6 +426,10 @@
+             } else {
+                 !self.state_rx.borrow().peer_exit_confirmed
+             }
++    }
++
++    pub(super) fn remote_termination_result(&self) -> Option<bool> {
++        self.remote_stop.get().and_then(|receipt| *receipt.borrow())
+     }
+ 
+     fn request_remote_termination(&self) -> &watch::Receiver<Option<bool>> {
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -1634,7 +1634,11 @@
+         // network-approval cleanup only after dropping that lock.
+         if let Some(pruned_entry) = pruned_entry {
+             unregister_network_approval_for_entry(&pruned_entry).await;
+-            if pruned_entry.process.uses_darwin_supervisor() {
++            if pruned_entry.process.owns_remote_termination() {
++                // The store keeps any outstanding stop visible to checked close.
++                pruned_entry.process.join_remote_termination().await;
++                Self::settle_remote_retirements(&mut *self.process_store.lock().await);
++            } else if pruned_entry.process.uses_darwin_supervisor() {
+                 #[cfg(target_os = "macos")]
+                 if pruned_entry.process.terminate_and_join().await {
+                     self.process_store
+@@ -2375,17 +2379,34 @@
+         }
+     }
+ 
++    fn settle_remote_retirements(store: &mut ProcessStore) {
++        let mut failed = store.remote_retirement_failed;
++        store.retiring_remote_processes.retain(|process| {
++            match process.remote_termination_result() {
++                Some(confirmed) => {
++                    failed |= !confirmed;
++                    false
++                }
++                None => process.needs_remote_cleanup(),
++            }
++        });
++        store.remote_retirement_failed = failed;
++    }
++
+     fn prune_processes_if_needed(store: &mut ProcessStore) -> Option<ProcessEntry> {
+         if store.processes.len() < MAX_UNIFIED_EXEC_PROCESSES {
+             return None;
+         }
+ 
++        Self::settle_remote_retirements(store);
++        let can_retire_remote = store.retiring_remote_processes.len() < MAX_UNIFIED_EXEC_PROCESSES;
+         let mut meta: Vec<(i32, Instant, bool)> = store
+             .processes
+             .iter()
+             .filter(|(_, entry)| {
+                 !entry.process.needs_remote_cleanup()
+-                    || (!entry.process.has_exited()
++                    || (can_retire_remote
++                        && !entry.process.has_exited()
+                         && entry.initial_exec_command_returned.load(Ordering::Acquire))
+             })
+             .map(|(id, entry)| (*id, entry.last_used, entry.process.has_exited()))
+@@ -2414,7 +2435,15 @@
+                 .map(|process| process.interaction_lock())
+                 && let Ok(_interaction_guard) = interaction_lock.try_lock_owned()
+             {
+-                return store.remove(process_id);
++                let entry = store.remove(process_id)?;
++                // Publish ownership of the stop under the same lock as eviction.
++                if entry.process.needs_remote_cleanup() {
++                    entry.process.request_terminate();
++                    store
++                        .retiring_remote_processes
++                        .push(Arc::clone(&entry.process));
++                }
++                return Some(entry);
+             }
+             found_locked_exited_process |= candidate_has_exited
+                 || candidate_process.is_some_and(|process| process.has_exited());
+@@ -2454,7 +2483,7 @@
+     }
+ 
+     pub(crate) async fn terminate_all_processes(&self) -> bool {
+-        let (entries, mut starting, starting_remote) = {
++        let (entries, mut starting, starting_remote, retiring_remote) = {
+             let mut store = self.process_store.lock().await;
+             let starting_remote: Vec<_> = store
+                 .starting_remote_processes
+@@ -2506,9 +2535,11 @@
+                 reserved_process_ids.retain(|id, _| starting_remote_processes.contains_key(id));
+                 Vec::new()
+             };
+-            (entries, starting, starting_remote)
+-        };
+-
++            let retiring_remote = store.retiring_remote_processes.clone();
++            (entries, starting, starting_remote, retiring_remote)
++        };
++
++        starting.extend(retiring_remote.into_iter().map(|process| (None, process)));
+         for entry in entries {
+             unregister_network_approval_for_entry(&entry).await;
+             if entry.process.uses_managed_local_sandbox() || entry.process.owns_remote_termination()
+@@ -2522,7 +2553,9 @@
+             self.join_owned_processes(starting),
+             self.join_starting_remote_processes(starting_remote, true),
+         );
+-        local && remote
++        let mut store = self.process_store.lock().await;
++        Self::settle_remote_retirements(&mut store);
++        local && remote && !store.remote_retirement_failed
+     }
+ 
+     pub(crate) async fn pending_local_exec(
+diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+--- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
++++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+@@ -801,6 +801,98 @@
+         (pruned.map(|entry| entry.process_id), store.processes.len()),
+         (None, MAX_UNIFIED_EXEC_PROCESSES)
+     );
++}
++
++#[tokio::test]
++async fn checked_shutdown_reports_failed_retirement_of_pruned_remote_process() {
++    let (_, turn) = crate::session::tests::make_session_and_context().await;
++    let manager = UnifiedExecProcessManager::default();
++    let mut remote = crate::unified_exec::process_tests::remote_process(
++        codex_exec_server::WriteStatus::Accepted,
++        Some("termination was not acknowledged".to_string()),
++        codex_sandboxing::SandboxType::None,
++    )
++    .await;
++    remote.own_remote_termination();
++    let remote = Arc::new(remote);
++    let other = Arc::new(
++        crate::unified_exec::process_tests::remote_process(
++            codex_exec_server::WriteStatus::Accepted,
++            /*terminate_error*/ None,
++            codex_sandboxing::SandboxType::None,
++        )
++        .await,
++    );
++    let newest = Instant::now();
++    let cwd = PathUri::parse("file:///tmp").expect("test cwd");
++    let mut store = manager.process_store.lock().await;
++    for index in 0..MAX_UNIFIED_EXEC_PROCESSES {
++        let process_id = i32::try_from(index).expect("process id");
++        store.processes.insert(
++            process_id,
++            ProcessEntry {
++                output_policy_store: None,
++                process: Arc::clone(if index == 0 { &remote } else { &other }),
++                plugin_metrics_sidecar: None,
++                call_id: format!("call-{process_id}"),
++                process_id,
++                cwd: cwd.clone(),
++                initial_exec_command_active: Arc::new(AtomicBool::new(false)),
++                initial_exec_command_returned: Arc::new(AtomicBool::new(true)),
++                hook_command: "command".to_string(),
++                tty: false,
++                environment_id: "remote".to_string(),
++                permissions: super::super::TerminalPermissions::for_launch(
++                    turn.initial_environments
++                        .primary()
++                        .expect("turn environment"),
++                    &turn,
++                    super::super::TerminalSandboxSource::Native,
++                    crate::sandboxing::SandboxPermissions::UseDefault,
++                    /*additional_permissions*/ None,
++                    /*internal_permissions*/ None,
++                ),
++                network_approval: None,
++                session: std::sync::Weak::new(),
++                last_used: if index == 0 {
++                    newest - Duration::from_secs(1)
++                } else {
++                    newest
++                },
++            },
++        );
++    }
++    // Pending retirement shares the existing soft cap. Once it is full, leave
++    // the next live remote in inventory instead of adding more outgoing work.
++    store.retiring_remote_processes = vec![Arc::clone(&remote); MAX_UNIFIED_EXEC_PROCESSES];
++    let removed = UnifiedExecProcessManager::prune_processes_if_needed(&mut store)
++        .expect("an eligible non-owned process can still be pruned");
++    assert_ne!(removed.process_id, 0);
++    assert_eq!(
++        store.retiring_remote_processes.len(),
++        MAX_UNIFIED_EXEC_PROCESSES
++    );
++    store.processes.insert(removed.process_id, removed);
++    store.retiring_remote_processes.clear();
++
++    let removed = UnifiedExecProcessManager::prune_processes_if_needed(&mut store)
++        .expect("evict the least recently used delivered command");
++    assert_eq!(removed.process_id, 0);
++    assert_eq!(store.processes.len(), MAX_UNIFIED_EXEC_PROCESSES - 1);
++    let [retiring] = store.retiring_remote_processes.as_slice() else {
++        panic!("pruned remote process should remain owned by checked close");
++    };
++    assert!(Arc::ptr_eq(retiring, &remote));
++    drop(store);
++    drop(removed);
++
++    assert!(!manager.terminate_all_processes().await);
++    {
++        let store = manager.process_store.lock().await;
++        assert!(store.retiring_remote_processes.is_empty());
++        assert!(store.remote_retirement_failed);
++    }
++    assert!(!manager.terminate_all_processes().await);
+ }
+ 
+ #[cfg(target_os = "linux")]

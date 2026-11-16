@@ -601,15 +601,25 @@ async def test_lost_start_ack_does_not_establish_no_effects(
             )
         )
         responses.respond(assistant_output("done"))
-        async with Agent(
-            instructions="Use tools.",
-            tools=[],
-            provider=provider(responses),
-        ).session(environment=declaration(peer)) as session:
-            turn = await session.submit("start")
-            await peer.start_reply_dropped.wait()
-            await turn.cancel()
-            assert marker.read_text() == "started"
+        with pytest.raises(NativeError) as session_error:
+            async with Agent(
+                instructions="Use tools.",
+                tools=[],
+                provider=provider(responses),
+            ).session(environment=declaration(peer)) as session:
+                turn = await session.submit("start")
+                await peer.start_reply_dropped.wait()
+                with pytest.raises(
+                    NativeError, match="Session cancellation failed during owned cleanup"
+                ) as cancel_error:
+                    await turn.cancel()
+                assert (
+                    str(cancel_error.value.__cause__)
+                    == "Interrupted local command cleanup did not finish"
+                )
+                raise cancel_error.value
+        assert session_error.value is cancel_error.value
+        assert marker.read_text() == "started"
         # This fixture observed one start, not an exactly-once protocol guarantee.
         starts = [request for request in peer.requests if request.get("method") == "process/start"]
         assert len(starts) == 1

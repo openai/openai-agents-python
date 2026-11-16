@@ -142,12 +142,22 @@ async def main():
         "CheckpointStatus",
         "NativeGoal",
     )
+    assert "ApplicationToolOutput" not in agents.__all__
+    assert not hasattr(agents, "ApplicationToolOutput")
     barrier = Barrier(8)
 
     def first_access(index):
         barrier.wait(timeout=10)
         offset = index % len(names)
-        classes = {name: getattr(agents, name) for name in names[offset:] + names[:offset]}
+        classes = {
+            name: getattr(
+                importlib.import_module("agents.state")
+                if name == "ApplicationToolOutput"
+                else agents,
+                name,
+            )
+            for name in names[offset:] + names[:offset]
+        }
         record = classes["ApplicationToolOutput"](
             submission_id="submission",
             turn_id="turn",
@@ -167,7 +177,7 @@ async def main():
     facade = importlib.import_module("agents.session")
     for group in groups:
         for name in names:
-            assert group[name] is getattr(canonical, name) is getattr(agents, name)
+            assert group[name] is getattr(canonical, name)
     for name in (
         "SessionState",
         "LocalStorage",

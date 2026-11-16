@@ -6,7 +6,7 @@ from pathlib import Path
 from agents import (
     Agent,
     Allow,
-    ApprovalRequested,
+    FunctionToolApprovalRequest,
     InteractionExpiredError,
     NativeProvider,
     RunBudget,
@@ -35,7 +35,7 @@ async def main():
         description="Synthetic effect",
         needs_approval=policy,
         before=before if guarded else None,
-        run_before_approval=guarded,
+        run_input_policy_before_approval=guarded,
     )
     def risky(value: str) -> str:
         with effects.open("a") as out:
@@ -66,7 +66,7 @@ async def main():
             request = risky.match(event)
             if request is not None:
                 break
-        if not isinstance(request, ApprovalRequested):
+        if not isinstance(request, FunctionToolApprovalRequest):
             await turn.get_result()
             raise AssertionError("Restored turn ended without its captured approval")
         assert request.call_id == "pending-approval" and request.turn_id == turn_id

@@ -299,7 +299,7 @@ async def test_playback_capacity_is_reused_for_completed_audio(
 ) -> None:
     from contextlib import aclosing
 
-    from agents.realtime import RealtimeAudio, RealtimePlaybackPosition, RealtimeResponse
+    from agents.realtime.native import RealtimeAudio, RealtimePlaybackPosition, RealtimeResponse
 
     peer = realtime_peer
     async with (
@@ -350,7 +350,7 @@ async def test_playback_capacity_is_reused_for_completed_audio(
 async def test_playback_capacity_preserves_unfinished_or_unplayed_audio(
     monkeypatch: pytest.MonkeyPatch, done: bool, played: bool
 ) -> None:
-    from agents.realtime import RealtimePlaybackPosition
+    from agents.realtime.native import RealtimePlaybackPosition
 
     owner, _ = live_owner(monkeypatch)
     monkeypatch.setattr(owner, "_HANDOFF_LIMIT", 1)
@@ -412,7 +412,7 @@ def receive_playback_audio(owner: RealtimeSession, response_id: str) -> None:
 async def test_playback_reclaims_identity_bytes_for_completed_audio(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from agents.realtime import RealtimePlaybackPosition
+    from agents.realtime.native import RealtimePlaybackPosition
 
     owner, _ = live_owner(monkeypatch)
     monkeypatch.setattr(owner, "_BUFFER_BYTES_LIMIT", 1600)
@@ -430,7 +430,7 @@ async def test_playback_reclaims_identity_bytes_for_completed_audio(
 async def test_playback_reclaims_unplayed_audio_after_authoritative_retirement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from agents.realtime import RealtimePlaybackPosition
+    from agents.realtime.native import RealtimePlaybackPosition
 
     owner, _ = live_owner(monkeypatch)
     monkeypatch.setattr(owner, "_HANDOFF_LIMIT", 1)
