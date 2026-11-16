@@ -525,7 +525,7 @@ async def test_fresh_manual_finisher_after_json_restore_needs_no_model_request(
         await next_request(source.interactions(), manual)
         payload = json.loads((await source.suspend()).to_json())
     if remove_outcomes:
-        payload["native_continuation"].pop("tool_outcomes", None)
+        payload["agent_options"]["_sdk_checkpoint_receipts"].pop("tool_outcomes", None)
     state = SessionState.from_json(json.dumps(payload))
     async with timeout(30), agent.session(state=state) as restored:
         assert restored.restored_turn is not None

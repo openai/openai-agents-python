@@ -126,6 +126,9 @@ async def test_legacy_settled_patch_keeps_pending_function_grant(responses, tmp_
     path = tmp_path / "legacy.json"
     raw = json.loads(path.read_text())
     (tmp_path / "producer-original.json").write_text(json.dumps(raw, indent=2))
+    # Read the current typed state to recover optional SDK receipts before
+    # writing the intentionally altered legacy fixture.
+    raw = SessionState.from_json(json.dumps(raw)).model_dump(mode="json", exclude_defaults=True)
     frame = raw["native_continuation"]
     legacy = json.loads(
         (Path(__file__).parent / "fixtures/legacy-settled-apply-patch-accounting.json").read_text()

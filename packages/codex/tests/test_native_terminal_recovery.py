@@ -109,7 +109,10 @@ async def test_saved_finisher_receipt_is_data_and_fresh_manual_reply_owns_comple
         state = json.loads((await session.suspend()).to_json())
     assert effects == ["old-once"]
     if not saved_outcomes:
-        state["native_continuation"].pop("tool_outcomes", None)
+        state = SessionState.from_json(json.dumps(state)).model_dump(
+            mode="json", exclude_defaults=True
+        )
+        del state["native_continuation"]["tool_outcomes"]
         # Missing historical sibling success cannot be invented from its text.
         responses.respond(assistant_output("resumed answer"))
     async with (

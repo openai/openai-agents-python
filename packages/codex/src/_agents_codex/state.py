@@ -386,6 +386,49 @@ class _RememberedApproval(BaseModel):
     reason: str | None
 
 
+_CHECKPOINT_RECEIPTS = "_sdk_checkpoint_receipts"
+_PASSIVE_CHECKPOINT_FIELDS = (
+    "run_usage",
+    "original_input",
+    "continuation_trace_id",
+    "application_tool_outputs",
+)
+
+
+def _unpack_checkpoint_receipts(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    options = value.get("agent_options")
+    if not isinstance(options, dict) or _CHECKPOINT_RECEIPTS not in options:
+        return None
+    receipts = options[_CHECKPOINT_RECEIPTS]
+    known = (*_PASSIVE_CHECKPOINT_FIELDS, "tool_outcomes")
+    if (
+        value.get("format_version") not in (2, 3, 4, 5, 6, 7)
+        or not isinstance(receipts, dict)
+        or receipts.keys() - known
+    ):
+        raise ValueError("Invalid checkpoint receipts")
+
+    payload = {**value, "agent_options": {**options}}
+    del payload["agent_options"][_CHECKPOINT_RECEIPTS]
+    for name in _PASSIVE_CHECKPOINT_FIELDS:
+        if name in receipts:
+            if name in payload:
+                raise ValueError(f"Duplicate checkpoint field: {name}")
+            payload[name] = receipts[name]
+
+    if "tool_outcomes" in receipts:
+        frame = payload.get("native_continuation")
+        outcomes = receipts["tool_outcomes"]
+        if not isinstance(frame, dict) or "tool_outcomes" in frame:
+            raise ValueError("Checkpoint tool outcomes require one continuation")
+        if not isinstance(outcomes, dict) or outcomes.get("held_call_ids", []) != []:
+            raise ValueError("Held tool outcomes require the current checkpoint reader")
+        payload["native_continuation"] = {**frame, "tool_outcomes": outcomes}
+    return payload
+
+
 def _saved_thread_settings(history: list[dict[str, Any]], thread_id: str) -> dict[str, Any] | None:
     for row in reversed(history):
         payload = row.get("payload")
@@ -661,7 +704,29 @@ class SessionState(BaseModel):
 
     def to_json(self) -> str:
         """Serialize for storage; the payload may contain sensitive conversation data."""
-        return self.model_dump_json(exclude_defaults=True)
+        encoded = self.model_dump_json(exclude_defaults=True)
+        if self.format_version in (8, 9):
+            return encoded
+
+        payload = json.loads(encoded)
+        receipts = {
+            name: payload.pop(name) for name in _PASSIVE_CHECKPOINT_FIELDS if name in payload
+        }
+        continuation = self.native_continuation
+        if (
+            continuation is not None
+            and continuation.tool_outcomes is not None
+            and not continuation.tool_outcomes.held_call_ids
+        ):
+            receipts["tool_outcomes"] = payload["native_continuation"].pop("tool_outcomes")
+        if not receipts:
+            return encoded
+
+        # Alpha.7 ignores unknown agent options, but rejects extra fields on the
+        # envelope and continuation. Keep data required by newer execution
+        # features in its usual place so alpha.7 still refuses that state.
+        payload.setdefault("agent_options", {})[_CHECKPOINT_RECEIPTS] = receipts
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     def _has_handoff_presentation(self) -> bool:
         for history in (self.history, *(child.history for child in self.descendants)):
@@ -710,6 +775,14 @@ class SessionState(BaseModel):
             or not compare_digest(expected_sha256, sha256(value.encode()).hexdigest())
         ):
             raise ValueError("Session state does not match its expected SHA-256 digest")
+        try:
+            decoded = json.loads(value)
+        except (ValueError, RecursionError):
+            # Keep the existing Pydantic error for malformed JSON.
+            decoded = None
+        expanded = _unpack_checkpoint_receipts(decoded)
+        if expanded is not None:
+            value = json.dumps(expanded, ensure_ascii=False, separators=(",", ":"))
         state = cls.model_validate_json(value)
         if expected_sha256 is not None:
             state._record_handoff_presentation_authority()

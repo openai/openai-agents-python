@@ -29,7 +29,7 @@ def _single_configured_child(state: SessionState) -> bool:
     if continuation is None or continuation.get("kind") != "configured-child-v1":
         return False
     try:
-        child = SessionState.model_validate_json(json.dumps(continuation["state"]))
+        child = SessionState.from_json(json.dumps(continuation["state"]))
     except (KeyError, TypeError, ValueError):
         return False
     nested = child.native_continuation
