@@ -233,6 +233,44 @@ class TestOpenAIConversationsSessionBasicOperations:
     """Test basic CRUD operations with simple mocking."""
 
     @pytest.mark.asyncio
+    async def test_function_call_wire_alias_survives_session_round_trip(self):
+        function_call = {
+            "id": "fc_1",
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup",
+            "arguments": "{}",
+            "status": "completed",
+            "async": True,
+        }
+        posted_items: list[dict[str, Any]] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            # Exercise the OpenAI client's parsing and serialization across the session boundary.
+            if request.method == "DELETE":
+                return httpx.Response(
+                    200, json={"id": "conv_test", "object": "conversation", "created_at": 0}
+                )
+            if request.method == "POST":
+                posted_items.extend(json.loads(request.content)["items"])
+            return httpx.Response(
+                200, json={"object": "list", "data": [function_call], "has_more": False}
+            )
+
+        async with AsyncOpenAI(
+            api_key="test-placeholder",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        ) as client:
+            session = OpenAIConversationsSession(conversation_id="conv_test", openai_client=client)
+            assert await session.get_items() == [function_call]
+            assert await session.get_items(limit=1) == [function_call]
+            popped = await session.pop_item()
+            assert popped is not None and popped == function_call
+            await session.add_items([popped])
+
+        assert posted_items == [function_call]
+
+    @pytest.mark.asyncio
     async def test_get_items_zero_limit_returns_empty_without_api_call(self, mock_openai_client):
         """A zero history limit must not be forwarded to the Conversations API."""
         mock_openai_client.conversations.items.list = MagicMock(
@@ -256,7 +294,7 @@ class TestOpenAIConversationsSessionBasicOperations:
             def __init__(self, item_id: int) -> None:
                 self.item_id = item_id
 
-            def model_dump(self, *, exclude_unset: bool) -> dict[str, int]:
+            def model_dump(self, *, exclude_unset: bool, by_alias: bool) -> dict[str, int]:
                 assert exclude_unset is True
                 return {"item_id": self.item_id}
 
