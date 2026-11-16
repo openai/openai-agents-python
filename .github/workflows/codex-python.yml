@@ -85,6 +85,11 @@ jobs:
       MATURIN_PGO: ${{ inputs.runner == 'ubuntu-24.04' && 'true' || 'false' }}
       # PEP 517 frontends may copy only the wheel out of the backend directory.
       OPENAI_AGENTS_NATIVE_RECEIPT_DIR: ${{ github.workspace }}/dist
+      # Run both Windows regressions in the existing sibling on cold preview pushes.
+      WINDOWS_REGRESSIONS_IN_SIBLING: &windows_regressions_in_sibling >-
+        ${{ github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
+        inputs.native_source_run == '' &&
+        github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness' }}
     steps:
       - &native_snapshot_checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -271,9 +276,7 @@ jobs:
       - name: Test Windows project-search filename handling
         if: >-
           runner.os == 'Windows' && inputs.native_source_run == '' &&
-          !(github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
-          inputs.native_source_run == '' &&
-          github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness')
+          env.WINDOWS_REGRESSIONS_IN_SIBLING != 'true'
         run: &windows_filename_command |
           python -I -S - <<'PYTHON'
           import os
@@ -292,24 +295,27 @@ jobs:
               cwd=root / ".upstream/codex/codex-rs", check=True,
           )
           PYTHON
-      - name: Build the shared test executor
+      - &copy_test_executor_source
+        name: Copy the shared test executor source
         if: inputs.native_source_run == ''
         run: |
+          fixture=packages/codex/tests/fixtures/exec_server.rs
+          mkdir -p "$(dirname "$OPENAI_AGENTS_BUILD_SOURCE/$fixture")"
+          cp "$fixture" "$OPENAI_AGENTS_BUILD_SOURCE/$fixture"
+      - name: Run the native binding admission regression
+        if: inputs.native_source_run == '' && env.WINDOWS_REGRESSIONS_IN_SIBLING != 'true'
+        run: &native_admission_test |
           python -I -S - <<'PYTHON'
           import os
-          import shutil
           import subprocess
           import sys
           import sysconfig
           from pathlib import Path
           root = Path(os.environ["OPENAI_AGENTS_BUILD_SOURCE"]) / "packages/codex"
-          fixture = Path("tests/fixtures/exec_server.rs")
-          (root / fixture).parent.mkdir(parents=True, exist_ok=True)
-          shutil.copy2(Path("packages/codex") / fixture, root / fixture)
           sys.path.insert(0, str(root / "scripts"))
           from native_env import build_environment, cargo_build_options
           environment = build_environment(root)
-          options, build_target = cargo_build_options(root, environment)
+          options, _ = cargo_build_options(root, environment)
           environment["PYO3_PYTHON"] = sys.executable
           if os.environ.get("OPENAI_AGENTS_NATIVE_BUILD_IMAGE"):
               libdir = sysconfig.get_config_var("LIBDIR")
@@ -324,6 +330,29 @@ jobs:
                "--", "--exact"],
               cwd=root, env=environment, check=True,
           )
+          PYTHON
+      - name: Build the shared test executor
+        if: inputs.native_source_run == ''
+        run: |
+          python -I -S - <<'PYTHON'
+          import os
+          import shutil
+          import subprocess
+          import sys
+          import sysconfig
+          from pathlib import Path
+          root = Path(os.environ["OPENAI_AGENTS_BUILD_SOURCE"]) / "packages/codex"
+          sys.path.insert(0, str(root / "scripts"))
+          from native_env import build_environment, cargo_build_options
+          environment = build_environment(root)
+          options, build_target = cargo_build_options(root, environment)
+          environment["PYO3_PYTHON"] = sys.executable
+          if os.environ.get("OPENAI_AGENTS_NATIVE_BUILD_IMAGE"):
+              libdir = sysconfig.get_config_var("LIBDIR")
+              environment["LD_LIBRARY_PATH"] = os.pathsep.join(
+                  part for part in (libdir, environment.get("LD_LIBRARY_PATH")) if part
+              )
+          environment.setdefault("RUST_MIN_STACK", str(16 * 1024 * 1024))
           subprocess.run(["cargo", "build", "--release", "--locked", "--timings", *options, "--example", "exec-server-fixture"], cwd=root, env=environment, check=True)
           target = Path(environment["CARGO_TARGET_DIR"])
           if not target.is_absolute():
@@ -520,10 +549,7 @@ jobs:
 
   windows-filename:
     name: Windows project-search filename regression
-    if: >-
-      github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
-      inputs.native_source_run == '' &&
-      github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness'
+    if: *windows_regressions_in_sibling
     runs-on: *native_snapshot_runner
     timeout-minutes: 100
     defaults:
@@ -542,6 +568,9 @@ jobs:
         run: &verify_filename_source python -I -S "$OPENAI_AGENTS_BUILD_SOURCE/packages/codex/scripts/prepare_codex.py"
       - name: Test Windows project-search filename handling
         run: *windows_filename_command
+      - *copy_test_executor_source
+      - name: Run the native binding admission regression
+        run: *native_admission_test
       - name: Verify the prepared native source after testing
         run: *verify_filename_source
 
