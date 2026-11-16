@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from agents import Agent, NativeProvider
-from agents.realtime import NativeRealtimeConnection, RealtimeAdapterContext, RealtimeConfig
+from agents.realtime.native import NativeRealtimeConnection, RealtimeAdapterContext, RealtimeConfig
 from tests._asyncio import timeout
 from tests.native_fixtures import text_response
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer

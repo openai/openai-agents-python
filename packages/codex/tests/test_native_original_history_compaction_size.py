@@ -17,8 +17,8 @@ async def test_repeated_compaction_preserves_originals_without_copying_the_prefi
         agent = Agent(instructions="Keep the original available.", provider=provider)
         async with agent.session() as session:
             initial = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=initial.revision, keep=0, items=[original]
+            await session.replace_history_suffix(
+                expected_revision=initial.revision, keep_prefix_count=0, items=[original]
             )
             retained = await session.history_snapshot()
             before_size = len((await session.save_state()).to_json().encode("utf-8"))

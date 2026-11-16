@@ -363,8 +363,9 @@ Each request receipt has been recording its HTTP version, negotiated ALPN and TL
 
 The two server modes have been using different HTTP implementations. Comparing their wall or CPU measurements has not been isolating SDK work or establishing a performance improvement. Keep the selected mode identical across a matched SDK comparison. All original measured, prefill and full-owner clocks have been remaining unchanged. Hypercorn has been staying pinned because the benchmark's TLS connection/shutdown adapter has been using its private `TCPServer` interface.
 
-The focused transport check has been launching a local TLS peer, verifying H2 reuse, HTTP/1.1 JSON and WebSocket delivery, complete bodies and joined shutdown, without importing either SDK:
+The focused transport check has been using an additional HTTPX test client in the peer environment. It has been launching a local TLS peer and checking H2 connection reuse, HTTP/1.1 JSON, WebSocket delivery, complete bodies, and joined shutdown without importing either SDK:
 
 ```sh
+uv pip install --compile-bytecode --python "$PEER_PY" 'httpx[http2]==0.28.1'
 "$PEER_PY" -B -m unittest discover -s "$BENCH/tests" -p 'test_http2_peer.py'
 ```

@@ -2,7 +2,7 @@
 
 import asyncio
 
-from agents.realtime import RealtimeGuardrailResult
+from agents.realtime.native import RealtimeGuardrailResult
 from tests.test_realtime_guardrail_retention import output, owner_for, settle
 
 

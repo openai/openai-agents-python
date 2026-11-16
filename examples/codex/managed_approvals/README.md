@@ -4,7 +4,7 @@ Pause a Python function before its callback runs, inspect the proposed arguments
 
 ## Run the example
 
-This development-only example is absent from the alpha.7 source archive. Follow the [source-build setup](../../../CONTRIBUTING.md#build-the-sdk-from-source), then activate the environment with the wheel and example files from that same checkout. This example uses synthetic data and a loopback Responses fixture. It needs no provider credentials or external service.
+Managed function approvals are new in alpha.8. The alpha.7 wheel and source archive do not include them. Check [release availability](../../../docs/sdk/versions.md), then use the wheel and example files from the same version. Until alpha.8 is available, follow the [source-build setup](../../../CONTRIBUTING.md#build-the-sdk-from-source). This example uses synthetic data and a loopback Responses fixture. It needs no provider credentials or external service.
 
 Run from the repository root and keep loopback traffic off your proxy:
 
@@ -16,9 +16,11 @@ The script checks that approval runs the callback exactly once, then prints `App
 
 ## Inspect and decide
 
-Set `@function_tool(needs_approval=True)` to pause before a Python function runs. Read `ApprovalRequested` from `session.interactions()`, inspect `arguments` and `effective_arguments`, then await `approve()` or `reject(reason)`. Approval runs the registered callback. Rejection returns a failed tool result without calling it. The request belongs to its original Session, Turn, and call; a second decision or an expired request fails.
+Set `@function_tool(needs_approval=True)` to pause before a Python function runs. Read `FunctionToolApprovalRequest` from `session.interactions()`, inspect `arguments` and `effective_arguments`, then await `approve()` or `reject(reason)`. Approval runs the registered callback. Rejection returns a failed tool result without calling it. The request belongs to its original Session, Turn, and call; a second decision or an expired request fails.
 
-`needs_approval` also accepts a synchronous or asynchronous predicate receiving `ToolContext`. A false result runs the function without asking the application. By default, the input guard runs after approval, immediately before the callback. With `run_before_approval=True`, the input guard also runs before the approval predicate. A replacement from that first check becomes the request's effective input. After approval, the SDK repeats the input guard and rejects replacements with different effective arguments before execution. Output guards run only after callback execution.
+`needs_approval` also accepts a synchronous or asynchronous predicate receiving `ToolContext`. A false result runs the function without asking the application. By default, the input guard runs after approval, immediately before the callback. With `run_input_policy_before_approval=True`, the input guard also runs before the approval predicate. A replacement from that first check becomes the request's effective input. After approval, the SDK repeats the input guard and rejects replacements with different effective arguments before execution. Output guards run only after callback execution.
+
+A one-shot handler can return `request.reply(FunctionToolApprovalDecision(approve=True))`. Import `FunctionToolApprovalRequest` and `FunctionToolApprovalDecision` from `agents`. These managed function types are separate from `ApprovalRequest`, which handles native command and MCP approval requests.
 
 ## Remember a Session decision
 

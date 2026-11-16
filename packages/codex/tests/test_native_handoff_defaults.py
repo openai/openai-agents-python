@@ -8,7 +8,7 @@ from contextlib import aclosing
 import pytest
 
 from agents import Agent, HttpMCP, NativeProvider, ToolRef, function_tool
-from agents.realtime import RealtimeConfig, RealtimeToolCall
+from agents.realtime.native import RealtimeConfig, RealtimeToolCall
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses

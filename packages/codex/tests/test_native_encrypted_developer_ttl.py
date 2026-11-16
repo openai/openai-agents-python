@@ -41,7 +41,9 @@ async def test_caller_instruction_roles_expire_without_retiring_native_instructi
         agent = Agent(instructions="CURRENT_NATIVE_INSTRUCTION", model="gpt-5.5", provider=provider)
         source = await leases.enter_async_context(agent.session(storage=storage))
         before = await source.history_snapshot()
-        await source.transact_history(expected_revision=before.revision, keep=0, items=[imported])
+        await source.replace_history_suffix(
+            expected_revision=before.revision, keep_prefix_count=0, items=[imported]
+        )
         identity = source.id
         if cold:
             await source.aclose()

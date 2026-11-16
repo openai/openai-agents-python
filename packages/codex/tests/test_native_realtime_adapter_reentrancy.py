@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from agents import Agent, NativeProvider
-from agents.realtime import NativeRealtimeConnection, RealtimeAdapterContext, RealtimeConfig
+from agents.realtime.native import NativeRealtimeConnection, RealtimeAdapterContext, RealtimeConfig
 from tests._asyncio import timeout
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
 
@@ -119,7 +119,7 @@ async def test_adapter_close_reentrancy_fails_then_retries_without_losing_owners
 async def test_adapter_controls_reject_self_io_without_consuming_approval(
     realtime_peer: RealtimePeer, operation: str, nested: bool
 ) -> None:
-    from agents.realtime import RealtimeHostedMcpApprovalRequested
+    from agents.realtime.native import RealtimeHostedMcpApprovalRequested
 
     peer = realtime_peer
     errors: list[BaseException] = []

@@ -3,7 +3,7 @@
 from contextlib import aclosing
 
 from agents import Agent, NativeProvider, function_tool
-from agents.realtime import RealtimeConfig, RealtimeResponse, RealtimeToolCall
+from agents.realtime.native import RealtimeConfig, RealtimeResponse, RealtimeToolCall
 from tests._asyncio import timeout
 from tests.native_fixtures import text_response
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer

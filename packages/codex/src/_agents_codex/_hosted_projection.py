@@ -4,6 +4,12 @@ from typing import Any as Any
 
 from ._public import preserve_module_identity as _preserve_module_identity
 
+_LIVE_TOOL_ITEM_FIELDS = {
+    "tool_search_call": ("call_id", "execution", "arguments"),
+    "tool_search_output": ("call_id", "execution", "tools"),
+    "mcp_approval_response": ("approval_request_id", "approve", "reason"),
+}
+
 _HOSTED_RESPONSE_ITEM_FIELDS = {
     "mcp_list_tools": ("server_label", "tools", "error"),
     "mcp_call": ("server_label", "name", "arguments", "output", "error"),
@@ -18,7 +24,11 @@ _HOSTED_RESPONSE_ITEM_FIELDS = {
 
 
 def project_hosted_response_item(
-    raw: dict[str, Any], turn_id: str | None, *, item_id: str | None = None
+    raw: dict[str, Any],
+    turn_id: str | None,
+    *,
+    item_id: str | None = None,
+    live_item_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Keep the complete provider payload alongside its public typed fields."""
     raw = {
@@ -27,11 +37,22 @@ def project_hosted_response_item(
         if key != "internal_chat_message_metadata_passthrough"
     }
     kind = raw.get("type", "")
-    fields = _HOSTED_RESPONSE_ITEM_FIELDS.get(kind)
+    live_fields = _LIVE_TOOL_ITEM_FIELDS.get(kind) if live_item_id is not None else None
+    fields = live_fields or _HOSTED_RESPONSE_ITEM_FIELDS.get(kind)
     resolved_id = raw.get("id") or item_id
+    if live_fields is not None:
+        if kind == "mcp_approval_response":
+            raw = {key: raw[key] for key in ("type", "id", *live_fields) if key in raw}
+        elif resolved_id is None and (call_id := raw.get("call_id")):
+            resolved_id = f"{call_id}:output" if kind == "tool_search_output" else call_id
+        resolved_id = resolved_id or live_item_id
     if fields is None or not resolved_id:
         return None
-    if kind == "program":
+    if live_fields is not None:
+        status = raw.get("status")
+        if status not in {"in_progress", "completed", "failed", "incomplete"}:
+            status = "completed"
+    elif kind == "program":
         status = raw.get("status", "completed")
     elif kind in {"shell_call", "shell_call_output"}:
         status = raw.get("status") or "unknown"

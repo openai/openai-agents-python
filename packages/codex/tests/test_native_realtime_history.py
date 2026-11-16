@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from agents import Agent, NativeProvider
-from agents.realtime import RealtimeConfig
+from agents.realtime.native import RealtimeConfig
 from tests._asyncio import timeout
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
 

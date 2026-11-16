@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import pickle
+import re
 from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -27,7 +28,7 @@ from agents import (
 )
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
-from tests.native_fixtures import assistant_output, function_call
+from tests.native_fixtures import assistant_output, function_call, tool_output
 from tests.test_native_executor_tools import declaration
 from tests.test_native_provider_websockets import WebSocketPeer
 
@@ -69,6 +70,7 @@ class ChildPeer(WebSocketPeer):
         self.action: dict[str, Any] | None = None
         self.root_started = False
         self.command: str | None = None
+        self.wait_for_command_exit = False
         self.extra_arguments: dict[str, Any] = {}
         self.patch: str | None = None
 
@@ -122,6 +124,21 @@ class ChildPeer(WebSocketPeer):
                     tool = "view_image"
                     args = {"path": "missing.png"}
                 return [function_call(tool, args, "shared-call-id")]
+            if self.wait_for_command_exit:
+                receipts = workspace_command_receipts(body)
+                output = tool_output(body, receipts[-1])
+                running = re.search(
+                    r"^Process running with session ID (\d+)$", output, re.MULTILINE
+                )
+                if running:
+                    return [
+                        function_call(
+                            "write_stdin",
+                            {"session_id": int(running[1]), "chars": "", "yield_time_ms": 1000},
+                            f"workspace-stdin-{len(receipts)}",
+                        )
+                    ]
+                assert "Process exited with code " in output, output
             result = assistant_output(name + " complete")
             result["item"]["id"] = "done-" + name
             return [result]
@@ -145,6 +162,18 @@ class ChildPeer(WebSocketPeer):
                 for name, role in zip(("alpha", "beta"), self.roles, strict=False)
             ]
         return [assistant_output("root complete")]
+
+
+def workspace_command_receipts(request: dict[str, Any]) -> list[str]:
+    return [
+        item["call_id"]
+        for item in request.get("input", [])
+        if item.get("type") == "function_call_output"
+        and (
+            item.get("call_id") == "shared-call-id"
+            or item.get("call_id", "").startswith("workspace-stdin-")
+        )
+    ]
 
 
 @asynccontextmanager
@@ -771,14 +800,18 @@ async def test_child_uses_current_executor_workspace_permissions(
         protected = executor.root.parent / "protected.txt"
         protected.write_text("original\n")
         peer.command = "cat allowed.txt; printf denied > ../protected.txt"
+        peer.wait_for_command_exit = True
         peer.release["alpha"].set()
         async with agent_for(peer, executor).session(environment=declaration(executor)) as session:
             await (await session.submit("Use the child workspace")).get_result()
             child = (await handles(session, 1))[0]
             assert await child_output(session, child) == "alpha complete"
-            output = json.dumps(peer.child_requests["alpha"][-1]).lower()
-            assert "workspace-child-proof" in output
-            assert "read-only file system" in output or "permission denied" in output
+            request = peer.child_requests["alpha"][-1]
+            output = "\n".join(
+                tool_output(request, call_id) for call_id in workspace_command_receipts(request)
+            ).lower()
+            assert "workspace-child-proof" in output, output
+            assert "read-only file system" in output or "permission denied" in output, output
             assert protected.read_text() == "original\n"
             assert any(request.get("method") == "process/start" for request in executor.requests)
 

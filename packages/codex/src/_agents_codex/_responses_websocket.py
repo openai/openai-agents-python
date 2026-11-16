@@ -39,14 +39,14 @@ class ResponsesWebSocketOptions(TypedDict, total=False):
     max_size: int | None
 
 
-class ResponsesSocketOptions(TypedDict):
+class ResponsesSocketFactoryOptions(TypedDict):
     url: str
     headers: dict[str, str]
     open_timeout: float | None
     websocket_options: ResponsesWebSocketOptions
 
 
-def _socket_scope(options: ResponsesSocketOptions) -> str:
+def _socket_scope(options: ResponsesSocketFactoryOptions) -> str:
     return hashlib.sha256(
         json.dumps(
             {
@@ -57,7 +57,9 @@ def _socket_scope(options: ResponsesSocketOptions) -> str:
     ).hexdigest()
 
 
-ResponsesSocketFactory: TypeAlias = Callable[[ModelRequest, ResponsesSocketOptions], Awaitable[Any]]
+ResponsesSocketFactory: TypeAlias = Callable[
+    [ModelRequest, ResponsesSocketFactoryOptions], Awaitable[Any]
+]
 
 
 if TYPE_CHECKING:
@@ -71,7 +73,7 @@ class _QuietSocketLogger(_SocketLoggerBase):
         return level > logging.DEBUG and super().isEnabledFor(level)
 
 
-async def _connect(request: ModelRequest, options: ResponsesSocketOptions) -> Any:
+async def _connect(request: ModelRequest, options: ResponsesSocketFactoryOptions) -> Any:
     socket_options: ResponsesWebSocketOptions = {
         "max_size": _MAX_CHAT_STREAM_BYTES,
         **options["websocket_options"],
@@ -126,7 +128,7 @@ def _timeout(client: Any, selected: ModelRequestOptions, phase: str) -> float | 
 
 async def _socket_options(
     client: Any, selected: ModelRequestOptions, websocket_options: ResponsesWebSocketOptions
-) -> ResponsesSocketOptions:
+) -> ResponsesSocketFactoryOptions:
     import httpx2
     from openai import NotGiven, Omit
 
@@ -510,7 +512,7 @@ class ResponsesWebSocketModel(ResponsesModel):
 
                 async def open_connection(
                     captured_request: ModelRequest,
-                    captured_options: ResponsesSocketOptions,
+                    captured_options: ResponsesSocketFactoryOptions,
                     captured_key: str,
                 ) -> _Connection:
                     socket = opened = None

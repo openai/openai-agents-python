@@ -18,7 +18,7 @@ from agents import (
     TurnStoppedError,
     function_tool,
 )
-from agents.realtime import RealtimeConfig, RealtimeResponse
+from agents.realtime.native import RealtimeConfig, RealtimeResponse
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_agent import provider

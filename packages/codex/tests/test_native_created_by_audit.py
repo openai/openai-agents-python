@@ -50,7 +50,9 @@ async def test_replay_drops_created_by_only_on_provider_wire(responses, kind, it
     agent = Agent(instructions="Answer briefly.", provider=provider(responses))
     async with agent.session() as source:
         initial = await source.history_snapshot()
-        await source.transact_history(expected_revision=initial.revision, keep=0, items=imported)
+        await source.replace_history_suffix(
+            expected_revision=initial.revision, keep_prefix_count=0, items=imported
+        )
         snapshot = await source.history_snapshot()
         assert snapshot.items == tuple(imported)
         state = await source.save_state()

@@ -13,7 +13,7 @@ from agents import (
     Agent,
     CompletionContext,
     ContinueTurn,
-    FinishToolBatch,
+    FinishTurn,
     FunctionTool,
     NativeProvider,
     OutputValidationError,
@@ -106,9 +106,9 @@ async def test_native_batch_completion_uses_ordered_known_results_and_typed_fina
         second_finished.set()
         return ToolOutput.error("explicit tool failure")
 
-    async def complete(ctx: ToolBatchCompletionContext[Any]) -> FinishToolBatch[Final]:
+    async def complete(ctx: ToolBatchCompletionContext[Any]) -> FinishTurn[Final]:
         proposals.append(tuple(str(result.call.call_id) for result in ctx.results))
-        return FinishToolBatch(
+        return FinishTurn(
             Final(
                 failed=tuple(
                     str(result.call.call_id) for result in ctx.results if not result.output.success
@@ -166,10 +166,10 @@ async def test_native_batch_completion_exposes_round_trippable_public_output(
     def lookup() -> ToolOutput:
         return output
 
-    def complete(ctx: ToolBatchCompletionContext[Any]) -> FinishToolBatch[str]:
+    def complete(ctx: ToolBatchCompletionContext[Any]) -> FinishTurn[str]:
         assert len(ctx.results) == 1
         observed.append(ctx.results[0].output.to_native())
-        return FinishToolBatch("complete")
+        return FinishTurn("complete")
 
     agent = Agent(
         instructions="Use lookup.",
@@ -198,9 +198,9 @@ async def test_native_batch_completion_yields_to_accepted_handoff(
         calls.append("lookup")
         return "lookup result"
 
-    def complete(ctx: ToolBatchCompletionContext[Any]) -> FinishToolBatch[str]:
+    def complete(ctx: ToolBatchCompletionContext[Any]) -> FinishTurn[str]:
         proposals.append(ctx)
-        return FinishToolBatch("source batch output")
+        return FinishTurn("source batch output")
 
     destination = Agent(name="Destination", instructions="Answer from the destination.")
     source = Agent(
@@ -238,9 +238,9 @@ async def test_native_batch_completion_uses_fresh_manual_reply_after_resume(
     )
     proposals: list[tuple[str | None, bool]] = []
 
-    def complete(ctx: ToolBatchCompletionContext[Any]) -> FinishToolBatch[str]:
+    def complete(ctx: ToolBatchCompletionContext[Any]) -> FinishTurn[str]:
         proposals.extend((result.call.call_id, result.output.success) for result in ctx.results)
-        return FinishToolBatch("lookup could not be completed")
+        return FinishTurn("lookup could not be completed")
 
     agent = Agent(
         instructions="Use lookup.",

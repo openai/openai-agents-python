@@ -70,7 +70,7 @@ PGO requires the native `x86_64-unknown-linux-gnu` target, `uv`, and Maturin 1.1
 
 The trainer uses a local synthetic Responses server and dependencies pinned in `uv.lock`. Maturin keeps the training wheel and profiles temporary; only the optimized wheel reaches the normal integrity and size checks. The adjacent `.whl.pristine.json` receipt records the compiler, Maturin version, target, PGO mode, and a hash of the Python training source in `native_build`.
 
-CI excludes the PGO target directory from dependency archives and reuses qualified final wheels through the existing snapshot checks. Changes to the trainer, fixture, or lockfile require a new native build. Python-only repacking preserves the original native build and its training-source hash.
+CI reuses qualified final wheels through the snapshot checks. Changes to the trainer, fixture, or lockfile require a new native build. Python-only repacking preserves the original native build and its training-source hash.
 
 ### Install outside the checkout
 
@@ -130,9 +130,9 @@ A branch producer also records its unique open PR, repository IDs and branch ref
 
 Tests searches artifacts by the exact native input hash, so later docs-only runs do not hide a retained snapshot. The hash covers native sources, pins, patches, build scripts and settings, training inputs and the lockfile, copied licenses, the test executor and executable CI controls. Python source-only changes can reuse the native build; qualification repacks and tests the current SDK. Snapshots and their captured producer identity are retained for 90 days.
 
-If no eligible snapshot exists, Tests checks the latest 20 successful push runs per source for reusable Rust dependencies, then starts a fresh build immediately. Incomplete source-history reads and corrupted downloads fail visibly. A copied snapshot must pass the same source, publication and qualification checks.
+If no eligible snapshot exists, Tests starts a fresh build immediately. Incomplete source-history reads and corrupted downloads fail visibly. A copied snapshot must pass the same source, publication and qualification checks.
 
-In this repository's CI, macOS snapshot reuse, SDK qualification and SDK tests have been using the ARM64 `macos-15` runner. Official `feat/codex-harness` pushes have been using `macos-26-xlarge` when rebuilding the native payload. Same-repository harness pull requests have been using that runner for builds without snapshot or dependency reuse. Other macOS native builds have been using `macos-15-xlarge`.
+In this repository's CI, macOS snapshot reuse, SDK qualification and SDK tests have been using the ARM64 `macos-15` runner. Official `feat/codex-harness` pushes have been using `macos-26-xlarge` when rebuilding the native payload. Same-repository harness pull requests have been using that runner for builds without snapshot reuse. Other macOS native builds have been using `macos-15-xlarge`.
 
 Artifact-control Python commands isolate startup from unbound checkout imports. Native CI rejects tracked Python bytecode/cache paths and root `.python-version`, `uv.toml` or `.venv` overrides before setting up uv; keep build settings in `pyproject.toml`.
 
@@ -140,9 +140,7 @@ Artifact-control Python commands isolate startup from unbound checkout imports. 
 
 Native producers do not restore or save Actions caches. They prefer verified native snapshots.
 
-If only local Rust source and Python SDK files changed, platforms with donor support can restore a separate verified dependency artifact and rebuild the current native package. Only push runs publish dependency artifacts. CI applies the same donor, digest, publication and qualification checks as for snapshots. Dependency artifacts preserve dependency sources and timestamps, exclude compiled `codex-agents-python` outputs, and require matching build environments.
-
-Pin, patch, lockfile, build-script or workflow changes require a cold build. Missing artifacts also fall back immediately to a cold build; CI never waits for another build. SDK-phase caches remain separate, and every new native package still passes full platform qualification.
+Rust source, pin, patch, lockfile, build-script or workflow changes require a cold build. Missing artifacts also fall back immediately to a cold build; CI never waits for another build. SDK-phase caches remain separate, and every new native package still passes full platform qualification.
 
 ## Keep the pin and source verifiable
 

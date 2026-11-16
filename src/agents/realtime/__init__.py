@@ -1,155 +1,10 @@
-"""Native Realtime controls with explicit, retained Classic constructors.
+"""Retained Classic Realtime API through its original import path.
 
-Non-conflicting legacy names have been retaining their Classic identities. Existing
-native names have been retaining native ownership; Classic-specific module paths
-have been supplying their corresponding retained Classic types.
+Native sessions, settings, and events are available from ``agents.realtime.native``.
 """
 
 from importlib import import_module as _import_module
 from typing import TYPE_CHECKING as _TYPE_CHECKING, Any as _Any
-
-from _agents_codex.realtime import (
-    BackgroundResult as BackgroundResult,
-    NativeRealtimeAdapter as NativeRealtimeAdapter,
-    NativeRealtimeConnection as NativeRealtimeConnection,
-    NativeRealtimeCustomVoice as NativeRealtimeCustomVoice,
-    NativeRealtimeHostedMcpTool as NativeRealtimeHostedMcpTool,
-    NativeRealtimeMcpApprovalFilter as NativeRealtimeMcpApprovalFilter,
-    NativeRealtimeMcpToolFilter as NativeRealtimeMcpToolFilter,
-    NativeRealtimeNoiseReduction as NativeRealtimeNoiseReduction,
-    NativeRealtimePrompt as NativeRealtimePrompt,
-    NativeRealtimePromptFile as NativeRealtimePromptFile,
-    NativeRealtimePromptImage as NativeRealtimePromptImage,
-    NativeRealtimePromptText as NativeRealtimePromptText,
-    NativeRealtimeReasoning as NativeRealtimeReasoning,
-    NativeRealtimeResponseOptions as NativeRealtimeResponseOptions,
-    NativeRealtimeSemanticVad as NativeRealtimeSemanticVad,
-    NativeRealtimeServerVad as NativeRealtimeServerVad,
-    NativeRealtimeSessionUpdate as NativeRealtimeSessionUpdate,
-    NativeRealtimeSettings as NativeRealtimeSettings,
-    NativeRealtimeToolChoice as NativeRealtimeToolChoice,
-    NativeRealtimeToolChoiceFunction as NativeRealtimeToolChoiceFunction,
-    NativeRealtimeToolChoiceMcp as NativeRealtimeToolChoiceMcp,
-    NativeRealtimeTracing as NativeRealtimeTracing,
-    NativeRealtimeTranscription as NativeRealtimeTranscription,
-    RealtimeAdapterContext as RealtimeAdapterContext,
-    RealtimeAgentConfig as RealtimeAgentConfig,
-    RealtimeAgentContext as RealtimeAgentContext,
-    RealtimeAudio as RealtimeAudio,
-    RealtimeAudioInput as RealtimeAudioInput,
-    RealtimeConfig as RealtimeConfig,
-    RealtimeConversationItemDeleted as RealtimeConversationItemDeleted,
-    RealtimeConversationItemObserved as RealtimeConversationItemObserved,
-    RealtimeDelegation as RealtimeDelegation,
-    RealtimeDetachedFunctionCall as RealtimeDetachedFunctionCall,
-    RealtimeEvent as RealtimeEvent,
-    RealtimeGuardrailEvent as RealtimeGuardrailEvent,
-    RealtimeGuardrailInput as RealtimeGuardrailInput,
-    RealtimeGuardrailResult as RealtimeGuardrailResult,
-    RealtimeHandoff as RealtimeHandoff,
-    RealtimeHistory as RealtimeHistory,
-    RealtimeHistoryItem as RealtimeHistoryItem,
-    RealtimeHostedMcpApprovalRequested as RealtimeHostedMcpApprovalRequested,
-    RealtimeHostedMcpCallCompleted as RealtimeHostedMcpCallCompleted,
-    RealtimeHostedMcpTool as RealtimeHostedMcpTool,
-    RealtimeHostedMcpToolsListed as RealtimeHostedMcpToolsListed,
-    RealtimeLifecycle as RealtimeLifecycle,
-    RealtimeOutputGuardrail as RealtimeOutputGuardrail,
-    RealtimePlaybackInterrupted as RealtimePlaybackInterrupted,
-    RealtimePlaybackPosition as RealtimePlaybackPosition,
-    RealtimePolicyContext as RealtimePolicyContext,
-    RealtimeProviderRequestError as RealtimeProviderRequestError,
-    RealtimeRawProviderEvent as RealtimeRawProviderEvent,
-    RealtimeResponse as RealtimeResponse,
-    RealtimeSession as RealtimeSession,
-    RealtimeSIP as RealtimeSIP,
-    RealtimeText as RealtimeText,
-    RealtimeTool as RealtimeTool,
-    RealtimeToolBatchError as RealtimeToolBatchError,
-    RealtimeToolCall as RealtimeToolCall,
-    RealtimeToolErrorContext as RealtimeToolErrorContext,
-    RealtimeUsage as RealtimeUsage,
-    RealtimeUsageAccounting as RealtimeUsageAccounting,
-    RealtimeUserInput as RealtimeUserInput,
-    RealtimeUserInputImage as RealtimeUserInputImage,
-    RealtimeUserInputMessage as RealtimeUserInputMessage,
-    RealtimeUserInputText as RealtimeUserInputText,
-    RealtimeWebRTC as RealtimeWebRTC,
-    background_result as background_result,
-    realtime_handoff as realtime_handoff,
-)
-
-# Wildcard imports are available with the native package's base dependencies.
-__all__ = [
-    "BackgroundResult",
-    "background_result",
-    "NativeRealtimeAdapter",
-    "NativeRealtimeConnection",
-    "RealtimeAdapterContext",
-    "RealtimeAgentConfig",
-    "RealtimeAgentContext",
-    "RealtimeHandoff",
-    "realtime_handoff",
-    "NativeRealtimeCustomVoice",
-    "NativeRealtimeHostedMcpTool",
-    "NativeRealtimeMcpApprovalFilter",
-    "NativeRealtimeMcpToolFilter",
-    "NativeRealtimeNoiseReduction",
-    "NativeRealtimePrompt",
-    "NativeRealtimePromptFile",
-    "NativeRealtimePromptImage",
-    "NativeRealtimePromptText",
-    "NativeRealtimeToolChoice",
-    "NativeRealtimeToolChoiceFunction",
-    "NativeRealtimeToolChoiceMcp",
-    "NativeRealtimeReasoning",
-    "NativeRealtimeResponseOptions",
-    "NativeRealtimeSemanticVad",
-    "NativeRealtimeServerVad",
-    "NativeRealtimeSessionUpdate",
-    "NativeRealtimeSettings",
-    "NativeRealtimeTracing",
-    "NativeRealtimeTranscription",
-    "RealtimeAudio",
-    "RealtimeAudioInput",
-    "RealtimeConfig",
-    "RealtimeDelegation",
-    "RealtimeEvent",
-    "RealtimeGuardrailEvent",
-    "RealtimeGuardrailInput",
-    "RealtimeGuardrailResult",
-    "RealtimeHistory",
-    "RealtimeHistoryItem",
-    "RealtimeHostedMcpApprovalRequested",
-    "RealtimeHostedMcpTool",
-    "RealtimeHostedMcpToolsListed",
-    "RealtimeHostedMcpCallCompleted",
-    "RealtimeLifecycle",
-    "RealtimeOutputGuardrail",
-    "RealtimePlaybackInterrupted",
-    "RealtimePlaybackPosition",
-    "RealtimeProviderRequestError",
-    "RealtimeRawProviderEvent",
-    "RealtimeResponse",
-    "RealtimeSession",
-    "RealtimeSIP",
-    "RealtimeText",
-    "RealtimeToolBatchError",
-    "RealtimeToolCall",
-    "RealtimeDetachedFunctionCall",
-    "RealtimeConversationItemObserved",
-    "RealtimeConversationItemDeleted",
-    "RealtimeUsage",
-    "RealtimeUsageAccounting",
-    "RealtimeUserInput",
-    "RealtimeUserInputText",
-    "RealtimeUserInputImage",
-    "RealtimeUserInputMessage",
-    "RealtimeWebRTC",
-]
-
-
-# Legacy constructors/types retain Classic ownership; existing native names stay native.
 
 if _TYPE_CHECKING:
     from ..classic.realtime import (
@@ -164,6 +19,7 @@ if _TYPE_CHECKING:
         RealtimeAgentEndEvent as RealtimeAgentEndEvent,
         RealtimeAgentHooks as RealtimeAgentHooks,
         RealtimeAgentStartEvent as RealtimeAgentStartEvent,
+        RealtimeAudio as RealtimeAudio,
         RealtimeAudioEnd as RealtimeAudioEnd,
         RealtimeAudioFormat as RealtimeAudioFormat,
         RealtimeAudioInterrupted as RealtimeAudioInterrupted,
@@ -222,9 +78,11 @@ if _TYPE_CHECKING:
         RealtimeRawModelEvent as RealtimeRawModelEvent,
         RealtimeReasoningConfig as RealtimeReasoningConfig,
         RealtimeReasoningEffort as RealtimeReasoningEffort,
+        RealtimeResponse as RealtimeResponse,
         RealtimeRunConfig as RealtimeRunConfig,
         RealtimeRunHooks as RealtimeRunHooks,
         RealtimeRunner as RealtimeRunner,
+        RealtimeSession as RealtimeSession,
         RealtimeSessionEvent as RealtimeSessionEvent,
         RealtimeSessionModelSettings as RealtimeSessionModelSettings,
         RealtimeToolApprovalRequired as RealtimeToolApprovalRequired,
@@ -233,16 +91,21 @@ if _TYPE_CHECKING:
         RealtimeToolExecutionConfig as RealtimeToolExecutionConfig,
         RealtimeToolStart as RealtimeToolStart,
         RealtimeTurnDetectionConfig as RealtimeTurnDetectionConfig,
+        RealtimeUserInput as RealtimeUserInput,
+        RealtimeUserInputMessage as RealtimeUserInputMessage,
+        RealtimeUserInputText as RealtimeUserInputText,
         SystemMessageItem as SystemMessageItem,
         UserMessageItem as UserMessageItem,
         get_api_key as get_api_key,
+        realtime_handoff as realtime_handoff,
     )
 
-_CLASSIC_EXPORTS = (
+__all__ = [
     "RealtimeAgent",
     "RealtimeAgentHooks",
     "RealtimeRunHooks",
     "RealtimeRunner",
+    "realtime_handoff",
     "RealtimeAudioFormat",
     "RealtimeClientMessage",
     "RealtimeGuardrailsSettings",
@@ -256,8 +119,12 @@ _CLASSIC_EXPORTS = (
     "RealtimeSessionModelSettings",
     "RealtimeToolExecutionConfig",
     "RealtimeTurnDetectionConfig",
+    "RealtimeUserInput",
+    "RealtimeUserInputMessage",
+    "RealtimeUserInputText",
     "RealtimeAgentEndEvent",
     "RealtimeAgentStartEvent",
+    "RealtimeAudio",
     "RealtimeAudioEnd",
     "RealtimeAudioInterrupted",
     "RealtimeError",
@@ -277,6 +144,7 @@ _CLASSIC_EXPORTS = (
     "InputText",
     "RealtimeItem",
     "RealtimeMessageItem",
+    "RealtimeResponse",
     "RealtimeToolCallItem",
     "SystemMessageItem",
     "UserMessageItem",
@@ -322,11 +190,12 @@ _CLASSIC_EXPORTS = (
     "OpenAIRealtimeSIPModel",
     "OpenAIRealtimeWebSocketModel",
     "get_api_key",
-)
+    "RealtimeSession",
+]
 
 
 def __getattr__(name: str) -> _Any:
-    if name not in _CLASSIC_EXPORTS:
+    if name not in __all__:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     value = getattr(_import_module("agents.classic.realtime"), name)
     globals()[name] = value
@@ -334,4 +203,4 @@ def __getattr__(name: str) -> _Any:
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(__all__) | set(_CLASSIC_EXPORTS))
+    return sorted(set(globals()) | set(__all__))

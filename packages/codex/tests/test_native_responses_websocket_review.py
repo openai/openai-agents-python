@@ -164,7 +164,7 @@ async def test_peer_closed_socket_reopens_before_native_tool_continuation() -> N
 
 
 async def test_socket_send_and_cleanup_failures_retain_their_original_diagnostics() -> None:
-    from agents import ModelRunOwner
+    from agents.models import ModelRunOwner
 
     sending = OSError("synthetic send failure")
     closing = RuntimeError("synthetic close failure")

@@ -158,6 +158,40 @@ class OutputTextDelta(_SubmissionEvent):
 
 
 @_sdk_dataclass(frozen=True, slots=True, kw_only=True)
+class ReasoningSummaryTextDelta(_SubmissionEvent):
+    """Visible native summary preview; requires include_model_output_items=True.
+
+    This is provider summary text, not private reasoning or accepted output.
+    Native transports can defer summaries until their summary part completes.
+    """
+
+    item_id: str
+    summary_index: int
+    delta: str = field(repr=False)
+    type: Literal["reasoning_summary_text_delta"] = field(
+        default="reasoning_summary_text_delta", init=False
+    )
+
+
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
+class FunctionCallArgumentsDelta(_SubmissionEvent):
+    """Responses argument preview, without execution or validation authority.
+
+    Requires include_raw_provider_events=True on the Session and
+    include_execution_details=True on the reader. Only Responses frames are
+    projected; Chat adapters do not synthesize argument previews. Read completed
+    execution and history for accepted arguments rather than parsing a preview.
+    """
+
+    item_id: str
+    output_index: int
+    delta: str = field(repr=False)
+    type: Literal["function_call_arguments_delta"] = field(
+        default="function_call_arguments_delta", init=False
+    )
+
+
+@_sdk_dataclass(frozen=True, slots=True, kw_only=True)
 class ResponseFactReceived(_SubmissionEvent):
     """Private received facts; durable history remains available after failure.
 
@@ -188,6 +222,9 @@ class HostedToolCallSummary:
         "image_generation_call",
         "shell_call",
         "shell_call_output",
+        "tool_search_call",
+        "tool_search_output",
+        "mcp_approval_response",
         "mcp_list_tools",
         "mcp_call",
         "program",
@@ -205,17 +242,20 @@ class ModelOutputItemCompleted(_SubmissionEvent):
     Open the Session with include_model_output_items=True to record ordinary
     assistant messages and provider reasoning summaries.
 
-    FileSearch, CodeInterpreter, ImageGeneration, and program items default to
-    HostedToolCallSummary. Read with
-    include_execution_details=True to receive their complete typed items.
-    Citation offsets refer to the individual text part. Use Session.items()
-    to recover recorded items if the event buffer drops an observation.
+    Tool search and hosted MCP approval decisions default to HostedToolCallSummary.
+    Default web search items omit their results. Read with
+    include_execution_details=True to receive the complete items.
+    Citation offsets refer to the individual text part. Session.items()
+    can recover recorded history if the event buffer drops an observation.
     """
 
     item: (
         _wire_types._events.MessageItem
         | _wire_types._events.ReasoningItem
         | _wire_types._events.WebSearchCallItem
+        | _wire_types._events.ToolSearchCallItem
+        | _wire_types._events.ToolSearchOutputItem
+        | _wire_types._events.HostedMcpApprovalDecisionItem
         | _wire_types._events.McpListToolsItem
         | _wire_types._events.HostedMcpCallItem
         | _wire_types._events.ProgramCallItem
@@ -403,6 +443,8 @@ Observation: TypeAlias = (
     | OutputAccepted
     | SubagentLifecycle
     | OutputTextDelta
+    | ReasoningSummaryTextDelta
+    | FunctionCallArgumentsDelta
     | ResponseFactReceived
     | RawProviderEvent
     | ModelOutputItemCompleted
@@ -694,7 +736,7 @@ class EventStream(AsyncIterator[Observation]):
                     if event.sequence > self._after:
                         self._after = event.sequence
                         if (
-                            isinstance(event, RawProviderEvent)
+                            isinstance(event, (RawProviderEvent, FunctionCallArgumentsDelta))
                             and not self._include_raw_provider_events
                         ):
                             continue
@@ -727,7 +769,10 @@ class EventStream(AsyncIterator[Observation]):
                                 not self._include_execution_details
                                 and not isinstance(model_item, HostedToolCallSummary)
                                 and (
-                                    model_item["type"] == "mcp_list_tools"
+                                    model_item["type"] == "tool_search_call"
+                                    or model_item["type"] == "tool_search_output"
+                                    or model_item["type"] == "mcp_approval_response"
+                                    or model_item["type"] == "mcp_list_tools"
                                     or model_item["type"] == "mcp_call"
                                     or model_item["type"] == "file_search_call"
                                     or model_item["type"] == "code_interpreter_call"

@@ -81,7 +81,7 @@ def test_portable_pending_input_keeps_order_and_detaches_changes():
         "call_id": "new-application-item",
         "output": "synthetic",
     }
-    staged = saved.with_pending_input("queue this").with_pending_input([raw, raw])
+    staged = saved.with_appended_pending_input("queue this").with_appended_pending_input([raw, raw])
     original_items = staged.pending_input
     raw["output"] = "changed"
     staged.pending_input[0]["role"] = "assistant"
@@ -118,12 +118,12 @@ def test_portable_pending_input_enforces_audio_capacity(
         item = {"type": item_type, "call_id": "staged-audio-output", "output": [part]}
     monkeypatch.setattr(_media, "_MAX_AUDIO_INPUT_BYTES", len(json.dumps([item])))
 
-    staged = saved.with_pending_input([item])
+    staged = saved.with_appended_pending_input([item])
     assert SessionState.from_json(staged.to_json()).pending_input == [item]
     with pytest.raises(ValueError, match="Audio input exceeds"):
-        saved.with_pending_input([item, item])
+        saved.with_appended_pending_input([item, item])
     with pytest.raises(ValueError, match="Audio input exceeds"):
-        staged.with_pending_input([item])
+        staged.with_appended_pending_input([item])
 
     data = json.loads(staged.to_json())
     data["native_continuation"]["pending_input"].append(item)
@@ -147,13 +147,13 @@ def test_portable_pending_input_rejects_nonfinite_values(value: float, load_chec
             data["native_continuation"]["pending_input"] = [item]
             SessionState.from_json(json.dumps(data))
         else:
-            saved.with_pending_input([item])
+            saved.with_appended_pending_input([item])
     assert saved.pending_input == []
 
 
 def test_portable_pending_input_refuses_idle_and_exhausted_checkpoints():
     with pytest.raises(ValueError, match="requires a manual continuation"):
-        checkpoint("idle").with_pending_input("idle")
+        checkpoint("idle").with_appended_pending_input("idle")
     data = json.loads(checkpoint("manual").to_json())
     data.update(
         format_version=8,
@@ -161,7 +161,7 @@ def test_portable_pending_input_refuses_idle_and_exhausted_checkpoints():
     )
     saved = SessionState.from_json(json.dumps(data))
     with pytest.raises(ValueError, match="no remaining model requests"):
-        saved.with_pending_input("over budget")
+        saved.with_appended_pending_input("over budget")
     assert saved.pending_input == []
 
 
@@ -221,9 +221,9 @@ async def test_staged_input_after_restored_approval(
             await next_request(source.interactions(), record_decision)
             saved = await source.suspend()
             assert not saved.remembered_approvals
-        saved = saved.with_pending_input(staged_text)
+        saved = saved.with_appended_pending_input(staged_text)
         if reject_input:
-            saved = saved.with_pending_input(
+            saved = saved.with_appended_pending_input(
                 [
                     {
                         "type": "function_call_output",
@@ -338,7 +338,7 @@ async def test_staged_retry_restores_handoff_agent(
         async with root.session() as source:
             await source.submit("Ask Worker to record once.")
             await next_request(source.interactions(), record)
-            saved = (await source.suspend()).with_pending_input(staged_text)
+            saved = (await source.suspend()).with_appended_pending_input(staged_text)
         async with root.session(state=saved) as restored:
             approval = await next_request(restored.interactions(), record)
             await approval.approve()
@@ -373,7 +373,7 @@ async def test_older_manual_checkpoint_preserves_accepted_effect_and_output_cont
     stage_input = mode != "original"
     rejected = mode == "rejected"
     if stage_input:
-        saved = SessionState.from_json(saved.with_pending_input(staged_text).to_json())
+        saved = SessionState.from_json(saved.with_appended_pending_input(staged_text).to_json())
     effects: list[str] = []
     guard_started = asyncio.Event()
     release_guard = asyncio.Event()

@@ -50,10 +50,12 @@ async def test_encrypted_ttl_accepts_new_imported_tool_pair(responses, tmp_path,
         agent = Agent(instructions="Continue the imported history.", provider=provider)
         async with timeout(25), agent.session(storage=storage) as session:
             initial = await session.history_snapshot()
-            await session.transact_history(expected_revision=initial.revision, keep=0, items=prefix)
+            await session.replace_history_suffix(
+                expected_revision=initial.revision, keep_prefix_count=0, items=prefix
+            )
             before = await session.history_snapshot()
-            await session.transact_history(
-                expected_revision=before.revision, keep=before.total, items=imported
+            await session.replace_history_suffix(
+                expected_revision=before.revision, keep_prefix_count=before.total, items=imported
             )
             after = await session.history_snapshot()
             assert after.items == tuple(prefix + imported)

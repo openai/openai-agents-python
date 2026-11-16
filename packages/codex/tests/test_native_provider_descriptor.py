@@ -38,6 +38,7 @@ def test_provider_dataclass_declaration_does_not_load_native(response_mode):
         "websocket_base_url": None,
         "websocket_options": None,
         "agent_harness_id": "synthetic-harness",
+        "tool_output_token_limit": None,
     }
     assert [field.name for field in fields(provider)] == list(expected)
     assert asdict(provider) == expected

@@ -2153,6 +2153,10 @@ impl PythonTools {
             !acknowledged.await?,
             "Native managed turn restarted during interruption"
         );
+        ensure!(
+            !thread.managed_local_exec_cancel_failed(expected_turn_id),
+            LOCAL_COMMAND_CLEANUP_FAILED
+        );
         // The SQ has now processed both the queued Compact and its stop.
         // Capturing before acknowledgement can capture the preceding receipt.
         let receipt = self.admission_ready(expected_turn_id)?;

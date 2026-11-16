@@ -20,7 +20,7 @@ from aiohttp.test_utils import TestServer
 
 from agents import (
     Agent,
-    ApprovalRequested,
+    FunctionToolApprovalRequest,
     ModelRetrySettings,
     NativeProvider,
     PendingRequests,
@@ -220,7 +220,7 @@ async def run(case):
                                     boundary = await turn.wait_for_request_or_result()
                                     assert isinstance(boundary, PendingRequests)
                                     [request] = boundary.requests
-                                    assert isinstance(request, ApprovalRequested)
+                                    assert isinstance(request, FunctionToolApprovalRequest)
                                     release_terminal.set()
                                     if not fixture_control:
                                         await wait_ends(1)

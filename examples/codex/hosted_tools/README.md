@@ -75,10 +75,10 @@ The [hosted-shell fixtures](../../../packages/codex/tests/test_native_hosted_she
 have been covering the current source declaration with `container_auto` and
 `container_reference`, separately from application-owned local shell execution.
 
-Live model and account verification has been remaining outstanding for every
-row. Azure deployments, other providers, and active-turn restore have been
-remaining outside this evidence. No live request, uploaded resource, or customer
-runtime has been contributing verification to these tables.
+The SDK and transport table has been reporting local fixture coverage. Live model requests,
+account access, Azure deployments, other providers, and active-turn restore have
+been remaining unverified. No uploaded resource or customer runtime has been
+contributing evidence.
 
 OpenAI executes these tools. They do not grant local Python execution or access to local files. Your application owns uploaded resources, durable downloads, and resource cleanup. Session close or cancellation does not delete provider files, vector stores, or containers. Saved session state preserves history; it does not keep provider resources alive. Treat saved state and image bytes as private data.
 

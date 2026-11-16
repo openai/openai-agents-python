@@ -6,8 +6,45 @@ from _agents_codex._stored_history import (
     _items_request,
     _search_request,
     _sessions_request,
+    _turn_page,
     _turns_request,
 )
+
+
+@pytest.mark.parametrize(
+    ("started_at", "completed_at", "started_at_ms", "completed_at_ms"),
+    [
+        (None, None, None, None),
+        (0, 1, 0, 1000),
+        (1_700_000_001, 1_700_000_003, 1_700_000_001_000, 1_700_000_003_000),
+        (1_700_000_001, None, 1_700_000_001_000, None),
+    ],
+)
+def test_stored_turn_timestamps_use_milliseconds(
+    started_at, completed_at, started_at_ms, completed_at_ms
+):
+    page = _turn_page(
+        {
+            "turns": [
+                {
+                    "id": "turn",
+                    "status": "completed",
+                    "error": None,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                    "duration_ms": 2345,
+                    "items": [],
+                }
+            ],
+            "next_cursor": None,
+            "backwards_cursor": None,
+        }
+    )
+    [turn] = page["turns"]
+    assert turn["started_at_ms"] == started_at_ms
+    assert turn["completed_at_ms"] == completed_at_ms
+    assert turn["duration_ms"] == 2345
+    assert "started_at" not in turn and "completed_at" not in turn
 
 
 @pytest.mark.parametrize(

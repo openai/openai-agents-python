@@ -99,11 +99,11 @@ if TYPE_CHECKING:
         _URL_ACCEPT as _URL_ACCEPT,
         ActionReply as ActionReply,
         ActionRequested as ActionRequested,
-        ApprovalDecision as ApprovalDecision,
         ApprovalRequest as ApprovalRequest,
-        ApprovalRequested as ApprovalRequested,
         ElicitationRequest as ElicitationRequest,
         FormRequest as FormRequest,
+        FunctionToolApprovalDecision as FunctionToolApprovalDecision,
+        FunctionToolApprovalRequest as FunctionToolApprovalRequest,
         Interaction as Interaction,
         UrlRequest as UrlRequest,
         VerificationRequest as VerificationRequest,
@@ -473,7 +473,15 @@ class _CapturedFunction:
 
     _allow_run_error_formatter: bool = field(default=False, repr=False)
     _reparse_error_arguments: bool = field(default=False, repr=False)
+    _recover_strict_input: bool = field(default=False, repr=False)
     configured_agent: _ConfiguredAgentTool | None = field(default=None, repr=False)
+
+    def _can_recover_input(self, *, run_formatter: bool) -> bool:
+        return (
+            self.input_error_function is not None
+            or (run_formatter and self._allow_run_error_formatter)
+            or self._recover_strict_input
+        )
 
     @property
     def _requires_live_manual_session(self) -> bool:
@@ -563,9 +571,8 @@ class _ToolCatalog:
                 from .manual import _CapturedApproval
 
                 function = tool.function if isinstance(tool, _CapturedApproval) else tool
-            if isinstance(function, _CapturedFunction) and (
-                function.input_error_function is not None
-                or (run_formatter and function._allow_run_error_formatter)
+            if isinstance(function, _CapturedFunction) and function._can_recover_input(
+                run_formatter=run_formatter
             ):
                 slots.append(slot)
         return slots
@@ -909,9 +916,9 @@ _OPTIONAL_OWNERS = {
     "_URL_ACCEPT": "manual",
     "ActionReply": "manual",
     "ActionRequested": "manual",
-    "ApprovalDecision": "manual",
+    "FunctionToolApprovalDecision": "manual",
     "ApprovalRequest": "manual",
-    "ApprovalRequested": "manual",
+    "FunctionToolApprovalRequest": "manual",
     "ElicitationRequest": "manual",
     "FormRequest": "manual",
     "Interaction": "manual",
