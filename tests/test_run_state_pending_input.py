@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any, cast
 
+import httpx2
 import pytest
+from openai import AsyncOpenAI, BadRequestError
+from openai.types.responses import ResponseReasoningItem
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
     ResponseComputerToolCall,
@@ -14,6 +17,7 @@ from agents.exceptions import InputGuardrailTripwireTriggered, ModelBehaviorErro
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
 from agents.items import ModelResponse, TResponseInputItem
 from agents.lifecycle import AgentHooks, RunHooks
+from agents.models.openai_responses import OpenAIResponsesModel
 from agents.run import CallModelData, ModelInputData
 from agents.run_context import RunContextWrapper
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
@@ -23,7 +27,7 @@ from agents.testing import ScriptedModel
 from agents.tool import Tool
 from agents.usage import Usage
 
-from .model_test_helpers import get_exact_output_stream_step
+from .model_test_helpers import get_exact_output_stream_step, get_response_obj
 from .test_computer_tool_lifecycle import FakeComputer
 from .test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
 from .utils.simple_session import SimpleListSession
@@ -1047,3 +1051,131 @@ async def test_terminal_state_rejects_pending_input_without_mutation() -> None:
         state.add_input("Too late")
 
     assert state.to_json() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize("submissions", [1, 2], ids=["single-input", "deliberate-identical-inputs"])
+async def test_streamed_approval_retry_preserves_pending_input_history(submissions: int) -> None:
+    calls: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def protected_tool(value: str) -> str:
+        calls.append(value)
+        return f"approved:{value}"
+
+    tool_call = get_function_tool_call(
+        "protected_tool", '{"value":"one"}', call_id="call-protected"
+    )
+    reasoning = ResponseReasoningItem(
+        id="rs-recovered",
+        type="reasoning",
+        summary=[],
+        encrypted_content="synthetic-opaque-content",
+    )
+    answer = get_text_message("Recovered")
+    requests: list[dict[str, Any]] = []
+
+    # Keep the real provider request, retry, and SSE parsing boundaries that ScriptedModel omits.
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if len(requests) == 2:
+            # A non-retryable request error escapes the default retries before any acceptance event.
+            return httpx2.Response(
+                400,
+                json={
+                    "error": {
+                        "message": "Request rejected before acceptance",
+                        "type": "invalid_request_error",
+                    }
+                },
+            )
+        if len(requests) == 1:
+            response = get_response_obj([tool_call], response_id="resp-approval")
+        elif len(requests) == 3:
+            response = get_response_obj([reasoning, answer], response_id="resp-recovered")
+        else:
+            assert len(requests) == 4
+            response = get_response_obj([get_text_message("Continued")], response_id="resp-next")
+        if not payload.get("stream"):
+            return httpx2.Response(200, json=response.model_dump(exclude_unset=True))
+        event = {
+            "type": "response.completed",
+            "response": response.model_dump(exclude_unset=True),
+            "sequence_number": 0,
+        }
+        return httpx2.Response(
+            200,
+            content=f"event: response.completed\ndata: {json.dumps(event)}\n\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with AsyncOpenAI(
+        api_key="synthetic",
+        base_url="https://provider.example/v1",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond), trust_env=False),
+    ) as client:
+        agent = Agent(
+            name="assistant",
+            model=OpenAIResponsesModel("synthetic-model", client),
+            tools=[protected_tool],
+        )
+        interrupted = Runner.run_streamed(agent, "Initial request", auto_previous_response_id=True)
+        async for _ in interrupted.stream_events():
+            pass
+        assert len(interrupted.interruptions) == 1
+        assert calls == []
+        state = interrupted.to_state()
+        state.approve(interrupted.interruptions[0])
+        for _ in range(submissions):
+            state.add_input("Late input")
+
+        failed = Runner.run_streamed(agent, state)
+        with pytest.raises(BadRequestError, match="Request rejected before acceptance"):
+            async for _ in failed.stream_events():
+                pass
+        assert len(requests) == 2
+        assert calls == ["one"]
+        assert [_message_text(item) for item in state.pending_input] == ["Late input"] * submissions
+
+        state = await RunState.from_string(agent, state.to_string())
+        recovered = Runner.run_streamed(agent, state)
+        async for _ in recovered.stream_events():
+            pass
+        assert recovered.final_output == "Recovered"
+        assert calls == ["one"]
+        assert state.pending_input == []
+        assert len(requests) == 3
+
+        expected_delta = [
+            {"type": "function_call_output", "call_id": "call-protected", "output": "approved:one"},
+            *[{"role": "user", "content": "Late input"} for _ in range(submissions)],
+        ]
+        assert requests[1]["previous_response_id"] == "resp-approval"
+        assert requests[2]["previous_response_id"] == "resp-approval"
+        assert requests[1]["input"] == expected_delta
+        assert requests[2]["input"] == expected_delta
+        assert [_message_text(item) for item in requests[2]["input"]].count(
+            "Late input"
+        ) == submissions
+
+        expected_history = [
+            {"role": "user", "content": "Initial request"},
+            tool_call.model_dump(exclude_unset=True),
+            *expected_delta,
+            reasoning.model_dump(exclude_unset=True),
+            answer.model_dump(exclude_unset=True),
+        ]
+        assert recovered.to_input_list() == expected_history
+        assert recovered.to_input_list(mode="normalized") == expected_history
+        assert [_message_text(item) for item in recovered.to_input_list(mode="normalized")].count(
+            "Late input"
+        ) == submissions
+
+        continued = await Runner.run(
+            agent, "Continue", previous_response_id=recovered.last_response_id
+        )
+        assert continued.final_output == "Continued"
+        assert requests[3]["previous_response_id"] == "resp-recovered"
+        assert requests[3]["input"] == [{"role": "user", "content": "Continue"}]
