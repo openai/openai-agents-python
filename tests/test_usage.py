@@ -591,7 +591,9 @@ def test_usage_serialization_preserves_cache_write_tokens() -> None:
     serialized = serialize_usage(usage)
     restored = deserialize_usage(serialized)
 
-    assert serialized["input_tokens_details"] == [{"cached_tokens": 3, "cache_write_tokens": 7}]
+    assert serialized["input_tokens_details"] == [
+        {"cache_write_tokens_details": None, "cached_tokens": 3, "cache_write_tokens": 7}
+    ]
     assert getattr(restored.input_tokens_details, "cache_write_tokens", None) == 7
     assert (
         getattr(
@@ -663,6 +665,7 @@ def test_usage_snapshot_delta_and_span_preserve_cache_write_tokens() -> None:
     assert delta.input_tokens_details.cached_tokens == 5
     assert getattr(delta.input_tokens_details, "cache_write_tokens", None) == 7
     assert span_usage["input_tokens_details"] == {
+        "cache_write_tokens_details": None,
         "cached_tokens": 5,
         "cache_write_tokens": 7,
     }
