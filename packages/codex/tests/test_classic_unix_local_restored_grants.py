@@ -1,7 +1,10 @@
 """Persisted UnixLocal path grants require current application authority."""
 
+from __future__ import annotations
+
 import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,11 +13,15 @@ from agents.classic.sandbox.errors import WorkspaceArchiveWriteError
 from agents.classic.sandbox.manifest import Manifest
 from agents.classic.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
 from agents.classic.sandbox.sandbox_agent import SandboxAgent
-from agents.classic.sandbox.sandboxes.unix_local import (
-    UnixLocalSandboxClient,
-    UnixLocalSandboxSessionState,
-)
 from agents.classic.sandbox.workspace_paths import SandboxPathGrant
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="UnixLocal requires Unix")
+
+if sys.platform != "win32":
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxSessionState,
+    )
 
 
 @pytest.mark.parametrize("loader", ["client", "model", "json", "constructor"])
