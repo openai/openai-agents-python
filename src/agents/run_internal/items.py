@@ -225,8 +225,10 @@ def drop_orphan_function_calls(
     rejects reasoning items that are not followed by their associated model-emitted item (``Item
     'rs_...' of type 'reasoning' was provided without its required following item``).
 
-    Committed session reads may opt into preserving completed external function/custom calls
-    marked ``async: true``: their emission is complete even while the external result is pending.
+    Committed session reads may preserve pending external calls marked ``async: true``.
+
+    Responses defaults omitted or null status to completed for async function/custom replay.
+
     Keep this disabled for SDK-generated history, retry cleanup, and unsettled session writes.
     """
 
@@ -283,7 +285,7 @@ def drop_orphan_function_calls(
             preserve_pending_async_calls
             and entry_type in {"function_call", "custom_tool_call"}
             and entry.get("async") is True
-            and entry.get("status") == "completed"
+            and entry.get("status") in (None, "completed")
             and isinstance(call_id, str)
             and bool(call_id)
         ):
