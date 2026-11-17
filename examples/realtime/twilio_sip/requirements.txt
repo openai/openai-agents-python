@@ -1,4 +1,4 @@
-fastapi>=0.162.0
+fastapi>=0.162.2
 starlette>=1.7.0; python_version < "3.11"
 starlette>=1.10.0; python_version >= "3.11"
 openai>=3.42.1,<4
