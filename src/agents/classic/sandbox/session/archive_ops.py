@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 from ...run_config import SandboxArchiveLimits
-from ..errors import InvalidCompressionSchemeError, WorkspaceArchiveWriteError
+from ..errors import ExecNonZeroError, InvalidCompressionSchemeError, WorkspaceArchiveWriteError
+from ..workspace_paths import sandbox_path_str
 from .archive_extraction import WorkspaceArchiveExtractor, safe_zip_member_rel_path
 
 if TYPE_CHECKING:
@@ -126,10 +127,19 @@ def _copy_archive(
 
 
 def _build_workspace_archive_extractor(session: BaseSandboxSession) -> WorkspaceArchiveExtractor:
+    async def is_symlink(path: Path) -> bool:
+        # Inspect the exact entry. Human-readable `ls -la` output cannot distinguish
+        # a symlink name containing " -> " from its target separator.
+        command = ("sh", "-c", '[ -L "$1" ]', "sh", sandbox_path_str(path))
+        result = await session.exec(*command, shell=False)
+        if result.exit_code not in (0, 1):
+            raise ExecNonZeroError(result, command=command)
+        return result.exit_code == 0
+
     return WorkspaceArchiveExtractor(
         mkdir=lambda path: session.mkdir(path, parents=True),
         write=session.write,
-        ls=lambda path: session.ls(path),
+        is_symlink=is_symlink,
     )
 
 

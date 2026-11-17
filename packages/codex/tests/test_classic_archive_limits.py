@@ -463,15 +463,15 @@ async def test_compressed_zip_members_release_decoder_without_cyclic_gc(
     async def mkdir(path: Path) -> None:
         pass
 
-    async def ls(path: Path) -> list:
-        return []
+    async def is_symlink(path: Path) -> bool:
+        return False
 
     async def write(path: Path, stream: io.IOBase) -> None:
         references.append(weakref.ref(stream))
         assert stream.read() == b"ordinary"
 
     # In-memory callbacks isolate decoder ownership from backend worker lifetimes.
-    extractor = WorkspaceArchiveExtractor(mkdir=mkdir, write=write, ls=ls)
+    extractor = WorkspaceArchiveExtractor(mkdir=mkdir, write=write, is_symlink=is_symlink)
     gc_was_enabled = gc.isenabled()
     gc.disable()
     try:

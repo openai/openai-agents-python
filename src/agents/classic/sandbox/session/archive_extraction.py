@@ -15,7 +15,6 @@ from typing import Any, Literal, cast
 
 from ...run_config import SandboxArchiveLimits
 from ..errors import ExecNonZeroError, WorkspaceArchiveWriteError
-from ..files import EntryKind, FileEntry
 from ..util.tar_utils import UnsafeTarMemberError, safe_tar_member_rel_path
 
 _ZSTD_WINDOW_LOG_MAX = 27
@@ -334,11 +333,11 @@ class WorkspaceArchiveExtractor:
         *,
         mkdir: Callable[[Path], Awaitable[None]],
         write: Callable[[Path, io.IOBase], Awaitable[None]],
-        ls: Callable[[Path], Awaitable[list[FileEntry]]],
+        is_symlink: Callable[[Path], Awaitable[bool]],
     ) -> None:
         self._mkdir = mkdir
         self._write = write
-        self._ls = ls
+        self._is_symlink = is_symlink
 
     async def extract_tar_archive(
         self,
@@ -349,7 +348,6 @@ class WorkspaceArchiveExtractor:
         archive_limits: SandboxArchiveLimits | None = None,
     ) -> None:
         archive_limits = archive_limits or SandboxArchiveLimits()
-        child_entry_cache: dict[Path, dict[str, EntryKind]] = {}
         try:
             with _open_limited_tar(data, archive_limits) as archive:
                 validate_tar_archive_for_extraction(archive, archive_limits=archive_limits)
@@ -366,17 +364,10 @@ class WorkspaceArchiveExtractor:
                         rel_path=rel_path,
                         member_name=member.name,
                         error_type="tar",
-                        child_entry_cache=child_entry_cache,
                     )
                     dest = destination_root / rel_path
                     if member.isdir():
                         await self._mkdir(dest)
-                        self._record_extract_entry(
-                            child_entry_cache=child_entry_cache,
-                            destination_root=destination_root,
-                            path=dest,
-                            kind=EntryKind.DIRECTORY,
-                        )
                         continue
 
                     fileobj = archive.extractfile(member)
@@ -387,19 +378,7 @@ class WorkspaceArchiveExtractor:
                         )
                     try:
                         await self._mkdir(dest.parent)
-                        self._record_extract_entry(
-                            child_entry_cache=child_entry_cache,
-                            destination_root=destination_root,
-                            path=dest.parent,
-                            kind=EntryKind.DIRECTORY,
-                        )
                         await self._write(dest, cast(io.IOBase, fileobj))
-                        self._record_extract_entry(
-                            child_entry_cache=child_entry_cache,
-                            destination_root=destination_root,
-                            path=dest,
-                            kind=EntryKind.FILE,
-                        )
                     finally:
                         fileobj.close()
         except UnsafeTarMemberError as e:
@@ -414,6 +393,8 @@ class WorkspaceArchiveExtractor:
                 context=_archive_resource_limit_context(e),
                 cause=e,
             ) from e
+        except ExecNonZeroError as e:
+            raise WorkspaceArchiveWriteError(path=archive_path, cause=e) from e
         except (tarfile.TarError, OSError, EOFError) as e:
             raise WorkspaceArchiveWriteError(path=archive_path, cause=e) from e
 
@@ -426,7 +407,6 @@ class WorkspaceArchiveExtractor:
         archive_limits: SandboxArchiveLimits | None = None,
     ) -> None:
         archive_limits = archive_limits or SandboxArchiveLimits()
-        child_entry_cache: dict[Path, dict[str, EntryKind]] = {}
         try:
             with zipfile_compatible_stream(data) as zip_data:
                 with _LimitedZipFile(zip_data, archive_limits=archive_limits) as archive:
@@ -441,26 +421,13 @@ class WorkspaceArchiveExtractor:
                             rel_path=rel_path,
                             member_name=member.filename,
                             error_type="zip",
-                            child_entry_cache=child_entry_cache,
                         )
                         dest = destination_root / rel_path
                         if member.is_dir():
                             await self._mkdir(dest)
-                            self._record_extract_entry(
-                                child_entry_cache=child_entry_cache,
-                                destination_root=destination_root,
-                                path=dest,
-                                kind=EntryKind.DIRECTORY,
-                            )
                             continue
 
                         await self._mkdir(dest.parent)
-                        self._record_extract_entry(
-                            child_entry_cache=child_entry_cache,
-                            destination_root=destination_root,
-                            path=dest.parent,
-                            kind=EntryKind.DIRECTORY,
-                        )
                         with archive.open(member, mode="r") as member_data:
                             if member.compress_type in (
                                 zipfile.ZIP_BZIP2,
@@ -476,12 +443,6 @@ class WorkspaceArchiveExtractor:
                                 # Validate decoder properties before write helpers can wrap errors.
                                 cast(zipfile.ZipExtFile, member_data).peek(1)
                             await self._write(dest, cast(io.IOBase, member_data))
-                        self._record_extract_entry(
-                            child_entry_cache=child_entry_cache,
-                            destination_root=destination_root,
-                            path=dest,
-                            kind=EntryKind.FILE,
-                        )
         except UnsafeZipMemberError as e:
             raise WorkspaceArchiveWriteError(
                 path=archive_path,
@@ -494,6 +455,8 @@ class WorkspaceArchiveExtractor:
                 context=_archive_resource_limit_context(e),
                 cause=e,
             ) from e
+        except ExecNonZeroError as e:
+            raise WorkspaceArchiveWriteError(path=archive_path, cause=e) from e
         except ValueError as e:
             raise WorkspaceArchiveWriteError(path=archive_path, cause=e) from e
         except (zipfile.BadZipFile, OSError) as e:
@@ -506,12 +469,10 @@ class WorkspaceArchiveExtractor:
         rel_path: Path,
         member_name: str,
         error_type: Literal["tar", "zip"],
-        child_entry_cache: dict[Path, dict[str, EntryKind]],
     ) -> None:
         symlink_component = await self._find_symlink_component(
             base_dir=destination_root,
             rel_path=rel_path,
-            child_entry_cache=child_entry_cache,
         )
         if symlink_component is None:
             return
@@ -526,69 +487,17 @@ class WorkspaceArchiveExtractor:
         *,
         base_dir: Path,
         rel_path: Path,
-        child_entry_cache: dict[Path, dict[str, EntryKind]],
     ) -> Path | None:
         current_dir = base_dir
         traversed = Path()
 
         for part in rel_path.parts:
-            entry_kind = await self._lookup_child_entry_kind(
-                current_dir,
-                part,
-                child_entry_cache=child_entry_cache,
-            )
-            if entry_kind is None:
-                return None
-
+            current_dir /= part
             traversed /= part
-            if entry_kind == EntryKind.SYMLINK:
+            if await self._is_symlink(current_dir):
                 return traversed
 
-            current_dir = current_dir / part
-
         return None
-
-    async def _lookup_child_entry_kind(
-        self,
-        parent_dir: Path,
-        child_name: str,
-        *,
-        child_entry_cache: dict[Path, dict[str, EntryKind]],
-    ) -> EntryKind | None:
-        cached_entries = child_entry_cache.get(parent_dir)
-        if cached_entries is None:
-            try:
-                entries = await self._ls(parent_dir)
-            except ExecNonZeroError:
-                return None
-            cached_entries = {Path(entry.path).name: entry.kind for entry in entries}
-            child_entry_cache[parent_dir] = cached_entries
-
-        return cached_entries.get(child_name)
-
-    @staticmethod
-    def _record_extract_entry(
-        *,
-        child_entry_cache: dict[Path, dict[str, EntryKind]],
-        destination_root: Path,
-        path: Path,
-        kind: EntryKind,
-    ) -> None:
-        try:
-            rel_path = path.relative_to(destination_root)
-        except ValueError:
-            return
-
-        if not rel_path.parts:
-            return
-
-        current_dir = destination_root
-        for index, part in enumerate(rel_path.parts):
-            child_kind = kind if index == len(rel_path.parts) - 1 else EntryKind.DIRECTORY
-            cached_entries = child_entry_cache.get(current_dir)
-            if cached_entries is not None:
-                cached_entries[part] = child_kind
-            current_dir = current_dir / part
 
 
 def _supports_zip_random_access(stream: io.IOBase) -> bool:
