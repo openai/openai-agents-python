@@ -2514,7 +2514,12 @@ async def run_single_turn_streamed(
     model = get_model(execution_agent, run_config)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
-        public_agent, run_config, model, prepared_overrides=bindings.model_settings_overrides
+        public_agent,
+        run_config,
+        model,
+        prepared_overrides=bindings.model_settings_overrides,
+        prompt=prompt_config,
+        has_tools=bool(all_tools or handoffs),
     )
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
@@ -2988,7 +2993,12 @@ async def get_new_response(
     model = get_model(execution_agent, run_config)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
-        public_agent, run_config, model, prepared_overrides=bindings.model_settings_overrides
+        public_agent,
+        run_config,
+        model,
+        prepared_overrides=bindings.model_settings_overrides,
+        prompt=prompt_config,
+        has_tools=bool(all_tools or handoffs),
     )
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 

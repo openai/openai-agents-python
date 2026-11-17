@@ -44,7 +44,7 @@ from ...models._trace import (
 from ...models.chatcmpl_converter import Converter
 from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
-from ...models.default_models import get_default_model_settings
+from ...models.default_models import _omit_model_defaults, get_default_model_settings
 from ...models.fake_id import FAKE_RESPONSES_ID
 from ...models.interface import Model, ModelTracing
 from ...models.openai_responses import (
@@ -279,6 +279,22 @@ class AnyLLMModel(Model):
         if self._provider_name == "openrouter" and self._provider_model.startswith("openai/"):
             return get_default_model_settings(self._provider_model.removeprefix("openai/"))
         return ModelSettings()
+
+    def _get_request_settings(
+        self,
+        settings: ModelSettings,
+        *,
+        prompt: ResponsePromptParam | None,
+        has_tools: bool,
+        implicit_fields: set[str],
+    ) -> ModelSettings:
+        return _omit_model_defaults(
+            settings,
+            implicit_fields,
+            reasoning="reasoning" in implicit_fields
+            and "reasoning_effort" in (settings.extra_args or {})
+            and self._selected_api() == "chat_completions",
+        )
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)

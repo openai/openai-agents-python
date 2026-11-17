@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+from collections.abc import AsyncIterator
 from contextlib import nullcontext
 from dataclasses import asdict, fields, replace
 from types import SimpleNamespace
@@ -47,6 +48,7 @@ from agents.models._retry_runtime import (
     provider_managed_retries_disabled,
     websocket_pre_event_retries_disabled,
 )
+from agents.models.openai_provider import OpenAIProvider
 from agents.models.openai_responses import (
     _HEADERS_OVERRIDE as RESP_HEADERS,
     ConvertedTools,
@@ -1712,6 +1714,93 @@ def test_build_response_create_kwargs_keeps_unset_transport_extra_kwargs_as_none
 
     assert kwargs["extra_query"] is None
     assert kwargs["extra_body"] is None
+
+
+@pytest.fixture
+async def recording_responses_provider() -> AsyncIterator[
+    tuple[OpenAIProvider, list[dict[str, Any]]]
+]:
+    # Capture the serialized fields after the runner and the Responses adapter apply settings.
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        bodies.append(json.loads(request.content))
+        return httpx2.Response(
+            200, content=get_response_obj([get_text_message("done")]).model_dump_json()
+        )
+
+    async with AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://example.invalid/v1",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+    ) as client:
+        yield OpenAIProvider(openai_client=client), bodies
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_runner_preserves_explicit_responses_fields_over_model_defaults(
+    recording_responses_provider: tuple[OpenAIProvider, list[dict[str, Any]]],
+) -> None:
+    provider, bodies = recording_responses_provider
+    text = {"format": {"type": "json_object"}}
+    reasoning = {"effort": "high"}
+    for model, extra_args in (
+        ("gpt-6-sol", {"text": text}),
+        ("gpt-6-astra", {"text": text, "reasoning": reasoning}),
+    ):
+        await Runner.run(
+            Agent(name="test", model=model),
+            "Return JSON.",
+            run_config=RunConfig(
+                model_provider=provider,
+                model_settings=ModelSettings(extra_args=extra_args),
+                tracing_disabled=True,
+            ),
+        )
+    with pytest.raises(TypeError, match="multiple values for keyword argument 'text'"):
+        await Runner.run(
+            Agent(name="test", model="gpt-6-sol"),
+            "Return JSON.",
+            run_config=RunConfig(
+                model_provider=provider,
+                model_settings=ModelSettings(verbosity="low", extra_args={"text": text}),
+                tracing_disabled=True,
+            ),
+        )
+    assert [body["text"] for body in bodies] == [text, text]
+    assert "reasoning" not in bodies[0]
+    assert bodies[1]["reasoning"] == reasoning
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["reasoning", "text"])
+async def test_runner_preserves_in_place_responses_fields(
+    recording_responses_provider: tuple[OpenAIProvider, list[dict[str, Any]]], field: str
+) -> None:
+    provider, bodies = recording_responses_provider
+    config = RunConfig(model_provider=provider, tracing_disabled=True)
+    agent = Agent(name="test", model="gpt-6-astra")
+    text = {"format": {"type": "json_object"}}
+    reasoning = {"effort": "high"}
+    agent.model_settings.extra_args = {field: reasoning if field == "reasoning" else text}
+    if field == "text":
+        agent = agent.clone(name="cloned")
+
+    await Runner.run(agent, "Return JSON.", run_config=config)
+    (body,) = bodies
+    assert body["reasoning"] == (reasoning if field == "reasoning" else {"effort": "low"})
+    assert body["text"] == (text if field == "text" else {"verbosity": "low"})
+
+    # A typed assignment makes the field explicit even when its value equals the SDK default.
+    if field == "reasoning":
+        agent.model_settings.reasoning = Reasoning(effort="low")
+    else:
+        agent.model_settings.verbosity = "low"
+    with pytest.raises(TypeError, match=f"multiple values for keyword argument '{field}'"):
+        await Runner.run(agent, "Return JSON.", run_config=config)
+    assert len(bodies) == 1
 
 
 @pytest.mark.allow_call_model_methods

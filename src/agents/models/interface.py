@@ -56,6 +56,17 @@ class Model(abc.ABC):
         name = getattr(self, "model", None)
         return get_default_model_settings(name) if isinstance(name, str) else None
 
+    def _get_request_settings(
+        self,
+        settings: ModelSettings,
+        *,
+        prompt: ResponsePromptParam | None,
+        has_tools: bool,
+        implicit_fields: set[str],
+    ) -> ModelSettings:
+        """Adjust the inferred fields after the runner resolves explicit overrides."""
+        return settings
+
     async def _cleanup_on_run_end(self, owner: object) -> None:
         """Release run-scoped resources after the runner finishes using this model."""
         return None

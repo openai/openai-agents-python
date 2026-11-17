@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
+import httpx2
 import pytest
-from openai import omit
+from openai import AsyncOpenAI
+from openai.types.shared import Reasoning
 
-from agents import Agent, Prompt, RunConfig, RunContextWrapper, Runner
-from agents.models.interface import Model, ModelProvider
-from agents.models.openai_responses import OpenAIResponsesModel
+from agents import Agent, ModelSettings, Prompt, RunConfig, RunContextWrapper, Runner
+from agents.models.openai_provider import OpenAIProvider
 from agents.prompts import GenerateDynamicPromptData
 from agents.testing import ScriptedModel
 from tests.model_test_helpers import get_response_obj
@@ -109,44 +111,76 @@ async def test_prompt_is_passed_to_model():
     assert model.last_prompt == expected_prompt
 
 
-class _SingleModelProvider(ModelProvider):
-    def __init__(self, model: Model):
-        self._model = model
-
-    def get_model(self, model_name: str | None) -> Model:
-        return self._model
-
-
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_agent_prompt_with_default_model_omits_model_and_tools_parameters():
-    called_kwargs: dict[str, object] = {}
+@pytest.mark.parametrize(
+    ("stream", "model", "run_settings", "expected_fields"),
+    [
+        pytest.param(False, None, None, {}, id="prompt-model"),
+        pytest.param(True, None, None, {}, id="streamed-prompt-model"),
+        pytest.param(
+            False,
+            None,
+            ModelSettings(reasoning=Reasoning(effort="low")),
+            {"reasoning": {"effort": "low"}},
+            id="explicit-run-effort",
+        ),
+        pytest.param(
+            False,
+            "gpt-6-astra",
+            None,
+            {"model": "gpt-6-astra", "reasoning": {"effort": "low"}, "text": {"verbosity": "low"}},
+            id="explicit-agent-model",
+        ),
+    ],
+)
+async def test_saved_prompt_preserves_model_ownership_and_explicit_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+    model: str | None,
+    run_settings: ModelSettings | None,
+    expected_fields: dict[str, Any],
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-6-astra")
+    bodies: list[dict[str, Any]] = []
 
-    class DummyResponses:
-        async def create(self, **kwargs):
-            nonlocal called_kwargs
-            called_kwargs = kwargs
-            return get_response_obj([get_text_message("done")])
+    # Capture the serialized request because a scripted model cannot observe omitted fields.
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        bodies.append(json.loads(request.content))
+        response = get_response_obj([get_text_message("done")]).model_dump(mode="json")
+        if stream:
+            event = {"type": "response.completed", "response": response, "sequence_number": 0}
+            return httpx2.Response(
+                200,
+                content=f"event: response.completed\ndata: {json.dumps(event)}\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx2.Response(200, json=response)
 
-    class DummyResponsesClient:
-        def __init__(self):
-            self.responses = DummyResponses()
+    async with AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://example.invalid/v1",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+    ) as client:
+        run_config = RunConfig(
+            model_provider=OpenAIProvider(openai_client=client),
+            model_settings=run_settings,
+            tracing_disabled=True,
+        )
+        agent = Agent(name="prompt-agent", model=model, prompt={"id": "pmpt_agent"})
+        if stream:
+            result = Runner.run_streamed(agent, input="hi", run_config=run_config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, input="hi", run_config=run_config)
 
-    model = OpenAIResponsesModel(
-        model="gpt-4.1",
-        openai_client=DummyResponsesClient(),  # type: ignore[arg-type]
-        model_is_explicit=False,
-    )
-
-    run_config = RunConfig(model_provider=_SingleModelProvider(model))
-    agent = Agent(name="prompt-agent", prompt={"id": "pmpt_agent"})
-
-    await Runner.run(agent, input="hi", run_config=run_config)
-
-    expected_prompt = {"id": "pmpt_agent", "version": None, "variables": None}
-    assert called_kwargs["prompt"] == expected_prompt
-    assert called_kwargs["model"] is omit
-    assert called_kwargs["tools"] is omit
+    (body,) = bodies
+    assert body["prompt"] == {"id": "pmpt_agent", "version": None, "variables": None}
+    assert "tools" not in body
+    assert {
+        key: body[key] for key in ("model", "reasoning", "text") if key in body
+    } == expected_fields
 
 
 @pytest.mark.asyncio
