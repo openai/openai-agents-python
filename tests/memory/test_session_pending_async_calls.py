@@ -11,7 +11,18 @@ import pytest
 from openai import AsyncOpenAI
 from openai.types.responses import ResponseCustomToolCall
 
-from agents import Agent, ModelSettings, RunConfig, Runner, SQLiteSession, TResponseInputItem
+from agents import (
+    Agent,
+    ModelSettings,
+    RunConfig,
+    Runner,
+    RunResult,
+    RunResultStreaming,
+    RunState,
+    SQLiteSession,
+    TResponseInputItem,
+)
+from agents.decorators import tool
 from agents.memory import OpenAIResponsesCompactionSession
 from agents.models.openai_responses import OpenAIResponsesModel
 from agents.retry import ModelRetryAdvice, ModelRetrySettings, retry_policies
@@ -19,7 +30,7 @@ from agents.run_internal.items import normalize_resumed_input, prepare_model_inp
 from agents.run_internal.session_persistence import _held_items_safe_to_settle
 from agents.testing import ModelStep, ScriptedModel
 from tests.model_test_helpers import get_response_obj
-from tests.test_responses import get_text_message
+from tests.test_responses import get_function_tool_call, get_text_message
 
 pytestmark = pytest.mark.asyncio
 
@@ -62,15 +73,20 @@ def imported_history(
 
 
 async def run(
-    agent: Agent[Any], session: Any, *, streamed: bool = False, config: RunConfig | None = None
-) -> None:
+    agent: Agent[Any],
+    session: Any,
+    *,
+    run_input: str | RunState[Any] = "Continue.",
+    streamed: bool = False,
+    config: RunConfig | None = None,
+) -> RunResult | RunResultStreaming:
     config = config or RunConfig(tracing_disabled=True)
     if streamed:
-        result = Runner.run_streamed(agent, "Continue.", session=session, run_config=config)
+        result = Runner.run_streamed(agent, run_input, session=session, run_config=config)
         async for _ in result.stream_events():
             pass
-    else:
-        await Runner.run(agent, "Continue.", session=session, run_config=config)
+        return result
+    return await Runner.run(agent, run_input, session=session, run_config=config)
 
 
 @pytest.mark.parametrize("call_type", ["function_call", "custom_tool_call"])
@@ -128,6 +144,67 @@ async def test_serialized_async_custom_call_survives_session_replay(streamed: bo
         await run(Agent(name="test", model=model), session, streamed=streamed)
         assert model.calls[0].input == [*history, {"role": "user", "content": "Continue."}]
         assert (await session.get_items())[: len(history)] == history
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("call_type", ["function_call", "custom_tool_call"])
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("serialized", [False, True])
+async def test_pending_async_history_survives_unrelated_approval_resume(
+    call_type: str, streamed: bool, serialized: bool
+) -> None:
+    history = imported_history(call_type, status="omitted")[:4]
+    if call_type == "custom_tool_call":
+        history[2] = cast(
+            TResponseInputItem,
+            ResponseCustomToolCall.model_validate(history[2]).model_dump(
+                mode="json", by_alias=True, exclude_unset=True
+            ),
+        )
+    executions: list[str] = []
+
+    @tool(needs_approval=True)
+    def unrelated_tool() -> str:
+        executions.append("approved")
+        return "approved result"
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("unrelated_tool", "{}", call_id="call_approval")],
+            [get_text_message("Done.")],
+        ]
+    )
+    agent = Agent(name="test", model=model, tools=[unrelated_tool])
+    session = SQLiteSession("pending-approval")
+    expected_input = [*history, {"role": "user", "content": "Continue."}]
+    try:
+        await session.add_items(history)
+        first = await run(agent, session, streamed=streamed)
+        assert model.calls[0].input == expected_input
+        assert len(first.interruptions) == 1
+        assert executions == []
+        state = first.to_state()
+        if serialized:
+            state = await RunState.from_string(agent, state.to_string())
+        assert state._original_input == expected_input
+        state.approve(state.get_interruptions()[0])
+
+        resumed = await run(agent, session, run_input=state, streamed=streamed)
+
+        assert resumed.final_output == "Done."
+        assert executions == ["approved"]
+        assert len(model.calls) == 2
+        resumed_input = model.calls[1].input
+        assert isinstance(resumed_input, list)
+        assert resumed_input[: len(expected_input)] == expected_input
+        assert [item.get("type") for item in resumed_input[len(expected_input) :]] == [
+            "function_call",
+            "function_call_output",
+        ]
+        committed = await session.get_items()
+        assert committed[: len(expected_input)] == expected_input
+        assert committed.count(history[2]) == 1
     finally:
         session.close()
 
@@ -207,6 +284,7 @@ async def test_session_still_prunes_sync_and_unsupported_orphans(
             {"role": "user", "content": "Continue."},
         ]
         assert (await session.get_items())[: len(history)] == history
+        assert normalize_resumed_input(history) == [history[0], *history[3:]]
     finally:
         session.close()
 
@@ -318,10 +396,14 @@ async def test_replaced_session_history_is_not_resurrected(replacement: str) -> 
 
 
 @pytest.mark.parametrize("call_type", ["function_call", "custom_tool_call"])
-async def test_generated_resume_and_held_write_cleanup_remain_strict(call_type: str) -> None:
-    history = imported_history(call_type)
+@pytest.mark.parametrize(
+    "status", ["completed", "omitted", None], ids=["completed", "omitted", "null"]
+)
+async def test_generated_and_held_write_cleanup_remain_strict(
+    call_type: str, status: str | None
+) -> None:
+    history = imported_history(call_type, status=status)
     expected = [history[0], *history[3:]]
     # These cleanup boundaries own incomplete SDK work, not committed imported history.
     assert prepare_model_input_items([], history) == expected
-    assert normalize_resumed_input(history) == expected
     assert _held_items_safe_to_settle(history, [], None) == expected

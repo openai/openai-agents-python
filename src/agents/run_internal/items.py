@@ -225,7 +225,7 @@ def drop_orphan_function_calls(
     rejects reasoning items that are not followed by their associated model-emitted item (``Item
     'rs_...' of type 'reasoning' was provided without its required following item``).
 
-    Committed session reads may preserve pending external calls marked ``async: true``.
+    Committed session reads and resumed original input may preserve pending external async calls.
 
     Responses defaults omitted or null status to completed for async function/custom replay.
 
@@ -401,10 +401,13 @@ def prepare_model_input_items(
 def normalize_resumed_input(
     raw_input: str | list[TResponseInputItem],
 ) -> str | list[TResponseInputItem]:
-    """Normalize resumed list inputs and drop orphan tool calls."""
+    """Normalize original input from RunState, preserving pending external async calls.
+
+    SDK-generated items are separate and retain strict cleanup in prepare_model_input_items.
+    """
     if isinstance(raw_input, list):
         normalized = normalize_input_items_for_api(raw_input)
-        return drop_orphan_function_calls(normalized)
+        return drop_orphan_function_calls(normalized, preserve_pending_async_calls=True)
     return raw_input
 
 
