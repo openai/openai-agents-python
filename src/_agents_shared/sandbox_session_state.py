@@ -237,30 +237,34 @@ class SandboxSessionState(BaseModel):
             if isinstance(redacted_value, list | tuple)
             else ()
         )
-        serialized_host_path_grant_paths = tuple(
-            grant.path for grant in state.manifest.extra_path_grants if grant.host_path is not None
+        serialized_grant_paths = tuple(
+            grant.path
+            for grant in state.manifest.extra_path_grants
+            if grant.host_path is not None or state.type == "unix_local"
         )
         persistent_grants = tuple(
-            grant for grant in state.manifest.extra_path_grants if grant.host_path is None
+            grant
+            for grant in state.manifest.extra_path_grants
+            if grant.host_path is None and state.type != "unix_local"
         )
         sanitized_manifest = state.manifest.model_copy(
             update={"extra_path_grants": persistent_grants},
         )
-        marked = state.model_copy(update={"manifest": sanitized_manifest})
-        marked._native_skill_copy_budget = _SkillCopyBudget(trusted=False)
-        marked._path_grants_require_rebind = tuple(
+        state.manifest = sanitized_manifest
+        state._native_skill_copy_budget = _SkillCopyBudget(trusted=False)
+        state._path_grants_require_rebind = tuple(
             dict.fromkeys(
                 (
                     *state.path_grants_require_rebind,
                     *marker_paths,
-                    *serialized_host_path_grant_paths,
+                    *serialized_grant_paths,
                 )
             )
         )
-        marked._mount_authority_redacted = bool(
+        state._mount_authority_redacted = bool(
             state.mount_authority_redacted or payload.get(REDACTED_MOUNT_AUTHORITY_KEY) is True
         )
-        return marked
+        return state
 
     def rebind_persisted_path_grants(
         self,
@@ -276,20 +280,18 @@ class SandboxSessionState(BaseModel):
                 "manifest before resume"
             )
 
-        trusted_host_path_grant_paths = {
+        trusted_grant_paths = {
             grant.path
             for grant in trusted_manifest.extra_path_grants
-            if grant.host_path is not None
+            if grant.host_path is not None or self.type == "unix_local"
         }
-        missing_host_paths = [
-            path
-            for path in self.path_grants_require_rebind
-            if path not in trusted_host_path_grant_paths
+        missing_paths = [
+            path for path in self.path_grants_require_rebind if path not in trusted_grant_paths
         ]
-        if missing_host_paths:
+        if missing_paths:
             raise ValueError(
-                "Sandbox session state requires current trusted host_path values for these "
-                f"path grants: {', '.join(missing_host_paths)}"
+                "Sandbox session state requires current trusted authorization for these "
+                f"path grants: {', '.join(missing_paths)}"
             )
 
         rebound_manifest = self.manifest.model_copy(
@@ -467,6 +469,8 @@ class SandboxSessionState(BaseModel):
         assert state is not None
         if marker:
             state._mount_authority_redacted = True
+        if isinstance(value, Mapping) and not isinstance(value.get("manifest"), Manifest):
+            state = cls._mark_persisted_path_grants(state, payload=cast(dict[str, object], value))
         return state
 
     @field_validator("snapshot", mode="before")
