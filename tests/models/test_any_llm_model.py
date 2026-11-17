@@ -2282,6 +2282,7 @@ async def test_any_llm_chat_stream_preserves_trace_data_at_completed(
                         "output_tokens": 5 if with_usage else 0,
                         "total_tokens": 12 if with_usage else 0,
                         "input_tokens_details": {
+                            "cache_write_tokens_details": None,
                             "cached_tokens": 2 if with_usage else 0,
                             "cache_write_tokens": 0,
                         },
@@ -2320,7 +2321,11 @@ async def test_any_llm_chat_stream_populates_span_before_yielding_completed(monk
                     "input_tokens": 11,
                     "output_tokens": 13,
                     "total_tokens": 24,
-                    "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                    "input_tokens_details": {
+                        "cache_write_tokens_details": None,
+                        "cached_tokens": 0,
+                        "cache_write_tokens": 0,
+                    },
                     "output_tokens_details": {"reasoning_tokens": 0},
                 }
                 break

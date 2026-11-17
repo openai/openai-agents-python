@@ -879,6 +879,7 @@ async def test_stream_span_is_populated_before_yielding_completed(
                         "output_tokens": 5 if with_usage else 0,
                         "total_tokens": 12 if with_usage else 0,
                         "input_tokens_details": {
+                            "cache_write_tokens_details": None,
                             "cached_tokens": 2 if with_usage else 0,
                             "cache_write_tokens": 0,
                         },
