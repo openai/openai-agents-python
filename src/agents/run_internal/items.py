@@ -213,6 +213,7 @@ def drop_orphan_function_calls(
     *,
     pruning_indexes: set[int] | None = None,
     output_pruning_indexes: set[int] | None = None,
+    preserve_pending_async_calls: bool = False,
 ) -> list[TResponseInputItem]:
     """
     Remove tool and program call items that do not have corresponding outputs so resumptions or
@@ -223,6 +224,12 @@ def drop_orphan_function_calls(
     immediately precede a call dropped by this pass are also removed, since the Responses API
     rejects reasoning items that are not followed by their associated model-emitted item (``Item
     'rs_...' of type 'reasoning' was provided without its required following item``).
+
+    Committed session reads and resumed original input may preserve pending external async calls.
+
+    Responses defaults omitted or null status to completed for async function/custom replay.
+
+    Keep this disabled for SDK-generated history, retry cleanup, and unsettled session writes.
     """
 
     completed_call_ids = _completed_call_ids_by_type(items)
@@ -273,6 +280,15 @@ def drop_orphan_function_calls(
         if entry_type == "program" and call_id in active_program_call_ids:
             continue
         if isinstance(call_id, str) and call_id in completed_call_ids.get(output_type, set()):
+            continue
+        if (
+            preserve_pending_async_calls
+            and entry_type in {"function_call", "custom_tool_call"}
+            and entry.get("async") is True
+            and entry.get("status") in (None, "completed")
+            and isinstance(call_id, str)
+            and bool(call_id)
+        ):
             continue
         if (
             entry_type == "tool_search_call"
@@ -385,10 +401,13 @@ def prepare_model_input_items(
 def normalize_resumed_input(
     raw_input: str | list[TResponseInputItem],
 ) -> str | list[TResponseInputItem]:
-    """Normalize resumed list inputs and drop orphan tool calls."""
+    """Normalize original input from RunState, preserving pending external async calls.
+
+    SDK-generated items are separate and retain strict cleanup in prepare_model_input_items.
+    """
     if isinstance(raw_input, list):
         normalized = normalize_input_items_for_api(raw_input)
-        return drop_orphan_function_calls(normalized)
+        return drop_orphan_function_calls(normalized, preserve_pending_async_calls=True)
     return raw_input
 
 
