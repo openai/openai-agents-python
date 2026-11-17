@@ -1,0 +1,12 @@
+diff --git a/codex-rs/core/src/config/execution.rs b/codex-rs/core/src/config/execution.rs
+index bcd8b12192ca85577abc4e70d391efc6eccf3d10..f752b935f2d2f2edb4383093b3ad2ba88575816b 100644
+--- a/codex-rs/core/src/config/execution.rs
++++ b/codex-rs/core/src/config/execution.rs
+@@ -160,6 +160,7 @@ fn supported_flags(value: &toml::Value) -> bool {
+         | "service_tier"
+         | "include_environment_context"
+         | "include_permissions_instructions"
++        | "include_collaboration_mode_instructions"
+         | "project_doc_max_bytes"
+         | "web_search" => true,
+         "model_providers" => value.as_table().is_some_and(|providers| {

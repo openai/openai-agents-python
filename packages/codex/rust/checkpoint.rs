@@ -71,8 +71,17 @@ pub(crate) fn restore_specs(
     specs: Option<ToolDeclarations>,
 ) -> anyhow::Result<Option<ToolDeclarations>> {
     let Some(opening) = &options.agent_profiles else {
+        ensure!(
+            !options.replace_idle_checkpoint_tools
+                || matches!(payload["format_version"].as_u64(), Some(2 | 4)),
+            "Changed tools require a settled idle checkpoint"
+        );
         return Ok(specs);
     };
+    ensure!(
+        !options.replace_idle_checkpoint_tools,
+        "Changed tools require an ordinary root without Agent profiles"
+    );
     ensure!(specs.is_some(), "Agent profiles require managed tools");
     let history: Vec<RolloutItem> = serde_json::from_value(payload["history"].clone())?;
     let (specs, manual_slots) =
@@ -99,14 +108,45 @@ impl Checkpoint {
     fn validate(
         &self,
         python_specs: Option<&[DynamicToolSpec]>,
+        replace_idle_tools: bool,
     ) -> anyhow::Result<HashSet<ThreadId>> {
         let trusted_specs = python_specs
             .map(crate::python_tools::checkpoint_specs)
             .transpose()?;
-        ensure!(
-            self.managed_tool_specs == trusted_specs,
-            "checkpoint tool mode and current managed specs must match; startup checkpoints cannot convert to managed tools"
-        );
+        if replace_idle_tools {
+            ensure!(
+                matches!(self.format_version, 2 | 4)
+                    && self.descendants.is_empty()
+                    && self.interrupted_thread_ids.is_empty()
+                    && self.agent_environment_policy_digest.is_none()
+                    && self.managed_tool_specs.is_some()
+                    && python_specs.is_some(),
+                "Changed tools require a settled managed root without descendants"
+            );
+            let saved_specs: Vec<DynamicToolSpec> = serde_json::from_value(
+                self.managed_tool_specs
+                    .clone()
+                    .expect("checked managed specs"),
+            )?;
+            crate::python_tools::validate_declarations(&saved_specs)?;
+            ensure!(
+                Some(crate::python_tools::checkpoint_specs(&saved_specs)?)
+                    == self.managed_tool_specs,
+                "Checkpoint saved tool declarations contain unknown fields"
+            );
+            ensure!(
+                saved_specs
+                    .iter()
+                    .chain(python_specs.expect("checked current specs"))
+                    .all(|spec| matches!(spec, DynamicToolSpec::Function(_))),
+                "Changed checkpoint tools require ordinary Python function declarations"
+            );
+        } else {
+            ensure!(
+                self.managed_tool_specs == trusted_specs,
+                "checkpoint tool mode and current managed specs must match; startup checkpoints cannot convert to managed tools"
+            );
+        }
         let has_code = self.root_code_mode.is_some()
             || self
                 .descendants
@@ -181,6 +221,7 @@ impl Checkpoint {
         &self,
         python_specs: Option<&[DynamicToolSpec]>,
         verify_current_default: bool,
+        replace_idle_tools: bool,
     ) -> anyhow::Result<Option<ManagedModels>> {
         // This early read chooses the current native model services only.
         // restore_checkpoint validates a format-3 frame before lowering it
@@ -193,7 +234,7 @@ impl Checkpoint {
             self.codex_revision == include_str!("../CODEX_REVISION").trim(),
             "checkpoint core revision differs"
         );
-        self.validate(python_specs)?;
+        self.validate(python_specs, replace_idle_tools)?;
         Ok(self.managed_tool_specs.as_ref().map(|_| ManagedModels {
             root: managed_settings(&self.history, self.source_session_id)
                 .map(|settings| settings.model.clone()),
@@ -1136,7 +1177,10 @@ async fn restore_inner(
         &checkpoint.root_metadata.model_provider,
         &engine.service_config.model_provider_id,
     )?;
-    let ids = checkpoint.validate(python_specs.as_deref())?;
+    let ids = checkpoint.validate(
+        python_specs.as_deref(),
+        options.replace_idle_checkpoint_tools,
+    )?;
     let root = checkpoint.source_session_id;
     if engine
         .service_config

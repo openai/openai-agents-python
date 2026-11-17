@@ -369,6 +369,16 @@ impl EngineState {
         } else {
             (crate::auth::manager(&config, api_key, siwc).await?, None)
         };
+        let standard_responses = runtime_options.sdk_standard_responses;
+        ensure!(
+            !standard_responses
+                || (!siwc
+                    && config.model_provider_id == "native_agent"
+                    && config.model_provider.requires_openai_auth
+                    && !config.model_provider.is_amazon_bedrock()
+                    && auth.auth_mode() == Some(codex_protocol::auth::AuthMode::ApiKey)),
+            "Standard Responses requires a native API-key provider"
+        );
         let goals_enabled = runtime_options.native_goal_store_enabled();
         let storage_home = (goals_enabled || local_home.is_some()).then(|| LocalStorageHome {
             path: config.sqlite_config().home(),
@@ -494,8 +504,13 @@ impl EngineState {
                 "Authorize the saved manual checkpoint default model on the Agent"
             );
         }
-        let models: SharedModelsManager = if sdk_user_input_enabled == Some(false) {
-            Arc::new(ConfiguredModels { inner: models })
+        let suppress_async_questions = sdk_user_input_enabled == Some(false);
+        let models: SharedModelsManager = if suppress_async_questions || standard_responses {
+            Arc::new(ConfiguredModels {
+                inner: models,
+                suppress_async_questions,
+                standard_responses,
+            })
         } else {
             models
         };
@@ -2331,10 +2346,12 @@ impl EngineState {
     }
 }
 
-// SDK unattended mode removes question capabilities before Core registers tools.
+// SDK model overrides apply before Core validates settings or registers tools.
 #[derive(Debug)]
 struct ConfiguredModels {
     inner: SharedModelsManager,
+    suppress_async_questions: bool,
+    standard_responses: bool,
 }
 
 impl ModelsManager for ConfiguredModels {
@@ -2404,12 +2421,17 @@ impl ModelsManager for ConfiguredModels {
     ) -> ModelsManagerFuture<'a, ModelInfo> {
         Box::pin(async move {
             let mut info = self.inner.get_model_info(model, config).await;
-            info.experimental_supported_tools.retain(|tool| {
-                !matches!(
-                    tool.as_str(),
-                    "request_user_input_async" | "send_user_message_async"
-                )
-            });
+            if self.suppress_async_questions {
+                info.experimental_supported_tools.retain(|tool| {
+                    !matches!(
+                        tool.as_str(),
+                        "request_user_input_async" | "send_user_message_async"
+                    )
+                });
+            }
+            if self.standard_responses {
+                info.use_responses_lite = false;
+            }
             info
         })
     }

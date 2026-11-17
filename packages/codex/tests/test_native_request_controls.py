@@ -168,6 +168,44 @@ async def test_native_wire_capture_updates_and_restores_values_and_explicit_clea
     assert len(responses.requests) == 5
 
 
+@pytest.mark.parametrize("standard", [False, True], ids=["catalog", "standard"])
+async def test_catalog_lite_model_uses_the_explicit_standard_formatter(responses, standard):
+    responses.respond(assistant_output("finished"))
+    options = {"responses_format": "standard"} if standard else {}
+    settings: ModelSettings = (
+        {
+            "store": True,
+            "parallel_tool_calls": False,
+            "verbosity": "high",
+            "prompt_cache_retention": "24h",
+            "prompt_cache_ttl": "12h",
+        }
+        if standard
+        else {}
+    )
+    async with timeout(30), provider_for(responses, **options) as provider:
+        result = await Agent(
+            model="gpt-6.1-sol",
+            instructions="Answer.",
+            provider=provider,
+            model_settings=settings,
+        ).run("Use the selected formatter.")
+    assert result.final_output == "finished"
+    assert len(responses.requests) == 1
+    request = responses.requests[0]
+    assert request["model"] == "gpt-6.1-sol"
+    lite_header = responses.request_headers[0].get("x-openai-internal-codex-responses-lite")
+    if standard:
+        assert lite_header is None
+        assert request["store"] is True
+        assert request["parallel_tool_calls"] is False
+        assert request["text"]["verbosity"] == "high"
+        assert request["prompt_cache_retention"] == "24h"
+        assert request["prompt_cache_options"] == {"ttl": "12h"}
+    else:
+        assert lite_header == "true"
+
+
 @pytest.mark.parametrize(
     "ttl,retention",
     [(None, None), ("30m", "in_memory"), ("12h", "24h"), ("12h", None), (None, "24h")],

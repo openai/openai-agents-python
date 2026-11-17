@@ -2961,6 +2961,7 @@ def _native_session_config(
     return {
         "include_permissions_instructions": executor is not None,
         "include_environment_context": executor is not None,
+        "include_collaboration_mode_instructions": False,
         **provider_config,
         "agents.enabled": False,
         "features.goals": goals,
@@ -5003,10 +5004,17 @@ def _opening_response_policy(
     output_guardrails: Sequence[OutputGuardrail[Any]],
     provider_history: ProviderHistory | None,
 ) -> bool:
-    if provider_history is not None and any(
-        profile.native_provider_id is not None for profile in profiles
-    ):
-        raise CapabilityError("Distinct handoff providers require SDK-managed history")
+    if any(profile.native_provider_id is not None for profile in profiles):
+        if provider_history is not None:
+            raise CapabilityError("Distinct handoff providers require SDK-managed history")
+        if any(
+            profile.declaration.provider is not None
+            and profile.declaration.provider.responses_format == "standard"
+            for profile in profiles
+        ):
+            raise CapabilityError(
+                'responses_format="standard" requires a shared native handoff provider'
+            )
     hold_assistant_completion = bool(
         output_guardrails
         or agent.output_guardrails
@@ -5765,13 +5773,41 @@ class Session(Generic[ContextT, OutputT]):
             bound_tools = catalog.tools
             native = importlib.import_module("agents._native")
             native._validate_python_tool_declarations(catalog.native_specs())
+            replace_idle_checkpoint_tools = False
             if (
                 state is not None
                 and saved.managed_tool_specs is not None
                 and not profiles
                 and (native_agents is not None or not manual_restore)
             ):
-                catalog = _restore_python_catalog(catalog, saved.managed_tool_specs)
+                allow_tool_changes = (
+                    not manual_restore
+                    and native_agents is None
+                    and not saved.descendants
+                    and not saved.interrupted_thread_ids
+                    and (saved.root_metadata or {}).get("forked_from_id") is None
+                    and all(spec.get("type") == "function" for spec in saved.managed_tool_specs)
+                    and len(available) == len(tools)
+                    and all(
+                        type(tool) is _CapturedFunction
+                        and tool.configured_agent is None
+                        and tool._ref.namespace is None
+                        for tool in catalog.tools
+                    )
+                )
+                # Explicit defaults still select the saved subset in its acknowledged order.
+                if restored_defaults is not None or not allow_tool_changes:
+                    catalog = _restore_python_catalog(catalog, saved.managed_tool_specs)
+                replace_idle_checkpoint_tools = (
+                    allow_tool_changes
+                    and json.loads(catalog.native_specs()) != saved.managed_tool_specs
+                )
+                if replace_idle_checkpoint_tools and restored_defaults is not None:
+                    removed = {_saved_python_ref(spec) for spec in saved.managed_tool_specs}
+                    removed.difference_update(tool._ref for tool in catalog.tools)
+                    restored_defaults = tuple(
+                        ref for ref in restored_defaults if ref not in removed
+                    )
             profile_runtimes, profile_roster = _capture_profile_runtimes(
                 profiles,
                 catalog,
@@ -6222,6 +6258,12 @@ class Session(Generic[ContextT, OutputT]):
             owned_provider = provider is None
             if provider is None:
                 provider = NativeProvider()
+            if provider.responses_format == "standard" or (
+                provider_history is not None
+                and provider.auth is None
+                and provider.model_backend is None
+            ):
+                runtime["_sdk_standard_responses"] = True
             try:
                 native, transport, provider_lease = provider._acquire_lease()
                 opening.lease = provider_lease
@@ -6320,6 +6362,11 @@ class Session(Generic[ContextT, OutputT]):
                 hosted_verification, chatgpt_apps = _opening_apps_registrations(allowed_mcp)
                 options = {
                     "_hosted_tools": hosted_tools,
+                    **(
+                        {"_replace_idle_checkpoint_tools": True}
+                        if replace_idle_checkpoint_tools
+                        else {}
+                    ),
                     **(
                         {"_sdk_profile_provider_keys": profile_provider_keys}
                         if profile_provider_keys

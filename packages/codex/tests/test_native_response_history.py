@@ -462,7 +462,8 @@ async def test_existing_native_retry_retains_failed_and_recovered_response_facts
             event["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
 
     responses.before_event = incomplete_once
-    responses.respond(assistant_output("partial"))
+    # The transport can recover while no assistant text has been published.
+    responses.respond()
     responses.respond(assistant_output("recovered"))
     async with (
         timeout(30),

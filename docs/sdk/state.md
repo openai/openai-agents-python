@@ -168,11 +168,19 @@ A recognized format does not relax the exact Codex-revision restriction or the c
 
 Supply a current Agent and application configuration as follows:
 
-- Match the saved Python and manual tool definitions, latest accepted application instructions, and typed output type when present.
+- In `0.24.0-alpha.8`, restore has been requiring the saved Python and manual tool definitions, latest accepted application instructions, and typed output type when present. Matching development builds have been allowing the limited Python-tool changes described below while retaining the instruction and output requirements.
 - Supply current callbacks and provider credentials. Pass application context through `agent.session(state=state, context=...)`. Saved text never selects credentials, callbacks, or permissions.
 - Select current MCP declarations with `tools=`, or omit it to use the Agent's tools. These declarations provide MCP servers, credentials, and selected tools. They can omit an old server or narrow its tool selection, and they set the new Session's tool-name limit.
 
 Restore creates fresh handles. Supply workspace files separately when the conversation needs them.
+
+#### Update Python tools on an idle restore
+
+Matching development builds have been accepting current tool definitions for idle portable checkpoints of ordinary roots with only unnamespaced Python function tools. Restore has been accepting changed descriptions, schemas, and strictness, plus added or removed tools. New turns have been using those definitions and current application callbacks. Saved history has been retaining earlier calls and accepted results without running completed tools again.
+
+An explicit saved tool selection has been retaining only surviving selected tools in their saved order, excluding newly added tools. Without an explicit saved selection, future turns have been using the tools supplied at restore, including an opening `tools=` selection. After restore, an idle `session.update(tools=...)` has been selecting tools from the current declarations.
+
+Checkpoints with pending manual requests, forks, agent profiles or handoffs, native children, or namespaced or hosted tools have been following their existing restore rules. A forked Session has still been requiring matching Python tool declarations after another save and restore. For MCP declarations, use the selection rules above.
 
 #### Retain or update the saved model
 

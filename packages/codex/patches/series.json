@@ -1539,7 +1539,19 @@
     {
       "path": "sdk-alpha7-readable-rollout-facts.patch",
       "sha256": "679171c5eac3280fd27442dcce28382972b8d3644b2a4adbc3b8547ced404e4a"
+    },
+    {
+      "path": "sdk-stable-application-instruction-prompt.patch",
+      "sha256": "aec94c1e5915d4de9266e0b54e5c20cbe13119419263394090825477dd358f1a"
+    },
+    {
+      "path": "sdk-no-retry-after-visible-text.patch",
+      "sha256": "72bb8c22c0ce8885b5dbf06f613da4f4184919eedf0ce461d8c307edd0e416b9"
+    },
+    {
+      "path": "sdk-disable-cli-collaboration-instructions.patch",
+      "sha256": "44a75148beb5ac212fe79bc6875b68ebfd655096740f12108042c15b16332ab6"
     }
   ],
-  "result_tree": "8d63d41f500c8c1899c949781528e4e2a82f7c74"
+  "result_tree": "fa1ea921ed70e016d585e0037b8fae0f3d8ef34e"
 }

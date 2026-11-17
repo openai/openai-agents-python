@@ -548,7 +548,7 @@ async def test_unsupported_state_is_rejected_before_native_creation(monkeypatch,
         assert not model.requests
 
 
-async def test_restore_requires_current_context_and_exact_tool_declarations():
+async def test_restore_requires_current_context_and_allows_idle_tool_removal():
     calls: list[ToolContext[Application]] = []
     async with timeout(30), peer() as model:
         agent = Agent(instructions="Read.", tools=[lookup_tool(calls)], provider=model.provider())
@@ -559,9 +559,8 @@ async def test_restore_requires_current_context_and_exact_tool_declarations():
                 selected = await missing_context.submit("use current lookup")
                 await selected.get_result()
         changed = Agent(instructions="Read.", provider=model.provider())
-        with pytest.raises(RuntimeError, match="current managed specs must match"):
-            async with changed.session(state=saved):
-                pytest.fail("restore accepted a different tool catalog")
+        async with changed.session(state=saved) as removed:
+            assert removed.id == saved.source_session_id
         async with agent.session(state=saved, context=Application("current")) as restored:
             assert restored.id == saved.source_session_id
         assert not calls and not model.requests

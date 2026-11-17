@@ -73,6 +73,9 @@ pub struct ThreadOptions {
     sdk_prompt_cache_key: Option<String>,
     #[serde(rename = "_application_instructions")]
     pub(crate) application_instructions: Option<String>,
+    // Current opening authority for fresh turns in a settled ordinary root.
+    #[serde(rename = "_replace_idle_checkpoint_tools")]
+    pub(crate) replace_idle_checkpoint_tools: bool,
     #[serde(rename = "_agent_profiles")]
     pub(crate) agent_profiles: Option<crate::agent_profiles::OpeningProfiles>,
     #[serde(rename = "_sdk_profile_provider_keys")]
