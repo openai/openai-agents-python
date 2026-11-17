@@ -27,9 +27,16 @@ print(result.final_output)  # "San Francisco"
 # Second turn - agent automatically remembers previous context
 result = await Runner.run(agent, "What state is it in?", session=session)
 print(result.final_output)  # "California"
+```
 
-# Also works with synchronous runner
-result = Runner.run_sync(agent, "What's the population?", session=session)
+For synchronous code:
+
+```python
+from agents import Agent, Runner, SQLiteSession
+
+agent = Agent(name="Assistant", instructions="Reply very concisely.")
+session = SQLiteSession("conversation_123")
+result = Runner.run_sync(agent, "What's the population of California?", session=session)
 print(result.final_output)  # "Approximately 39 million"
 ```
 
@@ -249,6 +256,8 @@ By default, after each turn, the SDK checks whether the compaction candidate mee
 
 When automatic compaction runs, the SDK waits for it before `Runner.run(...)` returns or the streamed event iterator closes. Usage reported by the compaction request contributes to that run's [`Usage`](../usage.md) totals. By default, a manual `run_compaction()` call made later has no enclosing run context and does not update the completed run's usage object.
 
+When a tool has been returning a result after a stored OpenAI compaction, sending the same encrypted compaction item again with response storage enabled has been producing `item_conflict`. For local history replay, `ModelSettings(store=False)` has been allowing the session to send full input on each model call. For a stored Responses chain, continuing from the response that requested the tool has been allowing the service to accept just the paired tool output. Codex has been using local history for automatic compaction. With `compaction_mode="previous_response_id"`, automatic compaction has been waiting for a model that supplies a stored Responses ID.
+
 `compaction_mode="previous_response_id"` uses Responses API response IDs retained by the compaction session and works best while that response chain remains available. `compaction_mode="input"` rebuilds the compaction request from the current session items instead, which is useful when the response chain is unavailable or you want the session contents to be the source of truth. The default `"auto"` chooses the safest available option.
 
 If your agent runs with `ModelSettings(store=False)`, the Responses API does not retain the last response for later lookup. In that stateless setup, the default `"auto"` mode falls back to input-based compaction instead of relying on `previous_response_id`. See [`examples/memory/compaction_session_stateless_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/compaction_session_stateless_example.py) for a complete example.
@@ -311,7 +320,10 @@ from agents.extensions.memory import AsyncSQLiteSession
 
 agent = Agent(name="Assistant")
 session = AsyncSQLiteSession("user_123", db_path="conversations.db")
-result = await Runner.run(agent, "Hello", session=session)
+try:
+    result = await Runner.run(agent, "Hello", session=session)
+finally:
+    await session.close()
 ```
 
 ### Redis sessions

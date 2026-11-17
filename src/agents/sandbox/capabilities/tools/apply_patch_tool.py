@@ -6,12 +6,14 @@ from typing import Any
 
 from ...._tool_invocation import tool_invocation_approval_scope
 from ....editor import ApplyPatchEditor, ApplyPatchOperation, ApplyPatchResult
+from ....exceptions import UserError
 from ....run_context import RunContextWrapper
 from ....tool import (
     ApplyPatchApprovalFunction,
     ApplyPatchOnApprovalFunction,
     CustomTool,
     CustomToolApprovalFunction,
+    FunctionTool,
 )
 from ....tool_context import ToolContext
 from ....util._approvals import evaluate_needs_approval_setting
@@ -204,6 +206,38 @@ class SandboxApplyPatchTool(CustomTool):
         )
         self.needs_approval = needs_approval
         self.on_approval = on_approval
+
+    def as_function_tool(self) -> FunctionTool:
+        """Adapt the existing patch editor to a JSON function transport."""
+        if self.on_approval is not None:
+            raise UserError(
+                "Function-transport sandbox patches do not support on_approval; "
+                "use needs_approval and RunState approval decisions."
+            )
+
+        async def invoke(ctx: ToolContext[Any], arguments: str) -> str:
+            return await self._on_invoke_tool(ctx, json.loads(arguments)["patch"])
+
+        async def needs_approval(
+            ctx: RunContextWrapper[Any], arguments: dict[str, Any], call_id: str
+        ) -> bool:
+            return await self._needs_custom_approval(ctx, arguments["patch"], call_id)
+
+        return FunctionTool(
+            name=self.name,
+            description=self.description.replace(
+                "This is a FREEFORM tool, so do not wrap the patch in JSON.",
+                "Pass the patch text in the JSON patch property.",
+            ),
+            params_json_schema={
+                "type": "object",
+                "properties": {"patch": {"type": "string"}},
+                "required": ["patch"],
+                "additionalProperties": False,
+            },
+            on_invoke_tool=invoke,
+            needs_approval=needs_approval,
+        )
 
     @property
     def operation_needs_approval(self) -> bool | ApplyPatchApprovalFunction:

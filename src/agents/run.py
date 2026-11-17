@@ -755,6 +755,15 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
                 reasoning_item_id_policy=resolved_reasoning_item_id_policy,
             )
+            conversation_agent = (
+                (run_state._current_agent or starting_agent)
+                if is_resumed_state and run_state is not None
+                else starting_agent
+            )
+            server_conversation_tracker.validate_model(
+                run_config.model if run_config.model is not None else conversation_agent.model,
+                run_config.model_provider,
+            )
         else:
             server_conversation_tracker = None
         session_persistence_enabled = session is not None and server_conversation_tracker is None

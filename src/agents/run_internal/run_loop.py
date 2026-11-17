@@ -1061,6 +1061,15 @@ async def start_streaming(
                 auto_previous_response_id=auto_previous_response_id,
                 reasoning_item_id_policy=resolved_reasoning_item_id_policy,
             )
+            conversation_agent = (
+                (run_state._current_agent or starting_agent)
+                if is_resumed_state and run_state is not None
+                else starting_agent
+            )
+            server_conversation_tracker.validate_model(
+                run_config.model if run_config.model is not None else conversation_agent.model,
+                run_config.model_provider,
+            )
         else:
             server_conversation_tracker = None
 
@@ -2510,6 +2519,8 @@ async def run_single_turn_streamed(
         ]
 
     model = get_model(execution_agent, run_config)
+    if server_conversation_tracker is not None:
+        server_conversation_tracker.validate_model(model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
         public_agent, run_config, model, prepared_overrides=bindings.model_settings_overrides
@@ -2729,7 +2740,12 @@ async def run_single_turn_streamed(
         )
 
     record_compaction_model_response(
-        session, context_wrapper, compaction_input_digests, final_response, reasoning_item_id_policy
+        session,
+        context_wrapper,
+        compaction_input_digests,
+        final_response,
+        reasoning_item_id_policy,
+        supports_stored_response_id=getattr(model, "_supports_stored_response_id", True),
     )
     context_wrapper.usage.add(final_response.usage)
 
@@ -2980,6 +2996,8 @@ async def get_new_response(
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
     model = get_model(execution_agent, run_config)
+    if server_conversation_tracker is not None:
+        server_conversation_tracker.validate_model(model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
         public_agent, run_config, model, prepared_overrides=bindings.model_settings_overrides
@@ -3087,6 +3105,7 @@ async def get_new_response(
         compaction_input_digests,
         new_response,
         reasoning_item_id_policy,
+        supports_stored_response_id=getattr(model, "_supports_stored_response_id", True),
     )
     context_wrapper.usage.add(new_response.usage)
 

@@ -1,8 +1,8 @@
 import asyncio
 import os
-import shutil
 import socket
 import subprocess
+import sys
 import time
 from typing import Any, cast
 
@@ -104,9 +104,6 @@ async def main():
 
 
 if __name__ == "__main__":
-    if not shutil.which("uv"):
-        raise RuntimeError("uv is not installed")
-
     process: subprocess.Popen[Any] | None = None
     try:
         this_dir = os.path.dirname(os.path.abspath(__file__))
@@ -116,7 +113,7 @@ if __name__ == "__main__":
         env = os.environ.copy()
         env.setdefault("STREAMABLE_HTTP_HOST", STREAMABLE_HTTP_HOST)
         env.setdefault("STREAMABLE_HTTP_PORT", str(STREAMABLE_HTTP_PORT))
-        process = subprocess.Popen(["uv", "run", server_file], env=env)
+        process = subprocess.Popen([sys.executable, server_file], env=env)
         time.sleep(3)
         print("Server started\n")
     except Exception as e:

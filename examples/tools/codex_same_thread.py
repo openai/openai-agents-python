@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
-from agents import Agent, ModelSettings, Runner, gen_trace_id, trace
+from agents import Agent, Runner, gen_trace_id, trace
 
 # This tool is still in experimental phase and the details could be changed until being GAed.
 from agents.extensions.experimental.codex import (
@@ -84,7 +84,6 @@ async def main() -> None:
                 use_run_context_thread_id=True,
             )
         ],
-        model_settings=ModelSettings(tool_choice="required"),
     )
 
     class MyContext(BaseModel):
@@ -111,7 +110,7 @@ async def main() -> None:
         log(first_result.final_output)
         log(f"thread id after turn 1: {first_thread_id}")
         if first_thread_id is None:
-            log("thread id after turn 1 is unavailable; turn 2 may start a new Codex thread.")
+            raise RuntimeError("The first run did not return a Codex tool thread ID.")
 
         log("Turn 2: continue with the same Codex thread.")
         second_prompt = (
@@ -122,10 +121,9 @@ async def main() -> None:
         second_thread_id = read_context_value(context, THREAD_ID_KEY)
         log(second_result.final_output)
         log(f"thread id after turn 2: {second_thread_id}")
-        log(
-            "same thread reused: "
-            + str(first_thread_id is not None and first_thread_id == second_thread_id)
-        )
+        if second_thread_id != first_thread_id:
+            raise RuntimeError("The second run did not reuse the Codex tool thread.")
+        log("same thread reused: True")
 
 
 if __name__ == "__main__":

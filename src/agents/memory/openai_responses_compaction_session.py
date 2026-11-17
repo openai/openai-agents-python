@@ -10,7 +10,7 @@ from openai import AsyncOpenAI
 from .._tool_identity import get_hosted_mcp_approval_request_identity
 from ..items import TResponseInputItem
 from ..logger import log_model_and_tool_action_warning
-from ..models._openai_shared import get_default_openai_client
+from ..models._openai_shared import clean_responses_input_item, get_default_openai_client
 from ..run_internal.items import (
     ReasoningItemIdPolicy,
     apply_reasoning_item_id_policy,
@@ -280,8 +280,21 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         prepare_items: Callable[[list[TResponseInputItem]], list[TResponseInputItem]] | None = None,
         read_snapshot: Callable[[int], Awaitable[_CompactionSnapshot | None]] | None = None,
     ) -> None:
+        is_automatic = wrapper is not None and getattr(
+            wrapper, "_session_compaction_is_automatic", False
+        )
+        if (
+            is_automatic
+            and self.compaction_mode == "previous_response_id"
+            and getattr(wrapper, "_session_compaction_supports_stored_response_id", True) is False
+        ):
+            # This exchange has no stored response. A prior model's ID cannot represent it.
+            self._response_id = self._deferred_response_id = None
+            return
         if args and args.get("response_id"):
             self._response_id = args["response_id"]
+        elif args and args.get("compaction_mode") == "input":
+            self._response_id = None
         requested_mode = args.get("compaction_mode") if args else None
         if args and "store" in args:
             store = args["store"]
@@ -303,9 +316,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 "when using previous_response_id compaction."
             )
 
-        is_automatic = wrapper is not None and getattr(
-            wrapper, "_session_compaction_is_automatic", False
-        )
         if not is_automatic and self.max_rollback_items is not None:
             # Check before even a default-unlimited candidate read. Time-filtered
             # stores can change during the request despite the wrapper mutation lock.
@@ -460,7 +470,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             compact_kwargs["previous_response_id"] = self._response_id
         else:
             # Manual compaction may reuse cached raw output from the preceding compaction.
-            compact_kwargs["input"] = normalize_input_items_for_api(session_items)
+            compact_kwargs["input"] = [
+                cleaned
+                for item in normalize_input_items_for_api(session_items)
+                if (cleaned := clean_responses_input_item(item)) is not None
+            ]
 
         compacted = await self.client.responses.compact(**compact_kwargs)
 

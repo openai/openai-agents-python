@@ -147,6 +147,8 @@ def _model_settings_for_resolved_name(
     agent: Agent[Any], run_config: RunConfig, model: Model
 ) -> ModelSettings:
     selection = run_config.model if run_config.model is not None else agent.model
+    if getattr(model, "_sandbox_model_capabilities", {}).get("use_provider_defaults"):
+        return model.get_default_model_settings() or ModelSettings()
     if isinstance(selection, Model):
         return ModelSettings()
     if isinstance(selection, str) and "/" not in selection:

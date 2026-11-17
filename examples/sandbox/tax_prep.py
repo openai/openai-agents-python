@@ -139,7 +139,7 @@ async def _run_turn(
     input_items: list[TResponseInputItem],
     run_config: RunConfig,
 ) -> list[TResponseInputItem]:
-    stream_result = Runner.run_streamed(agent, input_items, run_config=run_config)
+    stream_result = Runner.run_streamed(agent, input_items, run_config=run_config, max_turns=30)
     saw_text_delta = False
     async for event in stream_result.stream_events():
         if event.type == "raw_response_event" and isinstance(event.data, ResponseTextDeltaEvent):

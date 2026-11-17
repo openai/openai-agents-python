@@ -3170,6 +3170,33 @@ def process_model_response(
 ) -> ProcessedResponse:
     items: list[RunItem] = []
 
+    # A provider may have already executed client discovery before returning its response.
+    client_search_items: dict[str, list[Any]] = {}
+    for output in response.output:
+        if get_mapping_or_attr(output, "type") in ("tool_search_call", "tool_search_output"):
+            call_id = get_mapping_or_attr(output, "call_id")
+            if not isinstance(call_id, str) or not call_id:
+                if get_mapping_or_attr(output, "execution") == "client":
+                    raise ModelBehaviorError(
+                        "Client-executed tool_search calls require a matching completed output."
+                    )
+                continue
+            client_search_items.setdefault(call_id, []).append(output)
+    for pair in client_search_items.values():
+        if not any(get_mapping_or_attr(item, "execution") == "client" for item in pair):
+            continue
+        if (
+            len(pair) != 2
+            or get_mapping_or_attr(pair[0], "type") != "tool_search_call"
+            or get_mapping_or_attr(pair[1], "type") != "tool_search_output"
+            or get_mapping_or_attr(pair[1], "status") != "completed"
+            or any(get_mapping_or_attr(item, "execution") != "client" for item in pair)
+        ):
+            raise ModelBehaviorError(
+                "Client-executed tool_search calls require exactly one matching completed "
+                "tool_search_output with the same call_id and execution."
+            )
+
     run_handoffs = []
     functions = []
     computer_actions = []
@@ -3494,12 +3521,6 @@ def process_model_response(
                 agent_name=agent.name,
             )
             tool_search_call_raw = coerce_tool_search_call_raw_item(output)
-            if get_mapping_or_attr(tool_search_call_raw, "execution") == "client":
-                raise ModelBehaviorError(
-                    "Client-executed tool_search calls are not supported by the standard "
-                    "agent runner. Handle the tool_search_call yourself and return a matching "
-                    "tool_search_output item with the same call_id."
-                )
             items.append(ToolSearchCallItem(raw_item=tool_search_call_raw, agent=agent))
             tools_used.append("tool_search")
             continue

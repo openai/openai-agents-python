@@ -67,7 +67,7 @@ Start with the simplest path that fits your setup:
 | Use OpenAI models only | Use the default OpenAI provider with the Responses model path | [OpenAI models](#openai-models) |
 | Use OpenAI Responses API over websocket transport | Keep the Responses model path and enable websocket transport | [Responses WebSocket transport](#responses-websocket-transport) |
 | Use OpenAI-hosted subagents | Use the experimental hosted multi-agent model | [Hosted multi-agent](#hosted-multi-agent-experimental) |
-| Run an agent with text input and output through Codex | Select `CodexProvider` for the run | [Codex provider](#codex-provider) |
+| Run an agent with stock Codex, SDK tools, and handoffs | Select `CodexProvider` for the run | [Codex provider](#codex-provider) |
 | Use one non-OpenAI provider | Start with the built-in provider integration points | [Non-OpenAI models](#non-openai-models) |
 | Mix models or providers across agents | Select providers per run or per agent and review feature differences | [Mixing models in one workflow](#mixing-models-in-one-workflow) and [Mixing models across providers](#mixing-models-across-providers) |
 | Tune advanced OpenAI Responses request settings | Use `ModelSettings` on the OpenAI Responses path | [Advanced OpenAI Responses settings](#advanced-openai-responses-settings) |
@@ -360,106 +360,73 @@ See the [OpenAI Multi-agent guide](https://developers.openai.com/api/docs/guides
 
 ## Codex provider
 
-Set `RunConfig(model_provider=CodexProvider())` to use the embedded Codex runtime for an agent. Codex runs its shell, workspace, and configured tools under its own permissions. The Agents SDK sends text to Codex and returns the final text to your application.
+`CodexProvider` has been running agent model calls through the stock Codex App Server. The Agents SDK has been managing the agent loop, handoffs, tool approvals, output validation, and sessions in both modes. Codex has been managing its own model connection and native workspace tools.
 
-### Install the provider
+### Install and switch providers
 
-Install Python 3.10 or later, Rust 1.95 or later, Git, a C/C++ compiler, CMake, Make, Perl, and `pkg-config`. From the root of the Agents SDK checkout, activate your Python virtual environment and install the SDK and PyO3 extension.
+From this branch, these commands have been installing the Python SDK and the stock CLI used by the provider.
 
-```bash
-uv pip install . ./native/codex
+```sh
+uv sync
+npm install --global @openai/codex@0.166.0
+codex --version
+codex login
 ```
 
-After updating this SDK checkout, rerun the install command with `--reinstall-package openai-agents --reinstall-package openai-agents-codex` to refresh both packages. A `run_turn()` argument-count error can mean Python loaded the extension from an earlier revision.
+Codex has been reading its configuration and saved login from `CODEX_HOME`. The application has been needing write access to that directory. On a managed host, Codex has been using the host's authentication policy. On a host that allows API-key login, `CodexProvider(api_key=...)` has been signing in for the lifetime of the child process. The provider has been leaving any saved CLI login in place.
 
-The extension also needs a trusted native Codex executable to start its shell and file helpers. Use the stock `codex` or `codex-app-server` executable built from the same [Codex revision as the extension](https://github.com/openai/codex/tree/7c2ce90716335c889a5076ded9a630459f9c9899). Check out the linked revision in the Codex source repository, then run this command from its root.
-
-```bash
-cargo build --locked --manifest-path codex-rs/Cargo.toml \
-  --package codex-app-server --bin codex-app-server
-```
-
-With Cargo's default output directory, the executable is at `codex-rs/target/debug/codex-app-server` on Unix. Pass its absolute path as `CodexProvider(codex_executable=...)`. If you omit the argument, the provider looks for `codex` on `PATH`. Launcher scripts are rejected. If `codex` points to a launcher, pass the native executable directly.
-
-Use a saved Codex login or set `CODEX_API_KEY` in the Python process. Codex uses its own model provider and credentials. The Agents SDK's OpenAI client and API key settings do not configure Codex. Export any environment variables the run needs before starting Python. The CLI loads `$CODEX_HOME/.env` during startup. In an embedded run, the Python process supplies those environment variables. See [Codex authentication](https://developers.openai.com/codex/auth/).
-
-### Run a workspace task
-
-Use a local execution environment so Codex and Python see the same workspace. Codex uses `~/.codex` by default. If you set `CODEX_HOME`, point it to an existing, trusted directory. For example, use a separate home to keep test settings and any recorded trust separate from your everyday Codex configuration. Sign in to that home or set `CODEX_API_KEY` before running the example.
-
-Codex applies its user and managed configuration and loads project configuration according to its trust rules. Codex configuration controls the sandbox, approval policy, hooks, plugins, and MCP servers. If a workspace has no recorded trust decision and Codex's effective permissions allow writes there, Codex can record trust for the workspace or its Git root and load project configuration.
-
-The example needs permission to write in the working directory. If your Codex configuration uses `sandbox_mode`, set these keys in the example's `$CODEX_HOME/config.toml` where managed policy permits. A named permission profile can also provide workspace write access. Use `approval_policy = "never"` for the unattended example with either configuration style, where managed policy permits.
-
-```toml
-sandbox_mode = "workspace-write"
-approval_policy = "never"
-```
-
-When Codex sends the provider a request for interactive approval or user input, the provider rejects it. The provider cancels MCP requests that need user input. Codex still applies its configured review policy, including automatic review when configured, and enforces its sandbox rules. Use an interactive Codex client for tasks that need your approval or input.
-
-The example needs a Codex model that exposes the `apply_patch` and shell tools. If your default model lacks those tools, set `Agent.model` to a model that exposes them.
-
-On Unix, save the following as `codex_example.py`. The example creates a temporary workspace, asks Codex to edit and read a file, and checks the file before cleaning up. Run it with `python codex_example.py /path/to/codex-app-server` in the same virtual environment.
+The following script has been switching one agent between providers with a command-line flag. With the default provider, the script has been reading the application's OpenAI credentials. With `--codex`, it has been using the stock `codex` on `PATH`. For a specific executable, pass its path in `CodexProvider(codex_executable=...)`.
 
 ```python
-import sys
-from pathlib import Path
-from tempfile import TemporaryDirectory
+import argparse
 
 from agents import Agent, RunConfig, Runner
 from agents.models.codex import CodexProvider
 
-agent = Agent(name="Workspace assistant")
-with TemporaryDirectory(prefix="codex-workspace-") as directory:
-    workspace = Path(directory)
-    result = Runner.run_sync(
-        agent,
-        "Use the apply_patch tool to create hello.txt with the line Hello from Codex. "
-        "Run `cat hello.txt` in the shell and return one sentence about what you read.",
-        run_config=RunConfig(
-            model_provider=CodexProvider(cwd=workspace, codex_executable=sys.argv[1]),
-            tracing_disabled=True,
-        ),
-    )
-    text = (workspace / "hello.txt").read_text(encoding="utf-8").strip()
-    if text != "Hello from Codex":
-        raise RuntimeError(f"Unexpected file contents: {text!r}")
-    print(result.final_output)
+parser = argparse.ArgumentParser()
+parser.add_argument("--codex", action="store_true")
+args = parser.parse_args()
+
+agent = Agent(name="Guide", instructions="Answer in one sentence.")
+config = RunConfig(model_provider=CodexProvider()) if args.codex else RunConfig()
+result = Runner.run_sync(agent, "Why does bread rise?", run_config=config)
+print(result.final_output)
 ```
 
-Use `cwd` to select an existing working directory. If you omit `cwd`, the provider captures Python's working directory when you construct it. Codex configuration and trust determine what the run can do there. The SDK sandbox configuration controls SDK sandbox agents. Codex uses the execution environment configured in Codex. For a check that must finish before Codex can act, set `run_in_parallel=False` on the SDK input guardrail. SDK tool approvals, tool hooks, and tool guardrails apply to calls the SDK executes. Codex handles its own tool calls. See [SDK guardrails](../guardrails.md).
+The [wildlife example](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/model_providers/codex_provider.py) has been sending a local photograph, handing off to a specialist, calling an SDK function, and streaming a structured report. It has been checking that the specialist actually called the function and returned the expected catalog ID. From the repository root, the same two commands have been running the workflow in each mode.
 
-At the end of a model call, the provider asks Codex to clean up the temporary thread's managed terminal sessions. If cancellation or timeout occurs during an active turn, the provider requests an interrupt first. Python can report cancellation or timeout before cleanup finishes. On Linux, an already-running shell command can keep running after that report, even after Codex acknowledges the cleanup request. The command can make further writes allowed by its sandbox. Completed workspace writes can survive cancellation, timeout, or rejection by an output guardrail.
+```sh
+uv run python -m examples.model_providers.codex_provider
+uv run python -m examples.model_providers.codex_provider --codex
+```
 
-### Switch models and continue conversations
+### Tools, streaming, and history
 
-Leave `Agent.model` and `RunConfig.model` unset to use the Codex default model. Set either field to a model name to select a different one. A concrete `Model` object bypasses provider selection. The provider passes `Agent.instructions` to Codex as developer instructions. Set `ModelSettings.timeout` in seconds to limit how long the SDK waits for a call. Configure other model settings in Codex and leave their SDK counterparts at the defaults.
+Each model call has been starting a fresh Codex thread. The Runner has been passing the agent's instructions, supported history, tool schemas, and output schema into the thread. When Codex has been requesting an SDK tool or handoff, the Runner has been checking the agent's current permissions and executing the callback. SDK-managed MCP tools have been using the same path. On streamed runs the application has been receiving text deltas during generation. When the model has been supplying a requested reasoning summary, the application has also been receiving `response.reasoning_summary_text.delta` events.
 
-Each SDK model call starts a fresh temporary Codex thread. The SDK result's `last_response_id` is a Codex turn ID. Passing it as `previous_response_id` raises `UserError`. Pass a nonempty string or a list of user and assistant text messages ending with a nonempty user message. To continue a conversation, pass the prior text and append the new user message. A text-only SDK session can store this history. Codex starts the next call without its previous tool state. When switching an existing conversation to Codex, start fresh or pass a text summary if its history contains tool calls, images, or any items beyond user and assistant text.
+Streamed SDK function calls have been supplying their complete JSON arguments in a single update. For strict structured output, Codex has been enforcing the schema during generation. With `strict_json_schema=False`, the provider has been including the schema in the final-answer instructions and the Runner has been validating the returned JSON with the selected output type.
 
-Remove `model_provider` from `RunConfig` to use the default SDK provider. Configure OpenAI API credentials for the default provider as described in the [SDK quickstart](../quickstart.md#set-an-openai-api-key).
+A local image has been using a base64 data URL. An inline audio input has been requiring a model whose Codex catalog entry declares audio input. Checking the catalog has been preventing stock Codex from replacing unsupported audio with a text placeholder. Tool search has been discovering deferred SDK functions before execution. Local shell and patch tools have been using the application's executor or editor and its approval policy.
 
-### Provider limits
+For each follow-up, an SDK session or `result.to_input_list()` has been supplying prior messages and tool results. `OpenAIResponsesCompactionSession` has been using the OpenAI compact endpoint with the full input history. The compactor has been needing its own OpenAI client or API key. The SDK has been replaying the returned encrypted item on the next Codex turn. With sandbox memory, omitted memory-model settings have been following the sandbox agent's selected provider.
 
-| Area | Behavior in Codex mode |
+### Permissions and provider-specific features
+
+For an ordinary agent, `cwd` has been selecting the Codex workspace. Native Codex commands have been using the CLI's sandbox and approval settings. Linux workspace writes have been requiring a host that permits the native sandbox to start. SDK sandbox agents have been using the SDK's filesystem and tool policies. Runs with isolated SDK execution tools have been requiring enabled Codex MCP servers to be disabled in the Codex configuration.
+
+Input guardrails with `run_in_parallel=False` have been finishing before model execution. A native command may already have been writing to the workspace when a cancellation or an output guardrail has been stopping a run. Applications have been checking the workspace before repeating a failed operation. [SDK guardrails](../guardrails.md)
+
+Several features have been depending on a specific service or transport.
+
+| Feature | Provider requirement |
 | --- | --- |
-| SDK tools and request fields | The provider raises `UserError` for SDK tools, handoffs, structured output, multimodal input, `previous_response_id`, `conversation_id`, and `Agent.prompt`. The available Codex tools depend on the model and Codex configuration. |
-| Streaming and results | After Codex finishes, `Runner.run_streamed()` emits the final text in one `response.output_text.delta` event. SDK results and events carry the final text and any reported token totals. They omit native tool events and command exit status. Use workspace checks to verify edits or shell outcomes. |
-| Turn limits and retries | The SDK counts each Codex call as one model turn. Codex can make multiple model requests and tool calls within that turn. SDK model retries are unsupported. Check for changes before repeating a timed-out or failed task. |
-| Tracing | `RunConfig.tracing_disabled` controls SDK tracing. Codex handles its own diagnostics and analytics. The example disables SDK tracing so it can run with Codex credentials alone. |
-| CLI workflow | CLI session resume, interactive approvals, and live tool output are unavailable through this provider. Shell commands use their configured `PATH`. Use Codex's built-in `apply_patch` tool for edits. The shell `apply_patch` alias requires separate setup on the shell's `PATH`. |
+| Stored response and conversation IDs, saved prompt IDs, explicit cache keys and breakpoints | The OpenAI Responses provider has been supplying these features. Codex turn IDs have been identifying local turns. |
+| Hosted web search | With a web-search-capable provider, stock 0.166.0 has been returning hosted search calls on `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.5`. The two 5.4 models have been searching text. The 5.5 model has been allowing text and image results. On cache-only hosts, searches have been using cached results even when the application has been allowing live access. Setting `external_web_access=False` has been limiting searches to cached results. |
+| Remote image URLs, uploaded file IDs, and hosted file search or code interpreter | The Responses provider has been resolving remote or server-owned resources. Codex image input has been accepting inline image bytes. |
+| Model sampling, output-token limits, forced tool choice, programmatic tool callers | These controls have been requiring a provider that exposes them. |
+| Realtime, voice, Decisions, explicit OpenAI model objects | These APIs have been selecting their own model or transport. Setting the Runner's model provider has been affecting ordinary agent model calls. |
 
-Use the [experimental Codex tool](../tools.md#experimental-codex-tool) to delegate selected tasks to Codex from an SDK agent and receive tool events or reuse a Codex thread.
-
-### Troubleshoot startup and workspace access
-
-- If the provider cannot start a helper, check the native executable path and match the executable to the extension's pinned Codex revision. Make sure the Python environment that runs the example has the extension installed.
-- If authentication fails, check the Codex home and credentials visible to Python. A configured model provider can use its own credential setting. Managed authentication requirements can also affect which credentials Codex uses.
-- On Unix, Codex needs a writable `CODEX_HOME` to create helper aliases. With a release build of the extension, use a Codex home outside the system temporary directory and `/tmp`. With a restricted sandbox, keep the native executable and helper aliases outside directories Codex can write. A workspace-write policy can grant writes under `/tmp` and `$TMPDIR` as well as the workspace.
-- On Linux, the workspace sandbox also needs a host that permits Codex to start Bubblewrap with user namespaces. A restricted container can prevent nested sandbox startup.
-- On Windows, Codex may need additional elevated sandbox helpers. Codex looks beside the running Python executable and on `PATH` for those programs. The `codex_executable` argument selects only the main native Codex executable.
-- If a command or edit is denied, check the selected execution environment, workspace path, sandbox permissions, and managed requirements. Native startup and turn failures surface as `RuntimeError`. Operations that require an interactive approval cannot proceed through this provider. Ask for a final text summary in tool-only tasks so the SDK has a response to return.
+The [Codex tool guide](../tools.md) has been covering a different integration. Registering Codex as a function tool has been letting an agent delegate a task to Codex while retaining its ordinary model provider.
 
 ## Non-OpenAI models
 

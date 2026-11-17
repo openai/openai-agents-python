@@ -506,6 +506,86 @@ async def test_plaintext_agent_client_tool_search_requires_manual_handling() -> 
 
 
 @pytest.mark.asyncio
+async def test_plaintext_agent_paired_client_discovery_preserves_replay_without_execution():
+    agent = Agent(name="test")
+    call = {
+        "type": "tool_search_call",
+        "call_id": "search_1",
+        "arguments": {"query": "lookup"},
+        "execution": "client",
+        "status": "completed",
+    }
+    output = {
+        "type": "tool_search_output",
+        "call_id": "search_1",
+        "execution": "client",
+        "status": "completed",
+        "tools": [
+            {"type": "namespace", "name": "lookup", "description": "Lookup tools", "tools": []}
+        ],
+    }
+    response = ModelResponse(output=[], usage=Usage(), response_id=None)
+    response.output = cast(Any, [call, output])
+    result = await get_execute_result(agent, response)
+    assert [item.to_input_item()["type"] for item in result.generated_items] == [
+        "tool_search_call",
+        "tool_search_output",
+    ]
+    assert result.generated_items[1].to_input_item()["execution"] == "client"
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "duplicate_call",
+        "duplicate_output",
+        "mismatched_id",
+        "mismatched_execution",
+        "unrelated_output",
+        "incomplete",
+        "reversed",
+    ],
+)
+async def test_plaintext_agent_rejects_unpaired_client_discovery(case):
+    agent = Agent(name="test")
+    call = {
+        "type": "tool_search_call",
+        "call_id": "search_1",
+        "arguments": {"query": "lookup"},
+        "execution": "client",
+        "status": "completed",
+    }
+    output = {
+        "type": "tool_search_output",
+        "call_id": "search_1",
+        "execution": "client",
+        "status": "completed",
+        "tools": [],
+    }
+    items = [call, output]
+    if case == "duplicate_call":
+        items.insert(0, call)
+    elif case == "duplicate_output":
+        items.append(output)
+    elif case == "mismatched_id":
+        output["call_id"] = "other"
+    elif case == "mismatched_execution":
+        output["execution"] = "server"
+    elif case == "unrelated_output":
+        items = [output]
+    elif case == "incomplete":
+        output["status"] = "in_progress"
+    elif case == "reversed":
+        items.reverse()
+    response = ModelResponse(output=[], usage=Usage(), response_id=None)
+    response.output = cast(Any, items)
+    with pytest.raises(ModelBehaviorError, match="Client-executed tool_search calls"):
+        await get_execute_result(agent, response)
+
+
+@pytest.mark.asyncio
 async def test_plaintext_agent_hosted_shell_with_refusal_message_raises_refusal_error():
     shell_tool = ShellTool(environment={"type": "container_auto"})
     agent = Agent(name="test", tools=[shell_tool])

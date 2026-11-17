@@ -18,7 +18,7 @@ from pathlib import Path
 
 from openai.types.responses import ResponseTextDeltaEvent
 
-from agents import ModelSettings, Runner
+from agents import Runner
 from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Shell
@@ -63,7 +63,6 @@ def _build_agent(model: str) -> SandboxAgent:
         ),
         default_manifest=_build_manifest(),
         capabilities=[Shell()],
-        model_settings=ModelSettings(tool_choice="required"),
     )
 
 
@@ -147,6 +146,13 @@ async def main(model: str, question: str) -> None:
                 print()
             if not saw_any_text:
                 print(result.final_output)
+            if not any(item.type == "tool_call_output_item" for item in result.new_items):
+                raise RuntimeError("The sandbox agent did not execute a workspace tool.")
+            used_tools = set(tool_names_by_call_id.values())
+            if not {"exec_command", "write_stdin"}.issubset(used_tools):
+                raise RuntimeError(
+                    "The PTY demo did not start and continue an interactive process."
+                )
     finally:
         await client.delete(sandbox)
 

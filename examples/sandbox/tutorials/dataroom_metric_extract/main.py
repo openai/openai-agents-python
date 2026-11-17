@@ -172,7 +172,6 @@ async def main(
         capabilities=[Shell()],
         model_settings=ModelSettings(
             reasoning=Reasoning(effort="high"),
-            tool_choice="required",
         ),
         output_type=FinancialMetricBatch,
     )

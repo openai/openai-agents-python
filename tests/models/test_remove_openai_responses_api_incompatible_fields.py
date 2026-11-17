@@ -77,6 +77,17 @@ class TestRemoveOpenAIResponsesAPIIncompatibleFields:
         assert "provider_data" not in result[0]
         assert "provider_data" not in result[1]
 
+    @pytest.mark.parametrize("kind", ["function_call", "shell_call", "apply_patch_call"])
+    def test_replays_codex_calls_by_value_and_preserves_service_ids(self, model, kind):
+        common = {"type": kind, "call_id": "call_abc"}
+        result = model._remove_openai_responses_api_incompatible_fields(
+            [
+                {**common, "id": "call_abc", "codex_reasoning_summary": ["public summary"]},
+                {**common, "id": "fc_service"},
+            ]
+        )
+        assert result == [common, {**common, "id": "fc_service"}]
+
     def test_removes_fake_responses_id(self, model: OpenAIResponsesModel):
         """Items with id equal to FAKE_RESPONSES_ID should have their id removed."""
         list_input = [

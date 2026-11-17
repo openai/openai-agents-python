@@ -49,7 +49,7 @@ from ..memory.session import _call_session_method, _get_session_wrapper
 from ..models.fake_id import FAKE_RESPONSES_ID
 from ..run_config import RunConfig
 from ..run_context import RunContextWrapper
-from ..run_state import RunState, _PendingSessionWrite
+from ..run_state import RunState, _PendingSessionWrite, _SessionCompactionModelExchange
 from .blocked_output import (
     _current_response_boundary,
     _identity_sequence_start,
@@ -143,6 +143,7 @@ def record_compaction_model_response(
     input_digests: tuple[str, ...] | None,
     response: ModelResponse,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None,
+    supports_stored_response_id: bool = True,
 ) -> None:
     """Authorize automatic compaction only from the latest successful model exchange."""
     if input_digests is None or session is None:
@@ -156,11 +157,27 @@ def record_compaction_model_response(
         for item in response_items
         if (digest := digest_input_item(item, ignore_ids_for_matching=ignore_ids)) is not None
     )
+    wrapper._session_compaction_supports_stored_response_id = supports_stored_response_id  # type: ignore[attr-defined]
     # Keep the resolved replay policy bound to the same successful exchange.
     wrapper._session_compaction_model_exchange = (  # type: ignore[attr-defined]
         input_digests + response_digests,
         reasoning_item_id_policy,
     )
+
+
+def _snapshot_compaction_model_exchange(
+    wrapper: RunContextWrapper[Any] | None,
+) -> _SessionCompactionModelExchange | None:
+    model_exchange = getattr(wrapper, "_session_compaction_model_exchange", None)
+    if model_exchange is None:
+        return None
+    snapshot: _SessionCompactionModelExchange = {
+        "item_digests": list(model_exchange[0]),
+        "reasoning_item_id_policy": model_exchange[1],
+    }
+    if getattr(wrapper, "_session_compaction_supports_stored_response_id", True) is False:
+        snapshot["supports_stored_response_id"] = False
+    return snapshot
 
 
 async def admit_pending_input(
@@ -729,12 +746,17 @@ async def _apply_post_write_compaction(
     context wrapper; it is used as-is for ``run_compaction`` and re-gated here for
     ``_defer_compaction``, mirroring the two call sites this helper replaces.
     """
-    if not response_id or not is_openai_responses_compaction_aware_session(session):
+    supports_stored_response_id = getattr(
+        wrapper, "_session_compaction_supports_stored_response_id", True
+    )
+    if (
+        not response_id and supports_stored_response_id
+    ) or not is_openai_responses_compaction_aware_session(session):
         return
 
     if has_local_tool_outputs:
         defer_compaction = getattr(session, "_defer_compaction", None)
-        if callable(defer_compaction):
+        if callable(defer_compaction) and response_id is not None:
             await _call_session_method(
                 defer_compaction,
                 response_id,
@@ -758,11 +780,14 @@ async def _apply_post_write_compaction(
             response_id,
             deferred_response_id,
         )
-    compaction_args: OpenAIResponsesCompactionArgs = {
-        "response_id": response_id,
-        "force": force_compaction,
-    }
-    if store is not None:
+    compaction_args: OpenAIResponsesCompactionArgs = {"force": force_compaction}
+    if response_id is not None:
+        compaction_args["response_id"] = response_id
+    if not supports_stored_response_id:
+        compaction_args.pop("response_id", None)
+        compaction_args["compaction_mode"] = "input"
+        compaction_args["store"] = False
+    elif store is not None:
         compaction_args["store"] = store
     if wrapper is not None:
         wrapper._session_compaction_is_automatic = True  # type: ignore[attr-defined]
@@ -811,6 +836,9 @@ async def save_result_to_session(
         return 0
 
     compaction_wrapper = wrapper
+    if getattr(wrapper, "_session_compaction_supports_stored_response_id", True) is False:
+        # Provider response IDs cannot continue a stored Responses API exchange.
+        store = False
     wrapper = _get_session_wrapper(session, wrapper)
 
     new_run_items: list[RunItem]
@@ -918,12 +946,9 @@ async def save_result_to_session(
             "store": store,
             "has_local_tool_outputs": has_local_tool_outputs,
         }
-        model_exchange = getattr(compaction_wrapper, "_session_compaction_model_exchange", None)
+        model_exchange = _snapshot_compaction_model_exchange(compaction_wrapper)
         if model_exchange is not None:
-            resumed_write_state._pending_session_write["compaction_model_exchange"] = {
-                "item_digests": list(model_exchange[0]),
-                "reasoning_item_id_policy": model_exchange[1],
-            }
+            resumed_write_state._pending_session_write["compaction_model_exchange"] = model_exchange
         # resume_pending_session_write() applies post-write compaction itself once the
         # checkpoint settles, whether that happens inline below or on a later, separate
         # resume -- so it is not repeated after this call returns.
@@ -978,6 +1003,16 @@ async def save_resumed_turn_items(
         return persisted_count
     if claim_held:
         held_write = take_held_session_write(run_state)
+    if held_write is not None and wrapper is not None:
+        model_exchange = held_write.get("compaction_model_exchange")
+        if model_exchange is not None:
+            wrapper._session_compaction_model_exchange = (  # type: ignore[attr-defined]
+                tuple(model_exchange["item_digests"]),
+                model_exchange["reasoning_item_id_policy"],
+            )
+            wrapper._session_compaction_supports_stored_response_id = model_exchange.get(  # type: ignore[attr-defined]
+                "supports_stored_response_id", True
+            )
     settling_held = held_write is not None
     held_input = held_session_items_for_save(
         held_write,
@@ -1377,6 +1412,14 @@ def defer_interrupted_session_write(
         "reasoning_item_id_policy": reasoning_item_id_policy,
     }
     record["current_response"] = {"turn": run_state._current_turn, "start": len(prior)}
+    model_exchange = (
+        pending.get("compaction_model_exchange")
+        if pending is not None and pending.get("response_id") == response_id
+        else _snapshot_compaction_model_exchange(run_state._context)
+    )
+    if model_exchange is not None and model_exchange.get("supports_stored_response_id") is False:
+        record["compaction_model_exchange"] = model_exchange
+        record["store"] = False
     run_state._pending_session_write = record
 
 
@@ -1597,6 +1640,9 @@ async def resume_pending_session_write(
             wrapper._session_compaction_model_exchange = (  # type: ignore[attr-defined]
                 tuple(model_exchange["item_digests"]),
                 model_exchange["reasoning_item_id_policy"],
+            )
+            wrapper._session_compaction_supports_stored_response_id = model_exchange.get(  # type: ignore[attr-defined]
+                "supports_stored_response_id", True
             )
         pending["append_acknowledged"] = True
         run_state._current_turn_persisted_item_count = pending["persisted_count"]

@@ -53,7 +53,7 @@ class SandboxMemoryGenerationManager:
 
         self._session = session
         self._memory = memory
-        self._generate_config: MemoryGenerateConfig = memory.generate
+        self._generate_config: MemoryGenerateConfig = memory.generation_config()
         self._storage = SandboxMemoryStorage(session=session, layout=memory.layout)
         self._queue: asyncio.Queue[str | object] = asyncio.Queue()
         self._worker_task: asyncio.Task[None] | None = None
@@ -266,6 +266,8 @@ def get_or_create_memory_generation_manager(
                 "Sandbox session already has a different Memory generation config attached "
                 "for this memory layout."
             )
+        existing._memory = memory
+        existing._generate_config = memory.generation_config()
         return existing
 
     if managers_by_layout is not None:

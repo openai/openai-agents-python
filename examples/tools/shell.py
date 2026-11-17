@@ -15,7 +15,6 @@ from pathlib import Path
 
 from agents import (
     Agent,
-    ModelSettings,
     Runner,
     ShellCallOutcome,
     ShellCommandOutput,
@@ -125,7 +124,7 @@ async def main(prompt: str, model: str) -> None:
             name="Shell Assistant",
             model=model,
             instructions=(
-                "You can run shell commands using the shell tool. "
+                "Use the shell tool to inspect the workspace before answering. "
                 "Keep responses concise and include command output when helpful."
             ),
             tools=[
@@ -135,7 +134,6 @@ async def main(prompt: str, model: str) -> None:
                     on_approval=on_shell_approval,
                 )
             ],
-            model_settings=ModelSettings(tool_choice="required"),
         )
 
         result = await Runner.run(agent, prompt)

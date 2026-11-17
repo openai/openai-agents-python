@@ -136,9 +136,7 @@ def build_policy_sandbox_agent(
         model_settings=ModelSettings(
             reasoning=Reasoning(effort="low"),
             verbosity="low",
-            tool_choice="required",
         ),
-        reset_tool_choice=False,
         tool_use_behavior={"stop_at_tool_names": ["finalize_policy_packet"]},
     )
 

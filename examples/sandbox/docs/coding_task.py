@@ -13,7 +13,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from agents import ModelSettings, Runner
+from agents import Runner
 from agents.items import ToolCallItem, ToolCallOutputItem
 from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
@@ -64,7 +64,6 @@ def build_agent(model: str) -> SandboxAgent[None]:
                 )
             ),
         ],
-        model_settings=ModelSettings(tool_choice="required"),
     )
 
 

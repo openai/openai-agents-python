@@ -1,6 +1,6 @@
 # Custom HTTP Client Factory Example
 
-This repository example targets MCP Python SDK v2 and `httpx2`, and is intended to run with the repository's locked development environment. The Agents SDK client itself supports MCP v1 with `httpx` and MCP v2 with `httpx2`.
+This repository example targets MCP Python SDK v2 and `httpx2`. The command below selects MCP v2 for both the client and its local server. The Agents SDK client itself supports MCP v1 with `httpx` and MCP v2 with `httpx2`.
 
 This example demonstrates how to use the new `httpx_client_factory` parameter in `MCPServerStreamableHttp` to configure custom HTTP client behavior for MCP StreamableHTTP connections.
 
@@ -19,7 +19,7 @@ This example demonstrates how to use the new `httpx_client_factory` parameter in
 2. Run the example:
    ```bash
    cd examples/mcp/streamablehttp_custom_client_example
-   uv run main.py
+   uv run --with "mcp>=2.2,<3" python main.py
    ```
 
 ## Code Examples

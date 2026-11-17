@@ -5,7 +5,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from agents import Agent, ApplyPatchTool, ModelSettings, Runner, apply_diff, trace
+from agents import Agent, ApplyPatchTool, Runner, apply_diff, trace
 from agents.editor import ApplyPatchOperation, ApplyPatchResult
 from examples.auto_mode import confirm_with_fallback, is_auto_mode
 
@@ -114,7 +114,6 @@ async def main(auto_approve: bool, model: str) -> None:
                     "<BEGIN_FILES> and <END_FILES> in your prompt."
                 ),
                 tools=[tool],
-                model_settings=ModelSettings(tool_choice="required"),
             )
 
             print(f"[info] Workspace root: {workspace_path}")

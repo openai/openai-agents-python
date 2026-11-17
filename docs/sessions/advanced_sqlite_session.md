@@ -134,9 +134,11 @@ branch_id = await session.create_branch_from_turn(2)
 print(f"Created branch: {branch_id}")
 
 # Create a branch with custom name
+await session.switch_to_branch("main")
 branch_id = await session.create_branch_from_turn(2, branch_name="alternative_path")
 
 # Create branch by searching for content
+await session.switch_to_branch("main")
 branch_id = await session.create_branch_from_content("weather", branch_name="weather_focus")
 ```
 

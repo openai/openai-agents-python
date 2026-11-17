@@ -1,106 +1,974 @@
-import sys
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from collections import deque
 
 import pytest
+from pydantic import BaseModel
 
-from agents import Agent, RunConfig, Runner, UserError
-from agents.items import TResponseInputItem
+from agents import Agent, RunConfig, Runner, UserError, function_tool
 from agents.models.codex import CodexProvider
-from agents.models.multi_provider import MultiProvider
+
+
+class FakeServer:
+    # This double preserves App Server events and suspension while exercising the real Runner.
+    def __init__(self, text="A Codex response", call=None, gate=None, raw_items=()):
+        self.text = text
+        self.raw_items = raw_items
+        self.call = call
+        self.gate = gate
+        self.requests = []
+        self.closed = False
+        self.interrupted = False
+
+    async def request(self, method, params):
+        self.requests.append((method, params))
+        if method == "thread/start":
+            return {"thread": {"id": "thread_1"}, "model": params.get("model")}
+        if method == "modelProvider/capabilities/read":
+            return {"webSearch": True}
+        if method == "config/read":
+            return {
+                "config": {
+                    "web_search": "cached",
+                    "features": {"standalone_web_search": False},
+                    "tools": {
+                        "web_search": {
+                            "context_size": "high",
+                            "allowed_domains": ["example.com"],
+                            "location": {"country": "US", "city": "Boston"},
+                        }
+                    },
+                }
+            }
+        if method == "turn/start":
+            return {"turn": {"id": "turn_1"}}
+        if method == "turn/interrupt":
+            self.interrupted = True
+            return {}
+        if method == "configRequirements/read":
+            return {"requirements": None}
+        if method in ("initialize", "account/login/start", "thread/inject_items"):
+            return {}
+        raise AssertionError(f"Unexpected App Server request: {method}")
+
+    async def notify(self, method, params=None):
+        self.requests.append((method, params))
+
+    async def close(self):
+        self.closed = True
+
+    async def events(self):
+        common = {"threadId": "thread_1", "turnId": "turn_1"}
+        for raw in self.raw_items:
+            yield {"method": "rawResponseItem/completed", "params": {**common, "item": raw}}
+        if self.gate is not None:
+            yield {
+                "method": "item/agentMessage/delta",
+                "params": {**common, "itemId": "item_1", "delta": "A "},
+            }
+            await self.gate.wait()
+        if self.call is not None:
+            yield {"id": 55, "method": "item/tool/call", "params": {**common, **self.call}}
+            assert self.interrupted
+        else:
+            if self.gate is None:
+                for delta in [self.text[:2], self.text[2:]]:
+                    yield {
+                        "method": "item/agentMessage/delta",
+                        "params": {**common, "itemId": "item_1", "delta": delta},
+                    }
+            yield {
+                "method": "item/completed",
+                "params": {
+                    **common,
+                    "item": {
+                        "type": "agentMessage",
+                        "id": "item_1",
+                        "text": self.text,
+                        "phase": "final_answer",
+                    },
+                },
+            }
+        yield {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "threadId": "thread_1",
+                "tokenUsage": {
+                    "total": {
+                        "inputTokens": 10,
+                        "cachedInputTokens": 3,
+                        "outputTokens": 7,
+                        "reasoningOutputTokens": 2,
+                        "totalTokens": 17,
+                    }
+                },
+            },
+        }
+        yield {
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread_1",
+                "turn": {"id": "turn_1", "status": "interrupted" if self.call else "completed"},
+            },
+        }
 
 
 @pytest.fixture
-def native_turn(monkeypatch):
-    # The fake replaces only the optional extension. The tests exercise the real Runner.
-    run_turn = AsyncMock(
-        return_value={
-            "text": "A Codex response",
-            "model": "gpt-5.3-codex",
-            "item_id": "item_123",
-            "turn_id": "turn_123",
-            "input_tokens": 10,
-            "cached_input_tokens": 3,
-            "cache_write_input_tokens": 0,
-            "output_tokens": 7,
-            "reasoning_output_tokens": 2,
-            "total_tokens": 17,
-        }
-    )
-    monkeypatch.setitem(sys.modules, "_openai_agents_codex", SimpleNamespace(run_turn=run_turn))
-    return run_turn
+def servers(monkeypatch):
+    queue = deque()
+    opened = []
+
+    async def open_server(*args):
+        server = queue.popleft()
+        opened.append(args)
+        return server
+
+    monkeypatch.setattr("agents.models.codex.CodexAppServer.open", open_server)
+    monkeypatch.setattr("agents.models.codex.resolve_codex_executable", lambda _: "/stock/codex")
+    return queue, opened
+
+
+def config(tmp_path, **kwargs):
+    return RunConfig(model_provider=CodexProvider(cwd=tmp_path, **kwargs), tracing_disabled=True)
 
 
 @pytest.mark.asyncio
-async def test_codex_provider_runs_through_runner_and_replays_text_history(tmp_path, native_turn):
-    executable = Path(sys.executable).resolve()
-    config = RunConfig(
-        model_provider=CodexProvider(cwd=tmp_path, codex_executable=executable),
-        tracing_disabled=True,
-    )
-    agent = Agent(name="test", instructions="Be brief.", model="gpt-5.3-codex")
-    result = await Runner.run(agent, "Start here.", run_config=config)
+async def test_runner_text_usage_streaming_and_replay(tmp_path, servers):
+    queue, _ = servers
+    first, second = FakeServer(), FakeServer()
+    queue.extend([first, second])
+    agent = Agent(name="test", instructions="Be brief.")
+    result = await Runner.run(agent, "Start here.", run_config=config(tmp_path))
     assert result.final_output == "A Codex response"
     assert result.context_wrapper.usage.total_tokens == 17
-    native_turn.assert_awaited_once_with(
-        "Start here.", "Be brief.", "gpt-5.3-codex", str(tmp_path), [], str(executable)
-    )
-
-    history = result.to_input_list()
-    history.append({"role": "user", "content": "What follows?"})
-    streamed = Runner.run_streamed(agent, history, run_config=config)
-    events = [event async for event in streamed.stream_events()]
-    assert streamed.final_output == result.final_output
-    assert streamed.context_wrapper.usage == result.context_wrapper.usage
+    assert first.closed
+    history = result.to_input_list() + [{"role": "user", "content": "What follows?"}]
+    run = Runner.run_streamed(agent, history, run_config=config(tmp_path))
+    events = [event async for event in run.stream_events()]
+    assert run.final_output == result.final_output
     assert [
         event.data.delta
         for event in events
         if event.type == "raw_response_event" and event.data.type == "response.output_text.delta"
-    ] == ["A Codex response"]
-    native_turn.assert_awaited_with(
-        "What follows?",
-        "Be brief.",
-        "gpt-5.3-codex",
-        str(tmp_path),
-        [("user", "Start here."), ("assistant", "A Codex response")],
-        str(executable),
+    ] == ["A ", "Codex response"]
+    assert any(method == "thread/inject_items" for method, _ in second.requests)
+    assert dict(second.requests)["thread/start"]["ephemeral"] is True
+    assert second.closed
+
+
+@pytest.mark.asyncio
+async def test_runner_owns_function_execution_and_history(tmp_path, servers):
+    queue, _ = servers
+    executions = []
+
+    @function_tool
+    def lookup(value: str) -> str:
+        executions.append(value)
+        return "Found " + value
+
+    first = FakeServer(
+        call={
+            "callId": "call_1",
+            "namespace": None,
+            "tool": "lookup",
+            "arguments": {"value": "record"},
+        }
+    )
+    second = FakeServer(text="Found record")
+    queue.extend([first, second])
+    result = await Runner.run(
+        Agent(name="test", tools=[lookup]), "Find a record.", run_config=config(tmp_path)
+    )
+    assert result.final_output == "Found record"
+    assert executions == ["record"]
+    assert first.interrupted and first.closed and second.closed
+    injected = dict(second.requests)["thread/inject_items"]["items"]
+    assert any(
+        item.get("type") == "function_call_output" and item.get("call_id") == "call_1"
+        for item in injected
     )
 
 
 @pytest.mark.asyncio
-async def test_codex_provider_rejects_multimodal_input_before_launch(native_turn):
-    config = RunConfig(model_provider=CodexProvider(), tracing_disabled=True)
-    image_input: list[TResponseInputItem] = [
+async def test_runner_structured_output_and_explicit_key(tmp_path, servers):
+    queue, opened = servers
+
+    class Result(BaseModel):
+        answer: str
+
+    server = FakeServer(text='{"answer":"done"}')
+    queue.append(server)
+    result = await Runner.run(
+        Agent(name="test", output_type=Result),
+        "Answer",
+        run_config=config(tmp_path, api_key="secret-test"),
+    )
+    assert result.final_output.answer == "done"
+    assert dict(server.requests)["turn/start"]["outputSchema"]["type"] == "object"
+    assert dict(server.requests)["account/login/start"] == {
+        "type": "apiKey",
+        "apiKey": "secret-test",
+    }
+    assert opened[0][2][-1] == 'cli_auth_credentials_store="ephemeral"'
+    assert "secret-test" not in repr(opened)
+
+
+@pytest.mark.asyncio
+async def test_unsupported_settings_fail_before_launch(tmp_path, servers):
+    queue, opened = servers
+    from agents import ModelSettings
+
+    with pytest.raises(UserError, match="temperature"):
+        await Runner.run(
+            Agent(name="test", model_settings=ModelSettings(temperature=0.1)),
+            "Hello",
+            run_config=config(tmp_path),
+        )
+    assert not opened and not queue
+
+
+@pytest.mark.asyncio
+async def test_cancellation_closes_server_before_returning(tmp_path, servers):
+    import asyncio
+
+    queue, _ = servers
+    server = FakeServer(gate=asyncio.Event())
+    queue.append(server)
+    task = asyncio.create_task(Runner.run(Agent(name="test"), "Hello", run_config=config(tmp_path)))
+    while not server.requests or not any(method == "turn/start" for method, _ in server.requests):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert server.closed
+
+
+@pytest.mark.asyncio
+async def test_runner_handoff_preserves_runner_ownership(tmp_path, servers):
+    queue, _ = servers
+    specialist = Agent(name="Specialist", instructions="Resolve requests.")
+    first = FakeServer(
+        call={
+            "callId": "handoff_1",
+            "namespace": None,
+            "tool": "transfer_to_specialist",
+            "arguments": {},
+        }
+    )
+    second = FakeServer(text="Specialist answer")
+    queue.extend([first, second])
+    result = await Runner.run(
+        Agent(name="Coordinator", handoffs=[specialist]), "Transfer", run_config=config(tmp_path)
+    )
+    assert result.last_agent is specialist
+    assert result.final_output == "Specialist answer"
+    assert first.interrupted and first.closed
+    assert dict(second.requests)["thread/start"]["developerInstructions"] == "Resolve requests."
+
+
+@pytest.mark.asyncio
+async def test_stream_yields_delta_before_codex_turn_completes(tmp_path, servers):
+    import asyncio
+
+    from agents import ModelSettings
+    from agents.models.interface import ModelTracing
+
+    queue, _ = servers
+    gate = asyncio.Event()
+    server = FakeServer(gate=gate)
+    queue.append(server)
+    model = CodexProvider(cwd=tmp_path).get_model(None)
+    stream = model.stream_response(
+        None,
+        "Hello",
+        ModelSettings(),
+        [],
+        None,
+        [],
+        ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+    created = await anext(stream)
+    assert created.type == "response.created"
+    added = await anext(stream)
+    assert added.type == "response.output_item.added"
+    first = await anext(stream)
+    assert first.type == "response.output_text.delta" and first.delta == "A "
+    assert not gate.is_set() and not server.closed
+    gate.set()
+    remaining = [event async for event in stream]
+    assert remaining[-1].type == "response.completed"
+    assert server.closed
+
+
+@pytest.mark.asyncio
+async def test_runner_preserves_completed_stock_deferred_discovery(tmp_path, servers):
+    from agents import ToolSearchTool
+
+    queue, _ = servers
+
+    @function_tool(defer_loading=True)
+    def lookup_weather(city: str) -> str:
+        return "Sunny in " + city
+
+    search = {
+        "type": "tool_search_call",
+        "id": "search_1",
+        "call_id": "search_call_1",
+        "execution": "client",
+        "arguments": {"query": "lookup_weather"},
+    }
+    found = {
+        "type": "tool_search_output",
+        "id": "search_output_1",
+        "call_id": "search_call_1",
+        "execution": "client",
+        "status": "completed",
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "lookup_weather",
+                "description": "Weather lookup.",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup_weather",
+                        "description": "Weather lookup.",
+                        "strict": False,
+                        "defer_loading": True,
+                        "parameters": lookup_weather.params_json_schema,
+                    }
+                ],
+            }
+        ],
+    }
+    first = FakeServer(
+        raw_items=[search, found],
+        call={
+            "callId": "weather_1",
+            "namespace": "lookup_weather",
+            "tool": "lookup_weather",
+            "arguments": {"city": "Paris"},
+        },
+    )
+    second = FakeServer(text="Sunny in Paris")
+    queue.extend([first, second])
+    result = await Runner.run(
+        Agent(name="test", tools=[ToolSearchTool(), lookup_weather]),
+        "Find Paris weather",
+        run_config=config(tmp_path),
+    )
+    assert result.final_output == "Sunny in Paris"
+    assert [
+        item.raw_item.type
+        for item in result.new_items
+        if item.type in ("tool_search_call_item", "tool_search_output_item")
+    ] == ["tool_search_call", "tool_search_output"]
+    assert dict(first.requests)["thread/start"]["experimentalRawEvents"] is True
+
+
+@pytest.mark.asyncio
+async def test_raw_reasoning_is_preserved_for_replay(tmp_path, servers):
+    from agents import ModelSettings
+
+    queue, _ = servers
+    server = FakeServer(
+        raw_items=[
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "A summary."}],
+                "encrypted_content": "opaque-reasoning",
+            }
+        ]
+    )
+    queue.append(server)
+    result = await Runner.run(
+        Agent(
+            name="test",
+            model_settings=ModelSettings(response_include=["reasoning.encrypted_content"]),
+        ),
+        "Hello",
+        run_config=config(tmp_path),
+    )
+    reasoning = next(item for item in result.to_input_list() if item.get("type") == "reasoning")
+    assert reasoning["encrypted_content"] == "opaque-reasoning"
+    assert reasoning["summary"] == [{"type": "summary_text", "text": "A summary."}]
+
+
+@pytest.mark.asyncio
+async def test_native_web_search_config_and_result(tmp_path, servers):
+    from agents import WebSearchTool
+
+    queue, opened = servers
+    server = FakeServer(
+        raw_items=[
+            {
+                "type": "web_search_call",
+                "id": "web_1",
+                "status": "completed",
+                "action": {"type": "search", "query": "weather"},
+            }
+        ]
+    )
+    queue.append(server)
+    result = await Runner.run(
+        Agent(
+            name="test",
+            model="gpt-5.5",
+            tools=[
+                WebSearchTool(
+                    external_web_access=False,
+                    search_context_size="high",
+                    filters={"allowed_domains": ["example.com"]},
+                    user_location={"type": "approximate", "country": "US", "city": "Boston"},
+                )
+            ],
+        ),
+        "Search",
+        run_config=config(tmp_path),
+    )
+    assert any(item.get("type") == "web_search_call" for item in result.to_input_list())
+    overrides = opened[0][2]
+    assert 'web_search="cached"' in overrides
+    assert 'tools.web_search.context_size="high"' in overrides
+    assert 'tools.web_search.allowed_domains=["example.com"]' in overrides
+    assert 'tools.web_search.location.city="Boston"' in overrides
+    assert "dynamicTools" not in dict(server.requests)["thread/start"]
+    assert "configRequirements/read" in dict(server.requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permission", [None, True, False])
+async def test_native_host_may_narrow_web_access_to_cached(tmp_path, servers, permission):
+    from agents import WebSearchTool
+
+    class CachedHost(FakeServer):
+        async def request(self, method, params):
+            result = await super().request(method, params)
+            if method == "config/read":
+                # Stock reports the configured mode here, then applies host policy on the turn.
+                assert isinstance(result, dict)
+                config = result["config"]
+                assert isinstance(config, dict)
+                config["web_search"] = "cached" if permission is False else "live"
+            elif method == "configRequirements/read":
+                return {"requirements": {"allowedWebSearchModes": ["cached", "disabled"]}}
+            return result
+
+    queue, _ = servers
+    queue.append(
+        CachedHost(
+            raw_items=[
+                {
+                    "type": "web_search_call",
+                    "id": "ws_1",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "weather"},
+                }
+            ]
+        )
+    )
+    result = await Runner.run(
+        Agent(
+            name="Search",
+            model="gpt-5.4",
+            tools=[WebSearchTool(external_web_access=permission, search_context_size="high")],
+        ),
+        "Search",
+        run_config=config(tmp_path),
+    )
+    assert any(item.get("type") == "web_search_call" for item in result.to_input_list())
+
+
+@pytest.mark.asyncio
+async def test_audio_requires_effective_model_catalog_capability_before_turn(tmp_path, servers):
+    import base64
+    import io
+    import wave
+
+    audio_bytes = io.BytesIO()
+    with wave.open(audio_bytes, "wb") as wav:
+        wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        wav.writeframes(b"\x00\x00" * 160)
+    encoded_audio = base64.b64encode(audio_bytes.getvalue()).decode()
+    queue, _ = servers
+
+    class AudioServer(FakeServer):
+        async def request(self, method, params):
+            if method == "thread/start":
+                self.requests.append((method, params))
+                return {"thread": {"id": "thread_1"}, "model": "effective-audio"}
+            if method == "model/list":
+                self.requests.append((method, params))
+                if params["cursor"] is None:
+                    return {
+                        "data": [{"id": "other", "inputModalities": ["text"]}],
+                        "nextCursor": "page-2",
+                    }
+                return {
+                    "data": [{"id": "effective-audio", "inputModalities": ["text", "audio"]}],
+                    "nextCursor": None,
+                }
+            return await super().request(method, params)
+
+    server = AudioServer()
+    queue.append(server)
+    audio = [
         {
             "role": "user",
             "content": [
-                {"type": "input_image", "image_url": "https://example.com/a.png", "detail": "auto"}
+                {"type": "input_audio", "input_audio": {"data": encoded_audio, "format": "wav"}}
             ],
         }
     ]
-    with pytest.raises(UserError, match="only user and assistant text messages"):
-        await Runner.run(Agent(name="test"), image_input, run_config=config)
-    native_turn.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_codex_provider_reports_missing_extension_at_use(monkeypatch):
-    monkeypatch.setitem(sys.modules, "_openai_agents_codex", None)
-    assert isinstance(RunConfig().model_provider, MultiProvider)
-    config = RunConfig(model_provider=CodexProvider(), tracing_disabled=True)
-    with pytest.raises(UserError, match="Install the Codex extension"):
-        await Runner.run(Agent(name="test"), "Hello", run_config=config)
-
-
-@pytest.mark.asyncio
-async def test_codex_provider_rejects_a_launcher_script(tmp_path, native_turn):
-    launcher = tmp_path / "codex.cmd"
-    launcher.write_text("#!/bin/sh\n")
-    launcher.chmod(0o700)
-    config = RunConfig(
-        model_provider=CodexProvider(codex_executable=launcher), tracing_disabled=True
+    result = await Runner.run(
+        Agent(name="test", model="requested-model"), audio, run_config=config(tmp_path)
     )
-    with pytest.raises(UserError, match="native Codex binary"):
-        await Runner.run(Agent(name="test"), "Hello", run_config=config)
-    native_turn.assert_not_awaited()
+    assert result.final_output == "A Codex response"
+    pages = [params for method, params in server.requests if method == "model/list"]
+    assert [page["cursor"] for page in pages] == [None, "page-2"]
+
+    class NoAudioServer(AudioServer):
+        async def request(self, method, params):
+            if method == "model/list":
+                return {
+                    "data": [{"id": "effective-audio", "inputModalities": ["text"]}],
+                    "nextCursor": None,
+                }
+            return await super().request(method, params)
+
+    rejected = NoAudioServer()
+    queue.append(rejected)
+    with pytest.raises(UserError, match="does not support audio"):
+        await Runner.run(Agent(name="test"), audio, run_config=config(tmp_path))
+    assert rejected.closed
+    assert not any(method == "turn/start" for method, _ in rejected.requests)
+
+
+@pytest.mark.asyncio
+async def test_codex_named_model_uses_provider_defaults(tmp_path, servers):
+    queue, _ = servers
+    server = FakeServer()
+    queue.append(server)
+    await Runner.run(Agent(name="test", model="gpt-5.4-mini"), "Hello", run_config=config(tmp_path))
+    assert "effort" not in dict(server.requests)["turn/start"]
+    assert "config" not in dict(server.requests)["thread/start"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_owned_shell_disables_native_workspace_tool_descriptors(tmp_path, servers):
+    from agents.tool import ShellTool
+
+    queue, opened = servers
+    server = FakeServer(text="done")
+    queue.append(server)
+    shell = ShellTool(executor=lambda request: "workspace")
+    result = await Runner.run(
+        Agent(name="test", tools=[shell]),
+        "hello",
+        run_config=config(tmp_path),
+    )
+    assert result.final_output == "done"
+    overrides = opened[0][2]
+    assert "features.shell_tool=false" in overrides
+    assert "features.view_image=false" in overrides
+    requests = dict(server.requests)
+    assert requests["thread/start"]["environments"] == []
+    assert requests["turn/start"]["environments"] == []
+    assert "SDK-provided tools" in requests["thread/start"]["developerInstructions"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_function_stream_has_correlated_lifecycle_and_complete_arguments(
+    tmp_path, servers
+):
+    queue, _ = servers
+
+    @function_tool
+    def lookup(value: str) -> str:
+        return value
+
+    class StartedCallServer(FakeServer):
+        async def events(self):
+            common = {"threadId": "thread_1", "turnId": "turn_1"}
+            yield {
+                "method": "item/started",
+                "params": {
+                    **common,
+                    "item": {
+                        "type": "dynamicToolCall",
+                        "id": "call_1",
+                        "namespace": None,
+                        "tool": "lookup",
+                        "arguments": {"value": "record"},
+                        "status": "inProgress",
+                    },
+                },
+            }
+            yield {
+                "method": "item/started",
+                "params": {
+                    **common,
+                    "item": {
+                        "type": "dynamicToolCall",
+                        "id": "unaccepted_call",
+                        "namespace": None,
+                        "tool": "lookup",
+                        "arguments": {"value": "unaccepted"},
+                        "status": "inProgress",
+                    },
+                },
+            }
+            async for event in super().events():
+                yield event
+
+    first = StartedCallServer(
+        call={
+            "callId": "call_1",
+            "namespace": None,
+            "tool": "lookup",
+            "arguments": {"value": "record"},
+        }
+    )
+    queue.extend([first, FakeServer(text="record")])
+    run = Runner.run_streamed(
+        Agent(name="test", tools=[lookup]), "Find record", run_config=config(tmp_path)
+    )
+    events = [
+        event.data async for event in run.stream_events() if event.type == "raw_response_event"
+    ]
+    completed = next(
+        index for index, event in enumerate(events) if event.type == "response.completed"
+    )
+    first_turn = events[: completed + 1]
+    assert [event.type for event in first_turn] == [
+        "response.created",
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert [event.sequence_number for event in first_turn] == list(range(len(first_turn)))
+    added, delta, arguments_done, done = first_turn[1:5]
+    assert added.item.id == added.item.call_id == delta.item_id == done.item.id == "call_1"
+    assert (
+        added.output_index
+        == delta.output_index
+        == arguments_done.output_index
+        == done.output_index
+        == 0
+    )
+    assert added.item.status == "in_progress" and added.item.arguments == ""
+    assert delta.delta == arguments_done.arguments == done.item.arguments == '{"value":"record"}'
+    assert done.item.status == "completed" and first.closed
+    assert first_turn[-1].response.output == [done.item]
+    assert run.final_output == "record"
+    assert "unaccepted_call" not in str([event.model_dump() for event in events])
+
+
+@pytest.mark.asyncio
+async def test_assistant_stream_uses_stock_start_and_done_without_duplicate_text(tmp_path, servers):
+    queue, _ = servers
+
+    class StartedMessageServer(FakeServer):
+        async def events(self):
+            common = {"threadId": "thread_1", "turnId": "turn_1"}
+            yield {
+                "method": "item/started",
+                "params": {
+                    **common,
+                    "item": {
+                        "type": "agentMessage",
+                        "id": "item_1",
+                        "text": "",
+                        "phase": "final_answer",
+                    },
+                },
+            }
+            async for event in super().events():
+                yield event
+                if event["method"] == "item/completed":
+                    yield event
+
+    queue.append(StartedMessageServer())
+    run = Runner.run_streamed(Agent(name="test"), "Hello", run_config=config(tmp_path))
+    events = [
+        event.data async for event in run.stream_events() if event.type == "raw_response_event"
+    ]
+    assert [event.type for event in events] == [
+        "response.created",
+        "response.output_item.added",
+        "response.output_text.delta",
+        "response.output_text.delta",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert [event.sequence_number for event in events] == list(range(len(events)))
+    assert events[0].response.status == "in_progress" and events[0].response.output == []
+    assert events[1].item.id == events[4].item.id == "item_1"
+    assert (
+        events[1].output_index
+        == events[2].output_index
+        == events[3].output_index
+        == events[4].output_index
+        == 0
+    )
+    assert events[1].item.content == []
+    assert (
+        "".join(event.delta for event in events if event.type == "response.output_text.delta")
+        == "A Codex response"
+    )
+    assert events[-1].response.output == [events[4].item]
+
+
+@pytest.mark.asyncio
+async def test_non_strict_output_guides_json_without_native_strict_schema(tmp_path, servers):
+    from agents import AgentOutputSchema
+
+    queue, _ = servers
+
+    class Result(BaseModel):
+        values: dict[str, str]
+        note: str | None = None
+
+    server = FakeServer(text='{"values":{"route":"manual"}}')
+    queue.append(server)
+    result = await Runner.run(
+        Agent(
+            name="test",
+            instructions="Preserve the optional note.",
+            output_type=AgentOutputSchema(Result, strict_json_schema=False),
+        ),
+        "Return a route",
+        run_config=config(tmp_path),
+    )
+    assert result.final_output == Result(values={"route": "manual"})
+    requests = dict(server.requests)
+    assert "outputSchema" not in requests["turn/start"]
+    instructions = requests["thread/start"]["developerInstructions"]
+    assert instructions.startswith("Preserve the optional note.")
+    assert "JSON" in instructions and '"additionalProperties"' in instructions
+    assert "not a server-enforced constraint" in instructions
+
+
+@pytest.mark.asyncio
+async def test_non_strict_output_still_uses_runner_validation(tmp_path, servers):
+    from agents import AgentOutputSchema, ModelBehaviorError
+
+    queue, _ = servers
+
+    class Result(BaseModel):
+        values: dict[str, str]
+
+    queue.append(FakeServer(text='{"values":42}'))
+    with pytest.raises(ModelBehaviorError):
+        await Runner.run(
+            Agent(name="test", output_type=AgentOutputSchema(Result, strict_json_schema=False)),
+            "Return a route",
+            run_config=config(tmp_path),
+        )
+
+
+@pytest.mark.asyncio
+async def test_deferred_discovery_preserves_unrelated_direct_namespaces(tmp_path, servers):
+    from agents import ToolSearchTool
+
+    queue, _ = servers
+
+    @function_tool(defer_loading=True)
+    def lookup_weather() -> str:
+        return "SUNNY"
+
+    class ConfiguredServer(FakeServer):
+        async def request(self, method, params):
+            if method == "config/read":
+                self.requests.append((method, params))
+                return {
+                    "config": {
+                        "features": {
+                            "code_mode": {
+                                "direct_only_tool_namespaces": ["keep_existing", "lookup_weather"],
+                            }
+                        }
+                    }
+                }
+            return await super().request(method, params)
+
+    server = ConfiguredServer(text="done")
+    queue.append(server)
+    await Runner.run(
+        Agent(name="test", tools=[ToolSearchTool(), lookup_weather]),
+        "hello",
+        run_config=config(tmp_path),
+    )
+    thread = dict(server.requests)["thread/start"]
+    assert thread["config"]["features.code_mode.direct_only_tool_namespaces"] == [
+        "keep_existing",
+        "functions",
+    ]
+    assert thread["config"]["features.code_mode_tool_search"] is True
+    namespace = next(
+        tool for tool in thread["dynamicTools"] if tool.get("name") == "lookup_weather"
+    )
+    assert namespace["tools"][0]["deferLoading"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_auto_previous_response_id_rejects_before_codex_startup(tmp_path, servers, streamed):
+    _, opened = servers
+    with pytest.raises(UserError, match="does not support auto_previous_response_id"):
+        if streamed:
+            result = Runner.run_streamed(
+                Agent(name="test", model="gpt-5.4"),
+                "hello",
+                run_config=config(tmp_path),
+                auto_previous_response_id=True,
+            )
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(
+                Agent(name="test", model="gpt-5.4"),
+                "hello",
+                run_config=config(tmp_path),
+                auto_previous_response_id=True,
+            )
+    assert opened == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["gpt-5.4", "gpt-5.4-mini"])
+async def test_verified_text_web_models_accept_explicit_default_content_types(
+    tmp_path, servers, model
+):
+    from agents import WebSearchTool
+
+    queue, _ = servers
+    queue.append(FakeServer(text="done"))
+    result = await Runner.run(
+        Agent(
+            name="test",
+            model=model,
+            tools=[
+                WebSearchTool(
+                    external_web_access=False,
+                    search_context_size="high",
+                    search_content_types=["text"],
+                )
+            ],
+        ),
+        "hello",
+        run_config=config(tmp_path),
+    )
+    assert result.final_output == "done"
+
+
+@pytest.mark.asyncio
+async def test_text_web_model_rejects_unavailable_image_content_before_turn(tmp_path, servers):
+    from agents import WebSearchTool
+
+    queue, _ = servers
+    server = FakeServer(text="done")
+    queue.append(server)
+    with pytest.raises(UserError, match="default web search content types"):
+        await Runner.run(
+            Agent(
+                name="test",
+                model="gpt-5.4",
+                tools=[
+                    WebSearchTool(
+                        external_web_access=False,
+                        search_context_size="high",
+                        search_content_types=["text", "image"],
+                    )
+                ],
+            ),
+            "hello",
+            run_config=config(tmp_path),
+        )
+    assert all(method != "turn/start" for method, _ in server.requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested", [False, True])
+async def test_native_summary_notifications_stream_only_public_opted_in_text(
+    tmp_path,
+    servers,
+    requested,
+):
+    from openai.types.responses import ResponseReasoningSummaryTextDeltaEvent
+
+    from agents import ModelSettings
+
+    queue, _ = servers
+
+    class SummaryServer(FakeServer):
+        async def events(self):
+            common = {"threadId": "thread_1", "turnId": "turn_1", "itemId": "rs_1"}
+            yield {
+                "method": "item/reasoning/summaryPartAdded",
+                "params": {
+                    **common,
+                    "summaryIndex": 0,
+                },
+            }
+            for delta in ("Public ", "summary."):
+                yield {
+                    "method": "item/reasoning/summaryTextDelta",
+                    "params": {
+                        **common,
+                        "summaryIndex": 0,
+                        "delta": delta,
+                    },
+                }
+            yield {
+                "method": "item/reasoning/textDelta",
+                "params": {
+                    **common,
+                    "contentIndex": 0,
+                    "delta": "HIDDEN_REASONING_TEXT",
+                },
+            }
+            async for event in super().events():
+                yield event
+
+    server = SummaryServer(
+        raw_items=[
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "Public summary."}],
+                "encrypted_content": "opaque-replay",
+            }
+        ]
+    )
+    queue.append(server)
+    settings = ModelSettings(
+        reasoning={"summary": "auto"} if requested else None,
+        response_include=["reasoning.encrypted_content"],
+    )
+    stream = Runner.run_streamed(
+        Agent(name="test", model_settings=settings), "hello", run_config=config(tmp_path)
+    )
+    events = []
+    deltas = []
+    async for event in stream.stream_events():
+        if event.type != "raw_response_event":
+            continue
+        events.append(event.data)
+        if isinstance(event.data, ResponseReasoningSummaryTextDeltaEvent):
+            assert not stream.is_complete
+            assert event.data.item_id == "rs_1"
+            assert event.data.summary_index == 0
+            assert event.data.output_index == 0
+            deltas.append(event.data.delta)
+    assert deltas == (["Public ", "summary."] if requested else [])
+    parts = [event for event in events if event.type == "response.reasoning_summary_part.added"]
+    assert len(parts) == (1 if requested else 0)
+    assert all("HIDDEN_REASONING_TEXT" not in event.model_dump_json() for event in events)
+    reasoning = next(item for item in stream.to_input_list() if item.get("type") == "reasoning")
+    assert reasoning["encrypted_content"] == "opaque-replay"
+    assert reasoning["summary"] == [{"type": "summary_text", "text": "Public summary."}]

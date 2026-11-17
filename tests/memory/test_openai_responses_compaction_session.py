@@ -845,6 +845,8 @@ class TestOpenAIResponsesCompactionSession:
                 TResponseInputItem,
                 {
                     "type": "function_call",
+                    "id": "call_123",
+                    "provider_data": {"codex_tool_name": "lookup_account"},
                     "call_id": "call_123",
                     "name": "lookup_account",
                     "arguments": "{}",
@@ -881,6 +883,10 @@ class TestOpenAIResponsesCompactionSession:
         call_kwargs = mock_client.responses.compact.call_args.kwargs
         compact_input = cast(list[dict[str, Any]], call_kwargs["input"])
         assert compact_input[0]["type"] == "function_call"
+        assert "id" not in compact_input[0]
+        assert "provider_data" not in compact_input[0]
+        assert compact_input[0]["call_id"] == compact_input[1]["call_id"] == "call_123"
+        assert items[0].get("id") == "call_123"
         assert TOOL_CALL_SESSION_DESCRIPTION_KEY not in compact_input[0]
         assert TOOL_CALL_SESSION_TITLE_KEY not in compact_input[0]
 

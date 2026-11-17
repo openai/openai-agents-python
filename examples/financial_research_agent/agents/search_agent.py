@@ -19,7 +19,7 @@ class FinancialSearchSummary(BaseModel):
 
 search_agent = Agent(
     name="FinancialSearchAgent",
-    model="gpt-5.6-sol",
+    model="gpt-5.4",
     instructions=INSTRUCTIONS,
     tools=[WebSearchTool()],
     model_settings=ModelSettings(response_include=["web_search_call.action.sources"]),

@@ -8,7 +8,7 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from agents import Agent, ModelSettings, Runner, ShellTool, trace
+from agents import Agent, Runner, ShellTool, trace
 from agents.items import ToolApprovalItem
 from examples.tools.shell import ShellExecutor, prompt_shell_approval
 
@@ -35,7 +35,7 @@ async def main(prompt: str, model: str) -> None:
             name="Shell HITL Assistant",
             model=model,
             instructions=(
-                "You can run shell commands using the shell tool. "
+                "Use the shell tool to inspect the workspace before answering. "
                 "Ask for approval before running commands."
             ),
             tools=[
@@ -44,7 +44,6 @@ async def main(prompt: str, model: str) -> None:
                     needs_approval=True,
                 )
             ],
-            model_settings=ModelSettings(tool_choice="required"),
         )
 
         result = await Runner.run(agent, prompt)

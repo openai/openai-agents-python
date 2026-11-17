@@ -91,6 +91,7 @@ from ..util._error_tracing import (
 from ..util._json import _to_dump_compatible
 from ..version import __version__
 from ._openai_retry import get_openai_retry_advice
+from ._openai_shared import clean_responses_input_item
 from ._openai_websocket import (
     get_openai_websocket_logger,
     merge_openai_client_websocket_headers,
@@ -102,7 +103,7 @@ from ._retry_runtime import (
     should_disable_provider_managed_retries,
     should_disable_websocket_pre_event_retries,
 )
-from .fake_id import FAKE_RESPONSES_ID
+from .fake_id import is_local_response_item_id
 from .interface import Model, ModelTracing
 from .openai_client_utils import is_official_openai_base_url, is_official_openai_client
 
@@ -1084,7 +1085,11 @@ class OpenAIResponsesModel(Model):
         # independently of it.
         needs_cleaning = any(
             isinstance(item, dict)
-            and (item.get("provider_data") or item.get("id") == FAKE_RESPONSES_ID)
+            and (
+                "provider_data" in item
+                or "codex_reasoning_summary" in item
+                or is_local_response_item_id(item)
+            )
             for item in list_input
         )
         if not needs_cleaning:
@@ -1098,23 +1103,7 @@ class OpenAIResponsesModel(Model):
         return result
 
     def _clean_item_for_openai(self, item: Any) -> Any | None:
-        # Only process dict items
-        if not isinstance(item, dict):
-            return item
-
-        # Filter out reasoning items with provider_data (provider-specific reasoning).
-        if item.get("type") == "reasoning" and item.get("provider_data"):
-            return None
-
-        # Remove fake response ID.
-        if item.get("id") == FAKE_RESPONSES_ID:
-            del item["id"]
-
-        # Remove provider_data field.
-        if "provider_data" in item:
-            del item["provider_data"]
-
-        return item
+        return clean_responses_input_item(item)
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:

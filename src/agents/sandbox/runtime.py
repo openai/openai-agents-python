@@ -86,6 +86,7 @@ class SandboxRuntime(Generic[TContext]):
         self._sandbox_config = run_config.sandbox if run_config is not None else None
         self._tracing_disabled = run_config.tracing_disabled if run_config is not None else False
         self._run_config_model = run_config.model if run_config is not None else None
+        self._model_provider = run_config.model_provider if run_config is not None else None
         self._workspace_scope = SandboxWorkspaceScope.from_cwd(
             self._sandbox_config.cwd if self._sandbox_config is not None else None
         )
@@ -247,6 +248,13 @@ class SandboxRuntime(Generic[TContext]):
                 run_as=run_as,
             )
             prepared_agent: Agent[TContext]
+            resolved_model = None
+            if self._model_provider is not None and getattr(
+                self._model_provider, "_is_codex_provider", False
+            ):
+                model = self._run_config_model or current_agent.model
+                if model is None or isinstance(model, str):
+                    resolved_model = self._model_provider.get_model(model)
             if cached_preparation is not None and cached_preparation.session is session:
                 # Reuse the cached execution agent's bound capability instances so context
                 # processing can depend on live session state and preserve per-run state.
@@ -265,6 +273,7 @@ class SandboxRuntime(Generic[TContext]):
                         session=session,
                         capabilities=cached_capabilities,
                         run_config_model=self._run_config_model,
+                        resolved_model=resolved_model,
                         workspace_scope=self._workspace_scope,
                     )
                     self._prepared_agents[id(current_agent)] = _SandboxPreparedAgentCache(
@@ -272,6 +281,7 @@ class SandboxRuntime(Generic[TContext]):
                         session=session,
                         run_as_name=run_as_name,
                     )
+                self._set_active_memory_capability(prepared_agent)
                 return _SandboxPreparedAgent(
                     bindings=bind_execution_agent(
                         public_agent=current_agent,
@@ -295,6 +305,7 @@ class SandboxRuntime(Generic[TContext]):
                 session=session,
                 capabilities=prepared_capabilities,
                 run_config_model=self._run_config_model,
+                resolved_model=resolved_model,
                 workspace_scope=self._workspace_scope,
             )
             self._prepared_agents[id(current_agent)] = _SandboxPreparedAgentCache(
@@ -302,6 +313,7 @@ class SandboxRuntime(Generic[TContext]):
                 session=session,
                 run_as_name=run_as.name if run_as is not None else None,
             )
+            self._set_active_memory_capability(prepared_agent)
             return _SandboxPreparedAgent(
                 bindings=bind_execution_agent(
                     public_agent=current_agent,

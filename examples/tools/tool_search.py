@@ -6,7 +6,6 @@ from typing import Annotated, Any
 
 from agents import (
     Agent,
-    ModelSettings,
     Runner,
     ToolSearchTool,
     tool_namespace,
@@ -102,7 +101,6 @@ namespaced_agent = Agent(
         "filter before calling tools. "
         "Do not search `billing` unless the user asks about invoices."
     ),
-    model_settings=ModelSettings(parallel_tool_calls=False),
     tools=[*crm_tools, *billing_tools, ToolSearchTool()],
 )
 
@@ -113,7 +111,6 @@ top_level_agent = Agent(
         "For ETA questions in this example, search `get_shipping_eta` before calling tools. "
         "Do not search `get_shipping_credit_balance` unless the user asks about shipping credits."
     ),
-    model_settings=ModelSettings(parallel_tool_calls=False),
     tools=[get_shipping_eta, get_shipping_credit_balance, ToolSearchTool()],
 )
 

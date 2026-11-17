@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import inspect
 import textwrap
 from collections.abc import Awaitable, Callable, Sequence
@@ -15,7 +16,11 @@ from ..items import TResponseInputItem
 from ..models.default_models import get_default_model
 from ..models.interface import Model
 from ..run_context import RunContextWrapper, TContext
+from ..tool import ApplyPatchTool, FunctionTool, ShellTool, tool_namespace
 from .capabilities import Capability
+from .capabilities.compaction import Compaction
+from .capabilities.memory import Memory
+from .capabilities.tools.apply_patch_tool import SandboxApplyPatchTool
 from .manifest import Manifest
 from .manifest_render import render_manifest_description
 from .remote_mount_policy import build_remote_mount_policy_instructions
@@ -90,6 +95,7 @@ def prepare_sandbox_agent(
     capabilities: Sequence[Capability],
     run_config_model: str | Model | None = None,
     workspace_scope: SandboxWorkspaceScope | None = None,
+    resolved_model: Model | None = None,
 ) -> Agent[TContext]:
     manifest = session.state.manifest
     effective_workspace_scope = workspace_scope or SandboxWorkspaceScope()
@@ -102,7 +108,38 @@ def prepare_sandbox_agent(
             missing = ", ".join(sorted(missing_capability_types))
             raise UserError(f"{type(capability).__name__} requires missing capabilities: {missing}")
 
+    model = resolved_model or (run_config_model if run_config_model is not None else agent.model)
+    model_capabilities = getattr(model, "_sandbox_model_capabilities", {})
+    for capability in capabilities:
+        if isinstance(capability, Memory) and isinstance(model, Model):
+            capability._model_instance = model
     capability_tools = [tool for capability in capabilities for tool in capability.tools()]
+    namespace = model_capabilities.get("tool_namespace")
+    if namespace:
+        capability_tools = [
+            tool.as_function_tool() if isinstance(tool, SandboxApplyPatchTool) else tool
+            for tool in capability_tools
+        ]
+        if any(
+            not isinstance(tool, FunctionTool | ShellTool | ApplyPatchTool)
+            for tool in capability_tools
+        ):
+            raise UserError(
+                "This sandbox model supports function tools and local shell/patch "
+                "capability tools only."
+            )
+        capability_tools = [
+            tool_namespace(
+                name=namespace,
+                description="Tools operating in the SDK-managed sandbox workspace.",
+                tools=[tool],
+            )[0]
+            if isinstance(tool, FunctionTool)
+            else copy.copy(tool)
+            for tool in capability_tools
+        ]
+        for tool in capability_tools:
+            tool.__dict__["_sdk_sandbox"] = True
     model_settings = agent.model_settings
     extra_args = dict(model_settings.extra_args or {})
     resolved_model_name = resolve_sandbox_model_name(
@@ -110,6 +147,11 @@ def prepare_sandbox_agent(
         run_config_model=run_config_model,
     )
     for capability in capabilities:
+        if (
+            isinstance(capability, Compaction)
+            and model_capabilities.get("responses_compaction") is False
+        ):
+            continue
         capability_sampling_params = dict(extra_args)
         if resolved_model_name is not None:
             capability_sampling_params["model"] = resolved_model_name

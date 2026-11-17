@@ -180,6 +180,10 @@ async def demonstrate_advanced_features():
     raise SystemExit(1)
 
 
+async def main_all():
+    await main()
+    await demonstrate_advanced_features()
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
-    asyncio.run(demonstrate_advanced_features())
+    asyncio.run(main_all())

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from openai import AsyncOpenAI
+
+from .fake_id import is_local_response_item_id
 
 OpenAIResponsesTransport = Literal["http", "websocket"]
 
@@ -66,3 +68,20 @@ def get_default_openai_responses_transport() -> OpenAIResponsesTransport:
     if _default_openai_responses_transport != legacy_transport:
         _default_openai_responses_transport = legacy_transport
     return _default_openai_responses_transport
+
+
+def clean_responses_input_item(item: Any) -> Any | None:
+    """Prepare a by-value item for Responses generation or compaction."""
+    if not isinstance(item, dict):
+        return item
+    if item.get("type") == "reasoning" and item.get("provider_data"):
+        return None
+    strip_id = is_local_response_item_id(item)
+    if not strip_id and "provider_data" not in item and "codex_reasoning_summary" not in item:
+        return item
+    cleaned = item.copy()
+    if strip_id:
+        cleaned.pop("id")
+    cleaned.pop("provider_data", None)
+    cleaned.pop("codex_reasoning_summary", None)
+    return cleaned

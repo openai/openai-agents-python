@@ -89,6 +89,10 @@ class ResearchManager:
             if num_failed:
                 summary += f", {num_failed} failed"
             self.printer.update_item("searching", summary, is_done=True)
+            if not results:
+                raise RuntimeError(
+                    "The research report requires at least one completed web search."
+                )
             return results
 
     async def _search(self, item: WebSearchItem) -> str | None:
@@ -98,7 +102,13 @@ class ResearchManager:
                 search_agent,
                 input,
             )
-            return str(result.final_output)
+            if any(
+                item.type == "web_search_call" and item.status == "completed"
+                for response in result.raw_responses
+                for item in response.output
+            ):
+                return str(result.final_output)
+            return None
         except Exception:
             return None
 

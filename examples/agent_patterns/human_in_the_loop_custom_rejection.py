@@ -2,7 +2,7 @@
 
 This example is intentionally minimal:
 1. A single sensitive tool requires human approval.
-2. The first turn always issues that tool call.
+2. The first turn requests approval for that tool call.
 3. ``tool_error_formatter`` defines the universal fallback message shape.
 4. A per-call ``rejection_message`` passed to ``state.reject(...)`` overrides that fallback.
 5. The example prints both the tool output and the assistant's final reply.
@@ -12,7 +12,6 @@ import asyncio
 
 from agents import (
     Agent,
-    ModelSettings,
     RunConfig,
     Runner,
     ToolErrorFormatterArgs,
@@ -57,7 +56,6 @@ async def main() -> None:
             "Do not ask the user for approval in plain text; runtime approvals handle that. "
             "If the tool call is rejected, respond with the exact rejection message and nothing else."
         ),
-        model_settings=ModelSettings(tool_choice="publish_announcement"),
         tools=[publish_announcement],
     )
     run_config = RunConfig(tool_error_formatter=tool_error_formatter)

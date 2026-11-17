@@ -198,8 +198,8 @@ The `customer_facing_agent` handles all user interaction and invokes specialized
 ```python
 from agents import Agent
 
-booking_agent = Agent(...)
-refund_agent = Agent(...)
+booking_agent = Agent(name="Booking", instructions="Explain the booking process.")
+refund_agent = Agent(name="Refunds", instructions="Explain the refund process.")
 
 customer_facing_agent = Agent(
     name="Customer-facing agent",
@@ -227,8 +227,8 @@ Configured handoff targets are sub‑agents to which the agent can delegate. Whe
 ```python
 from agents import Agent
 
-booking_agent = Agent(...)
-refund_agent = Agent(...)
+booking_agent = Agent(name="Booking", instructions="Explain the booking process.")
+refund_agent = Agent(name="Refunds", instructions="Explain the refund process.")
 
 triage_agent = Agent(
     name="Triage agent",

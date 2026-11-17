@@ -184,6 +184,7 @@ class _SessionCompactionModelExchange(TypedDict):
 
     item_digests: list[str]
     reasoning_item_id_policy: Literal["preserve", "omit"] | None
+    supports_stored_response_id: NotRequired[bool]
 
 
 class _PendingSessionWrite(TypedDict):
@@ -304,7 +305,10 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "current-response diagnostics until its terminal guardrails complete."
     ),
     "1.21": "Makes duplicate-agent identity independent of mutable hook instance state.",
-    "1.22": "Records current-response ownership for approvals propagated from nested agent tools.",
+    "1.22": (
+        "Records current-response ownership for approvals propagated from nested agent tools "
+        "and distinguishes provider response IDs from stored Responses IDs for compaction."
+    ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -4780,7 +4784,13 @@ async def _build_run_state_from_json(
                 "compaction_model_exchange" in pending_write
                 and (
                     not isinstance(compaction_exchange, dict)
-                    or set(compaction_exchange) != {"item_digests", "reasoning_item_id_policy"}
+                    or set(compaction_exchange)
+                    - ({"supports_stored_response_id"} if _at_least("1.22") else set())
+                    != {"item_digests", "reasoning_item_id_policy"}
+                    or (
+                        "supports_stored_response_id" in compaction_exchange
+                        and type(compaction_exchange["supports_stored_response_id"]) is not bool
+                    )
                     or not isinstance(compaction_exchange["item_digests"], list)
                     or not all(
                         isinstance(digest, str) for digest in compaction_exchange["item_digests"]

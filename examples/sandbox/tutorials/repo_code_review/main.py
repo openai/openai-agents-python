@@ -12,7 +12,7 @@ from typing import cast
 
 from pydantic import BaseModel, Field
 
-from agents import ModelSettings, Runner
+from agents import Runner
 from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Filesystem, Shell
@@ -110,7 +110,6 @@ async def main(model: str, question: str, use_docker: bool, image: str) -> None:
         model=model,
         instructions=AGENTS_MD,
         capabilities=[Shell(), Filesystem()],
-        model_settings=ModelSettings(tool_choice="required"),
         output_type=RepoReviewResult,
     )
 

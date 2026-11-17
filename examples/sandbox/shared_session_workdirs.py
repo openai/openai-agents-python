@@ -13,7 +13,7 @@ import base64
 import json
 from pathlib import Path
 
-from agents import ModelSettings, Runner, RunResult, ToolOutputImage
+from agents import Runner, RunResult, ToolOutputImage
 from agents.items import ToolCallItem, ToolCallOutputItem
 from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
@@ -127,8 +127,6 @@ def _build_manifest() -> Manifest:
 
 
 def _build_agent(*, name: str, model: str) -> SandboxAgent:
-    # These settings only make the demo's dependent tool sequence deterministic.
-    # Run-scoped cwd does not require them.
     return SandboxAgent(
         name=name,
         model=model,
@@ -137,7 +135,6 @@ def _build_agent(*, name: str, model: str) -> SandboxAgent:
             "the base for every relative path."
         ),
         capabilities=[Shell(), Filesystem()],
-        model_settings=ModelSettings(tool_choice="required", parallel_tool_calls=False),
     )
 
 
@@ -199,6 +196,9 @@ def _apply_patch_input(item: ToolCallItem) -> str:
         raw_input = raw_item.get("input")
     else:
         raw_input = getattr(raw_item, "input", None)
+    if not isinstance(raw_input, str):
+        # Function-rendered sandbox patches carry the same input inside JSON arguments.
+        raw_input = _function_call_arguments(item).get("patch")
     if not isinstance(raw_input, str):
         raise RuntimeError("apply_patch did not provide patch input")
     return raw_input

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import wraps
+from inspect import signature
 from typing import TYPE_CHECKING, Any, Final
 
 from openai.types.shared import Reasoning
@@ -15,12 +17,35 @@ from ..models.interface import Model
 DEFAULT_PYTHON_SANDBOX_IMAGE: Final = "python:3.14-slim"
 
 
+_MEMORY_MODEL_FIELDS = frozenset({"phase_one_model", "phase_two_model"})
+
+
+def _track_memory_model_arguments(cls: type[MemoryGenerateConfig]) -> type[MemoryGenerateConfig]:
+    # Keep the public dataclass signature and literal defaults. A supplied model
+    # can have exactly the same value as the default and still be an explicit choice.
+    initialize = cls.__init__
+    parameters = signature(initialize)
+
+    @wraps(initialize)
+    def init(self: MemoryGenerateConfig, *args: Any, **kwargs: Any) -> None:
+        initialize(self, *args, **kwargs)
+        supplied = parameters.bind(self, *args, **kwargs).arguments
+        self.__dict__["_omitted_phase_models"] = _MEMORY_MODEL_FIELDS.difference(supplied)
+
+    cls.__init__ = init  # type: ignore[method-assign]
+    return cls
+
+
 def _default_memory_phase_one_model_settings() -> ModelSettings:
-    return ModelSettings(reasoning=Reasoning(effort="medium"))
+    settings = ModelSettings(reasoning=Reasoning(effort="medium"))
+    settings.__dict__["_sandbox_memory_default"] = True
+    return settings
 
 
 def _default_memory_phase_two_model_settings() -> ModelSettings:
-    return ModelSettings(reasoning=Reasoning(effort="medium"))
+    settings = ModelSettings(reasoning=Reasoning(effort="medium"))
+    settings.__dict__["_sandbox_memory_default"] = True
+    return settings
 
 
 @dataclass
@@ -34,6 +59,7 @@ class MemoryLayoutConfig:
     """Directory used for per-rollout JSONL artifacts."""
 
 
+@_track_memory_model_arguments
 @dataclass
 class MemoryGenerateConfig:
     """Configuration for sandbox-backed memory extraction and consolidation.
@@ -101,6 +127,12 @@ class MemoryGenerateConfig:
             extra_prompt: str | None = None,
             phase_two_max_turns: int = 500,
         ) -> None: ...
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        omitted = self.__dict__.get("_omitted_phase_models")
+        if omitted and name in omitted:
+            self.__dict__["_omitted_phase_models"] = omitted - {name}
+        super().__setattr__(name, value)
 
     def __post_init__(self) -> None:
         if self.phase_one_model_settings is not None:

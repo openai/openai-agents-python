@@ -1,13 +1,13 @@
 # MCP Prompt Server Example
 
-This repository example targets MCP Python SDK v2 and is intended to run with the repository's locked development environment. The Agents SDK client itself supports both MCP v1 and v2.
+This repository example targets MCP Python SDK v2. The command below selects MCP v2 for both the client and its local server. The Agents SDK client itself supports both MCP v1 and v2.
 
 This example uses a local MCP prompt server in [server.py](server.py).
 
 Run the example via:
 
 ```
-uv run python examples/mcp/prompt_server/main.py
+uv run --with "mcp>=2.2,<3" python examples/mcp/prompt_server/main.py
 ```
 
 ## Details

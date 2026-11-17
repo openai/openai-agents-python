@@ -6,6 +6,7 @@ from agents import Agent, Runner, WebSearchTool, trace
 async def main():
     agent = Agent(
         name="Web searcher",
+        model="gpt-5.4",
         instructions="You are a helpful agent.",
         tools=[WebSearchTool(user_location={"type": "approximate", "city": "New York"})],
     )

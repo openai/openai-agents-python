@@ -219,7 +219,6 @@ import os
 
 from agents import Agent, Runner
 from agents.mcp import MCPServerStreamableHttp
-from agents.model_settings import ModelSettings
 
 
 async def main() -> None:
@@ -238,7 +237,6 @@ async def main() -> None:
             name="Assistant",
             instructions="Use the MCP tools to answer the questions.",
             mcp_servers=[server],
-            model_settings=ModelSettings(tool_choice="required"),
         )
 
         result = await Runner.run(agent, "Add 7 and 22.")
@@ -329,7 +327,6 @@ If the MCP server implements the HTTP with SSE transport, instantiate [`MCPServe
 
 ```python
 from agents import Agent, Runner
-from agents.model_settings import ModelSettings
 from agents.mcp import MCPServerSse
 
 workspace_id = "demo-workspace"
@@ -345,7 +342,6 @@ async with MCPServerSse(
     agent = Agent(
         name="Assistant",
         mcp_servers=[server],
-        model_settings=ModelSettings(tool_choice="required"),
     )
     result = await Runner.run(agent, "What's the weather in Tokyo?")
     print(result.final_output)

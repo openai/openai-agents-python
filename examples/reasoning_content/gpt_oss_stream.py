@@ -12,21 +12,23 @@ from agents import (
     set_tracing_disabled,
 )
 
-set_tracing_disabled(True)
-
 # import logging
 # logging.basicConfig(level=logging.DEBUG)
 
-gpt_oss_model = OpenAIChatCompletionsModel(
-    model="openai/gpt-oss-20b",
-    openai_client=AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-    ),
-)
-
 
 async def main():
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ValueError("Set OPENROUTER_API_KEY before running the OpenRouter example.")
+
+    set_tracing_disabled(True)
+    gpt_oss_model = OpenAIChatCompletionsModel(
+        model="openai/gpt-oss-20b",
+        openai_client=AsyncOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+        ),
+    )
     agent = Agent(
         name="Assistant",
         instructions="You're a helpful assistant. You provide a concise answer to the user's question.",

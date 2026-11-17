@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from textwrap import dedent
 
-from agents import ModelSettings, Runner
+from agents import Runner
 from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig, WorkspaceReadNotFoundError
 from agents.sandbox.capabilities import (
@@ -109,7 +109,6 @@ def build_agent(model: str) -> SandboxAgent:
                 skills_path="skills",
             ),
         ],
-        model_settings=ModelSettings(tool_choice="required"),
     )
 
 

@@ -16,7 +16,7 @@ from pathlib import Path
 from docker import from_env as docker_from_env  # type: ignore[import-untyped]
 from openai.types.responses import ResponseTextDeltaEvent
 
-from agents import ModelSettings, Runner
+from agents import Runner
 from agents.run import RunConfig
 from agents.sandbox import SandboxAgent, SandboxRunConfig
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
@@ -95,9 +95,6 @@ async def main(model: str, question: str) -> None:
         default_manifest=manifest,
         # `WorkspaceShellCapability()` exposes one shell tool so the model can inspect files.
         capabilities=[WorkspaceShellCapability()],
-        # `tool_choice="required"` makes the demo more deterministic by forcing the model
-        # to look at the workspace instead of answering from prior assumptions.
-        model_settings=ModelSettings(tool_choice="required"),
     )
 
     # The Docker client owns the container lifecycle for the sandbox session.
@@ -152,6 +149,8 @@ async def main(model: str, question: str) -> None:
                 print()
             if not saw_any_text:
                 print(result.final_output)
+            if not any(item.type == "tool_call_output_item" for item in result.new_items):
+                raise RuntimeError("The sandbox agent did not execute a workspace tool.")
     finally:
         # The client still owns deleting the underlying Docker container.
         await docker_client.delete(sandbox)

@@ -139,7 +139,7 @@ async def main(model: str, question: str) -> None:
         ),
         default_manifest=pricing_manifest,
         capabilities=[WorkspaceShellCapability()],
-        model_settings=ModelSettings(tool_choice="required", reasoning=Reasoning(effort="none")),
+        model_settings=ModelSettings(reasoning=Reasoning(effort="none")),
         output_type=PricingPacketReview,
     )
     rollout_agent = SandboxAgent(
@@ -155,7 +155,7 @@ async def main(model: str, question: str) -> None:
         ),
         default_manifest=rollout_manifest,
         capabilities=[WorkspaceShellCapability()],
-        model_settings=ModelSettings(tool_choice="required", reasoning=Reasoning(effort="none")),
+        model_settings=ModelSettings(reasoning=Reasoning(effort="none")),
         output_type=RolloutRiskReview,
     )
 
@@ -174,7 +174,7 @@ async def main(model: str, question: str) -> None:
             "recommendation, use only facts and numbers that appear in the tool outputs, and do "
             "not add any extra incidents, price points, or contract terms."
         ),
-        model_settings=ModelSettings(tool_choice="required", reasoning=Reasoning(effort="none")),
+        model_settings=ModelSettings(reasoning=Reasoning(effort="none")),
         tools=[
             pricing_agent.as_tool(
                 tool_name="review_pricing_packet",
@@ -200,6 +200,9 @@ async def main(model: str, question: str) -> None:
         for item in result.new_items
         if getattr(item, "type", None) == "tool_call_item"
     ]
+    expected_tools = {"review_pricing_packet", "review_rollout_risk", "get_discount_approval_rule"}
+    if not expected_tools.issubset(tool_names):
+        raise RuntimeError(f"Missing required review tools: {expected_tools - set(tool_names)}")
     if tool_names:
         print(f"[tools used] {', '.join(tool_names)}")
     print(result.final_output)

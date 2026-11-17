@@ -20,6 +20,7 @@ from ..items import (
 )
 from ..logger import logger
 from ..models.fake_id import FAKE_RESPONSES_ID
+from ..models.interface import Model, ModelProvider
 from .items import (
     ReasoningItemIdPolicy,
     drop_orphan_function_calls,
@@ -133,6 +134,20 @@ class OpenAIServerConversationTracker:
     The runner uses these sets together to decide which deltas are still safe to send when a
     run is resumed, retried after a transient failure, or rebuilt from serialized RunState.
     """
+
+    def validate_model(
+        self, model: Model | str | None, provider: ModelProvider | None = None
+    ) -> None:
+        """Reject automatic response chaining for providers without stored response IDs."""
+        selected = model if isinstance(model, Model) else provider
+        if (
+            self.auto_previous_response_id
+            and getattr(selected, "_supports_stored_response_id", True) is False
+        ):
+            raise UserError(
+                "This model does not support auto_previous_response_id; "
+                "replay result.to_input_list() or use a session instead."
+            )
 
     conversation_id: str | None = None
     previous_response_id: str | None = None

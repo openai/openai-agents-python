@@ -651,6 +651,13 @@ spec:
         os.close(directory_fd)
 
 
+async def main_all():
+    await setup_instructions()
+    await main()
+    await demonstrate_advanced_features()
+    await demonstrate_multi_store()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Dapr session example")
     parser.add_argument(
@@ -684,7 +691,4 @@ if __name__ == "__main__":
         if args.only_setup:
             raise SystemExit(0)
 
-    asyncio.run(setup_instructions())
-    asyncio.run(main())
-    asyncio.run(demonstrate_advanced_features())
-    asyncio.run(demonstrate_multi_store())
+    asyncio.run(main_all())

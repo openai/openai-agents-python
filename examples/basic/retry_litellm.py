@@ -5,6 +5,7 @@ from agents import (
     Agent,
     ModelRetrySettings,
     ModelSettings,
+    MultiProvider,
     RetryDecision,
     RunConfig,
     Runner,
@@ -89,7 +90,7 @@ async def main() -> None:
         name="Assistant",
         instructions="You are a concise assistant. Answer in 3 short bullet points at most.",
         # Prefix with litellm/ to route this request through the LiteLLM adapter.
-        model="litellm/openai/gpt-4o-mini",
+        model=MultiProvider().get_model("litellm/openai/gpt-4o-mini"),
         # This Agent repeats the same retry config for clarity. In real code you
         # can keep shared defaults in RunConfig and only put per-agent overrides
         # here when you need different retry behavior.

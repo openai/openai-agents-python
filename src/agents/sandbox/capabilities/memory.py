@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
-from pydantic import Field
+from pydantic import Field, PrivateAttr, ValidatorFunctionWrapHandler, field_validator
 
-from ..config import MemoryGenerateConfig, MemoryLayoutConfig, MemoryReadConfig
+from ...models.interface import Model
+from ..config import (
+    _MEMORY_MODEL_FIELDS,
+    MemoryGenerateConfig,
+    MemoryLayoutConfig,
+    MemoryReadConfig,
+    _default_memory_phase_one_model_settings,
+)
 from ..errors import WorkspaceReadNotFoundError
 from ..manifest import Manifest
 from ..memory.prompts import render_memory_read_prompt
@@ -28,6 +36,40 @@ class Memory(Capability):
     """Read-side configuration. Set to `None` to disable memory reads."""
     generate: MemoryGenerateConfig | None = Field(default_factory=MemoryGenerateConfig)
     """Generation configuration. Set to `None` to disable background memory generation."""
+
+    _model_instance: Model | None = PrivateAttr(default=None)
+
+    def generation_config(self) -> MemoryGenerateConfig:
+        """Resolve omitted phase models and settings using the bound provider defaults."""
+        assert self.generate is not None
+        model = self._model_instance
+        if not getattr(model, "_sandbox_model_capabilities", {}).get("use_provider_defaults"):
+            return self.generate
+        updates: dict[str, Any] = {}
+        for phase in ("one", "two"):
+            model_key = f"phase_{phase}_model"
+            settings_key = f"phase_{phase}_model_settings"
+            if model_key in self.generate.__dict__.get("_omitted_phase_models", ()):
+                updates[model_key] = model
+            settings = getattr(self.generate, settings_key)
+            if (
+                settings is not None
+                and settings.__dict__.get("_sandbox_memory_default")
+                and settings == _default_memory_phase_one_model_settings()
+            ):
+                updates[settings_key] = None
+        return replace(self.generate, **updates)
+
+    @field_validator("generate", mode="wrap")
+    @classmethod
+    def _track_validated_model_arguments(
+        cls, value: Any, handler: ValidatorFunctionWrapHandler
+    ) -> MemoryGenerateConfig | None:
+        config: MemoryGenerateConfig | None = handler(value)
+        if config is not None and isinstance(value, dict):
+            # Pydantic validates mapping input without calling the dataclass constructor.
+            config.__dict__["_omitted_phase_models"] = _MEMORY_MODEL_FIELDS.difference(value)
+        return config
 
     def clone(self) -> Memory:
         """Return a per-run copy without deep-copying stateful memory model objects."""

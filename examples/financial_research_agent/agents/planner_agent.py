@@ -32,6 +32,6 @@ class FinancialSearchPlan(BaseModel):
 planner_agent = Agent(
     name="FinancialPlannerAgent",
     instructions=PROMPT,
-    model="o3-mini",
+    model="gpt-5.4-mini",
     output_type=FinancialSearchPlan,
 )

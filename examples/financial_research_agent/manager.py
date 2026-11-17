@@ -165,6 +165,10 @@ class FinancialResearchManager:
             if num_failed:
                 summary += f", {num_failed} failed"
             self.printer.update_item("searching", summary, is_done=True)
+            if not results:
+                raise RuntimeError(
+                    "Financial research requires at least one sourced search result."
+                )
             return results
 
     async def _search(self, item: FinancialSearchItem) -> FinancialSearchEvidence | None:

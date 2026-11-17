@@ -1,14 +1,13 @@
 import asyncio
 import os
-import shutil
 import socket
 import subprocess
+import sys
 import time
 from typing import Any, cast
 
 from agents import Agent, Runner, gen_trace_id, trace
 from agents.mcp import MCPServer, MCPServerSse
-from agents.model_settings import ModelSettings
 
 SSE_HOST = os.getenv("SSE_HOST", "127.0.0.1")
 
@@ -33,7 +32,6 @@ async def run(mcp_server: MCPServer):
         name="Assistant",
         instructions="Use the tools to answer the questions.",
         mcp_servers=[mcp_server],
-        model_settings=ModelSettings(tool_choice="required"),
     )
 
     # Use the `add` tool to add two numbers
@@ -69,12 +67,6 @@ async def main():
 
 
 if __name__ == "__main__":
-    # Let's make sure the user has uv installed
-    if not shutil.which("uv"):
-        raise RuntimeError(
-            "uv is not installed. Please install it: https://docs.astral.sh/uv/getting-started/installation/"
-        )
-
     # We'll run the SSE server in a subprocess. Usually this would be a remote server, but for this
     # demo, we'll run it locally at SSE_URL.
     process: subprocess.Popen[Any] | None = None
@@ -84,11 +76,11 @@ if __name__ == "__main__":
 
         print(f"Starting SSE server at {SSE_URL} ...")
 
-        # Run `uv run server.py` to start the SSE server
+        # Use the current interpreter so the server shares the MCP dependency.
         env = os.environ.copy()
         env.setdefault("SSE_HOST", SSE_HOST)
         env.setdefault("SSE_PORT", str(SSE_PORT))
-        process = subprocess.Popen(["uv", "run", server_file], env=env)
+        process = subprocess.Popen([sys.executable, server_file], env=env)
         # Give it 3 seconds to start
         time.sleep(3)
 

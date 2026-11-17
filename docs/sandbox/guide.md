@@ -287,11 +287,13 @@ private_notes = File(
 Users are the sandbox identities that can execute work. Add a `User` to the manifest when you want that identity to exist in the sandbox, then set `SandboxAgent.run_as` when model-facing sandbox tools such as shell commands, file reads, and patches should run as that user. If `run_as` points at a user that is not already in the manifest, the runner adds it to the effective manifest for you.
 
 ```python
+from docker import from_env as docker_from_env
+
 from agents import Runner
 from agents.run import RunConfig
 from agents.sandbox import FileMode, Manifest, Permissions, SandboxAgent, SandboxRunConfig, User
 from agents.sandbox.entries import Dir, LocalDir
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+from agents.sandbox.sandboxes.docker import DockerSandboxClient, DockerSandboxClientOptions
 
 analyst = User(name="analyst")
 
@@ -331,7 +333,10 @@ result = await Runner.run(
     agent,
     "Summarize the contracts and call out renewal dates.",
     run_config=RunConfig(
-        sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()),
+        sandbox=SandboxRunConfig(
+            client=DockerSandboxClient(docker_from_env()),
+            options=DockerSandboxClientOptions(image="python:3.14-slim"),
+        ),
     ),
 )
 ```
@@ -525,7 +530,7 @@ This coding-style example is a good default starting point:
 import asyncio
 from pathlib import Path
 
-from agents import ModelSettings, Runner
+from agents import Runner
 from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import (
@@ -571,7 +576,6 @@ def build_agent(model: str) -> SandboxAgent[None]:
                 )
             ),
         ],
-        model_settings=ModelSettings(tool_choice="required"),
     )
 
 
@@ -724,11 +728,13 @@ Use this when the skills bundle has its own release cadence or should be shared 
 Tool-agents can either get their own sandbox boundary or reuse a live sandbox from the parent run. Reuse is useful for a fast read-only explorer agent: it can inspect the exact workspace the parent run is using without paying to create, hydrate, or snapshot another sandbox.
 
 ```python
+from docker import from_env as docker_from_env
+
 from agents import Runner
 from agents.run import RunConfig
 from agents.sandbox import FileMode, Manifest, Permissions, SandboxAgent, SandboxRunConfig, User
 from agents.sandbox.entries import Dir, File
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+from agents.sandbox.sandboxes.docker import DockerSandboxClient, DockerSandboxClientOptions
 
 coordinator = User(name="coordinator")
 explorer = User(name="explorer")
@@ -774,8 +780,11 @@ pricing_explorer = SandboxAgent(
     run_as=explorer,
 )
 
-client = UnixLocalSandboxClient()
-sandbox = await client.create(manifest=manifest)
+client = DockerSandboxClient(docker_from_env())
+sandbox = await client.create(
+    manifest=manifest,
+    options=DockerSandboxClientOptions(image="python:3.14-slim"),
+)
 
 async with sandbox:
     shared_run_config = RunConfig(
