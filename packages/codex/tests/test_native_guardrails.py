@@ -130,6 +130,65 @@ async def test_tripwire_keeps_completed_siblings_and_arbitrary_host_diagnostics(
         assert "local diagnostic" not in json.dumps([item async for item in session.items()])
 
 
+@pytest.mark.parametrize("failure", ["cancel", "error"])
+async def test_unapproved_natural_output_never_enters_history_after_guard_failure(
+    responses, failure
+):
+    from agents import TurnStoppedError
+    from agents.state import SessionState
+
+    entered = asyncio.Event()
+    joined = asyncio.Event()
+    error = ValueError("synthetic output guard failure")
+
+    async def check(request, source):
+        if request.final_output != "unapproved-natural-output":
+            return GuardrailResult(False)
+        entered.set()
+        try:
+            if failure == "error":
+                raise error
+            await asyncio.Future()
+        finally:
+            joined.set()
+
+    responses.respond(assistant_output("accepted-earlier-output"))
+    responses.respond(assistant_output("unapproved-natural-output"))
+    responses.respond(assistant_output("accepted-successor-output"))
+    agent = Agent(
+        instructions="Answer.",
+        provider=provider(responses),
+        output_guardrails=[OutputGuardrail("admission", check)],
+    )
+    async with timeout(25), agent.session() as session:
+        earlier = await session.submit("first")
+        assert (await earlier.get_result()).final_output == "accepted-earlier-output"
+        candidate = await session.submit("second")
+        await entered.wait()
+        if failure == "cancel":
+            await candidate.cancel()
+            with pytest.raises(TurnStoppedError):
+                await candidate.get_result()
+        else:
+            with pytest.raises(ValueError) as caught:
+                await candidate.get_result()
+            assert caught.value is error
+        assert joined.is_set()
+
+        history = json.dumps([item async for item in session.items()])
+        saved = SessionState.from_json((await session.save_state()).to_json())
+        for encoded in (history, json.dumps(saved.history)):
+            assert "accepted-earlier-output" in encoded
+            assert "unapproved-natural-output" not in encoded
+
+        successor = await session.submit("continue")
+        assert (await successor.get_result()).final_output == "accepted-successor-output"
+        assert len(responses.requests) == 3
+        successor_input = json.dumps(responses.requests[-1]["input"])
+        assert "accepted-earlier-output" in successor_input
+        assert "unapproved-natural-output" not in successor_input
+
+
 @pytest.mark.parametrize("error_first", [False, True])
 async def test_first_observed_output_failure_joins_declared_earlier_sibling(responses, error_first):
     entered = asyncio.Event()

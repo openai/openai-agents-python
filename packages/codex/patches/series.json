@@ -1551,7 +1551,11 @@
     {
       "path": "sdk-disable-cli-collaboration-instructions.patch",
       "sha256": "44a75148beb5ac212fe79bc6875b68ebfd655096740f12108042c15b16332ab6"
+    },
+    {
+      "path": "sdk-discard-unaccepted-guardrail-completion.patch",
+      "sha256": "2d8dfca9d98dff3dfc31b79b03c57c72a704431f74d5fcb233e1103fff57a03a"
     }
   ],
-  "result_tree": "fa1ea921ed70e016d585e0037b8fae0f3d8ef34e"
+  "result_tree": "522cb98bb1a59770ef2ae4c55089a506b058e7cf"
 }
