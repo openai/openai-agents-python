@@ -238,7 +238,7 @@ async def test_run_config_model_name_override_takes_precedence() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("model_name", "reasoning_effort"),
-    [("gpt-5", "low"), ("gpt-5.6", "none")],
+    [("gpt-5", "low"), ("gpt-5.6", "none"), ("gpt-6-astra", "low")],
 )
 async def test_run_config_model_name_override_uses_model_specific_default_settings(
     monkeypatch,
