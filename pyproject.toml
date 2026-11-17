@@ -101,7 +101,7 @@ dev = [
   "pytest-asyncio",
   "pytest-mock>=3.14.0",
   "pytest-xdist",
-  "rich>=13.1.0, <15",
+  "rich>=13.1.0,<16",
   "mkdocs>=1.6.0",
   "mkdocs-material>=9.7.7",
   "pymdown-extensions>=11.0.1",
