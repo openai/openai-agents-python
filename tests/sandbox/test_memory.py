@@ -600,7 +600,23 @@ def test_updated_at_sort_key_places_unknown_timestamps_last() -> None:
 
 
 @pytest.mark.asyncio
-async def test_phase_two_selection_tracks_added_retained_and_removed_rollouts() -> None:
+@pytest.mark.parametrize(
+    ("older_timestamp", "newer_timestamp"),
+    [
+        pytest.param("2025-03-01T00:00:00Z", "2025-03-02T00:00:00Z", id="utc"),
+        pytest.param("2026-11-17T03:30:00+00:00", "2026-11-16T23:30:00-05:00", id="mixed-offsets"),
+        pytest.param("2026-11-17T03:30:00.1Z", "2026-11-16T23:30:00.1-05:00", id="tenths"),
+        pytest.param("2026-11-17T03:30:00+0000", "2026-11-16T23:30:00-0500", id="compact-offsets"),
+        pytest.param(
+            "2026-11-17T03:30:00.123456001Z",
+            "2026-11-17T03:30:00.123456002Z",
+            id="nanoseconds",
+        ),
+    ],
+)
+async def test_phase_two_selection_tracks_added_retained_and_removed_rollouts(
+    older_timestamp: str, newer_timestamp: str
+) -> None:
     client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
 
@@ -609,7 +625,7 @@ async def test_phase_two_selection_tracks_added_retained_and_removed_rollouts() 
         await storage.ensure_layout()
         old_item = PhaseTwoSelectionItem(
             rollout_id="old-rollout",
-            updated_at="2025-03-01T00:00:00Z",
+            updated_at=older_timestamp,
             rollout_path="sessions/old-rollout.jsonl",
             rollout_summary_file="rollout_summaries/old-rollout.md",
             terminal_state="completed",
@@ -627,7 +643,7 @@ async def test_phase_two_selection_tracks_added_retained_and_removed_rollouts() 
             storage.raw_memories_dir / "new-rollout.md",
             _raw_memory_record(
                 rollout_id="new-rollout",
-                updated_at="2025-03-02T00:00:00Z",
+                updated_at=newer_timestamp,
                 rollout_summary_file="rollout_summaries/new-rollout.md",
                 raw_memory="new raw",
             ),

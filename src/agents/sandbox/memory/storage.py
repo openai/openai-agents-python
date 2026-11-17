@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,11 @@ from ..config import MemoryLayoutConfig
 from ..errors import WorkspaceReadNotFoundError
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..workspace_paths import sandbox_path_str
+
+_OFFSET_TIMESTAMP = re.compile(
+    r"(?P<clock>[0-9-]+[T ][0-9:]+)(?:[.,](?P<fraction>[0-9]+))?"
+    r"(?:Z|(?P<hours>[+-][0-9]{2})(?::?(?P<minutes>[0-9]{2}))?)"
+)
 
 
 def decode_payload(payload: object) -> str:
@@ -225,14 +231,21 @@ class SandboxMemoryStorage:
 
 
 def _updated_at_sort_key(raw_memory: str) -> tuple[int, str]:
-    for line in raw_memory.splitlines():
-        if line.startswith("updated_at:"):
-            _, value = line.split(":", maxsplit=1)
-            updated_at = value.strip()
-            if not updated_at or updated_at == "unknown":
-                return (0, "")
-            return (1, updated_at)
-    return (0, "")
+    updated_at = _extract_metadata_value(raw_memory, "updated_at")
+    if not updated_at or updated_at == "unknown":
+        return (0, "")
+    match = _OFFSET_TIMESTAMP.fullmatch(updated_at)
+    if match is None:
+        return (1, updated_at)
+    offset = f"{match['hours'] or '+00'}:{match['minutes'] or '00'}"
+    try:
+        clock = datetime.fromisoformat(match["clock"] + offset)
+        utc = clock.astimezone(timezone.utc).replace(tzinfo=None)
+    except (ValueError, OverflowError):
+        return (1, updated_at)
+    # Compare the original fraction separately so datetime cannot truncate it to microseconds.
+    fraction = (match["fraction"] or "").rstrip("0")
+    return (1, f"{utc.isoformat(timespec='seconds')}.{fraction}")
 
 
 def _extract_selection_item(raw_memory: str) -> PhaseTwoSelectionItem | None:
