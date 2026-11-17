@@ -31,7 +31,9 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cache, partial
 from pathlib import Path, PurePosixPath
-from typing import Literal, cast
+from typing import Any, Literal, cast
+
+from pydantic import PrivateAttr, model_validator
 
 from ...logger import log_tool_action_warning
 from .._mount_security import redact_mount_error_data
@@ -228,6 +230,44 @@ class UnixLocalSandboxSessionState(SandboxSessionState):
     type: Literal["unix_local"] = "unix_local"
     workspace_root_owned: bool = False
 
+    _authorized_workspace_root: str | None = PrivateAttr(default=None)
+    _sdk_owned_workspace_root: str | None = PrivateAttr(default=None)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _bind_current_workspace_root(cls, value: Any, handler: Any) -> Any:
+        state = handler(value)
+        if isinstance(value, Mapping) and isinstance(value.get("manifest"), Manifest):
+            state._authorized_workspace_root = state.manifest.root
+        return state
+
+    def _rebind_persisted_workspace_root(
+        self, trusted_manifest: Manifest | None
+    ) -> SandboxSessionState:
+        if self._authorized_workspace_root == self.manifest.root:
+            return self
+        if (
+            trusted_manifest is None
+            or trusted_manifest.root == _DEFAULT_MANIFEST_ROOT
+            or trusted_manifest.root != self.manifest.root
+        ):
+            raise ValueError(
+                "Restored UnixLocal workspace requires a current trusted manifest with the "
+                "same root; pass SandboxRunConfig.manifest or resume(trusted_manifest=...). "
+                "To recover an older workspace, explicitly authorize its existing root."
+            )
+        rebound = self.model_copy(update={"workspace_root_owned": False})
+        rebound._authorized_workspace_root = trusted_manifest.root
+        rebound._sdk_owned_workspace_root = None
+        return rebound
+
+    def assert_path_grants_rebound(self) -> None:
+        super().assert_path_grants_rebound()
+        if self._authorized_workspace_root != self.manifest.root:
+            raise ValueError(
+                "Restored UnixLocal workspace requires a current trusted manifest before resume"
+            )
+
 
 class UnixLocalSandboxClientOptions(BaseSandboxClientOptions):
     type: Literal["unix_local"] = "unix_local"
@@ -283,6 +323,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     _host_environment_allowlist: frozenset[str] | None
 
     def __init__(self, *, state: UnixLocalSandboxSessionState) -> None:
+        state.assert_path_grants_rebound()
         self.state = state
         self._running = False
         self._portable_workspace_generation: str | None = None
@@ -296,6 +337,14 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     @classmethod
     def from_state(cls, state: UnixLocalSandboxSessionState) -> "UnixLocalSandboxSession":
         return cls(state=state)
+
+    async def start(self) -> None:
+        self.state.assert_path_grants_rebound()
+        await super().start()
+
+    async def _clear_workspace_root_on_resume(self) -> None:
+        self.state.assert_path_grants_rebound()
+        await super()._clear_workspace_root_on_resume()
 
     async def _validate_manifest_application(
         self,
@@ -1632,6 +1681,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 archive.close()
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
+        self.state.assert_path_grants_rebound()
         root = Path(self.state.manifest.root)
         extraction_root = self._files.workspace_root(self.state.manifest)
 
@@ -1723,6 +1773,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
             workspace_root_owned=workspace_root_owned,
             exposed_ports=resolved_options.exposed_ports,
         )
+        state._sdk_owned_workspace_root = manifest.root if workspace_root_owned else None
         inner = UnixLocalSandboxSession.from_state(state)
         if workspace_root_owned:
             inner._reset_skill_copy_budget_for_fresh_workspace()
@@ -1736,7 +1787,9 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         inner = session._inner
         if not isinstance(inner, UnixLocalSandboxSession):
             raise TypeError("UnixLocalSandboxClient.delete expects a UnixLocalSandboxSession")
-        if not inner.state.workspace_root_owned:
+        inner.state.assert_path_grants_rebound()
+        owned_root = inner.state._sdk_owned_workspace_root
+        if owned_root is None or owned_root != inner.state.manifest.root:
             return session
         unmount_failed = False
         for mount_entry, mount_path in inner.state.manifest.ephemeral_mount_targets():
@@ -1753,7 +1806,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         if unmount_failed:
             return session
         try:
-            await run_blocking_workspace_io(shutil.rmtree, Path(inner.state.manifest.root))
+            await run_blocking_workspace_io(shutil.rmtree, Path(owned_root))
         except FileNotFoundError:
             pass
         except Exception:
@@ -1764,9 +1817,22 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
     async def resume(
         self,
         state: SandboxSessionState,
+        *,
+        trusted_manifest: Manifest | None = None,
     ) -> SandboxSession:
+        """Resume with fresh root authorization after deserializing a checkpoint.
+
+        Supply the existing workspace root in ``trusted_manifest`` to recover old local
+        data. A restored root belongs to the application and is never recursively
+        deleted by this client, including roots originally allocated by another process.
+        Runner obtains this authorization from ``SandboxRunConfig.manifest``.
+        """
         if not isinstance(state, UnixLocalSandboxSessionState):
             raise TypeError("UnixLocalSandboxClient.resume expects a UnixLocalSandboxSessionState")
+        state = cast(
+            UnixLocalSandboxSessionState,
+            state._rebind_persisted_workspace_root(trusted_manifest),
+        )
         self._validate_manifest_for_resume(state)
         _assert_unix_local_host_path_grants_unsupported(state.manifest)
         inner = UnixLocalSandboxSession.from_state(state)

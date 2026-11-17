@@ -680,6 +680,7 @@ class SandboxRuntimeSessionManager(_BorrowedManifestPolicy, Generic[TContext]):
             return session_state
         processed_state = session_state.model_copy(update={"manifest": processed_manifest})
         processed_state = processed_state.rebind_persisted_path_grants(processed_manifest)
+        processed_state = processed_state._rebind_persisted_workspace_root(trusted_manifest)
         if not processed_state.mount_authority_redacted:
             return processed_state
         processed_trusted_manifest = cls._process_manifest(

@@ -303,6 +303,11 @@ class SandboxSessionState(BaseModel):
         rebound._path_grants_require_rebind = ()
         return rebound
 
+    def _rebind_persisted_workspace_root(
+        self, trusted_manifest: Manifest | None
+    ) -> SandboxSessionState:
+        return self
+
     @redact_mount_error_data_sync
     def rebind_persisted_mount_authority(
         self,
