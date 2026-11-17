@@ -253,9 +253,10 @@ class ModelSettings:
 
     def __setattr__(self, name: str, value: Any) -> None:
         object.__setattr__(self, name, value)
-        # SDK-owned defaults become explicit on assignment, even if the value is equal.
-        if "_agent_defaults_untouched" in self.__dict__ and name in self.__dataclass_fields__:
-            self.__dict__["_agent_defaults_untouched"] = False
+        # Remember explicit assignments on SDK-created settings, including same-value assignments.
+        assigned = self.__dict__.get("_agent_assigned_fields")
+        if assigned is not None and name in self.__dataclass_fields__:
+            self.__dict__["_agent_assigned_fields"] = assigned | {name}
 
     def resolve(self, override: ModelSettings | dict[str, Any] | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the

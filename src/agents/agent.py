@@ -520,7 +520,7 @@ class Agent(AgentBase, Generic[TContext]):
         settings_omitted = self.model_settings.__dict__.get("_agent_default_settings") is True
         if settings_omitted:
             self.model_settings = _initial_model_settings_for_model(self.model)
-            self.model_settings.__dict__["_agent_defaults_untouched"] = True
+            self.model_settings.__dict__["_agent_assigned_fields"] = frozenset()
         # Keep caller assignment and in-place edits from being treated as implicit defaults.
         self._implicit_model_settings: tuple[ModelSettings, ModelSettings] | None = (
             (self.model_settings, copy.deepcopy(self.model_settings)) if settings_omitted else None
@@ -611,19 +611,35 @@ class Agent(AgentBase, Generic[TContext]):
             )
         cloned = dataclasses.replace(self, **kwargs)
         if inherit_implicit_settings:
-            cloned.model_settings.__dict__["_agent_defaults_untouched"] = True
+            cloned.model_settings.__dict__["_agent_assigned_fields"] = frozenset()
             cloned._implicit_model_settings = (
                 cloned.model_settings,
                 copy.deepcopy(cloned.model_settings),
             )
+        elif "model_settings" not in kwargs:
+            # A shallow clone shares the settings and their original defaults.
+            cloned._implicit_model_settings = self._implicit_model_settings
         return cloned
+
+    def _implicit_request_fields(self) -> set[str]:
+        defaults = self._implicit_model_settings
+        if defaults is None or self.model_settings is not defaults[0]:
+            return set()
+
+        assigned = self.model_settings.__dict__["_agent_assigned_fields"]
+        return {
+            name
+            for name in ("reasoning", "verbosity")
+            if name not in assigned
+            and getattr(self.model_settings, name) == getattr(defaults[1], name)
+        }
 
     def _uses_implicit_model_settings(self) -> bool:
         defaults = self._implicit_model_settings
         return (
             defaults is not None
             and self.model_settings is defaults[0]
-            and self.model_settings.__dict__.get("_agent_defaults_untouched") is True
+            and not self.model_settings.__dict__["_agent_assigned_fields"]
             and self.model_settings == defaults[1]
         )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import copy
 from pathlib import PureWindowsPath
 from typing import Any, cast
 
@@ -786,6 +787,14 @@ async def test_routed_string_defaults_use_resolved_adapter(
     assert settings.temperature == 0.25
 
 
+def test_editing_shallow_settings_copy_preserves_agent_model_defaults() -> None:
+    agent = Agent(name="test", model="gpt-5.2")
+    copied_settings = copy(agent.model_settings)
+    copied_settings.temperature = 0.2
+
+    assert agent.clone(model="gpt-4.1").model_settings == ModelSettings()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("clone_timing", ["none", "before", "after"])
@@ -813,4 +822,4 @@ async def test_equal_in_place_assignment_preserves_explicit_settings(
     assert result.final_output == "chosen"
     assert model.calls[0].model_settings.reasoning == Reasoning(effort="none")
     assert agent.model_settings is original.model_settings
-    assert "_agent_defaults_untouched" not in agent.model_settings.to_json_dict()
+    assert "_agent_assigned_fields" not in agent.model_settings.to_json_dict()

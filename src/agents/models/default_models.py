@@ -1,5 +1,6 @@
 import os
 import re
+from dataclasses import replace
 from typing import Literal
 
 from openai.types.shared.reasoning import Reasoning
@@ -80,3 +81,18 @@ def get_default_model_settings(model: str | None = None) -> ModelSettings:
         reasoning=Reasoning(effort=effort) if effort is not None else None,
         verbosity="low",
     )
+
+
+def _omit_model_defaults(
+    settings: ModelSettings,
+    implicit_fields: set[str],
+    *,
+    reasoning: bool = False,
+    verbosity: bool = False,
+) -> ModelSettings:
+    changes = {}  # type: dict[str, None]
+    if reasoning and "reasoning" in implicit_fields:
+        changes["reasoning"] = None
+    if verbosity and "verbosity" in implicit_fields:
+        changes["verbosity"] = None
+    return replace(settings, **changes) if changes else settings
