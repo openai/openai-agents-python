@@ -2942,7 +2942,7 @@ requires-dist = [
     { name = "certifi", specifier = ">=2026.10.19" },
     { name = "cryptography", marker = "extra == 'encrypt'", specifier = ">=45.0,<51" },
     { name = "dapr", marker = "extra == 'dapr'", specifier = ">=1.16.0" },
-    { name = "daytona", marker = "extra == 'daytona'", specifier = ">=0.226.1" },
+    { name = "daytona", marker = "extra == 'daytona'", specifier = ">=0.226.1,<1" },
     { name = "docker", marker = "extra == 'docker'", specifier = ">=6.1" },
     { name = "e2b", marker = "extra == 'e2b'", specifier = "==2.31.0" },
     { name = "e2b-code-interpreter", marker = "extra == 'e2b'", specifier = "==2.8.1" },
