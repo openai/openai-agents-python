@@ -19,7 +19,10 @@ VERIFIER_PROMPT = (
     "allowed URL, accept the URL even when it contains a tracking parameter or another allowed "
     "variant exists. Treat information published on or before the research cutoff as potentially "
     "available. Mark unsupported claims separately from claims that the evidence directly "
-    "contradicts."
+    "contradicts. Evaluate explicitly labeled analyst inference as reasoning from supported "
+    "premises, not as a claim that the issuer said the same thing. Continue rejecting "
+    "unsupported factual premises, forecasts, and causal assertions. Editorial headings "
+    "and report-scope labels are not issuer financial claims."
 )
 
 

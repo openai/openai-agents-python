@@ -7,6 +7,7 @@ from .verifier_agent import VerificationResult
 
 class PrimarySourceCheck(BaseModel):
     dimension: str = ""
+    analysis: str = ""
     claim: str
     source_url: str
     supporting_extract: str
@@ -52,7 +53,14 @@ auditor_agent = Agent(
         "a claim of missing evidence, or a restatement of a rejected draft. Use a short "
         "complete readable passage with its original metric, figure, period and units. OPEN "
         "the cited primary document and confirm the extract. Set supported=false if you cannot. "
-        "Do not round, paraphrase, or add causal interpretations to findings."
+        "Do not round or paraphrase findings' supporting_extract text. Use the original "
+        "request's aspect names as dimension labels, not individual topics. For each finding, "
+        "provide a short analysis field explaining its significance for that aspect, explicitly "
+        "as conditional analyst inference based ONLY on the quoted facts. Do not add empirical "
+        "premises, forecasts, or unsupported causal assertions. When auditing a report, check "
+        "factual claims and the factual premises of labeled inference. Evaluate inference as "
+        "reasoning from those premises; do not require the issuer to have stated the analyst's "
+        "interpretation verbatim. Editorial headings and scope labels are not issuer claims."
     ),
     tools=[WebSearchTool()],
     model_settings=ModelSettings(

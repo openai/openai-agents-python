@@ -255,7 +255,7 @@ async def test_financial_report_fails_after_second_rejected_verification(
     monkeypatch.setattr(manager, "_verify_report", AsyncMock(return_value=rejected))
     monkeypatch.setattr(manager, "_revise_report", AsyncMock(return_value=report))
 
-    with pytest.raises(RuntimeError, match="failed evidence verification after one revision"):
+    with pytest.raises(RuntimeError, match="failed evidence verification after two revisions"):
         await manager._produce_verified_report("query", [])
 
 

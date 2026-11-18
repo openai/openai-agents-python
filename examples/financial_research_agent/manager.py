@@ -147,18 +147,36 @@ class FinancialResearchManager:
         search_results: Sequence[FinancialSearchEvidence],
     ) -> tuple[FinancialReportData, VerificationResult]:
         report = await self._write_report(query, search_results)
-        verification = await self._verify_report(query, report, search_results)
-        if verification.verified:
-            return report, verification
-
-        report = await self._revise_report(query, report, search_results, verification)
-        verification = await self._verify_report(query, report, search_results)
-        if not verification.verified:
-            raise RuntimeError(
-                "Financial report failed evidence verification after one revision: "
-                f"{verification.model_dump_json()}"
-            )
-        return report, verification
+        confirmed_findings = {}
+        opened_urls: set[str] = set()
+        for revision in range(3):
+            verification = await self._verify_report(query, report, search_results)
+            if verification.verified:
+                return report, verification
+            if revision == 2:
+                break
+            if isinstance(verification, AuditedVerificationResult):
+                opened_urls.update(verification.opened_source_urls)
+                for finding in verification.primary_source_findings:
+                    if (
+                        finding.supported
+                        and finding.supporting_extract.strip()
+                        and finding.source_url in verification.opened_source_urls
+                    ):
+                        confirmed_findings[
+                            (finding.dimension, finding.source_url, finding.supporting_extract)
+                        ] = finding
+                verification = verification.model_copy(
+                    update={
+                        "primary_source_findings": list(confirmed_findings.values()),
+                        "opened_source_urls": sorted(opened_urls),
+                    }
+                )
+            report = await self._revise_report(query, report, search_results, verification)
+        raise RuntimeError(
+            "Financial report failed evidence verification after two revisions: "
+            f"{verification.model_dump_json()}"
+        )
 
     async def _plan_searches(self, query: str) -> FinancialSearchPlan:
         self.printer.update_item("planning", "Planning searches...")
@@ -282,7 +300,7 @@ class FinancialResearchManager:
     ) -> FinancialReportData:
         self.printer.update_item("revising", "Revising report from verification feedback...")
         if isinstance(verification, AuditedVerificationResult):
-            confirmed = []
+            by_dimension = {}
             seen_extracts: set[str] = set()
             for finding in verification.primary_source_findings:
                 if (
@@ -294,9 +312,12 @@ class FinancialResearchManager:
                 ):
                     continue
                 seen_extracts.add(finding.supporting_extract)
-                confirmed.append(finding)
-                if len(confirmed) == 4:
-                    break
+                by_dimension.setdefault(finding.dimension, []).append(finding)
+            confirmed = []
+            while len(confirmed) < 4 and any(by_dimension.values()):
+                for findings in by_dimension.values():
+                    if findings and len(confirmed) < 4:
+                        confirmed.append(findings.pop(0))
             if len(confirmed) < 2:
                 raise RuntimeError(
                     "Financial report has insufficient independently confirmed complementary findings."
@@ -304,18 +325,14 @@ class FinancialResearchManager:
             paragraphs = [
                 f"### {finding.dimension}\n\n"
                 f"> {finding.supporting_extract}\n\n"
-                f"[Primary document]({finding.source_url})"
+                f"[Primary document]({finding.source_url})\n\n"
+                + (f"Analysis (inference): {finding.analysis}" if finding.analysis.strip() else "")
                 for finding in confirmed
             ]
             self.printer.mark_item_done("revising")
             return FinancialReportData(
-                short_summary="The independently read primary documents support the findings below.",
-                markdown_report=(
-                    "# Primary-source findings\n\n"
-                    "Coverage: This narrower report presents direct primary-source passages "
-                    "for the requested dimensions, without adding forecasts or causal interpretations.\n\n"
-                    + "\n\n".join(paragraphs)
-                ),
+                short_summary=" ".join(finding.supporting_extract for finding in confirmed[:2]),
+                markdown_report=("# Primary-source findings\n\n" + "\n\n".join(paragraphs)),
                 follow_up_questions=[],
             )
         revision_agent = writer_agent.clone(instructions=REVISION_PROMPT)
@@ -377,7 +394,7 @@ class FinancialResearchManager:
                             "explanation": "The fresh document read did not recheck this exact claim.",
                         }
                     ),
-                ).model_copy(update={"dimension": check.dimension})
+                ).model_copy(update={"dimension": check.dimension, "analysis": check.analysis})
                 if check.source_url == url
                 else check
                 for check in audit.checks

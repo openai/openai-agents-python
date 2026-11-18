@@ -225,7 +225,7 @@ async def test_financial_run_config_reaches_orchestration_and_specialist(
     )
     report, verification = await manager._produce_verified_report("Analyze revenue", [evidence])
 
-    assert "Coverage:" in report.markdown_report
+    assert "# Primary-source findings" in report.markdown_report
     assert verification.verified
     assert len(model.calls) == 6
     model.assert_complete()
@@ -420,6 +420,7 @@ async def test_primary_source_recovery_requires_a_fresh_matching_check_and_read(
     url = "https://issuer.example/statements.pdf"
     claim = "Services revenue was $123.301 billion in fiscal 2026."
     original = PrimarySourceCheck(
+        dimension="Risks",
         claim=claim,
         source_url=url,
         supporting_extract="An unproven initial extract",
@@ -451,6 +452,7 @@ async def test_primary_source_recovery_requires_a_fresh_matching_check_and_read(
     read_claims.assert_awaited_once_with(url, [claim])
     assert opened == {url}
     assert audit.checks[0].supported is matching_claim
+    assert audit.checks[0].dimension == "Risks"
     if matching_claim:
         assert audit.checks[0].supporting_extract == fresh.supporting_extract
     else:
@@ -514,9 +516,75 @@ async def test_financial_audited_revision_uses_only_confirmed_claims(
         assert check.supporting_extract in revised.markdown_report
     assert "Revenue will double" not in revised.markdown_report
     assert "Profit was" not in revised.markdown_report
-    assert "Coverage:" in revised.markdown_report
+    assert "# Primary-source findings" in revised.markdown_report
     assert "### Revenue drivers" in revised.markdown_report
     assert "### Risks" in revised.markdown_report
     assert "$109.2" not in revised.markdown_report
     assert "because of" not in revised.markdown_report
     run_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_second_revision_combines_previously_read_revenue_and_new_risk_findings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.financial_research_agent.agents.primary_source_auditor import (
+        AuditedVerificationResult,
+        PrimarySourceCheck,
+    )
+
+    url = "https://issuer.example/annual-report"
+
+    def finding(dimension: str, excerpt: str) -> PrimarySourceCheck:
+        return PrimarySourceCheck(
+            dimension=dimension,
+            claim=excerpt,
+            source_url=url,
+            supporting_extract=excerpt,
+            supported=True,
+            analysis="This observation may matter for the requested dimension.",
+            explanation="Confirmed against the opened primary report.",
+        )
+
+    revenue = [
+        finding("Revenue drivers", "Services sales increased."),
+        finding("Revenue drivers", "Device sales increased."),
+    ]
+    risks = [
+        finding("Key risks", "Our markets face aggressive competition."),
+        finding("Key risks", "We depend on carriers and other resellers."),
+    ]
+
+    def rejected(findings: list[PrimarySourceCheck]) -> AuditedVerificationResult:
+        return AuditedVerificationResult(
+            verified=False,
+            issues=[],
+            primary_source_checks=[],
+            primary_source_findings=findings,
+            opened_source_urls=[url],
+        )
+
+    manager = FinancialResearchManager()
+    manager.printer = Mock()
+    original = FinancialReportData(
+        short_summary="Draft", markdown_report="Draft", follow_up_questions=[]
+    )
+    monkeypatch.setattr(manager, "_write_report", AsyncMock(return_value=original))
+    verify = AsyncMock(
+        side_effect=[
+            rejected(revenue),
+            rejected(risks),
+            VerificationResult(verified=True, issues=[]),
+        ]
+    )
+    monkeypatch.setattr(manager, "_verify_report", verify)
+
+    report, verification = await manager._produce_verified_report("Analyze drivers and risks", [])
+
+    assert verification.verified
+    assert "### Revenue drivers" in report.markdown_report
+    assert "### Key risks" in report.markdown_report
+    assert all(
+        finding.supporting_extract in report.markdown_report for finding in [*revenue, *risks]
+    )
+    assert verify.await_count == 3
