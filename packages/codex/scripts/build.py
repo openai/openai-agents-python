@@ -200,6 +200,15 @@ def main():
     if mode == "build" and manylinux:
         # Qualify the same Linux glibc baseline even if Maturin detects an older one.
         output.extend(["--compatibility", manylinux])
+    if (
+        mode == "build"
+        and args.release
+        and "CARGO_PROFILE_RELEASE_CODEGEN_UNITS" not in environment
+    ):
+        # Parallelize the binding's optimized compile independently of the helper binaries.
+        cargo_options.extend(
+            ["--config", "profile.release.package.codex-agents-python.codegen-units=8"]
+        )
     command = ["maturin", mode, "--locked", *cargo_options, *flags, *output]
     if pgo:
         build_pgo_with_helpers(command, project, wheel_environment, build_helpers, binaries)
