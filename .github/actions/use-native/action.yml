@@ -1,13 +1,40 @@
 name: Use the shared native build
 description: Reuse this workflow run's SDK wheel and test executor without compiling Rust.
+inputs:
+  mode:
+    description: Restore a qualified package or an exact current-run snapshot.
+    default: qualified
+  artifact-id:
+    description: Exact current-run snapshot ID when mode is snapshot.
+  artifact-digest:
+    description: Exact uploader SHA-256 when mode is snapshot.
+  native-key:
+    description: Checked-out native identity from the changes job.
+  native-provenance:
+    description: Captured current-run producer identity.
 runs:
   using: composite
   steps:
-    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+    - if: inputs.mode == 'qualified'
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       with:
         name: native-${{ runner.os }}-${{ runner.arch }}
         path: ${{ runner.temp }}/agents-native
+    - name: Download the exact current-run snapshot
+      if: inputs.mode == 'snapshot'
+      env:
+        GH_TOKEN: ${{ github.token }}
+        NATIVE_CURRENT_SNAPSHOT: 'true'
+        NATIVE_ARTIFACT_ID: ${{ inputs.artifact-id }}
+        NATIVE_ARTIFACT_DIGEST: ${{ inputs.artifact-digest }}
+        NATIVE_INPUT_IDENTITY: ${{ inputs.native-key }}
+        NATIVE_PROVENANCE: ${{ inputs.native-provenance }}
+        SNAPSHOT_DIRECTORY: ${{ runner.temp }}/agents-native
+      shell: bash
+      run: python -I -S .github/scripts/download-native-snapshot.py
     - name: Select native artifacts
+      env:
+        NATIVE_MODE: ${{ inputs.mode }}
       shell: bash
       run: |
         python - <<'PY'
@@ -15,6 +42,8 @@ runs:
         import shutil
         from pathlib import Path
 
+        if os.environ["NATIVE_MODE"] not in {"qualified", "snapshot"}:
+            raise ValueError("Unknown native artifact mode")
         artifacts = Path(os.environ["RUNNER_TEMP"]) / "agents-native"
         wheel, = artifacts.glob("openai_agents-*.whl")
         name = "exec-server-fixture" + (".exe" if os.name == "nt" else "")

@@ -35,7 +35,23 @@ def download_archive(artifact_id, digest, source_run, expected_name, archive):
 
 def main():
     identity = os.environ["RUNNER_OS"] + "-" + os.environ["RUNNER_ARCH"]
-    selected = json.loads(os.environ["NATIVE_ARTIFACTS"])[identity]
+    if os.environ.get("NATIVE_CURRENT_SNAPSHOT") == "true":
+        native_key = os.environ["NATIVE_INPUT_IDENTITY"]
+        if not re.fullmatch(r"[0-9a-f]{64}", native_key):
+            raise ValueError("Missing or invalid current native input identity")
+        provenance = json.loads(os.environ["NATIVE_PROVENANCE"])
+        if not isinstance(provenance, dict):
+            raise ValueError("Current native producer identity must be an object")
+        selected = {
+            "id": os.environ["NATIVE_ARTIFACT_ID"],
+            "digest": "sha256:" + os.environ["NATIVE_ARTIFACT_DIGEST"],
+            "name": "native-snapshot-" + identity + "-" + native_key,
+            "provenance": provenance,
+        }
+        source_run = os.environ["GITHUB_RUN_ID"]
+    else:
+        selected = json.loads(os.environ["NATIVE_ARTIFACTS"])[identity]
+        source_run = os.environ["NATIVE_SOURCE_RUN"]
     artifact_id, digest = selected["id"], selected["digest"]
     destination = Path(os.environ["SNAPSHOT_DIRECTORY"])
     destination.mkdir(parents=True, exist_ok=False)
@@ -43,7 +59,7 @@ def main():
         download_archive(
             artifact_id,
             digest,
-            os.environ["NATIVE_SOURCE_RUN"],
+            source_run,
             selected["name"],
             archive,
         )
