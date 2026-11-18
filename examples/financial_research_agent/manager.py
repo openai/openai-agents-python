@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -9,7 +10,16 @@ from datetime import datetime, timezone
 from pydantic import BaseModel
 from rich.console import Console
 
-from agents import Runner, RunResult, RunResultStreaming, custom_span, gen_trace_id, trace
+from agents import (
+    RunConfig,
+    Runner,
+    RunResult,
+    RunResultStreaming,
+    custom_span,
+    gen_trace_id,
+    trace,
+)
+from agents.models.openai_provider import OpenAIProvider
 from examples.web_search_utils import extract_url_citations, extract_web_search_source_urls
 
 from .agents.financials_agent import financials_agent
@@ -21,7 +31,7 @@ from .agents.planner_agent import (
 )
 from .agents.risk_agent import risk_agent
 from .agents.search_agent import FinancialSearchSummary, search_agent
-from .agents.verifier_agent import VerificationResult, verifier_agent
+from .agents.verifier_agent import VerificationIssue, VerificationResult, verifier_agent
 from .agents.writer_agent import REVISION_PROMPT, FinancialReportData, writer_agent
 from .printer import Printer
 
@@ -70,7 +80,8 @@ class FinancialResearchManager:
     Orchestrates the full flow: planning, searching, sub‑analysis, writing, and verification.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, run_config: RunConfig | None = None) -> None:
+        self.run_config = run_config or RunConfig()
         self.console = Console()
         self.printer = Printer(self.console)
         self.research_cutoff = datetime.now(timezone.utc).date().isoformat()
@@ -124,7 +135,7 @@ class FinancialResearchManager:
 
     async def _plan_searches(self, query: str) -> FinancialSearchPlan:
         self.printer.update_item("planning", "Planning searches...")
-        result = await Runner.run(planner_agent, f"Query: {query}")
+        result = await Runner.run(planner_agent, f"Query: {query}", run_config=self.run_config)
         self.printer.update_item(
             "planning",
             f"Will perform {min(len(result.final_output.searches), MAX_SEARCHES)} searches",
@@ -174,7 +185,15 @@ class FinancialResearchManager:
     async def _search(self, item: FinancialSearchItem) -> FinancialSearchEvidence | None:
         input_data = f"Search term: {item.query}\nReason: {item.reason}"
         try:
-            result = await Runner.run(search_agent, input_data)
+            # The stock Codex App Server does not expose the retrieved-source metadata.
+            # Keep this search on Responses in both modes rather than trusting generated URLs.
+            result = await Runner.run(
+                search_agent,
+                input_data,
+                run_config=RunConfig(
+                    model_provider=OpenAIProvider(use_responses=True, use_responses_websocket=False)
+                ),
+            )
             search_summary = result.final_output_as(FinancialSearchSummary)
             sources = _extract_financial_sources(result.new_items)
             if not sources:
@@ -200,16 +219,18 @@ class FinancialResearchManager:
             tool_name="fundamentals_analysis",
             tool_description="Use to get a short write‑up of key financial metrics",
             custom_output_extractor=_summary_extractor,
+            run_config=self.run_config,
         )
         risk_tool = risk_agent.as_tool(
             tool_name="risk_analysis",
             tool_description="Use to get a short write‑up of potential red flags",
             custom_output_extractor=_summary_extractor,
+            run_config=self.run_config,
         )
         writer_with_tools = writer_agent.clone(tools=[fundamentals_tool, risk_tool])
         self.printer.update_item("writing", "Thinking about report...")
         input_data = self._report_input(query, search_results)
-        result = Runner.run_streamed(writer_with_tools, input_data)
+        result = Runner.run_streamed(writer_with_tools, input_data, run_config=self.run_config)
         update_messages = [
             "Planning report structure...",
             "Writing sections...",
@@ -239,7 +260,7 @@ class FinancialResearchManager:
             f"Existing report:\n{report.model_dump_json()}\n"
             f"Verification feedback:\n{verification.model_dump_json()}"
         )
-        result = await Runner.run(revision_agent, input_data)
+        result = await Runner.run(revision_agent, input_data, run_config=self.run_config)
         self.printer.mark_item_done("revising")
         return result.final_output_as(FinancialReportData)
 
@@ -253,9 +274,30 @@ class FinancialResearchManager:
         result = await Runner.run(
             verifier_agent,
             self._verification_input(query, report, search_results),
+            run_config=self.run_config,
         )
         self.printer.mark_item_done("verifying")
-        return result.final_output_as(VerificationResult)
+        verification = result.final_output_as(VerificationResult)
+        # Require a complete supplied URL token; a lookalike hostname is not a citation.
+        has_source_url = any(
+            re.search(
+                r"(?<![\w/:])" + re.escape(source.url) + r"(?=$|[\s<>\"'`()\[\],;])",
+                report.markdown_report,
+            )
+            for evidence in search_results
+            for source in evidence.sources
+        )
+        issues = list(verification.issues)
+        if not has_source_url:
+            issues.append(
+                VerificationIssue(
+                    claim="Report source citations",
+                    category="unsupported",
+                    explanation="The report does not include a complete supplied source URL.",
+                    source_urls=[],
+                )
+            )
+        return VerificationResult(verified=verification.verified and not issues, issues=issues)
 
     def _verification_input(
         self,

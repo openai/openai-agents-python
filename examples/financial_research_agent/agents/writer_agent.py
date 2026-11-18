@@ -11,7 +11,12 @@ WRITER_PROMPT = (
     "questions. If needed, you can call the available analysis tools (e.g. fundamentals_analysis, "
     "risk_analysis) to get short specialist write‑ups to incorporate. Every material numeric or "
     "time-sensitive claim must include an inline Markdown citation using a URL supplied in the "
-    "research evidence. Never invent or alter a source URL."
+    "research evidence. Never invent or alter a source URL. Ground each factual clause in the "
+    "supplied summaries, including qualitative strategy and risk claims. A source URL alone "
+    "does not establish facts absent from its supplied summary. Do not broaden a supported "
+    "claim by combining it with a related but unsupported claim. Apply these rules to the "
+    "executive summary as well as the report. If evidence is insufficient, omit the claim "
+    "or frame it as a follow-up question; do not assert that a fact or source does not exist."
 )
 
 REVISION_PROMPT = (
@@ -19,7 +24,13 @@ REVISION_PROMPT = (
     "every verification issue, remove claims that cannot be supported, preserve valid analysis, "
     "and return a complete replacement report rather than a patch or commentary. Copy replacement "
     "citation URLs verbatim from each verification issue's source_urls; do not change path casing, "
-    "language segments, or query parameters."
+    "language segments, or query parameters. When an issue identifies an unsupported part of "
+    "a compound claim, delete that part everywhere, including the executive summary. Retain "
+    "only the narrower facts explicitly supported by the supplied evidence. Do not merely "
+    "rephrase the unsupported claim, soften it, or attach another citation. An issue's "
+    "source_urls identify evidence to inspect, not proof that the rejected claim is true. "
+    "Before returning, check every factual clause against the supplied evidence and remove "
+    "any remaining unsupported assertion."
 )
 
 

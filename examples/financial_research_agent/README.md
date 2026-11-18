@@ -1,38 +1,21 @@
-# Financial Research Agent Example
+# Write a financial report with source checks
 
-This example shows how you might compose a richer financial research agent using the Agents SDK. The pattern is similar to the `research_bot` example, but with more specialized sub‑agents and a verification step.
+Run this example to see how an agent plans research, consults financial and risk analysts, and checks a draft before showing it to the reader. You can switch the agents to stock Codex without changing the search or the evidence rules.
 
-The flow is:
-
-1. **Planning**: A planner agent turns the end user’s request into a list of search terms relevant to financial analysis – recent news, earnings calls, corporate filings, industry commentary, etc.
-2. **Search**: A search agent uses the built‑in `WebSearchTool` to retrieve terse summaries for each search term. (You could also add `FileSearchTool` if you have indexed PDFs or 10‑Ks.)
-3. **Sub‑analysts**: Additional agents (e.g. a fundamentals analyst and a risk analyst) are exposed as tools so the writer can call them inline and incorporate their outputs.
-4. **Writing**: A senior writer agent brings together the search snippets and any sub‑analyst summaries into a long‑form markdown report plus a short executive summary.
-5. **Verification**: A final verifier agent audits the report for obvious inconsistencies or missing sourcing.
-
-You can run the example with:
+From the repository root, set `OPENAI_API_KEY` in your environment. **Both modes use the Responses API for web search and incur search and model charges.** For Codex mode, also install the stock `codex` CLI and make sure it's on your `PATH`.
 
 ```bash
-python -m examples.financial_research_agent.main
+# Default provider
+uv run python -m examples.financial_research_agent.main
+
+# Stock Codex for planning, analysis, writing, and verification
+uv run python -m examples.financial_research_agent.main --codex
 ```
 
-and enter a query like:
+Enter the same question at either prompt, for example: "What drives Apple's long-term revenue, and what risks does Apple identify in its latest annual report?" Set `EXAMPLES_INTERACTIVE_MODE=auto` to try a supplied question without typing one.
 
-```
-Write up an analysis of Apple Inc.'s most recent quarter.
-```
+## What counts as evidence
 
-### Starter prompt
+Some model replies contain links that look like citations. The example doesn't treat those links as evidence on their own. In both modes, the search agent uses the Responses API's `WebSearchTool`: the SDK can read citation annotations and the search result's source URLs from that response. Stock Codex doesn't expose the same source metadata, so the `--codex` flag deliberately leaves **only search** on Responses.
 
-The writer agent is seeded with instructions similar to:
-
-```
-You are a senior financial analyst. You will be provided with the original query
-and a set of raw search summaries. Your job is to synthesize these into a
-long‑form markdown report (at least several paragraphs) with a short executive
-summary. You also have access to tools like `fundamentals_analysis` and
-`risk_analysis` to get short specialist write‑ups if you want to incorporate them.
-Add a few follow‑up questions for further research.
-```
-
-You can tweak these prompts and sub‑agents to suit your own data sources and preferred report structure.
+The verifier checks the report against the collected evidence. If it finds an issue, the writer gets one revision. If no search returns sources, or if the revised report still fails, the example raises an error instead of printing the report. A pass means the verifier accepted the report against the retrieved material. Check the sources yourself before relying on its conclusions.
