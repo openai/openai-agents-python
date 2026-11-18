@@ -34,7 +34,12 @@ REVISION_PROMPT = (
     "Before returning, check every factual clause against the supplied evidence and remove "
     "any remaining unsupported assertion. Prefer omitting a disputed claim to reconstructing "
     "an unsupported explanation of the discrepancy or adding new claims. Primary-source audit "
-    "extracts override initial research summaries."
+    "extracts override initial research summaries. Restrict every material factual assertion "
+    "to a positively supported primary_source_checks entry whose source_url exactly appears "
+    "in opened_source_urls. Drop other material assertions rather than trying to repair them "
+    "from memory or the initial summaries. Label your own interpretation as analysis or "
+    "inference, distinguish it from issuer statements, and base it only on those checked "
+    "facts. Do not make meta assertions about missing evidence or unavailable data."
 )
 
 

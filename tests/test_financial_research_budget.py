@@ -201,11 +201,6 @@ async def test_financial_run_config_reaches_orchestration_and_specialist(
         markdown_report="Original report [source](https://example.com/report)",
         follow_up_questions=[],
     )
-    revised = FinancialReportData(
-        short_summary="Revised",
-        markdown_report="Revised report [source](https://example.com/report)",
-        follow_up_questions=[],
-    )
     model = ScriptedModel(
         steps=[
             [assistant_message(plan.model_dump_json())],
@@ -213,7 +208,6 @@ async def test_financial_run_config_reaches_orchestration_and_specialist(
             [assistant_message('{"summary":"Supported financial analysis"}')],
             [assistant_message(original.model_dump_json())],
             [assistant_message('{"verified":false,"issues":[]}')],
-            [assistant_message(revised.model_dump_json())],
             [assistant_message('{"verified":true,"issues":[]}')],
         ]
     )
@@ -231,9 +225,9 @@ async def test_financial_run_config_reaches_orchestration_and_specialist(
     )
     report, verification = await manager._produce_verified_report("Analyze revenue", [evidence])
 
-    assert report == revised
+    assert "Coverage:" in report.markdown_report
     assert verification.verified
-    assert len(model.calls) == 7
+    assert len(model.calls) == 6
     model.assert_complete()
 
 
@@ -310,7 +304,14 @@ def primary_audit() -> object:
                 supporting_extract="Revenue increased",
                 supported=True,
                 explanation="The primary document supports the report.",
-            )
+            ),
+            PrimarySourceCheck(
+                claim="Revenue was $123 billion.",
+                source_url="https://example.com/report",
+                supporting_extract="Revenue was $123 billion.",
+                supported=True,
+                explanation="The primary document supports this metric.",
+            ),
         ]
     ), {"https://example.com/report"}
 
@@ -380,6 +381,11 @@ async def test_primary_audit_blocks_false_summary_approval_and_requires_complete
         retrieved_at=manager.research_cutoff,
     )
 
+    monkeypatch.setattr(
+        manager,
+        "_read_primary_source_claims",
+        AsyncMock(return_value=(PrimarySourceAudit(checks=[]), set())),
+    )
     result = await manager._verify_report("Analyze issuer", report, [evidence])
 
     assert isinstance(result, AuditedVerificationResult)
@@ -394,3 +400,105 @@ async def test_primary_audit_blocks_false_summary_approval_and_requires_complete
 
     verifier_payload = json.loads(run_agent.await_args_list[1].args[1])
     assert verifier_payload["primary_source_audit"] == audit.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("matching_claim", [False, True])
+async def test_primary_source_recovery_requires_a_fresh_matching_check_and_read(
+    monkeypatch: pytest.MonkeyPatch, matching_claim: bool
+) -> None:
+    from examples.financial_research_agent.agents.primary_source_auditor import (
+        PrimarySourceAudit,
+        PrimarySourceCheck,
+    )
+
+    url = "https://issuer.example/statements.pdf"
+    claim = "Services revenue was $123.301 billion in fiscal 2026."
+    original = PrimarySourceCheck(
+        claim=claim,
+        source_url=url,
+        supporting_extract="An unproven initial extract",
+        supported=True,
+        explanation="The initial audit claimed support without opening this document.",
+    )
+    fresh = original.model_copy(
+        update={
+            "claim": claim if matching_claim else "A different claim",
+            "supporting_extract": (
+                "Services 123,301; twelve months ended September 26, 2026; in millions"
+            ),
+            "explanation": (
+                "The newly opened primary document establishes the exact metric and period."
+            ),
+        }
+    )
+    initial_result = Mock(
+        final_output_as=Mock(return_value=PrimarySourceAudit(checks=[original])), new_items=[]
+    )
+    monkeypatch.setattr(Runner, "run", AsyncMock(return_value=initial_result))
+    manager = FinancialResearchManager()
+    read_claims = AsyncMock(return_value=(PrimarySourceAudit(checks=[fresh]), {url}))
+    monkeypatch.setattr(manager, "_read_primary_source_claims", read_claims)
+    report = FinancialReportData(short_summary=claim, markdown_report=claim, follow_up_questions=[])
+
+    audit, opened = await manager._audit_primary_sources("Analyze issuer", report)
+
+    read_claims.assert_awaited_once_with(url, [claim])
+    assert opened == {url}
+    assert audit.checks[0].supported is matching_claim
+    if matching_claim:
+        assert audit.checks[0].supporting_extract == fresh.supporting_extract
+    else:
+        assert "did not recheck" in audit.checks[0].explanation
+
+
+@pytest.mark.asyncio
+async def test_financial_audited_revision_uses_only_confirmed_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.financial_research_agent.agents.primary_source_auditor import (
+        AuditedVerificationResult,
+        PrimarySourceCheck,
+    )
+
+    url = "https://issuer.example/statements.pdf"
+    confirmed = [
+        PrimarySourceCheck(
+            claim=claim,
+            source_url=url,
+            supporting_extract=claim,
+            supported=True,
+            explanation="Confirmed against the opened primary statement.",
+        )
+        for claim in ["Revenue was $123 billion in FY2026.", "Revenue was $109 billion in FY2025."]
+    ]
+    unsupported = confirmed[0].model_copy(
+        update={"claim": "Revenue will double.", "supported": False}
+    )
+    unread = confirmed[0].model_copy(
+        update={"claim": "Profit was $80 billion.", "source_url": "https://unread.example/report"}
+    )
+    verdict = AuditedVerificationResult(
+        verified=False,
+        issues=[],
+        primary_source_checks=[*confirmed, unsupported, unread],
+        opened_source_urls=[url],
+    )
+    manager = FinancialResearchManager()
+    manager.printer = Mock()
+    run_agent = AsyncMock()
+    monkeypatch.setattr(Runner, "run", run_agent)
+    original = FinancialReportData(
+        short_summary="Revenue will double.",
+        markdown_report="Unsupported draft",
+        follow_up_questions=[],
+    )
+
+    revised = await manager._revise_report("Analyze issuer", original, [], verdict)
+
+    for check in confirmed:
+        assert check.claim in revised.markdown_report
+    assert "Revenue will double" not in revised.markdown_report
+    assert "Profit was" not in revised.markdown_report
+    assert "Coverage:" in revised.markdown_report
+    run_agent.assert_not_awaited()
