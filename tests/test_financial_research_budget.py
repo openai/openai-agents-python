@@ -118,7 +118,7 @@ async def test_financial_search_uses_responses_metadata_in_both_modes(
                 "object": "response",
                 "created_at": 0,
                 "status": "completed",
-                "model": "gpt-5.4",
+                "model": requests[-1]["model"],
                 "output": [
                     {
                         "type": "web_search_call",

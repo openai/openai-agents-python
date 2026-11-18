@@ -2,6 +2,7 @@ from pydantic import BaseModel
 
 from agents import Agent, ModelSettings, WebSearchTool
 
+from .search_agent import search_agent
 from .verifier_agent import VerificationResult
 
 
@@ -28,7 +29,7 @@ class AuditedVerificationResult(VerificationResult):
 
 auditor_agent = Agent(
     name="PrimarySourceFinancialAuditor",
-    model="gpt-5.4",
+    model=search_agent.model,
     instructions=(
         "Independently audit the financial report against actual primary documents. Initial "
         "research summaries may contain fabricated figures; never use them as evidence. Use "
