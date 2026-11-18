@@ -5,6 +5,7 @@ from typing import Generic
 
 from ..agent import Agent
 from ..model_settings import ModelSettings
+from ..models.interface import Model
 from ..run_context import TContext
 
 __all__ = [
@@ -21,6 +22,7 @@ class AgentBindings(Generic[TContext]):
     public_agent: Agent[TContext]
     execution_agent: Agent[TContext]
     model_settings_overrides: ModelSettings | None = None
+    resolved_model: Model | None = None
 
 
 def bind_public_agent(agent: Agent[TContext]) -> AgentBindings[TContext]:
@@ -33,10 +35,12 @@ def bind_execution_agent(
     public_agent: Agent[TContext],
     execution_agent: Agent[TContext],
     model_settings_overrides: ModelSettings | None = None,
+    resolved_model: Model | None = None,
 ) -> AgentBindings[TContext]:
     """Build bindings for execution-only clones such as sandbox-prepared agents."""
     return AgentBindings(
         public_agent=public_agent,
         execution_agent=execution_agent,
         model_settings_overrides=model_settings_overrides,
+        resolved_model=resolved_model,
     )

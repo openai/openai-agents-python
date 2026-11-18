@@ -51,7 +51,6 @@ class CodexProvider(ModelProvider):
     handoffs, approvals, and conversation history. Each request uses an ephemeral thread.
     """
 
-    _is_codex_provider = True
     _supports_stored_response_id = False
 
     def __init__(

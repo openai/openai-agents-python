@@ -12,6 +12,7 @@ from ..exceptions import UserError
 from ..items import TResponseInputItem
 from ..logger import log_model_and_tool_action_warning
 from ..model_settings import ModelSettings
+from ..models.interface import Model
 from ..result import RunResult, RunResultStreaming
 from ..run_config import RunConfig
 from ..run_context import RunContextWrapper, TContext
@@ -20,6 +21,7 @@ from ..run_internal.agent_bindings import (
     bind_execution_agent,
     bind_public_agent,
 )
+from ..run_internal.turn_preparation import get_model
 from ..run_state import RunState
 from ..tracing import custom_span, get_current_trace
 from ..tracing.context import TraceCtxManager
@@ -55,6 +57,7 @@ class _SandboxPreparedAgentCache(Generic[TContext]):
     agent: Agent[TContext]
     session: BaseSandboxSession
     run_as_name: str | None
+    resolved_model: Model | None
 
 
 def _supports_trace_spans() -> bool:
@@ -86,7 +89,7 @@ class SandboxRuntime(Generic[TContext]):
         self._sandbox_config = run_config.sandbox if run_config is not None else None
         self._tracing_disabled = run_config.tracing_disabled if run_config is not None else False
         self._run_config_model = run_config.model if run_config is not None else None
-        self._model_provider = run_config.model_provider if run_config is not None else None
+        self._run_config = run_config
         self._workspace_scope = SandboxWorkspaceScope.from_cwd(
             self._sandbox_config.cwd if self._sandbox_config is not None else None
         )
@@ -248,13 +251,9 @@ class SandboxRuntime(Generic[TContext]):
                 run_as=run_as,
             )
             prepared_agent: Agent[TContext]
-            resolved_model = None
-            if self._model_provider is not None and getattr(
-                self._model_provider, "_is_codex_provider", False
-            ):
-                model = self._run_config_model or current_agent.model
-                if model is None or isinstance(model, str):
-                    resolved_model = self._model_provider.get_model(model)
+            resolved_model = (
+                get_model(current_agent, self._run_config) if self._run_config is not None else None
+            )
             if cached_preparation is not None and cached_preparation.session is session:
                 # Reuse the cached execution agent's bound capability instances so context
                 # processing can depend on live session state and preserve per-run state.
@@ -262,12 +261,13 @@ class SandboxRuntime(Generic[TContext]):
                 prepared_agent = cached_agent
                 cached_capabilities = cached_agent.capabilities
                 _bind_capability_run_as(cached_capabilities, run_as)
-                prepared_input = prepare_sandbox_input(
-                    cached_capabilities,
-                    current_input,
-                )
                 run_as_name = run_as.name if run_as is not None else None
-                if cached_preparation.run_as_name != run_as_name:
+                if (
+                    cached_preparation.run_as_name != run_as_name
+                    or cached_agent.model != current_agent.model
+                    or getattr(cached_preparation.resolved_model, "_sandbox_model_capabilities", {})
+                    != getattr(resolved_model, "_sandbox_model_capabilities", {})
+                ):
                     prepared_agent = prepare_sandbox_agent(
                         agent=current_agent,
                         session=session,
@@ -280,7 +280,12 @@ class SandboxRuntime(Generic[TContext]):
                         agent=prepared_agent,
                         session=session,
                         run_as_name=run_as_name,
+                        resolved_model=resolved_model,
                     )
+                for capability in cached_capabilities:
+                    if isinstance(capability, Memory) and resolved_model is not None:
+                        capability._model_instance = resolved_model
+                prepared_input = prepare_sandbox_input(cached_capabilities, current_input)
                 self._set_active_memory_capability(prepared_agent)
                 return _SandboxPreparedAgent(
                     bindings=bind_execution_agent(
@@ -289,6 +294,7 @@ class SandboxRuntime(Generic[TContext]):
                         model_settings_overrides=ModelSettings(
                             extra_args=prepared_agent.model_settings.extra_args
                         ),
+                        resolved_model=resolved_model,
                     ),
                     input=prepared_input,
                 )
@@ -312,6 +318,7 @@ class SandboxRuntime(Generic[TContext]):
                 agent=prepared_agent,
                 session=session,
                 run_as_name=run_as.name if run_as is not None else None,
+                resolved_model=resolved_model,
             )
             self._set_active_memory_capability(prepared_agent)
             return _SandboxPreparedAgent(
@@ -321,6 +328,7 @@ class SandboxRuntime(Generic[TContext]):
                     model_settings_overrides=ModelSettings(
                         extra_args=prepared_agent.model_settings.extra_args
                     ),
+                    resolved_model=resolved_model,
                 ),
                 input=prepared_input,
             )

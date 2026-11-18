@@ -178,8 +178,6 @@ async def test_sandbox_capabilities_follow_codex_provider_string_resolution() ->
     model = _FunctionSandboxModel(steps=[[get_final_output_message("done")]])
 
     class Provider(ModelProvider):
-        _is_codex_provider = True
-
         def get_model(self, model_name: str | None) -> Model:
             assert model_name == "selected-model"
             return model
@@ -325,3 +323,189 @@ async def test_sandbox_preserves_custom_local_shell_execution_and_approval() -> 
     assert isinstance(model.calls[0].tools[0], ShellTool)
     assert getattr(model.calls[0].tools[0], "_sdk_sandbox", False) is True
     assert not getattr(shell, "_sdk_sandbox", False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("run_override", [False, True])
+async def test_mapped_provider_sandbox_uses_one_resolved_model_with_original_name(
+    streamed: bool, run_override: bool
+) -> None:
+    from agents.models.interface import Model, ModelProvider
+    from agents.models.multi_provider import MultiProvider, MultiProviderMap
+    from agents.sandbox.capabilities import Capability
+
+    model = _FunctionSandboxModel(steps=[[get_final_output_message("mapped sandbox")]])
+    names: list[str | None] = []
+    capability_names: list[str | None] = []
+
+    class NamedCapability(Capability):
+        type: str = "named"
+
+        def sampling_params(self, sampling_params):
+            capability_names.append(sampling_params.get("model"))
+            return {}
+
+    class Provider(ModelProvider):
+        def get_model(self, model_name: str | None) -> Model:
+            names.append(model_name)
+            return model
+
+    providers = MultiProviderMap()
+    providers.add_provider("codex", Provider())
+    selected = "codex/selected-model"
+    agent = SandboxAgent(
+        name="sandbox",
+        model="ignored" if run_override else selected,
+        capabilities=[Filesystem(), NamedCapability()],
+    )
+    config = RunConfig(
+        model=selected if run_override else None,
+        model_provider=MultiProvider(provider_map=providers),
+        sandbox=SandboxRunConfig(session=scripted_sandbox_session()),
+        tracing_disabled=True,
+    )
+    if streamed:
+        result = Runner.run_streamed(agent, "hello", run_config=config)
+        async for _event in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "hello", run_config=config)
+    assert result.final_output == "mapped sandbox"
+    assert names == ["selected-model"]
+    assert capability_names == [selected]
+    assert model.calls[0].tools
+    assert model.calls[0].model_settings.extra_args is None
+    assert all(getattr(tool, "_sdk_sandbox", False) for tool in model.calls[0].tools)
+    assert agent.model == ("ignored" if run_override else selected)
+    assert config.model == (selected if run_override else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("initial_codex", [False, True])
+async def test_cached_sandbox_preparation_tracks_model_selection_changes(
+    streamed: bool, initial_codex: bool
+) -> None:
+    from agents import function_tool
+    from agents.models.interface import Model, ModelProvider
+
+    first_type = _FunctionSandboxModel if initial_codex else ScriptedModel
+    second_type = ScriptedModel if initial_codex else _FunctionSandboxModel
+    first = first_type(steps=[[get_function_tool_call("switch_model", "{}")]])
+    second = second_type(steps=[[get_final_output_message("switched")]])
+    names: list[str | None] = []
+
+    class Provider(ModelProvider):
+        def get_model(self, model_name: str | None) -> Model:
+            names.append(model_name)
+            return first if model_name == "first" else second
+
+    @function_tool
+    def switch_model() -> str:
+        agent.model = "second"
+        return "Use the second model."
+
+    agent = SandboxAgent(name="sandbox", model="first", tools=[switch_model])
+    config = RunConfig(
+        model_provider=Provider(),
+        sandbox=SandboxRunConfig(session=scripted_sandbox_session()),
+        tracing_disabled=True,
+    )
+    if streamed:
+        result = Runner.run_streamed(agent, "switch models", run_config=config)
+        async for _event in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "switch models", run_config=config)
+    assert result.final_output == "switched"
+    assert names == ["first", "second"]
+    for recorded, is_codex in [
+        (first.calls[0], initial_codex),
+        (second.calls[0], not initial_codex),
+    ]:
+        sandbox_tools = [tool for tool in recorded.tools if tool.name != "switch_model"]
+        assert all(getattr(tool, "_sdk_sandbox", False) == is_codex for tool in sandbox_tools)
+        assert (recorded.model_settings.extra_args is None) == is_codex
+
+
+@pytest.mark.asyncio
+async def test_cached_memory_uses_current_resolved_model_without_rebuilding_capabilities() -> None:
+    from agents.models.interface import Model, ModelProvider
+    from agents.run_context import RunContextWrapper
+    from agents.sandbox.runtime import SandboxRuntime
+
+    first_model = _FunctionSandboxModel()
+    second_model = _FunctionSandboxModel()
+    models = iter([first_model, second_model])
+
+    class Provider(ModelProvider):
+        def get_model(self, model_name: str | None) -> Model:
+            assert model_name == "same-selection"
+            return next(models)
+
+    agent = SandboxAgent(name="sandbox", model="same-selection", capabilities=[Memory(read=None)])
+    runtime = SandboxRuntime(
+        starting_agent=agent,
+        run_config=RunConfig(
+            model_provider=Provider(),
+            sandbox=SandboxRunConfig(session=scripted_sandbox_session()),
+            tracing_disabled=True,
+        ),
+        run_state=None,
+    )
+    context = RunContextWrapper(context=None)
+    try:
+        first = await runtime.prepare_agent(
+            current_agent=agent,
+            current_input="first",
+            context_wrapper=context,
+            is_resumed_state=False,
+        )
+        memory = next(
+            cap for cap in first.bindings.execution_agent.capabilities if isinstance(cap, Memory)
+        )
+        assert memory.generation_config().phase_one_model is first_model
+        second = await runtime.prepare_agent(
+            current_agent=agent,
+            current_input="second",
+            context_wrapper=context,
+            is_resumed_state=False,
+        )
+        assert second.bindings.execution_agent is first.bindings.execution_agent
+        assert second.bindings.resolved_model is second_model
+        assert memory.generation_config().phase_one_model is second_model
+        assert memory.generation_config().phase_two_model is second_model
+    finally:
+        await runtime.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_sandbox_does_not_resolve_provider_when_blocking_guardrail_stops_run(
+    streamed: bool,
+) -> None:
+    from agents import GuardrailFunctionOutput, InputGuardrailTripwireTriggered, input_guardrail
+    from agents.models.interface import Model, ModelProvider
+
+    class Provider(ModelProvider):
+        def get_model(self, model_name: str | None) -> Model:
+            raise AssertionError("The blocked run must not resolve a model.")
+
+    @input_guardrail(run_in_parallel=False)
+    def blocked(context, agent, input):
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    agent = SandboxAgent(name="sandbox", model="selected-model", input_guardrails=[blocked])
+    config = RunConfig(
+        model_provider=Provider(),
+        sandbox=SandboxRunConfig(session=scripted_sandbox_session()),
+        tracing_disabled=True,
+    )
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        if streamed:
+            result = Runner.run_streamed(agent, "blocked", run_config=config)
+            async for _event in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "blocked", run_config=config)

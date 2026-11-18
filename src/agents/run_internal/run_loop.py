@@ -2520,7 +2520,11 @@ async def run_single_turn_streamed(
             if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
         ]
 
-    model = get_model(execution_agent, run_config)
+    model = (
+        bindings.resolved_model
+        if bindings.resolved_model is not None
+        else get_model(execution_agent, run_config)
+    )
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_model(model)
     tool_use_tracker.record_model(model)
@@ -3006,7 +3010,11 @@ async def get_new_response(
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
-    model = get_model(execution_agent, run_config)
+    model = (
+        bindings.resolved_model
+        if bindings.resolved_model is not None
+        else get_model(execution_agent, run_config)
+    )
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_model(model)
     tool_use_tracker.record_model(model)
