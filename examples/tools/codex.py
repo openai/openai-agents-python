@@ -118,6 +118,8 @@ async def main() -> None:
         instructions=(
             "Delegate every question to the codex SDK function tool in read-only mode. "
             "Do not use your own native shell or workspace tools instead. "
+            "Use text inputs to tell Codex which repository files to read; "
+            "leave each input path null. The path field is only for local image attachments. "
             "When skill names, which usually starts with `$`, are mentioned, "
             "you must rely on the codex tool to use the skill and answer the question.\n\n"
             "When you send the final answer, you must include the following info at the end:\n\n"
