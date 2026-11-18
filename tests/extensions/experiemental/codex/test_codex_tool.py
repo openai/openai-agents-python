@@ -7,12 +7,14 @@ import importlib
 import inspect
 import json
 from dataclasses import dataclass, fields
+from enum import Enum
+from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 from openai.types.responses import ResponseFunctionToolCall
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, ValidationInfo, field_validator
 
 import agents._debug as _debug
 from agents import Agent, Runner, function_tool
@@ -46,6 +48,7 @@ class CodexMockState:
         self.events: list[dict[str, Any]] = []
         self.thread_id: str | None = "thread-1"
         self.last_turn_options: Any = None
+        self.last_input: Any = None
         self.start_calls = 0
         self.resume_calls = 0
         self.last_resumed_thread_id: str | None = None
@@ -57,7 +60,8 @@ class FakeThread:
         self._state = state
         self.id: str | None = None
 
-    async def run_streamed(self, _input: Any, turn_options: Any = None) -> Any:
+    async def run_streamed(self, input: Any, turn_options: Any = None) -> Any:
+        self._state.last_input = input
         self._state.last_turn_options = turn_options
         self.id = self._state.thread_id
 
@@ -1480,7 +1484,7 @@ def test_codex_tool_result_stringifies() -> None:
 
 def test_codex_tool_parse_input_rejects_invalid_json() -> None:
     with pytest.raises(ModelBehaviorError, match="Invalid JSON input for codex tool"):
-        codex_tool_module._parse_tool_input(codex_tool_module.CodexToolParameters, "{bad")
+        codex_tool_module._parse_tool_input(codex_tool_module.CodexToolParameters, "{bad", "python")
 
 
 def test_codex_tool_normalize_parameters_requires_inputs() -> None:
@@ -1494,6 +1498,11 @@ def test_codex_tool_normalize_parameters_requires_inputs() -> None:
 def test_codex_tool_coerce_options_rejects_unknown_fields() -> None:
     with pytest.raises(UserError, match="Unknown Codex tool option"):
         codex_tool_module._coerce_tool_options({"unknown": "value"})
+
+
+def test_codex_tool_rejects_unknown_parameter_validation_mode() -> None:
+    with pytest.raises(UserError, match="parameter_validation_mode"):
+        codex_tool({"parameter_validation_mode": "invalid"})
 
 
 def test_codex_tool_keyword_rejects_empty_run_context_key() -> None:
@@ -2014,6 +2023,91 @@ def test_codex_tool_resolve_codex_options_reads_env(monkeypatch: pytest.MonkeyPa
     assert resolved.api_key == "env-key"
 
 
+class _RegisteredThread(str, Enum):
+    SUMMARIES = "thread-7"
+
+
+class _StrictTupleParameters(BaseModel):
+    model_config = ConfigDict(strict=True)
+    inputs: tuple[CodexToolInputItem, ...]
+    thread_id: _RegisteredThread | Literal["thread-archive"]
+
+
+class _UnionParameters(BaseModel):
+    inputs: list[CodexToolInputItem]
+    thread_id: Path | str
+
+
+@pytest.mark.parametrize(
+    "parameters, options",
+    [
+        pytest.param(
+            _StrictTupleParameters, {"parameter_validation_mode": "json"}, id="strict-json"
+        ),
+        pytest.param(_UnionParameters, None, id="default-python-union"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_codex_tool_invokes_thread_with_custom_parameters(
+    parameters: type[BaseModel],
+    options: dict[str, str] | None,
+) -> None:
+    state = CodexMockState()
+    tool = codex_tool(
+        options,
+        parameters=parameters,
+        codex=cast(Codex, FakeCodex(state)),
+        failure_error_function=None,
+    )
+    input_json = (
+        '{"inputs":[{"type":"text","text":"Summarize","path":null}],"thread_id":"thread-7"}'
+    )
+    context = ToolContext(
+        None, tool_name=tool.name, tool_call_id="call-1", tool_arguments=input_json
+    )
+
+    await tool.on_invoke_tool(context, input_json)
+
+    assert state.last_input == [{"type": "text", "text": "Summarize"}]
+    assert state.last_resumed_thread_id == "thread-7"
+
+
+@pytest.mark.parametrize("mode", ["python", "json"])
+@pytest.mark.asyncio
+async def test_codex_tool_does_not_retry_a_rejected_thread_id(
+    mode: Literal["python", "json"],
+) -> None:
+    thread_lookups: list[tuple[str, str]] = []
+
+    class RegisteredThreadParameters(BaseModel):
+        inputs: list[CodexToolInputItem]
+        thread_id: str
+
+        @field_validator("thread_id")
+        @classmethod
+        def require_registered_thread(cls, value: str, info: ValidationInfo) -> str:
+            thread_lookups.append((info.mode, value))
+            raise ValueError("Unknown thread")
+
+    state = CodexMockState()
+    tool = codex_tool(
+        parameters=RegisteredThreadParameters,
+        parameter_validation_mode=mode,
+        codex=cast(Codex, FakeCodex(state)),
+        failure_error_function=None,
+    )
+    input_json = '{"inputs":[{"type":"text","text":"Summarize"}],"thread_id":"unknown"}'
+    context = ToolContext(
+        None, tool_name=tool.name, tool_call_id="call-1", tool_arguments=input_json
+    )
+
+    with pytest.raises(ModelBehaviorError):
+        await tool.on_invoke_tool(context, input_json)
+
+    assert thread_lookups == [(mode, "unknown")]
+    assert state.start_calls == state.resume_calls == 0
+
+
 def test_codex_tool_accepts_all_keyword_overrides() -> None:
     state = CodexMockState()
 
@@ -2076,18 +2170,21 @@ _CODEX_TOOL_ARGUMENT_SECRET = "SECRET_CODEX_TOOL_ARGUMENT_123"
     ids=["validation", "json_decode"],
 )
 @pytest.mark.parametrize("redact", [True, False], ids=["redacted", "diagnostic"])
+@pytest.mark.parametrize("mode", ["python", "json"])
 @pytest.mark.asyncio
 async def test_codex_tool_argument_errors_respect_tool_data_redaction(
     monkeypatch: pytest.MonkeyPatch,
     input_json: str,
     cause_type: type[Exception],
     redact: bool,
+    mode: Literal["python", "json"],
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redact)
     tool = codex_tool(
         CodexToolOptions(
             codex=cast(Codex, FakeCodex(CodexMockState())),
             failure_error_function=None,
+            parameter_validation_mode=mode,
         )
     )
     context = ToolContext(

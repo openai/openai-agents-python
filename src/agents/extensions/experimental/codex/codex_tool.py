@@ -220,6 +220,8 @@ class CodexToolOptions:
     failure_error_function: ToolErrorFunction | None = default_tool_error_function
     use_run_context_thread_id: bool = False
     run_context_thread_id_key: str | None = None
+    parameter_validation_mode: Literal["python", "json"] = "python"
+    """Use "json" for strict types such as tuples. The default validates decoded Python values."""
 
 
 class CodexToolCallArguments(TypedDict):
@@ -256,7 +258,9 @@ def codex_tool(
     failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
     use_run_context_thread_id: bool | None = None,
     run_context_thread_id_key: str | None = None,
+    parameter_validation_mode: Literal["python", "json"] | None = None,
 ) -> FunctionTool:
+    """Create a Codex tool. Set parameter_validation_mode="json" for Pydantic's JSON input mode."""
     resolved_options = _coerce_tool_options(options)
     if name is not None:
         resolved_options.name = name
@@ -296,6 +300,10 @@ def codex_tool(
         resolved_options.use_run_context_thread_id = use_run_context_thread_id
     if run_context_thread_id_key is not None:
         resolved_options.run_context_thread_id_key = run_context_thread_id_key
+    if parameter_validation_mode is None:
+        parameter_validation_mode = resolved_options.parameter_validation_mode
+    if parameter_validation_mode not in ("python", "json"):
+        raise UserError('parameter_validation_mode must be "python" or "json".')
     resolved_options.codex_options = coerce_codex_options(resolved_options.codex_options)
     resolved_options.default_thread_options = coerce_thread_options(
         resolved_options.default_thread_options
@@ -338,7 +346,7 @@ def codex_tool(
         nonlocal persisted_thread
         resolved_thread_id: str | None = None
         try:
-            parsed = _parse_tool_input(parameters_model, input_json)
+            parsed = _parse_tool_input(parameters_model, input_json, parameter_validation_mode)
             args = _normalize_parameters(parsed)
 
             if resolved_options.use_run_context_thread_id:
@@ -530,25 +538,30 @@ def _validate_default_run_context_thread_id_suffix(value: str) -> str:
     return suffix
 
 
-def _parse_tool_input(parameters_model: type[BaseModel], input_json: str) -> BaseModel:
+def _parse_tool_input(
+    parameters_model: type[BaseModel], input_json: str, mode: Literal["python", "json"]
+) -> BaseModel:
     base_message = "Invalid JSON input for codex tool"
-    decode_failed = False
-    try:
-        json_data = json.loads(input_json) if input_json else {}
-    except Exception as exc:
-        if not _debug.DONT_LOG_TOOL_DATA:
-            logger.debug("%s: %s", base_message, input_json)
-            raise ModelBehaviorError(f"{base_message}: {input_json}") from exc
-        logger.debug(base_message)
-        decode_failed = True
 
-    if decode_failed:
+    def decode_json() -> object:
+        try:
+            return json.loads(input_json) if input_json else {}
+        except Exception as exc:
+            if not _debug.DONT_LOG_TOOL_DATA:
+                logger.debug("%s: %s", base_message, input_json)
+                raise ModelBehaviorError(f"{base_message}: {input_json}") from exc
+            logger.debug(base_message)
         raise ModelBehaviorError(base_message)
 
     try:
-        return parameters_model.model_validate(json_data)
+        if mode == "json":
+            return parameters_model.model_validate_json(input_json or "{}")
+        return parameters_model.model_validate(decode_json())
     except ValidationError as exc:
         if not _debug.DONT_LOG_TOOL_DATA:
+            if mode == "json":
+                # Retain the distinct JSONDecodeError cause for malformed diagnostic input.
+                decode_json()
             raise ModelBehaviorError(f"{base_message}: {exc}") from exc
 
     raise ModelBehaviorError(base_message)
