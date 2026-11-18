@@ -17,7 +17,7 @@ from openai import NOT_GIVEN, APIConnectionError, AsyncOpenAI, RateLimitError, o
 from openai.types.responses import Response, ResponseCompletedEvent, ResponseErrorEvent
 from openai.types.responses.response import IncompleteDetails
 from openai.types.responses.response_create_params import ContextManagement, PromptCacheOptions
-from openai.types.responses.response_usage import ResponseUsage
+from openai.types.responses.response_usage import InputTokensDetails, ResponseUsage
 from openai.types.responses.tool_param import ImageGeneration
 from openai.types.shared.reasoning import Reasoning
 
@@ -737,11 +737,9 @@ async def test_get_response_span_exports_usage():
             "input_tokens": 10,
             "output_tokens": 4,
             "total_tokens": 14,
-            "input_tokens_details": {
-                "cache_write_tokens_details": None,
-                "cached_tokens": 0,
-                "cache_write_tokens": 0,
-            },
+            "input_tokens_details": InputTokensDetails.model_validate(
+                {"cached_tokens": 0, "cache_write_tokens": 0}
+            ).model_dump(),
             "output_tokens_details": {"reasoning_tokens": 0},
         },
     }

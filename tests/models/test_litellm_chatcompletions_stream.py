@@ -26,6 +26,7 @@ from openai.types.responses import (
     ResponseReasoningItem,
     ResponseRefusalDeltaEvent,
 )
+from openai.types.responses.response_usage import InputTokensDetails
 
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.extensions.models.litellm_provider import LitellmProvider
@@ -878,11 +879,9 @@ async def test_stream_span_is_populated_before_yielding_completed(
                         "input_tokens": 7 if with_usage else 0,
                         "output_tokens": 5 if with_usage else 0,
                         "total_tokens": 12 if with_usage else 0,
-                        "input_tokens_details": {
-                            "cache_write_tokens_details": None,
-                            "cached_tokens": 2 if with_usage else 0,
-                            "cache_write_tokens": 0,
-                        },
+                        "input_tokens_details": InputTokensDetails.model_validate(
+                            {"cached_tokens": 2 if with_usage else 0, "cache_write_tokens": 0}
+                        ).model_dump(),
                         "output_tokens_details": {"reasoning_tokens": 3 if with_usage else 0},
                     }
                     assert generation.span_data.output == (

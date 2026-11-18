@@ -113,11 +113,9 @@ async def test_get_response_creates_trace(monkeypatch):
                                 "input_tokens": 1,
                                 "output_tokens": 1,
                                 "total_tokens": 2,
-                                "input_tokens_details": {
-                                    "cache_write_tokens_details": None,
-                                    "cached_tokens": 0,
-                                    "cache_write_tokens": 0,
-                                },
+                                "input_tokens_details": InputTokensDetails.model_validate(
+                                    {"cached_tokens": 0, "cache_write_tokens": 0}
+                                ).model_dump(),
                                 "output_tokens_details": {"reasoning_tokens": 0},
                             },
                         },
@@ -181,11 +179,9 @@ async def test_non_data_tracing_preserves_response_id_without_response(monkeypat
                                 "input_tokens": 1,
                                 "output_tokens": 1,
                                 "total_tokens": 2,
-                                "input_tokens_details": {
-                                    "cache_write_tokens_details": None,
-                                    "cached_tokens": 0,
-                                    "cache_write_tokens": 0,
-                                },
+                                "input_tokens_details": InputTokensDetails.model_validate(
+                                    {"cached_tokens": 0, "cache_write_tokens": 0}
+                                ).model_dump(),
                                 "output_tokens_details": {"reasoning_tokens": 0},
                             },
                         },
@@ -350,11 +346,9 @@ async def test_stream_response_creates_trace(monkeypatch):
                                 "input_tokens": 0,
                                 "output_tokens": 0,
                                 "total_tokens": 0,
-                                "input_tokens_details": {
-                                    "cache_write_tokens_details": None,
-                                    "cached_tokens": 0,
-                                    "cache_write_tokens": 0,
-                                },
+                                "input_tokens_details": InputTokensDetails.model_validate(
+                                    {"cached_tokens": 0, "cache_write_tokens": 0}
+                                ).model_dump(),
                                 "output_tokens_details": {"reasoning_tokens": 0},
                             },
                         },
@@ -434,11 +428,9 @@ async def test_stream_response_failed_or_incomplete_terminal_event_creates_trace
                             "input_tokens": 0,
                             "output_tokens": 0,
                             "total_tokens": 0,
-                            "input_tokens_details": {
-                                "cache_write_tokens_details": None,
-                                "cached_tokens": 0,
-                                "cache_write_tokens": 0,
-                            },
+                            "input_tokens_details": InputTokensDetails.model_validate(
+                                {"cached_tokens": 0, "cache_write_tokens": 0}
+                            ).model_dump(),
                             "output_tokens_details": {"reasoning_tokens": 0},
                         }
                     },
@@ -519,11 +511,9 @@ async def test_stream_non_data_tracing_preserves_response_id_without_response(
                                 "input_tokens": 0,
                                 "output_tokens": 0,
                                 "total_tokens": 0,
-                                "input_tokens_details": {
-                                    "cache_write_tokens_details": None,
-                                    "cached_tokens": 0,
-                                    "cache_write_tokens": 0,
-                                },
+                                "input_tokens_details": InputTokensDetails.model_validate(
+                                    {"cached_tokens": 0, "cache_write_tokens": 0}
+                                ).model_dump(),
                                 "output_tokens_details": {"reasoning_tokens": 0},
                             },
                         },
