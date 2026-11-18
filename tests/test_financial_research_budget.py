@@ -588,3 +588,123 @@ async def test_second_revision_combines_previously_read_revenue_and_new_risk_fin
         finding.supporting_extract in report.markdown_report for finding in [*revenue, *risks]
     )
     assert verify.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_second_revision_prioritizes_current_findings_and_removes_superseded_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.financial_research_agent.agents.primary_source_auditor import (
+        AuditedVerificationResult,
+        PrimarySourceCheck,
+    )
+
+    url = "https://issuer.example/annual-report"
+
+    def finding(dimension: str, excerpt: str, analysis: str = "") -> PrimarySourceCheck:
+        return PrimarySourceCheck(
+            dimension=dimension,
+            claim=excerpt,
+            source_url=url,
+            supporting_extract=excerpt,
+            supported=True,
+            analysis=analysis,
+            explanation="Confirmed in the independently opened filing.",
+        )
+
+    old = [
+        finding(" Revenue  DRIVERS ", "Old services excerpt.", "Rejected named-category premise."),
+        finding("KEY RISKS", "Old risk excerpt.", "Rejected risk prediction."),
+    ]
+    current = [
+        finding("revenue drivers", "Corrected services excerpt.", "New inference not yet tested."),
+        finding("key risks", "Corrected risk excerpt."),
+    ]
+    first = AuditedVerificationResult(
+        verified=False,
+        issues=[],
+        primary_source_checks=[],
+        primary_source_findings=old,
+        opened_source_urls=[url],
+    )
+    second = first.model_copy(
+        update={
+            "primary_source_findings": current,
+            "primary_source_checks": [old[0].model_copy(update={"supported": False})],
+        }
+    )
+    manager = FinancialResearchManager()
+    manager.printer = Mock()
+    draft = FinancialReportData(
+        short_summary="Draft", markdown_report="Draft", follow_up_questions=[]
+    )
+    monkeypatch.setattr(manager, "_write_report", AsyncMock(return_value=draft))
+    verify = AsyncMock(side_effect=[first, second, VerificationResult(verified=True, issues=[])])
+    monkeypatch.setattr(manager, "_verify_report", verify)
+
+    report, verification = await manager._produce_verified_report(
+        "Analyze revenue drivers and key risks", []
+    )
+
+    assert verification.verified
+    assert all(f.supporting_extract in report.markdown_report for f in current)
+    assert all(f.supporting_extract not in report.markdown_report for f in old)
+    assert "Rejected" not in report.markdown_report
+    assert "New inference" not in report.markdown_report
+    assert "Analysis (inference)" not in report.markdown_report
+    assert verify.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_insufficient_first_repair_allows_next_bounded_audit_to_find_complementary_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.financial_research_agent.agents.primary_source_auditor import (
+        AuditedVerificationResult,
+        PrimarySourceCheck,
+    )
+
+    url = "https://issuer.example/annual-report"
+    revenue = PrimarySourceCheck(
+        dimension="Revenue drivers",
+        claim="Services increased.",
+        supporting_extract="Services increased.",
+        source_url=url,
+        supported=True,
+        explanation="Read.",
+    )
+    risk = revenue.model_copy(
+        update={
+            "dimension": "Key risks",
+            "claim": "Competition is intense.",
+            "supporting_extract": "Competition is intense.",
+        }
+    )
+    first = AuditedVerificationResult(
+        verified=False,
+        issues=[],
+        primary_source_checks=[],
+        primary_source_findings=[revenue],
+        opened_source_urls=[url],
+    )
+    manager = FinancialResearchManager()
+    manager.printer = Mock()
+    draft = FinancialReportData(
+        short_summary="Draft", markdown_report="Draft", follow_up_questions=[]
+    )
+    monkeypatch.setattr(manager, "_write_report", AsyncMock(return_value=draft))
+    verify = AsyncMock(
+        side_effect=[
+            first,
+            first.model_copy(update={"primary_source_findings": [revenue, risk]}),
+            VerificationResult(verified=True, issues=[]),
+        ]
+    )
+    monkeypatch.setattr(manager, "_verify_report", verify)
+
+    report, _ = await manager._produce_verified_report("Analyze drivers and risks", [])
+
+    assert verify.await_args_list[1].args[1] == draft
+    assert revenue.supporting_extract in report.markdown_report
+    assert risk.supporting_extract in report.markdown_report
+    assert verify.await_count == 3

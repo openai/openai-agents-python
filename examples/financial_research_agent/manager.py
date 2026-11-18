@@ -147,7 +147,7 @@ class FinancialResearchManager:
         search_results: Sequence[FinancialSearchEvidence],
     ) -> tuple[FinancialReportData, VerificationResult]:
         report = await self._write_report(query, search_results)
-        confirmed_findings = {}
+        previous_findings = []
         opened_urls: set[str] = set()
         for revision in range(3):
             verification = await self._verify_report(query, report, search_results)
@@ -157,18 +157,40 @@ class FinancialResearchManager:
                 break
             if isinstance(verification, AuditedVerificationResult):
                 opened_urls.update(verification.opened_source_urls)
-                for finding in verification.primary_source_findings:
-                    if (
-                        finding.supported
-                        and finding.supporting_extract.strip()
-                        and finding.source_url in verification.opened_source_urls
-                    ):
-                        confirmed_findings[
-                            (finding.dimension, finding.source_url, finding.supporting_extract)
-                        ] = finding
+                current = [
+                    finding
+                    for finding in verification.primary_source_findings
+                    if finding.supported
+                    and finding.supporting_extract.strip()
+                    and finding.source_url in verification.opened_source_urls
+                ]
+                current_dimensions = {" ".join(f.dimension.casefold().split()) for f in current}
+                rejected = [
+                    check
+                    for check in [
+                        *verification.primary_source_checks,
+                        *verification.primary_source_findings,
+                    ]
+                    if not check.supported
+                ]
+                rejected_dimensions = {" ".join(f.dimension.casefold().split()) for f in rejected}
+                rejected_sources = {f.source_url for f in rejected}
+                # Current corrections supersede old findings; historical material only fills gaps.
+                retained = [
+                    finding.model_copy(update={"analysis": ""})
+                    for finding in previous_findings
+                    if " ".join(finding.dimension.casefold().split())
+                    not in current_dimensions | rejected_dimensions
+                    and finding.source_url not in rejected_sources
+                ]
+                previous_findings = [*current, *retained]
+                revision_findings = [
+                    finding.model_copy(update={"analysis": ""}) if revision == 1 else finding
+                    for finding in previous_findings
+                ]
                 verification = verification.model_copy(
                     update={
-                        "primary_source_findings": list(confirmed_findings.values()),
+                        "primary_source_findings": revision_findings,
                         "opened_source_urls": sorted(opened_urls),
                     }
                 )
@@ -319,9 +341,12 @@ class FinancialResearchManager:
                     if findings and len(confirmed) < 4:
                         confirmed.append(findings.pop(0))
             if len(confirmed) < 2:
-                raise RuntimeError(
-                    "Financial report has insufficient independently confirmed complementary findings."
+                self.printer.update_item(
+                    "revising",
+                    "Insufficient confirmed findings; collecting fresh audit evidence.",
+                    is_done=True,
                 )
+                return report
             paragraphs = [
                 f"### {finding.dimension}\n\n"
                 f"> {finding.supporting_extract}\n\n"
