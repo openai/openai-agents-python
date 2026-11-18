@@ -51,6 +51,7 @@ jobs:
       native_source_run: ${{ steps.native-source.outputs.run_id }}
       native_artifacts: ${{ steps.native-source.outputs.artifacts }}
       native_provenance: ${{ steps.producer-identity.outputs.provenance }}
+      native_key: ${{ steps.native-inputs.outputs.identity }}
       sdk_tests: ${{ steps.sdk-tests.outputs.settings }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -182,6 +183,19 @@ jobs:
                   output.write("pr_number=" + str(record["pull_request"]["number"]) + "\n")
                   output.write("base_ref=" + record["pull_request"]["base_ref"] + "\n")
           PYTHON
+      - name: Identify current native build inputs
+        id: native-inputs
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          python -I -S - <<'PYTHON'
+          import os
+          import runpy
+          from pathlib import Path
+
+          identity = runpy.run_path('packages/codex/scripts/source_integrity.py')['native_bundle_identity'](Path('.'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('identity=' + identity + '\n')
+          PYTHON
       - name: Publish native producer identity
         if: github.event_name == 'push' && steps.changes.outputs.run == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -209,6 +223,7 @@ jobs:
           CURRENT_HEAD_REF: ${{ github.head_ref || github.ref_name }}
           CURRENT_BASE_REF: ${{ github.base_ref || steps.producer-identity.outputs.base_ref || '' }}
           REQUIRE_WINDOWS: ${{ steps.release-windows.outputs.run }}
+          NATIVE_INPUT_IDENTITY: ${{ steps.native-inputs.outputs.identity }}
           REUSE_ARM64: >-
             ${{ !inputs.native_only &&
             ((github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness') ||
@@ -235,7 +250,9 @@ jobs:
           download_archive = runpy.run_path('.github/scripts/download-native-snapshot.py')['download_archive']
           integrity = runpy.run_path('packages/codex/scripts/source_integrity.py')
           native_inputs = integrity['native_inputs']
-          native_identity = integrity['native_bundle_identity'](Path('.'))
+          native_identity = os.environ['NATIVE_INPUT_IDENTITY']
+          if not re.fullmatch(r'[0-9a-f]{64}', native_identity):
+              raise SystemExit('Missing or invalid current native input identity')
 
           def get(url):
               with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
@@ -581,7 +598,7 @@ jobs:
   native-linux:
     # PRs qualify platform-specific artifacts independently of Windows failures.
     # Push runs retain the producer ordering for reusable snapshots.
-    needs: [changes, produce-linux, produce-windows, produce-macos]
+    needs: &native_snapshot_jobs [changes, produce-linux, produce-windows, produce-macos]
     if: >-
       !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
       needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
@@ -591,6 +608,7 @@ jobs:
     uses: ./.github/workflows/codex-python-qualify.yml
     with:
       runner: ubuntu-24.04
+      sdk_checks: ${{ !inputs.native_only }}
       artifact_id: ${{ needs.produce-linux.outputs.artifact_id }}
       artifact_digest: ${{ needs.produce-linux.outputs.artifact_digest }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
@@ -626,7 +644,7 @@ jobs:
 
   lint:
     needs: [changes, produce-linux, produce-windows, produce-macos]
-    if: >-
+    if: &sdk_checks >-
       !inputs.native_only &&
       !cancelled() && needs.changes.result == 'success' &&
       ((needs.changes.outputs.code == 'false' && needs.produce-linux.result == 'skipped' &&
@@ -755,12 +773,8 @@ jobs:
         run: echo "Skipping Windows mypy for non-code changes."
 
   tests:
-    needs: [changes, native-linux]
-    if: >-
-      !inputs.native_only &&
-      !cancelled() && needs.changes.result == 'success' &&
-      ((needs.changes.outputs.code == 'false' && needs.native-linux.result == 'skipped') ||
-      (needs.changes.outputs.code == 'true' && needs.native-linux.result == 'success'))
+    needs: *native_snapshot_jobs
+    if: *sdk_checks
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
     strategy:
@@ -796,6 +810,12 @@ jobs:
       - name: Use the shared native build
         if: steps.changes.outputs.run == 'true'
         uses: ./.github/actions/use-native
+        with:
+          mode: snapshot
+          artifact-id: ${{ needs.produce-linux.outputs.artifact_id }}
+          artifact-digest: ${{ needs.produce-linux.outputs.artifact_digest }}
+          native-key: ${{ needs.changes.outputs.native_key }}
+          native-provenance: ${{ needs.changes.outputs.native_provenance }}
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
@@ -848,19 +868,6 @@ jobs:
           AGENTS_REQUIRE_TRACING_QUALIFICATION: '1'
         run: |
           uv run --with grpcio==1.85.0 --with opentelemetry-proto==1.45.1 python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_tracing_native.py packages/codex/tests/test_telemetry_transports.py
-      - name: Verify the qualified wheel archive
-        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
-        env:
-          OPENAI_AGENTS_WHEEL: ${{ env.OPENAI_AGENTS_NATIVE_WHEEL }}
-        run: PYTHONPATH=. uv run --no-sync python -m pytest -q packages/codex/tests/test_distribution.py
-      - name: Verify copied documentation and public tools against the qualified wheel
-        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
-        run: |
-          uv pip install --no-deps --target "$RUNNER_TEMP/docs-wheel" "$OPENAI_AGENTS_NATIVE_WHEEL"
-          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -c 'import agents, _agents_codex, os; from agents import _native; from pathlib import Path; root = Path(os.environ["PYTHONPATH"]).resolve(); assert all(Path(module.__file__).resolve().is_relative_to(root) for module in (agents, _agents_codex, _native)), "SDK imports must use the qualified wheel"'
-          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python .github/scripts/check_docs.py
-          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -m pytest -q packages/codex/tests/test_docs_code.py
-          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -m pytest -q packages/codex/tests/test_native_tool_input_recovery.py::test_strict_missing_arguments_return_retryable_error packages/codex/tests/test_native_tool_input_recovery.py::test_original_input_recovery_before_policy_and_execution
       - name: Set up Node for the optional Vercel client example
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -1035,8 +1042,14 @@ jobs:
           if-no-files-found: error
 
   native-macos-sandbox-shards:
-    if: ${{ !inputs.native_only }}
-    needs: [changes, native-macos]
+    if: >-
+      !inputs.native_only &&
+      !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
+      needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
+      (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
+      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))
+    needs: *native_snapshot_jobs
     runs-on: ${{ github.repository == 'openai/openai-agents-python' && 'macos-15' || 'macos-latest' }}
     timeout-minutes: 100
     name: macOS sandbox shard (${{ matrix.shard }})
@@ -1065,6 +1078,12 @@ jobs:
       - name: Use the shared native build
         if: steps.changes.outputs.run == 'true'
         uses: ./.github/actions/use-native
+        with:
+          mode: snapshot
+          artifact-id: ${{ needs.produce-macos.outputs.artifact_id }}
+          artifact-digest: ${{ needs.produce-macos.outputs.artifact_digest }}
+          native-key: ${{ needs.changes.outputs.native_key }}
+          native-provenance: ${{ needs.changes.outputs.native_provenance }}
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
@@ -1132,8 +1151,8 @@ jobs:
         run: test "$RESULT" = success
 
   tests-windows-shards:
-    if: ${{ !inputs.native_only }}
-    needs: [changes, native-windows]
+    if: ${{ !inputs.native_only && !cancelled() && success() && needs.changes.outputs.windows == 'true' }}
+    needs: *native_snapshot_jobs
     name: Windows test shard (${{ matrix.python-version }}, ${{ matrix.shard }})
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
     timeout-minutes: 100
@@ -1168,6 +1187,12 @@ jobs:
       - name: Use the shared native build
         if: steps.changes.outputs.run == 'true'
         uses: ./.github/actions/use-native
+        with:
+          mode: snapshot
+          artifact-id: ${{ needs.produce-windows.outputs.artifact_id }}
+          artifact-digest: ${{ needs.produce-windows.outputs.artifact_digest }}
+          native-key: ${{ needs.changes.outputs.native_key }}
+          native-provenance: ${{ needs.changes.outputs.native_provenance }}
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: uv sync --group dev

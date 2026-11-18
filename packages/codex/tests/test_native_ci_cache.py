@@ -771,14 +771,17 @@ def test_qualification_repack_receives_verified_overlay_in_its_environment(
         "metadata",
         "name",
         "missing",
+        "expired",
+        "captured_identity",
         "traversal",
         "duplicate",
         "tool_error",
         "inventory",
     ],
 )
+@pytest.mark.parametrize("current_run", [False, True], ids=["donor", "current-producer"])
 def test_snapshot_download_checks_exact_publication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str, current_run: bool
 ) -> None:
     import hashlib
     import io
@@ -789,7 +792,8 @@ def test_snapshot_download_checks_exact_publication(
         wheel = "openai_agents-fixture.whl"
         bundle.writestr("../escaped" if scenario == "traversal" else wheel, b"native")
         bundle.writestr(wheel + ".pristine.json", b"receipt")
-        bundle.writestr("native-provenance.json", json.dumps({"source_sha": "fixture"}))
+        source_sha = "foreign" if scenario == "captured_identity" else "fixture"
+        bundle.writestr("native-provenance.json", json.dumps({"source_sha": source_sha}))
         if scenario != "inventory":
             bundle.writestr("exec-server-fixture" + (".exe" if os.name == "nt" else ""), b"fixture")
         if scenario == "duplicate":
@@ -797,6 +801,8 @@ def test_snapshot_download_checks_exact_publication(
                 bundle.writestr(wheel, b"replacement")
     payload = archive.getvalue()
     digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    native_key = "a" * 64
+    name = "native-snapshot-Linux-X64-" + native_key
     for key, value in {
         "RUNNER_OS": "Linux",
         "RUNNER_ARCH": "X64",
@@ -808,13 +814,22 @@ def test_snapshot_download_checks_exact_publication(
                     "id": 456,
                     "digest": digest,
                     "provenance": {"source_sha": "fixture"},
-                    "name": "native-snapshot-Linux-X64",
+                    "name": name,
                 }
             }
         ),
         "SNAPSHOT_DIRECTORY": str(tmp_path / "snapshot"),
     }.items():
         monkeypatch.setenv(key, value)
+    if current_run:
+        monkeypatch.setenv("NATIVE_CURRENT_SNAPSHOT", "true")
+        monkeypatch.setenv("GITHUB_RUN_ID", "123")
+        monkeypatch.setenv("NATIVE_INPUT_IDENTITY", native_key)
+        monkeypatch.setenv("NATIVE_PROVENANCE", json.dumps({"source_sha": "fixture"}))
+        monkeypatch.setenv("NATIVE_ARTIFACT_ID", "456")
+        monkeypatch.setenv("NATIVE_ARTIFACT_DIGEST", digest.removeprefix("sha256:"))
+        monkeypatch.delenv("NATIVE_ARTIFACTS")
+        monkeypatch.delenv("NATIVE_SOURCE_RUN")
 
     def metadata(command: list[str], **kwargs: object) -> str:
         assert command == ["gh", "api", "repos/openai/openai-agents-python/actions/artifacts/456"]
@@ -823,10 +838,8 @@ def test_snapshot_download_checks_exact_publication(
         return json.dumps(
             {
                 "workflow_run": {"id": 999 if scenario == "metadata" else 123},
-                "name": "different-native-snapshot"
-                if scenario == "name"
-                else "native-snapshot-Linux-X64",
-                "expired": False,
+                "name": "different-native-snapshot" if scenario == "name" else name,
+                "expired": scenario == "expired",
                 "digest": digest,
             }
         )
@@ -850,6 +863,64 @@ def test_snapshot_download_checks_exact_publication(
         runpy.run_path(str(script), run_name="__main__")
         assert (tmp_path / "snapshot" / wheel).read_bytes() == b"native"
     assert not (tmp_path / "escaped").exists()
+
+
+@pytest.mark.parametrize(
+    ("variable", "invalid"),
+    [
+        ("NATIVE_INPUT_IDENTITY", ""),
+        ("NATIVE_PROVENANCE", "[]"),
+        ("NATIVE_ARTIFACT_ID", ""),
+        ("NATIVE_ARTIFACT_DIGEST", ""),
+    ],
+)
+def test_incomplete_current_producer_fails_before_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str, invalid: str
+) -> None:
+    import runpy
+
+    for key, value in {
+        "NATIVE_CURRENT_SNAPSHOT": "true",
+        "RUNNER_OS": "Linux",
+        "RUNNER_ARCH": "X64",
+        "GITHUB_RUN_ID": "123",
+        "NATIVE_INPUT_IDENTITY": "a" * 64,
+        "NATIVE_PROVENANCE": "{}",
+        "NATIVE_ARTIFACT_ID": "456",
+        "NATIVE_ARTIFACT_DIGEST": "a" * 64,
+        "SNAPSHOT_DIRECTORY": str(tmp_path / "snapshot"),
+    }.items():
+        monkeypatch.setenv(key, invalid if key == variable else value)
+    with pytest.raises(ValueError):
+        runpy.run_path(
+            str(ROOT / ".github/scripts/download-native-snapshot.py"), run_name="__main__"
+        )
+
+
+def test_early_source_suites_use_the_current_platform_snapshot() -> None:
+    jobs = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)[
+        "jobs"
+    ]
+    snapshots = {
+        name: step["with"]
+        for name, job in jobs.items()
+        for step in job.get("steps", [])
+        if step.get("uses") == "./.github/actions/use-native"
+        and step.get("with", {}).get("mode") == "snapshot"
+    }
+    owners = {
+        "tests": "linux",
+        "native-macos-sandbox-shards": "macos",
+        "tests-windows-shards": "windows",
+    }
+    assert snapshots.keys() == owners.keys()
+    for name, platform in owners.items():
+        selected = snapshots[name]
+        prefix = "${{ needs.produce-" + platform + ".outputs."
+        assert selected["artifact-id"] == prefix + "artifact_id }}"
+        assert selected["artifact-digest"] == prefix + "artifact_digest }}"
+        assert selected["native-key"] == "${{ needs.changes.outputs.native_key }}"
+        assert selected["native-provenance"] == "${{ needs.changes.outputs.native_provenance }}"
 
 
 @pytest.mark.parametrize(

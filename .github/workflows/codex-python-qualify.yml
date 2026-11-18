@@ -3,6 +3,9 @@ name: Build installable SDK package
 on:
   workflow_call:
     inputs:
+      sdk_checks:
+        type: boolean
+        default: false
       native_provenance:
         type: string
         required: true
@@ -389,6 +392,42 @@ jobs:
               cwd=stage, env=env, check=True,
           )
           PYTHON
+      - name: Prepare qualified Python 3.11 archive and documentation checks
+        if: inputs.sdk_checks && inputs.runner == 'ubuntu-24.04'
+        run: |
+          UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/sdk-3.11" UV_PYTHON="$RUNNER_TEMP/sdk-3.11/bin/python" \
+            uv sync --frozen --inexact --no-install-project --group dev
+          "$RUNNER_TEMP/sdk-3.11/bin/python" -I - <<'PYTHON'
+          import os
+          import sys
+          from pathlib import Path
+          import agents
+          import _agents_codex
+          from agents import _native
+
+          assert sys.version_info[:2] == (3, 11)
+          root = Path(sys.prefix).resolve()
+          assert all(Path(module.__file__).resolve().is_relative_to(root) for module in (agents, _agents_codex, _native)), "SDK imports must use the qualified wheel"
+          wheel, = Path('dist').glob('openai_agents-*.whl')
+          fixture = Path('dist/exec-server-fixture').resolve()
+          assert fixture.is_file() and os.access(fixture, os.X_OK)
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'OPENAI_AGENTS_NATIVE_WHEEL={wheel.resolve()}\n')
+              output.write(f'CODEX_EXEC_SERVER_TEST_BINARY={fixture}\n')
+          PYTHON
+      - name: Verify the qualified wheel archive
+        if: inputs.sdk_checks && inputs.runner == 'ubuntu-24.04'
+        env:
+          OPENAI_AGENTS_WHEEL: ${{ env.OPENAI_AGENTS_NATIVE_WHEEL }}
+        run: PYTHONPATH=. "$RUNNER_TEMP/sdk-3.11/bin/python" -m pytest -q packages/codex/tests/test_distribution.py
+      - name: Verify copied documentation and public tools against the qualified wheel
+        if: inputs.sdk_checks && inputs.runner == 'ubuntu-24.04'
+        run: |
+          uv pip install --python "$RUNNER_TEMP/sdk-3.11/bin/python" --no-deps --target "$RUNNER_TEMP/docs-wheel" "$OPENAI_AGENTS_NATIVE_WHEEL"
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" "$RUNNER_TEMP/sdk-3.11/bin/python" -c 'import agents, _agents_codex, os; from agents import _native; from pathlib import Path; root = Path(os.environ["PYTHONPATH"]).resolve(); assert all(Path(module.__file__).resolve().is_relative_to(root) for module in (agents, _agents_codex, _native)), "SDK imports must use the qualified wheel"'
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" "$RUNNER_TEMP/sdk-3.11/bin/python" .github/scripts/check_docs.py
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" "$RUNNER_TEMP/sdk-3.11/bin/python" -m pytest -q packages/codex/tests/test_docs_code.py
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" "$RUNNER_TEMP/sdk-3.11/bin/python" -m pytest -q packages/codex/tests/test_native_tool_input_recovery.py::test_strict_missing_arguments_return_retryable_error packages/codex/tests/test_native_tool_input_recovery.py::test_original_input_recovery_before_policy_and_execution
       - name: Share the package and test executor
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
