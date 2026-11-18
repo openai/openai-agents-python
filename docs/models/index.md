@@ -548,7 +548,7 @@ When you are using the OpenAI Responses API, several request fields already have
   with `"24h"`.
 - `prompt_cache_options`: Select implicit or explicit prompt caching and, for GPT-5.6, configure a `"30m"` cache TTL.
 - `response_include`: Request richer response payloads such as `web_search_call.action.sources`, `file_search_call.results`, or `reasoning.encrypted_content`.
-- `top_logprobs`: Request top-token logprobs for output text. The SDK also adds `message.output_text.logprobs` automatically.
+- `top_logprobs`: Request the most likely alternatives for each output token. For example, `ModelSettings(top_logprobs=5)` has been returning up to five alternatives per token with `gpt-4.1`. The SDK adds `message.output_text.logprobs` automatically.
 - `retry`: Opt in to runner-managed retry settings for model calls. See [Runner-managed retries](#runner-managed-retries).
 
 ```python
@@ -564,7 +564,6 @@ research_agent = Agent(
         context_management=[{"type": "compaction", "compact_threshold": 200000}],
         prompt_cache_options={"mode": "explicit", "ttl": "30m"},
         response_include=["web_search_call.action.sources"],
-        top_logprobs=5,
     ),
 )
 ```
