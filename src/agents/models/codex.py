@@ -234,6 +234,8 @@ class _CodexModel(Model):
             for tool in tools
         )
         overrides = list(provider._config_overrides)
+        if sdk_sandbox or require_sdk_call:
+            overrides.extend(("features.shell_tool=false", "features.view_image=false"))
         if sdk_sandbox:
             system_instructions = "\n\n".join(
                 filter(
@@ -256,8 +258,6 @@ class _CodexModel(Model):
                     "features.multi_agent_v2=false",
                     "features.hooks=false",
                     "features.code_mode=false",
-                    "features.shell_tool=false",
-                    "features.view_image=false",
                     "notify=[]",
                     'web_search="disabled"',
                 )

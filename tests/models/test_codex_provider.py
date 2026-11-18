@@ -982,7 +982,7 @@ async def test_required_tool_choice_returns_a_real_sdk_call(
 ):
     from agents import ModelSettings
 
-    queue, _ = servers
+    queue, opened = servers
     executions = []
 
     @function_tool
@@ -1010,7 +1010,13 @@ async def test_required_tool_choice_returns_a_real_sdk_call(
         tool_use_behavior="stop_on_first_tool",
     )
     if streamed:
-        run = Runner.run_streamed(agent, "Find a record.", run_config=config(tmp_path))
+        run = Runner.run_streamed(
+            agent,
+            "Find a record.",
+            run_config=config(
+                tmp_path, config_overrides=["features.shell_tool=true", "features.view_image=true"]
+            ),
+        )
         events = [event async for event in run.stream_events()]
         completed = [
             event.data.response
@@ -1021,7 +1027,13 @@ async def test_required_tool_choice_returns_a_real_sdk_call(
         assert any(item.type == "function_call" for item in completed[0].output)
         result = run
     else:
-        result = await Runner.run(agent, "Find a record.", run_config=config(tmp_path))
+        result = await Runner.run(
+            agent,
+            "Find a record.",
+            run_config=config(
+                tmp_path, config_overrides=["features.shell_tool=true", "features.view_image=true"]
+            ),
+        )
     assert result.final_output == ("Finished" if use_handoff else "Found record")
     assert executions == ([] if use_handoff else ["record"])
     assert first.closed and first.interrupted
@@ -1029,6 +1041,16 @@ async def test_required_tool_choice_returns_a_real_sdk_call(
     assert "Keep this instruction." in instructions
     assert "must call" in instructions
     assert "SDK tool or handoff" in instructions
+
+    assert opened[0][2] == [
+        "features.shell_tool=true",
+        "features.view_image=true",
+        "features.shell_tool=false",
+        "features.view_image=false",
+    ]
+    assert "environments" not in dict(first.requests)["thread/start"]
+    assert "environments" not in dict(first.requests)["turn/start"]
+    assert "agents_sdk namespace" not in instructions
 
 
 @pytest.mark.asyncio
@@ -1126,7 +1148,7 @@ async def test_required_without_eligible_tools_and_other_choices_fail_before_lau
 async def test_default_and_auto_tool_choice_keep_text_completion(tmp_path, servers, choice):
     from agents import ModelSettings
 
-    queue, _ = servers
+    queue, opened = servers
     server = FakeServer()
     queue.append(server)
     result = await Runner.run(
@@ -1143,6 +1165,8 @@ async def test_default_and_auto_tool_choice_keep_text_completion(tmp_path, serve
         dict(server.requests)["thread/start"]["developerInstructions"] == "Only this instruction."
     )
     assert server.closed
+
+    assert opened[0][2] == []
 
 
 @pytest.mark.asyncio
