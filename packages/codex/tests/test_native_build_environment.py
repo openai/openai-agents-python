@@ -3,12 +3,41 @@
 import hashlib
 import io
 import json
+import socket
 import subprocess
 import sys
 import urllib.error
 from pathlib import Path
 
 import pytest
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="PGO wheel builds run on Linux")
+def test_failed_pgo_build_stops_the_remaining_compiler(monkeypatch, tmp_path):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    import build
+
+    # The compiler child holds the connection open after its build driver exits.
+    driver = """
+import os, socket, sys
+observer = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+if os.fork() == 0:
+    observer.recv(1)
+    os._exit(0)
+sys.exit(23)
+"""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.settimeout(5)
+        command = [sys.executable, "-c", driver, str(listener.getsockname()[1])]
+        with pytest.raises(subprocess.CalledProcessError) as failure:
+            build.build_pgo_with_helpers(command, tmp_path, {}, lambda: None, tmp_path)
+        assert failure.value.returncode == 23
+        connection, _ = listener.accept()
+        with connection:
+            connection.settimeout(5)
+            assert connection.recv(1) == b""
 
 
 @pytest.mark.parametrize("status", [404, 504])
