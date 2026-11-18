@@ -24,6 +24,8 @@ Use this page as a catalog, then jump to the section that matches the runtime yo
 
 ## Hosted tools
 
+The [portable catalog companion](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/model_providers/portable_docs.py) pairs the image-and-document lookup below with an SDK function over application-owned records. `uv run python -m examples.model_providers.portable_docs --case tools` checks an exact metadata match and a missing-record query; adding `--codex` selects stock Codex. Its fixed synthetic catalog returns image captions and document IDs, without retrieving image pixels or live web results. Hosted search below provides the service-managed search alternative.
+
 OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel]:
 
 -   The [`WebSearchTool`][agents.tool.WebSearchTool] lets an agent search the web.
@@ -132,6 +134,8 @@ What to know:
 
 ### Programmatic Tool Calling
 
+The [portable inventory companion](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/model_providers/portable_docs.py) checks the same desk-lamp stock through a direct SDK function call: `uv run python -m examples.model_providers.portable_docs --case inventory`, with `--codex` for stock Codex. It verifies tool execution and the structured count of 42 units. The application implements the lookup; the hosted example below delegates tool coordination to generated JavaScript.
+
 Programmatic Tool Calling lets a supported OpenAI Responses model generate JavaScript that calls eligible tools, combines their outputs, and returns one result to the model. It is useful for bounded workflows that benefit from loops, branching, parallel calls, or intermediate calculations without a model round trip after every tool call.
 
 The generated program runs in a fresh hosted V8 environment. It does not have Node.js APIs, filesystem or network access, or a persistent process. The program can interact only with tools that you explicitly allow.
@@ -185,6 +189,8 @@ What to know:
 -   Official platform guide: [Programmatic Tool Calling](https://developers.openai.com/api/docs/guides/tools-programmatic-tool-calling).
 
 ### Hosted container shell + skills
+
+The [portable CSV companion](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/model_providers/portable_docs.py) sums fixed sales rows through an SDK function: `uv run python -m examples.model_providers.portable_docs --case csv`, with `--codex` for stock Codex. It checks totals of 15 for east and 7 for west. The local function parses only its embedded fixture, without executing generated programs or reading arbitrary files. The hosted example below runs shell commands with a mounted skill inside an OpenAI container.
 
 `ShellTool` also supports OpenAI-hosted container execution. Use this mode when you want the model to run shell commands in a managed container instead of your local runtime.
 

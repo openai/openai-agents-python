@@ -193,6 +193,8 @@ Transport selection happens when the SDK resolves a model name into a model inst
 
 #### Provider or run-level setup
 
+The [portable streaming companion](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/model_providers/portable_docs.py) demonstrates the streamed-answer task with either provider, without a custom endpoint. `uv run python -m examples.model_providers.portable_docs --case stream` uses the default provider; adding `--codex` uses stock Codex. The proxy URL and third-party routing examples in this section require their own reachable endpoints, credentials, and compatible models. The companion verifies Runner streaming, without exercising those endpoint or WebSocket configurations.
+
 You can also configure websocket transport per provider or per run:
 
 ```python
@@ -530,6 +532,8 @@ english_agent = Agent(
 
 ## Advanced OpenAI Responses settings
 
+The [portable task companions](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/model_providers/portable_docs.py) run local templates, conversation history, catalog lookup, inventory, CSV aggregation, and streaming with both providers. `uv run python -m examples.model_providers.portable_docs` runs all cases; adding `--codex` selects stock Codex. `--case` selects one task and `--model` overrides the provider's model. Each successful case prints a JSON record with `"status": "passed"` after checking the result. These application-owned tasks avoid the OpenAI-only request fields below. Cache breakpoints, server compaction controls, stored response IDs, source-inclusion flags, and token log probabilities retain their service-specific meanings.
+
 When you are on the OpenAI Responses path and need more control, start with `ModelSettings`.
 
 ### Common advanced `ModelSettings` options
@@ -590,6 +594,8 @@ result = await Runner.run(
     ],
 )
 ```
+
+To reuse background across turns with either provider, run the companion with `--case conversation`. It passes earlier messages back to the model. That preserves context without requiring a cache breakpoint; it does not guarantee a cache hit or lower input costs.
 
 `prompt_cache_retention` remains available for earlier model families that use the legacy
 retention control. Do not combine a direct `ModelSettings` field with the same key in

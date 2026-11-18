@@ -57,6 +57,8 @@ This is the Responses API over websocket transport, not the [Realtime API](realt
 
 For transport-selection rules and caveats around concrete model objects or custom providers, see [Models](models/index.md#responses-websocket-transport).
 
+The [portable streaming companion](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/model_providers/portable_docs.py) streams the same answer with either provider: `uv run python -m examples.model_providers.portable_docs --case stream`, with `--codex` for stock Codex. It checks both text deltas and the final answer. These shared Runner events let applications consume streamed output while each provider owns its transport. The following examples configure OpenAI Responses WebSockets specifically.
+
 ##### Pattern 1: No session helper (works)
 
 Use this when you just want websocket transport and do not need the SDK to manage a shared provider/session for you.
@@ -174,12 +176,20 @@ Use `tool_execution` when you want to configure SDK-side behavior for local func
 
 ```python
 from agents import Agent, RunConfig, Runner, ToolExecutionConfig
+from agents.decorators import tool
 
-agent = Agent(name="Assistant", tools=[...])
+
+@tool
+def lookup_stock(sku: str) -> str:
+    """Return the example stock count."""
+    return f"{sku}: 42 units"
+
+
+agent = Agent(name="Assistant", instructions="Call lookup_stock.", tools=[lookup_stock])
 
 result = await Runner.run(
     agent,
-    "Run the required tool calls.",
+    "Look up desk-lamp stock.",
     run_config=RunConfig(
         tool_execution=ToolExecutionConfig(
             max_function_tool_concurrency=2,
@@ -203,12 +213,20 @@ Set `tool_not_found_behavior="return_error_to_model"` when you want the run to r
 
 ```python
 from agents import Agent, RunConfig, Runner
+from agents.decorators import tool
 
-agent = Agent(name="Assistant", tools=[...])
+
+@tool
+def lookup_stock(sku: str) -> str:
+    """Return the example stock count."""
+    return f"{sku}: 42 units"
+
+
+agent = Agent(name="Assistant", instructions="Call lookup_stock.", tools=[lookup_stock])
 
 result = await Runner.run(
     agent,
-    "Handle this request with the available tools.",
+    "Look up desk-lamp stock.",
     run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
 )
 ```
@@ -364,6 +382,8 @@ See the [Sessions documentation](sessions/index.md) for more details.
 
 
 #### Server-managed conversations
+
+The [portable conversation companion](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/model_providers/portable_docs.py) preserves a parcel code across turns with `SQLiteSession`, then replays history with `result.to_input_list()`. `uv run python -m examples.model_providers.portable_docs --case conversation` checks both methods; adding `--codex` selects stock Codex. The application owns and resends this history. The server-managed examples below store history in OpenAI resources and continue through service IDs.
 
 You can also let the OpenAI conversation state feature manage conversation state on the server side, instead of handling it locally with `to_input_list()` or `Sessions`. This allows you to preserve conversation history without manually resending all past messages. With either server-managed approach below, pass only the new turn's input on each request and reuse the saved ID. See the [OpenAI Conversation state guide](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses) for more details.
 

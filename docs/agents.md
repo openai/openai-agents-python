@@ -67,6 +67,8 @@ Everything in this section applies to `Agent`. `SandboxAgent` builds on the same
 
 ## Prompt templates
 
+The [local template companion](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/model_providers/portable_docs.py) uses an instruction callback and typed context for the same poem-writing task with either provider. `uv run python -m examples.model_providers.portable_docs --case prompt` checks three nonempty lines; adding `--codex` selects stock Codex. The application owns the local template and its versioning. The hosted examples below use OpenAI prompt IDs and platform-managed versions.
+
 You can reference a prompt template created in the OpenAI platform by setting `prompt`. This works when OpenAI models are accessed through the Responses API.
 
 To use it, please:
