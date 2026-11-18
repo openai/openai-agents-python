@@ -20,7 +20,11 @@ from agents import (
     trace,
 )
 from agents.models.openai_provider import OpenAIProvider
-from examples.web_search_utils import extract_url_citations, extract_web_search_source_urls
+from examples.web_search_utils import (
+    extract_url_citations,
+    extract_web_search_source_urls,
+    get_field,
+)
 
 from .agents.financials_agent import financials_agent
 from .agents.planner_agent import (
@@ -28,6 +32,11 @@ from .agents.planner_agent import (
     FinancialSearchItem,
     FinancialSearchPlan,
     planner_agent,
+)
+from .agents.primary_source_auditor import (
+    AuditedVerificationResult,
+    PrimarySourceAudit,
+    auditor_agent,
 )
 from .agents.risk_agent import risk_agent
 from .agents.search_agent import FinancialSearchSummary, search_agent
@@ -264,16 +273,85 @@ class FinancialResearchManager:
         self.printer.mark_item_done("revising")
         return result.final_output_as(FinancialReportData)
 
+    async def _audit_primary_sources(
+        self, query: str, report: FinancialReportData
+    ) -> tuple[PrimarySourceAudit, set[str]]:
+        audit_result = await Runner.run(
+            auditor_agent,
+            json.dumps(
+                {
+                    "original_query": query,
+                    "research_cutoff": self.research_cutoff,
+                    "report": report.model_dump(mode="json"),
+                }
+            ),
+            run_config=RunConfig(
+                model_provider=OpenAIProvider(use_responses=True, use_responses_websocket=False)
+            ),
+            max_turns=3,
+        )
+        audit = audit_result.final_output_as(PrimarySourceAudit)
+        opened_urls: set[str] = set()
+        for item in audit_result.new_items:
+            raw = get_field(item, "raw_item")
+            if get_field(raw, "type") != "web_search_call":
+                continue
+            action = get_field(raw, "action")
+            url = get_field(action, "url")
+            if (
+                get_field(raw, "status") == "completed"
+                and get_field(action, "type") == "open_page"
+                and isinstance(url, str)
+            ):
+                opened_urls.add(url)
+        return audit, opened_urls
+
     async def _verify_report(
         self,
         query: str,
         report: FinancialReportData,
         search_results: Sequence[FinancialSearchEvidence],
     ) -> VerificationResult:
-        self.printer.update_item("verifying", "Verifying report...")
+        self.printer.update_item("verifying", "Reading primary documents and verifying report...")
+        audit, opened_urls = await self._audit_primary_sources(query, report)
+        audit_issues: list[VerificationIssue] = []
+        if not audit.checks:
+            audit_issues.append(
+                VerificationIssue(
+                    claim="Primary-source audit",
+                    category="unsupported",
+                    explanation="No material claims were checked against opened primary documents.",
+                    source_urls=[],
+                )
+            )
+        for check in audit.checks:
+            if (
+                not check.supported
+                or check.source_url not in opened_urls
+                or not check.supporting_extract.strip()
+            ):
+                audit_issues.append(
+                    VerificationIssue(
+                        claim=check.claim,
+                        category="unsupported",
+                        explanation=(
+                            f"Primary-source audit: {check.explanation} "
+                            f"Document extract: {check.supporting_extract}. "
+                            f"Source opened: {check.source_url in opened_urls}."
+                        ),
+                        source_urls=[check.source_url] if check.source_url in opened_urls else [],
+                    )
+                )
+        verification_input = json.loads(self._verification_input(query, report, search_results))
+        verification_input["primary_source_audit"] = audit.model_dump(mode="json")
+        verification_input["opened_source_urls"] = sorted(opened_urls)
+        verification_input["allowed_source_urls"] = sorted(
+            set(verification_input["allowed_source_urls"]) | opened_urls
+        )
+
         result = await Runner.run(
             verifier_agent,
-            self._verification_input(query, report, search_results),
+            json.dumps(verification_input),
             run_config=self.run_config,
         )
         self.printer.mark_item_done("verifying")
@@ -281,13 +359,12 @@ class FinancialResearchManager:
         # Require a complete supplied URL token; a lookalike hostname is not a citation.
         has_source_url = any(
             re.search(
-                r"(?<![\w/:])" + re.escape(source.url) + r"(?=$|[\s<>\"'`()\[\],;])",
+                r"(?<![\w/:])" + re.escape(source_url) + r"(?=$|[\s<>\"'`()\[\],;])",
                 report.markdown_report,
             )
-            for evidence in search_results
-            for source in evidence.sources
+            for source_url in verification_input["allowed_source_urls"]
         )
-        issues = list(verification.issues)
+        issues = [*verification.issues, *audit_issues]
         if not has_source_url:
             issues.append(
                 VerificationIssue(
@@ -297,7 +374,12 @@ class FinancialResearchManager:
                     source_urls=[],
                 )
             )
-        return VerificationResult(verified=verification.verified and not issues, issues=issues)
+        return AuditedVerificationResult(
+            verified=verification.verified and not issues,
+            issues=issues,
+            primary_source_checks=audit.checks,
+            opened_source_urls=sorted(opened_urls),
+        )
 
     def _verification_input(
         self,

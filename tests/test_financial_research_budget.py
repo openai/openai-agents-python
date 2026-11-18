@@ -188,7 +188,9 @@ async def test_financial_main_selects_provider_without_global_defaults(
 
 
 @pytest.mark.asyncio
-async def test_financial_run_config_reaches_orchestration_and_specialist() -> None:
+async def test_financial_run_config_reaches_orchestration_and_specialist(
+    monkeypatch: pytest.MonkeyPatch, primary_audit: object
+) -> None:
     from agents.testing import ScriptedModel, assistant_message, function_call
 
     plan = FinancialSearchPlan(
@@ -217,6 +219,7 @@ async def test_financial_run_config_reaches_orchestration_and_specialist() -> No
     )
     manager = FinancialResearchManager(run_config=RunConfig(model=model))
     manager.printer = Mock()
+    monkeypatch.setattr(manager, "_audit_primary_sources", AsyncMock(return_value=primary_audit))
 
     assert await manager._plan_searches("Analyze revenue") == plan
     evidence = FinancialSearchEvidence(
@@ -247,7 +250,11 @@ async def test_financial_run_config_reaches_orchestration_and_specialist() -> No
     ],
 )
 async def test_financial_verification_enforces_source_presence_and_unresolved_issues(
-    monkeypatch: pytest.MonkeyPatch, report_text: str, has_issues: bool, expected_verified: bool
+    monkeypatch: pytest.MonkeyPatch,
+    report_text: str,
+    has_issues: bool,
+    expected_verified: bool,
+    primary_audit: object,
 ) -> None:
     from examples.financial_research_agent.agents.verifier_agent import VerificationIssue
 
@@ -269,6 +276,7 @@ async def test_financial_verification_enforces_source_presence_and_unresolved_is
     )
     manager = FinancialResearchManager()
     manager.printer = Mock()
+    monkeypatch.setattr(manager, "_audit_primary_sources", AsyncMock(return_value=primary_audit))
     evidence = FinancialSearchEvidence(
         query="annual report",
         reason="metrics",
@@ -285,3 +293,104 @@ async def test_financial_verification_enforces_source_presence_and_unresolved_is
     assert result.verified is expected_verified
     if not expected_verified:
         assert result.issues
+
+
+@pytest.fixture
+def primary_audit() -> object:
+    from examples.financial_research_agent.agents.primary_source_auditor import (
+        PrimarySourceAudit,
+        PrimarySourceCheck,
+    )
+
+    return PrimarySourceAudit(
+        checks=[
+            PrimarySourceCheck(
+                claim="Revenue increased",
+                source_url="https://example.com/report",
+                supporting_extract="Revenue increased",
+                supported=True,
+                explanation="The primary document supports the report.",
+            )
+        ]
+    ), {"https://example.com/report"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("supported", "status", "action_type"),
+    [
+        (False, "completed", "open_page"),
+        (True, "failed", "open_page"),
+        (True, "completed", "search"),
+        (True, "completed", "open_page"),
+    ],
+)
+async def test_primary_audit_blocks_false_summary_approval_and_requires_completed_page_reads(
+    monkeypatch: pytest.MonkeyPatch, supported: bool, status: str, action_type: str
+) -> None:
+    from examples.financial_research_agent.agents.primary_source_auditor import (
+        AuditedVerificationResult,
+        PrimarySourceAudit,
+        PrimarySourceCheck,
+    )
+
+    url = "https://issuer.example/annual-financial-statements.pdf"
+    claim = f"FY2026 Services revenue was ${'123.301' if supported else '105'} billion."
+    audit = PrimarySourceAudit(
+        checks=[
+            PrimarySourceCheck(
+                claim=claim,
+                source_url=url,
+                supporting_extract="Services 123,301 (in millions)",
+                supported=supported,
+                explanation=(
+                    "The primary statement reports FY2026 Services revenue of $123.301 billion, "
+                    "not $105 billion."
+                ),
+            )
+        ]
+    )
+    audit_result = Mock(
+        final_output_as=Mock(return_value=audit),
+        new_items=[
+            {
+                "raw_item": {
+                    "type": "web_search_call",
+                    "status": status,
+                    "action": {"type": action_type, "url": url},
+                }
+            }
+        ],
+    )
+    accepted = Mock(final_output_as=Mock(return_value=VerificationResult(verified=True, issues=[])))
+    run_agent = AsyncMock(side_effect=[audit_result, accepted])
+    monkeypatch.setattr(Runner, "run", run_agent)
+    manager = FinancialResearchManager()
+    manager.printer = Mock()
+    report = FinancialReportData(
+        short_summary=claim,
+        markdown_report=f"{claim} [Source]({url})",
+        follow_up_questions=[],
+    )
+    evidence = FinancialSearchEvidence(
+        query="annual services revenue",
+        reason="metrics",
+        summary="FY2026 Services revenue was $105 billion.",
+        sources=[FinancialSource(title="Annual statements", url=url)],
+        retrieved_at=manager.research_cutoff,
+    )
+
+    result = await manager._verify_report("Analyze issuer", report, [evidence])
+
+    assert isinstance(result, AuditedVerificationResult)
+    assert result.verified is (supported and status == "completed" and action_type == "open_page")
+    assert result.opened_source_urls == (
+        [url] if status == "completed" and action_type == "open_page" else []
+    )
+    assert result.primary_source_checks == audit.checks
+    if not result.verified:
+        assert "123.301" in result.issues[0].explanation
+    import json
+
+    verifier_payload = json.loads(run_agent.await_args_list[1].args[1])
+    assert verifier_payload["primary_source_audit"] == audit.model_dump(mode="json")

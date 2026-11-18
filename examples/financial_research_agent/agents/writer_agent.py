@@ -16,7 +16,9 @@ WRITER_PROMPT = (
     "does not establish facts absent from its supplied summary. Do not broaden a supported "
     "claim by combining it with a related but unsupported claim. Apply these rules to the "
     "executive summary as well as the report. If evidence is insufficient, omit the claim "
-    "or frame it as a follow-up question; do not assert that a fact or source does not exist."
+    "or frame it as a follow-up question; do not assert that a fact or source does not exist. "
+    "Keep several paragraphs of analysis, but use only a few representative financial figures "
+    "and explain their significance rather than compiling a long numerical inventory."
 )
 
 REVISION_PROMPT = (
@@ -30,7 +32,9 @@ REVISION_PROMPT = (
     "rephrase the unsupported claim, soften it, or attach another citation. An issue's "
     "source_urls identify evidence to inspect, not proof that the rejected claim is true. "
     "Before returning, check every factual clause against the supplied evidence and remove "
-    "any remaining unsupported assertion."
+    "any remaining unsupported assertion. Prefer omitting a disputed claim to reconstructing "
+    "an unsupported explanation of the discrepancy or adding new claims. Primary-source audit "
+    "extracts override initial research summaries."
 )
 
 

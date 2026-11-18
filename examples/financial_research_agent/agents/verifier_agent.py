@@ -9,7 +9,9 @@ from agents import Agent
 VERIFIER_PROMPT = (
     "You are a meticulous evidence auditor. You will receive an original request, an explicit "
     "research cutoff date, a financial report, and structured web research evidence with source "
-    "URLs. Judge the report only against that supplied evidence; do not reject or approve claims "
+    "URLs and an independent primary_source_audit with opened_source_urls. Treat that audit’s "
+    "document extracts as authoritative over initial summaries when they disagree. Reject "
+    "claims that its primary documents contradict or cannot support. Judge the report only against that supplied evidence; do not reject or approve claims "
     "based on your own memory. Check that material numeric and time-sensitive claims are supported "
     "by the evidence, that citations use supplied URLs, that the report is internally consistent, "
     "and that uncertainty is appropriately caveated. The payload includes allowed_source_urls; "
