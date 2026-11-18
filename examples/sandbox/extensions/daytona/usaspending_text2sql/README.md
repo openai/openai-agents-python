@@ -37,6 +37,29 @@ export DAYTONA_API_KEY="..."
 uv run python -m examples.sandbox.extensions.daytona.usaspending_text2sql.agent
 ```
 
+## Local SQL companion
+
+The [local companion](local_agent.py) has been running the same `SqlCapability` against a temporary Unix-local workspace on macOS or Linux. Its `--demo` option has been creating four synthetic transactions with the same schema, including a negative obligation and a grant. It has been labeling these records as synthetic in the terminal. It has not been downloading or certifying NASA data.
+
+From the repository root, these commands have been querying the demo with stock Codex and streaming:
+
+```bash
+uv run python -m examples.sandbox.extensions.daytona.usaspending_text2sql.local_agent --demo --codex
+uv run python -m examples.sandbox.extensions.daytona.usaspending_text2sql.local_agent --demo --codex --stream
+```
+
+Omitting `--codex` has been selecting the default provider. `CODEX_MODEL` and `OPENAI_MODEL` have been selecting an optional model for their respective providers. Codex authentication has been following the local CLI configuration; the default provider has been using `OPENAI_API_KEY`. The local companion has not been importing the optional Daytona integration or requiring a Daytona account.
+
+For an existing database from `setup_db.py`, `--database` has been replacing `--demo`:
+
+```bash
+uv run python -m examples.sandbox.extensions.daytona.usaspending_text2sql.local_agent \
+  --database ./data/usaspending.db --codex \
+  --question "Compare contract and grant obligations by fiscal year."
+```
+
+The agent has been working on a copy of the supplied database, with the existing read-only SQL checks, row limits, and query timeout. The terminal has been printing the SQL tool's result after the answer. The local path has been demonstrating SQL tool execution; cloud pause/resume, long-term memory, and signed download URLs have been remaining part of the Daytona example. Like the other Unix-local examples, Linux execution has been relying on trusted local development or isolation supplied by the host; macOS execution has been using the backend's filesystem restrictions.
+
 ## Example questions
 
 ```

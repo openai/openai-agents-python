@@ -16,6 +16,7 @@ from typing import Any
 from agents import (
     Agent,
     Model,
+    ModelSettings,
     OpenAIConversationsSession,
     Runner,
 )
@@ -86,7 +87,8 @@ async def run_scenario_step(
             f"Call {step.tool_name} exactly once before responding. "
             "Pass the user input as the 'query' argument."
         ),
-        tools=[approval_echo, approval_note],
+        tools=[approval_echo if step.tool_name == TOOL_ECHO else approval_note],
+        model_settings=ModelSettings(tool_choice="required"),
         model=model,
         tool_use_behavior="stop_on_first_tool",
     )

@@ -418,6 +418,8 @@ For an ordinary agent, `cwd` has been selecting the Codex workspace. Native Code
 
 Input guardrails with `run_in_parallel=False` have been finishing before model execution. A native command may already have been writing to the workspace when a cancellation or an output guardrail has been stopping a run. Applications have been checking the workspace before repeating a failed operation. [SDK guardrails](../guardrails.md)
 
+With `ModelSettings(tool_choice="required")`, the Codex provider has been checking that an SDK tool or handoff actually ran. It hasn't been forcing a specific function by name. For deferred tool discovery, select a model whose stock Codex catalog advertises tool search. With `CODEX_MODEL` set to that model, `uv run -m examples.tools.tool_search --codex` has been checking both which tools loaded and what their callbacks returned. For local conversation history, images, or PDF text, the repository's `examples/basic/README.md` has been listing commands that need no extra account.
+
 Several features have been depending on a specific service or transport.
 
 | Feature | Provider requirement |
@@ -425,7 +427,7 @@ Several features have been depending on a specific service or transport.
 | Stored response and conversation IDs, saved prompt IDs, explicit cache keys and breakpoints | The OpenAI Responses provider has been supplying these features. Codex turn IDs have been identifying local turns. |
 | Hosted web search | With a web-search-capable provider, stock 0.166.0 has been returning hosted search calls on `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.5`. The two 5.4 models have been searching text. The 5.5 model has been allowing text and image results. On cache-only hosts, searches have been using cached results even when the application has been allowing live access. Setting `external_web_access=False` has been limiting searches to cached results. |
 | Remote image URLs, uploaded file IDs, and hosted file search or code interpreter | The Responses provider has been resolving remote or server-owned resources. Codex image input has been accepting inline image bytes. |
-| Model sampling, output-token limits, forced tool choice, programmatic tool callers | These controls have been requiring a provider that exposes them. |
+| Model sampling, output-token limits, a specific tool selected by name, programmatic tool callers | These controls have been requiring a provider that exposes them. |
 | Realtime, voice, Decisions, explicit OpenAI model objects | These APIs have been selecting their own model or transport. Setting the Runner's model provider has been affecting ordinary agent model calls. |
 
 The [Codex tool guide](../tools.md) has been covering a different integration. Registering Codex as a function tool has been letting an agent delegate a task to Codex while retaining its ordinary model provider.

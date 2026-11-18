@@ -1,11 +1,13 @@
+import argparse
 import asyncio
 import json
-import sys
+import os
 from collections.abc import Mapping
 from typing import Annotated, Any
 
 from agents import (
     Agent,
+    RunConfig,
     Runner,
     ToolSearchTool,
     tool_namespace,
@@ -108,8 +110,9 @@ top_level_agent = Agent(
     name="Shipping assistant",
     model="gpt-5.6-sol",
     instructions=(
-        "For ETA questions in this example, search `get_shipping_eta` before calling tools. "
-        "Do not search `get_shipping_credit_balance` unless the user asks about shipping credits."
+        "For ETA questions in this example, search for the exact tool name get_shipping_eta. "
+        "When tool search accepts a query and limit, use exactly get_shipping_eta and limit 1. "
+        "Do not search for shipping credits unless the user asks about them."
     ),
     tools=[get_shipping_eta, get_shipping_credit_balance, ToolSearchTool()],
 )
@@ -157,7 +160,14 @@ def loaded_paths(result: Any) -> list[str]:
     return sorted(paths)
 
 
-def print_result(title: str, result: Any, registered_paths: list[str]) -> None:
+def print_result(
+    title: str,
+    result: Any,
+    registered_paths: list[str],
+    *,
+    expected_path: str,
+    expected_calls: dict[str, str],
+) -> None:
     loaded = loaded_paths(result)
     untouched = [path for path in registered_paths if path not in loaded]
 
@@ -174,42 +184,75 @@ def print_result(title: str, result: Any, registered_paths: list[str]) -> None:
             print(f"- {item.type}: {item.raw_item}")
     print()
 
+    outputs = {
+        item.call_id: str(item.output)
+        for item in result.new_items
+        if item.type == "tool_call_output_item"
+    }
+    verified = {
+        item.tool_name
+        for item in result.new_items
+        if item.type == "tool_call_item"
+        and item.tool_name in expected_calls
+        and item.call_id is not None
+        and expected_calls[item.tool_name] in outputs.get(item.call_id, "")
+    }
+    if set(loaded) != {expected_path} or verified != expected_calls.keys():
+        raise RuntimeError(
+            f"Expected discovery of {expected_path} and calls to {sorted(expected_calls)}; "
+            f"actually loaded {loaded} and verified {sorted(verified)}."
+        )
 
-async def run_namespaced_example() -> None:
+
+async def run_namespaced_example(config: RunConfig | None = None) -> None:
     result = await Runner.run(
         namespaced_agent,
         "Look up customer_42 and list their open orders.",
+        run_config=config,
     )
     print_result(
         "Tool search with namespaces",
         result,
         registered_paths=["crm", "billing"],
+        expected_path="crm",
+        expected_calls={"get_customer_profile": "Avery Chen", "list_open_orders": "ord_1042"},
     )
 
 
-async def run_top_level_example() -> None:
+async def run_top_level_example(config: RunConfig | None = None) -> None:
     result = await Runner.run(
         top_level_agent,
         "Can you get my ETA for tracking number ZX-123?",
+        run_config=config,
     )
     print_result(
         "Tool search with top-level deferred tools",
         result,
         registered_paths=["get_shipping_eta", "get_shipping_credit_balance"],
+        expected_path="get_shipping_eta",
+        expected_calls={"get_shipping_eta": SHIPPING_ETAS["ZX-123"]},
     )
 
 
 async def main() -> None:
-    mode = sys.argv[1] if len(sys.argv) > 1 else "all"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("mode", choices=("all", "namespace", "top-level"), default="all", nargs="?")
+    parser.add_argument("--codex", action="store_true")
+    args = parser.parse_args()
+    config = None
+    if args.codex:
+        from agents.models.codex import CodexProvider
 
-    if mode not in {"all", "namespace", "top-level"}:
-        raise SystemExit(f"Unknown mode: {mode}. Expected one of: all, namespace, top-level.")
+        model = os.environ.get("CODEX_MODEL")
+        if not model:
+            parser.error("Set CODEX_MODEL to a model with tool search in the stock Codex catalog.")
+        config = RunConfig(model=model, model_provider=CodexProvider())
 
     with trace("Tool search example"):
-        if mode in {"all", "namespace"}:
-            await run_namespaced_example()
-        if mode in {"all", "top-level"}:
-            await run_top_level_example()
+        if args.mode in {"all", "namespace"}:
+            await run_namespaced_example(config)
+        if args.mode in {"all", "top-level"}:
+            await run_top_level_example(config)
 
 
 if __name__ == "__main__":

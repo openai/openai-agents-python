@@ -3,9 +3,10 @@ import asyncio
 import hashlib
 import os
 import tempfile
+from contextlib import closing, nullcontext
 from pathlib import Path
 
-from agents import Agent, ApplyPatchTool, Runner, apply_diff, trace
+from agents import Agent, ApplyPatchTool, RunConfig, Runner, SQLiteSession, apply_diff, trace
 from agents.editor import ApplyPatchOperation, ApplyPatchResult
 from examples.auto_mode import confirm_with_fallback, is_auto_mode
 
@@ -96,8 +97,15 @@ class WorkspaceEditor:
         self._approvals.remember(fingerprint)
 
 
-async def main(auto_approve: bool, model: str) -> None:
-    with trace("apply_patch_example"):
+async def main(auto_approve: bool, model: str, use_codex: bool = False) -> None:
+    config = None
+    if use_codex:
+        from agents.models.codex import CodexProvider
+
+        config = RunConfig(model=os.environ.get("CODEX_MODEL"), model_provider=CodexProvider())
+    # Hosted response IDs remain the default; Codex replays the SDK-managed history.
+    session = SQLiteSession("apply-patch") if use_codex else None
+    with closing(session) if session is not None else nullcontext(), trace("apply_patch_example"):
         with tempfile.TemporaryDirectory(prefix="apply-patch-example-") as workspace:
             workspace_path = Path(workspace).resolve()
             approvals = ApprovalTracker()
@@ -111,7 +119,13 @@ async def main(auto_approve: bool, model: str) -> None:
                 instructions=(
                     f"You can edit files inside {workspace_path} using the apply_patch tool. "
                     "When modifying an existing file, include the file contents between "
-                    "<BEGIN_FILES> and <END_FILES> in your prompt."
+                    "<BEGIN_FILES> and <END_FILES> in your prompt. "
+                    "For create_file, operation.diff contains only file-content lines prefixed "
+                    "with '+'. For update_file, use @@ hunks and context/+/- lines. "
+                    "Do not wrap operation.diff in *** Begin Patch, *** End Patch, filename "
+                    "headers, Markdown fences, or <BEGIN_FILES>. "
+                    "Use '- [ ] ' for unchecked items and '- [x] ' for checked items. "
+                    "Only perform the edit requested in the current user message."
                 ),
                 tools=[tool],
             )
@@ -121,8 +135,10 @@ async def main(auto_approve: bool, model: str) -> None:
             print("[run] Creating tasks.md")
             result = await Runner.run(
                 agent,
-                "Create tasks.md with a shopping checklist of 5 entries.",
-                previous_response_id=previous_response_id,
+                "Create tasks.md with exactly 5 unchecked shopping items. Do not check off any items.",
+                previous_response_id=None if use_codex else previous_response_id,
+                session=session,
+                run_config=config,
             )
             previous_response_id = result.last_response_id
             print(f"[run] Final response #1:\n{result.final_output}\n")
@@ -132,6 +148,15 @@ async def main(auto_approve: bool, model: str) -> None:
             updated_notes = notes_path.read_text(encoding="utf-8")
             print("[file] tasks.md after creation:\n")
             print(updated_notes)
+            original_items = [
+                line.lstrip()
+                for line in updated_notes.splitlines()
+                if line.lstrip().startswith("- [")
+            ]
+            if len(original_items) != 5 or not all(
+                line.startswith("- [ ] ") for line in original_items
+            ):
+                raise RuntimeError("Expected five unchecked shopping items after creation.")
 
             prompt = (
                 "<BEGIN_FILES>\n"
@@ -143,13 +168,38 @@ async def main(auto_approve: bool, model: str) -> None:
             result2 = await Runner.run(
                 agent,
                 prompt,
-                previous_response_id=previous_response_id,
+                previous_response_id=None if use_codex else previous_response_id,
+                session=session,
+                run_config=config,
             )
             print(f"[run] Final response #2:\n{result2.final_output}\n")
             if not notes_path.exists():
                 raise RuntimeError("tasks.md vanished unexpectedly before the second read.")
             print("[file] Final tasks.md:\n")
-            print(notes_path.read_text(encoding="utf-8"))
+            final_notes = notes_path.read_text(encoding="utf-8")
+            print(final_notes)
+            checklist = [
+                line.lstrip()
+                for line in final_notes.splitlines()
+                if line.lstrip().startswith("- [")
+            ]
+            expected = [
+                line.replace("- [ ] ", "- [x] ", 1) if index >= 3 else line
+                for index, line in enumerate(original_items)
+            ]
+            if checklist != expected:
+                raise RuntimeError("Expected five checklist items with only the final two checked.")
+            expected_items = iter(expected)
+            expected_lines = [
+                next(expected_items) if line.lstrip().startswith("- [") else line
+                for line in updated_notes.split("\n")
+            ]
+            final_lines = [
+                line.lstrip() if line.lstrip().startswith("- [") else line
+                for line in final_notes.split("\n")
+            ]
+            if final_lines != expected_lines:
+                raise RuntimeError("The update changed content outside the two checkbox markers.")
 
 
 if __name__ == "__main__":
@@ -165,5 +215,8 @@ if __name__ == "__main__":
         default="gpt-5.6-sol",
         help="Model ID to use for the agent.",
     )
+    parser.add_argument(
+        "--codex", action="store_true", help="Use stock Codex with SDK-managed history."
+    )
     args = parser.parse_args()
-    asyncio.run(main(args.auto_approve, args.model))
+    asyncio.run(main(args.auto_approve, args.model, args.codex))
