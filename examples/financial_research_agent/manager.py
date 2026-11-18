@@ -283,37 +283,37 @@ class FinancialResearchManager:
         self.printer.update_item("revising", "Revising report from verification feedback...")
         if isinstance(verification, AuditedVerificationResult):
             confirmed = []
-            source_urls: set[str] = set()
-            seen_claims: set[str] = set()
-            for check in verification.primary_source_checks:
+            seen_extracts: set[str] = set()
+            for finding in verification.primary_source_findings:
                 if (
-                    not check.supported
-                    or not check.supporting_extract.strip()
-                    or check.source_url not in verification.opened_source_urls
-                    or check.claim in seen_claims
+                    not finding.supported
+                    or not finding.supporting_extract.strip()
+                    or not finding.dimension.strip()
+                    or finding.source_url not in verification.opened_source_urls
+                    or finding.supporting_extract in seen_extracts
                 ):
                     continue
-                if check.source_url not in source_urls and len(source_urls) == 2:
-                    continue
-                source_urls.add(check.source_url)
-                seen_claims.add(check.claim)
-                confirmed.append(check)
-                if len(confirmed) == 6:
+                seen_extracts.add(finding.supporting_extract)
+                confirmed.append(finding)
+                if len(confirmed) == 4:
                     break
             if len(confirmed) < 2:
                 raise RuntimeError(
-                    "Financial report has insufficient independently confirmed claims for revision."
+                    "Financial report has insufficient independently confirmed complementary findings."
                 )
             paragraphs = [
-                f"{check.claim} ([Primary document]({check.source_url}))" for check in confirmed
+                f"### {finding.dimension}\n\n"
+                f"> {finding.supporting_extract}\n\n"
+                f"[Primary document]({finding.source_url})"
+                for finding in confirmed
             ]
             self.printer.mark_item_done("revising")
             return FinancialReportData(
-                short_summary=" ".join(paragraphs[:2]),
+                short_summary="The independently read primary documents support the findings below.",
                 markdown_report=(
                     "# Primary-source findings\n\n"
-                    "Coverage: This narrower report includes only the claims independently "
-                    "confirmed against the primary documents cited below.\n\n"
+                    "Coverage: This narrower report presents direct primary-source passages "
+                    "for the requested dimensions, without adding forecasts or causal interpretations.\n\n"
                     + "\n\n".join(paragraphs)
                 ),
                 follow_up_questions=[],
@@ -347,6 +347,8 @@ class FinancialResearchManager:
         )
         audit = audit_result.final_output_as(PrimarySourceAudit)
         opened_urls = _opened_primary_source_urls(audit_result.new_items)
+        original_check_count = len(audit.checks)
+        audit.checks = [*audit.checks, *audit.findings]
         missing_urls = list(
             dict.fromkeys(
                 check.source_url for check in audit.checks if check.source_url not in opened_urls
@@ -375,11 +377,13 @@ class FinancialResearchManager:
                             "explanation": "The fresh document read did not recheck this exact claim.",
                         }
                     ),
-                )
+                ).model_copy(update={"dimension": check.dimension})
                 if check.source_url == url
                 else check
                 for check in audit.checks
             ]
+        audit.findings = audit.checks[original_check_count:]
+        audit.checks = audit.checks[:original_check_count]
         return audit, opened_urls
 
     async def _read_primary_source_claims(
@@ -430,7 +434,7 @@ class FinancialResearchManager:
                     source_urls=[],
                 )
             )
-        for check in audit.checks:
+        for check in [*audit.checks, *audit.findings]:
             if (
                 not check.supported
                 or check.source_url not in opened_urls
@@ -484,6 +488,7 @@ class FinancialResearchManager:
             verified=verification.verified and not issues,
             issues=issues,
             primary_source_checks=audit.checks,
+            primary_source_findings=audit.findings,
             opened_source_urls=sorted(opened_urls),
         )
 

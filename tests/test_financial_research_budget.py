@@ -296,7 +296,7 @@ def primary_audit() -> object:
         PrimarySourceCheck,
     )
 
-    return PrimarySourceAudit(
+    audit = PrimarySourceAudit(
         checks=[
             PrimarySourceCheck(
                 claim="Revenue increased",
@@ -313,7 +313,12 @@ def primary_audit() -> object:
                 explanation="The primary document supports this metric.",
             ),
         ]
-    ), {"https://example.com/report"}
+    )
+    audit.findings = [
+        check.model_copy(update={"dimension": dimension})
+        for check, dimension in zip(audit.checks, ["Revenue drivers", "Risks"], strict=True)
+    ]
+    return audit, {"https://example.com/report"}
 
 
 @pytest.mark.asyncio
@@ -464,13 +469,21 @@ async def test_financial_audited_revision_uses_only_confirmed_claims(
     url = "https://issuer.example/statements.pdf"
     confirmed = [
         PrimarySourceCheck(
-            claim=claim,
+            dimension="Revenue drivers",
+            claim="Revenue was approximately $109.2 billion.",
             source_url=url,
-            supporting_extract=claim,
+            supporting_extract="Services: 109,158 (in millions), fiscal 2025.",
             supported=True,
             explanation="Confirmed against the opened primary statement.",
-        )
-        for claim in ["Revenue was $123 billion in FY2026.", "Revenue was $109 billion in FY2025."]
+        ),
+        PrimarySourceCheck(
+            dimension="Risks",
+            claim="Profit may fall because of competition.",
+            source_url=url,
+            supporting_extract="Our markets are subject to aggressive price competition.",
+            supported=True,
+            explanation="Confirmed against the opened primary statement.",
+        ),
     ]
     unsupported = confirmed[0].model_copy(
         update={"claim": "Revenue will double.", "supported": False}
@@ -482,6 +495,7 @@ async def test_financial_audited_revision_uses_only_confirmed_claims(
         verified=False,
         issues=[],
         primary_source_checks=[*confirmed, unsupported, unread],
+        primary_source_findings=[*confirmed, unsupported, unread],
         opened_source_urls=[url],
     )
     manager = FinancialResearchManager()
@@ -497,8 +511,12 @@ async def test_financial_audited_revision_uses_only_confirmed_claims(
     revised = await manager._revise_report("Analyze issuer", original, [], verdict)
 
     for check in confirmed:
-        assert check.claim in revised.markdown_report
+        assert check.supporting_extract in revised.markdown_report
     assert "Revenue will double" not in revised.markdown_report
     assert "Profit was" not in revised.markdown_report
     assert "Coverage:" in revised.markdown_report
+    assert "### Revenue drivers" in revised.markdown_report
+    assert "### Risks" in revised.markdown_report
+    assert "$109.2" not in revised.markdown_report
+    assert "because of" not in revised.markdown_report
     run_agent.assert_not_awaited()
