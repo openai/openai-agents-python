@@ -1,5 +1,5 @@
 {
-  "linux_workers": 12,
+  "linux_workers": 16,
   "macos_shards": 4,
   "windows_shards": 3,
   "reporting": "-rap"
