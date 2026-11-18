@@ -88,7 +88,7 @@ def _settings(settings: ModelSettings) -> tuple[str | None, str | None]:
         value = getattr(settings, field.name)
         if field.name in supported or value is None:
             continue
-        if (field.name == "tool_choice" and value == "auto") or (
+        if (field.name == "tool_choice" and value in ("auto", "required")) or (
             field.name == "store" and value is False
         ):
             continue
@@ -193,6 +193,22 @@ class _CodexModel(Model):
         effort, summary = _settings(model_settings)
         history, turn_input = prepare_codex_history(input, tools)
         dynamic_tools, identities = prepare_dynamic_tools(tools, handoffs)
+        require_sdk_call = model_settings.tool_choice == "required"
+        if require_sdk_call:
+            if not identities:
+                raise UserError(
+                    "CodexProvider tool_choice='required' needs an exposed SDK tool or handoff."
+                )
+            system_instructions = "\n\n".join(
+                filter(
+                    None,
+                    [
+                        system_instructions,
+                        "You must call an exposed SDK tool or handoff before answering. "
+                        "Native Codex tools and plain text do not satisfy this requirement.",
+                    ],
+                )
+            )
         if (
             output_schema is not None
             and not output_schema.is_plain_text()
@@ -510,7 +526,7 @@ class _CodexModel(Model):
                 output=[],
                 parallel_tool_calls=False,
                 status="in_progress",
-                tool_choice="auto",
+                tool_choice="required" if require_sdk_call else "auto",
                 tools=[],
             )
             yield ResponseCreatedEvent(
@@ -761,7 +777,13 @@ class _CodexModel(Model):
                     sequence += 1
         finally:
             await server.close()
-        if not completed or (sdk_call is None and not output):
+        if not completed:
+            raise RuntimeError("Codex finished without a completed response.")
+        if require_sdk_call and sdk_call is None:
+            raise UserError(
+                "CodexProvider tool_choice='required' did not return an SDK tool or handoff call."
+            )
+        if sdk_call is None and not output:
             raise RuntimeError("Codex finished without a completed response.")
         items = list(output.values()) + ([sdk_call] if sdk_call is not None else [])
         if reasoning_summaries:

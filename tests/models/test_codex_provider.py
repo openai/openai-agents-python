@@ -972,3 +972,285 @@ async def test_native_summary_notifications_stream_only_public_opted_in_text(
     reasoning = next(item for item in stream.to_input_list() if item.get("type") == "reasoning")
     assert reasoning["encrypted_content"] == "opaque-replay"
     assert reasoning["summary"] == [{"type": "summary_text", "text": "Public summary."}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("use_handoff", [False, True])
+async def test_required_tool_choice_returns_a_real_sdk_call(
+    tmp_path, servers, streamed, use_handoff
+):
+    from agents import ModelSettings
+
+    queue, _ = servers
+    executions = []
+
+    @function_tool
+    def lookup(value: str) -> str:
+        executions.append(value)
+        return "Found " + value
+
+    target = Agent(name="specialist")
+    first = FakeServer(
+        call={
+            "callId": "call_required",
+            "namespace": None,
+            "tool": "transfer_to_specialist" if use_handoff else "lookup",
+            "arguments": {} if use_handoff else {"value": "record"},
+        }
+    )
+    second = FakeServer(text="Finished")
+    queue.extend([first, second] if use_handoff else [first])
+    agent = Agent(
+        name="test",
+        instructions="Keep this instruction.",
+        model_settings=ModelSettings(tool_choice="required"),
+        tools=[] if use_handoff else [lookup],
+        handoffs=[target] if use_handoff else [],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    if streamed:
+        run = Runner.run_streamed(agent, "Find a record.", run_config=config(tmp_path))
+        events = [event async for event in run.stream_events()]
+        completed = [
+            event.data.response
+            for event in events
+            if event.type == "raw_response_event" and event.data.type == "response.completed"
+        ]
+        assert completed[0].tool_choice == "required"
+        assert any(item.type == "function_call" for item in completed[0].output)
+        result = run
+    else:
+        result = await Runner.run(agent, "Find a record.", run_config=config(tmp_path))
+    assert result.final_output == ("Finished" if use_handoff else "Found record")
+    assert executions == ([] if use_handoff else ["record"])
+    assert first.closed and first.interrupted
+    instructions = dict(first.requests)["thread/start"]["developerInstructions"]
+    assert "Keep this instruction." in instructions
+    assert "must call" in instructions
+    assert "SDK tool or handoff" in instructions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("native_shell", [False, True, "empty"])
+async def test_required_tool_choice_never_completes_with_only_text_or_native_tools(
+    tmp_path, servers, streamed, native_shell
+):
+    from agents import ModelRetrySettings, ModelSettings
+
+    queue, opened = servers
+
+    @function_tool
+    def lookup() -> str:
+        raise AssertionError("No SDK tool call was returned.")
+
+    class NativeServer(FakeServer):
+        async def events(self):
+            if native_shell == "empty":
+                yield {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread_1",
+                        "turn": {"id": "turn_1", "status": "completed"},
+                    },
+                }
+                return
+            if native_shell is True:
+                yield {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread_1",
+                        "turnId": "turn_1",
+                        "item": {
+                            "type": "commandExecution",
+                            "id": "native_shell",
+                            "command": "pwd",
+                            "status": "completed",
+                            "aggregatedOutput": "/workspace",
+                            "exitCode": 0,
+                        },
+                    },
+                }
+            async for event in super().events():
+                yield event
+
+    server = NativeServer(text="I answered without an SDK call.")
+    queue.append(server)
+    agent = Agent(
+        name="test",
+        tools=[lookup],
+        model_settings=ModelSettings(
+            tool_choice="required", retry=ModelRetrySettings(max_retries=2)
+        ),
+    )
+    events = []
+    with pytest.raises(UserError, match="required.*SDK tool or handoff"):
+        if streamed:
+            run = Runner.run_streamed(agent, "Find a record.", run_config=config(tmp_path))
+            async for event in run.stream_events():
+                events.append(event)
+        else:
+            await Runner.run(agent, "Find a record.", run_config=config(tmp_path))
+    assert not any(
+        event.type == "raw_response_event" and event.data.type == "response.completed"
+        for event in events
+    )
+    assert server.closed
+    assert len(opened) == 1
+    assert not queue
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("choice", ["required", "none", "lookup"])
+async def test_required_without_eligible_tools_and_other_choices_fail_before_launch(
+    tmp_path, servers, streamed, choice
+):
+    from agents import ModelSettings
+
+    queue, opened = servers
+    agent = Agent(name="test", model_settings=ModelSettings(tool_choice=choice))
+    with pytest.raises(UserError, match="required.*SDK tool or handoff|tool_choice"):
+        if streamed:
+            run = Runner.run_streamed(agent, "Hello", run_config=config(tmp_path))
+            async for _event in run.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "Hello", run_config=config(tmp_path))
+    assert not opened and not queue
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice", [None, "auto"])
+async def test_default_and_auto_tool_choice_keep_text_completion(tmp_path, servers, choice):
+    from agents import ModelSettings
+
+    queue, _ = servers
+    server = FakeServer()
+    queue.append(server)
+    result = await Runner.run(
+        Agent(
+            name="test",
+            instructions="Only this instruction.",
+            model_settings=ModelSettings(tool_choice=choice),
+        ),
+        "Hello",
+        run_config=config(tmp_path),
+    )
+    assert result.final_output == "A Codex response"
+    assert (
+        dict(server.requests)["thread/start"]["developerInstructions"] == "Only this instruction."
+    )
+    assert server.closed
+
+
+@pytest.mark.asyncio
+async def test_required_rejects_only_hosted_tools_before_launch(tmp_path, servers):
+    from agents import ModelSettings, WebSearchTool
+
+    queue, opened = servers
+    with pytest.raises(UserError, match="required.*SDK tool or handoff"):
+        await Runner.run(
+            Agent(
+                name="test",
+                tools=[WebSearchTool()],
+                model_settings=ModelSettings(tool_choice="required"),
+            ),
+            "Use a tool.",
+            run_config=config(tmp_path),
+        )
+    assert not opened and not queue
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("kind", ["shell", "apply_patch"])
+async def test_required_accepts_sdk_local_tool_callbacks(tmp_path, servers, streamed, kind):
+    from agents import ApplyPatchTool, ModelSettings
+    from agents.editor import ApplyPatchResult
+    from agents.tool import ShellTool
+
+    queue, _ = servers
+    executions = []
+
+    def shell_executor(request):
+        executions.extend(request.data.action.commands)
+        return "workspace"
+
+    class Editor:
+        def create_file(self, operation):
+            executions.append(operation.path)
+            return ApplyPatchResult(output="Created test.txt")
+
+    tool = (
+        ShellTool(executor=shell_executor) if kind == "shell" else ApplyPatchTool(editor=Editor())
+    )
+    arguments = (
+        {"action": {"commands": ["pwd"]}}
+        if kind == "shell"
+        else {"operation": {"type": "create_file", "path": "test.txt", "diff": "+hello"}}
+    )
+    first = FakeServer(
+        call={
+            "callId": "local_required",
+            "namespace": "agents_sdk",
+            "tool": kind,
+            "arguments": arguments,
+        }
+    )
+    second = FakeServer(text="Local SDK tool finished.")
+    queue.extend([first, second])
+    agent = Agent(name="test", tools=[tool], model_settings=ModelSettings(tool_choice="required"))
+    if streamed:
+        run = Runner.run_streamed(agent, "Use the SDK tool.", run_config=config(tmp_path))
+        events = [event async for event in run.stream_events()]
+        completed = [
+            event.data.response
+            for event in events
+            if event.type == "raw_response_event" and event.data.type == "response.completed"
+        ]
+        assert completed[0].tool_choice == "required"
+        assert any(item.type == kind + "_call" for item in completed[0].output)
+        result = run
+    else:
+        result = await Runner.run(agent, "Use the SDK tool.", run_config=config(tmp_path))
+    assert result.final_output == "Local SDK tool finished."
+    assert executions == (["pwd"] if kind == "shell" else ["test.txt"])
+    assert first.interrupted and first.closed and second.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_required_preserves_incomplete_turn_runtime_error(tmp_path, servers, streamed):
+    from agents import ModelSettings
+
+    queue, _ = servers
+
+    @function_tool
+    def lookup() -> str:
+        return "unused"
+
+    class IncompleteServer(FakeServer):
+        async def events(self):
+            yield {
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "threadId": "thread_1",
+                    "turnId": "turn_1",
+                    "itemId": "text",
+                    "delta": "Unfinished",
+                },
+            }
+
+    server = IncompleteServer()
+    queue.append(server)
+    agent = Agent(name="test", tools=[lookup], model_settings=ModelSettings(tool_choice="required"))
+    with pytest.raises(RuntimeError, match="without a completed response"):
+        if streamed:
+            run = Runner.run_streamed(agent, "Use a tool.", run_config=config(tmp_path))
+            async for _event in run.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "Use a tool.", run_config=config(tmp_path))
+    assert server.closed
