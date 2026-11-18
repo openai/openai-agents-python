@@ -1,0 +1,440 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 77ccb8c0b3774c13411021ff397431b5f1d0d188..e3056ea5470e14569f89afce537391551887e8b8 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3414,12 +3414,6 @@ async fn propose_tool_batch_completion(
+         return Ok(None);
+     }
+ 
+-    let handoff_tools = step.settings.agent_profile.as_ref().and_then(|profile| {
+-        profile
+-            .profile
+-            .data
+-            .get::<codex_extension_api::AgentProfileHandoffTools>()
+-    });
+     let mut results = Vec::new();
+     let mut call_ids = Vec::new();
+     for ((call, output), succeeded) in tools.calls.iter().zip(&tools.outputs).zip(&tools.outcomes) {
+@@ -3440,10 +3434,9 @@ async fn propose_tool_batch_completion(
+             namespace: namespace.clone(),
+         }
+         .with_default_namespace();
+-        if handoff_tools
+-            .as_ref()
+-            .is_some_and(|handoffs| handoffs.targets.contains_key(&tool))
+-        {
++        if step.settings.agent_profile.as_ref().is_some_and(|profile| {
++            crate::tools::parallel::admits_handoff(&profile.profile.data, &tool, None)
++        }) {
+             if *succeeded {
+                 return Ok(None);
+             }
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index d706cdb82a668bec7e7deaaf4356accb28da01fb..b5518259956ab5d61e15928df97fb288bfd5f49d 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -51,7 +51,7 @@ pub(crate) struct DirectToolResult {
+ 
+ #[derive(Default)]
+ struct AgentHandoffSelection {
+-    first_requested: Option<(String, String)>,
++    first_requested: Option<(String, codex_tools::ToolName)>,
+     accepted: Option<codex_protocol::agent_profile::AgentProfileHandoff>,
+ }
+ 
+@@ -92,6 +92,24 @@ impl WeakToolCallRuntime {
+     }
+ }
+ 
++/// The immutable producing profile owns both the tool and its allowed destinations.
++pub(crate) fn admits_handoff(
++    data: &codex_extension_api::ExtensionDataInit,
++    name: &codex_tools::ToolName,
++    target: Option<&str>,
++) -> bool {
++    let name = name.clone().with_default_namespace();
++    data.get::<codex_extension_api::AgentProfileHandoffTools>()
++        .and_then(|tools| tools.targets.get(&name).cloned())
++        .is_some_and(|allowed| target.is_none_or(|target| target == allowed))
++        || data
++            .get::<codex_extension_api::AgentProfileDecisionHandoffTools>()
++            .and_then(|tools| tools.targets.get(&name).cloned())
++            .is_some_and(|allowed| {
++                target.is_none_or(|target| allowed.iter().any(|allowed| allowed == target))
++            })
++}
++
+ impl ToolCallRuntime {
+     pub(crate) fn downgrade(&self) -> WeakToolCallRuntime {
+         WeakToolCallRuntime {
+@@ -116,24 +134,19 @@ impl ToolCallRuntime {
+         }
+     }
+ 
+-    fn handoff_target(&self, name: &codex_tools::ToolName) -> Option<String> {
+-        let profile = self.step_context.settings.agent_profile.as_ref()?;
+-        profile
+-            .profile
+-            .data
+-            .get::<codex_extension_api::AgentProfileHandoffTools>()?
+-            .targets
+-            .get(&name.clone().with_default_namespace())
+-            .cloned()
+-    }
+-
+     pub(crate) fn observe_requested_handoff(&self, name: &codex_tools::ToolName, call_id: &str) {
+-        if let Some(target) = self.handoff_target(name) {
++        if self
++            .step_context
++            .settings
++            .agent_profile
++            .as_ref()
++            .is_some_and(|profile| admits_handoff(&profile.profile.data, name, None))
++        {
+             self.handoff_selection
+                 .lock()
+                 .unwrap()
+                 .first_requested
+-                .get_or_insert_with(|| (call_id.to_owned(), target));
++                .get_or_insert_with(|| (call_id.to_owned(), name.clone().with_default_namespace()));
+         }
+     }
+ 
+@@ -160,14 +173,20 @@ impl ToolCallRuntime {
+     }
+ 
+     pub(crate) fn ignores_handoff(&self, name: &codex_tools::ToolName, call_id: &str) -> bool {
+-        self.handoff_target(name).is_some()
++        self.step_context
++            .settings
++            .agent_profile
++            .as_ref()
++            .is_some_and(|profile| admits_handoff(&profile.profile.data, name, None))
+             && self
+                 .handoff_selection
+                 .lock()
+                 .unwrap()
+                 .first_requested
+                 .as_ref()
+-                .is_some_and(|(first, _)| first != call_id)
++                .is_some_and(|(first, first_name)| {
++                    first != call_id || first_name != &name.clone().with_default_namespace()
++                })
+     }
+ 
+     pub(crate) fn accepted_handoff(
+@@ -247,13 +266,31 @@ impl ToolCallRuntime {
+                             .agent_profile
+                             .as_ref()
+                             .map(|profile| &profile.receipt);
+-                        if source != Some(&handoff.source)
+-                            || selection.first_requested.as_ref()
+-                                != Some(&(
+-                                    handoff.call_id.clone(),
+-                                    handoff.target_profile_id.clone(),
+-                                ))
+-                        {
++                        let admitted =
++                            selection
++                                .first_requested
++                                .as_ref()
++                                .is_some_and(|(call, name)| {
++                                    call == &handoff.call_id
++                                        && call == &error_call.call_id
++                                        && name
++                                            == &error_call
++                                                .tool_name
++                                                .clone()
++                                                .with_default_namespace()
++                                        && retained_step_context
++                                            .settings
++                                            .agent_profile
++                                            .as_ref()
++                                            .is_some_and(|profile| {
++                                                admits_handoff(
++                                                    &profile.profile.data,
++                                                    name,
++                                                    Some(&handoff.target_profile_id),
++                                                )
++                                            })
++                                });
++                        if source != Some(&handoff.source) || !admitted {
+                             return Err(CodexErr::InvalidRequest(
+                                 "Accepted handoff differs from the first requested native handoff"
+                                     .into(),
+@@ -1030,3 +1067,51 @@ mod tests {
+ #[cfg(test)]
+ #[path = "parallel_observation_tests.rs"]
+ mod observation_tests;
++
++#[cfg(test)]
++mod decision_handoff_tests {
++    use super::admits_handoff;
++    use codex_extension_api::{
++        AgentProfileDecisionHandoffTools, AgentProfileHandoffTools, ExtensionDataInit,
++    };
++    use codex_tools::ToolName;
++
++    #[test]
++    fn static_and_decision_grants_preserve_exact_tool_and_target_membership() {
++        let mut init = ExtensionDataInit::new();
++        init.insert(AgentProfileHandoffTools {
++            targets: [(
++                ToolName::new(None, "fixed").with_default_namespace(),
++                "b".into(),
++            )]
++            .into(),
++        });
++        init.insert(AgentProfileDecisionHandoffTools {
++            targets: [(
++                ToolName::new(None, "choose").with_default_namespace(),
++                vec!["b".into(), "c".into()],
++            )]
++            .into(),
++        });
++        let data = init;
++        for (name, target, admitted) in [
++            ("fixed", "b", true),
++            ("fixed", "c", false),
++            ("choose", "b", true),
++            ("choose", "c", true),
++            ("choose", "missing", false),
++            ("other", "b", false),
++        ] {
++            assert_eq!(
++                admits_handoff(&data, &ToolName::new(None, name), Some(target)),
++                admitted
++            );
++        }
++        assert!(admits_handoff(&data, &ToolName::new(None, "choose"), None));
++        assert!(!admits_handoff(
++            &data,
++            &ToolName::namespaced("other", "choose"),
++            Some("b")
++        ));
++    }
++}
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index ec5a5ab1bb58aa70dfe4e49cf3d68d07929c1be6..4465dfc328fa146cfc7cc10ff014f90b9f81acb3 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -1123,6 +1123,21 @@ impl UnifiedExecProcessManager {
+                 .processes
+                 .get(&process_id)
+                 .ok_or(UnifiedExecError::UnknownProcessId { process_id })?;
++            // SDK profile terminals remain within the environment captured for this step.
++            // Reject before output diagnostics, approval, polling, or stdin can touch the process.
++            if context
++                .step_context
++                .extension_data
++                .get::<codex_extension_api::AgentProfileEnvironment>()
++                .is_some()
++                && !context
++                    .step_context
++                    .environments
++                    .turn_environments()
++                    .any(|environment| environment.selection.environment_id == entry.environment_id)
++            {
++                return Err(UnifiedExecError::UnknownProcessId { process_id });
++            }
+             if crate::tools::builtin_result_policy::controlled(
+                 &context.step_context.turn.extension_data,
+                 &context.call_id,
+diff --git a/codex-rs/exec-server/src/client_api.rs b/codex-rs/exec-server/src/client_api.rs
+index e870f124717a7a52624bfe0840d4d55f2822e5b7..654d568bb077c4a2937385e9aeb47fd6ff1a0646 100644
+--- a/codex-rs/exec-server/src/client_api.rs
++++ b/codex-rs/exec-server/src/client_api.rs
+@@ -85,14 +85,25 @@ pub(crate) struct StdioExecServerConnectArgs {
+ }
+ 
+ /// Structured process command used to start an exec-server over stdio.
+-#[derive(Debug, Clone, PartialEq, Eq)]
+-pub(crate) struct StdioExecServerCommand {
++#[derive(Clone, PartialEq, Eq)]
++pub struct StdioExecServerCommand {
+     pub program: String,
+     pub args: Vec<String>,
+     pub env: HashMap<String, String>,
+     pub cwd: Option<PathBuf>,
+ }
+ 
++impl std::fmt::Debug for StdioExecServerCommand {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("StdioExecServerCommand")
++            .field("program", &"<host-owned>")
++            .field("args", &"<redacted>")
++            .field("env", &"<redacted>")
++            .field("cwd", &"<redacted>")
++            .finish()
++    }
++}
++
+ pub(crate) type DeferredEnvironmentReadiness = watch::Receiver<Option<Result<(), String>>>;
+ 
+ #[derive(Clone)]
+@@ -115,7 +126,6 @@ pub(crate) enum ExecServerTransportParams {
+         provider: Arc<dyn NoiseRendezvousConnectProvider>,
+         identity: NoiseChannelIdentity,
+     },
+-    #[allow(dead_code)]
+     StdioCommand {
+         command: StdioExecServerCommand,
+         initialize_timeout: Duration,
+@@ -185,3 +195,22 @@ pub trait HttpClient: Send + Sync {
+         params: HttpRequestParams,
+     ) -> BoxFuture<'_, Result<(HttpRequestResponse, HttpResponseBodyStream), ExecServerError>>;
+ }
++
++#[cfg(test)]
++mod stdio_command_redaction_tests {
++    use super::StdioExecServerCommand;
++    use std::collections::HashMap;
++    use std::path::PathBuf;
++
++    #[test]
++    fn host_owned_command_debug_keeps_arguments_and_environment_private() {
++        let private = "synthetic-private-stdio-material";
++        let command = StdioExecServerCommand {
++            program: private.to_owned(),
++            args: vec![private.to_owned()],
++            env: HashMap::from([("TOKEN".to_owned(), private.to_owned())]),
++            cwd: Some(PathBuf::from(private)),
++        };
++        assert!(!format!("{command:?}").contains(private));
++    }
++}
+diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
+index ddbe65d6fe1785330c2a5b14fc1b952656afa90e..41f692fb2357b3c8ebf0405fa87f4b72be519c59 100644
+--- a/codex-rs/exec-server/src/environment.rs
++++ b/codex-rs/exec-server/src/environment.rs
+@@ -28,6 +28,7 @@ use crate::client::LazyRemoteExecServerClient;
+ use crate::client::http_client::RouteAwareHttpClient;
+ use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT;
+ use crate::client_api::ExecServerTransportParams;
++use crate::client_api::StdioExecServerCommand;
+ use crate::environment_bootstrap::PreparedEnvironmentManager;
+ use crate::environment_bootstrap::PreparedEnvironmentSource;
+ use crate::environment_config::read_environment_config;
+@@ -529,6 +530,31 @@ impl EnvironmentManager {
+         self.insert_environment(environment_id, Arc::new(environment))
+     }
+ 
++    /// Registers a trusted host-owned command through the existing stdio transport.
++    ///
++    /// The host must select this command from current trusted configuration,
++    /// never model input or serialized checkpoints. Remote policies and the
++    /// existing connection owner apply.
++    pub fn upsert_stdio_environment(
++        &self,
++        environment_id: String,
++        command: StdioExecServerCommand,
++        initialize_timeout: Option<std::time::Duration>,
++    ) -> Result<(), ExecServerError> {
++        validate_environment_id(&environment_id)?;
++        let environment = Environment::remote_with_transport(
++            ExecServerTransportParams::StdioCommand {
++                command,
++                initialize_timeout: initialize_timeout
++                    .unwrap_or(crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT),
++            },
++            self.local_runtime_paths.clone(),
++            self.http_client_factory.clone(),
++            ScopedSkillsConfig::default(),
++        );
++        self.insert_environment(environment_id, Arc::new(environment))
++    }
++
+     /// Returns the stable environment for an ID, creating it as pending when absent.
+     pub fn materialize_pending_noise_environment(
+         &self,
+@@ -1761,6 +1787,36 @@ mod tests {
+             .expect("accept connection");
+     }
+ 
++    #[tokio::test]
++    async fn host_stdio_registration_preserves_selection_and_lazy_ownership() {
++        let manager = EnvironmentManager::without_environments(legacy_http_client_factory());
++        let command = StdioExecServerCommand {
++            program: "codex-missing-exec-server-for-test".to_string(),
++            args: Vec::new(),
++            env: HashMap::new(),
++            cwd: None,
++        };
++        assert!(
++            manager
++                .upsert_stdio_environment(String::new(), command.clone(), None)
++                .is_err()
++        );
++        assert!(manager.get_environment("").is_none());
++        manager
++            .upsert_stdio_environment("selected".to_owned(), command, None)
++            .expect("register host-owned command");
++        let environment = manager
++            .get_environment("selected")
++            .expect("registered environment");
++        assert!(environment.is_remote());
++        assert!(manager.default_environment().is_none());
++        assert_eq!(
++            environment.status().await,
++            EnvironmentObservedStatus::Pending
++        );
++        assert!(!environment.startup_finished());
++    }
++
+     #[tokio::test]
+     async fn environment_status_keeps_stdio_environment_pending() {
+         let environment = Environment::remote_with_transport(
+diff --git a/codex-rs/exec-server/src/lib.rs b/codex-rs/exec-server/src/lib.rs
+index 3adf5278a0727bcce8579c17594d3decf58a4a9e..c87d8ee33f41cece2eb493696e7babcf470ea3cb 100644
+--- a/codex-rs/exec-server/src/lib.rs
++++ b/codex-rs/exec-server/src/lib.rs
+@@ -83,6 +83,7 @@ pub use client_api::NoiseRendezvousConnectArgs;
+ pub use client_api::NoiseRendezvousConnectBundle;
+ pub use client_api::NoiseRendezvousConnectProvider;
+ pub use client_api::RemoteExecServerConnectArgs;
++pub use client_api::StdioExecServerCommand;
+ pub use codex_exec_server_protocol::ExecutorCapabilityDiscoverySnapshot;
+ pub use codex_exec_server_protocol::ProcessId;
+ pub use codex_file_system::CopyOptions;
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 450d526ae3e340e288b3687589150591158b5983..d83b35777f84a3d3cf0b298cc2ff449856348a66 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -65,6 +65,7 @@ pub use turn_input::TurnInputEnvironment;
+ pub use turn_lifecycle::AgentProfile;
+ pub use turn_lifecycle::AgentProfileActivation;
+ pub use turn_lifecycle::AgentProfileBoundaryInput;
++pub use turn_lifecycle::AgentProfileDecisionHandoffTools;
+ pub use turn_lifecycle::AgentProfileHandoffTools;
+ pub use turn_lifecycle::AgentProfileInstructions;
+ pub use turn_lifecycle::AgentProfileModelSettings;
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 292c70ddfca895b4bc94ad29b8de727989cf1ce7..71e9f2253eb1eeeb501df056578b3a61e16b84c5 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -213,6 +213,13 @@ pub struct AgentProfileHandoffTools {
+     pub targets: std::collections::HashMap<codex_tools::ToolName, String>,
+ }
+ 
++/// Callback-only handoffs whose selected destination requires a live SDK reply.
++/// This attachment never grants Realtime handoff authority.
++#[derive(Clone, Debug, Default)]
++pub struct AgentProfileDecisionHandoffTools {
++    pub targets: std::collections::HashMap<codex_tools::ToolName, Vec<String>>,
++}
++
+ /// Clean application text captured with the accepted profile publication.
+ /// A missing attachment preserves legacy inheritance; `text: None` clears it.
+ #[derive(Clone, Debug)]
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 594579f511b60b0c9c4b81548a5bb234c04b9ad1..54ecd06fb3cd135cc7a235f599ce75c4d4ff9c97 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -50,6 +50,7 @@ pub use codex_tools::parse_tool_input_schema_without_compaction;
+ pub use contributors::AgentProfile;
+ pub use contributors::AgentProfileActivation;
+ pub use contributors::AgentProfileBoundaryInput;
++pub use contributors::AgentProfileDecisionHandoffTools;
+ pub use contributors::AgentProfileHandoffTools;
+ pub use contributors::AgentProfileInstructions;
+ pub use contributors::AgentProfileModelSettings;

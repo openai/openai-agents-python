@@ -1,6 +1,6 @@
 //! Pure schema adaptation for the standalone Decisions provider.
 
-use codex_api::decisions::{DecisionError, DecisionSchema};
+use crate::decision_schema::{DecisionError, DecisionSchema};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde_json::{Value, json};

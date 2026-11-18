@@ -1,0 +1,445 @@
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 2725b3bf2489788c0b7150637235030d45a7b7b9..e68ce60443fb73dff28a83ae3fe4c8120c5d5bbc 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -4161,12 +4161,46 @@ impl Session {
+                 required_plugins,
+                 /*apply_named_tool_choice*/ true,
+                 None,
++                None,
+             )
+             .await?;
+         self.set_last_known_step_context(&step_context).await;
+         Ok(step_context)
+     }
+ 
++    /// Builds the source recovery context without charging it as a model request.
++    /// Only this exact step receives the marker; concurrent captures do not inherit it.
++    pub(crate) async fn capture_staged_input_preparation(
++        self: &Arc<Self>,
++        turn_context: Arc<TurnContext>,
++        cancellation_token: &CancellationToken,
++        required_servers: &[String],
++        required_plugins: &HashSet<String>,
++    ) -> CodexResult<Arc<StepContext>> {
++        struct EndPreparation(codex_extension_api::StagedInputPreparation);
++        impl Drop for EndPreparation {
++            fn drop(&mut self) {
++                self.0.finish();
++            }
++        }
++        let preparation =
++            codex_extension_api::StagedInputPreparation::new(turn_context.sub_id.clone());
++        let _end = EndPreparation(preparation.clone());
++        let step = self
++            .capture_step_context_inner(
++                turn_context,
++                cancellation_token,
++                required_servers,
++                required_plugins,
++                true,
++                None,
++                Some(preparation),
++            )
++            .await?;
++        self.set_last_known_step_context(&step).await;
++        Ok(step)
++    }
++
+     /// Prepares a candidate step without replacing the active turn's retained context.
+     /// The caller must retain it explicitly if it is selected for execution.
+     async fn capture_speculative_step_context(
+@@ -4181,6 +4215,7 @@ impl Session {
+             /*required_plugins*/ &HashSet::new(),
+             /*apply_named_tool_choice*/ true,
+             None,
++            None,
+         )
+         .await
+     }
+@@ -4200,6 +4235,7 @@ impl Session {
+                 /*required_plugins*/ &HashSet::new(),
+                 /*apply_named_tool_choice*/ false,
+                 None,
++                None,
+             )
+             .await?;
+         self.set_last_known_step_context(&step_context).await;
+@@ -4212,7 +4248,7 @@ impl Session {
+         source: crate::realtime_conversation::RealtimeToolExecutionSource,
+         cancellation: &CancellationToken,
+     ) -> CodexResult<Arc<StepContext>> {
+-        self.capture_step_context_inner(context, cancellation, &[], &HashSet::new(), false, Some(source))
++        self.capture_step_context_inner(context, cancellation, &[], &HashSet::new(), false, Some(source), None)
+             .await
+     }
+ 
+@@ -4225,6 +4261,7 @@ impl Session {
+         required_plugins: &HashSet<String>,
+         apply_named_tool_choice: bool,
+         source: Option<crate::realtime_conversation::RealtimeToolExecutionSource>,
++        staged_input_preparation: Option<codex_extension_api::StagedInputPreparation>,
+     ) -> CodexResult<Arc<StepContext>> {
+         let realtime_source = source.or_else(|| {
+             turn_context
+@@ -4329,6 +4366,9 @@ impl Session {
+                         })
+                         .unwrap_or_default(),
+                 );
++                if let Some(preparation) = &staged_input_preparation {
++                    extension_data.insert(preparation.clone());
++                }
+                 if let Some(source) = &realtime_source {
+                     extension_data.insert(source.clone());
+                     extension_data.insert(codex_extension_api::ToolsOnlyWorkCancellation(
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 823bf57f3e392a4753b2d27eb7762e3894cd400b..0fe625cf14f60001552fd8bbfe69df1c4253b3ee 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -293,13 +293,31 @@ pub(crate) async fn run_turn(
+     let first_capture = match reusable_initial_step {
+         Some(step) => Ok(step),
+         None => {
+-            sess.capture_step_context_with_required_mcp_servers(
+-                Arc::clone(&turn_context),
+-                &cancellation_token,
+-                required_servers,
+-                required_plugins,
+-            )
+-            .await
++            let staged_preparation = turn_context
++                .extension_data
++                .get::<codex_extension_api::StagedInputBatch>()
++                .is_some_and(|batch| batch.items_for(&turn_context.sub_id).is_some())
++                && turn_context
++                    .extension_data
++                    .get::<codex_extension_api::SelectedStagedInput>()
++                    .is_none();
++            if staged_preparation {
++                sess.capture_staged_input_preparation(
++                    Arc::clone(&turn_context),
++                    &cancellation_token,
++                    required_servers,
++                    required_plugins,
++                )
++                .await
++            } else {
++                sess.capture_step_context_with_required_mcp_servers(
++                    Arc::clone(&turn_context),
++                    &cancellation_token,
++                    required_servers,
++                    required_plugins,
++                )
++                .await
++            }
+         }
+     };
+     let first_step_context = match first_capture {
+@@ -603,6 +621,23 @@ pub(crate) async fn run_turn(
+             next_step_context = None;
+         }
+ 
++        let staged_input = turn_context
++            .extension_data
++            .get::<codex_extension_api::StagedInputBatch>()
++            .filter(|staged| {
++                staged.items_for(&turn_context.sub_id).is_some()
++                    && turn_context
++                        .extension_data
++                        .get::<codex_extension_api::SelectedStagedInput>()
++                        .is_none()
++            });
++        if let Some(staged) = &staged_input {
++            turn_context
++                .extension_data
++                .insert(codex_extension_api::SelectedStagedInput(Arc::clone(staged)));
++            next_step_context = None;
++        }
++
+         // Capture once so context, advertised tools, and tool calls share one request view.
+         let step_context = match next_step_context.take() {
+             Some(step_context) if pending_input.is_empty() => step_context,
+@@ -641,6 +676,29 @@ pub(crate) async fn run_turn(
+                 .await?
+             }
+         };
++        if let Some(staged) = &staged_input
++            && let Some(items) = staged.items_for(&turn_context.sub_id)
++        {
++            if cancellation_token.is_cancelled() {
++                return Err(CodexErr::TurnAborted);
++            }
++            crate::file_admission::validate_response_items(
++                sess.captured_provider_image_reference_policy(),
++                &step_context.settings.model_info,
++                items,
++            )
++            .map_err(CodexErr::Fatal)?;
++            // Step selection has joined the SDK input guardrails. The manual replies
++            // are already in history, so the batch follows them in the next request.
++            sess.record_conversation_items(
++                &turn_context,
++                &step_context.settings.model_info,
++                items,
++            )
++            .await;
++            sess.ensure_rollout_durable().await?;
++            staged.acknowledge();
++        }
+         let sampling_request_result: CodexResult<_> = async {
+             super::time_reminder::maybe_record_current_time_reminder(
+                 sess.as_ref(),
+@@ -2915,6 +2973,7 @@ fn record_tool_choice_use(
+ /// Original direct-call order and accepted outputs from this sample only.
+ #[derive(Debug, Default)]
+ struct SettledDirectTools {
++    recovered: bool,
+     calls: Vec<ResponseItem>,
+     outputs: Vec<ResponseItem>,
+     /// Unknown for pending execution and unqualified recovered receipts.
+@@ -3102,6 +3161,7 @@ fn recovered_tools_from_history(
+         ordered_outputs.push(output);
+     }
+     Ok(SettledDirectTools {
++        recovered: true,
+         calls,
+         outputs: ordered_outputs,
+         outcomes: ordered_outcomes,
+@@ -3412,6 +3472,7 @@ async fn propose_tool_batch_completion(
+     for contributor in enabled {
+         let decision = contributor
+             .propose_tool_batch_completion(codex_extension_api::ToolBatchCompletionInput {
++                recovered: tools.recovered,
+                 turn_id: &step.turn.sub_id,
+                 model: &step.settings.model_info.slug,
+                 continuation_count: 0,
+@@ -4119,6 +4180,75 @@ fn assign_missing_streamed_response_item_id(
+     Session::assign_missing_response_item_id(item);
+ }
+ 
++// Provider execution has no local accepted-call owner, including capabilities
++// retained by a hosted prompt or a provider-owned history cursor.
++fn sdk_request_may_have_provider_effects(
++    prompt: &Prompt,
++    visible_tools: &[codex_tools::ToolSpec],
++) -> bool {
++    prompt
++        .request_controls
++        .hosted_prompt
++        .as_ref()
++        .is_some_and(Option::is_some)
++        || prompt.canonical_history_input.is_some()
++        || prompt.tools.iter().chain(visible_tools.iter()).any(|tool| {
++            matches!(
++                tool,
++                codex_tools::ToolSpec::Mcp(_)
++                    | codex_tools::ToolSpec::CodeInterpreter(_)
++                    | codex_tools::ToolSpec::Shell(_)
++                    | codex_tools::ToolSpec::ImageGeneration(_)
++            )
++        })
++}
++
++#[cfg(test)]
++#[test]
++fn sdk_cold_recovery_classifies_provider_effect_capabilities() {
++    let mut prompt = Prompt::default();
++    assert!(!sdk_request_may_have_provider_effects(&prompt, &[]));
++    assert!(!sdk_request_may_have_provider_effects(
++        &prompt,
++        &[codex_tools::ToolSpec::ApplyPatch {}]
++    ));
++    let hosted = vec![
++        codex_tools::ToolSpec::Mcp(
++            serde_json::from_value(serde_json::json!({"server_label":"remote"})).unwrap(),
++        ),
++        codex_tools::ToolSpec::CodeInterpreter(
++            serde_json::from_value(serde_json::json!({"container":{"type":"auto"}})).unwrap(),
++        ),
++        codex_tools::ToolSpec::Shell(
++            serde_json::from_value(serde_json::json!({"environment":{"type":"container_auto"}}))
++                .unwrap(),
++        ),
++        codex_tools::ToolSpec::ImageGeneration(
++            serde_json::from_value(serde_json::json!({})).unwrap(),
++        ),
++    ];
++    for tool in hosted {
++        assert!(sdk_request_may_have_provider_effects(
++            &prompt,
++            std::slice::from_ref(&tool)
++        ));
++        prompt.tools = vec![tool].into();
++        assert!(sdk_request_may_have_provider_effects(&prompt, &[]));
++        prompt.tools = Vec::new().into();
++    }
++    prompt.request_controls.hosted_prompt = Some(Some(Default::default()));
++    assert!(sdk_request_may_have_provider_effects(&prompt, &[]));
++    prompt
++        .request_controls
++        .hosted_prompt
++        .as_mut()
++        .unwrap()
++        .as_mut()
++        .unwrap()
++        .omit_tools = true;
++    assert!(sdk_request_may_have_provider_effects(&prompt, &[]));
++}
++
+ // Provider actions have no local accepted-call deduplication owner. Unknown
+ // output has lost its raw type, so its replay safety cannot be established.
+ fn provider_event_may_have_effects(event: &ResponseEvent, tools: &[codex_tools::ToolSpec]) -> bool {
+@@ -4224,21 +4354,29 @@ async fn try_run_sampling_request(
+     // Record settings from this actual sampling context without changing the resume baseline.
+     // A later request in the same turn may select different live settings.
+     struct LastSdkReceipt(serde_json::Value);
+-    if let Some(receipt) =
++    if let Some(mut receipt) =
+         step_context.sdk_sampling_receipt(sess.thread_id(), &prompt.input, effort.as_ref())
+-        && turn_context
++    {
++        receipt["provider_effects_possible"] =
++            serde_json::Value::Bool(sdk_request_may_have_provider_effects(
++                prompt,
++                &step_context.tool_router.model_visible_specs(),
++            ));
++        if turn_context
+             .extension_data
+             .get::<LastSdkReceipt>()
+             .as_deref()
+             .map(|last| &last.0)
+             != Some(&receipt)
+-    {
+-        let mut item = step_context.to_turn_context_item();
+-        item.sdk_receipt = Some(receipt.clone());
+-        if sess
+-            .persist_rollout_items(&[RolloutItem::TurnContext(item)])
+-            .await
+         {
++            let mut item = step_context.to_turn_context_item();
++            item.sdk_receipt = Some(receipt.clone());
++            if !sess
++                .persist_rollout_items(&[RolloutItem::TurnContext(item)])
++                .await
++            {
++                return Err(CodexErr::Fatal("Canonical sampling receipt persistence failed; execution stopped pending recovery".to_string()));
++            }
+             turn_context.extension_data.insert(LastSdkReceipt(receipt));
+         }
+     }
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+index a2a20e15164baa8ec9045ec9571efd0fffc50e4c..b3ae177d305a8e5fcf91c92b4442b02ef8d87fc7 100644
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -165,6 +165,7 @@ impl codex_extension_api::TurnLifecycleContributor for TerminalPolicy {
+ }
+ fn settled_test_calls() -> SettledDirectTools {
+     SettledDirectTools {
++        recovered: false,
+         calls: ["first", "second", "third"]
+             .iter()
+             .map(|id| {
+@@ -373,6 +374,7 @@ fn recovered_batch_fixture() -> (
+ fn tool_terminal_recovery_resolves_written_prefix_across_same_id_start() {
+     let (thread, candidates, history) = recovered_batch_fixture();
+     let tools = recovered_tools_from_history(&candidates, thread, "recovered", &history).unwrap();
++    assert!(tools.recovered);
+     assert!(tools.all_succeeded);
+     assert_eq!(tools.calls.len(), 3);
+     for (index, output) in tools.outputs.iter().enumerate() {
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 5edbb33e1ae7b6cf40a2cb99642ebf7286266ec8..292c70ddfca895b4bc94ad29b8de727989cf1ce7 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -153,6 +153,8 @@ pub struct ToolBatchCompletionResult<'a> {
+ /// A single completed direct-call batch. The host applies the same final
+ /// reservation and stop policies used for individual tool completion.
+ pub struct ToolBatchCompletionInput<'a> {
++    /// This batch comes from recovered history, rather than a new live sample.
++    pub recovered: bool,
+     pub turn_id: &'a str,
+     pub model: &'a str,
+     pub continuation_count: usize,
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 1e2fc8180fbce7913bd088df5640274832ef25b8..594579f511b60b0c9c4b81548a5bb234c04b9ad1 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -159,6 +159,9 @@ pub use model_request::ModelResponseStream;
+ pub use model_request::ModelToolAdmission;
+ pub use model_request::ProviderResponseAnchor;
+ pub use model_request::ResponseEvent;
++pub use model_request::SelectedStagedInput;
++pub use model_request::StagedInputBatch;
++pub use model_request::StagedInputPreparation;
+ pub use model_request::ToolsOnlyCallInput;
+ pub use model_request::ToolsOnlyWorkCancellation;
+ pub use model_request::TurnSamplingStop;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index a6c2c4f4bf7ae4e7c05270c9766c63460b93a279..01dbcfb24c8a4503ce282fc964346b89b882591c 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -144,6 +144,64 @@ pub struct ModelRequestInput<'a> {
+     pub model_omitted: bool,
+ }
+ 
++/// Native-owned marker for one discarded recovery preparation, not a sampling admission.
++/// The capture owner closes every clone before returning or dropping its future.
++#[derive(Clone)]
++pub struct StagedInputPreparation {
++    turn_id: String,
++    active: Arc<AtomicBool>,
++}
++
++impl StagedInputPreparation {
++    pub fn new(turn_id: String) -> Self {
++        Self {
++            turn_id,
++            active: Arc::new(AtomicBool::new(true)),
++        }
++    }
++
++    pub fn is_for(&self, turn_id: &str) -> bool {
++        self.turn_id == turn_id && self.active.load(Ordering::Acquire)
++    }
++
++    pub fn finish(&self) {
++        self.active.store(false, Ordering::Release);
++    }
++}
++
++/// Application input staged on a portable manual checkpoint.
++#[derive(Clone)]
++pub struct StagedInputBatch {
++    turn_id: String,
++    items: Arc<[ResponseItem]>,
++    admitted: Arc<AtomicBool>,
++}
++
++impl StagedInputBatch {
++    pub fn new(turn_id: String, items: Vec<ResponseItem>) -> Self {
++        Self {
++            turn_id,
++            items: items.into(),
++            admitted: Arc::new(AtomicBool::new(false)),
++        }
++    }
++
++    pub fn items_for(&self, turn_id: &str) -> Option<&[ResponseItem]> {
++        (self.turn_id == turn_id && self.is_pending()).then_some(self.items.as_ref())
++    }
++
++    pub fn is_pending(&self) -> bool {
++        !self.items.is_empty() && !self.admitted.load(Ordering::Acquire)
++    }
++
++    pub fn acknowledge(&self) {
++        self.admitted.store(true, Ordering::Release);
++    }
++}
++
++/// Core publishes this view only after the next sampling agent has been selected.
++pub struct SelectedStagedInput(pub Arc<StagedInputBatch>);
++
+ /// A detached input projection for one model request, before transport retries.
+ pub struct ModelContextInput<'a> {
+     pub turn_store: Option<&'a ExtensionData>,

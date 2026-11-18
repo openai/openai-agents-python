@@ -1,0 +1,75 @@
+diff --git a/codex-rs/core/src/agent_communication.rs b/codex-rs/core/src/agent_communication.rs
+index 9925d61f9f80c2cae077e094b330f0ecf8bb643d..c4730ed18b7ea572405521f23efe23ea551620b6 100644
+--- a/codex-rs/core/src/agent_communication.rs
++++ b/codex-rs/core/src/agent_communication.rs
+@@ -50,6 +50,19 @@ pub(crate) fn emit_agent_communication_send(
+     communication: &InterAgentCommunication,
+     receiver_thread_id: ThreadId,
+ ) {
++    let policy = codex_otel::sdk_trace::current_scope_policy();
++    if policy.as_ref().is_some_and(|policy| policy.disabled) {
++        return;
++    }
++    let content = policy
++        .is_none_or(|policy| policy.include_sensitive_data)
++        .then(|| {
++            communication
++                .encrypted_content
++                .as_deref()
++                .unwrap_or("[plaintext]")
++        });
++
+     tracing::info!(
+         target: AGENT_COMMUNICATION_TARGET,
+         {
+@@ -59,10 +72,7 @@ pub(crate) fn emit_agent_communication_send(
+             state = "send",
+             sender_thread_id = %context.sender_thread_id,
+             receiver_thread_id = %receiver_thread_id,
+-            content = communication
+-                .encrypted_content
+-                .as_deref()
+-                .unwrap_or("[plaintext]"),
++            content,
+         },
+         "agent communication"
+     );
+diff --git a/codex-rs/exec-server/src/client.rs b/codex-rs/exec-server/src/client.rs
+index 46d06a37c1e1866644f284fe5d02e0dd9e1032ff..2f0924183fc6c36e5dcf87422b0fd75e8513ea55 100644
+--- a/codex-rs/exec-server/src/client.rs
++++ b/codex-rs/exec-server/src/client.rs
+@@ -440,8 +440,8 @@ impl LazyRemoteExecServerClient {
+         let client = self.clone();
+         Some(AbortOnDropHandle::new(tokio::spawn(
+             async move {
+-                if let Err(error) = client.wait_until_ready().await {
+-                    debug!(%error, "exec-server environment startup failed");
++                if client.wait_until_ready().await.is_err() {
++                    debug!("exec-server environment startup failed");
+                 }
+             }
+             .in_current_span()
+diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
+index b92961a719c9d1d589ee9d4c6fd3018ee79f0b39..d0e57969177f225602e5e50cbd78270c20685646 100644
+--- a/codex-rs/exec-server/src/environment.rs
++++ b/codex-rs/exec-server/src/environment.rs
+@@ -1060,7 +1060,7 @@ impl Environment {
+                 };
+                 match discover().await {
+                     Err(error) if crate::client::is_retryable_recovery_error(&error) => {
+-                        tracing::warn!(%error, "replaying capability discovery after executor recovery");
++                        tracing::warn!("replaying capability discovery after executor recovery");
+                         let recovered =
+                             tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                                 loop {
+@@ -1124,8 +1124,8 @@ impl Environment {
+             let client = client.clone();
+             *startup_task = Some(AbortOnDropHandle::new(tokio::spawn(
+                 async move {
+-                    if let Err(error) = client.wait_until_ready().await {
+-                        tracing::debug!(%error, "exec-server environment startup failed");
++                    if client.wait_until_ready().await.is_err() {
++                        tracing::debug!("exec-server environment startup failed");
+                     }
+                 }
+                 .in_current_span()

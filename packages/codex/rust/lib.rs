@@ -14,6 +14,7 @@ mod checkpoint;
 mod config;
 mod console_diagnostics;
 mod context;
+mod decision_schema;
 mod decisions;
 mod engine;
 mod environment;

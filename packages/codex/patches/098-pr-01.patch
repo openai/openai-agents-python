@@ -1,0 +1,1836 @@
+diff --git a/codex-rs/core-api/src/lib.rs b/codex-rs/core-api/src/lib.rs
+index aac630ae6dbc90b15bd2e94f628de55716a5962f..ffcfaf6a1c14256ff952aaaa4453aada3b2d827f 100644
+--- a/codex-rs/core-api/src/lib.rs
++++ b/codex-rs/core-api/src/lib.rs
+@@ -32,6 +32,7 @@ pub use codex_core::AgentTreeShutdown;
+ pub use codex_core::CodexAppsToolsCache;
+ pub use codex_core::CodexThread;
+ pub use codex_core::CodexThreadSettingsOverrides;
++pub use codex_core::ConfirmRemoteProcessTermination;
+ pub use codex_core::EnvironmentConfig;
+ pub use codex_core::EnvironmentMcpPolicy;
+ pub use codex_core::EnvironmentNetworkPolicy;
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index cb344d80dea54d8dde52df41a76422f11cf53dc9..cd77c8fc2c149459f08ff2ac0a4ceba9a9fa436f 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -243,6 +243,11 @@ pub struct BackgroundTerminalInfo {
+     pub cwd: PathUri,
+ }
+ 
++/// Require confirmed remote command cleanup for this SDK-owned thread.
++#[doc(hidden)]
++#[derive(Default)]
++pub struct ConfirmRemoteProcessTermination;
++
+ /// The SDK-local command cleanup could not prove that the named turn stopped.
+ #[derive(Clone, Debug)]
+ pub struct ManagedLocalExecCancelFailure(pub(crate) String);
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 49b93df7e4cbbec2beda9906ff365d96cbbbb41d..d1825e8dd253cf9a054d0af7c4fc3220f34daf1a 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -57,6 +57,7 @@ pub use codex_protocol::mcp_policy::EnvironmentMcpPolicy;
+ pub use codex_protocol::protocol::EnvironmentConfig;
+ pub use codex_thread::BackgroundTerminalInfo;
+ pub use codex_thread::CodexThread;
++pub use codex_thread::ConfirmRemoteProcessTermination;
+ pub use codex_thread::ManagedLocalExecCancelFailure;
+ mod owned_question;
+ pub use codex_thread::CodexThreadSettingsOverrides;
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 6843b902ed520c78c4cd168a6e6b1a845003c4d2..49bd1f6539c9642024e92b77e90e93ff5ef45ea3 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -1544,16 +1544,21 @@ impl Session {
+             .extension_data
+             .get::<Arc<crate::session::model_invocation_deadline::ModelInvocationDeadline>>();
+         let join_local_commands = reason == TurnAbortReason::Interrupted
+-            && self
++            && (self
+                 .services
+-                .turn_environments
+-                .environment_manager()
+-                .try_local_environment()
+-                .is_some_and(|environment| {
+-                    environment
+-                        .local_runtime_paths()
+-                        .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
+-                });
++                .thread_extension_data
++                .get::<crate::ConfirmRemoteProcessTermination>()
++                .is_some()
++                || self
++                    .services
++                    .turn_environments
++                    .environment_manager()
++                    .try_local_environment()
++                    .is_some_and(|environment| {
++                        environment
++                            .local_runtime_paths()
++                            .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
++                    }));
+         // Tools roots own source-specific batch futures and physical callback
+         // release receipts. Their cancellation must drain beyond the ordinary
+         // 100ms grace rather than dropping the owner and certifying a false join.
+diff --git a/codex-rs/core/src/tools/builtin_result_policy.rs b/codex-rs/core/src/tools/builtin_result_policy.rs
+index 66316e2ace94ae4a2c81add6f94b91adde4b16dc..f98f0a8124293785c44e5537faae5ac9bd56feec 100644
+--- a/codex-rs/core/src/tools/builtin_result_policy.rs
++++ b/codex-rs/core/src/tools/builtin_result_policy.rs
+@@ -144,14 +144,20 @@ pub(crate) fn tracks_local_exec(invocation: &ToolInvocation) -> bool {
+     invocation
+         .session
+         .services
+-        .turn_environments
+-        .environment_manager()
+-        .try_local_environment()
+-        .is_some_and(|environment| {
+-            environment
+-                .local_runtime_paths()
+-                .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
+-        })
++        .thread_extension_data
++        .get::<crate::ConfirmRemoteProcessTermination>()
++        .is_some()
++        || invocation
++            .session
++            .services
++            .turn_environments
++            .environment_manager()
++            .try_local_environment()
++            .is_some_and(|environment| {
++                environment
++                    .local_runtime_paths()
++                    .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
++            })
+ }
+ 
+ pub(crate) async fn pending_local_exec(
+diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
+index 901c81c4beed3d9a9b9123e1ace1bc4197d71b69..2eba4f7c55214200df88883ba592e71377edffa7 100644
+--- a/codex-rs/core/src/unified_exec/mod.rs
++++ b/codex-rs/core/src/unified_exec/mod.rs
+@@ -156,6 +156,9 @@ impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
+ #[derive(Default)]
+ pub(crate) struct ProcessStore {
+     processes: HashMap<i32, ProcessEntry>,
++    starting_remote_processes: HashMap<i32, process_manager::StartingRemoteProcess>,
++    retiring_remote_processes: Vec<Arc<UnifiedExecProcess>>,
++    remote_retirement_failed: bool,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     starting_processes: HashMap<i32, StartingManagedProcess>,
+     #[cfg(target_os = "macos")]
+diff --git a/codex-rs/core/src/unified_exec/process.rs b/codex-rs/core/src/unified_exec/process.rs
+index b129559570ddf741286c2dbcd5533e1737f8db25..840b00cece5a5f03cf1d29bb40dea5421a30c0dc 100644
+--- a/codex-rs/core/src/unified_exec/process.rs
++++ b/codex-rs/core/src/unified_exec/process.rs
+@@ -129,6 +129,8 @@ pub(crate) struct UnifiedExecProcess {
+     state_tx: watch::Sender<ProcessState>,
+     state_rx: watch::Receiver<ProcessState>,
+     output_task: Option<JoinHandle<()>>,
++    owns_remote_termination: bool,
++    remote_stop: OnceLock<watch::Receiver<Option<bool>>>,
+     sandbox_type: Option<SandboxType>,
+     timed_out: AtomicBool,
+     suppress_output_diagnostics: AtomicBool,
+@@ -177,6 +179,8 @@ impl UnifiedExecProcess {
+             state_tx,
+             state_rx,
+             output_task: None,
++            owns_remote_termination: false,
++            remote_stop: OnceLock::new(),
+             sandbox_type,
+             timed_out: AtomicBool::new(false),
+             suppress_output_diagnostics: AtomicBool::new(false),
+@@ -285,16 +289,31 @@ impl UnifiedExecProcess {
+                 process_handle.terminate();
+             }
+             ProcessHandle::ExecServer(process_handle) => {
+-                let process_handle = Arc::clone(process_handle);
+-                tokio::spawn(async move {
+-                    let _ = process_handle.terminate().await;
+-                });
++                if self.owns_remote_termination {
++                    if !self.state_rx.borrow().peer_exit_confirmed {
++                        self.request_remote_termination();
++                    }
++                } else {
++                    let process_handle = Arc::clone(process_handle);
++                    tokio::spawn(async move {
++                        let _ = process_handle.terminate().await;
++                    });
++                }
+             }
+         }
+         self.finish_termination();
+     }
+ 
+     pub(super) async fn terminate_confirmed(&self) -> Result<(), UnifiedExecError> {
++        if self.owns_remote_termination {
++            if !self.join_remote_termination().await {
++                return Err(UnifiedExecError::process_failed(
++                    "could not confirm remote command exit".to_string(),
++                ));
++            }
++            self.finish_termination();
++            return Ok(());
++        }
+         if self.uses_managed_local_sandbox() {
+             if !self.terminate_and_join().await {
+                 return Err(UnifiedExecError::process_failed(
+@@ -374,6 +393,12 @@ impl UnifiedExecProcess {
+ 
+     /// Request a stop without ending the output watcher that confirms exit.
+     pub(super) fn request_terminate(&self) {
++        if self.owns_remote_termination {
++            if !self.state_rx.borrow().peer_exit_confirmed {
++                self.request_remote_termination();
++            }
++            return;
++        }
+         match &self.process_handle {
+             ProcessHandle::Local(process) => self.request_local_termination(process),
+             ProcessHandle::ExecServer(process) => {
+@@ -385,7 +410,86 @@ impl UnifiedExecProcess {
+         }
+     }
+ 
++    pub(super) fn own_remote_termination(&mut self) {
++        debug_assert!(matches!(&self.process_handle, ProcessHandle::ExecServer(_)));
++        self.owns_remote_termination = true;
++    }
++
++    pub(super) fn owns_remote_termination(&self) -> bool {
++        self.owns_remote_termination
++    }
++
++    pub(super) fn needs_remote_cleanup(&self) -> bool {
++        self.owns_remote_termination
++            && if let Some(receipt) = self.remote_stop.get() {
++                *receipt.borrow() != Some(true)
++            } else {
++                !self.state_rx.borrow().peer_exit_confirmed
++            }
++    }
++
++    pub(super) fn remote_termination_result(&self) -> Option<bool> {
++        self.remote_stop.get().and_then(|receipt| *receipt.borrow())
++    }
++
++    fn request_remote_termination(&self) -> &watch::Receiver<Option<bool>> {
++        self.remote_stop.get_or_init(|| {
++            let ProcessHandle::ExecServer(process) = &self.process_handle else {
++                unreachable!("remote termination requires an exec-server process");
++            };
++            let process = Arc::clone(process);
++            let state = self.state_rx.clone();
++            let (result, receiver) = watch::channel(None);
++            tokio::spawn(async move {
++                // Subscribe before the RPC. Close or failure alone cannot confirm exit.
++                let events = process.subscribe_events();
++                let confirmed = tokio::time::timeout(Duration::from_secs(5), async {
++                    if state.borrow().peer_exit_confirmed {
++                        return true;
++                    }
++                    if process.terminate().await.is_err() {
++                        return false;
++                    }
++                    wait_for_remote_exit(process.as_ref(), state, events).await
++                })
++                .await
++                .unwrap_or(false);
++                let _ = result.send_replace(Some(confirmed));
++            });
++            receiver
++        })
++    }
++
++    pub(super) async fn join_remote_termination(&self) -> bool {
++        if self.remote_stop.get().is_none() && self.state_rx.borrow().peer_exit_confirmed {
++            return true;
++        }
++        let mut receipt = self.request_remote_termination().clone();
++        receipt
++            .wait_for(Option::is_some)
++            .await
++            .is_ok_and(|receipt| *receipt == Some(true))
++    }
++
++    pub(super) fn drain_remote_output_for_close(&self, confirmed: bool) {
++        if !confirmed {
++            self.state_tx.send_modify(|state| {
++                if !state.peer_exit_confirmed && state.failure_message.is_none() {
++                    *state = state
++                        .clone()
++                        .failed("could not confirm remote command exit".into());
++                }
++            });
++        }
++        // Peer process exit and output closure are separate receipts. Start the
++        // normal trailing-output grace period without aborting the producer.
++        self.output.cancellation_token.cancel();
++    }
++
+     pub(super) async fn terminate_and_join(&self) -> bool {
++        if self.owns_remote_termination {
++            return self.join_remote_termination().await;
++        }
+         let mut state = self.state_rx.clone();
+         let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+             match &self.process_handle {
+@@ -657,6 +761,12 @@ impl UnifiedExecProcess {
+         started: StartedExecProcess,
+         controlled: bool,
+     ) -> Result<Self, UnifiedExecError> {
++        let managed = Self::attach_exec_server(started, controlled);
++        managed.check_early_remote_exit().await?;
++        Ok(managed)
++    }
++
++    pub(super) fn attach_exec_server(started: StartedExecProcess, controlled: bool) -> Self {
+         let process_handle = ProcessHandle::ExecServer(Arc::clone(&started.process));
+         // Older peers do not report this field. In that case, skip local
+         // classification rather than attributing a violation to a guessed backend.
+@@ -673,7 +783,11 @@ impl UnifiedExecProcess {
+             managed.state_tx.clone(),
+         ));
+ 
+-        let mut state_rx = managed.state_rx.clone();
++        managed
++    }
++
++    pub(super) async fn check_early_remote_exit(&self) -> Result<(), UnifiedExecError> {
++        let mut state_rx = self.state_rx.clone();
+         if tokio::time::timeout(EARLY_EXIT_GRACE_PERIOD, async {
+             loop {
+                 let state = state_rx.borrow().clone();
+@@ -688,10 +802,10 @@ impl UnifiedExecProcess {
+         .await
+         .is_ok()
+         {
+-            managed.check_for_sandbox_denial().await?;
++            self.check_for_sandbox_denial().await?;
+         }
+ 
+-        Ok(managed)
++        Ok(())
+     }
+ 
+     fn spawn_exec_server_output_task(
+@@ -795,6 +909,7 @@ impl UnifiedExecProcess {
+                     if sandbox_denied || exited {
+                         let mut state = state_tx.borrow().clone();
+                         state.sandbox_denied |= sandbox_denied;
++                        state.peer_exit_confirmed |= exited && exit_code.is_some();
+                         let _ = state_tx.send_replace(if exited {
+                             state.exited(exit_code)
+                         } else {
+@@ -837,6 +952,7 @@ impl UnifiedExecProcess {
+                         last_seq = seq;
+                         let mut state = state_tx.borrow().clone();
+                         state.sandbox_denied |= sandbox_denied.unwrap_or(false);
++                        state.peer_exit_confirmed = true;
+                         let _ = state_tx.send_replace(state.exited(Some(exit_code)));
+                     }
+                     ExecProcessEvent::Closed { seq } => {
+@@ -905,6 +1021,49 @@ impl UnifiedExecProcess {
+     }
+ }
+ 
++async fn wait_for_remote_exit(
++    process: &dyn codex_exec_server::ExecProcess,
++    mut state: watch::Receiver<ProcessState>,
++    mut events: codex_exec_server::ExecProcessEventReceiver,
++) -> bool {
++    // Replay is bounded. The output watcher can already own an exit that
++    // this new subscriber never sees.
++    let confirmed = tokio::select! {
++        biased;
++        Ok(_) = state.wait_for(|state| state.peer_exit_confirmed) => true,
++        confirmed = async {
++            let mut saw_output = false;
++            loop {
++                let closed = match events.recv().await {
++                    Ok(ExecProcessEvent::Exited { .. }) => return true,
++                    Ok(ExecProcessEvent::Output(chunk)) => {
++                        let has_replay_gap = !saw_output && chunk.seq > 1;
++                        saw_output = true;
++                        if !has_replay_gap {
++                            continue;
++                        }
++                        false
++                    }
++                    Ok(ExecProcessEvent::Closed { .. }) => true,
++                    Err(broadcast::error::RecvError::Lagged(_)) => false,
++                    Ok(ExecProcessEvent::Failed(_))
++                    | Err(broadcast::error::RecvError::Closed) => return false,
++                };
++                let exit_confirmed = process
++                    .read(Some(u64::MAX), None, Some(0))
++                    .await
++                    .is_ok_and(|receipt| {
++                        receipt.failure.is_none() && receipt.exited && receipt.exit_code.is_some()
++                    });
++                if exit_confirmed || closed {
++                    return exit_confirmed;
++                }
++            }
++        } => confirmed,
++    };
++    confirmed || state.borrow().peer_exit_confirmed
++}
++
+ impl Drop for UnifiedExecProcess {
+     fn drop(&mut self) {
+         self.terminate();
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 4465dfc328fa146cfc7cc10ff014f90b9f81acb3..98670a216721da36344ccceba38c1ef8fa59166c 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -1,3 +1,6 @@
++use futures::FutureExt;
++use futures::future::BoxFuture;
++use futures::future::Shared;
+ use rand::Rng;
+ use std::cmp::Reverse;
+ use std::collections::HashMap;
+@@ -10,6 +13,7 @@ use tokio::sync::watch;
+ use tokio::time::Duration;
+ use tokio::time::Instant;
+ use tokio_util::sync::CancellationToken;
++use tracing::Instrument;
+ use uuid::Uuid;
+ 
+ use super::oneshot::Completion;
+@@ -112,9 +116,78 @@ const LATE_NETWORK_DENIAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
+ const MAX_STDIN_APPROVAL_BYTES: usize = 8_000;
+ const INTERRUPT: &str = "\u{3}";
+ 
++const REMOTE_START_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
++
++struct RemoteStartError {
++    process_id: codex_exec_server::ProcessId,
++    error: RemoteStartFailure,
++}
++
++enum RemoteStartFailure {
++    Executor(codex_exec_server::ExecServerError),
++    Task(tokio::task::JoinError),
++}
++
++impl std::fmt::Display for RemoteStartError {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(formatter, "remote start {}: ", self.process_id.as_str())?;
++        match &self.error {
++            RemoteStartFailure::Executor(error) => std::fmt::Display::fmt(error, formatter),
++            RemoteStartFailure::Task(error) => std::fmt::Display::fmt(error, formatter),
++        }
++    }
++}
++
++type RemoteStart =
++    Shared<BoxFuture<'static, Result<Arc<UnifiedExecProcess>, Arc<RemoteStartError>>>>;
++type RemoteStartStop = Shared<BoxFuture<'static, bool>>;
++
++#[derive(Clone)]
++pub(super) struct StartingRemoteProcess {
++    turn: Arc<codex_extension_api::ExtensionData>,
++    generation: Arc<()>,
++    start: RemoteStart,
++    stop: Arc<std::sync::OnceLock<RemoteStartStop>>,
++}
++
++impl StartingRemoteProcess {
++    fn request_stop(&self) -> &RemoteStartStop {
++        self.stop.get_or_init(|| {
++            let start = self.start.clone();
++            // If this caller times out or is dropped, the task still owns
++            // cleanup of the exact remote process whenever its start settles.
++            let stop_task = tokio::spawn(async move {
++                match start.await {
++                    Ok(process) => process.join_remote_termination().await,
++                    Err(error) => matches!(
++                        &error.error,
++                        // Method-not-found and invalid-params reject admission.
++                        // Other errors do not prove the command never started.
++                        RemoteStartFailure::Executor(codex_exec_server::ExecServerError::Server {
++                            code: -32601 | -32602,
++                            ..
++                        })
++                    ),
++                }
++            });
++            async move { stop_task.await.unwrap_or(false) }
++                .boxed()
++                .shared()
++        })
++    }
++
++    async fn join(&self) -> bool {
++        tokio::time::timeout(REMOTE_START_CLEANUP_TIMEOUT, self.request_stop().clone())
++            .await
++            .unwrap_or(false)
++    }
++}
++
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ struct ManagedLocalExecStopped;
+ 
++struct ManagedRemoteExecStopped;
++
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ impl ProcessStore {
+     fn start_managed_process(
+@@ -622,16 +695,31 @@ impl UnifiedExecProcessManager {
+     }
+ 
+     pub(super) async fn release_initial_process_id(&self, process_id: i32, generation: &Arc<()>) {
++        // Cancellation can also drop the one-shot tool before its process is
++        // published. Leave the receipt visible to a concurrent turn interrupt.
++        let starting = self
++            .process_store
++            .lock()
++            .await
++            .starting_remote_processes
++            .get(&process_id)
++            .filter(|start| Arc::ptr_eq(&start.generation, generation))
++            .cloned();
++        if let Some(starting) = starting
++            && !self
++                .join_starting_remote_processes(vec![(process_id, starting)], false)
++                .await
++        {
++            return;
++        }
+         let removed = {
+             let mut store = self.process_store.lock().await;
+             if !store.owns_reservation(process_id, generation) {
+                 return;
+             }
+-            if store
+-                .processes
+-                .get(&process_id)
+-                .is_some_and(|entry| entry.process.needs_darwin_cleanup())
+-            {
++            if store.processes.get(&process_id).is_some_and(|entry| {
++                entry.process.needs_darwin_cleanup() || entry.process.needs_remote_cleanup()
++            }) {
+                 return;
+             }
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -668,7 +756,9 @@ impl UnifiedExecProcessManager {
+         let removed = {
+             let mut store = self.process_store.lock().await;
+             if !store.processes.get(&process_id).is_some_and(|entry| {
+-                Arc::ptr_eq(&entry.process, process) && !process.needs_darwin_cleanup()
++                Arc::ptr_eq(&entry.process, process)
++                    && !process.needs_darwin_cleanup()
++                    && !process.needs_remote_cleanup()
+             }) {
+                 return;
+             }
+@@ -1391,6 +1481,9 @@ impl UnifiedExecProcessManager {
+         let process_id = entry.process_id;
+ 
+         if entry.process.has_exited() {
++            if entry.process.needs_remote_cleanup() {
++                return ProcessStatus::Unknown;
++            }
+             let Some(entry) = store.remove(process_id) else {
+                 return ProcessStatus::Unknown;
+             };
+@@ -1485,8 +1578,27 @@ impl UnifiedExecProcessManager {
+         let (pruned_entry, stored) = {
+             let mut store = self.process_store.lock().await;
+             let owns_reservation = store.owns_reservation(process_id, process_id_generation);
++            let owns_remote_start = !process.owns_remote_termination()
++                || (context
++                    .step_context
++                    .turn
++                    .extension_data
++                    .get::<ManagedRemoteExecStopped>()
++                    .is_none()
++                    && store
++                        .starting_remote_processes
++                        .get(&process_id)
++                        .is_some_and(|start| {
++                            Arc::ptr_eq(&start.generation, process_id_generation)
++                                && Arc::ptr_eq(
++                                    &start.turn,
++                                    &context.step_context.turn.extension_data,
++                                )
++                                && start.stop.get().is_none()
++                        }));
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             let can_store = owns_reservation
++                && owns_remote_start
+                 && (!process.uses_managed_local_sandbox()
+                     || (context
+                         .step_context
+@@ -1496,10 +1608,14 @@ impl UnifiedExecProcessManager {
+                         .is_none()
+                         && store.remove_starting_process(process_id, &process)));
+             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+-            let can_store = owns_reservation;
++            let can_store = owns_reservation && owns_remote_start;
+             if !can_store {
+                 drop(store);
+-                process.request_terminate();
++                if process.owns_remote_termination() {
++                    process.join_remote_termination().await;
++                } else {
++                    process.request_terminate();
++                }
+                 unregister_network_approval_for_entry(&entry).await;
+                 (None, false)
+             } else {
+@@ -1513,6 +1629,9 @@ impl UnifiedExecProcessManager {
+                         .retiring_darwin_processes
+                         .push(Arc::clone(&pruned.process));
+                 }
++                if process.owns_remote_termination() {
++                    store.starting_remote_processes.remove(&process_id);
++                }
+                 store.processes.insert(process_id, entry);
+                 (pruned_entry, true)
+             }
+@@ -1530,7 +1649,7 @@ impl UnifiedExecProcessManager {
+                         .retiring_darwin_processes
+                         .retain(|process| !Arc::ptr_eq(process, &pruned_entry.process));
+                 }
+-            } else {
++            } else if !pruned_entry.process.owns_remote_termination() {
+                 pruned_entry.process.terminate();
+             }
+         }
+@@ -1669,15 +1788,102 @@ impl UnifiedExecProcessManager {
+                 unified_exec_process_id = process_id,
+                 process.id = params.process_id.as_str(),
+             );
+-            let started = match network_policy_decider {
+-                Some(decider) => {
+-                    backend
+-                        .start_with_network_policy_decider(params, decider)
++            let executor_process_id = params.process_id.clone();
++            let start = async move {
++                match network_policy_decider {
++                    Some(decider) => {
++                        backend
++                            .start_with_network_policy_decider(params, decider)
++                            .await
++                    }
++                    None => backend.start(params).await,
++                }
++            };
++            if environment.is_remote()
++                && let Some(context) = tool_ctx
++                && (context
++                    .session
++                    .services
++                    .thread_extension_data
++                    .get::<crate::ConfirmRemoteProcessTermination>()
++                    .is_some()
++                    || environment
++                        .local_runtime_paths()
++                        .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt))
++            {
++                let started = {
++                    let turn = &context.step_context.turn.extension_data;
++                    let mut store = self.process_store.lock().await;
++                    if !store.owns_reservation(process_id, process_id_generation)
++                        || turn.get::<ManagedRemoteExecStopped>().is_some()
++                    {
++                        return Err(UnifiedExecError::process_failed("command cancelled".into()));
++                    }
++                    let std::collections::hash_map::Entry::Vacant(slot) =
++                        store.starting_remote_processes.entry(process_id)
++                    else {
++                        return Err(UnifiedExecError::create_process(
++                            "a command already owns this remote process id".into(),
++                        ));
++                    };
++                    // The store owns the launch before the tool awaits its result.
++                    // Keep the watcher and exact peer handle through grace and promotion.
++                    let launch = tokio::spawn(
++                        async move {
++                            let started = start.await?;
++                            spawn_lifecycle.after_spawn();
++                            let mut process =
++                                UnifiedExecProcess::attach_exec_server(started, controlled);
++                            process.own_remote_termination();
++                            Ok(Arc::new(process))
++                        }
++                        .in_current_span(),
++                    );
++                    let started = async move {
++                        let error = match launch.await {
++                            Ok(Ok(process)) => return Ok(process),
++                            Ok(Err(error)) => RemoteStartFailure::Executor(error),
++                            Err(error) => RemoteStartFailure::Task(error),
++                        };
++                        Err(Arc::new(RemoteStartError {
++                            process_id: executor_process_id,
++                            error,
++                        }))
++                    }
++                    .boxed()
++                    .shared();
++                    let starting = StartingRemoteProcess {
++                        turn: Arc::clone(turn),
++                        generation: Arc::clone(process_id_generation),
++                        start: started,
++                        stop: Arc::new(std::sync::OnceLock::new()),
++                    };
++                    slot.insert(starting.clone());
++                    starting
++                };
++                let process = started
++                    .start
++                    .clone()
++                    .await
++                    .map_err(|err| UnifiedExecError::create_process(err.to_string()))?;
++                if let Err(error) = process.check_early_remote_exit().await {
++                    // A sandbox retry reuses the public reservation with a new
++                    // executor ID. Only permit it after the old attempt settled.
++                    if !self
++                        .join_starting_remote_processes(vec![(process_id, started)], false)
+                         .await
++                    {
++                        return Err(UnifiedExecError::process_failed(
++                            "could not confirm remote command exit".into(),
++                        ));
++                    }
++                    return Err(error);
+                 }
+-                None => backend.start(params).await,
++                return Ok(process);
+             }
+-            .map_err(|err| UnifiedExecError::create_process(err.to_string()))?;
++            let started = start
++                .await
++                .map_err(|err| UnifiedExecError::create_process(err.to_string()))?;
+             spawn_lifecycle.after_spawn();
+             return UnifiedExecProcess::from_exec_server_started_with_output_policy(
+                 started, controlled,
+@@ -2181,14 +2387,36 @@ impl UnifiedExecProcessManager {
+         }
+     }
+ 
++    fn settle_remote_retirements(store: &mut ProcessStore) {
++        let mut failed = store.remote_retirement_failed;
++        store.retiring_remote_processes.retain(|process| {
++            match process.remote_termination_result() {
++                Some(confirmed) => {
++                    failed |= !confirmed;
++                    false
++                }
++                None => process.needs_remote_cleanup(),
++            }
++        });
++        store.remote_retirement_failed = failed;
++    }
++
+     fn prune_processes_if_needed(store: &mut ProcessStore) -> Option<ProcessEntry> {
+         if store.processes.len() < MAX_UNIFIED_EXEC_PROCESSES {
+             return None;
+         }
+ 
++        Self::settle_remote_retirements(store);
++        let can_retire_remote = store.retiring_remote_processes.len() < MAX_UNIFIED_EXEC_PROCESSES;
+         let mut meta: Vec<(i32, Instant, bool)> = store
+             .processes
+             .iter()
++            .filter(|(_, entry)| {
++                !entry.process.needs_remote_cleanup()
++                    || (can_retire_remote
++                        && !entry.process.has_exited()
++                        && entry.initial_exec_command_returned.load(Ordering::Acquire))
++            })
+             .map(|(id, entry)| (*id, entry.last_used, entry.process.has_exited()))
+             .collect();
+         let mut found_locked_exited_process = false;
+@@ -2215,7 +2443,15 @@ impl UnifiedExecProcessManager {
+                 .map(|process| process.interaction_lock())
+                 && let Ok(_interaction_guard) = interaction_lock.try_lock_owned()
+             {
+-                return store.remove(process_id);
++                let entry = store.remove(process_id)?;
++                // Publish ownership of the stop under the same lock as eviction.
++                if entry.process.needs_remote_cleanup() {
++                    entry.process.request_terminate();
++                    store
++                        .retiring_remote_processes
++                        .push(Arc::clone(&entry.process));
++                }
++                return Some(entry);
+             }
+             found_locked_exited_process |= candidate_has_exited
+                 || candidate_process.is_some_and(|process| process.has_exited());
+@@ -2255,8 +2491,16 @@ impl UnifiedExecProcessManager {
+     }
+ 
+     pub(crate) async fn terminate_all_processes(&self) -> bool {
+-        let (entries, mut starting) = {
++        let (entries, mut starting, starting_remote, retiring_remote) = {
+             let mut store = self.process_store.lock().await;
++            let starting_remote: Vec<_> = store
++                .starting_remote_processes
++                .iter()
++                .map(|(&id, entry)| {
++                    entry.request_stop();
++                    (id, entry.clone())
++                })
++                .collect();
+             let entries = store
+                 .processes
+                 .drain()
+@@ -2266,10 +2510,14 @@ impl UnifiedExecProcessManager {
+             let starting: Vec<_> = {
+                 let ProcessStore {
+                     starting_processes,
++                    starting_remote_processes,
+                     reserved_process_ids,
+                     ..
+                 } = &mut *store;
+-                reserved_process_ids.retain(|id, _| starting_processes.contains_key(id));
++                reserved_process_ids.retain(|id, _| {
++                    starting_processes.contains_key(id)
++                        || starting_remote_processes.contains_key(id)
++                });
+                 starting_processes
+                     .iter()
+                     .map(|(&id, entry)| (Some(id), Arc::clone(&entry.process)))
+@@ -2287,21 +2535,46 @@ impl UnifiedExecProcessManager {
+                 .collect::<Vec<_>>();
+             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+             let starting = {
+-                store.reserved_process_ids.clear();
++                let ProcessStore {
++                    starting_remote_processes,
++                    reserved_process_ids,
++                    ..
++                } = &mut *store;
++                reserved_process_ids.retain(|id, _| starting_remote_processes.contains_key(id));
+                 Vec::new()
+             };
+-            (entries, starting)
++            let retiring_remote = store.retiring_remote_processes.clone();
++            (entries, starting, starting_remote, retiring_remote)
+         };
+ 
++        let mut owned_remote = retiring_remote;
+         for entry in entries {
+             unregister_network_approval_for_entry(&entry).await;
+             if entry.process.uses_managed_local_sandbox() {
+                 starting.push((None, entry.process));
++            } else if entry.process.owns_remote_termination() {
++                owned_remote.push(entry.process);
+             } else {
+                 entry.process.terminate();
+             }
+         }
+-        self.join_owned_processes(starting).await
++        let (local, registered, launching) = tokio::join!(
++            self.join_owned_processes(starting),
++            async {
++                futures::future::join_all(owned_remote.into_iter().map(|process| async move {
++                    let confirmed = process.join_remote_termination().await;
++                    process.drain_remote_output_for_close(confirmed);
++                    confirmed
++                }))
++                .await
++                .into_iter()
++                .all(|confirmed| confirmed)
++            },
++            self.join_starting_remote_processes(starting_remote, true),
++        );
++        let mut store = self.process_store.lock().await;
++        Self::settle_remote_retirements(&mut store);
++        local && registered && launching && !store.remote_retirement_failed
+     }
+ 
+     pub(crate) async fn pending_local_exec(
+@@ -2312,7 +2585,8 @@ impl UnifiedExecProcessManager {
+     ) -> Option<PendingLocalExec> {
+         let store = self.process_store.lock().await;
+         let entry = store.processes.get(&process_id)?;
+-        (entry.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
++        ((entry.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
++            || entry.process.owns_remote_termination())
+             && entry.call_id == call_id
+             && entry
+                 .output_policy_store
+@@ -2329,15 +2603,26 @@ impl UnifiedExecProcessManager {
+         &self,
+         turn: &Arc<codex_extension_api::ExtensionData>,
+     ) -> bool {
+-        let processes = {
++        let (processes, starting_remote) = {
+             let store = self.process_store.lock().await;
++            turn.get_or_init(|| ManagedRemoteExecStopped);
++            let starting_remote: Vec<_> = store
++                .starting_remote_processes
++                .iter()
++                .filter(|(_, entry)| Arc::ptr_eq(&entry.turn, turn))
++                .map(|(&id, entry)| {
++                    entry.request_stop();
++                    (id, entry.clone())
++                })
++                .collect();
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             let mut store = store;
+             let processes = store
+                 .processes
+                 .values()
+                 .filter(|entry| {
+-                    entry.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
++                    (entry.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
++                        || entry.process.owns_remote_termination())
+                         && !entry.initial_exec_command_returned.load(Ordering::Acquire)
+                         && entry
+                             .output_policy_store
+@@ -2354,6 +2639,7 @@ impl UnifiedExecProcessManager {
+                 let ProcessStore {
+                     processes: published,
+                     starting_processes,
++                    starting_remote_processes,
+                     reserved_process_ids,
+                     ..
+                 } = &mut *store;
+@@ -2363,6 +2649,7 @@ impl UnifiedExecProcessManager {
+                 reserved_process_ids.retain(|id, reservation| {
+                     !reservation.turn.ptr_eq(&interrupted_turn)
+                         || starting_processes.contains_key(id)
++                        || starting_remote_processes.contains_key(id)
+                         || published.contains_key(id)
+                 });
+                 let mut processes = processes;
+@@ -2374,9 +2661,37 @@ impl UnifiedExecProcessManager {
+                 );
+                 processes
+             };
+-            processes
++            (processes, starting_remote)
+         };
+-        self.join_owned_processes(processes).await
++        let (local, remote) = tokio::join!(
++            self.join_owned_processes(processes),
++            self.join_starting_remote_processes(starting_remote, true),
++        );
++        local && remote
++    }
++
++    async fn join_starting_remote_processes(
++        &self,
++        processes: Vec<(i32, StartingRemoteProcess)>,
++        release_reservation: bool,
++    ) -> bool {
++        let stopped =
++            futures::future::join_all(processes.iter().map(|(_, starting)| starting.join())).await;
++        let mut store = self.process_store.lock().await;
++        for ((id, completed), stopped) in processes.iter().zip(&stopped) {
++            if *stopped
++                && store
++                    .starting_remote_processes
++                    .get(id)
++                    .is_some_and(|current| Arc::ptr_eq(&current.stop, &completed.stop))
++            {
++                store.starting_remote_processes.remove(id);
++                if release_reservation && store.owns_reservation(*id, &completed.generation) {
++                    store.reserved_process_ids.remove(id);
++                }
++            }
++        }
++        stopped.into_iter().all(|exited| exited)
+     }
+ 
+     async fn join_owned_processes(
+@@ -2421,7 +2736,11 @@ impl UnifiedExecProcessManager {
+         let mut entries = store
+             .processes
+             .values()
+-            .filter(|entry| !entry.process.has_exited() || entry.process.needs_darwin_cleanup())
++            .filter(|entry| {
++                !entry.process.has_exited()
++                    || entry.process.needs_darwin_cleanup()
++                    || entry.process.needs_remote_cleanup()
++            })
+             .collect::<Vec<_>>();
+         entries.sort_by_key(|entry| entry.process_id);
+         entries
+@@ -2444,7 +2763,9 @@ impl UnifiedExecProcessManager {
+             (Arc::clone(&entry.process), entry.process.has_exited())
+         };
+ 
+-        if (process.uses_managed_local_sandbox() || !already_exited)
++        if (process.uses_managed_local_sandbox()
++            || process.needs_remote_cleanup()
++            || !already_exited)
+             && process.terminate_confirmed().await.is_err()
+         {
+             return false;
+diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+index 05c71b453a94b05f785986ef241a6327496c1953..cabae4ce995a61bec7fc3af83a5f18863d1c1ca2 100644
+--- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
++++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+@@ -58,6 +58,112 @@ async fn deterministic_process_ids_are_not_reused_after_release() {
+     assert_eq!((first, second), (1000, 1001));
+ }
+ 
++#[tokio::test]
++async fn remote_launch_before_registration_is_joined_by_its_turn() {
++    let manager = Arc::new(UnifiedExecProcessManager::default());
++    let turn = Arc::new(codex_extension_api::ExtensionData::new("owner"));
++    let other_turn = Arc::new(codex_extension_api::ExtensionData::new("other"));
++    let (id, generation) = manager
++        .allocate_process_id(&turn)
++        .await
++        .expect("reserve id");
++    let (reply, response) = tokio::sync::oneshot::channel();
++    let starting = StartingRemoteProcess {
++        turn: Arc::clone(&turn),
++        generation,
++        start: async move { response.await.expect("test exec RPC should settle") }
++            .boxed()
++            .shared(),
++        stop: Arc::new(std::sync::OnceLock::new()),
++    };
++    manager
++        .process_store
++        .lock()
++        .await
++        .starting_remote_processes
++        .insert(id, starting.clone());
++
++    assert!(manager.join_unreturned_local_commands(&other_turn).await);
++    assert!(starting.stop.get().is_none());
++
++    let interrupt = manager.join_unreturned_local_commands(&turn);
++    tokio::pin!(interrupt);
++    assert!(futures::poll!(&mut interrupt).is_pending());
++    assert!(
++        manager
++            .process_store
++            .lock()
++            .await
++            .starting_remote_processes
++            .contains_key(&id)
++    );
++
++    let error = Arc::new(RemoteStartError {
++        process_id: codex_exec_server::ProcessId::from("executor-id"),
++        error: RemoteStartFailure::Executor(codex_exec_server::ExecServerError::Server {
++            code: -32602,
++            message: "invalid command".into(),
++        }),
++    });
++    assert!(reply.send(Err(error)).is_ok());
++    assert!(interrupt.await);
++    assert!(
++        !manager
++            .process_store
++            .lock()
++            .await
++            .starting_remote_processes
++            .contains_key(&id)
++    );
++}
++
++#[tokio::test]
++async fn ambiguous_remote_launch_retains_identity_after_interrupt() {
++    let manager = UnifiedExecProcessManager::default();
++    let turn = Arc::new(codex_extension_api::ExtensionData::new("owner"));
++    let (id, generation) = manager
++        .allocate_process_id(&turn)
++        .await
++        .expect("reserve id");
++    let start = async {
++        Err(Arc::new(RemoteStartError {
++            process_id: codex_exec_server::ProcessId::from("executor-id"),
++            error: RemoteStartFailure::Executor(codex_exec_server::ExecServerError::Closed),
++        }))
++    }
++    .boxed()
++    .shared();
++    manager
++        .process_store
++        .lock()
++        .await
++        .starting_remote_processes
++        .insert(
++            id,
++            StartingRemoteProcess {
++                turn: Arc::clone(&turn),
++                generation: generation.clone(),
++                start,
++                stop: Arc::new(std::sync::OnceLock::new()),
++            },
++        );
++
++    assert!(!manager.join_unreturned_local_commands(&turn).await);
++    let store = manager.process_store.lock().await;
++    assert!(store.owns_reservation(id, &generation));
++    let receipt = store
++        .starting_remote_processes
++        .get(&id)
++        .expect("retained launch")
++        .start
++        .clone();
++    drop(store);
++    let Err(error) = receipt.await else {
++        panic!("start should report a transport failure");
++    };
++    assert_eq!(error.process_id.as_str(), "executor-id");
++}
++
+ #[tokio::test]
+ async fn deterministic_process_ids_are_not_reused_after_removal() {
+     let manager = UnifiedExecProcessManager::default();
+@@ -697,6 +803,100 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
+     );
+ }
+ 
++#[tokio::test]
++async fn checked_shutdown_reports_failed_retirement_of_pruned_remote_process() {
++    let (_, turn) = crate::session::tests::make_session_and_context().await;
++    let manager = UnifiedExecProcessManager::default();
++    let mut remote = crate::unified_exec::process_tests::remote_process(
++        codex_exec_server::WriteStatus::Accepted,
++        Some("termination was not acknowledged".to_string()),
++        codex_sandboxing::SandboxType::None,
++    )
++    .await;
++    remote.own_remote_termination();
++    let remote = Arc::new(remote);
++    let other = Arc::new(
++        crate::unified_exec::process_tests::remote_process(
++            codex_exec_server::WriteStatus::Accepted,
++            /*terminate_error*/ None,
++            codex_sandboxing::SandboxType::None,
++        )
++        .await,
++    );
++    let newest = Instant::now();
++    let cwd = PathUri::parse("file:///tmp").expect("test cwd");
++    let mut store = manager.process_store.lock().await;
++    for index in 0..MAX_UNIFIED_EXEC_PROCESSES {
++        let process_id = i32::try_from(index).expect("process id");
++        store.processes.insert(
++            process_id,
++            ProcessEntry {
++                output_policy_store: None,
++                process: Arc::clone(if index == 0 { &remote } else { &other }),
++                plugin_metrics_sidecar: None,
++                call_id: format!("call-{process_id}"),
++                process_id,
++                cwd: cwd.clone(),
++                initial_exec_command_active: Arc::new(AtomicBool::new(false)),
++                initial_exec_command_returned: Arc::new(AtomicBool::new(true)),
++                hook_command: "command".to_string(),
++                tty: false,
++                environment_id: "remote".to_string(),
++                permissions: super::super::TerminalPermissions::for_launch(
++                    turn.initial_environments
++                        .primary()
++                        .expect("turn environment"),
++                    &turn,
++                    super::super::TerminalSandboxSource::Native,
++                    crate::sandboxing::SandboxPermissions::UseDefault,
++                    /*additional_permissions*/ None,
++                    /*internal_permissions*/ None,
++                ),
++                network_approval: None,
++                session: std::sync::Weak::new(),
++                last_used: if index == 0 {
++                    newest - Duration::from_secs(1)
++                } else {
++                    newest
++                },
++            },
++        );
++    }
++    // Pending retirement shares the existing soft cap. Once it is full, leave
++    // the next live remote in inventory instead of adding more outgoing work.
++    store.retiring_remote_processes = vec![Arc::clone(&remote); MAX_UNIFIED_EXEC_PROCESSES];
++    let removed = UnifiedExecProcessManager::prune_processes_if_needed(&mut store)
++        .expect("an eligible non-owned process can still be pruned");
++    assert_ne!(removed.process_id, 0);
++    assert_eq!(
++        store.retiring_remote_processes.len(),
++        MAX_UNIFIED_EXEC_PROCESSES
++    );
++    store.processes.insert(removed.process_id, removed);
++    store.retiring_remote_processes.clear();
++
++    let removed = UnifiedExecProcessManager::prune_processes_if_needed(&mut store)
++        .expect("evict the least recently used delivered command");
++    assert_eq!(removed.process_id, 0);
++    assert_eq!(store.processes.len(), MAX_UNIFIED_EXEC_PROCESSES - 1);
++    let [retiring] = store.retiring_remote_processes.as_slice() else {
++        panic!("pruned remote process should remain owned by checked close");
++    };
++    assert!(Arc::ptr_eq(retiring, &remote));
++    drop(store);
++    drop(removed);
++
++    assert!(!manager.terminate_all_processes().await);
++    assert!(remote.cancellation_token().is_cancelled());
++    assert!(!remote.needs_remote_cleanup() || remote.failure_message().is_some());
++    {
++        let store = manager.process_store.lock().await;
++        assert!(store.retiring_remote_processes.is_empty());
++        assert!(store.remote_retirement_failed);
++    }
++    assert!(!manager.terminate_all_processes().await);
++}
++
+ #[cfg(target_os = "linux")]
+ #[tokio::test]
+ async fn interrupt_joins_owned_start_and_fences_late_acknowledgement() {
+diff --git a/codex-rs/core/src/unified_exec/process_state.rs b/codex-rs/core/src/unified_exec/process_state.rs
+index 65e11b6f3e204be5e5e06ef68953a6f1056965c6..17084be07baf1e3ad2119f10a83bbecaa212cb62 100644
+--- a/codex-rs/core/src/unified_exec/process_state.rs
++++ b/codex-rs/core/src/unified_exec/process_state.rs
+@@ -1,6 +1,7 @@
+ #[derive(Clone, Debug, Default, Eq, PartialEq)]
+ pub(crate) struct ProcessState {
+     pub(crate) has_exited: bool,
++    pub(crate) peer_exit_confirmed: bool,
+     pub(crate) exit_code: Option<i32>,
+     pub(crate) failure_message: Option<String>,
+     pub(crate) sandbox_denied: bool,
+@@ -10,6 +11,7 @@ impl ProcessState {
+     pub(crate) fn exited(&self, exit_code: Option<i32>) -> Self {
+         Self {
+             has_exited: true,
++            peer_exit_confirmed: self.peer_exit_confirmed,
+             exit_code,
+             failure_message: self.failure_message.clone(),
+             sandbox_denied: self.sandbox_denied,
+@@ -19,6 +21,7 @@ impl ProcessState {
+     pub(crate) fn failed(&self, message: String) -> Self {
+         Self {
+             has_exited: true,
++            peer_exit_confirmed: self.peer_exit_confirmed,
+             exit_code: self.exit_code,
+             failure_message: Some(message),
+             sandbox_denied: self.sandbox_denied,
+diff --git a/codex-rs/core/src/unified_exec/process_tests.rs b/codex-rs/core/src/unified_exec/process_tests.rs
+index ed59dfd4865406ae472bbae1fd95c2abe20d21a3..732c19d6661fe2abd7c1dea89797826f3e171048 100644
+--- a/codex-rs/core/src/unified_exec/process_tests.rs
++++ b/codex-rs/core/src/unified_exec/process_tests.rs
+@@ -1,5 +1,7 @@
+ use super::process::UnifiedExecProcess;
+ use crate::unified_exec::UnifiedExecError;
++use codex_exec_server::Environment;
++use codex_exec_server::ExecParams;
+ use codex_exec_server::ExecProcess;
+ use codex_exec_server::ExecProcessEventReceiver;
+ use codex_exec_server::ExecProcessFuture;
+@@ -10,11 +12,17 @@ use codex_exec_server::ReadResponse;
+ use codex_exec_server::StartedExecProcess;
+ use codex_exec_server::WriteResponse;
+ use codex_exec_server::WriteStatus;
++use codex_utils_path_uri::PathUri;
++use futures::SinkExt;
++use futures::StreamExt;
+ use pretty_assertions::assert_eq;
++use serde_json::json;
+ use std::collections::VecDeque;
+ use std::sync::Arc;
++use std::time::Duration;
+ use tokio::sync::Mutex;
+ use tokio::sync::watch;
++use tokio_tungstenite::tungstenite::Message;
+ 
+ struct MockExecProcess {
+     process_id: ProcessId,
+@@ -213,3 +221,258 @@ async fn remote_process_preserves_executor_sandbox_type() {
+         assert_eq!(process.sandbox_type(), sandbox_type);
+     }
+ }
++
++type TestExecServer = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
++
++async fn recv_exec_request(peer: &mut TestExecServer) -> serde_json::Value {
++    let message = tokio::time::timeout(Duration::from_secs(3), peer.next())
++        .await
++        .expect("executor request should arrive")
++        .expect("executor connection should stay open")
++        .expect("valid executor frame");
++    serde_json::from_str(message.to_text().expect("text request")).expect("JSON-RPC request")
++}
++
++async fn send_exec_message(peer: &mut TestExecServer, message: serde_json::Value) {
++    peer.send(Message::Text(message.to_string().into()))
++        .await
++        .expect("executor message should send");
++}
++
++async fn start_owned_remote_process() -> (UnifiedExecProcess, TestExecServer) {
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
++        .await
++        .expect("loopback listener");
++    let url = format!("ws://{}", listener.local_addr().expect("listener address"));
++    let peer = tokio::spawn(async move {
++        let (stream, _) = listener.accept().await.expect("executor connection");
++        let mut peer = tokio_tungstenite::accept_async(stream)
++            .await
++            .expect("executor handshake");
++        let initialize = recv_exec_request(&mut peer).await;
++        assert_eq!(initialize["method"], "initialize");
++        send_exec_message(
++            &mut peer,
++            json!({
++                "id": initialize["id"],
++                "result": { "sessionId": "registered-termination" }
++            }),
++        )
++        .await;
++        assert_eq!(recv_exec_request(&mut peer).await["method"], "initialized");
++
++        let start = recv_exec_request(&mut peer).await;
++        assert_eq!(start["method"], "process/start");
++        assert_eq!(start["params"]["processId"], "registered-process");
++        send_exec_message(
++            &mut peer,
++            json!({
++                "id": start["id"],
++                "result": { "processId": "registered-process" }
++            }),
++        )
++        .await;
++        peer
++    });
++    let environment = Environment::create_for_tests(Some(url)).expect("remote environment");
++    let started = environment
++        .get_exec_backend()
++        .start(ExecParams {
++            process_id: "registered-process".to_string().into(),
++            metadata: None,
++            argv: vec!["synthetic-command".to_string()],
++            cwd: PathUri::parse("file:///workspace").expect("test cwd"),
++            env_policy: None,
++            shell_snapshot: None,
++            env: Default::default(),
++            tty: false,
++            pipe_stdin: false,
++            arg0: None,
++            sandbox: None,
++            enforce_managed_network: false,
++            managed_network: None,
++            network_proxy: None,
++        })
++        .await
++        .expect("remote executor start");
++    let mut process = UnifiedExecProcess::from_exec_server_started(started)
++        .await
++        .expect("remote process should start");
++    process.own_remote_termination();
++    (process, peer.await.expect("executor startup task"))
++}
++
++async fn recv_terminate(peer: &mut TestExecServer) -> serde_json::Value {
++    let terminate = recv_exec_request(peer).await;
++    assert_eq!(terminate["method"], "process/terminate");
++    assert_eq!(terminate["params"]["processId"], "registered-process");
++    terminate
++}
++
++async fn acknowledge_terminate(peer: &mut TestExecServer, terminate: &serde_json::Value) {
++    send_exec_message(
++        peer,
++        json!({
++            "id": terminate["id"],
++            "result": { "running": true }
++        }),
++    )
++    .await;
++}
++
++async fn send_peer_exit(peer: &mut TestExecServer) {
++    send_exec_message(
++        peer,
++        json!({
++            "method": "process/exited",
++            "params": {
++                "processId": "registered-process",
++                "seq": 1,
++                "exitCode": 137,
++                "sandboxDenied": false
++            }
++        }),
++    )
++    .await;
++}
++
++async fn assert_peer_has_no_more_requests(peer: &mut TestExecServer) {
++    match tokio::time::timeout(Duration::from_millis(100), peer.next()).await {
++        Err(_) | Ok(None) | Ok(Some(Ok(Message::Close(_)))) => {}
++        Ok(frame) => panic!("unexpected executor frame after termination: {frame:?}"),
++    }
++}
++
++#[test_case::test_case(true; "ack_before_exit")]
++#[test_case::test_case(false; "exit_before_ack")]
++#[tokio::test]
++async fn owned_remote_termination_waits_for_ack_and_peer_exit(ack_first: bool) {
++    let (process, mut peer) = start_owned_remote_process().await;
++    {
++        let first = process.join_remote_termination();
++        let second = process.join_remote_termination();
++        tokio::pin!(first, second);
++        assert!(futures::poll!(first.as_mut()).is_pending());
++        assert!(futures::poll!(second.as_mut()).is_pending());
++
++        let request = recv_terminate(&mut peer).await;
++        if ack_first {
++            acknowledge_terminate(&mut peer, &request).await;
++        } else {
++            send_peer_exit(&mut peer).await;
++        }
++        assert!(
++            tokio::time::timeout(Duration::from_millis(100), first.as_mut())
++                .await
++                .is_err(),
++            "a single gate must not complete termination"
++        );
++        assert!(futures::poll!(second.as_mut()).is_pending());
++
++        if ack_first {
++            send_peer_exit(&mut peer).await;
++        } else {
++            acknowledge_terminate(&mut peer, &request).await;
++        }
++        assert_eq!(
++            tokio::time::timeout(Duration::from_secs(3), async {
++                tokio::join!(first.as_mut(), second.as_mut())
++            })
++            .await
++            .expect("both termination callers should finish"),
++            (true, true)
++        );
++    }
++    drop(process);
++    assert_peer_has_no_more_requests(&mut peer).await;
++}
++
++#[test_case::test_case(Some(137); "retained_exit")]
++#[test_case::test_case(None; "closure_without_exit")]
++#[tokio::test]
++async fn owned_remote_termination_checks_retained_exit_after_output_closes(exit_code: Option<i32>) {
++    let (process, mut peer) = start_owned_remote_process().await;
++    let joined = process.join_remote_termination();
++    tokio::pin!(joined);
++    assert!(futures::poll!(joined.as_mut()).is_pending());
++    let request = recv_terminate(&mut peer).await;
++    // The retained status contains the exit while the observable event stream
++    // only has an output-closure event. The stop still owes its own ACK.
++    send_exec_message(
++        &mut peer,
++        json!({
++            "method": "process/closed",
++            "params": { "processId": "registered-process", "seq": 1 }
++        }),
++    )
++    .await;
++    assert!(futures::poll!(joined.as_mut()).is_pending());
++    acknowledge_terminate(&mut peer, &request).await;
++    let read = recv_exec_request(&mut peer).await;
++    assert_eq!(read["method"], "process/read");
++    assert_eq!(read["params"]["processId"], "registered-process");
++    send_exec_message(
++        &mut peer,
++        json!({
++            "id": read["id"],
++            "result": {
++                "chunks": [],
++                "nextSeq": 2,
++                "exited": exit_code.is_some(),
++                "exitCode": exit_code,
++                "closed": true,
++                "sandboxDenied": false
++            }
++        }),
++    )
++    .await;
++    assert_eq!(
++        tokio::time::timeout(Duration::from_secs(3), joined.as_mut())
++            .await
++            .expect("retained peer status should settle termination"),
++        exit_code.is_some()
++    );
++}
++
++#[tokio::test]
++async fn owned_remote_termination_does_not_accept_observer_failure_as_exit() {
++    let (process, mut peer) = start_owned_remote_process().await;
++    {
++        let joined = process.join_remote_termination();
++        tokio::pin!(joined);
++        assert!(futures::poll!(joined.as_mut()).is_pending());
++        let request = recv_terminate(&mut peer).await;
++        acknowledge_terminate(&mut peer, &request).await;
++        // Overflow the peer's pending process event buffer by leaving seq 1
++        // missing. The client then publishes an observer failure over this
++        // still-open transport without any peer exit notification.
++        for seq in 2..=258 {
++            send_exec_message(
++                &mut peer,
++                json!({
++                    "method": "process/closed",
++                    "params": { "processId": "registered-process", "seq": seq }
++                }),
++            )
++            .await;
++        }
++        let confirmed = tokio::time::timeout(Duration::from_secs(3), joined.as_mut())
++            .await
++            .expect("observer failure should settle the termination wait");
++        assert!(!confirmed);
++        tokio::time::timeout(Duration::from_secs(3), async {
++            while process.failure_message().is_none() {
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .expect("output observer should publish the failure");
++        assert!(
++            process.has_exited(),
++            "failure ends the local output observer"
++        );
++        assert!(process.exit_code().is_none());
++    }
++    drop(process);
++    assert_peer_has_no_more_requests(&mut peer).await;
++}
+diff --git a/codex-rs/exec-server/src/client.rs b/codex-rs/exec-server/src/client.rs
+index eea4e9fb114cc33d22fa5935d0ee8b54619a990a..3fd3566c331f8a2565db13d1713c18b36a08ee21 100644
+--- a/codex-rs/exec-server/src/client.rs
++++ b/codex-rs/exec-server/src/client.rs
+@@ -402,6 +402,7 @@ pub(crate) struct LazyRemoteExecServerClient {
+     current_client: Arc<StdMutex<Option<ExecServerClient>>>,
+     reconnect: Arc<StdMutex<Option<Arc<ConnectionAttempt>>>>,
+     refresh_lock: Arc<Mutex<()>>,
++    retired: CancellationToken,
+     environment_connection_state_tx: watch::Sender<EnvironmentConnectionState>,
+ }
+ 
+@@ -418,6 +419,7 @@ impl LazyRemoteExecServerClient {
+             current_client: Arc::new(StdMutex::new(None)),
+             reconnect: Arc::new(StdMutex::new(None)),
+             refresh_lock: Arc::new(Mutex::new(())),
++            retired: CancellationToken::new(),
+             environment_connection_state_tx: watch::channel(
+                 EnvironmentConnectionState::Disconnected,
+             )
+@@ -506,7 +508,17 @@ impl LazyRemoteExecServerClient {
+         self.initial_client().await.map(drop)
+     }
+ 
++    fn check_not_retired(&self) -> Result<(), ExecServerError> {
++        if self.retired.is_cancelled() {
++            return Err(ExecServerError::Disconnected(
++                "exec-server environment was retired".into(),
++            ));
++        }
++        Ok(())
++    }
++
+     pub(crate) async fn get(&self) -> Result<ExecServerClient, ExecServerError> {
++        self.check_not_retired()?;
+         if matches!(self.recovery_policy, RecoveryPolicy::FailFast) {
+             let client = match self.cached_client() {
+                 Some(client) => client,
+@@ -544,6 +556,7 @@ impl LazyRemoteExecServerClient {
+     }
+ 
+     async fn initial_client(&self) -> Result<ExecServerClient, ExecServerError> {
++        self.check_not_retired()?;
+         let result = if self.can_reconnect()
+             && (self.startup.cancelled.is_cancelled()
+                 || self.startup.result.get().is_some_and(|result| {
+@@ -581,6 +594,7 @@ impl LazyRemoteExecServerClient {
+                 .reconnect
+                 .lock()
+                 .unwrap_or_else(std::sync::PoisonError::into_inner);
++            self.check_not_retired()?;
+             if let Some(client) = self.connected_client() {
+                 return Ok(client);
+             }
+diff --git a/codex-rs/exec-server/src/client/accepted.rs b/codex-rs/exec-server/src/client/accepted.rs
+index ae6d5f84e7b2b305f0144830059dcfb3a00100e5..0bc0f5aa47f5d9405326e5434663a765a3e5dee2 100644
+--- a/codex-rs/exec-server/src/client/accepted.rs
++++ b/codex-rs/exec-server/src/client/accepted.rs
+@@ -250,6 +250,7 @@ impl LazyRemoteExecServerClient {
+             current_client: std::sync::Arc::new(std::sync::Mutex::new(Some(client))),
+             reconnect: std::sync::Arc::new(std::sync::Mutex::new(None)),
+             refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
++            retired: Default::default(),
+             environment_connection_state_tx,
+         }
+     }
+diff --git a/codex-rs/exec-server/src/client_refresh.rs b/codex-rs/exec-server/src/client_refresh.rs
+index 3579cb4f72f3abfa69256bb476178a7bcc098740..bc276a2f36cad36b674cad271ac0759ec82617dc 100644
+--- a/codex-rs/exec-server/src/client_refresh.rs
++++ b/codex-rs/exec-server/src/client_refresh.rs
+@@ -32,7 +32,7 @@ use super::ExecServerClient;
+ use super::ExecServerError;
+ use super::Inner;
+ use super::LazyRemoteExecServerClient;
+-use super::fail_all_in_flight_work;
++use super::fail_all_sessions;
+ use crate::EnvironmentConnectionState;
+ use crate::NoiseChannelPublicKey;
+ use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT;
+@@ -83,6 +83,7 @@ impl LazyRemoteExecServerClient {
+     )]
+     pub(crate) async fn refresh_connection(&self) -> Result<(), ExecServerError> {
+         let _refresh = self.refresh_lock.lock().await;
++        self.check_not_retired()?;
+         let (previous, attempt) = loop {
+             let observed = self.cached_client();
+             let observed_registration = observed
+@@ -128,6 +129,7 @@ impl LazyRemoteExecServerClient {
+                 .current_client
+                 .lock()
+                 .unwrap_or_else(std::sync::PoisonError::into_inner);
++            self.check_not_retired()?;
+             // A new client makes the lookup stale. Recovery can also renew the
+             // registration on the same client, so compare it under the connection lock.
+             if !match (&observed, &*current) {
+@@ -216,6 +218,7 @@ impl LazyRemoteExecServerClient {
+         // Keep the transport future out of every caller's async layout, including
+         // the CLI entry point, which otherwise exceeds rustc's query-depth limit.
+         Box::pin(async move {
++            self.check_not_retired().map_err(Arc::new)?;
+             let transport = attempt
+                 .transport
+                 .as_ref()
+@@ -237,7 +240,7 @@ impl LazyRemoteExecServerClient {
+                     .current_client
+                     .lock()
+                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+-                if !attempt.cancelled.is_cancelled() {
++                if !self.retired.is_cancelled() && !attempt.cancelled.is_cancelled() {
+                     client.attach_environment_connection_state(
+                         self.environment_connection_state_tx.clone(),
+                     );
+@@ -253,9 +256,57 @@ impl LazyRemoteExecServerClient {
+     }
+ }
+ 
++impl LazyRemoteExecServerClient {
++    fn fence_current_connection(&self) -> Option<ExecServerClient> {
++        let reconnect = self
++            .reconnect
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        let current = self
++            .current_client
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        // Use the same lock order as attempt admission and installation.
++        self.retired.cancel();
++        self.startup.cancelled.cancel();
++        if let Some(attempt) = reconnect.as_ref() {
++            attempt.cancelled.cancel();
++        }
++        current.clone()
++    }
++
++    pub(crate) async fn retire_current_connection(&self) {
++        if let Some(client) = self.fence_current_connection() {
++            client.inner.retire().await;
++        }
++    }
++
++    pub(crate) fn retire_on_scope_drop(&self) {
++        if let Some(client) = self.fence_current_connection() {
++            client.inner.begin_retirement();
++            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
++                runtime.spawn(async move {
++                    client
++                        .inner
++                        .fail_all_http_body_streams(RETIRED_MESSAGE.to_owned())
++                        .await;
++                });
++            }
++        }
++    }
++}
++
++const RETIRED_MESSAGE: &str = "exec-server executor was replaced";
++
+ impl Inner {
+     async fn retire(self: &Arc<Self>) {
+-        let message = "exec-server executor was replaced".to_string();
++        self.begin_retirement();
++        self.fail_all_http_body_streams(RETIRED_MESSAGE.to_owned())
++            .await;
++    }
++
++    fn begin_retirement(self: &Arc<Self>) {
++        let message = RETIRED_MESSAGE.to_owned();
+         let rpc_client = {
+             let mut connection = self
+                 .connection
+@@ -277,9 +328,9 @@ impl Inner {
+         self.connection_changed.send_replace(());
+         // Drain pending RPCs before stream cleanup, which may wait for other work.
+         if let Some(rpc_client) = rpc_client {
+-            rpc_client.close_transport().await;
++            rpc_client.close_transport_now();
+         }
+-        fail_all_in_flight_work(self, message).await;
++        fail_all_sessions(self, message);
+     }
+ }
+ 
+diff --git a/codex-rs/exec-server/src/client_refresh_tests.rs b/codex-rs/exec-server/src/client_refresh_tests.rs
+index 5e391a602aaccb5fe937271d066cc528e57d0fd3..f858830e9a1c868e9faa6eb6cb3bbf9e6e02213b 100644
+--- a/codex-rs/exec-server/src/client_refresh_tests.rs
++++ b/codex-rs/exec-server/src/client_refresh_tests.rs
+@@ -663,6 +663,45 @@ async fn superseded_refresh_lookup_does_not_retire_a_newer_session() -> Result<(
+     Ok(())
+ }
+ 
++#[tokio::test]
++async fn retired_environment_rejects_in_flight_and_future_reconnects() -> Result<()> {
++    let _clock = freeze_clock();
++    let executor = Executor::start(Validator::default()).await?;
++    let (client, registry) = executor.client()?;
++    let original = client.get().await?;
++    original.inner.retire().await;
++    let release = registry.block_next_lookup();
++    let reconnect = client.get();
++    tokio::pin!(reconnect);
++    assert!(futures::poll!(reconnect.as_mut()).is_pending());
++    registry.lookup_started.notified().await;
++
++    client.retire_current_connection().await;
++    assert!(matches!(
++        futures::poll!(reconnect.as_mut()),
++        std::task::Poll::Ready(Err(ExecServerError::ConnectionAttempt(_)))
++    ));
++    drop(release);
++    let calls = registry.calls.load(Ordering::Relaxed);
++    assert!(matches!(
++        client.get().await,
++        Err(ExecServerError::Disconnected(_))
++    ));
++    assert!(matches!(
++        client.refresh_connection().await,
++        Err(ExecServerError::Disconnected(_))
++    ));
++    assert_eq!(registry.calls.load(Ordering::Relaxed), calls);
++    assert!(Arc::ptr_eq(
++        &original.inner,
++        &client
++            .cached_client()
++            .expect("original client remains cached")
++            .inner,
++    ));
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn provisioned_environment_waits_for_offline_executor_on_the_same_handle() -> Result<()> {
+     let _clock = freeze_clock();
+diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
+index 6420ea881f99d47f8d9a78b077e38eee5bee9c26..49b14e36617b82272cb22461ece8ef5d0e52b416 100644
+--- a/codex-rs/exec-server/src/environment.rs
++++ b/codex-rs/exec-server/src/environment.rs
+@@ -127,6 +127,9 @@ impl Drop for ScopedEnvironment {
+                 scoped.remove(&self.id);
+             }
+         }
++        if let Some(client) = &self.environment.remote_client {
++            client.retire_on_scope_drop();
++        }
+     }
+ }
+ 
+@@ -467,6 +470,35 @@ impl EnvironmentManager {
+             .and_then(Weak::upgrade)
+     }
+ 
++    /// Retires this runtime's remote connections after all managed work stops.
++    ///
++    /// Call only from the owner of this manager. Explicit scopes own their
++    /// registrations even when their connection refers to a borrowed sandbox.
++    #[doc(hidden)]
++    pub async fn retire_owned_executor_connections(&self) {
++        let environments = {
++            let configured = self
++                .environments
++                .read()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            let scoped = self
++                .scoped_environments
++                .read()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            configured
++                .values()
++                .cloned()
++                .chain(scoped.values().filter_map(Weak::upgrade))
++                .collect::<Vec<_>>()
++        };
++        futures::future::join_all(
++            environments
++                .iter()
++                .map(|environment| environment.retire_current_connection()),
++        )
++        .await;
++    }
++
+     /// Registers a host-owned local executor without selecting it by default.
+     pub fn register_scoped_local_environment(
+         self: &Arc<Self>,
+@@ -1110,6 +1142,14 @@ impl Environment {
+             .map(LazyRemoteExecServerClient::subscribe_connection_state)
+     }
+ 
++    /// Retires the current remote connection during shutdown of its owning runtime.
++    #[doc(hidden)]
++    pub async fn retire_current_connection(&self) {
++        if let Some(client) = &self.remote_client {
++            client.retire_current_connection().await;
++        }
++    }
++
+     pub fn local_runtime_paths(&self) -> Option<&ExecServerRuntimeOptions> {
+         self.local_runtime_paths.as_ref()
+     }
+@@ -2124,8 +2164,16 @@ mod tests {
+                 .upsert_environment(id.to_owned(), url.clone(), None)
+                 .is_err()
+         );
++        let scope = Arc::new(scope);
++        let retained_owner = Arc::clone(&scope);
+         drop(scope);
++        assert!(manager.get_environment(id).is_some());
++        drop(retained_owner);
+         assert!(manager.get_environment(id).is_none());
++        assert!(matches!(
++            retained.wait_until_ready().await,
++            Err(crate::ExecServerError::Disconnected(_))
++        ));
+         let next = attach().expect("scope can register again after retirement");
+         let current = manager.get_environment(id).expect("fresh scoped executor");
+         assert!(!Arc::ptr_eq(&retained, &current));
+diff --git a/codex-rs/exec-server/src/rpc.rs b/codex-rs/exec-server/src/rpc.rs
+index b1ed87a76cfc617ed2bf7030cf0d02e16eb964a1..5769228febe68a84f97b7f97a6a23ca5ac268e1e 100644
+--- a/codex-rs/exec-server/src/rpc.rs
++++ b/codex-rs/exec-server/src/rpc.rs
+@@ -521,6 +521,10 @@ impl RpcClient {
+     }
+ 
+     pub(crate) async fn close_transport(&self) {
++        self.close_transport_now();
++    }
++
++    pub(crate) fn close_transport_now(&self) {
+         self.closed.store(true, Ordering::Release);
+         self.transport.terminate();
+         for task in &self.transport_tasks {

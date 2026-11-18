@@ -1,0 +1,1474 @@
+diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
+index 6451a1e65065568b38f2e35ee3f02fe63e27a416..74e7289be69b9fc33dace5e45b4cbe2214f8797d 100644
+--- a/codex-rs/app-server/src/notification_media.rs
++++ b/codex-rs/app-server/src/notification_media.rs
+@@ -69,7 +69,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
+                 | ResponseItem::ItemReference { .. }
+                 | ResponseItem::Program { .. }
+                 | ResponseItem::ProgramOutput { .. }
+-                | ResponseItem::Other => {}
++                | ResponseItem::LocalShellCallOutput { .. }
++            | ResponseItem::Other => {}
+             }
+             ServerNotification::RawResponseItemCompleted(notification)
+         }
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index 7ca4096691ccfc9d1a518b71e1b21a216254520a..19c55903f984755c4bb57c062a88bf9c1ceb8ad7 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -85,7 +85,8 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
+         | ResponseItem::ItemReference { .. }
+         | ResponseItem::Program { .. }
+         | ResponseItem::ProgramOutput { .. }
+-        | ResponseItem::Other => false,
++        | ResponseItem::LocalShellCallOutput { .. }
++            | ResponseItem::Other => false,
+     }) {
+         return Err(invalid_request(REMOTE_IMAGE_URL_ERROR));
+     }
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 89fecbf5ba7abe7862ebb9554e1af74a92c81e65..507edde0b68607742ee68559fdf9431bb0ac5613 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -133,6 +133,7 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
+             | ResponseItem::ItemReference { .. }
+             | ResponseItem::Program { .. }
+             | ResponseItem::ProgramOutput { .. }
++            | ResponseItem::LocalShellCallOutput { .. }
+             | ResponseItem::Other => false,
+         },
+         RolloutItem::RealtimeItem(_)
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index 25eb202cee492d0e397557807eeeeb0eea263a8d..fe264d831ee22f27d15f0bee63d689f243a36cf5 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -259,6 +259,7 @@ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
+             | ResponseItem::ItemReference { .. }
+             | ResponseItem::Program { .. }
+             | ResponseItem::ProgramOutput { .. }
++            | ResponseItem::LocalShellCallOutput { .. }
+             | ResponseItem::Other => {}
+         }
+     }
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index d07f8c85ee0a412fc019f808a7b57768df986847..d31b90211c0a4401f766d2734fea4d883c851922 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1214,6 +1214,7 @@ pub(crate) fn is_api_message(
+         | ResponseItem::ComputerCall { .. }
+         | ResponseItem::ApplyPatchCallOutput { .. }
+         | ResponseItem::ComputerCallOutput { .. }
++        | ResponseItem::LocalShellCallOutput { .. }
+         | ResponseItem::CustomToolCall { .. }
+         | ResponseItem::CustomToolCallOutput { .. }
+         | ResponseItem::LocalShellCall { .. }
+@@ -1405,6 +1406,8 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
+         ResponseItem::ToolSearchCall { arguments, .. } => json_content_bytes(arguments),
+         ResponseItem::ToolSearchOutput { tools, .. } => json_content_bytes(tools),
+         ResponseItem::LocalShellCall { action, .. } => json_content_bytes(action),
++        ResponseItem::LocalShellCallOutput { id, output, .. } =>
++            text_bytes(id).saturating_add(text_bytes(output)),
+         ResponseItem::WebSearchCall { action, .. } => {
+             action.as_ref().map(json_content_bytes).unwrap_or_default()
+         }
+@@ -1643,6 +1646,7 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
+         ResponseItem::AdditionalTools { .. }
+         | ResponseItem::ApplyPatchCallOutput { .. }
+         | ResponseItem::ComputerCallOutput { .. }
++        | ResponseItem::LocalShellCallOutput { .. }
+         | ResponseItem::FunctionCallOutput { .. }
+         | ResponseItem::ToolSearchOutput { .. }
+         | ResponseItem::CustomToolCallOutput { .. }
+diff --git a/codex-rs/core/src/context_manager/normalize.rs b/codex-rs/core/src/context_manager/normalize.rs
+index 253670d893b82e4d53f7c9f3fc254817a9ddf5c9..d2c4643011e86c90f541fbbc141f108ccadc9f2e 100644
+--- a/codex-rs/core/src/context_manager/normalize.rs
++++ b/codex-rs/core/src/context_manager/normalize.rs
+@@ -34,6 +34,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
+     items.retain(|entry| !matches!(&entry.item, ResponseItem::ComputerCall { call_id, .. } if !completed_computer_calls.contains(call_id)));
+ 
+     let mut function_output_ids = HashSet::new();
++    let mut local_shell_output_ids = HashSet::new();
+     let mut tool_search_output_ids = HashSet::new();
+     let mut custom_tool_output_ids = HashSet::new();
+     let mut mcp_approval_output_ids = HashSet::new();
+@@ -45,6 +46,9 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
+             } => {
+                 function_output_ids.insert(call_id.as_str());
+             }
++            ResponseItem::LocalShellCallOutput { id, .. } => {
++                local_shell_output_ids.insert(id.as_str());
++            }
+             ResponseItem::ToolSearchOutput {
+                 call_id: Some(call_id),
+                 ..
+@@ -144,7 +148,8 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
+                 id,
+                 call_id: Some(call_id),
+                 ..
+-            } if !function_output_ids.contains(call_id.as_str()) => {
++            } if !function_output_ids.contains(call_id.as_str())
++                && !local_shell_output_ids.contains(call_id.as_str()) => {
+                 error_or_panic(format!(
+                     "Local shell call output is missing for call id: {call_id}"
+                 ));
+@@ -165,6 +170,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
+     }
+     drop((
+         function_output_ids,
++        local_shell_output_ids,
+         tool_search_output_ids,
+         custom_tool_output_ids,
+         mcp_approval_output_ids,
+@@ -382,13 +388,18 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
+             ..
+         } => {
+             remove_first_matching(items, |i| {
+-                matches!(
+-                    i,
+-                    ResponseItem::FunctionCallOutput {
+-                        call_id: Some(existing),
+-                        ..
+-                    } if existing == call_id
+-                )
++                matches!(i, ResponseItem::FunctionCallOutput {
++                    call_id: Some(existing), ..
++                } if existing == call_id)
++                    || matches!(i, ResponseItem::LocalShellCallOutput { id, .. }
++                        if id == call_id)
++            });
++        }
++        ResponseItem::LocalShellCallOutput { id, .. } => {
++            remove_first_matching(items, |i| {
++                matches!(i, ResponseItem::LocalShellCall {
++                    call_id: Some(call_id), ..
++                } if call_id == id)
+             });
+         }
+         _ => {}
+diff --git a/codex-rs/core/src/image_preparation.rs b/codex-rs/core/src/image_preparation.rs
+index 0d021023eb91ba4aa45231d44d2e175898252b66..c4878a74557e1dcbe630e3e8d3f01a7e48f33885 100644
+--- a/codex-rs/core/src/image_preparation.rs
++++ b/codex-rs/core/src/image_preparation.rs
+@@ -300,6 +300,7 @@ pub(crate) async fn prepare_response_items(
+             | ResponseItem::ItemReference { .. }
+             | ResponseItem::Program { .. }
+             | ResponseItem::ProgramOutput { .. }
++            | ResponseItem::LocalShellCallOutput { .. }
+             | ResponseItem::Other => None,
+         };
+         prepared_items.push(item);
+diff --git a/codex-rs/core/src/mcp_tool_call.rs b/codex-rs/core/src/mcp_tool_call.rs
+index bae232f8635b709ac7bdd487fb5040ba50d39226..bb792b2eb17b9c0cfc7c7f5cc9ac9ec99f5d8719 100644
+--- a/codex-rs/core/src/mcp_tool_call.rs
++++ b/codex-rs/core/src/mcp_tool_call.rs
+@@ -139,6 +139,7 @@ pub(crate) async fn handle_mcp_tool_call(
+     invocation_tool_name: ToolName,
+     source: &crate::tools::context::ToolCallSource,
+     arguments: String,
++    output_observers: &[Arc<dyn codex_extension_api::RecordedToolOutputObserver>],
+ ) -> HandledMcpToolCall {
+     let turn_context = &step_context.turn;
+     let server = tool_info.server_name.clone();
+@@ -153,6 +154,7 @@ pub(crate) async fn handle_mcp_tool_call(
+             Err(e) => {
+                 error!("failed to parse tool call arguments: {e}");
+                 return HandledMcpToolCall {
++                    observer_failed: false,
+                     result: CallToolResult::from_error_text(format!("err: {e}")),
+                     tool_input: JsonValue::Object(serde_json::Map::new()),
+                 };
+@@ -180,6 +182,7 @@ pub(crate) async fn handle_mcp_tool_call(
+         )
+         .await;
+         return HandledMcpToolCall {
++                    observer_failed: false,
+             result: CallToolResult::from_result(result),
+             tool_input: arguments_value
+                 .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+@@ -205,6 +208,7 @@ pub(crate) async fn handle_mcp_tool_call(
+             )
+             .await;
+             return HandledMcpToolCall {
++                    observer_failed: false,
+                 result: CallToolResult::from_result(result),
+                 tool_input: arguments_value
+                     .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+@@ -250,6 +254,7 @@ pub(crate) async fn handle_mcp_tool_call(
+             /*duration*/ None,
+         );
+         return HandledMcpToolCall {
++                    observer_failed: false,
+             result: CallToolResult::from_result(result),
+             tool_input: arguments_value
+                 .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+@@ -314,6 +319,7 @@ pub(crate) async fn handle_mcp_tool_call(
+                         decision,
+                         policy: approval_policy,
+                     },
++                    output_observers,
+                 )
+                 .await;
+             }
+@@ -372,6 +378,7 @@ pub(crate) async fn handle_mcp_tool_call(
+         );
+ 
+         return HandledMcpToolCall {
++                    observer_failed: false,
+             result: CallToolResult::from_result(result),
+             tool_input: arguments_value
+                 .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+@@ -390,11 +397,13 @@ pub(crate) async fn handle_mcp_tool_call(
+         item_metadata,
+         source,
+         McpToolApprovalApplication::NotRequired,
++        output_observers,
+     )
+     .await
+ }
+ 
+ pub(crate) struct HandledMcpToolCall {
++    pub(crate) observer_failed: bool,
+     pub(crate) result: CallToolResult,
+     pub(crate) tool_input: JsonValue,
+ }
+@@ -457,6 +466,7 @@ async fn handle_approved_mcp_tool_call(
+     item_metadata: McpToolCallItemMetadata,
+     source: &crate::tools::context::ToolCallSource,
+     approval_application: McpToolApprovalApplication,
++    output_observers: &[Arc<dyn codex_extension_api::RecordedToolOutputObserver>],
+ ) -> HandledMcpToolCall {
+     let turn_context = step_context.turn.as_ref();
+     let server = invocation.server.clone();
+@@ -472,6 +482,7 @@ async fn handle_approved_mcp_tool_call(
+         .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new()));
+     let mut elicitation_type = None;
+     let mut request_failed = false;
++    let mut observer_failed = false;
+     let mut transport_error: Option<Arc<dyn std::error::Error + Send + Sync>> = None;
+     let result = async {
+         if let Some(recovery) = turn_context
+@@ -514,6 +525,14 @@ async fn handle_approved_mcp_tool_call(
+                             };
+                         let mcp_tool =
+                             McpToolContext::from_prepared_call(&prepared_call, server_config);
++                        anyhow::ensure!(!cancellation_token.is_cancelled(), "MCP call cancelled before entry");
++                        for observer in output_observers {
++                            if observer.on_mcp_entry().await.is_err() {
++                                observer_failed = true;
++                                anyhow::bail!("MCP tool lifecycle callback failed");
++                            }
++                        }
++                        anyhow::ensure!(!cancellation_token.is_cancelled(), "MCP call cancelled during entry");
+                         let is_cancelled: Arc<dyn Fn() -> bool + Send + Sync> = {
+                             let token = cancellation_token.clone();
+                             Arc::new(move || token.is_cancelled())
+@@ -790,6 +809,7 @@ async fn handle_approved_mcp_tool_call(
+     );
+ 
+     HandledMcpToolCall {
++        observer_failed,
+         result: CallToolResult::from_result(result),
+         tool_input,
+     }
+diff --git a/codex-rs/core/src/realtime_conversation/tool_task.rs b/codex-rs/core/src/realtime_conversation/tool_task.rs
+index 179f614b97c11174f9d96b268cb33ec3a448cf71..f577402287afb423f07d1498066106c5cc98d591 100644
+--- a/codex-rs/core/src/realtime_conversation/tool_task.rs
++++ b/codex-rs/core/src/realtime_conversation/tool_task.rs
+@@ -908,7 +908,7 @@ impl RealtimeToolCall {
+             .realtime_tool_call = Some(self.correlation().await);
+         session
+             .record_tool_result(&ctx, &step.settings.model_info, result)
+-            .await;
++            .await?;
+         let text = text.ok_or_else(|| {
+             CodexErr::InvalidRequest("Realtime function requires a textual native output".into())
+         })?;
+diff --git a/codex-rs/core/src/session/handoff_history.rs b/codex-rs/core/src/session/handoff_history.rs
+index e3cec36257846ef2d8f16d66c1ad19c1e97f9a11..5114cd632892bf8cb293bdd502e788364e6351f5 100644
+--- a/codex-rs/core/src/session/handoff_history.rs
++++ b/codex-rs/core/src/session/handoff_history.rs
+@@ -1,9 +1,11 @@
+-//! Canonical removal of current, occurrence-bound assistant text at an accepted transfer.
++//! Canonical removal of current, occurrence-bound records at an accepted transfer.
++use std::collections::HashMap;
+ use std::collections::HashSet;
+ 
+ use codex_history::CompactedItem;
+ use codex_history::ResponseItemEnvelope;
+ use codex_history::sdk_originals::SdkOriginalHistory;
++use codex_history::sdk_originals::client_tool_pair_part;
+ use codex_protocol::agent_profile::AgentProfileHandoffPresentation;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::models::ContentItem;
+@@ -18,6 +20,23 @@ pub(super) struct Replacement {
+     pub envelopes: Vec<ResponseItemEnvelope>,
+ }
+ 
++fn droppable_function_pair_part(row: &ResponseItemEnvelope) -> Option<(&str, bool)> {
++    if !matches!(
++        &row.item,
++        ResponseItem::FunctionCall { .. } | ResponseItem::FunctionCallOutput { .. }
++    ) || row.metadata.as_ref().is_some_and(|metadata| {
++        metadata.sdk_agent_handoff.is_some()
++            || metadata.sdk_managed_agent_tool.is_some()
++            || metadata.delivered_assistant_message.is_some()
++    }) {
++        return None;
++    }
++    let (_, Some(id), is_call) = client_tool_pair_part(&row.item)? else {
++        return None;
++    };
++    (!id.is_empty()).then_some((id, is_call))
++}
++
+ impl Session {
+     /// The caller retains the profile persistence/task gates through publication.
+     pub(super) async fn prepare_handoff_history_replacement(
+@@ -95,6 +114,15 @@ impl Session {
+             return Err(invalid("Canonical handoff generated occurrences changed"));
+         }
+         let keep = selection.keep.iter().copied().collect::<HashSet<_>>();
++        let mut function_parts: HashMap<&str, Vec<(usize, bool)>> = HashMap::new();
++        for (ordinal, (index, _)) in generated.iter().enumerate() {
++            if let Some((id, is_call)) = droppable_function_pair_part(&rows[*index]) {
++                function_parts
++                    .entry(id)
++                    .or_default()
++                    .push((ordinal, is_call));
++            }
++        }
+         let mut drop_rows = HashSet::new();
+         let mut drop_originals = HashSet::new();
+         for (ordinal, (index, _)) in generated.iter().enumerate() {
+@@ -102,42 +130,74 @@ impl Session {
+                 continue;
+             }
+             let row = &rows[*index];
+-            if !matches!(&row.item, ResponseItem::Message { role, content, .. }
+-                if role == "assistant" && content.iter().all(|item| matches!(item, ContentItem::OutputText { .. })))
+-            {
+-                return Err(invalid(
+-                    "Canonical handoff history preserves tool, policy and non-text source rows",
+-                ));
+-            }
+-            let origin = row
+-                .metadata
+-                .as_ref()
+-                .and_then(|metadata| metadata.retained_source.as_ref())
+-                .ok_or_else(|| {
+-                    invalid("Canonical handoff message lacks native occurrence provenance")
+-                })?;
+-            let order = row.metadata.as_ref().and_then(|metadata| metadata.user_input_order)
+-                .ok_or_else(|| invalid("Canonical handoff message lacks native occurrence order"))?;
+-            let matches = current
+-                .items
+-                .iter()
+-                .enumerate()
+-                .filter_map(|(index, original)| {
+-                    let projection = original.projection.as_ref()?;
+-                    (projection.item == row.item
+-                        && projection
+-                            .metadata
+-                            .as_ref()
+-                            .and_then(|metadata| metadata.retained_source.as_ref())
+-                            == Some(origin)
+-                        && projection.metadata.as_ref().and_then(|metadata| metadata.user_input_order)
+-                            == Some(order))
+-                    .then_some(index)
+-                })
+-                .collect::<Vec<_>>();
+-            if matches.len() != 1 || !drop_originals.insert(matches[0]) {
++            let matched_occurrence = if let Some((id, _)) = droppable_function_pair_part(row) {
++                let complete_pair_is_omitted = matches!(
++                    function_parts.get(id).map(Vec::as_slice),
++                    Some([(call, true), (output, false)])
++                        if !keep.contains(call) && !keep.contains(output)
++                );
++                if id == selection.handoff.call_id || !complete_pair_is_omitted {
++                    return Err(invalid(
++                        "Canonical handoff history can omit only an entire settled current tool pair",
++                    ));
++                }
++                // The native suffix is pinned by the handoff sampling frontier.
++                // Reject ambiguous equality instead of editing an earlier use
++                // of the same call ID or dropping an unrelated raw record.
++                current
++                    .items
++                    .iter()
++                    .enumerate()
++                    .filter_map(|(index, original)| {
++                        (original.projection.as_ref() == Some(row)).then_some(index)
++                    })
++                    .collect::<Vec<_>>()
++            } else {
++                if !matches!(&row.item, ResponseItem::Message { role, content, .. }
++                    if role == "assistant" && content.iter().all(|item| matches!(item, ContentItem::OutputText { .. })))
++                {
++                    return Err(invalid(
++                        "Canonical handoff history preserves tool, policy and non-text source rows",
++                    ));
++                }
++                let origin = row
++                    .metadata
++                    .as_ref()
++                    .and_then(|metadata| metadata.retained_source.as_ref())
++                    .ok_or_else(|| {
++                        invalid("Canonical handoff message lacks native occurrence provenance")
++                    })?;
++                let order = row
++                    .metadata
++                    .as_ref()
++                    .and_then(|metadata| metadata.user_input_order)
++                    .ok_or_else(|| {
++                        invalid("Canonical handoff message lacks native occurrence order")
++                    })?;
++                current
++                    .items
++                    .iter()
++                    .enumerate()
++                    .filter_map(|(index, original)| {
++                        let projection = original.projection.as_ref()?;
++                        (projection.item == row.item
++                            && projection
++                                .metadata
++                                .as_ref()
++                                .and_then(|metadata| metadata.retained_source.as_ref())
++                                == Some(origin)
++                            && projection
++                                .metadata
++                                .as_ref()
++                                .and_then(|metadata| metadata.user_input_order)
++                                == Some(order))
++                        .then_some(index)
++                    })
++                    .collect::<Vec<_>>()
++            };
++            if matched_occurrence.len() != 1 || !drop_originals.insert(matched_occurrence[0]) {
+                 return Err(invalid(
+-                    "Canonical handoff message has no unique original occurrence",
++                    "Canonical handoff row has no unique original occurrence",
+                 ));
+             }
+             drop_rows.insert(*index);
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 88f33bdfa9a9e654a3ec7550ea59f071db341667..7dab6a3bc1cbf37ff7073bae31992aef157da640 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -7,6 +7,8 @@ use codex_analytics::ImagePreparationMetadata;
+ use codex_features::Feature;
+ use codex_history::CodexHarnessMetadata;
+ use codex_history::ResponseItemEnvelope;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
+ use codex_protocol::models::ResponseItem;
+ use codex_protocol::openai_models::ModelInfo;
+ 
+@@ -173,7 +175,8 @@ impl Session {
+         turn_context: &TurnContext,
+         model_info: &ModelInfo,
+         result: DirectToolResult,
+-    ) {
++    ) -> CodexResult<()> {
++        let observed = (!result.observers.is_empty()).then(|| result.envelope.clone());
+         self.record_annotated_items_with_exec(
+             turn_context,
+             model_info,
+@@ -181,6 +184,14 @@ impl Session {
+             result.pending_exec,
+         )
+         .await;
++        if let Some(output) = observed {
++            self.ensure_rollout_durable().await?;
++            for observer in result.observers {
++                observer.on_output(&output, result.succeeded).await
++                    .map_err(CodexErr::Fatal)?;
++            }
++        }
++        Ok(())
+     }
+ 
+     async fn record_annotated_items_with_exec(
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 9e049aa03eb2d3851747190e65159dadd8de36d8..18d7cabcf1d43d212f2bdfb5da1f01ba512d9f9a 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -7843,6 +7843,7 @@ async fn request_permissions_tool_resolves_legacy_paths_against_selected_environ
+         async move {
+             handler
+                 .handle(ToolInvocation {
++                    call_state: None,
+                     provider_agent_metadata: None,
+                     session,
+                     step_context,
+@@ -7928,6 +7929,7 @@ async fn request_permissions_tool_rejects_invalid_requests(
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+     let result = RequestPermissionsHandler
+         .handle(ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             session: Arc::new(session),
+             step_context,
+@@ -14648,6 +14650,7 @@ async fn unified_exec_rejects_escalated_permissions_when_policy_not_on_request()
+     let handler = ExecCommandHandler::default();
+     let resp = handler
+         .handle(ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+diff --git a/codex-rs/core/src/session/tests/guardian_tests.rs b/codex-rs/core/src/session/tests/guardian_tests.rs
+index 099b7979996fae35b15de5abb9798b555db02a26..12ef76a8bf337b5da588f939fb8766be3813a1c7 100644
+--- a/codex-rs/core/src/session/tests/guardian_tests.rs
++++ b/codex-rs/core/src/session/tests/guardian_tests.rs
+@@ -608,6 +608,7 @@ async fn guardian_allows_exec_command_additional_permissions_requests_past_polic
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+     let resp = handler
+         .handle(ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+@@ -733,6 +734,7 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_exec_command_policy_s
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+     let resp = handler
+         .handle(ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+@@ -886,6 +888,7 @@ async fn delayed_exec_command_uses_its_captured_authority_after_next_turn_starts
+     let command = "echo captured-action-authority";
+     let handler = crate::tools::handlers::ExecCommandHandler::default();
+     let invocation = handler.handle(ToolInvocation {
++        call_state: None,
+         provider_agent_metadata: None,
+         session: Arc::clone(&session),
+         turn: Arc::clone(&action_turn),
+@@ -1064,6 +1067,7 @@ async fn guardian_allows_unified_exec_additional_permissions_requests_past_polic
+     let handler = ExecCommandHandler::default();
+     let resp = handler
+         .handle(ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+@@ -1186,6 +1190,7 @@ async fn exec_command_allows_sticky_turn_permissions_without_inline_request_perm
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+     let resp = handler
+         .handle(ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index a6b2ddb2a6ef353983b607bc668e5cb20dcec0a3..89940b08a3aa6959c02c043fd52c03e058f2fb0a 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -591,7 +591,7 @@ pub(crate) async fn run_turn(
+             .outputs
+             .lock()
+             .expect("held terminal outputs poisoned")
+-            .extend(candidates.held_outputs.iter().cloned());
++            .extend(candidates.held_outputs.iter().cloned().map(|(output, succeeded)| (output, succeeded, Vec::new())));
+         if try_complete_tool_turn(
+             &sess,
+             &first_step_context,
+@@ -3730,17 +3730,18 @@ fn recovered_tools_from_history(
+     })
+ }
+ 
+-async fn release_held_tool_results(sess: &Session, step: &StepContext, withheld: bool) {
++async fn release_held_tool_results(sess: &Session, step: &StepContext, withheld: bool) -> CodexResult<()> {
+     let Some(held) = step
+         .turn
+         .extension_data
+         .get::<codex_extension_api::HeldToolCompletionResults>()
+     else {
+-        return;
++        return Ok(());
+     };
+     let outputs =
+         std::mem::take(&mut *held.outputs.lock().expect("held terminal outputs poisoned"));
+-    for (mut envelope, mut succeeded) in outputs {
++    let mut first_error = None;
++    for (mut envelope, mut succeeded, observers) in outputs {
+         if withheld {
+             if let ResponseItem::FunctionCallOutput { output, .. }
+             | ResponseItem::CustomToolCallOutput { output, .. } = &mut envelope.item
+@@ -3761,17 +3762,22 @@ async fn release_held_tool_results(sess: &Session, step: &StepContext, withheld:
+                         });
+             }
+         }
+-        sess.record_tool_result(
++        let outcome = sess.record_tool_result(
+             &step.turn,
+             &step.settings.model_info,
+             DirectToolResult {
++                observers,
+                 envelope,
+                 succeeded,
+                 pending_exec: None,
+             },
+         )
+         .await;
++        if let Err(error) = outcome {
++            first_error.get_or_insert(error);
++        }
+     }
++    first_error.map_or(Ok(()), Err)
+ }
+ 
+ async fn release_failed_tool_candidates(sess: &Session, step: &StepContext) {
+@@ -3783,7 +3789,7 @@ async fn release_failed_tool_candidates(sess: &Session, step: &StepContext) {
+     {
+         return;
+     }
+-    release_held_tool_results(sess, step, true).await;
++    let _ = release_held_tool_results(sess, step, true).await;
+ }
+ 
+ #[allow(clippy::too_many_arguments)]
+@@ -3806,7 +3812,7 @@ async fn try_complete_tool_turn(
+         cancellation_token,
+     )
+     .await;
+-    release_held_tool_results(sess, step_context, proposal.is_err()).await;
++    release_held_tool_results(sess, step_context, proposal.is_err()).await?;
+     if let Some(completion) = proposal? {
+         let stop = run_turn_stop_hooks(sess, step_context, *stop_hook_active, None).await;
+         if stop.should_stop {
+@@ -3964,7 +3970,7 @@ async fn record_tool_completion_feedback(
+     step: &StepContext,
+     feedback: Option<String>,
+ ) -> CodexResult<()> {
+-    release_held_tool_results(sess, step, false).await;
++    release_held_tool_results(sess, step, false).await?;
+     if let Some(feedback) = feedback {
+         let item = build_hook_prompt_message(&[
+             codex_protocol::items::HookPromptFragment::from_single_hook(
+@@ -4739,22 +4745,23 @@ async fn drain_in_flight(
+                     ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.clone()),
+                     _ => None,
+                 };
+-                if held {
++                let outcome = if held {
+                     turn_context
+                         .extension_data
+                         .get_or_init(codex_extension_api::HeldToolCompletionResults::default)
+                         .outputs
+                         .lock()
+                         .expect("held terminal outputs poisoned")
+-                        .push((result.envelope, result.succeeded));
++                        .push((result.envelope, result.succeeded, result.observers));
++                    Ok(())
+                 } else {
+                     sess.record_tool_result(
+                         turn_context,
+                         &step_context.settings.model_info,
+                         result,
+                     )
+-                    .await;
+-                }
++                    .await
++                };
+                 // Retire the copy only after canonical publication or terminal ownership.
+                 if let Some(id) = unpublished_id
+                     && let Some(owner) = turn_context
+@@ -4773,6 +4780,9 @@ async fn drain_in_flight(
+                             _ => true,
+                         });
+                 }
++                // End observation can fail after canonical publication. Retire
++                // the unpublished copy before returning that failure.
++                outcome?;
+             }
+             Err(err) => return Err(err),
+         }
+@@ -5683,6 +5693,7 @@ async fn try_run_sampling_request(
+                         | ResponseItem::ItemReference { .. }
+                         | ResponseItem::Program { .. }
+                         | ResponseItem::ProgramOutput { .. }
++                        | ResponseItem::LocalShellCallOutput { .. }
+                         | ResponseItem::Other => false,
+                     };
+ 
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 1d862dcf634ad60d59d291440d88e954c4c1883c..b4cb21ebe9eb01496ab43875f0bced18d55f9d05 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -734,6 +734,7 @@ pub(crate) async fn handle_non_tool_response_item(
+         ResponseItem::ItemReference { .. } => "item_reference",
+         ResponseItem::Program { .. } => "program",
+         ResponseItem::ProgramOutput { .. } => "program_output",
++        ResponseItem::LocalShellCallOutput { .. } => "local_shell_call_output",
+         ResponseItem::Other => "other",
+     };
+     debug!(
+diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
+index a7977536d7f0729fce0a892b3ac82eca8a67ef68..2b274e851749b42271920aada73b7317c40fbaff 100644
+--- a/codex-rs/core/src/tools/context.rs
++++ b/codex-rs/core/src/tools/context.rs
+@@ -51,6 +51,7 @@ pub(crate) struct ToolCallState {
+         OnceLock<super::program_callers::ProgrammaticCallReceipt>,
+     pub(crate) provider_agent_metadata: OnceLock<serde_json::Value>,
+     pub(crate) terminal_outcome_reached: AtomicBool,
++    pub(crate) output_observers: OnceLock<Vec<Arc<dyn codex_extension_api::RecordedToolOutputObserver>>>,
+     pub(crate) dispatch_started_at: OnceLock<std::time::Instant>,
+     pub(crate) builtin_sandbox_operation: OnceLock<codex_extension_api::BuiltinSandboxOperation>,
+     pub(crate) delivered_assistant_message: OnceLock<String>,
+@@ -72,6 +73,8 @@ pub enum ToolCallSource {
+ 
+ #[derive(Clone)]
+ pub struct ToolInvocation {
++    // Weak: the dispatch state owns observers and must not cycle through itself.
++    pub(crate) call_state: Option<std::sync::Weak<ToolCallState>>,
+     /// Observed provider attribution for this exact direct occurrence; never routing authority.
+     pub(crate) provider_agent_metadata: Option<serde_json::Value>,
+     pub session: Arc<Session>,
+diff --git a/codex-rs/core/src/tools/handlers/apply_patch_tests.rs b/codex-rs/core/src/tools/handlers/apply_patch_tests.rs
+index aacaaebbe2d59d3a4b359271c46a0588422909ab..6ff7d58f41c1b0462f27d0c2903774d390b272e6 100644
+--- a/codex-rs/core/src/tools/handlers/apply_patch_tests.rs
++++ b/codex-rs/core/src/tools/handlers/apply_patch_tests.rs
+@@ -46,6 +46,7 @@ async fn invocation_for_payload(payload: ToolPayload) -> ToolInvocation {
+     let (session, turn) = make_session_and_context().await;
+     let turn = Arc::new(turn);
+     ToolInvocation {
++        call_state: None,
+         provider_agent_metadata: None,
+         session: session.into(),
+         step_context: StepContext::for_test(Arc::clone(&turn)),
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index d736523bf622773b5e10202a7873e9f1f8824720..dc34d14363334f42b4b8b82f4d3daffc04a17871 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -529,6 +529,7 @@ mod tests {
+         let (session, turn) = crate::session::tests::make_session_and_context().await;
+         let turn = Arc::new(turn);
+         let invocation = ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             session: session.into(),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+@@ -624,6 +625,7 @@ mod tests {
+         model_info.node_repl_disabled = !turn.model_info().node_repl_disabled;
+         let node_repl_disabled = model_info.node_repl_disabled;
+         let invocation = ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             session,
+             step_context,
+diff --git a/codex-rs/core/src/tools/handlers/mcp.rs b/codex-rs/core/src/tools/handlers/mcp.rs
+index 7f44a7bfcbc74ad09eb302b0976d4d4b585b4721..ffae2160705369af2f0d755fd32f855f4fbc7c18 100644
+--- a/codex-rs/core/src/tools/handlers/mcp.rs
++++ b/codex-rs/core/src/tools/handlers/mcp.rs
+@@ -263,8 +263,12 @@ impl McpHandler {
+             mcp_tool.as_ref(),
+             /*builtin_sandbox_operation*/ None,
+         )
+-        .await;
++        .await?;
+ 
++        let output_observers = invocation.call_state.as_ref()
++            .and_then(std::sync::Weak::upgrade)
++            .and_then(|state| state.output_observers.get().cloned())
++            .unwrap_or_default();
+         let originating_call = invocation.originating_call().await;
+         let ToolInvocation {
+             session,
+@@ -305,9 +309,13 @@ impl McpHandler {
+             tool_name,
+             &source,
+             payload,
++            &output_observers,
+         )
+         .await;
+ 
++        if result.observer_failed {
++            return Err(FunctionCallError::Fatal("MCP tool lifecycle callback failed".into()));
++        }
+         Ok(boxed_tool_output(McpToolOutput {
+             result: result.result,
+             tool_input: result.tool_input,
+@@ -688,6 +696,7 @@ mod tests {
+             .expect("MCP tool spec should build");
+         assert_eq!(
+             handler.pre_tool_use_payload(&ToolInvocation {
++                call_state: None,
+                 provider_agent_metadata: None,
+                 session: session.into(),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+@@ -723,6 +732,7 @@ mod tests {
+ 
+         assert_eq!(
+             handler.pre_tool_use_payload(&ToolInvocation {
++                call_state: None,
+                 provider_agent_metadata: None,
+                 session: session.into(),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+@@ -754,6 +764,7 @@ mod tests {
+         let invocation = handler
+             .with_updated_hook_input(
+                 ToolInvocation {
++                    call_state: None,
+                     provider_agent_metadata: None,
+                     session: session.into(),
+                     step_context: StepContext::for_test(Arc::clone(&turn)),
+@@ -816,6 +827,7 @@ mod tests {
+         let handler = McpHandler::new(tool_info("filesystem", "filesystem", "read_file"))
+             .expect("MCP tool spec should build");
+         let invocation = ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             session: session.into(),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+index 7c75f34f1a5dd9c8243a32784209604d455bfbed..e53d2dac9e505065065b9f001ec261bf2747f273 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -107,6 +107,7 @@ fn invocation(
+ ) -> ToolInvocation {
+     let step_context = StepContext::for_test(Arc::clone(&turn));
+     ToolInvocation {
++        call_state: None,
+         provider_agent_metadata: None,
+         session,
+         step_context,
+diff --git a/codex-rs/core/src/tools/handlers/request_plugin_install_tests.rs b/codex-rs/core/src/tools/handlers/request_plugin_install_tests.rs
+index 7c647fd9e122a82b8a16757f4384ec1e9d57a370..35cb6b3de9af34ba335f3a03e31339603666019c 100644
+--- a/codex-rs/core/src/tools/handlers/request_plugin_install_tests.rs
++++ b/codex-rs/core/src/tools/handlers/request_plugin_install_tests.rs
+@@ -58,6 +58,7 @@ async fn request_plugin_install_rejects_subagent_threads(presentation: ToolSugge
+ 
+     let result = RequestPluginInstallHandler::new(Vec::new(), presentation)
+         .handle(ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             session: Arc::new(session),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_tests.rs b/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
+index 8fc5a990bb94856c058f90fc57d6818a674f7230..4f4cb99ace01172a83416734a02caeef42ff5a9a 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
+@@ -40,6 +40,7 @@ async fn multi_agent_v2_request_user_input_rejects_subagent_threads() {
+         available_modes: Vec::new(),
+     }
+     .handle(ToolInvocation {
++        call_state: None,
+         provider_agent_metadata: None,
+         session: Arc::new(session),
+         step_context: StepContext::for_test(Arc::clone(&turn)),
+@@ -119,6 +120,7 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode(
+                 available_modes: vec![ModeKind::Default],
+             }
+             .handle(ToolInvocation {
++                call_state: None,
+                 provider_agent_metadata: None,
+                 session,
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+@@ -241,6 +243,7 @@ async fn request_user_input_sets_blocking_from_turn_mode() {
+                 available_modes: vec![ModeKind::Plan],
+             }
+             .handle(ToolInvocation {
++                call_state: None,
+                 provider_agent_metadata: None,
+                 session,
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec_tests.rs b/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
+index aef687260932862991f33eec3bafcc1e88c92fa8..e36c7a23f14fe4681c185167ca3c42e35bf8099c 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
+@@ -35,6 +35,7 @@ async fn invocation_for_payload(
+     let (session, turn) = make_session_and_context().await;
+     let turn = Arc::new(turn);
+     ToolInvocation {
++        call_state: None,
+         provider_agent_metadata: None,
+         session: session.into(),
+         step_context: StepContext::for_test(Arc::clone(&turn)),
+@@ -366,6 +367,7 @@ async fn exec_command_rejects_login_when_selected_environment_disallows_it() {
+ 
+     let turn = Arc::new(turn);
+     let invocation = ToolInvocation {
++        call_state: None,
+         provider_agent_metadata: None,
+         session: session.into(),
+         step_context: StepContext::for_test(Arc::clone(&turn)),
+@@ -516,6 +518,7 @@ async fn exec_command_reuses_foreign_windows_grant() {
+     );
+     let response = ExecCommandHandler::default()
+         .handle(ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             step_context,
+@@ -557,6 +560,7 @@ async fn exec_command_pre_tool_use_payload_uses_raw_command() {
+ 
+     assert_eq!(
+         handler.pre_tool_use_payload(&ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             session: session.into(),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+@@ -586,6 +590,7 @@ async fn exec_command_pre_tool_use_payload_skips_write_stdin() {
+ 
+     assert_eq!(
+         handler.pre_tool_use_payload(&ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             session: session.into(),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+diff --git a/codex-rs/core/src/tools/handlers/view_image.rs b/codex-rs/core/src/tools/handlers/view_image.rs
+index 5523650c77d7bcb454a6487140ecc6de0d04874e..a0c9e246ab6491fe3672717c94a8842615e819b0 100644
+--- a/codex-rs/core/src/tools/handlers/view_image.rs
++++ b/codex-rs/core/src/tools/handlers/view_image.rs
+@@ -403,6 +403,7 @@ mod tests {
+ 
+         let result = ViewImageHandler::default()
+             .handle(ToolInvocation {
++                call_state: None,
+                 provider_agent_metadata: None,
+                 session: Arc::new(session),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+@@ -434,6 +435,7 @@ mod tests {
+ 
+         let result = ViewImageHandler::default()
+             .handle(ToolInvocation {
++                call_state: None,
+                 provider_agent_metadata: None,
+                 session: Arc::new(session),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+@@ -478,6 +480,7 @@ mod tests {
+ 
+         let result = ViewImageHandler::default()
+             .handle(ToolInvocation {
++                call_state: None,
+                 provider_agent_metadata: None,
+                 session: Arc::new(session),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+@@ -517,6 +520,7 @@ mod tests {
+ 
+         let result = ViewImageHandler::default()
+             .handle(ToolInvocation {
++                call_state: None,
+                 provider_agent_metadata: None,
+                 session: Arc::new(session),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+diff --git a/codex-rs/core/src/tools/lifecycle.rs b/codex-rs/core/src/tools/lifecycle.rs
+index 8794545696480ed0e300b22a4e7453f5e3fab7a8..da13f2bb49040bb11f0c602cfa617c5d55d84f5a 100644
+--- a/codex-rs/core/src/tools/lifecycle.rs
++++ b/codex-rs/core/src/tools/lifecycle.rs
+@@ -22,14 +22,14 @@ pub(crate) async fn notify_tool_start(
+     invocation: &ToolInvocation,
+     mcp_tool: Option<&McpToolContext>,
+     builtin_sandbox_operation: Option<codex_extension_api::BuiltinSandboxOperation>,
+-) {
++) -> Result<(), codex_tools::FunctionCallError> {
+     let contributors = invocation
+         .session
+         .services
+         .extensions
+         .tool_lifecycle_contributors();
+     if contributors.is_empty() {
+-        return;
++        return Ok(());
+     }
+     let thread_store = &invocation.session.services.thread_extension_data;
+     let conversation_history = invocation.session.conversation_history_snapshot().await;
+@@ -39,9 +39,7 @@ pub(crate) async fn notify_tool_start(
+         .await
+         .and_then(|origin| origin.item_id);
+ 
+-    for contributor in contributors {
+-        contributor
+-            .on_tool_start(ToolStartInput {
++    let input = || ToolStartInput {
+                 step_store: Some(&invocation.step_context.extension_data),
+                 session_store: &invocation.session.services.session_extension_data,
+                 thread_store,
+@@ -57,9 +55,23 @@ pub(crate) async fn notify_tool_start(
+                 payload: &invocation.payload,
+                 conversation_history: Arc::clone(&conversation_history),
+                 source: extension_tool_call_source(invocation.source.clone()),
+-            })
+-            .await;
++            };
++    for contributor in contributors {
++        contributor.on_tool_start(input()).await;
++    }
++    if let Some(state) = invocation.call_state.as_ref().and_then(std::sync::Weak::upgrade) {
++        let mut observers = Vec::new();
++        for contributor in contributors {
++            if let Some(observer) = contributor.observe_tool_start(input()).await
++                .map_err(codex_tools::FunctionCallError::Fatal)? {
++                observers.push(observer);
++            }
++        }
++        state.output_observers.set(observers)
++            .map_err(|_| codex_tools::FunctionCallError::Fatal(
++                "Tool observation already started".into()))?;
+     }
++    Ok(())
+ }
+ 
+ pub(crate) async fn notify_command_start(
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 9bca166cfa8b4903fe904dc30624aba90bf3bbcd..32c460aca67674ee453b7334110937f0372686ab 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -46,6 +46,7 @@ struct ToolCallTimingGuard {
+ }
+ 
+ pub(crate) struct DirectToolResult {
++    pub(crate) observers: Vec<Arc<dyn codex_extension_api::RecordedToolOutputObserver>>,
+     pub(crate) succeeded: bool,
+     pub(crate) envelope: ResponseItemEnvelope,
+     pub(crate) pending_exec: Option<PendingLocalExec>,
+@@ -431,6 +432,7 @@ impl ToolCallRuntime {
+                 }
+             }
+             Ok(DirectToolResult {
++                observers: call_state.output_observers.get().cloned().unwrap_or_default(),
+                 succeeded,
+                 envelope: response,
+                 pending_exec,
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 5d6e82ec906b7d0063a57377473a8906e094158c..b58d8ac46c614f7c3e9fc5f5bb4f1bdacffb5b40 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -647,6 +647,7 @@ impl ToolRegistry {
+         mut invocation: ToolInvocation,
+         call_state: Option<Arc<ToolCallState>>,
+     ) -> Result<AnyToolResult, FunctionCallError> {
++        invocation.call_state = call_state.as_ref().map(Arc::downgrade);
+         let tool_name = invocation.tool_name.clone();
+         let call_id_owned = invocation.call_id.clone();
+         let otel = invocation
+@@ -853,12 +854,18 @@ impl ToolRegistry {
+             {
+                 let _ = state.builtin_sandbox_operation.set(operation);
+             }
+-            notify_tool_start(
++            if let Err(error) = notify_tool_start(
+                 &invocation,
+                 /*mcp_tool*/ None,
+                 builtin_sandbox_operation,
+-            )
+-            .await;
++            ).await {
++                notify_tool_finish_if_unclaimed(
++                    &invocation,
++                    call_state.as_deref(),
++                    ToolCallOutcome::Failed { handler_executed: false },
++                ).await;
++                return Err(error);
++            }
+         }
+         let mut control_tool_analytics = tool
+             .is_builtin_control_tool()
+@@ -1124,7 +1131,13 @@ async fn handle_any_tool(
+     let call_id = invocation.call_id.clone();
+     let payload = invocation.payload.clone();
+     let (output, pending_exec) = match tool.handle(invocation.clone()).await {
+-        Ok(output) => match result_owner {
++        Ok(output) => {
++            if let Some(observers) = call_state.and_then(|state| state.output_observers.get()) {
++                for observer in observers {
++                    observer.on_handler_output(output.as_ref());
++                }
++            }
++            match result_owner {
+             Some(owner) => super::builtin_result_policy::accept(&invocation, owner, output).await?,
+             None => {
+                 let pending_exec = if !tool.is_third_party_tool()
+@@ -1139,6 +1152,7 @@ async fn handle_any_tool(
+                 };
+                 (output, pending_exec)
+             }
++        }
+         },
+         Err(_) if result_owner.is_some() => return Err(super::builtin_result_policy::failure()),
+         Err(error) => return Err(error),
+diff --git a/codex-rs/core/src/tools/registry_tests.rs b/codex-rs/core/src/tools/registry_tests.rs
+index 6e1171eeab2b93b73d6b2a9eefe10c5dc9f27bf0..f913a31d850c6701b8aede79a61d48fa0129f11d 100644
+--- a/codex-rs/core/src/tools/registry_tests.rs
++++ b/codex-rs/core/src/tools/registry_tests.rs
+@@ -459,6 +459,7 @@ async fn function_tools_expose_default_hook_payloads_and_rewrites() -> anyhow::R
+         tool_name: tool_name.clone(),
+     };
+     let invocation = ToolInvocation {
++        call_state: None,
+         provider_agent_metadata: None,
+         payload: ToolPayload::Function {
+             arguments: serde_json::json!({ "message": "hello" }).to_string(),
+@@ -506,6 +507,7 @@ async fn function_hook_input_defaults_empty_arguments_to_object() {
+         tool_name: tool_name.clone(),
+     };
+     let invocation = ToolInvocation {
++        call_state: None,
+         provider_agent_metadata: None,
+         payload: ToolPayload::Function {
+             arguments: "  ".to_string(),
+@@ -539,6 +541,7 @@ async fn spawn_agent_function_tools_use_agent_matcher_alias() {
+             tool_name: tool_name.clone(),
+         };
+         let invocation = ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: None,
+             payload: ToolPayload::Function {
+                 arguments: serde_json::json!({ "message": "inspect this repo" }).to_string(),
+@@ -960,6 +963,7 @@ fn test_invocation(
+ ) -> ToolInvocation {
+     let step_context = StepContext::for_test(Arc::clone(&turn));
+     ToolInvocation {
++        call_state: None,
+         provider_agent_metadata: None,
+         session,
+         step_context,
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+index 93a46da54dd309b0e45f062e82aecabd7e9704e9..43b5063d016900bc207e980901957d8cc01052e3 100644
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -600,6 +600,7 @@ impl ToolRouter {
+         // Keep the legacy ToolInvocation.turn field tied to the same request state until handlers migrate.
+         let turn = Arc::clone(&step_context.turn);
+         let invocation = ToolInvocation {
++            call_state: None,
+             provider_agent_metadata: call_state.as_ref().and_then(|state| state.provider_agent_metadata.get()).cloned(),
+             session,
+             turn,
+diff --git a/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs b/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs
+index a2de08c06a9000794b5a3fbbba9cfd26e8f3459b..2dd07ba192f4155ef12e82356b411418d88228da 100644
+--- a/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs
++++ b/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs
+@@ -357,6 +357,7 @@ fn test_invocation_with_payload(
+ ) -> ToolInvocation {
+     let step_context = StepContext::for_test(Arc::clone(&turn));
+     ToolInvocation {
++        call_state: None,
+         provider_agent_metadata: None,
+         session,
+         step_context,
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index c1d70c8a115687c139d997a48353af2eb25a5d8a..671120ea024a9428f1c9bacb358054a65624a32a 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -464,7 +464,8 @@ fn response_item_records_turn_ttft(item: &ResponseItem) -> bool {
+         | ResponseItem::ItemReference { .. }
+         | ResponseItem::Program { .. }
+         | ResponseItem::ProgramOutput { .. }
+-        | ResponseItem::Other => false,
++        | ResponseItem::LocalShellCallOutput { .. }
++            | ResponseItem::Other => false,
+     }
+ }
+ 
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 5079591b3530e8335b7929b32712407cd35fd8a9..d5704c7d696b4dbed2ab7c2f309dd13f10f2c6c0 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -58,6 +58,7 @@ pub use tool_lifecycle::ToolFinishInput;
+ pub use tool_lifecycle::ToolLifecycleFuture;
+ pub use tool_lifecycle::ToolNotFoundInput;
+ pub use tool_lifecycle::ToolStartInput;
++pub use tool_lifecycle::RecordedToolOutputObserver;
+ pub use tool_lifecycle::ToolTimingBoundary;
+ pub use tool_lifecycle::ToolTimingInput;
+ pub use tool_lifecycle::is_reserved_mcp_request_metadata_key;
+@@ -559,6 +560,16 @@ pub trait ToolLifecycleContributor: Send + Sync {
+         Box::pin(std::future::ready(()))
+     }
+ 
++    /// Await application observation after ordinary start hooks and before execution.
++    /// The returned observer stays with this exact native invocation, including
++    /// held outputs. Errors stop dispatch before its handler executes.
++    fn observe_tool_start<'a>(
++        &'a self,
++        _input: ToolStartInput<'a>,
++    ) -> crate::ExtensionFuture<'a, Result<Option<Arc<dyn RecordedToolOutputObserver>>, String>> {
++        Box::pin(async { Ok(None) })
++    }
++
+     /// Called for a resolved builtin command before attribution and execution.
+     ///
+     /// This includes commands issued by code mode. It does not imply that
+diff --git a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+index cbffde320b65ed6fb0a5b0c5977a4694822e7843..f143f3820a812d648401f9da574f90042361663f 100644
+--- a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+@@ -282,6 +282,25 @@ pub struct ToolFinishInput<'a> {
+     pub outcome: ToolCallOutcome,
+ }
+ 
++/// An observer retained by the exact dispatch until its native output is recorded.
++/// The callback cannot replace output or mint a tool/approval grant.
++pub trait RecordedToolOutputObserver: Send + Sync {
++    /// Run after approval inside the exact prepared MCP lease, before request
++    /// preparation or tools/call. This cannot grant access or rewrite the call.
++    fn on_mcp_entry(&self) -> crate::ExtensionFuture<'_, Result<(), String>> {
++        Box::pin(async { Ok(()) })
++    }
++    /// Observe the exact live handler value before result projection replaces it.
++    /// This cannot grant acceptance or replace the output.
++    fn on_handler_output(&self, _output: &dyn codex_tools::ToolOutput) {}
++
++    fn on_output<'a>(
++        &'a self,
++        output: &'a codex_history::ResponseItemEnvelope,
++        succeeded: bool,
++    ) -> crate::ExtensionFuture<'a, Result<(), String>>;
++}
++
+ /// The execution interval represented by a tool timing observation.
+ #[derive(Clone, Copy, Debug)]
+ pub enum ToolTimingBoundary {
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 56997653310a6a95fe44c27c75813294a11f6e74..2947866cd81902d31cc28c8eae5ae02ba0378d1f 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -206,7 +206,11 @@ pub struct HeldToolCompletionResults {
+     pub unpublished_outputs: std::sync::Mutex<Vec<(codex_history::ResponseItemEnvelope, bool)>>,
+     /// The admitted SDK owner's existing finite readiness counter.
+     pub unpublished_progress: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+-    pub outputs: std::sync::Mutex<Vec<(codex_history::ResponseItemEnvelope, bool)>>,
++    pub outputs: std::sync::Mutex<Vec<(
++        codex_history::ResponseItemEnvelope,
++        bool,
++        Vec<std::sync::Arc<dyn super::RecordedToolOutputObserver>>,
++    )>>,
+     pub suspending: std::sync::atomic::AtomicBool,
+     /// Opt in only through the SDK portable-manual suspension submission.
+     pub portable_suspension: std::sync::OnceLock<()>,
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 894e42c1e007c0362872459cbb518ee00b622d30..f7502727671e1cf032ce29c8db58b63eb57c8643 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -127,6 +127,7 @@ pub use contributors::ToolLifecycleContributor;
+ pub use contributors::ToolLifecycleFuture;
+ pub use contributors::ToolNotFoundInput;
+ pub use contributors::ToolStartInput;
++pub use contributors::RecordedToolOutputObserver;
+ pub use contributors::ToolTimingBoundary;
+ pub use contributors::ToolTimingInput;
+ pub use contributors::TurnAbortInput;
+diff --git a/codex-rs/ext/image-generation/src/tool.rs b/codex-rs/ext/image-generation/src/tool.rs
+index 87237b74a8394aae7f4f038dcf37f7d68caf4e94..a1d292ea56d14f6132522e8f6f7025803d509370 100644
+--- a/codex-rs/ext/image-generation/src/tool.rs
++++ b/codex-rs/ext/image-generation/src/tool.rs
+@@ -542,6 +542,7 @@ fn recent_images(
+             | ResponseItem::ItemReference { .. }
+             | ResponseItem::Program { .. }
+             | ResponseItem::ProgramOutput { .. }
++            | ResponseItem::LocalShellCallOutput { .. }
+             | ResponseItem::Other => {}
+         }
+         for image in image_references {
+diff --git a/codex-rs/guardian-context/src/transcript.rs b/codex-rs/guardian-context/src/transcript.rs
+index b74295818dfca973d5a98bb012ef63d1d413426c..618fb885538a5b03299876e576fd25aaefec8398 100644
+--- a/codex-rs/guardian-context/src/transcript.rs
++++ b/codex-rs/guardian-context/src/transcript.rs
+@@ -280,6 +280,15 @@ pub fn collect_transcript(
+                 };
+                 (kind, text)
+             }
++            ResponseItem::LocalShellCallOutput { output, .. } => {
++                if !config.options.include_tool_outputs {
++                    continue;
++                }
++                (
++                    ConversationTranscriptEntryKind::ToolOutput("local shell result".to_string()),
++                    output.clone(),
++                )
++            }
+             ResponseItem::FunctionCallOutput {
+                 call_id: None,
+                 name: Some(name),
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index 468ba0ed1bdb41fd6fb5eb5d4eb766b2074044e9..1701180fb7a1fd8c01e6a4fc07798e3bf68cb9f2 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -535,6 +535,7 @@ pub fn client_tool_pair_part(item: &ResponseItem) -> Option<(&'static str, Optio
+             matches!(item, ResponseItem::ShellCall { .. }),
+         ),
+         ResponseItem::LocalShellCall { call_id, .. } => ("function", call_id.as_deref(), true),
++        ResponseItem::LocalShellCallOutput { id, .. } => ("function", Some(id.as_str()), false),
+         ResponseItem::FunctionCallOutput { call_id, .. } => ("function", call_id.as_deref(), false),
+         ResponseItem::ComputerCall { call_id, .. } => ("computer", Some(call_id.as_str()), true),
+         ResponseItem::ComputerCallOutput { call_id, .. } => {
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index 977f877d5dc956ac4663a2284c5ffd2d95c3597f..9d59715007795d43e95b1475927aa2674ed54287 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -1437,6 +1437,7 @@ impl SessionTelemetry {
+             ResponseItem::ItemReference { .. } => "item_reference".into(),
+             ResponseItem::Program { .. } => "program".into(),
+             ResponseItem::ProgramOutput { .. } => "program_output".into(),
++            ResponseItem::LocalShellCallOutput { .. } => "local_shell_call_output".into(),
+             ResponseItem::Other => "other".into(),
+         }
+     }
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index 75968b41a678f2381e8a11979309c305cf24e3d0..25b78d312cd43d36889dbedae0d0da362f1e12c9 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -1232,6 +1232,16 @@ pub enum ResponseItem {
+         #[ts(optional)]
+         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+     },
++    /// Historical Responses local-shell output. `id` references the provider call;
++    /// it is not a new SDK occurrence ID or an execution receipt.
++    LocalShellCallOutput {
++        id: String,
++        output: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        status: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
++    },
+     #[serde(deserialize_with = "deserialize_function_call")]
+     FunctionCall {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -1632,6 +1642,7 @@ impl ResponseItem {
+             Self::ConfigurationUpdate { .. }
+             | Self::CompactionTrigger { .. }
+             | Self::ItemReference { .. }
++            | Self::LocalShellCallOutput { .. }
+             | Self::Other => None,
+         }
+     }
+@@ -1671,6 +1682,7 @@ impl ResponseItem {
+             Self::ConfigurationUpdate { .. }
+             | Self::CompactionTrigger { .. }
+             | Self::ItemReference { .. }
++            | Self::LocalShellCallOutput { .. }
+             | Self::Other => {}
+         }
+     }
+@@ -1709,6 +1721,7 @@ impl ResponseItem {
+             Self::ConfigurationUpdate { .. }
+             | Self::CompactionTrigger { .. }
+             | Self::ItemReference { .. }
++            | Self::LocalShellCallOutput { .. }
+             | Self::Other => None,
+         }
+     }
+@@ -1758,6 +1771,10 @@ impl ResponseItem {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+             }
++            | Self::LocalShellCallOutput {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
+             | Self::FunctionCallOutput {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+@@ -1866,6 +1883,10 @@ impl ResponseItem {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+             }
++            | Self::LocalShellCallOutput {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
+             | Self::CustomToolCall {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+@@ -1984,6 +2005,10 @@ impl ResponseItem {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+             }
++            | Self::LocalShellCallOutput {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
+             | Self::CustomToolCall {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+@@ -5341,4 +5366,27 @@ mod computer_protocol_tests {
+             assert_eq!(serde_json::to_value(parsed).unwrap(), item);
+         }
+     }
++
++    #[test]
++    fn local_shell_output_keeps_provider_correlation_id() {
++        let wire = serde_json::json!({
++            "type": "local_shell_call_output",
++            "id": "historical-shell",
++            "output": "historical result",
++            "status": "completed"
++        });
++        let mut item: ResponseItem = serde_json::from_value(wire.clone()).unwrap();
++        assert!(matches!(item, ResponseItem::LocalShellCallOutput { .. }));
++        assert!(item.id().is_none());
++        assert!(item.id_prefix().is_none());
++        item.set_id(Some("invented-receipt".to_owned().into()));
++        assert_eq!(serde_json::to_value(item).unwrap(), wire);
++        for bad in [
++            serde_json::json!({"type": "local_shell_call_output", "output": "missing id"}),
++            serde_json::json!({"type": "local_shell_call_output", "id": "historical-shell", "output": 7}),
++        ] {
++            assert!(serde_json::from_value::<ResponseItem>(bad).is_err());
++        }
++    }
++
+ }
+diff --git a/codex-rs/rollout/src/persistence_metrics.rs b/codex-rs/rollout/src/persistence_metrics.rs
+index 86e6803c18c28bf85bbda0ff81c75340a0dd71ce..7b60e6b8c4934ea4a3bc89163119c4cb9aa6ba74 100644
+--- a/codex-rs/rollout/src/persistence_metrics.rs
++++ b/codex-rs/rollout/src/persistence_metrics.rs
+@@ -351,6 +351,7 @@ fn response_item_type(item: &ResponseItemEnvelope) -> &'static str {
+         ResponseItem::ItemReference { .. } => "response.item_reference",
+         ResponseItem::Program { .. } => "response.program",
+         ResponseItem::ProgramOutput { .. } => "response.program_output",
++        ResponseItem::LocalShellCallOutput { .. } => "response.local_shell_call_output",
+         ResponseItem::Other => "response.other",
+     }
+ }
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index aaebb48c56db2e26fc6f9e97c1ea3341d886be74..83ba083a6cbc49ea9ccfc2fc4c08c93b26d25eae 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -89,6 +89,7 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {
+         | ResponseItem::FunctionCall { .. }
+         | ResponseItem::ToolSearchCall { .. }
+         | ResponseItem::FunctionCallOutput { .. }
++        | ResponseItem::LocalShellCallOutput { .. }
+         | ResponseItem::ToolSearchOutput { .. }
+         | ResponseItem::ApplyPatchCall { .. }
+         | ResponseItem::ComputerCall { .. }
+@@ -126,6 +127,7 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
+         | ResponseItem::FunctionCall { .. }
+         | ResponseItem::ToolSearchCall { .. }
+         | ResponseItem::FunctionCallOutput { .. }
++        | ResponseItem::LocalShellCallOutput { .. }
+         | ResponseItem::ToolSearchOutput { .. }
+         | ResponseItem::ApplyPatchCall { .. }
+         | ResponseItem::ComputerCall { .. }
+diff --git a/codex-rs/tools/src/tool_output.rs b/codex-rs/tools/src/tool_output.rs
+index c442032e2292bf8b32e40e4bc4c903540aa7ea45..a11b4d95bcc927dbd3f4d29f68a451fe2a7e5863 100644
+--- a/codex-rs/tools/src/tool_output.rs
++++ b/codex-rs/tools/src/tool_output.rs
+@@ -10,6 +10,11 @@ use crate::{LoadableToolSpec, ToolPayload};
+ 
+ /// Model-facing output contract returned by executable tool runtimes.
+ pub trait ToolOutput: Send {
++    /// Optional live concrete identity for owner-bound output observers.
++    fn as_any(&self) -> Option<&dyn std::any::Any> {
++        None
++    }
++
+     /// Called only after Core accepts this output following hooks and validation.
+     /// Implementations may consume an owned acceptance receipt; dropped outputs stay unaccepted.
+     fn mark_accepted(&mut self) {}
+diff --git a/codex-rs/utils/audio/src/lib.rs b/codex-rs/utils/audio/src/lib.rs
+index 4eb8434ae3c3e1103904f5db80505634e6e6ca4b..09e04fd5c6946f88632808dce26c74eb173170a9 100644
+--- a/codex-rs/utils/audio/src/lib.rs
++++ b/codex-rs/utils/audio/src/lib.rs
+@@ -99,6 +99,7 @@ pub fn prepare_response_items(items: &mut [ResponseItem]) {
+             | ResponseItem::ItemReference { .. }
+             | ResponseItem::Program { .. }
+             | ResponseItem::ProgramOutput { .. }
++            | ResponseItem::LocalShellCallOutput { .. }
+             | ResponseItem::Other => {}
+         }
+     }
