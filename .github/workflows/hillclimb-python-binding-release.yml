@@ -1,0 +1,56 @@
+name: Verify Python release wheel bindings
+
+on:
+  push:
+    branches: [ci/hillclimb/python-binding-release-proof]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  windows_wheel:
+    if: github.repository == 'openai/openai-agents-python' && github.event.created && github.run_attempt == '1'
+    uses: ./.github/workflows/codex-python.yml
+    with:
+      runner: windows-latest
+      native_provenance: &release_source >-
+        ${{ format('{{"repository_id":"{0}","source_sha":"{1}","head_ref":"{2}","run_id":"{3}","run_attempt":"{4}","pull_request":null}}',
+        github.event.repository.id, github.sha, github.ref_name, github.run_id, github.run_attempt) }}
+  windows_package:
+    needs: windows_wheel
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with:
+      runner: windows-latest
+      artifact_id: ${{ needs.windows_wheel.outputs.artifact_id }}
+      artifact_digest: ${{ needs.windows_wheel.outputs.artifact_digest }}
+      native_provenance: *release_source
+  macos_wheel:
+    needs: windows_package
+    uses: ./.github/workflows/codex-python.yml
+    with:
+      runner: macos-26-xlarge
+      native_provenance: *release_source
+  macos_package:
+    needs: macos_wheel
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with:
+      runner: macos-latest
+      artifact_id: ${{ needs.macos_wheel.outputs.artifact_id }}
+      artifact_digest: ${{ needs.macos_wheel.outputs.artifact_digest }}
+      native_provenance: *release_source
+  linux_pgo_wheel:
+    needs: windows_package
+    uses: ./.github/workflows/codex-python.yml
+    with:
+      runner: ubuntu-24.04
+      native_provenance: *release_source
+  linux_pgo_package:
+    needs: linux_pgo_wheel
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with:
+      runner: ubuntu-24.04
+      sdk_checks: true
+      artifact_id: ${{ needs.linux_pgo_wheel.outputs.artifact_id }}
+      artifact_digest: ${{ needs.linux_pgo_wheel.outputs.artifact_digest }}
+      native_provenance: *release_source
