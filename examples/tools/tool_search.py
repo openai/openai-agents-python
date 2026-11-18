@@ -99,8 +99,8 @@ namespaced_agent = Agent(
     name="Operations assistant",
     model="gpt-5.6-sol",
     instructions=(
-        "For customer questions in this example, load the full `crm` namespace with no query "
-        "filter before calling tools. "
+        "For customer questions, find the CRM profile and order tools, then use both. "
+        "If search accepts a query and limit, use crm as the whole query and limit 2. "
         "Do not search `billing` unless the user asks about invoices."
     ),
     tools=[*crm_tools, *billing_tools, ToolSearchTool()],
