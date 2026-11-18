@@ -1,0 +1,27 @@
+name: Measure full Linux PGO helper overlap
+
+on:
+  push:
+    branches: [ci/hillclimb/python-pgo-helper-ab]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    if: github.repository == 'openai/openai-agents-python' && github.event.created && github.run_attempt == '1'
+    uses: ./.github/workflows/codex-python.yml
+    with:
+      runner: ubuntu-24.04
+      native_provenance: &comparison_source >-
+        ${{ format('{{"repository_id":"{0}","source_sha":"{1}","head_ref":"{2}","run_id":"{3}","run_attempt":"{4}","pull_request":null}}',
+        github.event.repository.id, github.sha, github.ref_name, github.run_id, github.run_attempt) }}
+  qualify:
+    needs: build
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with:
+      runner: ubuntu-24.04
+      artifact_id: ${{ needs.build.outputs.artifact_id }}
+      artifact_digest: ${{ needs.build.outputs.artifact_digest }}
+      native_provenance: *comparison_source

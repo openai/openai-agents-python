@@ -547,6 +547,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: Measure the unchanged full PGO wheel on the same runner
+        id: paired-control
+        if: github.event_name == 'push' && github.ref == 'refs/heads/ci/hillclimb/python-pgo-helper-ab' && inputs.runner == 'ubuntu-24.04'
+        run: python -I -S .github/scripts/compare-pgo-control.py
+      - name: Upload paired PGO timings
+        if: always() && steps.paired-control.outcome != 'skipped' && github.event_name == 'push' && github.ref == 'refs/heads/ci/hillclimb/python-pgo-helper-ab' && inputs.runner == 'ubuntu-24.04'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paired-pgo-wheel-comparison
+          path: ${{ runner.temp }}/pgo-control-comparison/evidence
+          if-no-files-found: warn
+          retention-days: 7
+
   windows-filename:
     name: Windows project-search filename regression
     if: *windows_regressions_in_sibling
