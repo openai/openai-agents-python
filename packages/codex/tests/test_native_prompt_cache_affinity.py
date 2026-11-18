@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from aiohttp import web
@@ -24,7 +25,9 @@ from tests.native_fixtures import (
 from tests.test_conversations_history import endpoint as endpoint
 
 
-@pytest.mark.parametrize("case", ["session", "session_group", "manual", "chat", "responses"])
+@pytest.mark.parametrize(
+    "case", ["session", "session_group", "fresh_prompt", "manual", "chat", "responses"]
+)
 def test_native_prompt_cache_trace_affinity(case: str, tmp_path: Path) -> None:
     # Native telemetry must be configured before the first SDK client in this process.
     env = {**os.environ, "CODEX_HOME": str(tmp_path)}
@@ -58,6 +61,8 @@ async def _trace_affinity_case(case: str) -> None:
             await _session_affinity(fixture)
         elif case == "session_group":
             await _session_group_affinity(fixture)
+        elif case == "fresh_prompt":
+            await _fresh_session_prompt_stability(fixture)
         elif case == "manual":
             await _manual_affinity(fixture)
         else:
@@ -131,6 +136,54 @@ async def _session_group_affinity(responses: ResponsesFixture) -> None:
     keys = [request["prompt_cache_key"] for request in responses.requests]
     assert keys[0] == keys[1] == keys[3]
     assert keys[0] != keys[2]
+
+
+async def _fresh_session_prompt_stability(responses: ResponsesFixture) -> None:
+    for _ in range(3):
+        responses.respond(assistant_output("accepted"))
+
+    async with NativeProvider(
+        base_url=responses.url,
+        api_key="synthetic-loopback",
+        supports_websockets=False,
+    ) as provider:
+        agent = Agent(model="gpt-6.1-sol", instructions="Answer consistently.", provider=provider)
+        states = []
+        for _ in range(2):
+            async with agent.session(
+                trace_options=TraceOptions(group_id="synthetic-stable-prompt")
+            ) as session:
+                turn = await session.submit("Identical input")
+                assert (await turn.get_result()).final_output == "accepted"
+                states.append(await session.save_state())
+        async with agent.session(state=SessionState.from_json(states[0].to_json())) as restored:
+            turn = await restored.submit("Follow-up input")
+            assert (await turn.get_result()).final_output == "accepted"
+
+    first, second, restored_request = responses.requests
+    assert first["prompt_cache_key"] == second["prompt_cache_key"]
+
+    def instruction_text(request: dict[str, Any]) -> list[str]:
+        return [
+            part["text"]
+            for item in request["input"]
+            if item.get("role") == "developer"
+            for part in item.get("content", [])
+            if part.get("type") == "input_text"
+            and "<application_instructions>" in part.get("text", "")
+        ]
+
+    expected = (
+        "<application_instructions>The following application instructions replace all earlier "
+        "application instructions. An empty value clears them.\n"
+        "Answer consistently.</application_instructions>"
+    )
+    # Stable model text must not replace the UUID-bearing native receipt on disk.
+    for state in states:
+        assert "Native instruction revision: msg_sdk_application_" in state.to_json()
+    assert states[0].to_json() != states[1].to_json()
+    assert instruction_text(first) == instruction_text(second) == [expected]
+    assert instruction_text(restored_request) == [expected]
 
 
 async def test_current_native_conversation_affinity(responses, endpoint) -> None:

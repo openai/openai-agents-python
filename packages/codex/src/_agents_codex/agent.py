@@ -445,8 +445,17 @@ class NativeProvider:
     absolute WS(S) and HTTP(S) URLs. The native runtime derives the WebSocket
     scheme. This endpoint does not change transport selection or HTTP routing.
 
-    ``request_max_retries`` controls retries of failed HTTP requests;
+    Set ``responses_format="standard"`` to use standard Responses with an
+    API-key endpoint that supports it. The default ``"auto"`` follows the
+    model catalog for ordinary requests and uses standard Responses for
+    provider-managed history. The opening provider selects the format for
+    its Session. Standard format selection does not choose HTTP or WebSockets.
+
+    ``request_max_retries`` controls retries of failed HTTP requests.
     ``stream_max_retries`` controls reconnections of dropped response streams.
+    For each model request, the SDK has been retrying eligible interruptions
+    only before publishing assistant text. After publication, it has been
+    surfacing the interruption even in ``Agent.run()`` without an event reader.
     Omission uses native defaults (4 and 5 respectively). Zero disables retries
     at that layer. The native runtime caps each configured count at 100.
 
@@ -535,10 +544,17 @@ class NativeProvider:
     websocket_options: Mapping[str, int | None] | None = field(default=None, repr=False, hash=False)
     agent_harness_id: str | None = field(default=None, repr=False)
     tool_output_token_limit: int | None = field(default=None, repr=False)
+    responses_format: Literal["auto", "standard"] = field(default="auto", repr=False)
 
     def __post_init__(self) -> None:
         from .telemetry import _normalize_agent_harness_id, get_default_agent_harness_id
 
+        if self.responses_format not in ("auto", "standard"):
+            raise ValueError('responses_format must be "auto" or "standard"')
+        if self.responses_format == "standard" and (
+            self.auth is not None or self.model_backend is not None
+        ):
+            raise ValueError('responses_format="standard" requires a native API-key provider')
         object.__setattr__(
             self,
             "agent_harness_id",
@@ -1866,7 +1882,13 @@ class Agent(Generic[ContextT, OutputT]):
 
         With ``state``, restore an idle or settled manual native checkpoint
         using the effective provider, current tools, and application context.
-        Tool declarations and instructions must match the saved conversation.
+        Supply the saved application instructions. An idle root Session with
+        only ordinary, unnamespaced Python function tools has been accepting
+        current tool definitions for future turns. An explicit saved selection
+        has been keeping surviving tools in their saved order. Pending calls
+        and forked Sessions have been requiring matching Python declarations.
+        Agent graphs and other tool types have been following their existing
+        restore rules.
         Saved model settings take precedence over this Agent's model settings.
         Use update(model=...) to change the default after the Session becomes idle.
         Live submission handles

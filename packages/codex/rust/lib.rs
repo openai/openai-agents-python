@@ -5261,7 +5261,11 @@ fn create_checkpoint_engine<'py>(
             let checkpoint: checkpoint::Checkpoint =
                 serde_json::from_value(payload).map_err(py_error)?;
             checkpoint
-                .initial_managed_models(specs.as_deref(), _verify_current_default_model)
+                .initial_managed_models(
+                    specs.as_deref(),
+                    _verify_current_default_model,
+                    options.replace_idle_checkpoint_tools,
+                )
                 .map_err(py_error)
         })
         .transpose()?

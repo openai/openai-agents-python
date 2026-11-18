@@ -39,6 +39,7 @@ def test_provider_dataclass_declaration_does_not_load_native(response_mode):
         "websocket_options": None,
         "agent_harness_id": "synthetic-harness",
         "tool_output_token_limit": None,
+        "responses_format": "auto",
     }
     assert [field.name for field in fields(provider)] == list(expected)
     assert asdict(provider) == expected
@@ -104,6 +105,46 @@ def test_provider_controls_accept_supported_integer_bounds(name, value):
     from agents import NativeProvider
 
     assert getattr(NativeProvider(**{name: value}), name) == value
+
+
+def test_standard_responses_format_requires_native_api_key_provider():
+    from agents import CodexLogin, NativeProvider
+
+    class BorrowedModel:
+        def complete(self, _request):
+            raise AssertionError("Construction must not call the model")
+
+    with pytest.raises(ValueError, match="responses_format"):
+        NativeProvider(responses_format="lite")  # type: ignore[arg-type]
+    for options in ({"auth": CodexLogin()}, {"model_backend": BorrowedModel()}):
+        with pytest.raises(ValueError, match="requires a native API-key provider"):
+            NativeProvider(responses_format="standard", **options)
+
+
+@pytest.mark.parametrize("standard_role", ["root", "destination"])
+async def test_standard_responses_format_rejects_distinct_handoff_providers(standard_role):
+    from agents import Agent, CapabilityError, NativeProvider
+
+    destination = Agent(
+        name="Destination",
+        instructions="Finish.",
+        provider=NativeProvider(
+            api_key="synthetic-destination",
+            responses_format="standard" if standard_role == "destination" else "auto",
+        ),
+    )
+    root = Agent(
+        name="Root",
+        instructions="Start.",
+        provider=NativeProvider(
+            api_key="synthetic-root",
+            responses_format="standard" if standard_role == "root" else "auto",
+        ),
+        handoffs=[destination],
+    )
+    with pytest.raises(CapabilityError, match="requires a shared native handoff provider"):
+        async with root.session():
+            pytest.fail("Unsupported handoff providers opened a Session")
 
 
 @pytest.mark.parametrize("options", [{}, {"connect_timeout_ms": None, "ping_interval_ms": 50}])

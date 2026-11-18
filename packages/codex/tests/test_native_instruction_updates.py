@@ -31,8 +31,7 @@ def application_texts(request: dict[str, Any]) -> list[str]:
             for part in item.get("content", []):
                 text = part.get("text", "")
                 if text.startswith(START):
-                    revision, body = text[len(START) :].split("\n", 1)
-                    assert revision.startswith(REVISION + "msg_sdk_application_")
+                    body = text[len(START) :]
                     assert body.startswith(NOTICE) and body.endswith(END)
                     texts.append(body[len(NOTICE) : -len(END)])
     return texts

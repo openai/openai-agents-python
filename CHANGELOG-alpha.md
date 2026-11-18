@@ -4,6 +4,14 @@ Release notes for previews of the OpenAI Agents SDK. Versions alpha.5 and earlie
 
 ## Unreleased
 
+### Highlights
+
+- The SDK has been surfacing stream interruptions after publishing assistant text for a model request, even in `Agent.run()` without an event reader. Before publication, the SDK has still been retrying eligible interruptions, including when output guardrails have been withholding text.
+- Native API-key Sessions with provider-managed history have been selecting standard Responses automatically, including for stored turns continued with `previous_response_id`. For other requests that need standard Responses controls such as `verbosity`, use `NativeProvider(responses_format="standard")` with a compatible API-key endpoint.
+- The SDK has been omitting generated revision IDs from the application instructions sent to the model, keeping the prompt prefix stable across otherwise identical Sessions. Saved history has been retaining the original instruction receipts and IDs.
+- Idle portable checkpoints for ordinary roots with only unnamespaced Python function tools have been accepting current tool definitions for future turns, including additions and removals. Explicit saved selections have been retaining surviving tools in their saved order.
+- SDK Sessions have been omitting newly generated CLI collaboration instructions. Older collaboration text in saved history has been remaining eligible for replay.
+
 ## 0.24.0-alpha.8 (2026-11-15)
 
 ### Upgrading from 0.24.0-alpha.7

@@ -126,6 +126,61 @@ async def test_native_response_lineage_sends_each_tool_effect_once():
         assert reads == [("/v1/responses/resp_external", "Bearer current-owner")]
 
 
+async def test_catalog_lite_model_selects_standard_for_stored_response_resume():
+    effects = []
+
+    @function_tool
+    def effect(label: str) -> str:
+        effects.append(label)
+        return label
+
+    async with timeout(40), history_peer() as (provider, model, reads, _, _wire):
+        model.respond(function_call("effect", {"label": "once"}, "call_once"))
+        model.respond(assistant_output("Before."))
+        model.respond(assistant_output("After."))
+        agent = Agent(
+            model="gpt-6.1-sol",
+            instructions="Perform the requested operation.",
+            provider=provider,
+            tools=[effect],
+            model_settings={
+                "store": True,
+                "parallel_tool_calls": False,
+                "verbosity": "high",
+                "prompt_cache_retention": "24h",
+                "prompt_cache_ttl": "12h",
+            },
+        )
+        async with agent.session(provider_history={"type": "previous_response"}) as source:
+            assert (await (await source.submit("Before.")).get_result()).final_output == "Before."
+            state = await source.save_state()
+        async with agent.session(
+            state=state, provider_history={"type": "previous_response", "id": "resp_2"}
+        ) as restored:
+            assert (await (await restored.submit("After.")).get_result()).final_output == "After."
+
+    assert effects == ["once"]
+    assert len(model.requests) == 3
+    assert [request.get("previous_response_id") for request in model.requests] == [
+        None,
+        "resp_1",
+        "resp_2",
+    ]
+    assert len(model.requests[1]["input"]) == 1
+    assert model.requests[1]["input"][0]["type"] == "function_call_output"
+    assert model.requests[1]["input"][0]["call_id"] == "call_once"
+    assert len(model.requests[2]["input"]) == 1
+    assert reads == [("/v1/responses/resp_2", "Bearer current-owner")]
+    for request, headers in zip(model.requests, model.request_headers, strict=True):
+        assert request["model"] == "gpt-6.1-sol"
+        assert request["store"] is True
+        assert request["parallel_tool_calls"] is False
+        assert request["text"]["verbosity"] == "high"
+        assert request["prompt_cache_retention"] == "24h"
+        assert request["prompt_cache_options"] == {"ttl": "12h"}
+        assert "x-openai-internal-codex-responses-lite" not in headers
+
+
 async def test_native_conversation_keeps_its_id_without_enabling_response_storage():
     async with timeout(30), history_peer() as (provider, model, reads, _, _wire):
         model.respond(assistant_output("First."))
@@ -208,7 +263,8 @@ async def test_native_portable_lineage_requires_current_anchor_and_account():
         ]
 
 
-async def test_native_websocket_lineage_keeps_unstored_history_on_one_connection():
+@pytest.mark.parametrize("model_name", ["gpt-5.5", "gpt-6.1-sol"])
+async def test_native_websocket_lineage_keeps_unstored_history_on_one_connection(model_name):
     from tests.test_native_provider_websockets import message_text, peer as websocket_peer
 
     async with timeout(30), websocket_peer() as model:
@@ -216,7 +272,7 @@ async def test_native_websocket_lineage_keeps_unstored_history_on_one_connection
         model.respond(assistant_output("After."))
         agent = Agent(
             instructions="Continue the current response chain.",
-            model="gpt-5.5",
+            model=model_name,
             provider=model.provider(),
             model_settings={"store": False},
         )

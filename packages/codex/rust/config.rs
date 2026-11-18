@@ -45,6 +45,8 @@ pub(crate) struct RuntimeOptions {
     // The facade owns this signal on its live runtime; checkpoint runtime is ignored.
     #[serde(rename = "_sdk_native_config")]
     sdk_native_config: bool,
+    #[serde(rename = "_sdk_standard_responses")]
+    pub(crate) sdk_standard_responses: bool,
     // Project guidance reads only host-authorized trust and discovery settings.
     #[serde(rename = "_sdk_project_guidance_config")]
     sdk_project_guidance_config: bool,

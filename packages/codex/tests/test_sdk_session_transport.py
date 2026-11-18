@@ -11,15 +11,23 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from pydantic import Field, ValidationError
 
-from agents import Agent, NativeProvider, Session, TurnStoppedError, function_tool
-from agents.observation import OutputTextDelta, ToolFinished
+from agents import (
+    Agent,
+    GuardrailResult,
+    NativeProvider,
+    OutputGuardrail,
+    Session,
+    TurnStoppedError,
+    function_tool,
+)
+from agents.observation import ModelOutputItemCompleted, OutputTextDelta, ToolFinished
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call, tool_output
 from tests.test_native_agent_observation import text_response
@@ -984,6 +992,133 @@ async def test_split_citations_and_trailing_blank_message_preserve_visible_text(
             assert "".join(deltas) == "Visible answer"
             assert result.final_output == "Visible answer"
         assert len(peer.requests) == 1
+
+
+@pytest.mark.parametrize("first_output", ["delta", "delta-and-done", "done"])
+async def test_partial_sse_eof_never_retries_after_visible_text(
+    first_output: Literal["delta", "delta-and-done", "done"],
+) -> None:
+    from agents import NativeError
+
+    model = "gpt-6.1-sol"
+    prefix_seen = asyncio.Event()
+    async with timeout(30), http_peer(expected_model=model) as peer:
+
+        async def remove_first_completion(event: dict[str, Any]) -> None:
+            if len(peer.requests) == 1 and event["type"] == "response.completed":
+                await prefix_seen.wait()
+                event["type"] = "response.in_progress"
+
+        peer.before_event = remove_first_completion
+        first = text_response("interrupted-text", "Ticket 42 ")
+        if first_output == "delta":
+            first = first[:-1]
+        elif first_output == "done":
+            first = first[-1:]
+        peer.respond(*first)
+        peer.respond(*text_response("retry-text", "Ticket 42 is created."))
+        async with peer.provider() as provider:
+            agent = Agent(model=model, instructions="Answer.", provider=provider)
+            async with agent.session(include_model_output_items=True) as session:
+                turn = await session.submit("Create a ticket.")
+
+                async def read_text() -> str:
+                    chunks = []
+                    async for event in turn.events():
+                        if isinstance(event, OutputTextDelta) and first_output != "done":
+                            chunks.append(event.delta)
+                            prefix_seen.set()
+                        elif (
+                            first_output == "done"
+                            and isinstance(event, ModelOutputItemCompleted)
+                            and event.item["type"] == "message"
+                        ):
+                            chunks.extend(
+                                part["text"]
+                                for part in event.item["content"]
+                                if part["type"] == "output_text"
+                            )
+                            prefix_seen.set()
+                    return "".join(chunks)
+
+                reader = asyncio.create_task(read_text())
+                try:
+                    with pytest.raises(NativeError):
+                        await turn.get_result()
+                    assert await reader == "Ticket 42 "
+                    assert len(peer.requests) == 1
+                finally:
+                    reader.cancel()
+                    await asyncio.gather(reader, return_exceptions=True)
+
+
+@pytest.mark.parametrize("interruption", ["eof", "max_output_tokens"])
+async def test_agent_run_never_retries_after_text_without_an_event_reader(
+    interruption: Literal["eof", "max_output_tokens"],
+) -> None:
+    from agents import NativeError
+
+    model = "gpt-6.1-sol"
+    async with timeout(30), http_peer(expected_model=model) as peer:
+
+        async def interrupt_first_response(event: dict[str, Any]) -> None:
+            if len(peer.requests) == 1 and event["type"] == "response.completed":
+                if interruption == "eof":
+                    event["type"] = "response.in_progress"
+                else:
+                    event["type"] = "response.incomplete"
+                    event["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
+
+        peer.before_event = interrupt_first_response
+        if interruption == "eof":
+            peer.respond(*text_response("interrupted-text", "Ticket 42 ")[:-1])
+        else:
+            peer.respond(assistant_output("Ticket 42 "))
+        peer.respond(assistant_output("Ticket 42 is created."))
+        async with peer.provider() as provider:
+            agent = Agent(model=model, instructions="Answer.", provider=provider)
+            with pytest.raises(NativeError):
+                await agent.run("Create a ticket.")
+            assert len(peer.requests) == 1
+
+
+@pytest.mark.parametrize("withheld_assistant", [False, True], ids=["empty", "guardrail"])
+async def test_partial_sse_eof_before_visible_text_still_retries(withheld_assistant: bool) -> None:
+    model = "gpt-6.1-sol"
+    async with timeout(30), http_peer(expected_model=model) as peer:
+
+        async def remove_first_completion(event: dict[str, Any]) -> None:
+            if len(peer.requests) == 1 and event["type"] == "response.completed":
+                event["type"] = "response.in_progress"
+
+        peer.before_event = remove_first_completion
+        if withheld_assistant:
+            peer.respond(*text_response("withheld-text", "Unvalidated answer."))
+        else:
+            peer.respond()
+        peer.respond(*text_response("retry-text", "Ticket 42 is created."))
+        async with peer.provider() as provider:
+            agent = Agent(
+                model=model,
+                instructions="Answer.",
+                provider=provider,
+                output_guardrails=[OutputGuardrail("allow", lambda *_: GuardrailResult(False))]
+                if withheld_assistant
+                else [],
+            )
+            async with agent.session() as session:
+                turn = await session.submit("Create a ticket.")
+                assert (await turn.get_result()).final_output == "Ticket 42 is created."
+                visible = "".join(
+                    [
+                        event.delta
+                        async for event in turn.events()
+                        if isinstance(event, OutputTextDelta)
+                    ]
+                )
+                assert "Unvalidated answer." not in visible
+                assert len(peer.requests) == 2
+                assert "Unvalidated answer." not in json.dumps(peer.requests[1]["input"])
 
 
 async def test_partial_sse_eof_retries_with_accepted_tools_and_no_duplicate_usage() -> None:
