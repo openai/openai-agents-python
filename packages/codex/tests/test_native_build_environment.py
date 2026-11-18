@@ -466,9 +466,10 @@ def test_native_windows_build_supplies_checksum_verified_v8_binding(monkeypatch,
         "develop",
         "free_threaded",
         "implementation",
+        "profile_codegen_units",
     ),
     [
-        ("win32", None, "x86_64-pc-windows-msvc", False, False, False, "cpython"),
+        ("win32", None, "x86_64-pc-windows-msvc", False, False, False, "cpython", None),
         (
             "win32",
             "aarch64-pc-windows-msvc",
@@ -477,14 +478,15 @@ def test_native_windows_build_supplies_checksum_verified_v8_binding(monkeypatch,
             False,
             False,
             "cpython",
+            "16",
         ),
-        ("linux", None, "x86_64-unknown-linux-gnu", True, False, False, "cpython"),
-        ("linux", None, "x86_64-unknown-linux-gnu", True, True, False, "cpython"),
-        ("linux", None, "x86_64-unknown-linux-gnu", False, False, True, "cpython"),
-        ("linux", None, "x86_64-unknown-linux-gnu", False, True, True, "cpython"),
-        ("darwin", None, "aarch64-apple-darwin", False, False, False, "cpython"),
-        ("linux", None, "x86_64-unknown-linux-gnu", False, False, False, "pypy"),
-        ("linux", None, "x86_64-unknown-linux-gnu", False, True, False, "pypy"),
+        ("linux", None, "x86_64-unknown-linux-gnu", True, False, False, "cpython", None),
+        ("linux", None, "x86_64-unknown-linux-gnu", True, True, False, "cpython", None),
+        ("linux", None, "x86_64-unknown-linux-gnu", False, False, True, "cpython", None),
+        ("linux", None, "x86_64-unknown-linux-gnu", False, True, True, "cpython", None),
+        ("darwin", None, "aarch64-apple-darwin", False, False, False, "cpython", None),
+        ("linux", None, "x86_64-unknown-linux-gnu", False, False, False, "pypy", None),
+        ("linux", None, "x86_64-unknown-linux-gnu", False, True, False, "pypy", None),
     ],
 )
 def test_helpers_and_extension_share_the_selected_target_and_crt(
@@ -497,6 +499,7 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
     develop,
     free_threaded,
     implementation,
+    profile_codegen_units,
 ):
     run_cli = subprocess.run
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -514,6 +517,8 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
     (rmcp / "LICENSE").write_text("pinned RMCP license\n")
     target_dir = tmp_path / "cargo-target"
     environment = {"CARGO_TARGET_DIR": str(target_dir)}
+    if profile_codegen_units is not None:
+        environment["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"] = profile_codegen_units
     if timings:
         environment["OPENAI_AGENTS_NATIVE_TIMINGS"] = "1"
     if configured_target:
@@ -543,6 +548,7 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
             f"rustc 1.95.0\nhost: {host}\n" if command[0] == "rustc" else "maturin 1.16.0\n"
         ),
     )
+    binding_codegen = "profile.release.package.codex-agents-python.codegen-units=8"
     extension_builds = []
 
     def run(command, **kwargs):
@@ -550,6 +556,7 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
             assert configured_target is None
             return subprocess.CompletedProcess(command, 0, f"host: {host}\n")
         if command[0] == "cargo":
+            assert binding_codegen not in command
             assert ("--timings" in command) is timings
             assert "--release" in command and "--locked" in command
             if timings:
@@ -585,13 +592,18 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
                 assert command[command.index("--interpreter") + 1] == sys.executable
             else:
                 assert "--interpreter" not in command
+            expected_configs = []
             if platform == "win32":
-                assert command[command.index("--config") + 1] == str(
-                    upstream / "codex-rs/.cargo/config.toml"
-                )
+                expected_configs.append(str(upstream / "codex-rs/.cargo/config.toml"))
                 assert command[command.index("--target") + 1] == host
             else:
-                assert "--config" not in command and "--target" not in command
+                assert "--target" not in command
+            if not develop and profile_codegen_units is None:
+                expected_configs.append(binding_codegen)
+            configs = [
+                arg for flag, arg in zip(command, command[1:], strict=False) if flag == "--config"
+            ]
+            assert configs == expected_configs
             assert kwargs["env"].get("CARGO_BUILD_TARGET") == configured_target
         return subprocess.CompletedProcess(command, 0)
 
