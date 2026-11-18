@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import dataclasses
 import inspect
@@ -1142,10 +1143,11 @@ async def _consume_events(
                 await event_queue.put(None)
 
     try:
-        if on_stream is None:
-            await _process_events()
-        else:
-            await run_producer_consumer(_process_events(), _dispatch())
+        async with contextlib.aclosing(events):
+            if on_stream is None:
+                await _process_events()
+            else:
+                await run_producer_consumer(_process_events(), _dispatch())
     finally:
         # Ensure any open spans are closed even on failure.
         for span in active_spans.values():

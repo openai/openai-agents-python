@@ -2455,3 +2455,63 @@ async def test_codex_command_tracing_disabled_with_caller_trace() -> None:
         span.span_data.type == "custom" and span.span_data.name == "Codex command execution"
         for span in SPAN_PROCESSOR_TESTING.get_ordered_spans()
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_callback", [False, True], ids=["direct", "callback"])
+@pytest.mark.parametrize("failure_type", ["error", "turn.failed", "exec-error"])
+async def test_codex_tool_closes_real_thread_stream_after_failure(
+    with_callback: bool, failure_type: str
+) -> None:
+    from agents.extensions.experimental.codex.codex_options import CodexOptions
+    from agents.extensions.experimental.codex.exec import CodexExec
+    from agents.extensions.experimental.codex.thread import Thread
+    from agents.extensions.experimental.codex.thread_options import ThreadOptions
+
+    closed = asyncio.Event()
+    failure = RuntimeError("CLI execution failed")
+
+    class FailingExec:
+        # Fixture CLI JSON preserves the real Thread's parsing and cleanup boundary.
+        async def run(self, _args: Any):
+            try:
+                yield json.dumps({"type": "thread.started", "thread_id": "thread-rejected"})
+                if failure_type == "exec-error":
+                    raise failure
+                event = (
+                    {"type": "error", "message": "model unavailable"}
+                    if failure_type == "error"
+                    else {"type": "turn.failed", "error": {"message": "model unavailable"}}
+                )
+                yield json.dumps(event)
+            finally:
+                closed.set()
+
+    thread = Thread(
+        exec_client=cast(CodexExec, FailingExec()),
+        options=CodexOptions(),
+        thread_options=ThreadOptions(),
+    )
+    tool = codex_tool(
+        codex=cast(Codex, SimpleNamespace(start_thread=lambda _options: thread)),
+        on_stream=(lambda _event: None) if with_callback else None,
+        failure_error_function=None,
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "Inspect the workspace"}]}'
+    context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call-rejected",
+        tool_arguments=input_json,
+    )
+    expected_error = RuntimeError if failure_type == "exec-error" else UserError
+    expected_message = (
+        "CLI execution failed" if failure_type == "exec-error" else "model unavailable"
+    )
+
+    with pytest.raises(expected_error, match=expected_message) as caught:
+        await tool.on_invoke_tool(context, input_json)
+
+    if failure_type == "exec-error":
+        assert caught.value is failure
+    assert closed.is_set()
