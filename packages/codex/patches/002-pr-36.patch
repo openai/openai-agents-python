@@ -2625,7 +2625,7 @@ index 4442fa62af1506edc4ec77d9097fa0d0444e838c..c3ae565399573279f2ea099d85f73cbd
 +    assert!(harness.outgoing_rx.try_recv().is_err());
 +}
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 642a0e48790aa89751fbc895da0e84249fda7ea9..859d1cd0ad4db87b8b6b5b0b90c5e6d83265c80f 100644
+index 870f7797c8403f3b0e2366eba929e045d57308c4..e6159f969a2b11e829401cd7b0e0860951c36fd2 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -254,6 +254,21 @@ impl CodexThread {
@@ -2651,10 +2651,10 @@ index 642a0e48790aa89751fbc895da0e84249fda7ea9..859d1cd0ad4db87b8b6b5b0b90c5e6d8
          self.io.submit(op).await
      }
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index d92917472cc237275aef5aad22ce044e540b7964..27ca3657e72bde67b0e09ef0f429a66a577fee0b 100644
+index 9e69213389900476db621915bfac113669042d89..6cee543904cec10987ef5cd8e7dd50b03f525edf 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -1627,7 +1627,7 @@ async fn run_sampling_request(
+@@ -1671,7 +1671,7 @@ async fn run_sampling_request(
          Arc::clone(&step_context),
          Arc::clone(&turn_diff_tracker),
      );

@@ -1,0 +1,1402 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index eccffd1e960d0f781e56a5186810911729a11c67..cb60d6854500eca20a53ededa9ad99422c002ba1 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -3851,6 +3851,7 @@ dependencies = [
+  "codex-secrets",
+  "codex-terminal-detection",
+  "codex-utils-cargo-bin",
++ "codex-utils-path",
+  "codex-utils-process",
+  "codex-utils-template",
+  "codex-workload-identity",
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+index f3b9b05f8187f77c6592e1b52601b74a8e99702b..ef4b9b776cb6d97dcc2277d488cd9e974d363643 100644
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -15,6 +15,8 @@ use codex_protocol::error::ConnectionFailedError;
+ use codex_protocol::error::RetryLimitReachedError;
+ use codex_protocol::error::UnexpectedResponseError;
+ use codex_protocol::error::UsageLimitReachedError;
++use codex_protocol::error::is_chatgpt_plan_unsupported_capability;
++use codex_protocol::error::is_chatgpt_plan_usage_limit;
+ use codex_protocol::protocol::MisalignmentErrorDetails;
+ use http::HeaderMap;
+ use serde::Deserialize;
+@@ -58,6 +60,35 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
+     error
+ }
+ 
++pub(crate) fn is_http_slow_down(error: &TransportError) -> bool {
++    let TransportError::Http {
++        status: http::StatusCode::SERVICE_UNAVAILABLE,
++        body: Some(body),
++        ..
++    } = error
++    else {
++        return false;
++    };
++    service_unavailable_error(body)
++        .is_some_and(|error| matches!(error.details(), CodexErrorDetails::RateLimitExceeded(_)))
++}
++
++fn service_unavailable_error(body: &str) -> Option<CodexErr> {
++    let value = serde_json::from_str::<Value>(body).ok()?;
++    let error = value.get("error")?;
++    match error.get("code").and_then(Value::as_str) {
++        Some("server_is_overloaded") => Some(CodexErr::ServerOverloaded),
++        Some("slow_down") => Some(CodexErr::new(CodexErrorDetails::RateLimitExceeded(
++            error
++                .get("message")
++                .and_then(Value::as_str)
++                .unwrap_or_default()
++                .to_owned(),
++        ))),
++        _ => None,
++    }
++}
++
+ fn map_api_error_details(err: ApiError) -> CodexErr {
+     match err {
+         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
+@@ -114,22 +145,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+                 let body_text = body.unwrap_or_default();
+ 
+                 if status == http::StatusCode::SERVICE_UNAVAILABLE
+-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_text)
+-                    && let Some(error) = value.get("error")
++                    && let Some(error) = service_unavailable_error(&body_text)
+                 {
+-                    match error.get("code").and_then(Value::as_str) {
+-                        Some("server_is_overloaded") => return CodexErr::ServerOverloaded,
+-                        Some("slow_down") => {
+-                            return CodexErr::new(CodexErrorDetails::RateLimitExceeded(
+-                                error
+-                                    .get("message")
+-                                    .and_then(Value::as_str)
+-                                    .unwrap_or_default()
+-                                    .to_owned(),
+-                            ));
+-                        }
+-                        _ => {}
+-                    }
++                    return error;
+                 }
+ 
+                 if (status == http::StatusCode::BAD_REQUEST
+@@ -155,7 +173,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+                     });
+                 }
+ 
+-                if status == http::StatusCode::BAD_REQUEST {
++                if status == http::StatusCode::BAD_REQUEST
++                    && !is_chatgpt_plan_unsupported_capability(status, &body_text)
++                {
+                     if let Ok(parsed) = serde_json::from_str::<Value>(&body_text)
+                         && let Some(error) = parsed.get("error")
+                         && let Some(
+@@ -193,10 +213,12 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+                     }
+                 } else if status == http::StatusCode::INTERNAL_SERVER_ERROR {
+                     CodexErr::InternalServerError
+-                } else if status == http::StatusCode::TOO_MANY_REQUESTS {
+-                    if let Ok(body) = serde_json::from_str::<Value>(&body_text)
+-                        && let Some(error) = body.get("error").and_then(parse_flex_unavailable)
+-                    {
++                } else if status == http::StatusCode::TOO_MANY_REQUESTS
++                    && !is_chatgpt_plan_usage_limit(status, &body_text)
++                {
++                    let body = serde_json::from_str::<Value>(&body_text).ok();
++                    let provider_error = body.as_ref().and_then(|body| body.get("error"));
++                    if let Some(error) = provider_error.and_then(parse_flex_unavailable) {
+                         return map_api_error(error);
+                     }
+                     if let Ok(err) = serde_json::from_str::<UsageErrorResponse>(&body_text) {
+@@ -252,6 +274,12 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+                     CodexErr::RetryLimit(RetryLimitReachedError {
+                         status,
+                         request_id: extract_request_tracking_id(headers.as_ref()),
++                        provider_code: (body_text.len() <= 128 * 1024
++                            && provider_error
++                                .and_then(|error| error.get("code"))
++                                .and_then(Value::as_str)
++                                == Some("rate_limit_exceeded"))
++                        .then_some("rate_limit_exceeded"),
+                     })
+                 } else {
+                     CodexErr::UnexpectedStatus(UnexpectedResponseError {
+@@ -272,6 +300,7 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+             TransportError::RetryLimit => CodexErr::RetryLimit(RetryLimitReachedError {
+                 status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                 request_id: None,
++                provider_code: None,
+             }),
+             TransportError::Timeout => CodexErr::RequestTimeout,
+             TransportError::Policy(denied) => CodexErr::Fatal(denied.to_string()),
+diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
+index 40ff37082281faf6356163819a10b87259f57609..e582645ee0419440aa554fea9f1a5c0515aa66d8 100644
+--- a/codex-rs/codex-api/src/endpoint/responses.rs
++++ b/codex-rs/codex-api/src/endpoint/responses.rs
+@@ -38,6 +38,7 @@ pub struct ResponsesOptions {
+     pub extra_headers: HeaderMap,
+     pub compression: Compression,
+     pub turn_state: Option<Arc<OnceLock<String>>>,
++    pub terminal_limit_errors: bool,
+ }
+ 
+ impl<T: HttpTransport> ResponsesClient<T> {
+@@ -80,6 +81,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             options.extra_headers,
+             options.compression,
+             options.turn_state,
++            options.terminal_limit_errors,
+         )
+         .await
+     }
+@@ -115,6 +117,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+                 options.compression,
+                 "application/json",
+                 Some(MAX_JSON_RESPONSE_BODY_BYTES),
++                /*terminal_limit_errors*/ false,
+             )
+             .await?;
+         Ok(super::responses_json::response_stream(
+@@ -166,8 +169,14 @@ impl<T: HttpTransport> ResponsesClient<T> {
+     ) -> Result<ResponseStream, ApiError> {
+         let body = EncodedJsonBody::encode(&body)
+             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+-        self.stream_encoded(body, extra_headers, compression, turn_state)
+-            .await
++        self.stream_encoded(
++            body,
++            extra_headers,
++            compression,
++            turn_state,
++            /*terminal_limit_errors*/ false,
++        )
++        .await
+     }
+ 
+     async fn stream_encoded(
+@@ -176,9 +185,17 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         extra_headers: HeaderMap,
+         compression: Compression,
+         turn_state: Option<Arc<OnceLock<String>>>,
++        terminal_limit_errors: bool,
+     ) -> Result<ResponseStream, ApiError> {
+         let stream_response = self
+-            .send_encoded(body, extra_headers, compression, "text/event-stream", None)
++            .send_encoded(
++                body,
++                extra_headers,
++                compression,
++                "text/event-stream",
++                None,
++                terminal_limit_errors,
++            )
+             .await?;
+ 
+         Ok(spawn_response_stream(
+@@ -186,6 +203,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             self.session.provider().stream_idle_timeout,
+             self.sse_telemetry.clone(),
+             turn_state,
++            terminal_limit_errors,
+         ))
+     }
+     async fn send_encoded(
+@@ -195,6 +213,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         compression: Compression,
+         accept: &'static str,
+         response_body_limit_bytes: Option<usize>,
++        terminal_limit_errors: bool,
+     ) -> Result<codex_client::StreamResponse, ApiError> {
+         let request_compression = match compression {
+             Compression::None => RequestCompression::None,
+@@ -207,6 +226,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+                 "/responses",
+                 extra_headers,
+                 Some(body),
++                terminal_limit_errors,
+                 |req| {
+                     req.headers
+                         .insert(http::header::ACCEPT, HeaderValue::from_static(accept));
+diff --git a/codex-rs/codex-api/src/endpoint/session.rs b/codex-rs/codex-api/src/endpoint/session.rs
+index 61672726bac367191e6473118d9890e47d153bb3..7e5a1f12c3881fd83b287271c1d3a48b61029d6f 100644
+--- a/codex-rs/codex-api/src/endpoint/session.rs
++++ b/codex-rs/codex-api/src/endpoint/session.rs
+@@ -1,3 +1,4 @@
++use crate::api_bridge::is_http_slow_down;
+ use crate::auth::SharedAuthProvider;
+ use crate::endpoint::responses_json::check_json_structure;
+ use crate::error::ApiError;
+@@ -100,6 +101,7 @@ impl<T: HttpTransport> EndpointSession<T> {
+             self.provider.retry.to_policy(),
+             self.request_telemetry.clone(),
+             make_request,
++            /*is_terminal_error*/ None,
+             |req| {
+                 let auth = self.auth.clone();
+                 let transport = &self.transport;
+@@ -126,6 +128,7 @@ impl<T: HttpTransport> EndpointSession<T> {
+         path: &str,
+         extra_headers: HeaderMap,
+         body: Option<EncodedJsonBody>,
++        terminal_limit_errors: bool,
+         configure: C,
+     ) -> Result<StreamResponse, ApiError>
+     where
+@@ -143,6 +146,7 @@ impl<T: HttpTransport> EndpointSession<T> {
+             self.provider.retry.to_policy(),
+             self.request_telemetry.clone(),
+             make_request,
++            terminal_limit_errors.then_some(is_http_slow_down),
+             |req| {
+                 let auth = self.auth.clone();
+                 let transport = &self.transport;
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index 8a2810076dcb0fe0a80396b75c9b9e2ddd1fed42..bdba7398e143dd2c60d46c7be09976924ce4d2d6 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -42,6 +42,7 @@ pub fn spawn_response_stream(
+     idle_timeout: Duration,
+     telemetry: Option<Arc<dyn SseTelemetry>>,
+     turn_state: Option<Arc<OnceLock<String>>>,
++    terminal_limit_errors: bool,
+ ) -> ResponseStream {
+     let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
+     let api_rate_limits = parse_api_rate_limits(&stream_response.headers);
+@@ -106,6 +107,7 @@ pub fn spawn_response_stream(
+             idle_timeout,
+             telemetry,
+             safety_buffering_treatment,
++            terminal_limit_errors,
+         )
+         .await;
+             } => {},
+@@ -695,6 +697,7 @@ pub async fn process_sse(
+         idle_timeout,
+         telemetry,
+         SafetyBufferingTreatment::default(),
++        /*terminal_limit_errors*/ false,
+     )
+     .await;
+ }
+@@ -705,6 +708,7 @@ async fn process_sse_with_treatment(
+     idle_timeout: Duration,
+     telemetry: Option<Arc<dyn SseTelemetry>>,
+     safety_buffering_treatment: SafetyBufferingTreatment,
++    terminal_limit_errors: bool,
+ ) {
+     let mut stream = stream.eventsource();
+     let mut response_error: Option<ApiError> = None;
+@@ -842,12 +846,21 @@ async fn process_sse_with_treatment(
+             Ok(None) => {}
+             Err(error) => {
+                 let error = error.into_api_error();
+-                if matches!(
+-                    error,
+-                    ApiError::FlexUnavailable
+-                        | ApiError::InvalidRequest { .. }
+-                        | ApiError::ResponseIntegrity { .. }
+-                ) {
++                let terminal_limit = terminal_limit_errors
++                    && matches!(
++                        error,
++                        ApiError::QuotaExceeded
++                            | ApiError::UsageNotIncluded
++                            | ApiError::RateLimitExceeded { .. }
++                    );
++                if terminal_limit
++                    || matches!(
++                        error,
++                        ApiError::FlexUnavailable
++                            | ApiError::InvalidRequest { .. }
++                            | ApiError::ResponseIntegrity { .. }
++                    )
++                {
+                     let _ = tx_event.send(Err(error)).await;
+                     return;
+                 }
+@@ -1990,6 +2003,7 @@ mod tests {
+             idle_timeout(),
+             /*telemetry*/ None,
+             /*turn_state*/ None,
++            /*terminal_limit_errors*/ false,
+         );
+         assert_eq!(stream.upstream_request_id.as_deref(), Some("req-1"));
+         let event = stream
+@@ -2030,6 +2044,7 @@ mod tests {
+             idle_timeout(),
+             /*telemetry*/ None,
+             /*turn_state*/ None,
++            /*terminal_limit_errors*/ false,
+         );
+         let mut events = Vec::new();
+         while let Some(event) = stream.rx_event.recv().await {
+diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+index db9998ee378ab1861df22902a4d18ede06d55233..dd81df0523227f6ae81adf75f5ed78dbca6b284c 100644
+--- a/codex-rs/codex-api/src/sse/responses_error_tests.rs
++++ b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+@@ -42,6 +42,7 @@ async fn flex_failure_with_retry_header_ends_stream_immediately() {
+             Duration::from_secs(60),
+             /*telemetry*/ None,
+             /*turn_state*/ None,
++            /*terminal_limit_errors*/ false,
+         );
+         let mut observed_failures = 0;
+         let error = loop {
+diff --git a/codex-rs/codex-api/src/telemetry.rs b/codex-rs/codex-api/src/telemetry.rs
+index 91918a65b92d69ddb9198ced8101a24277394eeb..f70b8cec0c3d8cbcec41da28ff1622f1f4acfc81 100644
+--- a/codex-rs/codex-api/src/telemetry.rs
++++ b/codex-rs/codex-api/src/telemetry.rs
+@@ -69,6 +69,7 @@ pub(crate) async fn run_with_request_telemetry<T, F, Fut>(
+     policy: RetryPolicy,
+     telemetry: Option<Arc<dyn RequestTelemetry>>,
+     make_request: impl FnMut() -> Request,
++    is_terminal_error: Option<fn(&TransportError) -> bool>,
+     send: F,
+ ) -> Result<T, TransportError>
+ where
+@@ -91,8 +92,14 @@ where
+                 };
+                 t.on_request(attempt, status, err, start.elapsed());
+             }
+-            result
++            // Return terminal errors intact through the retry loop.
++            match result {
++                Err(error) if !is_terminal_error.is_some_and(|is_terminal| is_terminal(&error)) => {
++                    Err(error)
++                }
++                result => Ok(result),
++            }
+         }
+     })
+-    .await
++    .await?
+ }
+diff --git a/codex-rs/codex-api/tests/clients.rs b/codex-rs/codex-api/tests/clients.rs
+index db06ee1ffa588d4bc2a0dd3d4d04d148147a37e7..bb8977906a03a67ae9b81240bab4a906b08776de 100644
+--- a/codex-rs/codex-api/tests/clients.rs
++++ b/codex-rs/codex-api/tests/clients.rs
+@@ -677,6 +677,7 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
+                 extra_headers,
+                 compression: Compression::None,
+                 turn_state: None,
++                terminal_limit_errors: false,
+             },
+         )
+         .await?;
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 46f8787cd807b15dce3e43aca632aa3b1a16bdf9..7d430bf1ea039e24ca7ebfe6cae22494ba8a6b6f 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -132,8 +132,12 @@ use crate::context::ContextualUserFragment;
+ use crate::cyber_access_program;
+ use crate::feedback_tags;
+ use crate::responses_metadata::CodexResponsesMetadata;
++use crate::responses_metadata::CodexResponsesRequestKind;
+ use crate::responses_metadata::subagent_header_value;
+ use crate::util::emit_feedback_auth_recovery_tags;
++use codex_analytics::CompactionImplementation;
++use codex_analytics::CompactionPhase;
++use codex_analytics::CompactionTrigger;
+ use codex_feedback::FeedbackRequestTags;
+ use codex_feedback::emit_feedback_request_tags_with_auth_env;
+ use codex_login::auth::AgentIdentityAuthPolicy;
+@@ -1489,6 +1493,43 @@ impl Drop for ModelClientSession {
+ }
+ 
+ impl ModelClientSession {
++    pub(crate) fn saved_login_limits_need_attention(&self) -> bool {
++        let source = &self.client.state.session_source;
++        // ThreadSpawn children expose the same attention API as root turns.
++        (!source.is_non_root_agent() || source.parent_thread_id().is_some())
++            && self
++                .client
++                .auth_manager()
++                .is_some_and(|manager| manager.uses_saved_chatgpt_login())
++    }
++
++    pub(crate) fn terminal_limit_errors(
++        &self,
++        request_kind: Option<CodexResponsesRequestKind>,
++    ) -> bool {
++        let turn_owned = match request_kind {
++            Some(CodexResponsesRequestKind::Turn) => true,
++            Some(CodexResponsesRequestKind::Compaction(metadata)) => {
++                matches!(metadata.trigger(), CompactionTrigger::Auto)
++                    && matches!(
++                        metadata.phase(),
++                        CompactionPhase::PreTurn | CompactionPhase::MidTurn
++                    )
++            }
++            _ => false,
++        };
++        turn_owned
++            && (self.saved_login_limits_need_attention()
++                || matches!(
++                    request_kind,
++                    Some(CodexResponsesRequestKind::Compaction(metadata))
++                        if matches!(metadata.implementation(), CompactionImplementation::Responses)
++                ) && self
++                    .client
++                    .auth_manager()
++                    .is_some_and(|manager| manager.uses_app_managed_model_oauth()))
++    }
++
+     pub(crate) fn inference_tools_changed(&self, tools: &Arc<[ToolSpec]>) -> bool {
+         let previous = self
+             .client
+@@ -1533,6 +1574,7 @@ impl ModelClientSession {
+             },
+             compression,
+             turn_state: Some(Arc::clone(&self.turn_state)),
++            terminal_limit_errors: self.terminal_limit_errors(responses_metadata.request_kind),
+         }
+     }
+ 
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 5d3a19d648721727a8e7f1ade4d865adeabab547..f9dd9bae05a9986b5380c298988f634c9d4a507f 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -431,6 +431,14 @@ async fn run_compact_task_inner_impl(
+                 return Err(e);
+             }
+             Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
++                if sess
++                    .services
++                    .model_client
++                    .auth_manager()
++                    .is_some_and(|manager| manager.uses_app_managed_model_oauth())
++                {
++                    return Err(e);
++                }
+                 if turn_input_len > 1 {
+                     // Trim from the beginning to preserve cache (prefix-based) and keep recent messages intact.
+                     error!(
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 65d897db092197467b383f2ecb4ecc09125456f7..ab56dfd6253ccd8f64597528f3b7e4d4ba31cf70 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -21,6 +21,7 @@ use crate::hook_runtime::PreCompactHookOutcome;
+ use crate::hook_runtime::run_post_compact_hooks;
+ use crate::hook_runtime::run_pre_compact_hooks;
+ use crate::responses_metadata::CodexResponsesMetadata;
++use crate::responses_metadata::CodexResponsesRequestKind;
+ use crate::responses_metadata::CompactionTurnMetadata;
+ use crate::responses_retry::ResponsesStreamRequest;
+ use crate::responses_retry::ResponsesStreamRetryState;
+@@ -48,6 +49,8 @@ use codex_protocol::models::ContentItem;
+ #[cfg(test)]
+ use codex_protocol::models::ImageReference;
+ use codex_protocol::models::ResponseItem;
++use codex_protocol::protocol::ApiRateLimits;
++use codex_protocol::protocol::CodexErrorInfo;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::TokenUsage;
+ use codex_protocol::protocol::TruncationPolicy;
+@@ -251,6 +254,11 @@ async fn run_remote_compact_task_inner_impl(
+         return Ok(());
+     }
+ 
++    let terminal_limit_errors = client_session.as_deref().is_some_and(|client| {
++        client.terminal_limit_errors(Some(CodexResponsesRequestKind::Compaction(
++            compaction_metadata,
++        )))
++    });
+     let attempt = run_remote_compact_v2_attempt(
+         sess,
+         step_context,
+@@ -264,7 +272,9 @@ async fn run_remote_compact_task_inner_impl(
+         Ok(attempt) => (attempt, turn_context),
+         Err(error) => {
+             let fallback_turn_context = &replacement_step_context.turn;
+-            if !should_retry_with_current_model(&error, turn_context, fallback_turn_context) {
++            if (terminal_limit_errors && is_usage_or_rate_limit(&error))
++                || !should_retry_with_current_model(&error, turn_context, fallback_turn_context)
++            {
+                 return Err(error);
+             }
+             sess.set_last_known_step_context(replacement_step_context)
+@@ -296,7 +306,8 @@ async fn run_remote_compact_task_inner_impl(
+             match fallback_result {
+                 Ok(attempt) => (attempt, fallback_turn_context),
+                 Err(fallback_error)
+-                    if matches!(fallback_error.details(), CodexErrorDetails::Fatal(_)) =>
++                    if matches!(fallback_error.details(), CodexErrorDetails::Fatal(_))
++                        || (terminal_limit_errors && is_usage_or_rate_limit(&fallback_error)) =>
+                 {
+                     return Err(fallback_error);
+                 }
+@@ -392,6 +403,17 @@ struct RemoteCompactionV2Output {
+     token_usage: Option<TokenUsage>,
+ }
+ 
++fn is_usage_or_rate_limit(error: &CodexErr) -> bool {
++    matches!(
++        error.to_codex_protocol_error(),
++        CodexErrorInfo::UsageLimitExceeded
++            | CodexErrorInfo::RateLimitExceeded
++            | CodexErrorInfo::ResponseTooManyFailedAttempts {
++                http_status_code: Some(429)
++            }
++    )
++}
++
+ async fn run_remote_compaction_request_v2(
+     sess: &Session,
+     step_context: &StepContext,
+@@ -405,9 +427,12 @@ async fn run_remote_compaction_request_v2(
+         .info()
+         .stream_max_retries()
+         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
++    let terminal_limit_errors =
++        client_session.terminal_limit_errors(responses_metadata.request_kind);
+     let mut retry_state = ResponsesStreamRetryState::default();
+     loop {
+         sess.ensure_rollout_durable().await?;
++        let mut stream_api_rate_limits = None;
+         let result = match client_session
+             .stream(
+                 prompt,
+@@ -425,12 +450,21 @@ async fn run_remote_compaction_request_v2(
+             )
+             .await
+         {
+-            Ok(stream) => collect_compaction_output(sess, turn_context, stream).await,
++            Ok(stream) => {
++                collect_compaction_output(sess, turn_context, stream, &mut stream_api_rate_limits)
++                    .await
++            }
+             Err(err) => Err(err),
+         };
+ 
+         match result {
+             Ok(compaction_output) => return Ok(compaction_output),
++            Err(err) if terminal_limit_errors && is_usage_or_rate_limit(&err) => {
++                if let Some(snapshot) = err.api_rate_limits().cloned().or(stream_api_rate_limits) {
++                    sess.emit_api_rate_limits(turn_context, snapshot).await;
++                }
++                return Err(err);
++            }
+             Err(err) => {
+                 handle_response_stream_error(
+                     &mut retry_state,
+@@ -451,6 +485,7 @@ async fn collect_compaction_output(
+     sess: &Session,
+     turn_context: &TurnContext,
+     mut stream: ResponseStream,
++    stream_api_rate_limits: &mut Option<ApiRateLimits>,
+ ) -> CodexResult<RemoteCompactionV2Output> {
+     let mut output_item_count = 0usize;
+     let mut compaction_count = 0usize;
+@@ -461,6 +496,9 @@ async fn collect_compaction_output(
+     let mut response_fact_budget = codex_protocol::response_facts::ResponseFactBudget::default();
+     while let Some(event) = stream.next().await {
+         match event? {
++            ResponseEvent::ApiRateLimits(snapshot) => {
++                *stream_api_rate_limits = Some(snapshot);
++            }
+             ResponseEvent::OutputItemDone(item) => {
+                 output_item_count += 1;
+                 if let ResponseItem::Compaction { .. } = item {
+@@ -1343,9 +1381,11 @@ mod tests {
+ 
+         let (sess, turn_context, rx) =
+             crate::session::tests::make_session_and_context_with_rx().await;
+-        let output = collect_compaction_output(&sess, &turn_context, stream)
+-            .await
+-            .expect("compaction should be collected");
++        let mut stream_api_rate_limits = None;
++        let output =
++            collect_compaction_output(&sess, &turn_context, stream, &mut stream_api_rate_limits)
++                .await
++                .expect("compaction should be collected");
+ 
+         assert_eq!(output.compaction_output, compaction);
+         assert_eq!(output.response_id, "resp-compact");
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index a9ae6376a9bc70c35dae7bdbf72549a65bc61baf..02df20033b2d105f0e60af75059107ce15a0e55c 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1917,6 +1917,7 @@ async fn run_sampling_request(
+         Arc::clone(&turn_diff_tracker),
+     );
+     let max_retries = turn_context.provider.info().stream_max_retries();
++    let stop_at_rate_limit = client_session.saved_login_limits_need_attention();
+     let mut retry_state = ResponsesStreamRetryState::default();
+     let mut recovery_attempt = 0;
+     let mut initial_input = Some(input);
+@@ -2082,6 +2083,17 @@ async fn run_sampling_request(
+                     if let Some(snapshot) = err.api_rate_limits().cloned() {
+                         sess.emit_api_rate_limits(&turn_context, snapshot).await;
+                     }
++                    let rate_limited = match err.details() {
++                        CodexErrorDetails::RateLimitExceeded(_) => true,
++                        CodexErrorDetails::RetryLimit(error) => {
++                            error.status == http::StatusCode::TOO_MANY_REQUESTS
++                        }
++                        _ => false,
++                    };
++                    if rate_limited && stop_at_rate_limit {
++                        // SDK callers decide when to resubmit after saved-login throttling.
++                        return Err(err);
++                    }
+                     match err.details() {
+                         CodexErrorDetails::ContextWindowExceeded => {
+                             sess.set_total_tokens_full(&turn_context, &step_context.settings)
+diff --git a/codex-rs/core/src/tasks/compact.rs b/codex-rs/core/src/tasks/compact.rs
+index 5c5b3e2c4bf8ef0141e2fad382abdc5c218d9e21..fa8b9fc37260ab45b76e14552683653d3354ba12 100644
+--- a/codex-rs/core/src/tasks/compact.rs
++++ b/codex-rs/core/src/tasks/compact.rs
+@@ -97,7 +97,9 @@ impl SessionTask for CompactTask {
+                 return Err(err);
+             }
+             let error = err.to_codex_protocol_error();
+-            if matches!(error, CodexErrorInfo::UsageLimitExceeded) {
++            if matches!(error, CodexErrorInfo::UsageLimitExceeded)
++                || matches!(err.details(), CodexErrorDetails::UnexpectedStatus(_))
++            {
+                 // Compaction already emitted the error; notify extensions without emitting it twice.
+                 session
+                     .emit_turn_error_lifecycle(ctx.as_ref(), error, err.details())
+diff --git a/codex-rs/login/Cargo.toml b/codex-rs/login/Cargo.toml
+index 50de4dc83a8d67c55a56ec51148b431f14a55511..3eba4b495bfd343947abeef04c25a31389563875 100644
+--- a/codex-rs/login/Cargo.toml
++++ b/codex-rs/login/Cargo.toml
+@@ -21,6 +21,7 @@ codex-otel = { workspace = true }
+ codex-protocol = { workspace = true }
+ codex-secrets = { workspace = true }
+ codex-terminal-detection = { workspace = true }
++codex-utils-path = { workspace = true }
+ codex-utils-template = { workspace = true }
+ codex-workload-identity = { workspace = true }
+ http = { workspace = true }
+diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
+index 918a3b04023d5fa172d2c8952e6707c14e251964..820a75004802f7deb0e632d5803cfe73e20d652d 100644
+--- a/codex-rs/login/src/auth/manager.rs
++++ b/codex-rs/login/src/auth/manager.rs
+@@ -16,11 +16,13 @@ use std::sync::Mutex;
+ use std::sync::OnceLock;
+ use std::sync::RwLock;
+ use std::sync::Weak;
++use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::AtomicU64;
+ use std::sync::atomic::Ordering;
+ use std::time::Duration;
+ use std::time::Instant;
+ use tokio::sync::Semaphore;
++use tokio::sync::SemaphorePermit;
+ use tokio::sync::watch;
+ use tracing::instrument;
+ 
+@@ -57,6 +59,7 @@ pub use crate::auth::storage::AuthDotJson;
+ pub use crate::auth::storage::AuthKeyringBackendKind;
+ use crate::auth::storage::AuthStorageBackend;
+ use crate::auth::storage::create_auth_storage;
++use crate::auth::storage::create_saved_chatgpt_storage;
+ use crate::default_client::create_client;
+ use crate::default_client::create_default_auth_client;
+ use crate::oauth::ErrorBodyLimit;
+@@ -276,6 +279,16 @@ pub trait ExternalAuth: Send + Sync {
+     /// Returns the provider's current auth value.
+     fn resolve(&self) -> ExternalAuthFuture<'_, CodexAuth>;
+ 
++    /// Whether Core may ask the provider to refresh after an unauthorized response.
++    fn can_refresh(&self) -> bool {
++        true
++    }
++
++    /// Whether model OAuth credentials are managed by the application.
++    fn uses_app_managed_model_oauth(&self) -> bool {
++        false
++    }
++
+     /// Refreshes auth and makes the returned value current for future `resolve()` calls.
+     fn refresh(&self, context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth>;
+ 
+@@ -1600,6 +1613,14 @@ async fn load_auth(
+ // regular loader, this path never looks at environment or in-memory auth.
+ type SavedChatgptOwner = (Option<String>, String);
+ 
++struct SavedChatgptLogin {
++    owner: SavedChatgptOwner,
++    manager: Weak<AuthManager>,
++    refresh: Arc<tokio::sync::Mutex<()>>,
++    closing: AtomicBool,
++    rotation_save_failed: AtomicBool,
++}
++
+ fn saved_chatgpt_owner(auth: &AuthDotJson) -> Option<SavedChatgptOwner> {
+     let tokens = auth.tokens.as_ref()?;
+     let account_id = tokens.account_id.as_ref();
+@@ -1623,11 +1644,11 @@ fn load_saved_chatgpt(
+     auth_route_config: &AuthRouteConfig,
+     expected_owner: Option<&SavedChatgptOwner>,
+ ) -> std::io::Result<Option<(CodexAuth, SavedChatgptOwner)>> {
+-    let storage = create_auth_storage(
+-        codex_home.to_path_buf(),
+-        AuthCredentialsStoreMode::File,
+-        AuthKeyringBackendKind::default(),
+-    );
++    let storage = match create_saved_chatgpt_storage(codex_home.to_path_buf()) {
++        Ok(storage) => storage,
++        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
++        Err(err) => return Err(err),
++    };
+     let Some(auth) = storage.load()? else {
+         return Ok(None);
+     };
+@@ -1647,6 +1668,14 @@ fn load_saved_chatgpt(
+     )))
+ }
+ 
++#[derive(Debug, Error)]
++enum PersistTokensError {
++    #[error(transparent)]
++    Other(#[from] std::io::Error),
++    #[error(transparent)]
++    SaveRotation(std::io::Error),
++}
++
+ // Persist refreshed tokens into auth storage and update last_refresh.
+ fn persist_tokens(
+     storage: &Arc<dyn AuthStorageBackend>,
+@@ -1654,14 +1683,34 @@ fn persist_tokens(
+     access_token: Option<String>,
+     refresh_token: Option<String>,
+     saved_login: Option<&AuthDotJson>,
+-) -> std::io::Result<AuthDotJson> {
++) -> Result<AuthDotJson, PersistTokensError> {
++    let rotated = saved_login
++        .and_then(|saved| saved.tokens.as_ref())
++        .zip(refresh_token.as_ref())
++        .is_some_and(|(tokens, replacement)| {
++            !replacement.trim().is_empty() && replacement != &tokens.refresh_token
++        });
++    let publication_error = |error| {
++        if rotated {
++            PersistTokensError::SaveRotation(error)
++        } else {
++            error.into()
++        }
++    };
+     let mut auth_dot_json = storage
+-        .load()?
+-        .ok_or(std::io::Error::other("Token data is not available."))?;
++        .load()
++        .map_err(|error| {
++            // File access errors carry an OS code. Binding and decode errors
++            // keep their existing classification.
++            if error.raw_os_error().is_some() {
++                publication_error(error)
++            } else {
++                error.into()
++            }
++        })?
++        .ok_or_else(|| publication_error(std::io::Error::other("Token data is not available.")))?;
+     if saved_login.is_some_and(|saved| *saved != auth_dot_json) {
+-        return Err(std::io::Error::other(
+-            "Saved Codex login changed during refresh.",
+-        ));
++        return Err(std::io::Error::other("Saved Codex login changed during refresh.").into());
+     }
+ 
+     let tokens = auth_dot_json.tokens.get_or_insert_with(TokenData::default);
+@@ -1678,11 +1727,9 @@ fn persist_tokens(
+     if let Some(saved) = saved_login
+         && saved_chatgpt_owner(saved) != saved_chatgpt_owner(&auth_dot_json)
+     {
+-        return Err(std::io::Error::other(
+-            "Refreshed Codex login changed its owner.",
+-        ));
++        return Err(std::io::Error::other("Refreshed Codex login changed its owner.").into());
+     }
+-    storage.save(&auth_dot_json)?;
++    storage.save(&auth_dot_json).map_err(publication_error)?;
+     Ok(auth_dot_json)
+ }
+ 
+@@ -1904,7 +1951,7 @@ enum ReloadOutcome {
+     /// Reload was performed and the cached auth changed
+     ReloadedChanged,
+     /// Reload was performed and the cached auth remained the same
+-    ReloadedNoChange,
++    ReloadedNoChange(CodexAuth),
+     /// Reload was skipped (missing or mismatched account id)
+     Skipped,
+ }
+@@ -2063,7 +2110,7 @@ impl UnauthorizedRecovery {
+                             auth_state_changed: Some(true),
+                         });
+                     }
+-                    ReloadOutcome::ReloadedNoChange => {
++                    ReloadOutcome::ReloadedNoChange(_) => {
+                         self.step = UnauthorizedRecoveryStep::RefreshToken;
+                         return Ok(UnauthorizedRecoveryStepResult {
+                             auth_state_changed: Some(false),
+@@ -2127,7 +2174,7 @@ pub struct AuthManager {
+     agent_identity_bootstrap_cooldown: Mutex<AgentIdentityBootstrapCooldown>,
+     external_auth: RwLock<Option<Arc<dyn ExternalAuth>>>,
+     workload_identity_selected: bool,
+-    saved_chatgpt_owner: Option<SavedChatgptOwner>,
++    saved_chatgpt: Option<SavedChatgptLogin>,
+     auth_route_config: AuthRouteConfig,
+ }
+ 
+@@ -2293,7 +2340,7 @@ impl AuthManager {
+             agent_identity_bootstrap_cooldown: Mutex::default(),
+             external_auth: RwLock::new(None),
+             workload_identity_selected: false,
+-            saved_chatgpt_owner: None,
++            saved_chatgpt: None,
+             auth_route_config,
+         }
+     }
+@@ -2319,9 +2366,17 @@ impl AuthManager {
+             /*enable_codex_api_key_env*/ false,
+             Some(auth),
+         );
+-        manager.saved_chatgpt_owner = Some(owner);
+         manager.agent_identity_authapi_base_url = None;
+-        Ok(Arc::new(manager))
++        Ok(Arc::new_cyclic(|weak| {
++            manager.saved_chatgpt = Some(SavedChatgptLogin {
++                owner,
++                manager: weak.clone(),
++                refresh: Arc::new(tokio::sync::Mutex::new(())),
++                closing: AtomicBool::new(false),
++                rotation_save_failed: AtomicBool::new(false),
++            });
++            manager
++        }))
+     }
+ 
+     /// Create an AuthManager with a specific CodexAuth, for testing only.
+@@ -2356,7 +2411,7 @@ impl AuthManager {
+             agent_identity_bootstrap_cooldown: Mutex::default(),
+             external_auth: RwLock::new(None),
+             workload_identity_selected: false,
+-            saved_chatgpt_owner: None,
++            saved_chatgpt: None,
+             auth_route_config: crate::test_support::transport_default_auth_route_config(),
+         })
+     }
+@@ -2387,7 +2442,7 @@ impl AuthManager {
+             agent_identity_bootstrap_cooldown: Mutex::default(),
+             external_auth: RwLock::new(None),
+             workload_identity_selected: false,
+-            saved_chatgpt_owner: None,
++            saved_chatgpt: None,
+             auth_route_config: crate::test_support::transport_default_auth_route_config(),
+         })
+     }
+@@ -2426,7 +2481,7 @@ impl AuthManager {
+             agent_identity_bootstrap_cooldown: Mutex::default(),
+             external_auth: RwLock::new(None),
+             workload_identity_selected: false,
+-            saved_chatgpt_owner: None,
++            saved_chatgpt: None,
+             auth_route_config: crate::test_support::transport_default_auth_route_config(),
+         })
+     }
+@@ -2455,7 +2510,7 @@ impl AuthManager {
+             agent_identity_bootstrap_cooldown: Mutex::default(),
+             external_auth: RwLock::new(Some(Arc::new(BearerTokenRefresher::new(config)))),
+             workload_identity_selected: false,
+-            saved_chatgpt_owner: None,
++            saved_chatgpt: None,
+             // External bearer auth refreshes by running the provider's command and never makes
+             // auth-owned HTTP requests, so this route is intentionally inert.
+             auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
+@@ -2525,7 +2580,7 @@ impl AuthManager {
+         policy: AgentIdentityAuthPolicy,
+         session_source: SessionSource,
+     ) -> std::io::Result<Option<AgentIdentityAuth>> {
+-        if self.saved_chatgpt_owner.is_some() {
++        if self.saved_chatgpt.is_some() {
+             return Ok(None);
+         }
+         let Some(auth) = self.auth().await else {
+@@ -2599,7 +2654,7 @@ impl AuthManager {
+     ) -> ReloadOutcome {
+         // Personal saved logins can have no workspace ID. The saved loader
+         // still verifies the original owner before returning auth.
+-        if expected_account_id.is_none() && self.saved_chatgpt_owner.is_none() {
++        if expected_account_id.is_none() && self.saved_chatgpt.is_none() {
+             tracing::info!("Skipping auth reload because no account id is available.");
+             return ReloadOutcome::Skipped;
+         }
+@@ -2608,23 +2663,25 @@ impl AuthManager {
+         let new_account_id = new_auth.as_ref().and_then(CodexAuth::get_account_id);
+         let expected_label = expected_account_id.unwrap_or("personal");
+ 
+-        if new_auth.is_none() || new_account_id.as_deref() != expected_account_id {
++        let Some(new_auth) = new_auth.filter(|_| new_account_id.as_deref() == expected_account_id)
++        else {
+             let found_account_id = new_account_id.as_deref().unwrap_or("unknown");
+             tracing::info!(
+                 "Skipping auth reload due to account id mismatch (expected: {expected_label}, found: {found_account_id})"
+             );
+             return ReloadOutcome::Skipped;
+-        }
++        };
+ 
+         tracing::info!("Reloading auth for account {expected_label}");
+         let cached_before_reload = self.auth_cached();
+         let auth_changed =
+-            !Self::auths_equal_for_refresh(cached_before_reload.as_ref(), new_auth.as_ref());
+-        self.set_cached_auth(new_auth);
++            !Self::auths_equal_for_refresh(cached_before_reload.as_ref(), Some(&new_auth));
+         if auth_changed {
++            self.set_cached_auth(Some(new_auth));
+             ReloadOutcome::ReloadedChanged
+         } else {
+-            ReloadOutcome::ReloadedNoChange
++            self.set_cached_auth(Some(new_auth.clone()));
++            ReloadOutcome::ReloadedNoChange(new_auth)
+         }
+     }
+ 
+@@ -2683,11 +2740,15 @@ impl AuthManager {
+     }
+ 
+     async fn load_auth(&self) -> Option<CodexAuth> {
+-        if let Some(owner) = &self.saved_chatgpt_owner {
+-            return load_saved_chatgpt(&self.codex_home, &self.auth_route_config, Some(owner))
+-                .ok()
+-                .flatten()
+-                .map(|(auth, _)| auth);
++        if let Some(saved) = &self.saved_chatgpt {
++            return load_saved_chatgpt(
++                &self.codex_home,
++                &self.auth_route_config,
++                Some(&saved.owner),
++            )
++            .ok()
++            .flatten()
++            .map(|(auth, _)| auth);
+         }
+         if let Some(external_auth) = self.external_auth_provider() {
+             let cached_auth = self.auth_cached();
+@@ -2778,7 +2839,7 @@ impl AuthManager {
+         &self,
+         external_auth: Arc<dyn ExternalAuth>,
+     ) -> Result<(), RefreshTokenError> {
+-        if self.saved_chatgpt_owner.is_some() {
++        if self.saved_chatgpt.is_some() {
+             return Err(permanent_external_auth_error(
+                 "the saved Codex login cannot be replaced at runtime",
+             ));
+@@ -2941,7 +3002,8 @@ impl AuthManager {
+     }
+ 
+     fn has_refreshable_external_auth(&self) -> bool {
+-        self.has_external_auth()
++        self.external_auth_provider()
++            .is_some_and(|auth| auth.can_refresh())
+             && self
+                 .auth_cached()
+                 .as_ref()
+@@ -2965,26 +3027,64 @@ impl AuthManager {
+     /// we can assume that the source already refreshed it. Otherwise, ask the
+     /// token authority to refresh.
+     pub async fn refresh_token(&self) -> Result<(), RefreshTokenError> {
+-        // Separate SDK engines can open the same file. Reload after another
+-        // in-process engine finishes so both don't spend the same refresh token.
++        if let Some(saved) = &self.saved_chatgpt {
++            return self.refresh_saved_chatgpt(saved).await;
++        }
++        let _refresh_guard = Self::acquire_refresh_lock(&self.refresh_lock).await?;
++        if let Some(auth) = self.auth_to_refresh().await? {
++            self.refresh_token_from_authority_impl(Some(auth)).await?;
++        }
++        Ok(())
++    }
++
++    async fn refresh_saved_chatgpt(
++        &self,
++        saved: &SavedChatgptLogin,
++    ) -> Result<(), RefreshTokenError> {
++        // Separate engines can open the same file. Keep the gate through
++        // publication so the next engine reloads before spending a token.
+         static SAVED_CHATGPT_REFRESH_LOCK: Semaphore = Semaphore::const_new(1);
+-        let refresh_lock = if self.saved_chatgpt_owner.is_some() {
+-            &SAVED_CHATGPT_REFRESH_LOCK
+-        } else {
+-            &self.refresh_lock
++        let shared_guard = Self::acquire_refresh_lock(&SAVED_CHATGPT_REFRESH_LOCK).await?;
++        let Some(auth) = self.auth_to_refresh().await? else {
++            return Ok(());
+         };
+-        let _refresh_guard = refresh_lock.acquire().await.map_err(|_| {
++        let completion = Arc::clone(&saved.refresh).lock_owned().await;
++        if saved.closing.load(Ordering::Acquire) {
++            return Err(std::io::Error::other("Saved Codex login is closing.").into());
++        }
++        let manager = saved
++            .manager
++            .upgrade()
++            .expect("saved login manager is owned by the caller");
++        // Admission holds the completion lock before checking the seal. The
++        // caller can stop waiting without dropping the exchange or either guard.
++        tokio::spawn(async move {
++            let _completion = completion;
++            let _shared_guard = shared_guard;
++            manager.refresh_token_from_authority_impl(Some(auth)).await
++        })
++        .await
++        .map_err(|_| std::io::Error::other("Saved Codex login refresh task did not complete."))?
++    }
++
++    async fn acquire_refresh_lock(
++        lock: &Semaphore,
++    ) -> Result<SemaphorePermit<'_>, RefreshTokenError> {
++        lock.acquire().await.map_err(|_| {
+             RefreshTokenError::Permanent(RefreshTokenFailedError::new(
+                 RefreshTokenFailedReason::Other,
+                 REFRESH_TOKEN_UNKNOWN_MESSAGE.to_string(),
+             ))
+-        })?;
++        })
++    }
++
++    async fn auth_to_refresh(&self) -> Result<Option<CodexAuth>, RefreshTokenError> {
+         let auth_before_reload = self.auth_cached();
+         if auth_before_reload
+             .as_ref()
+             .is_some_and(|auth| auth.is_api_key_auth() || auth.is_personal_access_token_auth())
+         {
+-            return Ok(());
++            return Ok(None);
+         }
+         let expected_account_id = auth_before_reload
+             .as_ref()
+@@ -2996,9 +3096,9 @@ impl AuthManager {
+         {
+             ReloadOutcome::ReloadedChanged => {
+                 tracing::info!("Skipping token refresh because auth changed after guarded reload.");
+-                Ok(())
++                Ok(None)
+             }
+-            ReloadOutcome::ReloadedNoChange => self.refresh_token_from_authority_impl().await,
++            ReloadOutcome::ReloadedNoChange(auth) => Ok(Some(auth)),
+             ReloadOutcome::Skipped => {
+                 Err(RefreshTokenError::Permanent(RefreshTokenFailedError::new(
+                     RefreshTokenFailedReason::Other,
+@@ -3012,22 +3112,20 @@ impl AuthManager {
+     /// it and update the shared cache. If the token refresh fails, returns the
+     /// error to the caller.
+     pub async fn refresh_token_from_authority(&self) -> Result<(), RefreshTokenError> {
+-        if self.saved_chatgpt_owner.is_some() {
++        if self.saved_chatgpt.is_some() {
+             return self.refresh_token().await;
+         }
+-        let _refresh_guard = self.refresh_lock.acquire().await.map_err(|_| {
+-            RefreshTokenError::Permanent(RefreshTokenFailedError::new(
+-                RefreshTokenFailedReason::Other,
+-                REFRESH_TOKEN_UNKNOWN_MESSAGE.to_string(),
+-            ))
+-        })?;
+-        self.refresh_token_from_authority_impl().await
++        let _refresh_guard = Self::acquire_refresh_lock(&self.refresh_lock).await?;
++        self.refresh_token_from_authority_impl(self.auth_cached())
++            .await
+     }
+ 
+-    async fn refresh_token_from_authority_impl(&self) -> Result<(), RefreshTokenError> {
++    async fn refresh_token_from_authority_impl(
++        &self,
++        attempted_auth: Option<CodexAuth>,
++    ) -> Result<(), RefreshTokenError> {
+         tracing::info!("Refreshing token");
+ 
+-        let attempted_auth = self.auth_cached();
+         if let Some(error) = attempted_auth
+             .as_ref()
+             .and_then(|auth| self.refresh_failure_for_auth(auth))
+@@ -3107,7 +3205,7 @@ impl AuthManager {
+     }
+ 
+     fn ensure_logout_allowed(&self) -> std::io::Result<()> {
+-        if self.saved_chatgpt_owner.is_some() {
++        if self.saved_chatgpt.is_some() {
+             return Err(std::io::Error::new(
+                 std::io::ErrorKind::PermissionDenied,
+                 "Manage the saved Codex login with the Codex CLI",
+@@ -3122,6 +3220,38 @@ impl AuthManager {
+         Ok(())
+     }
+ 
++    /// Prevent this engine from admitting another saved-login refresh.
++    pub fn seal_saved_chatgpt_refresh(&self) {
++        if let Some(saved) = &self.saved_chatgpt {
++            saved.closing.store(true, Ordering::Release);
++        }
++    }
++
++    /// After sealing, wait for any admitted exchange and cache update.
++    pub async fn wait_for_saved_chatgpt_refresh(&self) {
++        if let Some(saved) = &self.saved_chatgpt {
++            let _completion = saved.refresh.lock().await;
++        }
++    }
++
++    /// After sealing and joining the refresh, report an unpublished rotation.
++    pub fn saved_chatgpt_rotation_save_failed(&self) -> bool {
++        self.saved_chatgpt
++            .as_ref()
++            .is_some_and(|saved| saved.rotation_save_failed.load(Ordering::Acquire))
++    }
++
++    /// Returns whether this manager was opened from an SDK-managed saved login.
++    pub fn uses_saved_chatgpt_login(&self) -> bool {
++        self.saved_chatgpt.is_some()
++    }
++
++    /// Whether the external provider uses application-managed model OAuth credentials.
++    pub fn uses_app_managed_model_oauth(&self) -> bool {
++        self.external_auth_provider()
++            .is_some_and(|auth| auth.uses_app_managed_model_oauth())
++    }
++
+     /// Returns the precise kind of credentials backing the current authentication.
+     pub fn get_api_auth_mode(&self) -> Option<AuthMode> {
+         self.auth_cached().as_ref().map(CodexAuth::api_auth_mode)
+@@ -3230,7 +3360,7 @@ impl AuthManager {
+         auth: &ChatgptAuth,
+         refresh_token: String,
+     ) -> Result<(), RefreshTokenError> {
+-        let saved_login = if self.saved_chatgpt_owner.is_some() {
++        let saved_login = if self.saved_chatgpt.is_some() {
+             Some(
+                 auth.current_auth_json()
+                     .ok_or_else(|| std::io::Error::other("Saved Codex login is unavailable."))?,
+@@ -3251,6 +3381,7 @@ impl AuthManager {
+         saved_login: Option<&AuthDotJson>,
+         response: Result<RefreshResponse, RefreshTokenError>,
+     ) -> Result<(), RefreshTokenError> {
++        let mut rotation_save_failed = false;
+         let result = response.and_then(|response| {
+             persist_tokens(
+                 auth.storage(),
+@@ -3259,7 +3390,13 @@ impl AuthManager {
+                 response.refresh_token,
+                 saved_login,
+             )
+-            .map_err(RefreshTokenError::from)
++            .map_err(|error| match error {
++                PersistTokensError::Other(error) => error.into(),
++                PersistTokensError::SaveRotation(error) => {
++                    rotation_save_failed = true;
++                    error.into()
++                }
++            })
+         });
+         if let Err(error) = result {
+             // A separate Codex process may have saved a replacement during the
+@@ -3273,9 +3410,15 @@ impl AuthManager {
+                 self.set_cached_auth(Some(replacement));
+                 return Ok(());
+             }
++            if rotation_save_failed && let Some(saved) = &self.saved_chatgpt {
++                saved.rotation_save_failed.store(true, Ordering::Release);
++            }
+             return Err(error);
+         }
+         self.reload().await;
++        if let Some(saved) = &self.saved_chatgpt {
++            saved.rotation_save_failed.store(false, Ordering::Release);
++        }
+         Ok(())
+     }
+ }
+diff --git a/codex-rs/login/src/auth/storage.rs b/codex-rs/login/src/auth/storage.rs
+index 4dccbc9138e83c5989ff130c8748941236f70401..f7ed29f28cc6857f3347cd786704b6cba2a19171 100644
+--- a/codex-rs/login/src/auth/storage.rs
++++ b/codex-rs/login/src/auth/storage.rs
+@@ -2,6 +2,7 @@ use chrono::DateTime;
+ use chrono::Utc;
+ use codex_otel::auth_storage::Operation;
+ use codex_otel::auth_storage::Store;
++use codex_utils_path::write_atomically;
+ use serde::Deserialize;
+ use serde::Serialize;
+ use sha2::Digest;
+@@ -181,11 +182,29 @@ pub(super) trait AuthStorageBackend: Debug + Send + Sync {
+ #[derive(Clone, Debug)]
+ pub(super) struct FileAuthStorage {
+     codex_home: PathBuf,
++    bound_auth_file: Option<PathBuf>,
+ }
+ 
+ impl FileAuthStorage {
+     pub(super) fn new(codex_home: PathBuf) -> Self {
+-        Self { codex_home }
++        Self {
++            codex_home,
++            bound_auth_file: None,
++        }
++    }
++
++    fn auth_file(&self) -> std::io::Result<PathBuf> {
++        let auth_file = get_auth_file(&self.codex_home);
++        let Some(bound) = &self.bound_auth_file else {
++            return Ok(auth_file);
++        };
++        let target = auth_file.canonicalize()?;
++        if &target != bound {
++            return Err(std::io::Error::other(
++                "Saved Codex login changed during refresh.",
++            ));
++        }
++        Ok(target)
+     }
+ 
+     /// Attempt to read and parse the `auth.json` file in the given `CODEX_HOME` directory.
+@@ -202,8 +221,10 @@ impl FileAuthStorage {
+ 
+ impl AuthStorageBackend for FileAuthStorage {
+     fn load(&self) -> std::io::Result<Option<AuthDotJson>> {
+-        let auth_file = get_auth_file(&self.codex_home);
+-        let auth_dot_json = match self.try_read_auth_json(&auth_file) {
++        let auth_dot_json = match self
++            .auth_file()
++            .and_then(|path| self.try_read_auth_json(&path))
++        {
+             Ok(auth) => auth,
+             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+             Err(err) => return Err(err),
+@@ -212,7 +233,12 @@ impl AuthStorageBackend for FileAuthStorage {
+     }
+ 
+     fn save(&self, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
+-        let auth_file = get_auth_file(&self.codex_home);
++        let auth_file = self.auth_file()?;
++        if self.bound_auth_file.is_some() {
++            // Replace the resolved destination and leave any symlink in place.
++            // The atomic writer creates its temporary file with private permissions.
++            return write_atomically(&auth_file, &serde_json::to_string_pretty(auth_dot_json)?);
++        }
+ 
+         if let Some(parent) = auth_file.parent() {
+             std::fs::create_dir_all(parent)?;
+@@ -583,6 +609,21 @@ impl AuthStorageBackend for EphemeralAuthStorage {
+     }
+ }
+ 
++pub(super) fn create_saved_chatgpt_storage(
++    codex_home: PathBuf,
++) -> std::io::Result<Arc<dyn AuthStorageBackend>> {
++    let bound_auth_file = get_auth_file(&codex_home).canonicalize()?;
++    let storage = FileAuthStorage {
++        codex_home,
++        bound_auth_file: Some(bound_auth_file),
++    };
++    Ok(storage_telemetry::observe(
++        Arc::new(storage),
++        AuthCredentialsStoreMode::File,
++        AuthKeyringBackendKind::default(),
++    ))
++}
++
+ pub(super) fn create_auth_storage(
+     codex_home: PathBuf,
+     mode: AuthCredentialsStoreMode,
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+index 3080fcafdaacd73be74dd678923448960cf8651e..be42aa143e8f322eec948d3890a144997356ab0c 100644
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -457,7 +457,8 @@ impl CodexErr {
+                 if matches!(
+                     error.status,
+                     http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN
+-                ) =>
++                ) || is_chatgpt_plan_usage_limit(error.status, &error.body)
++                    || is_chatgpt_plan_unsupported_capability(error.status, &error.body) =>
+             {
+                 None
+             }
+@@ -519,7 +520,9 @@ impl CodexErr {
+     /// Translate core error to client-facing protocol error.
+     pub fn to_codex_protocol_error(&self) -> CodexErrorInfo {
+         match &self.details {
+-            CodexErrorDetails::ModelInvocationDeadlineExceeded(_) => CodexErrorInfo::ModelInvocationDeadlineExceeded,
++            CodexErrorDetails::ModelInvocationDeadlineExceeded(_) => {
++                CodexErrorInfo::ModelInvocationDeadlineExceeded
++            }
+             CodexErrorDetails::ContextWindowExceeded => CodexErrorInfo::ContextWindowExceeded,
+             CodexErrorDetails::SessionBudgetExceeded => CodexErrorInfo::SessionBudgetExceeded,
+             CodexErrorDetails::RateLimitExceeded(_) => CodexErrorInfo::RateLimitExceeded,
+@@ -537,6 +540,16 @@ impl CodexErr {
+             CodexErrorDetails::RetryLimit(_) => CodexErrorInfo::ResponseTooManyFailedAttempts {
+                 http_status_code: self.http_status_code_value(),
+             },
++            CodexErrorDetails::UnexpectedStatus(error)
++                if is_chatgpt_plan_usage_limit(error.status, &error.body) =>
++            {
++                CodexErrorInfo::UsageLimitExceeded
++            }
++            CodexErrorDetails::UnexpectedStatus(error)
++                if is_chatgpt_plan_unsupported_capability(error.status, &error.body) =>
++            {
++                CodexErrorInfo::BadRequest
++            }
+             CodexErrorDetails::ConnectionFailed(_) | CodexErrorDetails::UnexpectedStatus(_) => {
+                 CodexErrorInfo::HttpConnectionFailed {
+                     http_status_code: self.http_status_code_value(),
+@@ -636,12 +649,32 @@ pub struct UnexpectedResponseError {
+ 
+ const UNEXPECTED_RESPONSE_BODY_MAX_BYTES: usize = 1000;
+ 
++pub fn is_chatgpt_plan_usage_limit(status: StatusCode, body: &str) -> bool {
++    status == StatusCode::TOO_MANY_REQUESTS
++        && serde_json::from_str::<serde_json::Value>(body).is_ok_and(|body| {
++            body["error"]["code"].as_str() == Some("subscription_sharing_usage_limit_exceeded")
++        })
++}
++
++pub const CHATGPT_PLAN_UNSUPPORTED_CAPABILITY: &str = "subscription_sharing_unsupported_capability";
++
++pub fn is_chatgpt_plan_unsupported_capability(status: StatusCode, body: &str) -> bool {
++    status == StatusCode::BAD_REQUEST
++        && serde_json::from_str::<serde_json::Value>(body).is_ok_and(|body| {
++            body["error"]["code"].as_str() == Some(CHATGPT_PLAN_UNSUPPORTED_CAPABILITY)
++        })
++}
++
+ impl UnexpectedResponseError {
+     fn display_body(&self) -> String {
+         if let Some(message) = self.extract_error_message() {
+             return message;
+         }
+ 
++        if is_chatgpt_plan_unsupported_capability(self.status, &self.body) {
++            return "Unsupported ChatGPT plan capability.".to_string();
++        }
++
+         let trimmed_body = self.body.trim();
+         if trimmed_body.is_empty() {
+             return "Unknown error".to_string();
+@@ -720,6 +753,8 @@ fn truncate_text(content: &str, policy: TruncationPolicy) -> String {
+ pub struct RetryLimitReachedError {
+     pub status: StatusCode,
+     pub request_id: Option<String>,
++    /// Allowlisted code observed in the HTTP body.
++    pub provider_code: Option<&'static str>,
+ }
+ 
+ impl std::fmt::Display for RetryLimitReachedError {
+diff --git a/codex-rs/protocol/src/error_tests.rs b/codex-rs/protocol/src/error_tests.rs
+index d56deb8156ca8a8defea65d85d97055b17419194..574d7ab68d03aeb7cd9095648626965f754b43b7 100644
+--- a/codex-rs/protocol/src/error_tests.rs
++++ b/codex-rs/protocol/src/error_tests.rs
+@@ -49,6 +49,7 @@ fn retryability_preserves_error_details_distinctions() {
+             CodexErr::RetryLimit(RetryLimitReachedError {
+                 status: StatusCode::TOO_MANY_REQUESTS,
+                 request_id: None,
++                provider_code: None,
+             }),
+             false,
+         ),

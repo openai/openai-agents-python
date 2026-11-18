@@ -1,0 +1,496 @@
+diff --git a/codex-rs/core/src/thread_manager/shutdown.rs b/codex-rs/core/src/thread_manager/shutdown.rs
+index f009ab513906c43a984d005a3cc1fb841a5b8e43..e02bfec9c220425df65b776b84c9ee76333b186a 100644
+--- a/codex-rs/core/src/thread_manager/shutdown.rs
++++ b/codex-rs/core/src/thread_manager/shutdown.rs
+@@ -1,6 +1,7 @@
+ //! Fences and signals one local agent tree, then exposes its teardown result.
+ 
+ use super::ThreadManager;
++use crate::CodexThread;
+ use crate::agent::control::AgentTreeShutdownState;
+ use codex_protocol::ThreadId;
+ use codex_protocol::error::Result as CodexResult;
+@@ -34,13 +35,19 @@ impl ThreadManager {
+         &self,
+         thread_id: ThreadId,
+     ) -> CodexResult<AgentTreeShutdown> {
+-        let thread = self.get_thread(thread_id).await?;
+-        Ok(AgentTreeShutdown {
+-            state: thread
+-                .session
+-                .services
+-                .local_agent_runtime
+-                .request_shutdown(),
+-        })
++        Ok(self
++            .get_thread(thread_id)
++            .await?
++            .request_agent_tree_shutdown())
++    }
++}
++
++impl CodexThread {
++    /// Request shutdown of the exact tree owned by this thread handle.
++    #[doc(hidden)]
++    pub fn request_agent_tree_shutdown(&self) -> AgentTreeShutdown {
++        AgentTreeShutdown {
++            state: self.session.services.local_agent_runtime.request_shutdown(),
++        }
+     }
+ }
+diff --git a/codex-rs/core/src/tools/orchestrator.rs b/codex-rs/core/src/tools/orchestrator.rs
+index 3d7e2b62c5227910980c56fc6be5f426d35e20c1..c312c4560fc687601af4694b6e467a6e1c662140 100644
+--- a/codex-rs/core/src/tools/orchestrator.rs
++++ b/codex-rs/core/src/tools/orchestrator.rs
+@@ -143,12 +143,12 @@ impl ToolOrchestrator {
+         let environment = tool.turn_environment(req);
+         let sandbox_manager = SandboxManager::new();
+         #[cfg(target_os = "macos")]
+-        let sandbox_manager = sandbox_manager.with_allowed_symlinked_codex_home(
+-            environment
+-                .environment
+-                .local_runtime_paths()
+-                .and_then(|paths| paths.allowed_symlinked_codex_home.clone()),
+-        );
++        let sandbox_manager = match environment.environment.local_runtime_paths() {
++            Some(paths) => sandbox_manager
++                .with_restricted_macos_process_sandbox(paths.restricted_macos_process_sandbox)
++                .with_allowed_symlinked_codex_home(paths.allowed_symlinked_codex_home.clone()),
++            None => sandbox_manager,
++        };
+         let sandbox_config = environment.config();
+         let owner_network_policy = sandbox_config.network_policy.is_some();
+         let workspace_roots = environment.workspace_roots();
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 8c0cfcfd0406f80967cebb44d5cb66fdd2e590da..275427d72d31f170eb5657239b7358e5d3df7ecd 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -32,6 +32,7 @@ use crate::tools::ApprovalContext;
+ use crate::tools::context::ExecCommandToolOutput;
+ use crate::tools::events::ToolEmitter;
+ use crate::tools::events::ToolEventCtx;
++use crate::tools::events::ToolEventFailure;
+ use crate::tools::events::ToolEventStage;
+ use crate::tools::network_approval::DeferredNetworkApproval;
+ use crate::tools::network_approval::finish_deferred_network_approval;
+@@ -533,6 +534,32 @@ impl UnifiedExecProcessManager {
+             Ok((attempt, deferred_network_approval)) => (attempt, deferred_network_approval),
+             Err(err) => {
+                 self.release_process_id(request.process_id).await;
++                // A process denied during the early-exit check returns before Begin.
++                // Record the final denial only after the sandbox orchestrator has
++                // decided whether to retry, using the original process output.
++                if let UnifiedExecError::SandboxDenied { output, .. } = &err {
++                    let model_context = context.step_context.model_context();
++                    let mut event_ctx = ToolEventCtx::new(
++                        context.session.as_ref(),
++                        context.step_context.turn.as_ref(),
++                        &context.step_context.settings.model_info,
++                        &context.call_id,
++                        /*turn_diff_tracker*/ None,
++                    );
++                    event_ctx.model_context = Some(&model_context);
++                    ToolEmitter::unified_exec(
++                        &request.command,
++                        cwd,
++                        ExecCommandSource::UnifiedExecStartup,
++                        /*process_id*/ None,
++                        /*plugin_attribution*/ None,
++                    )
++                    .emit(
++                        event_ctx,
++                        ToolEventStage::Failure(ToolEventFailure::Output(output.clone())),
++                    )
++                    .await;
++                }
+                 return Err(err);
+             }
+         };
+diff --git a/codex-rs/exec-server/src/process_sandbox.rs b/codex-rs/exec-server/src/process_sandbox.rs
+index fd2c89ee16b88be00a8640dd541b6efce2839a62..541f61915ddf1cab83f072cc122242099ac8e005 100644
+--- a/codex-rs/exec-server/src/process_sandbox.rs
++++ b/codex-rs/exec-server/src/process_sandbox.rs
+@@ -213,6 +213,7 @@ pub(crate) async fn prepare_exec_request_with_telemetry(
+         .with_linux_sandbox_pid_namespace(runtime_paths.linux_sandbox_pid_namespace);
+     #[cfg(target_os = "macos")]
+     let sandbox_manager = sandbox_manager
++        .with_restricted_macos_process_sandbox(runtime_paths.restricted_macos_process_sandbox)
+         .with_allowed_symlinked_codex_home(runtime_paths.allowed_symlinked_codex_home.clone());
+     let (sandbox, windows_sandbox_level) = select_sandbox(
+         &sandbox_manager,
+diff --git a/codex-rs/exec-server/src/runtime_options.rs b/codex-rs/exec-server/src/runtime_options.rs
+index 812e09553f2ea9b8ed6915589937e1be3d50009b..9e3d66addb353fe83e7dcbd7d9b8fa6a3095b45c 100644
+--- a/codex-rs/exec-server/src/runtime_options.rs
++++ b/codex-rs/exec-server/src/runtime_options.rs
+@@ -17,6 +17,9 @@ pub struct ExecServerRuntimeOptions {
+     pub linux_sandbox_pid_namespace: LinuxSandboxPidNamespace,
+     /// Trusted startup routing; request policy still controls destination access.
+     pub proxy_private_ips_via_upstream: bool,
++    /// Use the platform runtime paths without implicit scratch and application access.
++    #[cfg(target_os = "macos")]
++    pub restricted_macos_process_sandbox: bool,
+     /// User-config opt-out of writable-root symlink checks beneath this host's home.
+     #[cfg(target_os = "macos")]
+     pub allowed_symlinked_codex_home: Option<AbsolutePathBuf>,
+@@ -46,6 +49,8 @@ impl ExecServerRuntimeOptions {
+             codex_self_exe: absolute_path(codex_self_exe)?,
+             codex_linux_sandbox_exe: codex_linux_sandbox_exe.map(absolute_path).transpose()?,
+             #[cfg(target_os = "macos")]
++            restricted_macos_process_sandbox: false,
++            #[cfg(target_os = "macos")]
+             allowed_symlinked_codex_home: None,
+         })
+     }
+@@ -62,6 +67,13 @@ impl ExecServerRuntimeOptions {
+         self
+     }
+ 
++    /// Restricts the platform defaults to runtime access for an SDK-owned local executor.
++    #[cfg(target_os = "macos")]
++    pub fn with_restricted_macos_process_sandbox(mut self) -> Self {
++        self.restricted_macos_process_sandbox = true;
++        self
++    }
++
+     /// Applies the symlink opt-in resolved by the execution host's config loader.
+     #[cfg(target_os = "macos")]
+     pub fn with_allowed_symlinked_codex_home(
+diff --git a/codex-rs/linux-sandbox/src/bwrap.rs b/codex-rs/linux-sandbox/src/bwrap.rs
+index 5efdb6f3553dbe241c49f61908ee40b91a3ac1b6..4adb13d9e7a10e8be24d9248537d741818125f82 100644
+--- a/codex-rs/linux-sandbox/src/bwrap.rs
++++ b/codex-rs/linux-sandbox/src/bwrap.rs
+@@ -563,7 +563,19 @@ fn create_filesystem_args(
+             ];
+         } else {
+             for root in readable_roots {
+-                if !root.exists() {
++                // The covering writable bind and its read-only carveout mount this
++                // path below. A bootstrap bind could depend on a temporary empty
++                // metadata target that another sandbox removes before startup.
++                let covered_protected_metadata =
++                    root.file_name().is_some_and(is_protected_metadata_name)
++                        && writable_roots.iter().any(|writable_root| {
++                            root.parent() == Some(writable_root.root.as_path())
++                                && writable_root
++                                    .read_only_subpaths
++                                    .iter()
++                                    .any(|path| path.as_path() == root)
++                        });
++                if covered_protected_metadata || !root.exists() {
+                     continue;
+                 }
+                 // Writable roots are rebound by real target below; mirror that
+@@ -733,9 +745,14 @@ fn create_filesystem_args(
+             if deferred_read_only_subpaths.contains(&subpath) {
+                 continue;
+             }
++            let protected_metadata = subpath
++                .file_name()
++                .is_some_and(is_protected_metadata_name)
++                .then(|| fs::symlink_metadata(&subpath));
+             append_read_only_subpath_args(
+                 &mut bwrap_args,
+                 &subpath,
++                protected_metadata,
+                 &allowed_write_paths,
+                 &daemon_directories,
+             )?;
+@@ -1214,24 +1231,34 @@ fn append_mount_target_parent_dir_args(args: &mut Vec<String>, mount_target: &Pa
+ fn append_read_only_subpath_args(
+     bwrap_args: &mut BwrapArgs,
+     subpath: &Path,
++    protected_metadata: Option<io::Result<Metadata>>,
+     allowed_write_paths: &[PathBuf],
+     daemon_directories: &BTreeSet<PathBuf>,
+ ) -> Result<()> {
+-    if let Some(metadata) = transient_empty_metadata_path(subpath)
++    if let Some(metadata) = protected_metadata
+         && is_within_allowed_write_paths(subpath, allowed_write_paths)
+     {
+         // Another concurrent bwrap setup can leave an empty mount target at
+-        // a missing metadata path. Treat it like the missing case instead of
+-        // binding that transient host path as the stable source.
++        // a missing metadata path. Use the initial observation to avoid a
++        // bind that depends on this transient host path.
+         match metadata {
+-            EmptyProtectedMetadataPath::File(metadata) => {
+-                append_existing_empty_file_bind_data_args(bwrap_args, subpath, &metadata)?;
++            Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {
++                return append_existing_empty_file_bind_data_args(bwrap_args, subpath, &metadata);
+             }
+-            EmptyProtectedMetadataPath::Directory(metadata) => {
++            Ok(metadata) if metadata.is_dir() && directory_is_empty_or_missing(subpath) => {
+                 append_existing_empty_directory_args(bwrap_args, subpath, &metadata);
++                return Ok(());
+             }
++            Err(err) if err.kind() == io::ErrorKind::NotFound => {
++                let missing_ancestor = subpath.parent().and_then(find_first_non_existent_component);
++                let first_missing_component = missing_ancestor.as_deref().unwrap_or(subpath);
++                if is_within_allowed_write_paths(first_missing_component, allowed_write_paths) {
++                    append_missing_read_only_subpath_args(bwrap_args, first_missing_component)?;
++                }
++                return Ok(());
++            }
++            _ => {}
+         }
+-        return Ok(());
+     }
+ 
+     if !subpath.exists() {
+@@ -1402,33 +1429,11 @@ fn is_within_allowed_write_paths(path: &Path, allowed_write_paths: &[PathBuf]) -
+         .any(|root| path.starts_with(root))
+ }
+ 
+-enum EmptyProtectedMetadataPath {
+-    File(Metadata),
+-    Directory(Metadata),
+-}
+-
+-fn transient_empty_metadata_path(path: &Path) -> Option<EmptyProtectedMetadataPath> {
+-    if !path.file_name().is_some_and(is_protected_metadata_name) {
+-        return None;
++fn directory_is_empty_or_missing(path: &Path) -> bool {
++    match fs::read_dir(path).and_then(|mut entries| entries.next().transpose()) {
++        Ok(entry) => entry.is_none(),
++        Err(err) => err.kind() == io::ErrorKind::NotFound,
+     }
+-
+-    let metadata = fs::symlink_metadata(path).ok()?;
+-    if metadata.file_type().is_file() && metadata.len() == 0 {
+-        return Some(EmptyProtectedMetadataPath::File(metadata));
+-    }
+-
+-    if metadata.file_type().is_dir() && directory_is_empty(path) {
+-        return Some(EmptyProtectedMetadataPath::Directory(metadata));
+-    }
+-
+-    None
+-}
+-
+-fn directory_is_empty(path: &Path) -> bool {
+-    let Ok(mut entries) = fs::read_dir(path) else {
+-        return false;
+-    };
+-    entries.next().is_none()
+ }
+ 
+ fn first_writable_symlink_component_in_path(
+@@ -1523,6 +1528,67 @@ mod tests {
+     use pretty_assertions::assert_eq;
+     use tempfile::TempDir;
+ 
++    #[test]
++    fn restricted_read_bootstrap_defers_protected_metadata_to_the_writable_bind() {
++        let workspace = TempDir::new().expect("workspace");
++        let root = workspace.path();
++        let dot_git = root.join(".git");
++        fs::create_dir(&dot_git).expect("create transient .git directory");
++        let workspace_root = AbsolutePathBuf::from_absolute_path(root).expect("absolute workspace");
++        let mut policy = FileSystemSandboxPolicy::workspace_write(&[], true, true)
++            .materialize_project_roots_with_workspace_roots(&[workspace_root]);
++        let root_read = policy
++            .entries
++            .iter_mut()
++            .find(|entry| {
++                matches!(
++                    entry.path,
++                    FileSystemPath::Special {
++                        value: FileSystemSpecialPath::Root,
++                    }
++                )
++            })
++            .expect("workspace root read baseline");
++        root_read.path = FileSystemPath::Special {
++            value: FileSystemSpecialPath::Minimal,
++        };
++        let plan = || {
++            create_filesystem_args(&policy, root, BwrapOptions::default()).expect("filesystem args")
++        };
++        let transient = plan();
++        fs::remove_dir(&dot_git).expect("remove transient .git directory");
++        let dot_git_str = path_to_string(&dot_git);
++        let readonly_binds = |args: &BwrapArgs| {
++            args.args
++                .windows(3)
++                .enumerate()
++                .filter_map(|(index, window)| {
++                    (window == ["--ro-bind", dot_git_str.as_str(), dot_git_str.as_str()])
++                        .then_some(index)
++                })
++                .collect::<Vec<_>>()
++        };
++        assert_empty_directory_mounted_read_only(&transient.args, &dot_git);
++        assert!(readonly_binds(&transient).is_empty());
++        assert!(synthetic_mount_target_paths(&transient).contains(&dot_git));
++
++        fs::create_dir(&dot_git).expect("create real .git directory");
++        fs::write(dot_git.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
++        let real = plan();
++        let root_str = path_to_string(root);
++        let writable_bind = real
++            .args
++            .windows(3)
++            .position(|window| window == ["--bind", root_str.as_str(), root_str.as_str()])
++            .expect("workspace writable bind");
++        let binds = readonly_binds(&real);
++        assert_eq!(binds.len(), 1);
++        assert!(
++            binds[0] > writable_bind,
++            "the real metadata stays read-only"
++        );
++    }
++
+     #[test]
+     fn default_unreadable_glob_scan_has_no_depth_cap() {
+         assert_eq!(BwrapOptions::default().glob_scan_max_depth, None);
+@@ -2058,6 +2124,38 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn protected_metadata_observed_missing_uses_a_mask_if_a_placeholder_appears() {
++        let workspace = TempDir::new().expect("workspace");
++        let dot_git = workspace.path().join(".git");
++        let missing = fs::symlink_metadata(&dot_git).expect_err(".git should be missing");
++        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
++        fs::create_dir(&dot_git).expect("create transient .git directory");
++
++        let mut args = BwrapArgs {
++            args: Vec::new(),
++            preserved_files: Vec::new(),
++            synthetic_mount_targets: Vec::new(),
++            protected_create_targets: Vec::new(),
++        };
++        append_read_only_subpath_args(
++            &mut args,
++            &dot_git,
++            Some(Err(missing)),
++            &[workspace.path().to_path_buf()],
++            &BTreeSet::new(),
++        )
++        .expect("plan read-only mount");
++        fs::remove_dir(&dot_git).expect("remove transient .git directory");
++
++        assert_empty_directory_mounted_read_only(&args.args, &dot_git);
++        assert!(!args.args.iter().any(|arg| arg == "--ro-bind"));
++        assert_eq!(
++            args.synthetic_mount_targets,
++            vec![SyntheticMountTarget::missing_empty_directory(&dot_git)]
++        );
++    }
++
+     #[test]
+     fn transient_empty_preserved_file_uses_empty_file_bind_data() {
+         let temp_dir = TempDir::new().expect("temp dir");
+diff --git a/codex-rs/linux-sandbox/src/linux_run_main.rs b/codex-rs/linux-sandbox/src/linux_run_main.rs
+index 8ef516589c06847b4dfbdcc8ef326269ea8c5bd7..fd0b8a3052be13bc08753ba9a48aa26923096db5 100644
+--- a/codex-rs/linux-sandbox/src/linux_run_main.rs
++++ b/codex-rs/linux-sandbox/src/linux_run_main.rs
+@@ -40,6 +40,7 @@ use codex_protocol::protocol::FileSystemSandboxPolicy;
+ use codex_protocol::protocol::FileSystemSpecialPath;
+ use codex_protocol::protocol::NetworkSandboxPolicy;
+ use codex_sandboxing::landlock::CODEX_LINUX_SANDBOX_ARG0;
++use codex_utils_absolute_path::AbsolutePathBuf;
+ 
+ static BWRAP_CHILD_PID: AtomicI32 = AtomicI32::new(0);
+ static PENDING_FORWARDED_SIGNAL: AtomicI32 = AtomicI32::new(0);
+@@ -337,6 +338,14 @@ pub fn run_main() -> ! {
+             proxy_route_spec,
+             command,
+         });
++        // The inner executable is this trusted helper. With restricted reads,
++        // expose only that file so bubblewrap can re-enter it to apply seccomp.
++        let helper = AbsolutePathBuf::from_absolute_path(Path::new(&inner[0]))
++            .unwrap_or_else(|err| panic!("invalid sandbox helper path: {err}"));
++        let file_system_sandbox_policy = file_system_sandbox_policy.with_additional_readable_roots(
++            &sandbox_policy_cwd,
++            &[helper],
++        );
+         run_bwrap_with_proc_fallback(
+             &sandbox_policy_cwd,
+             command_cwd.as_deref(),
+diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
+index 6a068945ebab3b04919cd0d36c7a4a7b0ab1055d..01ca1096a46647a0da80ec4b7be4c5fa5bd0535b 100644
+--- a/codex-rs/rollout/src/lib.rs
++++ b/codex-rs/rollout/src/lib.rs
+@@ -144,6 +144,7 @@ pub use persistence_metrics::RolloutPersistenceBatchMeasurement;
+ pub use persistence_metrics::RolloutPersistenceTelemetry;
+ pub use persistence_metrics::measure_and_filter_rollout_items;
+ pub use policy::into_persisted_rollout_items;
++pub use policy::persisted_event_msg;
+ pub use policy::persisted_rollout_item;
+ pub use policy::persisted_rollout_items;
+ pub use policy::should_persist_response_item;
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index e2f5e2952305e5cdb2573d6e77e7a2ce562aab52..06a22f50019f5a0d64eeeba7613575682bf2115e 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -124,7 +124,8 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
+     }
+ }
+ 
+-fn persisted_event_msg(
++/// Returns the authoritative durable representation of an event.
++pub fn persisted_event_msg(
+     ev: &EventMsg,
+     history_mode: ThreadHistoryMode,
+ ) -> Option<Cow<'_, EventMsg>> {
+@@ -232,7 +233,13 @@ fn persisted_item_completed_event<'a>(
+     history_mode: ThreadHistoryMode,
+ ) -> Option<Cow<'a, EventMsg>> {
+     match history_mode {
+-        ThreadHistoryMode::Legacy => {
++        // The SDK also reads execution completions from legacy in-memory histories.
++        ThreadHistoryMode::Legacy
++            if !matches!(
++                event.item,
++                TurnItem::CommandExecution(_) | TurnItem::McpToolCall(_) | TurnItem::FileChange(_)
++            ) =>
++        {
+             // Legacy rollouts keep only items with no lossless raw ResponseItem or legacy
+             // equivalent.
+             (matches!(
+@@ -247,7 +254,7 @@ fn persisted_item_completed_event<'a>(
+             ))
+             .then_some(Cow::Borrowed(ev))
+         }
+-        ThreadHistoryMode::Paginated => match &event.item {
++        ThreadHistoryMode::Legacy | ThreadHistoryMode::Paginated => match &event.item {
+             TurnItem::CommandExecution(CommandExecutionItem {
+                 aggregated_output: Some(aggregated_output),
+                 ..
+diff --git a/codex-rs/sandboxing/src/bwrap.rs b/codex-rs/sandboxing/src/bwrap.rs
+index 633487136abe00065ee0f30707573ceb67b04e5b..1823edd14fe0ad3e0f01561090e1acb9a8f0248b 100644
+--- a/codex-rs/sandboxing/src/bwrap.rs
++++ b/codex-rs/sandboxing/src/bwrap.rs
+@@ -166,7 +166,9 @@ fn is_user_namespace_failure(output: &Output) -> bool {
+ }
+ 
+ pub fn find_system_bwrap_in_path() -> Option<PathBuf> {
+-    let search_path = std::env::var_os("PATH")?;
++    // The SDK launcher keeps pre-sandbox lookup separate from the child PATH.
++    let search_path =
++        std::env::var_os("CODEX_SDK_BWRAP_SEARCH_PATH").or_else(|| std::env::var_os("PATH"))?;
+     let cwd = std::env::current_dir().ok()?;
+     find_system_bwrap_in_search_paths(std::env::split_paths(&search_path), &cwd)
+ }
+diff --git a/codex-rs/sandboxing/src/manager.rs b/codex-rs/sandboxing/src/manager.rs
+index 2bdcecfc525b19ebcd5b438d44e29741bbe9a939..5449a7cc3bf3ea547c21d24bfc31a61094228f49 100644
+--- a/codex-rs/sandboxing/src/manager.rs
++++ b/codex-rs/sandboxing/src/manager.rs
+@@ -296,6 +296,15 @@ impl SandboxManager {
+         self
+     }
+ 
++    /// Use the narrow Seatbelt defaults without additional application or scratch grants.
++    #[cfg(target_os = "macos")]
++    pub fn with_restricted_macos_process_sandbox(mut self, restricted: bool) -> Self {
++        if restricted {
++            self.seatbelt_profile = MacosSeatbeltProfile::FileSystemHelper;
++        }
++        self
++    }
++
+     /// Allows otherwise-authorized writable roots beneath the opted-in user home
+     /// to follow symlinks, including targets outside that home.
+     #[cfg(target_os = "macos")]

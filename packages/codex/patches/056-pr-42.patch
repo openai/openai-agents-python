@@ -1,0 +1,1408 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index df605ffdbec4d9c27a421db6fff024ec57046aeb..f50bce107320a6e3aa8f55c01d47a3413249cea0 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1082,6 +1082,11 @@ impl CodexThread {
+         self.session.sdk_history_snapshot(limit).await
+     }
+ 
++    #[doc(hidden)]
++    pub async fn sdk_replay_history_snapshot(&self) -> CodexResult<(String, usize, Vec<String>)> {
++        self.session.sdk_replay_history_snapshot().await
++    }
++
+     /// Replace a canonical history suffix under the SDK's exclusive idle permit.
+     #[doc(hidden)]
+     pub async fn sdk_replace_history(
+@@ -1262,7 +1267,11 @@ impl CodexThread {
+         generation: &str,
+         receipt: &codex_extension_api::AgentProfileReceipt,
+     ) {
+-        crate::realtime_conversation::release_voice_agent_source(&self.session, generation, receipt);
++        crate::realtime_conversation::release_voice_agent_source(
++            &self.session,
++            generation,
++            receipt,
++        );
+     }
+ 
+     pub fn release_realtime_agent_profile_sources(&self, generation: &str) {
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 85db3a39d33cfefc175fa987c0fcd459e40e5c30..1ea0391fc56a76848d8ba5919c40cf2d039417d4 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -279,11 +279,39 @@ impl Session {
+         &self,
+         limit: Option<usize>,
+     ) -> codex_protocol::error::Result<(String, usize, Vec<String>)> {
+-        if let Some(snapshot) = self.state.lock().await.sdk_originals.snapshot(limit) {
+-            return Ok(snapshot);
++        self.sdk_history_snapshot_inner(limit, None).await
++    }
++
++    pub(crate) async fn sdk_replay_history_snapshot(
++        &self,
++    ) -> codex_protocol::error::Result<(String, usize, Vec<String>)> {
++        const MAX_RECORDS: usize = 4096;
++        const MAX_BYTES: usize = 8 * 1024 * 1024;
++        self.sdk_history_snapshot_inner(Some(MAX_RECORDS), Some(MAX_BYTES))
++            .await
++    }
++
++    async fn sdk_history_snapshot_inner(
++        &self,
++        limit: Option<usize>,
++        max_bytes: Option<usize>,
++    ) -> codex_protocol::error::Result<(String, usize, Vec<String>)> {
++        use super::original_history_read::REPLAY_HISTORY_LIMIT_ERROR;
++        use super::original_history_read::SnapshotReader;
++        use codex_protocol::error::CodexErr;
++        {
++            let state = self.state.lock().await;
++            let originals = &state.sdk_originals;
++            if max_bytes.is_some() && originals.len().zip(limit).is_some_and(|(n, cap)| n > cap) {
++                return Err(CodexErr::InvalidRequest(REPLAY_HISTORY_LIMIT_ERROR.into()));
++            }
++            if max_bytes.is_none_or(|cap| originals.retained_bytes() <= cap)
++                && let Some(snapshot) = originals.snapshot(limit)
++            {
++                return Ok(snapshot);
++            }
+         }
+         if let Some(limit) = limit {
+-            use codex_protocol::error::CodexErr;
+             let unavailable =
+                 || CodexErr::InvalidRequest("Canonical original history is unavailable".into());
+             let (token, total, policy) = {
+@@ -301,12 +329,21 @@ impl Session {
+             };
+             let live = self.live_thread().ok_or_else(unavailable)?;
+             live.flush().await.map_err(|_| unavailable())?;
+-            let snapshot =
+-                live.read_original_history(Box::new(
+-                    super::original_history_read::SnapshotReader { limit, policy },
+-                ))
++            let snapshot = live
++                .read_original_history(Box::new(SnapshotReader {
++                    limit,
++                    policy,
++                    max_bytes,
++                }))
+                 .await
+-                .map_err(|_| unavailable())?;
++                .map_err(|error| match error {
++                    codex_thread_store::ThreadStoreError::InvalidRequest { message }
++                        if max_bytes.is_some() && message == REPLAY_HISTORY_LIMIT_ERROR =>
++                    {
++                        CodexErr::InvalidRequest(message)
++                    }
++                    _ => unavailable(),
++                })?;
+             let state = self.state.lock().await;
+             if token
+                 != (
+diff --git a/codex-rs/core/src/session/original_history_read.rs b/codex-rs/core/src/session/original_history_read.rs
+index 72b861aeb73392879c87cfca17a1f5a412f1479b..0934fcb3a0c14f17d04eb9fb63f4148f50325f3d 100644
+--- a/codex-rs/core/src/session/original_history_read.rs
++++ b/codex-rs/core/src/session/original_history_read.rs
+@@ -115,8 +115,38 @@ fn invalid() -> io::Error {
+ pub(super) struct SnapshotReader {
+     pub(super) limit: usize,
+     pub(super) policy: TruncationPolicy,
++    pub(super) max_bytes: Option<usize>,
+ }
++pub(super) const REPLAY_HISTORY_LIMIT_ERROR: &str =
++    "Run completed, but its one-shot conversation history exceeds the result size limit";
++
++fn snapshot_error(error: io::Error) -> ThreadStoreError {
++    if error.kind() == io::ErrorKind::FileTooLarge {
++        return ThreadStoreError::InvalidRequest {
++            message: REPLAY_HISTORY_LIMIT_ERROR.into(),
++        };
++    }
++    ThreadStoreError::Internal {
++        message: "original history stream unavailable".into(),
++    }
++}
++
+ impl SnapshotReader {
++    fn fold(&self, total: usize) -> io::Result<SdkOriginalSnapshotFold> {
++        if self.max_bytes.is_some() && total > self.limit {
++            return Err(io::ErrorKind::FileTooLarge.into());
++        }
++        Ok(SdkOriginalSnapshotFold::new(total, self.limit).with_byte_limit(self.max_bytes))
++    }
++
++    fn check_projection_size(&self, row: &ResponseItemEnvelope) -> io::Result<()> {
++        if let Some(max_bytes) = self.max_bytes {
++            serde_json::to_writer(LimitedWriter(max_bytes), row)
++                .map_err(|error| error.io_error_kind().map_or_else(invalid, io::Error::from))?;
++        }
++        Ok(())
++    }
++
+     fn native_projection(&self, row: &ResponseItemEnvelope) -> Option<ResponseItemEnvelope> {
+         let mut projected = ContextManager::new();
+         let normalized = if matches!(&row.item, ResponseItem::Message { .. }) {
+@@ -187,64 +217,59 @@ impl SnapshotReader {
+         fold: &mut SdkOriginalSnapshotFold,
+     ) -> io::Result<()> {
+         fold.begin_item().map_err(|_| invalid())?;
+-        source.original(entry.original, self, fold)?;
++        let read = source.original(entry.original, self, fold);
++        if fold.byte_limit_exceeded() {
++            return Err(io::ErrorKind::FileTooLarge.into());
++        }
++        read?;
+         fold.end_item().map_err(|_| invalid())
+     }
+     fn read(&self, items: &[RolloutItem]) -> io::Result<OriginalHistorySnapshot> {
+         self.read_source(&mut MemorySource::new(items))
+     }
+     fn read_source(&self, source: &mut dyn OriginalSource) -> io::Result<OriginalHistorySnapshot> {
+-        // Identify the final replacement and whether its suffix has rollback. No payload retained.
+-        let mut generation = 0usize;
+-        let mut total = 0usize;
++        // Discover the surviving generation from control records before decoding entries.
++        // Older generations can contain payloads that would exceed this result's budget.
+         let mut has_rollback = false;
+-        while let Some(action) = source.next(self)? {
++        while let Some(action) = source.next(self, Scan::Controls)? {
+             match action {
+                 Action::Reset => {
+-                    generation = generation.checked_add(1).ok_or_else(invalid)?;
+-                    total = 0;
++                    source.mark_generation();
+                     has_rollback = false;
+                 }
+-                Action::Append(_) => total = total.checked_add(1).ok_or_else(invalid)?,
+                 Action::Rollback(_) => has_rollback = true,
++                Action::Append(_) => return Err(invalid()),
+             }
+         }
+         source.rewind()?;
+-        let mut seen_generation = 0usize;
+         if !has_rollback {
+-            let mut fold = SdkOriginalSnapshotFold::new(total, self.limit);
+-            while let Some(action) = source.next(self)? {
+-                match action {
+-                    Action::Reset => seen_generation += 1,
+-                    Action::Append(entry) if seen_generation == generation => {
+-                        self.fold_original(source, entry, &mut fold)?
+-                    }
+-                    _ => {}
++            let mut total = 0usize;
++            while let Some(action) = source.next(self, Scan::Entries)? {
++                if !matches!(action, Action::Append(_)) {
++                    return Err(invalid());
+                 }
++                total = total.checked_add(1).ok_or_else(invalid)?;
+             }
+-            if seen_generation != generation {
+-                return Err(invalid());
++            let mut fold = self.fold(total)?;
++            source.rewind()?;
++            while let Some(action) = source.next(self, Scan::Entries)? {
++                let Action::Append(entry) = action else {
++                    return Err(invalid());
++                };
++                self.fold_original(source, entry, &mut fold)?;
+             }
+             return fold.finish().map_err(|_| invalid());
+         }
+         // Rollback needs only an ephemeral sparse sequence of source positions.
+         let mut positions = Positions::new()?;
+-        while let Some(action) = source.next(self)? {
++        while let Some(action) = source.next(self, Scan::Entries)? {
+             match action {
+-                Action::Reset => {
+-                    seen_generation += 1;
+-                }
+-                Action::Append(entry) if seen_generation == generation => positions.push(entry)?,
+-                Action::Rollback(turns) if seen_generation == generation => {
+-                    self.rollback(source, &mut positions, turns)?
+-                }
+-                _ => {}
++                Action::Append(entry) => positions.push(entry)?,
++                Action::Rollback(turns) => self.rollback(source, &mut positions, turns)?,
++                Action::Reset => return Err(invalid()),
+             }
+         }
+-        if seen_generation != generation {
+-            return Err(invalid());
+-        }
+-        let mut fold = SdkOriginalSnapshotFold::new(positions.len, self.limit);
++        let mut fold = self.fold(positions.len)?;
+         for index in 0..positions.len {
+             self.fold_original(source, positions.get(index)?, &mut fold)?;
+         }
+@@ -401,8 +426,14 @@ enum Action {
+     Append(Entry),
+     Rollback(u32),
+ }
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum Scan {
++    Controls,
++    Entries,
++}
+ trait OriginalSource {
+-    fn next(&mut self, reader: &SnapshotReader) -> io::Result<Option<Action>>;
++    fn next(&mut self, reader: &SnapshotReader, scan: Scan) -> io::Result<Option<Action>>;
++    fn mark_generation(&mut self);
+     fn rewind(&mut self) -> io::Result<()>;
+     fn projection(
+         &mut self,
+@@ -420,6 +451,7 @@ struct MemorySource<'a> {
+     items: &'a [RolloutItem],
+     record: usize,
+     nested: Option<usize>,
++    generation: Option<usize>,
+ }
+ impl<'a> MemorySource<'a> {
+     fn new(items: &'a [RolloutItem]) -> Self {
+@@ -427,16 +459,20 @@ impl<'a> MemorySource<'a> {
+             items,
+             record: 0,
+             nested: None,
++            generation: None,
+         }
+     }
+ }
+ impl OriginalSource for MemorySource<'_> {
++    fn mark_generation(&mut self) {
++        self.generation = Some(self.record);
++    }
+     fn rewind(&mut self) -> io::Result<()> {
+-        self.record = 0;
+-        self.nested = None;
++        self.record = self.generation.unwrap_or_default();
++        self.nested = self.generation.map(|_| 0);
+         Ok(())
+     }
+-    fn next(&mut self, _reader: &SnapshotReader) -> io::Result<Option<Action>> {
++    fn next(&mut self, _reader: &SnapshotReader, scan: Scan) -> io::Result<Option<Action>> {
+         loop {
+             let Some(record) = self.items.get(self.record) else {
+                 return Ok(None);
+@@ -447,6 +483,11 @@ impl OriginalSource for MemorySource<'_> {
+                 item: 0,
+             };
+             if let Some(nested) = self.nested {
++                if scan == Scan::Controls {
++                    self.nested = None;
++                    self.record += 1;
++                    continue;
++                }
+                 let RolloutItem::Compacted(checkpoint) = record else {
+                     return Err(invalid());
+                 };
+@@ -503,7 +544,7 @@ impl OriginalSource for MemorySource<'_> {
+                 continue;
+             }
+             match record {
+-                RolloutItem::ResponseItem(row) => {
++                RolloutItem::ResponseItem(row) if scan == Scan::Entries => {
+                     self.record += 1;
+                     if is_api_message(&row.item, row.metadata.as_ref()) {
+                         return Ok(Some(Action::Append(Entry {
+@@ -537,8 +578,16 @@ impl OriginalSource for MemorySource<'_> {
+         reader: &SnapshotReader,
+     ) -> io::Result<Option<ResponseItemEnvelope>> {
+         Ok(match reader.row(self.items, position)? {
+-            Row::Native(row) => reader.native_projection(row),
+-            Row::Original(row) => row.projection.clone(),
++            Row::Native(row) => {
++                reader.check_projection_size(row)?;
++                reader.native_projection(row)
++            }
++            Row::Original(row) => {
++                if let Some(projection) = &row.projection {
++                    reader.check_projection_size(projection)?;
++                }
++                row.projection.clone()
++            }
+         })
+     }
+     fn original(
+@@ -570,6 +619,21 @@ enum Row<'a> {
+     Native(&'a ResponseItemEnvelope),
+     Original(&'a codex_history::sdk_originals::SdkOriginalItem),
+ }
++
++struct LimitedWriter(usize);
++impl Write for LimitedWriter {
++    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
++        self.0 = self
++            .0
++            .checked_sub(bytes.len())
++            .ok_or(io::ErrorKind::FileTooLarge)?;
++        Ok(bytes.len())
++    }
++    fn flush(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++}
++
+ struct FoldWriter<'a>(&'a mut SdkOriginalSnapshotFold);
+ impl Write for FoldWriter<'_> {
+     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+@@ -582,18 +646,14 @@ impl Write for FoldWriter<'_> {
+ }
+ impl OriginalHistoryReader for SnapshotReader {
+     fn read_items(&mut self, items: &[RolloutItem]) -> ThreadStoreResult<OriginalHistorySnapshot> {
+-        self.read(items).map_err(|_| ThreadStoreError::Internal {
+-            message: "original history stream unavailable".to_string(),
+-        })
++        self.read(items).map_err(snapshot_error)
+     }
+     fn read_segments(
+         &mut self,
+         _segments: &[OriginalHistorySegment],
+     ) -> ThreadStoreResult<OriginalHistorySnapshot> {
+         self.read_source(&mut stream::LocalSource::new(_segments))
+-            .map_err(|_| ThreadStoreError::Internal {
+-                message: "original history stream unavailable".into(),
+-            })
++            .map_err(snapshot_error)
+     }
+ }
+ 
+@@ -604,6 +664,37 @@ mod tests {
+     use codex_protocol::protocol::ThreadRolledBackEvent;
+     use serde_json::json;
+ 
++    #[test]
++    fn replay_snapshot_requires_all_records_to_fit() {
++        let originals = [
++            json!({"type": "audit", "value": "first"}),
++            json!({"type": "audit", "value": "second"}),
++        ];
++        let records = [checkpoint(&originals)];
++        let expected: Vec<_> = originals.iter().map(serde_json::Value::to_string).collect();
++        let bytes = expected.iter().map(String::len).sum::<usize>();
++
++        let mut reader = SnapshotReader {
++            limit: 2,
++            policy: TruncationPolicy::Bytes(4096),
++            max_bytes: Some(bytes),
++        };
++        assert_eq!(reader.read_items(&records).unwrap().2, expected);
++
++        for (limit, max_bytes) in [(2, bytes - 1), (1, bytes)] {
++            reader.limit = limit;
++            reader.max_bytes = Some(max_bytes);
++            assert!(matches!(
++                reader.read_items(&records),
++                Err(ThreadStoreError::InvalidRequest { message })
++                    if message == REPLAY_HISTORY_LIMIT_ERROR
++            ));
++        }
++
++        reader.max_bytes = None;
++        assert_eq!(reader.read_items(&records).unwrap().2, expected[1..]);
++    }
++
+     fn checkpoint(values: &[serde_json::Value]) -> RolloutItem {
+         let mut originals = SdkOriginalHistory::default();
+         for value in values {
+@@ -643,6 +734,7 @@ mod tests {
+             let reader = SnapshotReader {
+                 limit,
+                 policy: TruncationPolicy::Bytes(4096),
++                max_bytes: None,
+             };
+             assert_eq!(
+                 reader.read(&records).unwrap(),
+@@ -670,6 +762,7 @@ mod tests {
+                 let reader = SnapshotReader {
+                     limit,
+                     policy: TruncationPolicy::Bytes(4096),
++                    max_bytes: None,
+                 };
+                 assert_eq!(
+                     reader.read(&records).unwrap(),
+@@ -733,6 +826,7 @@ mod tests {
+         let reader = SnapshotReader {
+             limit: 1,
+             policy: TruncationPolicy::Bytes(4096),
++            max_bytes: None,
+         };
+         let expected = full(&reader, &records).snapshot(Some(1));
+         live.append_items(&records).await.unwrap();
+@@ -785,6 +879,7 @@ mod tests {
+             let mut reader = SnapshotReader {
+                 limit,
+                 policy: TruncationPolicy::Bytes(4096),
++                max_bytes: None,
+             };
+             assert_eq!(
+                 reader.read_segments(&segments).unwrap(),
+@@ -808,6 +903,7 @@ mod tests {
+             let reader = SnapshotReader {
+                 limit: 1,
+                 policy: TruncationPolicy::Bytes(4096),
++                max_bytes: None,
+             };
+             assert_eq!(
+                 reader.read(&records).unwrap(),
+@@ -882,6 +978,7 @@ mod tests {
+         let mut reader = SnapshotReader {
+             limit: 1,
+             policy: TruncationPolicy::Bytes(4096),
++            max_bytes: None,
+         };
+         let snapshot = reader.read_segments(&segments).unwrap();
+         let bounded_peak = peak_rss();
+diff --git a/codex-rs/core/src/session/original_history_stream.rs b/codex-rs/core/src/session/original_history_stream.rs
+index 9c56597a0f7717b5a64d0b2224d72d23eb287d17..5a8c9e1554f23d5a74d6cacfe685879283ad547c 100644
+--- a/codex-rs/core/src/session/original_history_stream.rs
++++ b/codex-rs/core/src/session/original_history_stream.rs
+@@ -1,5 +1,5 @@
+ //! Selective local JSONL source. Replacement catalogs never become a whole line or Vec.
+-use super::{Action, Entry, FoldWriter, OriginalSource, Position, SnapshotReader, invalid};
++use super::{Action, Entry, FoldWriter, OriginalSource, Position, Scan, SnapshotReader, invalid};
+ use codex_history::ResponseItemEnvelope;
+ use codex_history::sdk_originals::SdkOriginalSnapshotFold;
+ use codex_thread_store::OriginalHistorySegment;
+@@ -61,6 +61,7 @@ pub(super) struct LocalSource<'a> {
+     next_record: u64,
+     array: Option<Array>,
+     input: Option<(usize, Input)>,
++    generation: (usize, u64, Option<Array>),
+ }
+ impl<'a> LocalSource<'a> {
+     pub(super) fn new(segments: &'a [OriginalHistorySegment]) -> Self {
+@@ -70,6 +71,7 @@ impl<'a> LocalSource<'a> {
+             next_record: 0,
+             array: None,
+             input: None,
++            generation: (0, 0, None),
+         }
+     }
+     fn cursor(&mut self, segment: usize, position: u64) -> io::Result<&mut Input> {
+@@ -132,14 +134,28 @@ impl<'a> LocalSource<'a> {
+             end: input.line_end()?,
+         })
+     }
+-    fn native(&mut self, position: Position) -> io::Result<ResponseItemEnvelope> {
++    fn native(
++        &mut self,
++        position: Position,
++        reader: &SnapshotReader,
++    ) -> io::Result<ResponseItemEnvelope> {
+         let segment = usize::try_from(position.record).map_err(|_| invalid())?;
+         let frame = self.frame(segment, position.item)?;
+         if frame.kind.as_deref() != Some("response_item") {
+             return Err(invalid());
+         }
++        let payload_span = frame.payload.ok_or_else(invalid)?;
++        if let Some(max_bytes) = reader.max_bytes {
++            let span_len = |span: Span| span.end.checked_sub(span.start).ok_or_else(invalid);
++            let decode_bytes = span_len(payload_span)?
++                .checked_add(frame.metadata.map(span_len).transpose()?.unwrap_or(0))
++                .ok_or(io::ErrorKind::FileTooLarge)?;
++            if decode_bytes > max_bytes as u64 {
++                return Err(io::ErrorKind::FileTooLarge.into());
++            }
++        }
+         let payload = self
+-            .cursor(segment, frame.payload.ok_or_else(invalid)?.start)?
++            .cursor(segment, payload_span.start)?
+             .value::<serde_json::Value>()?;
+         let mut value = serde_json::Map::new();
+         value.insert("type".into(), "response_item".into());
+@@ -158,10 +174,20 @@ impl<'a> LocalSource<'a> {
+             _ => Err(invalid()),
+         }
+     }
+-    fn envelope(&mut self, position: Position) -> io::Result<Option<ResponseItemEnvelope>> {
+-        let value = self
+-            .cursor(position.record as usize, position.item)?
+-            .value::<serde_json::Value>()?;
++    fn envelope(
++        &mut self,
++        position: Position,
++        reader: &SnapshotReader,
++    ) -> io::Result<Option<ResponseItemEnvelope>> {
++        let input = self.cursor(position.record as usize, position.item)?;
++        if let Some(max) = reader.max_bytes {
++            let span = input.skip()?;
++            if span.end.checked_sub(span.start).ok_or_else(invalid)? > max as u64 {
++                return Err(io::ErrorKind::FileTooLarge.into());
++            }
++            input.seek(span.start)?;
++        }
++        let value = input.value::<serde_json::Value>()?;
+         serde_json::from_value(value).map_err(|_| invalid())
+     }
+     fn array(&mut self, segment: usize, start: u64, legacy: bool) -> io::Result<()> {
+@@ -252,15 +278,16 @@ impl<'a> LocalSource<'a> {
+     }
+ }
+ impl OriginalSource for LocalSource<'_> {
++    fn mark_generation(&mut self) {
++        self.generation = (self.segment, self.next_record, self.array);
++    }
+     fn rewind(&mut self) -> io::Result<()> {
+-        self.segment = 0;
+-        self.next_record = 0;
+-        self.array = None;
++        (self.segment, self.next_record, self.array) = self.generation;
+         Ok(())
+     }
+-    fn next(&mut self, reader: &SnapshotReader) -> io::Result<Option<Action>> {
++    fn next(&mut self, reader: &SnapshotReader, scan: Scan) -> io::Result<Option<Action>> {
+         loop {
+-            if let Some(mut array) = self.array.take() {
++            if let Some(mut array) = self.array.take().filter(|_| scan == Scan::Entries) {
+                 let input = self.cursor(array.segment, array.next)?;
+                 let Some(item) = input.next_array(array.first)? else {
+                     continue;
+@@ -274,7 +301,7 @@ impl OriginalSource for LocalSource<'_> {
+                         record: array.segment as u64,
+                         item: item.start,
+                     };
+-                    let row = self.envelope(position)?.ok_or_else(invalid)?;
++                    let row = self.envelope(position, reader)?.ok_or_else(invalid)?;
+                     if !crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()) {
+                         continue;
+                     }
+@@ -341,13 +368,13 @@ impl OriginalSource for LocalSource<'_> {
+             let frame = self.frame(segment, position)?;
+             self.next_record = frame.end;
+             match frame.kind.as_deref() {
+-                Some("response_item") => {
++                Some("response_item") if scan == Scan::Entries => {
+                     let position = Position {
+                         kind: 10,
+                         record: segment as u64,
+                         item: position,
+                     };
+-                    let row = self.native(position)?;
++                    let row = self.native(position, reader)?;
+                     if crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()) {
+                         return Ok(Some(Action::Append(Entry {
+                             original: position,
+@@ -387,7 +414,6 @@ impl OriginalSource for LocalSource<'_> {
+                 Some(_) => {}
+                 None => return Err(invalid()),
+             }
+-            let _ = reader;
+         }
+     }
+     fn projection(
+@@ -396,10 +422,10 @@ impl OriginalSource for LocalSource<'_> {
+         reader: &SnapshotReader,
+     ) -> io::Result<Option<ResponseItemEnvelope>> {
+         match position.kind {
+-            10 => Ok(reader.native_projection(&self.native(position)?)),
+-            12 => self.envelope(position),
++            10 => Ok(reader.native_projection(&self.native(position, reader)?)),
++            12 => self.envelope(position, reader),
+             13 => Ok(self
+-                .envelope(position)?
++                .envelope(position, reader)?
+                 .and_then(|row| reader.native_projection(&row))),
+             _ => Err(invalid()),
+         }
+@@ -407,18 +433,18 @@ impl OriginalSource for LocalSource<'_> {
+     fn original(
+         &mut self,
+         position: Position,
+-        _reader: &SnapshotReader,
++        reader: &SnapshotReader,
+         fold: &mut SdkOriginalSnapshotFold,
+     ) -> io::Result<()> {
+         match position.kind {
+             11 => self
+                 .cursor(position.record as usize, position.item)?
+                 .string(|bytes| fold.write_item(bytes).map_err(|_| invalid())),
+-            10 => serde_json::to_writer(FoldWriter(fold), &self.native(position)?.item)
++            10 => serde_json::to_writer(FoldWriter(fold), &self.native(position, reader)?.item)
+                 .map_err(|_| invalid()),
+             13 => serde_json::to_writer(
+                 FoldWriter(fold),
+-                &self.envelope(position)?.ok_or_else(invalid)?.item,
++                &self.envelope(position, reader)?.ok_or_else(invalid)?.item,
+             )
+             .map_err(|_| invalid()),
+             _ => Err(invalid()),
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index 309c41aa223b96172c4bec2d18fa98260c9aa12b..971e412b00a732e101404536437931d8e18d542c 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -305,6 +305,8 @@ pub struct SdkOriginalSnapshotFold {
+     items: Vec<String>,
+     active: bool,
+     current: Option<Vec<u8>>,
++    remaining_bytes: Option<usize>,
++    byte_limit_exceeded: bool,
+ }
+ 
+ impl SdkOriginalSnapshotFold {
+@@ -317,9 +319,20 @@ impl SdkOriginalSnapshotFold {
+             items: Vec::new(),
+             active: false,
+             current: None,
++            remaining_bytes: None,
++            byte_limit_exceeded: false,
+         }
+     }
+ 
++    pub fn with_byte_limit(mut self, limit: Option<usize>) -> Self {
++        self.remaining_bytes = limit;
++        self
++    }
++
++    pub fn byte_limit_exceeded(&self) -> bool {
++        self.byte_limit_exceeded
++    }
++
+     pub fn begin_item(&mut self) -> Result<(), &'static str> {
+         if self.active || self.completed == self.expected_total {
+             return Err("inconsistent original stream");
+@@ -336,10 +349,17 @@ impl SdkOriginalSnapshotFold {
+         if !self.active {
+             return Err("inconsistent original stream");
+         }
+-        self.index.hash.update(bytes);
+         if let Some(current) = &mut self.current {
++            if let Some(remaining) = &mut self.remaining_bytes {
++                let Some(next) = remaining.checked_sub(bytes.len()) else {
++                    self.byte_limit_exceeded = true;
++                    return Err("original stream exceeds the snapshot byte limit");
++                };
++                *remaining = next;
++            }
+             current.extend_from_slice(bytes);
+         }
++        self.index.hash.update(bytes);
+         Ok(())
+     }
+ 
+diff --git a/codex-rs/state/migrations/0060_threads_retired.sql b/codex-rs/state/migrations/0060_threads_retired.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..28b954fbd6e48121bcba53439b42516a02c4bbbc
+--- /dev/null
++++ b/codex-rs/state/migrations/0060_threads_retired.sql
+@@ -0,0 +1,2 @@
++-- Retain logical IDs and shared journals after explicit owner retirement.
++ALTER TABLE threads ADD COLUMN is_retired INTEGER NOT NULL DEFAULT 0 CHECK (is_retired IN (0, 1));
+diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
+index f534fd611f856cf6b1081cbc56458a8466584eb3..89d4f759f675e9f91767bf32407dc4914cd71e02 100644
+--- a/codex-rs/state/src/runtime/threads.rs
++++ b/codex-rs/state/src/runtime/threads.rs
+@@ -6,6 +6,30 @@ use std::sync::atomic::AtomicI64;
+ use std::sync::atomic::Ordering;
+ 
+ impl StateRuntime {
++    /// Permanently retires an existing logical owner without removing shared rollout data.
++    /// Ordinary metadata upserts intentionally omit this insert-default-only column.
++    pub async fn retire_thread_owner(&self, id: ThreadId) -> anyhow::Result<bool> {
++        Ok(
++            sqlx::query("UPDATE threads SET is_retired = 1 WHERE id = ? AND is_retired = 0")
++                .bind(id.to_string())
++                .execute(self.pool.as_ref())
++                .await?
++                .rows_affected()
++                == 1,
++        )
++    }
++
++    pub async fn is_thread_retired(&self, id: ThreadId) -> anyhow::Result<bool> {
++        Ok(
++            sqlx::query_scalar::<_, i64>("SELECT is_retired FROM threads WHERE id = ?")
++                .bind(id.to_string())
++                .fetch_optional(self.pool.as_ref())
++                .await?
++                .unwrap_or(0)
++                != 0,
++        )
++    }
++
+     pub async fn get_thread(&self, id: ThreadId) -> anyhow::Result<Option<crate::ThreadMetadata>> {
+         let row = sqlx::query(
+             r#"
+@@ -56,7 +80,7 @@ SELECT
+     threads.git_branch,
+     threads.git_origin_url
+ FROM threads
+-WHERE threads.id = ?
++WHERE threads.id = ? AND threads.is_retired = 0
+             "#,
+         )
+         .bind(id.to_string())
+@@ -1188,11 +1212,18 @@ ON CONFLICT(id) DO UPDATE SET
+             return Ok(0);
+         }
+ 
+-        let thread_id_strings = thread_ids
++        // Retired rows reserve their IDs and retain data needed by surviving lineage.
++        let mut active_thread_ids = Vec::new();
++        for thread_id in thread_ids {
++            if !self.is_thread_retired(*thread_id).await? {
++                active_thread_ids.push(*thread_id);
++            }
++        }
++        let thread_id_strings = active_thread_ids
+             .iter()
+             .map(ThreadId::to_string)
+             .collect::<Vec<_>>();
+-        for (thread_id, thread_id_string) in thread_ids.iter().zip(&thread_id_strings) {
++        for (thread_id, thread_id_string) in active_thread_ids.iter().zip(&thread_id_strings) {
+             sqlx::query("DELETE FROM logs WHERE thread_id = ?")
+                 .bind(thread_id_string)
+                 .execute(self.logs_pool.as_ref())
+@@ -1220,7 +1251,7 @@ ON CONFLICT(id) DO UPDATE SET
+         }
+         let mut rows_affected = 0;
+         for thread_id_string in &thread_id_strings {
+-            rows_affected += sqlx::query("DELETE FROM threads WHERE id = ?")
++            rows_affected += sqlx::query("DELETE FROM threads WHERE id = ? AND is_retired = 0")
+                 .bind(thread_id_string)
+                 .execute(&mut *tx)
+                 .await?
+@@ -1466,7 +1497,7 @@ fn push_thread_filters_with_preview<'a>(
+         sort_direction,
+         search_term,
+     } = options;
+-    builder.push(" WHERE 1 = 1");
++    builder.push(" WHERE threads.is_retired = 0");
+     if archived_only {
+         builder.push(" AND threads.archived = 1");
+     } else {
+@@ -1641,6 +1672,36 @@ mod tests {
+     use pretty_assertions::assert_eq;
+     use std::path::PathBuf;
+ 
++    #[tokio::test]
++    async fn retired_thread_owner_survives_upsert_and_metadata_deletion() {
++        let home = unique_temp_dir();
++        let runtime = StateRuntime::init(
++            crate::SqliteConfig::new_for_testing(home.as_path().abs()),
++            "test-provider".to_string(),
++        )
++        .await
++        .expect("state database");
++        let id = ThreadId::new();
++        let mut metadata = test_thread_metadata(&home, id, home.clone());
++        runtime
++            .upsert_thread(&metadata)
++            .await
++            .expect("initial owner");
++        assert!(runtime.get_thread(id).await.unwrap().is_some());
++        assert!(runtime.retire_thread_owner(id).await.unwrap());
++        assert!(runtime.get_thread(id).await.unwrap().is_none());
++        metadata.title = "stale metadata refresh".to_string();
++        runtime
++            .upsert_thread(&metadata)
++            .await
++            .expect("ordinary reconciliation");
++        assert!(runtime.is_thread_retired(id).await.unwrap());
++        assert!(runtime.get_thread(id).await.unwrap().is_none());
++        assert_eq!(runtime.delete_threads_strict(&[id]).await.unwrap(), 0);
++        assert!(runtime.is_thread_retired(id).await.unwrap());
++        assert!(!runtime.retire_thread_owner(id).await.unwrap());
++    }
++
+     const CUSTOM_THREAD_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf317";
+     #[tokio::test]
+     async fn upsert_thread_keeps_creation_memory_mode_for_existing_rows() {
+diff --git a/codex-rs/thread-store/src/local/archive_thread.rs b/codex-rs/thread-store/src/local/archive_thread.rs
+index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..cf6f0bcd919edc4a728627e46ed11cb28f379cd1 100644
+--- a/codex-rs/thread-store/src/local/archive_thread.rs
++++ b/codex-rs/thread-store/src/local/archive_thread.rs
+@@ -39,6 +39,9 @@ pub(super) async fn archive_threads(
+         }
+     }
+     let _writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
++    for thread_id in &thread_ids {
++        store.check_thread_not_retired(*thread_id).await?;
++    }
+     // Only inspect active files whose names belong to the threads being archived.
+     let reference_index = RolloutReferenceIndex::scan_unarchived_threads(
+         store.config.codex_home.as_path(),
+diff --git a/codex-rs/thread-store/src/local/delete_thread.rs b/codex-rs/thread-store/src/local/delete_thread.rs
+index 75e55ef84f1b1bf16315314e681103f138c95ed3..215ad063e5172b6b95ccb1f21f04845b144550e1 100644
+--- a/codex-rs/thread-store/src/local/delete_thread.rs
++++ b/codex-rs/thread-store/src/local/delete_thread.rs
+@@ -70,10 +70,12 @@ pub(super) async fn delete_thread(
+     let thread_id = params.thread_id;
+     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
+     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
++    store.check_thread_not_retired(thread_id).await?;
+     let reference_index = scan_reference_index(store).await?;
+     let thread_rollouts = ThreadRollouts::from_index(&reference_index, thread_id);
+     ensure_no_external_references(&reference_index, std::slice::from_ref(&thread_rollouts))?;
+     let mut writer_guards = store.acquire_writer_locks(&[thread_id]).await?;
++    store.check_thread_not_retired(thread_id).await?;
+     if let Some(cleanup) = &store.thread_data_cleanup {
+         cleanup(vec![thread_id]).await?;
+     }
+@@ -111,6 +113,7 @@ pub(super) async fn delete_threads(
+     let mut _live_writer_guards = Vec::with_capacity(lock_thread_ids.len());
+     for &thread_id in &lock_thread_ids {
+         _live_writer_guards.push(store.live_writer_locks.lock(thread_id).await);
++        store.check_thread_not_retired(thread_id).await?;
+     }
+ 
+     let reference_index = scan_reference_index(store).await?;
+@@ -121,6 +124,9 @@ pub(super) async fn delete_threads(
+     ensure_no_external_references(&reference_index, thread_rollouts.as_slice())?;
+ 
+     let mut writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
++    for thread_id in &thread_ids {
++        store.check_thread_not_retired(*thread_id).await?;
++    }
+     if let Some(cleanup) = &store.thread_data_cleanup {
+         cleanup(thread_ids.clone()).await?;
+     }
+diff --git a/codex-rs/thread-store/src/local/list_threads.rs b/codex-rs/thread-store/src/local/list_threads.rs
+index 8256cf9344487a37aadad1ce65b62b8a803df2b7..bad31214d3b2dba6cbf9683f45720b4db2c3ba7d 100644
+--- a/codex-rs/thread-store/src/local/list_threads.rs
++++ b/codex-rs/thread-store/src/local/list_threads.rs
+@@ -99,6 +99,15 @@ async fn list_threads_impl(
+         })
+         .collect::<Vec<_>>();
+ 
++    let mut visible = Vec::with_capacity(items.len());
++    for thread in items {
++        match store.check_thread_not_retired(thread.thread_id).await {
++            Ok(()) => visible.push(thread),
++            Err(ThreadStoreError::ThreadNotFound { .. }) => {}
++            Err(error) => return Err(error),
++        }
++    }
++    items = visible;
+     let thread_history_modes = items
+         .iter()
+         .map(|thread| (thread.thread_id, thread.history_mode))
+diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
+index e1b49e82b70490d056427abe87eeddb421464616..17be7707832183c899e91e69a02c70be3e3b5a72 100644
+--- a/codex-rs/thread-store/src/local/live_writer.rs
++++ b/codex-rs/thread-store/src/local/live_writer.rs
+@@ -28,9 +28,12 @@ pub(super) async fn create_thread(
+ ) -> ThreadStoreResult<()> {
+     let thread_id = params.thread_id;
+     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
++    store.check_thread_not_retired(thread_id).await?;
+     let history_mode = params.history_mode;
+     store.ensure_live_recorder_absent(thread_id).await?;
++    // Recheck under the cross-process writer fence before creating a durable owner.
+     let writer_lock = store.acquire_writer_lock(thread_id)?;
++    store.check_thread_not_retired(thread_id).await?;
+     let recorder = create_thread::create_thread(store, params, writer_lock.clone()).await?;
+     store
+         .insert_live_recorder(thread_id, recorder, thread_id, history_mode, writer_lock)
+@@ -42,8 +45,10 @@ pub(super) async fn resume_thread(
+     params: ResumeThreadParams,
+ ) -> ThreadStoreResult<Arc<Vec<RolloutItem>>> {
+     let _live_writer_guard = store.live_writer_locks.lock(params.thread_id).await;
++    store.check_thread_not_retired(params.thread_id).await?;
+     store.ensure_live_recorder_absent(params.thread_id).await?;
+     let writer_lock = store.acquire_writer_lock(params.thread_id)?;
++    store.check_thread_not_retired(params.thread_id).await?;
+     let rollout_path = match params.rollout_path {
+         Some(rollout_path) => rollout_path,
+         None => {
+@@ -72,6 +77,14 @@ pub(super) async fn resume_thread(
+             message: format!("thread {} is archived", params.thread_id),
+         });
+     }
++    let header = codex_rollout::read_session_meta_line(&rollout_path)
++        .await
++        .map_err(thread_store_io_error)?;
++    if header.meta.id != params.thread_id {
++        return Err(ThreadStoreError::InvalidRequest {
++            message: "rollout path does not belong to the requested thread".to_string(),
++        });
++    }
+     let history = match params.history {
+         Some(history)
+             if !matches!(
+@@ -218,6 +231,7 @@ pub(super) async fn discard_thread(
+ ) -> ThreadStoreResult<()> {
+     let mut pending_metadata = store.pending_thread_metadata.lock(thread_id).await;
+     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
++    store.check_thread_not_retired(thread_id).await?;
+     if pending_metadata.take().is_some() {
+         store.pending_thread_metadata.remove(thread_id).await;
+     }
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index ba62925be102f855f802eabfe39905d085a23542..e761d27839ce85e2bff06e00fc2e1ad58833a7ac 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -11,6 +11,7 @@ mod paginated_fork;
+ mod pending_thread_metadata;
+ mod projects;
+ mod read_thread;
++mod retired_owner;
+ mod revert_thread;
+ mod rollout_migration;
+ // This lands before the reader PRs that consume the shared lineage resolver.
+@@ -405,6 +406,7 @@ impl LocalThreadStore {
+         &self,
+         params: LoadThreadHistoryParams,
+     ) -> ThreadStoreResult<StoredThreadHistory> {
++        self.check_thread_not_retired(params.thread_id).await?;
+         if let Ok(rollout_path) = live_writer::rollout_path(self, params.thread_id).await {
+             if !params.include_archived
+                 && helpers::rollout_path_is_archived(
+@@ -513,6 +515,7 @@ impl ThreadStore for LocalThreadStore {
+                     message: "pending thread metadata cannot set rollout_path".to_string(),
+                 });
+             }
++            self.check_thread_not_retired(thread_id).await?;
+             self.pending_thread_metadata.stage(thread_id, patch).await
+         })
+     }
+@@ -2454,6 +2457,7 @@ impl LocalThreadStore {
+         &self,
+         params: LoadThreadHistoryParams,
+     ) -> ThreadStoreResult<Vec<crate::OriginalHistorySegment>> {
++        self.check_thread_not_retired(params.thread_id).await?;
+         let path = if let Ok(path) = live_writer::rollout_path(self, params.thread_id).await {
+             if !params.include_archived
+                 && helpers::rollout_path_is_archived(
+diff --git a/codex-rs/thread-store/src/local/paginated_fork.rs b/codex-rs/thread-store/src/local/paginated_fork.rs
+index 0b14091267769ac55b5751e20ddb6798196f2431..155603cc50ee32d63fb8f3b56514d8d5b9ab848d 100644
+--- a/codex-rs/thread-store/src/local/paginated_fork.rs
++++ b/codex-rs/thread-store/src/local/paginated_fork.rs
+@@ -21,6 +21,7 @@ pub(super) async fn prepare(
+         boundary,
+     } = params;
+     let source_reservation = store.live_writer_locks.reserve_lifecycle(thread_id).await;
++    store.check_thread_not_retired(thread_id).await?;
+     // Keep the source reserved until persistence and lineage materialization finish, even if the
+     // caller cancels fork preparation.
+     let lineage_store = store.clone();
+diff --git a/codex-rs/thread-store/src/local/read_thread.rs b/codex-rs/thread-store/src/local/read_thread.rs
+index 3401702d75d5ec4a454f92fee1f76484a8b49959..d784f79aabbadd2ba5ebc827894c3a4329b03f9b 100644
+--- a/codex-rs/thread-store/src/local/read_thread.rs
++++ b/codex-rs/thread-store/src/local/read_thread.rs
+@@ -33,6 +33,7 @@ pub(super) async fn read_thread(
+     params: ReadThreadParams,
+ ) -> ThreadStoreResult<StoredThread> {
+     let thread_id = params.thread_id;
++    store.check_thread_not_retired(thread_id).await?;
+     let sqlite_metadata = read_sqlite_metadata(store, thread_id).await;
+     let persisted_model_settings = sqlite_metadata
+         .as_ref()
+@@ -140,6 +141,7 @@ pub(super) async fn read_thread_by_rollout_path(
+ ) -> ThreadStoreResult<StoredThread> {
+     let path = resolve_requested_rollout_path(store, rollout_path).await?;
+     let mut thread = read_thread_from_rollout_path(store, path.clone()).await?;
++    store.check_thread_not_retired(thread.thread_id).await?;
+     if !include_archived && thread.archived_at.is_some() {
+         return Err(ThreadStoreError::InvalidRequest {
+             message: format!("thread {} is archived", thread.thread_id),
+diff --git a/codex-rs/thread-store/src/local/retired_owner.rs b/codex-rs/thread-store/src/local/retired_owner.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ba5a0d45eff9b8ea1139120c94b1fffc5f6a6f18
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/retired_owner.rs
+@@ -0,0 +1,50 @@
++//! Logical owner retirement; immutable shared rollout IDs remain readable by descendants.
++
++use codex_protocol::ThreadId;
++
++use super::LocalThreadStore;
++use crate::ThreadStoreError;
++use crate::ThreadStoreResult;
++
++impl LocalThreadStore {
++    /// Retires only the public owner. This does not promise physical erasure of shared data.
++    pub async fn retire_thread_owner(&self, thread_id: ThreadId) -> ThreadStoreResult<()> {
++        let _lifecycle = self.live_writer_locks.lock_lifecycle(thread_id).await;
++        let _writer = self.live_writer_locks.lock(thread_id).await;
++        self.ensure_live_recorder_absent(thread_id).await?;
++        let _writer_lock = self.acquire_writer_lock(thread_id)?;
++        let state = self.state_db().await.ok_or(ThreadStoreError::Unsupported {
++            operation: "retire_thread_owner",
++        })?;
++        if !state
++            .retire_thread_owner(thread_id)
++            .await
++            .map_err(|error| ThreadStoreError::Internal {
++                message: format!("failed to retire stored thread owner: {error}"),
++            })?
++        {
++            return Err(ThreadStoreError::ThreadNotFound { thread_id });
++        }
++        Ok(())
++    }
++
++    pub(super) async fn check_thread_not_retired(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreResult<()> {
++        if let Some(state) = self.state_db().await
++            && state.is_thread_retired(thread_id).await.map_err(|error| {
++                ThreadStoreError::Internal {
++                    message: format!("failed to read stored thread retirement: {error}"),
++                }
++            })?
++        {
++            return Err(ThreadStoreError::ThreadNotFound { thread_id });
++        }
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++#[path = "retired_owner_tests.rs"]
++mod tests;
+diff --git a/codex-rs/thread-store/src/local/retired_owner_tests.rs b/codex-rs/thread-store/src/local/retired_owner_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ca416f041c08ec23b345660f1cfb9e8da4d25037
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/retired_owner_tests.rs
+@@ -0,0 +1,295 @@
++use std::sync::Arc;
++use std::time::Duration;
++
++use codex_protocol::ThreadId;
++use codex_protocol::models::BaseInstructions;
++use codex_protocol::protocol::{SessionSource, ThreadHistoryMode, ThreadMemoryMode};
++use codex_rollout::RolloutItem;
++use codex_utils_absolute_path::test_support::PathExt;
++use tempfile::TempDir;
++
++use super::super::LocalThreadStore;
++use super::super::test_support::test_config;
++use crate::{
++    AppendThreadItemsParams, CreateThreadParams, DeleteThreadParams, ForkBoundary,
++    ListThreadsParams, LoadThreadHistoryParams, PersistContext, PrepareForkParams,
++    ReadThreadByRolloutPathParams, ReadThreadParams, ResumeThreadParams, SortDirection,
++    ThreadPersistenceMetadata, ThreadSortKey, ThreadStore,
++};
++
++fn metadata() -> ThreadPersistenceMetadata {
++    ThreadPersistenceMetadata {
++        cwd: Some(std::env::current_dir().unwrap()),
++        model_provider: "test-provider".to_string(),
++        memory_mode: ThreadMemoryMode::Disabled,
++    }
++}
++
++fn create(store: &LocalThreadStore, id: ThreadId) -> CreateThreadParams {
++    CreateThreadParams {
++        sdk_mcp_source_required: true,
++        creator_user_id: None,
++        creator_account_id: None,
++        session_id: id.into(),
++        thread_id: id,
++        extra_config: None,
++        forked_from_id: None,
++        parent_thread_id: None,
++        source: SessionSource::Exec,
++        thread_source: None,
++        originator: "retirement-test".to_string(),
++        base_instructions: BaseInstructions::default(),
++        dynamic_tools: Vec::new(),
++        selected_capability_roots: Vec::new(),
++        multi_agent_version: None,
++        history_mode: ThreadHistoryMode::Paginated,
++        history_base: None,
++        subagent_history_start_ordinal: None,
++        initial_window_id: "window-1".to_string(),
++        runtime_workspace_roots: Some(vec![store.config.codex_home.join("workspace").abs()]),
++        metadata: metadata(),
++    }
++}
++
++fn listing(archived: bool) -> ListThreadsParams {
++    ListThreadsParams {
++        page_size: 10,
++        cursor: None,
++        sort_key: ThreadSortKey::CreatedAt,
++        sort_direction: SortDirection::Asc,
++        allowed_sources: vec![SessionSource::Exec],
++        model_providers: Some(Vec::new()),
++        cwd_filters: None,
++        section: None,
++        project_id: None,
++        archived,
++        search_term: None,
++        relation_filter: None,
++        use_state_db_only: true,
++    }
++}
++
++#[tokio::test]
++async fn retirement_preserves_child_checkpoint_but_rejects_source_paths_and_id_reuse() {
++    let home = TempDir::new().unwrap();
++    let config = test_config(home.path());
++    let db = codex_state::StateRuntime::init(
++        config.sqlite.clone(),
++        config.default_model_provider_id.clone(),
++    )
++    .await
++    .unwrap();
++    let store = LocalThreadStore::new(config, Some(db));
++    let source = ThreadId::new();
++    store.create_thread(create(&store, source)).await.unwrap();
++    let message = serde_json::from_value(serde_json::json!({
++        "type":"message", "role":"user",
++        "content":[{"type":"input_text","text":"shared original 😀"}]
++    }))
++    .unwrap();
++    store
++        .append_items(AppendThreadItemsParams {
++            thread_id: source,
++            items: vec![RolloutItem::ResponseItem(message)],
++        })
++        .await
++        .unwrap();
++    store
++        .persist_thread(source, PersistContext::Standard)
++        .await
++        .unwrap();
++    let source_path = store.live_rollout_path(source).await.unwrap();
++    store.shutdown_thread(source).await.unwrap();
++    let prepared = store
++        .prepare_fork(PrepareForkParams {
++            thread_id: source,
++            boundary: ForkBoundary::Latest,
++        })
++        .await
++        .unwrap();
++    let child = ThreadId::new();
++    let mut child_params = create(&store, child);
++    child_params.forked_from_id = Some(source);
++    child_params.history_base = prepared.history_base;
++    store.create_thread(child_params).await.unwrap();
++    store
++        .persist_thread(child, PersistContext::Standard)
++        .await
++        .unwrap();
++    let child_path = store.live_rollout_path(child).await.unwrap();
++    store.shutdown_thread(child).await.unwrap();
++    drop(prepared);
++    let original = store
++        .load_original_history(LoadThreadHistoryParams {
++            thread_id: child,
++            include_archived: true,
++        })
++        .await
++        .unwrap();
++    let saved_child = Arc::new(
++        store
++            .load_latest_model_context(LoadThreadHistoryParams {
++                thread_id: child,
++                include_archived: true,
++            })
++            .await
++            .unwrap()
++            .items,
++    );
++    let saved_revision = super::super::history_revision::read(&child_path)
++        .await
++        .unwrap();
++    let source_bytes = tokio::fs::read(&source_path).await.unwrap();
++    let child_bytes = tokio::fs::read(&child_path).await.unwrap();
++    assert!(
++        store
++            .delete_thread(DeleteThreadParams { thread_id: source })
++            .await
++            .is_err()
++    );
++
++    // Same existing fork reservation order as archive/delete: no early owner retirement.
++    let reservation = store.live_writer_locks.reserve_lifecycle(source).await;
++    let mut retire = Box::pin(store.retire_thread_owner(source));
++    tokio::select! {
++        biased;
++        result = &mut retire => panic!("retirement passed a pending fork reservation: {result:?}"),
++        _ = tokio::task::yield_now() => {}
++    }
++    let writer = tokio::time::timeout(Duration::from_secs(1), store.live_writer_locks.lock(source))
++        .await
++        .expect("waiting retirement must not take the writer lock first");
++    drop(writer);
++    drop(reservation);
++    retire.await.unwrap();
++
++    assert_eq!(tokio::fs::read(&source_path).await.unwrap(), source_bytes);
++    assert_eq!(tokio::fs::read(&child_path).await.unwrap(), child_bytes);
++    assert_eq!(
++        super::super::history_revision::read(&child_path)
++            .await
++            .as_deref(),
++        Some(saved_revision.as_str())
++    );
++    assert!(
++        store
++            .read_thread(ReadThreadParams {
++                thread_id: source,
++                include_archived: true,
++                include_history: false
++            })
++            .await
++            .is_err()
++    );
++    assert!(
++        ThreadStore::read_thread_by_rollout_path(
++            &store,
++            ReadThreadByRolloutPathParams {
++                rollout_path: source_path.clone(),
++                include_archived: true,
++                include_history: false,
++            }
++        )
++        .await
++        .is_err()
++    );
++    assert!(
++        store
++            .resume_thread(ResumeThreadParams {
++                thread_id: source,
++                rollout_path: Some(source_path),
++                history: None,
++                history_revision: None,
++                include_archived: true,
++                metadata: metadata(),
++            })
++            .await
++            .is_err()
++    );
++    assert!(store.create_thread(create(&store, source)).await.is_err());
++    let page = store
++        .list_threads_including_empty_preview(listing(false))
++        .await
++        .unwrap();
++    assert_eq!(
++        page.items
++            .iter()
++            .map(|thread| thread.thread_id)
++            .collect::<Vec<_>>(),
++        vec![child]
++    );
++    assert!(
++        store
++            .list_threads_including_empty_preview(listing(true))
++            .await
++            .unwrap()
++            .items
++            .is_empty()
++    );
++    let cold = store
++        .load_original_history(LoadThreadHistoryParams {
++            thread_id: child,
++            include_archived: true,
++        })
++        .await
++        .unwrap();
++    assert_eq!(
++        serde_json::to_value(&cold.items).unwrap(),
++        serde_json::to_value(&original.items).unwrap()
++    );
++    let resumed = store
++        .resume_thread(ResumeThreadParams {
++            thread_id: child,
++            rollout_path: Some(child_path),
++            history: Some(saved_child.clone()),
++            history_revision: Some(saved_revision),
++            include_archived: true,
++            metadata: metadata(),
++        })
++        .await
++        .unwrap();
++    assert_eq!(
++        serde_json::to_value(&*resumed).unwrap(),
++        serde_json::to_value(&*saved_child).unwrap()
++    );
++    store.shutdown_thread(child).await.unwrap();
++}
++
++#[tokio::test]
++async fn supplied_history_cannot_resume_another_owners_retired_rollout() {
++    let home = TempDir::new().unwrap();
++    let config = test_config(home.path());
++    let db = codex_state::StateRuntime::init(
++        config.sqlite.clone(),
++        config.default_model_provider_id.clone(),
++    )
++    .await
++    .unwrap();
++    let store = LocalThreadStore::new(config, Some(db));
++    let source = ThreadId::new();
++    store.create_thread(create(&store, source)).await.unwrap();
++    store
++        .persist_thread(source, PersistContext::Standard)
++        .await
++        .unwrap();
++    let source_path = store.live_rollout_path(source).await.unwrap();
++    store.shutdown_thread(source).await.unwrap();
++    store.retire_thread_owner(source).await.unwrap();
++    let bytes = tokio::fs::read(&source_path).await.unwrap();
++    let error = store
++        .resume_thread(ResumeThreadParams {
++            thread_id: ThreadId::new(),
++            rollout_path: Some(source_path.clone()),
++            history: Some(Arc::new(Vec::new())),
++            history_revision: None,
++            include_archived: true,
++            metadata: metadata(),
++        })
++        .await
++        .unwrap_err();
++    assert!(matches!(
++        error,
++        crate::ThreadStoreError::InvalidRequest { .. }
++    ));
++    assert_eq!(tokio::fs::read(&source_path).await.unwrap(), bytes);
++}
+diff --git a/codex-rs/thread-store/src/local/revert_thread.rs b/codex-rs/thread-store/src/local/revert_thread.rs
+index ca44c96bc10d44fcecbcf64e32e284ca843dc485..661e278cc7f205f17eb6e891840a04e0fec9a4ea 100644
+--- a/codex-rs/thread-store/src/local/revert_thread.rs
++++ b/codex-rs/thread-store/src/local/revert_thread.rs
+@@ -33,8 +33,10 @@ pub(super) async fn revert(
+         })?;
+     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
+     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
++    store.check_thread_not_retired(thread_id).await?;
+     store.ensure_live_recorder_absent(thread_id).await?;
+     let writer_lock = store.acquire_writer_lock(thread_id)?;
++    store.check_thread_not_retired(thread_id).await?;
+ 
+     // Resolution may return a compressed sibling. Keep SQLite's exact stored path for the CAS.
+     let stored_metadata = state_db
+diff --git a/codex-rs/thread-store/src/local/rollout_lineage.rs b/codex-rs/thread-store/src/local/rollout_lineage.rs
+index 556ca03767bc97a75c05cb97afe6e76c4d7e4592..3ebc84d981cf0fe3be8b91cc8e76c48095f9a6ef 100644
+--- a/codex-rs/thread-store/src/local/rollout_lineage.rs
++++ b/codex-rs/thread-store/src/local/rollout_lineage.rs
+@@ -61,6 +61,8 @@ impl LocalThreadStore {
+         representation: LineageRepresentation,
+         mut initial_path: Option<PathBuf>,
+     ) -> ThreadStoreResult<RolloutLineage> {
++        // Only the requested logical owner is gated; ancestor rollout IDs stay usable.
++        self.check_thread_not_retired(requested_thread_id).await?;
+         let mut segments = Vec::new();
+         let mut seen = HashSet::new();
+         let mut next_rollout_id = None;
+diff --git a/codex-rs/thread-store/src/local/thread_rollout_resolver.rs b/codex-rs/thread-store/src/local/thread_rollout_resolver.rs
+index 5fad0edd5074f570fb1d706b24f42f2383a339b2..12aaa12179bde647f7bf5331ead9bb56ca44cc50 100644
+--- a/codex-rs/thread-store/src/local/thread_rollout_resolver.rs
++++ b/codex-rs/thread-store/src/local/thread_rollout_resolver.rs
+@@ -75,6 +75,7 @@ async fn resolve(
+     thread_id: ThreadId,
+     scope: LookupScope,
+ ) -> ThreadStoreResult<Option<ResolvedThreadRollout>> {
++    store.check_thread_not_retired(thread_id).await?;
+     if let Ok(path) = live_writer::rollout_path(store, thread_id).await
+         && codex_rollout::existing_rollout_path(path.as_path())
+             .await
+diff --git a/codex-rs/thread-store/src/local/update_thread_metadata.rs b/codex-rs/thread-store/src/local/update_thread_metadata.rs
+index 393513eb996323a08231e6d6d0265b3f24c55233..8771c096c785ee2c463b6b0323d54e321b60af76 100644
+--- a/codex-rs/thread-store/src/local/update_thread_metadata.rs
++++ b/codex-rs/thread-store/src/local/update_thread_metadata.rs
+@@ -40,6 +40,8 @@ pub(super) async fn update_thread_metadata(
+     params: UpdateThreadMetadataParams,
+ ) -> ThreadStoreResult<StoredThread> {
+     let thread_id = params.thread_id;
++    let _lifecycle = store.live_writer_locks.reserve_lifecycle(thread_id).await;
++    store.check_thread_not_retired(thread_id).await?;
+     let mut pending_metadata = store.pending_thread_metadata.lock(thread_id).await;
+     let pending_patch = pending_metadata
+         .as_ref()

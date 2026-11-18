@@ -1,0 +1,1211 @@
+diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
+index d1b0ab89756d38579d0d976ee72a5ee80cc216f2..09731cd0dfd6a92334913baa44b1bfe8a54d2047 100644
+--- a/codex-rs/app-server/src/bespoke_event_handling.rs
++++ b/codex-rs/app-server/src/bespoke_event_handling.rs
+@@ -1582,7 +1582,9 @@ async fn handle_token_count_event(
+     token_count_event: TokenCountEvent,
+     outgoing: &ThreadScopedOutgoingMessageSender,
+ ) {
+-    let TokenCountEvent { info, rate_limits } = token_count_event;
++    let TokenCountEvent {
++        info, rate_limits, ..
++    } = token_count_event;
+     if let Some(token_usage) = info.map(ThreadTokenUsage::from) {
+         let notification = ThreadTokenUsageUpdatedNotification {
+             thread_id: conversation_id.to_string(),
+@@ -3699,6 +3701,7 @@ mod tests {
+             conversation_id,
+             turn_id.clone(),
+             TokenCountEvent {
++                api_rate_limits: None,
+                 info: Some(info),
+                 rate_limits: Some(rate_limits),
+             },
+@@ -3752,6 +3755,7 @@ mod tests {
+             conversation_id,
+             turn_id.clone(),
+             TokenCountEvent {
++                api_rate_limits: None,
+                 info: None,
+                 rate_limits: None,
+             },
+diff --git a/codex-rs/app-server/src/request_processors/token_usage_replay.rs b/codex-rs/app-server/src/request_processors/token_usage_replay.rs
+index c6d21f4cfe5370e563d6d440e3bb74784c74d359..d947a858fc9cb110a060dab9f98d3994b19edf4f 100644
+--- a/codex-rs/app-server/src/request_processors/token_usage_replay.rs
++++ b/codex-rs/app-server/src/request_processors/token_usage_replay.rs
+@@ -181,6 +181,7 @@ mod tests {
+                 questions: None,
+             })),
+             RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
++                api_rate_limits: None,
+                 info: None,
+                 rate_limits: None,
+             })),
+diff --git a/codex-rs/app-server/tests/common/rollout.rs b/codex-rs/app-server/tests/common/rollout.rs
+index 75a48b59872c6bb0a3f1ccc5765ad07911306660..7ee53240ffb4ce3855376106b4e3214d774a4690 100644
+--- a/codex-rs/app-server/tests/common/rollout.rs
++++ b/codex-rs/app-server/tests/common/rollout.rs
+@@ -115,6 +115,7 @@ pub fn create_fake_rollout_with_token_usage(
+         /*git_info*/ None,
+     )?;
+     let payload = serde_json::to_value(EventMsg::TokenCount(TokenCountEvent {
++        api_rate_limits: None,
+         info: Some(TokenUsageInfo {
+             total_token_usage: TokenUsage {
+                 input_tokens: 120,
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
+index 6f58231e30fd1d2ecbfa440f8c84a5cb39435c18..8b11f9a39355e0024633dacb16b57040babba042 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
+@@ -3927,6 +3927,7 @@ async fn cold_paginated_resume_restores_usage_without_loading_turns() -> Result<
+     append_rollout_item_to_path(
+         &path,
+         &RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
++            api_rate_limits: None,
+             info: Some(TokenUsageInfo {
+                 total_token_usage: TokenUsage {
+                     input_tokens: 120,
+@@ -4008,6 +4009,7 @@ async fn cold_paginated_resume_omits_usage_when_its_turn_is_ambiguous() -> Resul
+     append_rollout_item_to_path(
+         &path,
+         &RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
++            api_rate_limits: None,
+             info: Some(TokenUsageInfo {
+                 total_token_usage: TokenUsage {
+                     total_tokens: 150,
+@@ -4284,6 +4286,7 @@ async fn thread_resume_token_usage_replay_can_belong_to_interrupted_turn() -> Re
+             "timestamp": meta_rfc3339,
+             "type": "event_msg",
+             "payload": serde_json::to_value(EventMsg::TokenCount(TokenCountEvent {
++                api_rate_limits: None,
+                 info: Some(TokenUsageInfo {
+                     total_token_usage: TokenUsage {
+                         input_tokens: 180,
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+index abf0bf0d7041d3ce2c5b3e4a5f8f5535e064e31b..fce0f0cdd0ed3af1607e6907653e63d6d4134dc4 100644
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -1,4 +1,5 @@
+ use crate::TransportError;
++use crate::api_rate_limits::parse_api_rate_limits;
+ use crate::error::ApiError;
+ use crate::error::parse_flex_unavailable;
+ use crate::rate_limits::parse_promo_message;
+@@ -40,11 +41,20 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
+         | ApiError::BioPolicy { .. }
+         | ApiError::MisalignmentPolicyViolation { .. } => None,
+     };
+-    let error = map_api_error_details(err);
+-    match retry_after {
+-        Some(retry_after) => error.with_retry_after(retry_after),
+-        None => error,
++    let api_rate_limits = match &err {
++        ApiError::Transport(TransportError::Http { headers, .. }) => {
++            headers.as_ref().and_then(parse_api_rate_limits)
++        }
++        _ => None,
++    };
++    let mut error = map_api_error_details(err);
++    if let Some(retry_after) = retry_after {
++        error = error.with_retry_after(retry_after);
++    }
++    if let Some(snapshot) = api_rate_limits {
++        error = error.with_api_rate_limits(snapshot);
+     }
++    error
+ }
+ 
+ fn map_api_error_details(err: ApiError) -> CodexErr {
+diff --git a/codex-rs/codex-api/src/api_rate_limits.rs b/codex-rs/codex-api/src/api_rate_limits.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7bec674e43676bcc3a77aed1fc50c0785738b9f
+--- /dev/null
++++ b/codex-rs/codex-api/src/api_rate_limits.rs
+@@ -0,0 +1,116 @@
++//! Reads only documented API rate-limit and retry fields from a provider response.
++
++use codex_http_client::RetryAfter;
++use codex_protocol::protocol::ApiRateLimitWindow;
++use codex_protocol::protocol::ApiRateLimits;
++use http::HeaderMap;
++use regex_lite::Regex;
++use std::sync::OnceLock;
++
++pub(crate) fn parse_api_rate_limits(headers: &HeaderMap) -> Option<ApiRateLimits> {
++    let snapshot = ApiRateLimits {
++        requests: parse_window(headers, "requests"),
++        tokens: parse_window(headers, "tokens"),
++        project_tokens: parse_window(headers, "project-tokens"),
++        retry_after: header(headers, "retry-after")
++            .filter(|value| value.len() <= 64 && RetryAfter::from_header(value).is_some())
++            .map(str::to_owned),
++    };
++    (snapshot != ApiRateLimits::default()).then_some(snapshot)
++}
++
++fn parse_window(headers: &HeaderMap, unit: &str) -> Option<ApiRateLimitWindow> {
++    let window = ApiRateLimitWindow {
++        limit: count(headers, &format!("x-ratelimit-limit-{unit}")),
++        remaining: count(headers, &format!("x-ratelimit-remaining-{unit}")),
++        reset_after: header(headers, &format!("x-ratelimit-reset-{unit}"))
++            .filter(|value| is_duration(value))
++            .map(str::to_owned),
++    };
++    (window != ApiRateLimitWindow::default()).then_some(window)
++}
++
++fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
++    let value = headers.get(name)?.to_str().ok()?.trim();
++    (!value.is_empty()).then_some(value)
++}
++
++fn count(headers: &HeaderMap, name: &str) -> Option<u64> {
++    let value = header(headers, name)?;
++    if !value.bytes().all(|byte| byte.is_ascii_digit()) {
++        return None;
++    }
++    value.parse().ok()
++}
++
++#[expect(clippy::expect_used, reason = "the duration expression is fixed")]
++fn is_duration(value: &str) -> bool {
++    static DURATION: OnceLock<Regex> = OnceLock::new();
++    value.len() <= 64
++        && DURATION
++            .get_or_init(|| {
++                Regex::new(r"\A(?:[0-9]+(?:\.[0-9]+)?(?:ms|us|ns|h|m|s))+\z")
++                    .expect("valid duration expression")
++            })
++            .is_match(value)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use http::HeaderValue;
++
++    #[test]
++    fn projects_only_valid_rate_limit_fields() {
++        let mut headers = HeaderMap::new();
++        headers.insert(
++            "authorization",
++            HeaderValue::from_static("Bearer fake-secret"),
++        );
++        headers.insert(
++            "x-ratelimit-limit-tokens",
++            HeaderValue::from_static("invalid"),
++        );
++        headers.insert(
++            "x-ratelimit-reset-requests",
++            HeaderValue::from_static("fake-secret"),
++        );
++        headers.insert("retry-after", HeaderValue::from_static("fake-secret"));
++        assert_eq!(parse_api_rate_limits(&headers), None);
++
++        headers.insert(
++            "x-ratelimit-limit-requests",
++            HeaderValue::from_static("120"),
++        );
++        headers.insert(
++            "x-ratelimit-remaining-requests",
++            HeaderValue::from_static("0"),
++        );
++        headers.insert("x-ratelimit-reset-tokens", HeaderValue::from_static("6m0s"));
++        headers.insert(
++            "x-ratelimit-reset-project-tokens",
++            HeaderValue::from_static("1.25s"),
++        );
++        headers.insert("retry-after", HeaderValue::from_static("56"));
++
++        assert_eq!(
++            parse_api_rate_limits(&headers),
++            Some(ApiRateLimits {
++                requests: Some(ApiRateLimitWindow {
++                    limit: Some(120),
++                    remaining: Some(0),
++                    reset_after: None,
++                }),
++                tokens: Some(ApiRateLimitWindow {
++                    reset_after: Some("6m0s".to_string()),
++                    ..Default::default()
++                }),
++                project_tokens: Some(ApiRateLimitWindow {
++                    reset_after: Some("1.25s".to_string()),
++                    ..Default::default()
++                }),
++                retry_after: Some("56".to_string()),
++            }),
++        );
++    }
++}
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index 42c9fecd1a3065cf1729ce7b53f017fe1dbac53c..14a0d6bc11c7421892c572b5be030e1e4a1a9314 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -4,6 +4,7 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
+ use codex_protocol::config_types::Verbosity as VerbosityConfig;
+ use codex_protocol::models::ResponseItem;
+ use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
++use codex_protocol::protocol::ApiRateLimits;
+ use codex_protocol::protocol::ModelVerification;
+ use codex_protocol::protocol::RateLimitSnapshot;
+ use codex_protocol::protocol::TokenUsage;
+@@ -128,6 +129,7 @@ pub enum ResponseEvent {
+         summary_index: i64,
+     },
+     RateLimits(RateLimitSnapshot),
++    ApiRateLimits(ApiRateLimits),
+     ModelsEtag(String),
+ }
+ 
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 9e79edda926c5c5a8d233d56162705451931d0c4..794b4d0a99b8767f7a2b7a1f1b766aab72ae0cd2 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -1,3 +1,4 @@
++use crate::api_rate_limits::parse_api_rate_limits;
+ use crate::auth::SharedAuthProvider;
+ use crate::common::ResponseEvent;
+ use crate::common::ResponseStream;
+@@ -15,6 +16,7 @@ use crate::telemetry::WebsocketTelemetry;
+ use codex_client::TransportError;
+ use codex_http_client::HttpClientFactory;
+ use codex_http_client::RetryAfter;
++use codex_protocol::protocol::ApiRateLimits;
+ use codex_websocket_client::WebSocketConnection;
+ use codex_websocket_client::WebSocketConnector;
+ use futures::FutureExt;
+@@ -51,6 +53,7 @@ struct WsStream {
+     tx_command: mpsc::Sender<WsCommand>,
+     rx_message: mpsc::UnboundedReceiver<Result<Message, WsError>>,
+     pump_task: tokio::task::JoinHandle<()>,
++    upgrade_rate_limits: Option<ApiRateLimits>,
+ }
+ 
+ enum WsCommand {
+@@ -61,7 +64,7 @@ enum WsCommand {
+ }
+ 
+ impl WsStream {
+-    fn new(inner: WebSocketConnection) -> Self {
++    fn new(inner: WebSocketConnection, upgrade_rate_limits: Option<ApiRateLimits>) -> Self {
+         let (tx_command, mut rx_command) = mpsc::channel::<WsCommand>(32);
+         let (tx_message, rx_message) = mpsc::unbounded_channel::<Result<Message, WsError>>();
+ 
+@@ -122,6 +125,7 @@ impl WsStream {
+             tx_command,
+             rx_message,
+             pump_task,
++            upgrade_rate_limits,
+         }
+     }
+ 
+@@ -311,6 +315,14 @@ impl ResponsesWebsocketConnection {
+                         return;
+                     };
+ 
++                    if !timing_log_context.warmup
++                        && let Some(snapshot) = ws_stream.upgrade_rate_limits.take()
++                    {
++                        let _ = tx_event
++                            .send(Ok(ResponseEvent::ApiRateLimits(snapshot)))
++                            .await;
++                    }
++
+                     tokio::select! {
+                         biased;
+                         result = run_websocket_response_stream(
+@@ -540,7 +552,7 @@ async fn connect_websocket(
+         let _ = turn_state.set(header_value.to_string());
+     }
+     Ok((
+-        WsStream::new(stream),
++        WsStream::new(stream, parse_api_rate_limits(response.headers())),
+         response.status(),
+         reasoning_included,
+         server_model,
+@@ -768,6 +780,11 @@ async fn run_websocket_response_stream(
+                 {
+                     let _ = turn_state.set(response_turn_state);
+                 }
++                if let Some(snapshot) = event.api_rate_limits() {
++                    let _ = tx_event
++                        .send(Ok(ResponseEvent::ApiRateLimits(snapshot)))
++                        .await;
++                }
+                 let model_verifications = event.model_verifications();
+                 let turn_moderation_metadata = event.turn_moderation_metadata();
+                 let safety_buffering =
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index b7511d9e50f4b4eb02a32908be1ec3c88bf48df0..ce0ed21cec52b9ebd98ed82711cf7eafc83000af 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -1,4 +1,5 @@
+ pub(crate) mod api_bridge;
++mod api_rate_limits;
+ pub(crate) mod auth;
+ pub(crate) mod common;
+ pub(crate) mod endpoint;
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index b9739289d123239f3e6670b1f2aad39d1af096d7..ab5901be538752cc4af26d078b866a5b1da26fe3 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -1,4 +1,5 @@
+ use super::responses_error::parse_failed_response;
++use crate::api_rate_limits::parse_api_rate_limits;
+ use crate::common::ResponseEvent;
+ use crate::common::ResponseStream;
+ use crate::common::SafetyBuffering;
+@@ -6,12 +7,14 @@ use crate::common::SafetyBufferingTreatment;
+ use crate::error::ApiError;
+ use crate::error::parse_flex_unavailable;
+ use crate::rate_limits::parse_all_rate_limits;
++use crate::responses_headers::json_headers_to_http_headers;
+ use crate::safety_buffering::treatment_from_headers;
+ use crate::telemetry::SseTelemetry;
+ use codex_client::ByteStream;
+ use codex_client::StreamResponse;
+ use codex_protocol::ResponseUsageMetadata;
+ use codex_protocol::models::ResponseItem;
++use codex_protocol::protocol::ApiRateLimits;
+ use codex_protocol::protocol::ModelVerification;
+ use codex_protocol::protocol::TokenUsage;
+ use codex_protocol::protocol::TurnModerationMetadataEvent;
+@@ -41,6 +44,7 @@ pub fn spawn_response_stream(
+     turn_state: Option<Arc<OnceLock<String>>>,
+ ) -> ResponseStream {
+     let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
++    let api_rate_limits = parse_api_rate_limits(&stream_response.headers);
+     let models_etag = stream_response
+         .headers
+         .get("X-Models-Etag")
+@@ -78,6 +82,11 @@ pub fn spawn_response_stream(
+         for snapshot in rate_limit_snapshots {
+             let _ = tx_event.send(Ok(ResponseEvent::RateLimits(snapshot))).await;
+         }
++        if let Some(snapshot) = api_rate_limits {
++            let _ = tx_event
++                .send(Ok(ResponseEvent::ApiRateLimits(snapshot)))
++                .await;
++        }
+         if let Some(etag) = models_etag {
+             let _ = tx_event.send(Ok(ResponseEvent::ModelsEtag(etag))).await;
+         }
+@@ -207,6 +216,23 @@ impl ResponsesStreamEvent {
+         }
+     }
+ 
++    pub(crate) fn api_rate_limits(&self) -> Option<ApiRateLimits> {
++        let response_headers = self
++            .response
++            .as_ref()
++            .and_then(|response| response.get("headers"));
++        let error_headers = self
++            .response
++            .as_ref()
++            .and_then(|response| response.get("error"))
++            .and_then(|error| error.get("headers"));
++        [error_headers, response_headers, self.headers.as_ref()]
++            .into_iter()
++            .flatten()
++            .filter_map(Value::as_object)
++            .find_map(|headers| parse_api_rate_limits(&json_headers_to_http_headers(headers)))
++    }
++
+     pub(crate) fn turn_state(&self) -> Option<String> {
+         if self.kind() != "response.metadata" {
+             return None;
+@@ -350,13 +376,21 @@ pub fn process_responses_event(
+                 return Err(ResponsesEventError::Api(error));
+             }
+         }
+-        "response.output_item.done" => {
+-            if let Some(item_val) = event.item {
+-                if let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) {
+-                    return Ok(Some(ResponseEvent::OutputItemDone(item)));
+-                }
+-                debug!("failed to parse ResponseItem from output_item.done");
+-            }
++        "response.output_item.done" | "response.output_item.added" => {
++            let item = event
++                .item
++                .and_then(|value| serde_json::from_value::<ResponseItem>(value).ok())
++                .ok_or_else(|| {
++                    ResponsesEventError::Api(ApiError::InvalidRequest {
++                        message: "Native model response ended without complete supported output"
++                            .to_string(),
++                    })
++                })?;
++            return Ok(Some(if event.kind == "response.output_item.done" {
++                ResponseEvent::OutputItemDone(item)
++            } else {
++                ResponseEvent::OutputItemAdded(item)
++            }));
+         }
+         "response.output_text.delta" => {
+             if let Some(delta) = event.delta {
+@@ -462,14 +496,6 @@ pub fn process_responses_event(
+                 }
+             }
+         }
+-        "response.output_item.added" => {
+-            if let Some(item_val) = event.item {
+-                if let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) {
+-                    return Ok(Some(ResponseEvent::OutputItemAdded(item)));
+-                }
+-                debug!("failed to parse ResponseItem from output_item.added");
+-            }
+-        }
+         "response.reasoning_summary_part.added" => {
+             if let Some(summary_index) = event.summary_index {
+                 return Ok(Some(ResponseEvent::ReasoningSummaryPartAdded {
+@@ -585,6 +611,14 @@ async fn process_sse_with_treatment(
+                 continue;
+             }
+         };
++        if let Some(snapshot) = event.api_rate_limits()
++            && tx_event
++                .send(Ok(ResponseEvent::ApiRateLimits(snapshot)))
++                .await
++                .is_err()
++        {
++            return;
++        }
+         let model_verifications = event.model_verifications();
+         let turn_moderation_metadata = event.turn_moderation_metadata();
+         let safety_buffering = event.safety_buffering(&safety_buffering_treatment);
+@@ -639,7 +673,10 @@ async fn process_sse_with_treatment(
+             Ok(None) => {}
+             Err(error) => {
+                 let error = error.into_api_error();
+-                if matches!(error, ApiError::FlexUnavailable) {
++                if matches!(
++                    error,
++                    ApiError::FlexUnavailable | ApiError::InvalidRequest { .. }
++                ) {
+                     let _ = tx_event.send(Err(error)).await;
+                     return;
+                 }
+@@ -699,6 +736,112 @@ mod tests {
+         events
+     }
+ 
++    #[test]
++    fn undecodable_output_items_fail_without_exposing_payload() {
++        for kind in ["response.output_item.added", "response.output_item.done"] {
++            let text: ResponsesStreamEvent = serde_json::from_value(json!({
++                "type": "response.output_item.done",
++                "item": {"type": "message", "role": "assistant", "content": [
++                    {"type": "output_text", "text": "earlier commentary"}
++                ]}
++            }))
++            .unwrap();
++            assert_matches!(
++                process_responses_event(text),
++                Ok(Some(ResponseEvent::OutputItemDone(_)))
++            );
++            let invalid: ResponsesStreamEvent = serde_json::from_value(json!({
++                "type": kind,
++                "item": {"type": "message", "id": "private-item-id", "role": "assistant", "content": [
++                    {"type": "refusal", "refusal": "private-refusal-payload"}
++                ]}
++            })).unwrap();
++            let error = process_responses_event(invalid)
++                .unwrap_err()
++                .into_api_error();
++            assert_matches!(&error, ApiError::InvalidRequest { message }
++                if message == "Native model response ended without complete supported output");
++            assert!(!format!("{error:?}").contains("private"));
++        }
++    }
++
++    #[test]
++    fn missing_or_null_known_output_items_fail_without_payload() {
++        for kind in ["response.output_item.added", "response.output_item.done"] {
++            for event in [json!({"type": kind}), json!({"type": kind, "item": null})] {
++                let error = process_responses_event(serde_json::from_value(event).unwrap())
++                    .unwrap_err()
++                    .into_api_error();
++                assert_matches!(error, ApiError::InvalidRequest { message }
++                    if message == "Native model response ended without complete supported output");
++            }
++        }
++    }
++
++    #[test]
++    fn supported_output_and_unknown_events_keep_existing_parser_behavior() {
++        for kind in ["response.output_item.added", "response.output_item.done"] {
++            for text in ["ordinary text", "", " \n\t "] {
++                let event = serde_json::from_value(json!({
++                    "type": kind,
++                    "item": {"type": "message", "role": "assistant", "content": [
++                        {"type": "output_text", "text": text}
++                    ]}
++                }))
++                .unwrap();
++                assert!(process_responses_event(event).unwrap().is_some());
++            }
++            let tool = serde_json::from_value(json!({
++                "type": kind,
++                "item": {"type": "function_call", "call_id": "call", "name": "lookup", "arguments": "{}"}
++            })).unwrap();
++            assert!(process_responses_event(tool).unwrap().is_some());
++        }
++        let unknown = serde_json::from_value(json!({
++            "type": "response.future_event", "item": {"private": "ignored"}
++        }))
++        .unwrap();
++        assert!(process_responses_event(unknown).unwrap().is_none());
++    }
++
++    #[tokio::test]
++    async fn undecodable_output_is_terminal_before_later_completion_or_tool() {
++        for kind in ["response.output_item.added", "response.output_item.done"] {
++            for item in [
++                None,
++                Some(Value::Null),
++                Some(json!({
++                    "type": "message", "role": "assistant", "content": [
++                        {"type": "refusal", "refusal": "private-refusal-payload"}
++                    ]
++                })),
++            ] {
++                let mut invalid = json!({"type": kind});
++                if let Some(item) = item {
++                    invalid["item"] = item;
++                }
++                let events = [
++                    json!({"type": "response.output_text.delta", "delta": "earlier commentary"}),
++                    invalid,
++                    json!({"type": "response.output_item.done", "item": {
++                        "type": "function_call", "call_id": "late-call", "name": "lookup", "arguments": "{}"
++                    }}),
++                    json!({"type": "response.completed", "response": {"id": "response"}}),
++                ];
++                let body = events
++                    .iter()
++                    .map(|event| format!("data: {event}\n\n"))
++                    .collect::<String>();
++                let results = collect_events(&[body.as_bytes()]).await;
++                assert_eq!(results.len(), 2);
++                assert_matches!(&results[0], Ok(ResponseEvent::OutputTextDelta(text)) if text == "earlier commentary");
++                assert_matches!(&results[1], Err(ApiError::InvalidRequest { message })
++                    if message == "Native model response ended without complete supported output");
++                assert!(!format!("{:?}", results[1]).contains("private-refusal-payload"));
++            }
++        }
++    }
++
+     async fn run_sse(events: Vec<serde_json::Value>) -> Vec<ResponseEvent> {
+         let mut body = String::new();
+         for e in events {
+diff --git a/codex-rs/codex-api/src/sse/responses_error.rs b/codex-rs/codex-api/src/sse/responses_error.rs
+index 890f45ab6bc4c54e958fae3ffbb3403ecf9bd149..12df487a9d91ac7f6ea63ebc8929e57b659b69dc 100644
+--- a/codex-rs/codex-api/src/sse/responses_error.rs
++++ b/codex-rs/codex-api/src/sse/responses_error.rs
+@@ -50,7 +50,8 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
+             "insufficient_quota"
+             | "credit_balance_exhausted"
+             | "organization_spend_limit_exceeded"
+-            | "project_spend_limit_exceeded",
++            | "project_spend_limit_exceeded"
++            | "organization_usage_limit_exceeded",
+         ) => ApiError::QuotaExceeded,
+         Some("usage_not_included") => ApiError::UsageNotIncluded,
+         Some("cyber_policy") => ApiError::CyberPolicy {
+diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+index aeeb4cecac9ad34a4849b6aa026b1d58d5914be8..c426ada810d0e2d82509497c6efa91305a350d8a 100644
+--- a/codex-rs/codex-api/src/sse/responses_error_tests.rs
++++ b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+@@ -45,7 +45,7 @@ async fn flex_failure_with_retry_header_ends_stream_immediately() {
+         );
+         let error = loop {
+             match stream.next().await {
+-                Some(Ok(ResponseEvent::RateLimits(_))) => {}
++                Some(Ok(ResponseEvent::RateLimits(_) | ResponseEvent::ApiRateLimits(_))) => {}
+                 Some(Err(error)) => break map_api_error(error),
+                 event => panic!("expected a Flex error, got {event:?}"),
+             }
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 83f9774074a1adfcaf1a7ab8db4f751e7cfe61cc..1bf878b5ae6c0fdfe832a4249180257a5af8c188 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -792,6 +792,9 @@ async fn drain_to_completed(
+             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
+                 sess.set_server_reasoning_included(included).await;
+             }
++            Ok(ResponseEvent::ApiRateLimits(snapshot)) => {
++                sess.emit_api_rate_limits(turn_context, snapshot).await;
++            }
+             Ok(ResponseEvent::RateLimits(snapshot)) => {
+                 sess.update_rate_limits(turn_context, snapshot).await;
+             }
+diff --git a/codex-rs/core/src/session/guardian_checkpoint.rs b/codex-rs/core/src/session/guardian_checkpoint.rs
+index 918e005e70840508457f0371e450a0edfb615e5c..127050493e56edbe1b367d272beecf6e4f4307ac 100644
+--- a/codex-rs/core/src/session/guardian_checkpoint.rs
++++ b/codex-rs/core/src/session/guardian_checkpoint.rs
+@@ -34,6 +34,7 @@ impl Session {
+         }
+         items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+             TokenCountEvent {
++                api_rate_limits: None,
+                 info: history.token_info(),
+                 rate_limits: None,
+             },
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 7b14f934c972ac163040c7371f715b9943a954b0..5256df2414b06a51fa02dec61fb588304c92968c 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -360,6 +360,7 @@ use codex_protocol::models::LocalImagePreparation;
+ use codex_protocol::models::ResponseInputItem;
+ use codex_protocol::models::ResponseItem;
+ use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
++use codex_protocol::protocol::ApiRateLimits;
+ use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
+ use codex_protocol::protocol::AskForApproval;
+ use codex_protocol::protocol::CodexErrorInfo;
+@@ -4842,10 +4843,32 @@ impl Session {
+             let state = self.state.lock().await;
+             state.token_info_and_rate_limits()
+         };
+-        let event = EventMsg::TokenCount(TokenCountEvent { info, rate_limits });
++        let event = EventMsg::TokenCount(TokenCountEvent {
++            info,
++            rate_limits,
++            api_rate_limits: None,
++        });
+         self.send_event(turn_context, event).await;
+     }
+ 
++    pub(crate) async fn emit_api_rate_limits(
++        &self,
++        turn_context: &TurnContext,
++        snapshot: ApiRateLimits,
++    ) {
++        // Response headers describe live provider state and are not retained usage.
++        let event = Event {
++            id: turn_context.sub_id.clone(),
++            msg: EventMsg::TokenCount(TokenCountEvent {
++                info: None,
++                rate_limits: None,
++                api_rate_limits: Some(snapshot),
++            }),
++        };
++        self.send_event_raw_with_persistence(event, /*persist*/ false)
++            .await;
++    }
++
+     pub(crate) async fn set_total_tokens_full(&self, turn_context: &TurnContext) {
+         if let Some(context_window) = turn_context.model_context_window() {
+             let mut state = self.state.lock().await;
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 8e13dbf102466ef98ce6e04bcd450f1760860c16..ced8b3c2e8c38f51b45805ad46294709f92f763b 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -3339,24 +3339,28 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
+ 
+     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+         TokenCountEvent {
++            api_rate_limits: None,
+             info: Some(info1),
+             rate_limits: None,
+         },
+     )));
+     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+         TokenCountEvent {
++            api_rate_limits: None,
+             info: None,
+             rate_limits: None,
+         },
+     )));
+     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+         TokenCountEvent {
++            api_rate_limits: None,
+             info: Some(info2.clone()),
+             rate_limits: None,
+         },
+     )));
+     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+         TokenCountEvent {
++            api_rate_limits: None,
+             info: None,
+             rate_limits: None,
+         },
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index d92917472cc237275aef5aad22ce044e540b7964..9e69213389900476db621915bfac113669042d89 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -409,6 +409,7 @@ pub(crate) async fn run_turn(
+ 
+     let mut last_agent_message: Option<String> = None;
+     let mut stop_hook_active = false;
++    let mut completion_continuations = 0;
+     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
+     // many turns, from the perspective of the user, it is a single turn.
+     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(
+@@ -562,19 +563,62 @@ pub(crate) async fn run_turn(
+                 can_drain_pending_input = true;
+                 // Process async hooks only after sampling and its tools have finished.
+                 drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ false).await;
+-                let (has_pending_input, token_status) = async {
+-                    let has_pending_input =
+-                        sess.input_queue.has_pending_input(&sess.active_turn).await;
+-                    let token_status = super::context_window::context_window_token_status(
+-                        sess.as_ref(),
+-                        turn_context.as_ref(),
+-                    )
+-                    .await;
+-                    (has_pending_input, token_status)
++                let has_pending_input = sess.input_queue.has_pending_input(&sess.active_turn).await;
++                let mut needs_follow_up = model_needs_follow_up || has_pending_input;
++                if !needs_follow_up {
++                    for contributor in sess.services.extensions.turn_lifecycle_contributors() {
++                        let feedback = contributor
++                            .before_turn_complete(codex_extension_api::TurnCompletionInput {
++                                turn_id: &turn_context.sub_id,
++                                model: &step_context.settings.model_info.slug,
++                                last_assistant_message: sampling_request_last_agent_message
++                                    .as_deref(),
++                                continuation_count: completion_continuations,
++                                thread_store: &sess.services.thread_extension_data,
++                                turn_store: turn_context.extension_data.as_ref(),
++                            })
++                            .or_cancel(&cancellation_token)
++                            .await?
++                            .map_err(CodexErr::InvalidRequest)?;
++                        if cancellation_token.is_cancelled() {
++                            return Err(CodexErr::TurnAborted);
++                        }
++                        if let Some(feedback) = feedback {
++                            let item = build_hook_prompt_message(&[
++                                codex_protocol::items::HookPromptFragment::from_single_hook(
++                                    feedback,
++                                    uuid::Uuid::new_v4().to_string(),
++                                ),
++                            ])
++                            .ok_or_else(|| {
++                                CodexErr::InvalidRequest(
++                                    "Completion feedback must not be empty".to_owned(),
++                                )
++                            })?;
++                            sess.record_response_item_and_emit_turn_item(
++                                &turn_context,
++                                &step_context.settings.model_info,
++                                item,
++                            )
++                            .await;
++                            sess.input_queue
++                                .accept_mailbox_delivery_for_current_turn(
++                                    &sess.active_turn,
++                                    &turn_context.sub_id,
++                                )
++                                .await;
++                            completion_continuations += 1;
++                            needs_follow_up = true;
++                            break;
++                        }
++                    }
+                 }
++                let token_status = super::context_window::context_window_token_status(
++                    sess.as_ref(),
++                    turn_context.as_ref(),
++                )
+                 .instrument(trace_span!("run_turn.collect_post_sampling_state"))
+                 .await;
+-                let needs_follow_up = model_needs_follow_up || has_pending_input;
+                 let token_limit_reached = token_status.token_limit_reached;
+ 
+                 trace!(
+@@ -1684,20 +1728,25 @@ async fn run_sampling_request(
+             Ok(output) => {
+                 return Ok((output, original_input.unwrap_or(prompt.input)));
+             }
+-            Err(err) => match err.details() {
+-                CodexErrorDetails::ContextWindowExceeded => {
+-                    sess.set_total_tokens_full(&turn_context).await;
+-                    return Err(err);
++            Err(err) => {
++                if let Some(snapshot) = err.api_rate_limits().cloned() {
++                    sess.emit_api_rate_limits(&turn_context, snapshot).await;
+                 }
+-                CodexErrorDetails::UsageLimitReached(e) => {
+-                    let rate_limits = e.rate_limits.clone();
+-                    if let Some(rate_limits) = rate_limits {
+-                        sess.update_rate_limits(&turn_context, *rate_limits).await;
++                match err.details() {
++                    CodexErrorDetails::ContextWindowExceeded => {
++                        sess.set_total_tokens_full(&turn_context).await;
++                        return Err(err);
++                    }
++                    CodexErrorDetails::UsageLimitReached(e) => {
++                        let rate_limits = e.rate_limits.clone();
++                        if let Some(rate_limits) = rate_limits {
++                            sess.update_rate_limits(&turn_context, *rate_limits).await;
++                        }
++                        return Err(err);
+                     }
+-                    return Err(err);
++                    _ => err,
+                 }
+-                _ => err,
+-            },
++            }
+         };
+ 
+         let original_input = original_input.get_or_insert(prompt.input);
+@@ -2926,6 +2975,9 @@ async fn try_run_sampling_request(
+             ResponseEvent::ServerReasoningIncluded(included) => {
+                 sess.set_server_reasoning_included(included).await;
+             }
++            ResponseEvent::ApiRateLimits(snapshot) => {
++                sess.emit_api_rate_limits(&turn_context, snapshot).await;
++            }
+             ResponseEvent::RateLimits(snapshot) => {
+                 // Update internal state with latest rate limits, but defer sending until
+                 // token usage is available to avoid duplicate TokenCount events.
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index 75a2bf9bf04b17bbf84b4e12b08f7608b9f85b2d..79fd80dcebaca03ebedaacb9ff537b0833258455 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -404,6 +404,7 @@ fn response_event_records_turn_ttft(event: &ResponseEvent) -> bool {
+         | ResponseEvent::Completed { .. }
+         | ResponseEvent::ReasoningSummaryPartAdded { .. }
+         | ResponseEvent::RateLimits(_)
++        | ResponseEvent::ApiRateLimits(_)
+         | ResponseEvent::ModelsEtag(_) => false,
+     }
+ }
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 61cdbe4da7226222954ea98d4d7bb622e35fafd9..1c6624b5ab0c4722261d193e26cb0fdaa33a5bd9 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -57,6 +57,7 @@ pub use tool_lifecycle::ToolTimingInput;
+ pub use turn_input::TurnInputContext;
+ pub use turn_input::TurnInputEnvironment;
+ pub use turn_lifecycle::TurnAbortInput;
++pub use turn_lifecycle::TurnCompletionInput;
+ pub use turn_lifecycle::TurnErrorInput;
+ pub use turn_lifecycle::TurnStartInput;
+ pub use turn_lifecycle::TurnStartPhase;
+@@ -202,6 +203,15 @@ pub trait ThreadLifecycleContributor<C: Sync>: Send + Sync {
+ /// extension-private turn state. The host exposes stable identifiers and
+ /// extension stores instead of core runtime objects.
+ pub trait TurnLifecycleContributor: Send + Sync {
++    /// Accept natural completion, or return feedback to continue the same turn.
++    /// Errors fail the turn; callback results never authorize tools or permissions.
++    fn before_turn_complete<'a>(
++        &'a self,
++        _input: TurnCompletionInput<'a>,
++    ) -> ExtensionFuture<'a, Result<Option<String>, String>> {
++        Box::pin(std::future::ready(Ok(None)))
++    }
++
+     /// Selects the start phase using the current thread policy. Disabled callbacks
+     /// may retain the default phase and return without doing any work.
+     fn turn_start_phase(&self, _thread_store: &ExtensionData) -> TurnStartPhase {
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 7361c20c5fb2a2e1724e6a1ca2a82b222be7b6b9..96c4b7572b99efb263d88ca5e2950ecd47a7bdc8 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -33,6 +33,16 @@ pub struct TurnStartInput<'a> {
+     pub turn_store: &'a ExtensionData,
+ }
+ 
++/// Application acceptance of a successful natural completion, before turn stop.
++pub struct TurnCompletionInput<'a> {
++    pub turn_id: &'a str,
++    pub model: &'a str,
++    pub last_assistant_message: Option<&'a str>,
++    pub continuation_count: usize,
++    pub thread_store: &'a ExtensionData,
++    pub turn_store: &'a ExtensionData,
++}
++
+ /// Input supplied when the host completes a turn.
+ pub struct TurnStopInput<'a> {
+     /// Store scoped to the host session runtime.
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index c8436c8feb86ffbab63d73cf2d81b920b226b6b7..5608403f15b85b708d548e7e7e1c5bc1e0430d71 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -88,6 +88,7 @@ pub use contributors::ToolStartInput;
+ pub use contributors::ToolTimingBoundary;
+ pub use contributors::ToolTimingInput;
+ pub use contributors::TurnAbortInput;
++pub use contributors::TurnCompletionInput;
+ pub use contributors::TurnContextContributionInput;
+ pub use contributors::TurnErrorInput;
+ pub use contributors::TurnInputContext;
+diff --git a/codex-rs/external-agent-migration/src/sessions/export.rs b/codex-rs/external-agent-migration/src/sessions/export.rs
+index e3b360da3ad4bb49a395dc686c999ed9608f48c0..6433e2198f880c107b69edca3aabeb36cfaff576 100644
+--- a/codex-rs/external-agent-migration/src/sessions/export.rs
++++ b/codex-rs/external-agent-migration/src/sessions/export.rs
+@@ -191,6 +191,7 @@ fn token_count_item(last_model_visible_tokens: i64) -> RolloutItem {
+         ..TokenUsage::default()
+     };
+     RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
++        api_rate_limits: None,
+         info: Some(TokenUsageInfo {
+             total_token_usage: usage.clone(),
+             last_token_usage: usage,
+diff --git a/codex-rs/models-manager/src/bundled_models_tests.rs b/codex-rs/models-manager/src/bundled_models_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..de632304f37ef9aa021b6111ea9015fd2ca840f1
+--- /dev/null
++++ b/codex-rs/models-manager/src/bundled_models_tests.rs
+@@ -0,0 +1,66 @@
++//! Embedded data can be shared; returned catalog/config ownership cannot.
++use super::*;
++use codex_protocol::openai_models::ModelsResponse;
++use pretty_assertions::assert_eq;
++use std::sync::Arc;
++use std::sync::Barrier;
++
++const EMBEDDED: &str = include_str!("../models.json");
++
++#[test]
++fn cached_catalog_matches_fresh_json_and_returns_independent_owned_models() {
++    let expected: ModelsResponse = serde_json::from_str(EMBEDDED).unwrap();
++    let mut first = bundled_models_response().unwrap();
++    assert_eq!(first, expected);
++    assert!(!first.models.is_empty());
++    first.models[0].slug = "caller-owned-model".to_string();
++    first.models[0]
++        .model_messages
++        .get_or_insert_default()
++        .instructions_template = Some("caller-owned instructions".to_string());
++    first.models.pop();
++    assert_eq!(bundled_models_response().unwrap(), expected);
++}
++
++#[test]
++fn concurrent_calls_preserve_catalogs_and_owned_return_values() {
++    let barrier = Arc::new(Barrier::new(8));
++    let workers = (0..8)
++        .map(|_| {
++            let barrier = barrier.clone();
++            std::thread::spawn(move || {
++                barrier.wait();
++                bundled_models_response().unwrap()
++            })
++        })
++        .collect::<Vec<_>>();
++    let mut results = workers
++        .into_iter()
++        .map(|worker| worker.join().unwrap())
++        .collect::<Vec<_>>();
++    let expected: ModelsResponse = serde_json::from_str(EMBEDDED).unwrap();
++    assert!(results.iter().all(|result| result == &expected));
++    results[0].models.clear();
++    assert!(results[1..].iter().all(|result| result == &expected));
++    assert_eq!(bundled_models_response().unwrap(), expected);
++}
++
++#[test]
++fn per_lookup_model_settings_do_not_modify_the_embedded_seed() {
++    let original = bundled_models_response().unwrap();
++    let selected = original.models.first().unwrap().clone();
++    let overrides = ModelsManagerConfig {
++        base_instructions: Some("current session instructions".to_string()),
++        ..ModelsManagerConfig::default()
++    };
++    let changed = model_info::with_config_overrides(selected, &overrides);
++    assert_eq!(
++        changed
++            .model_messages
++            .unwrap()
++            .instructions_template
++            .as_deref(),
++        Some("current session instructions")
++    );
++    assert_eq!(bundled_models_response().unwrap(), original);
++}
+diff --git a/codex-rs/models-manager/src/lib.rs b/codex-rs/models-manager/src/lib.rs
+index cd7b59a0530b6ead4c3852d0a3217aa7115a4d81..079579e6e4f07215e69648c7e09af448bea2050a 100644
+--- a/codex-rs/models-manager/src/lib.rs
++++ b/codex-rs/models-manager/src/lib.rs
+@@ -1,3 +1,5 @@
++use std::sync::OnceLock;
++
+ pub mod cache;
+ pub mod collaboration_mode_presets;
+ pub(crate) mod config;
+@@ -9,10 +11,16 @@ pub mod test_support;
+ pub use codex_protocol::auth::AuthMode;
+ pub use config::ModelsManagerConfig;
+ 
++static BUNDLED_MODELS: OnceLock<codex_protocol::openai_models::ModelsResponse> = OnceLock::new();
++
+ /// Load the bundled model catalog shipped with `codex-models-manager`.
+ pub fn bundled_models_response()
+ -> std::result::Result<codex_protocol::openai_models::ModelsResponse, serde_json::Error> {
+-    serde_json::from_str(include_str!("../models.json"))
++    if let Some(parsed) = BUNDLED_MODELS.get() {
++        return Ok(parsed.clone());
++    }
++    let parsed = serde_json::from_str(include_str!("../models.json"))?;
++    Ok(BUNDLED_MODELS.get_or_init(move || parsed).clone())
+ }
+ 
+ /// Convert the client version string to a whole version string (e.g. "1.2.3-alpha.4" -> "1.2.3").
+@@ -24,3 +32,7 @@ pub fn client_version_to_whole() -> String {
+         env!("CARGO_PKG_VERSION_PATCH")
+     )
+ }
++
++#[cfg(test)]
++#[path = "bundled_models_tests.rs"]
++mod bundled_models_tests;
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index 352265d9ea21f7e0812708888c1cedb90f30687c..1dfc24cce6bc19f7293fac328987cd1a34797445 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -1385,6 +1385,7 @@ impl SessionTelemetry {
+             ResponseEvent::SafetyBuffering(_) => "safety_buffering".into(),
+             ResponseEvent::ServerReasoningIncluded(_) => "server_reasoning_included".into(),
+             ResponseEvent::RateLimits(_) => "rate_limits".into(),
++            ResponseEvent::ApiRateLimits(_) => "api_rate_limits".into(),
+             ResponseEvent::ModelsEtag(_) => "models_etag".into(),
+         }
+     }
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+index 4a89f709db2368c74efc007dc0c6d922accd72c3..be922daf5cb1514ca6823d1ef55745e5be5749a8 100644
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -5,6 +5,7 @@ pub use crate::auth::RefreshTokenFailedError;
+ pub use crate::auth::RefreshTokenFailedReason;
+ use crate::exec_output::ExecToolCallOutput;
+ use crate::network_policy::NetworkPolicyDecisionPayload;
++use crate::protocol::ApiRateLimits;
+ use crate::protocol::CodexErrorInfo;
+ use crate::protocol::ErrorEvent;
+ use crate::protocol::MisalignmentErrorDetails;
+@@ -73,6 +74,7 @@ pub enum SandboxErr {
+ pub struct CodexErr {
+     details: CodexErrorDetails,
+     retry_after: Option<RetryAfter>,
++    api_rate_limits: Option<Box<ApiRateLimits>>,
+ }
+ 
+ /// The semantic category and diagnostic payload for a [`CodexErr`].
+@@ -239,6 +241,7 @@ impl From<CodexErrorDetails> for CodexErr {
+         Self {
+             details,
+             retry_after: None,
++            api_rate_limits: None,
+         }
+     }
+ }
+@@ -303,6 +306,7 @@ macro_rules! codex_err_unit_constructors {
+             pub const $variant: Self = Self {
+                 details: CodexErrorDetails::$variant,
+                 retry_after: None,
++                api_rate_limits: None,
+             };
+         )*
+     };
+@@ -448,6 +452,16 @@ impl CodexErr {
+         self.retry_after.map(RetryAfter::remaining_delay)
+     }
+ 
++    /// Returns API rate limits carried by the failed transport response.
++    pub fn api_rate_limits(&self) -> Option<&ApiRateLimits> {
++        self.api_rate_limits.as_deref()
++    }
++
++    pub fn with_api_rate_limits(mut self, snapshot: ApiRateLimits) -> Self {
++        self.api_rate_limits = Some(Box::new(snapshot));
++        self
++    }
++
+     /// Retains an already captured server deadline without restarting it.
+     pub fn with_retry_after(mut self, retry_after: RetryAfter) -> Self {
+         self.retry_after = Some(retry_after);
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index b3b5f3aaf3619f176c15b19b70f97f0fce1a0e69..8277ed8384f0ac2380f8edfb2bcb8a8bea70b43c 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -2343,6 +2343,27 @@ impl TokenUsageInfo {
+ pub struct TokenCountEvent {
+     pub info: Option<TokenUsageInfo>,
+     pub rate_limits: Option<RateLimitSnapshot>,
++    /// Rate limits observed on the API provider response.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub api_rate_limits: Option<ApiRateLimits>,
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
++pub struct ApiRateLimits {
++    pub requests: Option<ApiRateLimitWindow>,
++    pub tokens: Option<ApiRateLimitWindow>,
++    pub project_tokens: Option<ApiRateLimitWindow>,
++    /// Validated Retry-After header, in delay seconds or HTTP date form.
++    pub retry_after: Option<String>,
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
++pub struct ApiRateLimitWindow {
++    pub limit: Option<u64>,
++    pub remaining: Option<u64>,
++    /// Validated relative duration, such as `6m0s`.
++    pub reset_after: Option<String>,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
+diff --git a/codex-rs/rollout/src/recorder_tests.rs b/codex-rs/rollout/src/recorder_tests.rs
+index c97800ba4b156d663b508fc88cb22a613c899a95..25b5e381f10725e693ce9611270b60ae4dfc17a8 100644
+--- a/codex-rs/rollout/src/recorder_tests.rs
++++ b/codex-rs/rollout/src/recorder_tests.rs
+@@ -1071,6 +1071,7 @@ async fn resumed_paginated_rollout_continues_after_decimal_token_count() -> std:
+     recorder
+         .record_canonical_items(&[RolloutItem::EventMsg(EventMsg::TokenCount(
+             TokenCountEvent {
++                api_rate_limits: None,
+                 info: None,
+                 rate_limits: Some(RateLimitSnapshot {
+                     limit_id: None,
+diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
+index fe64fb6050eaa8d819a2767070fc519ce29e990b..e3c2d212cfffe7447af1acae32735f56d742b902 100644
+--- a/codex-rs/state/src/runtime/threads.rs
++++ b/codex-rs/state/src/runtime/threads.rs
+@@ -3549,6 +3549,7 @@ mod tests {
+         );
+         let items = vec![RolloutItem::EventMsg(EventMsg::TokenCount(
+             codex_protocol::protocol::TokenCountEvent {
++                api_rate_limits: None,
+                 info: Some(codex_protocol::protocol::TokenUsageInfo {
+                     total_token_usage: codex_protocol::protocol::TokenUsage {
+                         input_tokens: 0,
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index d7aa740270d284f96a32c85c627b2885540f1115..907ce0a71771d7cbad28a12901b220806a92a095 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -1204,6 +1204,7 @@ mod tests {
+                 ),
+                 RolloutItem::EventMsg(EventMsg::TokenCount(
+                     codex_protocol::protocol::TokenCountEvent {
++                        api_rate_limits: None,
+                         info: None,
+                         rate_limits: None,
+                     },
+@@ -1330,6 +1331,7 @@ mod tests {
+         live_thread
+             .append_items(&[RolloutItem::EventMsg(EventMsg::TokenCount(
+                 codex_protocol::protocol::TokenCountEvent {
++                    api_rate_limits: None,
+                     info: None,
+                     rate_limits: None,
+                 },
+diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
+index 058cc29a125b99070e5d5038585367d7c16b149c..86004a2b39d1851f11a7ddcc80068b97224fd596 100644
+--- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
+@@ -1945,6 +1945,7 @@ async fn paginated_projection_accepts_float_rate_limits_and_later_final_answers(
+         .expect("rollout path");
+     let token_count = |primary: Option<f64>, secondary: Option<f64>| {
+         RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
++            api_rate_limits: None,
+             info: None,
+             rate_limits: Some(RateLimitSnapshot {
+                 limit_id: None,

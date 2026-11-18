@@ -1,0 +1,12 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 5d7ca264d9744e5381fb89e33cf7431f03b6b7e3..acb9ddb93f3fd1edf965e130c50fa85745c18f30 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2924,6 +2924,7 @@ async fn run_sampling_request(
+                 }
+                 if let Some(guidance) = step_context.settings.agent_profile.as_ref()
+                     .and_then(|profile| profile.profile.data.get::<codex_extension_api::AgentProfileWorkspaceGuidance>())
++                    .or_else(|| sess.services.thread_extension_data.get::<codex_extension_api::AgentProfileWorkspaceGuidance>())
+                 {
+                     append_profile_workspace_guidance(
+                         sampling_prompt.to_mut(), &guidance,

@@ -542,10 +542,10 @@ index 72189a41fbb967f64061bb66615aaa463661bdb6..30bc97b1157daf506f6962f0cddf5fb6
      use assert_matches::assert_matches;
      use bytes::Bytes;
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index c9048b602ee923ee84d38255218d567cd06b03bd..43d5ed1c337463ea3b308d0ff20219eeb5a444df 100644
+index b832da2f807b1ad588207d1ece4c88e8b9b641a1..90c88108272cfa9201f982a483bdde28dfbd5ae4 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -6677,6 +6677,12 @@
+@@ -6672,6 +6672,12 @@
            },
            "type": "array"
          },
@@ -585,7 +585,7 @@ index 749921aefb7c7b413c7547b8979dde321a86cdb8..4343ef47e84fb411d1080f75c84be8ea
                  .collect::<String>()
          }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index c351714d9aea395e0822023757cbd37f5a0b669c..3adeedc19076d1dd0873756fea157cffa5066bb5 100644
+index f256cdbee29c9994cadab422d478ccd938f09745..6b5ebc4d090b9ca0d4d16d2e43df215be93d50be 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -197,6 +197,7 @@ fn assistant_message(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
@@ -632,10 +632,10 @@ index c351714d9aea395e0822023757cbd37f5a0b669c..3adeedc19076d1dd0873756fea157cff
                          model: "parent-only-model".to_string(),
                          model_provider_id: "parent-only-provider".to_string(),
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index ec05c0cd2eb18d61f82d982eb73cbd387f8716f1..c998f46068929e8b4fa1c4841724eeba1056f7ae 100644
+index ad2416fa7f2f40b59091a45245addfaa44a44c1f..af01e5eb97bd6c26f1c59ea8b943b3defad63398 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -959,7 +959,27 @@ impl ModelClient {
+@@ -958,7 +958,27 @@ impl ModelClient {
          .then_some(StreamOptions {
              reasoning_summary_delivery: codex_api::ReasoningSummaryDelivery::SequentialCutoff,
          });
@@ -664,7 +664,7 @@ index ec05c0cd2eb18d61f82d982eb73cbd387f8716f1..c998f46068929e8b4fa1c4841724eeba
          let verbosity = if model_info.support_verbosity {
              self.state.model_verbosity.or(model_info.default_verbosity)
          } else {
-@@ -998,7 +1018,7 @@ impl ModelClient {
+@@ -997,7 +1017,7 @@ impl ModelClient {
              model: model_info.slug.clone(),
              input,
              tools,
@@ -771,7 +771,7 @@ index 5af77bec75b38afc7c656089509d9888f933ab08..e23385b0c2c145c7a66a45b5a6bee4d1
              ResponseItem::Message {
                  id: None,
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index 5ade27a2f44a06c773e8b2ecdc5d2b1648bc2eb7..a9a860bed4a69aa951a0c655bb853264e78be34f 100644
+index 05ea1c6119e5ae199d747d664f13b72e9c784c46..9c795432435c0dc0fd025c3154207414ea96579a 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
 @@ -727,6 +727,62 @@ async fn responses_request_includes_internal_metadata_for_provider_grant_or_firs
@@ -846,7 +846,7 @@ index 5ade27a2f44a06c773e8b2ecdc5d2b1648bc2eb7..a9a860bed4a69aa951a0c655bb853264
          }],
          phase: None,
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 6b2bf91986ba080bc953939e175d7ee337af1311..ad7f9481b2723c6693644fb11382527712b3d413 100644
+index 3daf3d4afe1adda27c97a22f0286d0275d77526d..4e4ef9a6d83301379ccbbba9d8d9c9a8bf6dae95 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -164,6 +164,7 @@ pub struct CodexThreadSettingsOverrides {
@@ -857,7 +857,7 @@ index 6b2bf91986ba080bc953939e175d7ee337af1311..ad7f9481b2723c6693644fb113825277
      pub collaboration_mode: Option<CollaborationMode>,
      pub personality: Option<Personality>,
      pub disabled_plugin_ids: Option<Vec<String>>,
-@@ -763,6 +764,7 @@ impl CodexThread {
+@@ -758,6 +759,7 @@ impl CodexThread {
              effort,
              summary,
              service_tier,
@@ -865,7 +865,7 @@ index 6b2bf91986ba080bc953939e175d7ee337af1311..ad7f9481b2723c6693644fb113825277
              collaboration_mode,
              personality,
              disabled_plugin_ids,
-@@ -775,6 +777,7 @@ impl CodexThread {
+@@ -770,6 +772,7 @@ impl CodexThread {
                  collaboration_mode,
                  reasoning_summary: summary,
                  service_tier,
@@ -874,10 +874,10 @@ index 6b2bf91986ba080bc953939e175d7ee337af1311..ad7f9481b2723c6693644fb113825277
                  approval_policy,
                  approvals_reviewer,
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index cf28c3322e4e731ef8611f5c2fb58b27139c6722..8e7b8abf9630cc003c68316220a5e31607cd379a 100644
+index 79a14d031e52aac1907fa9223ede50a0a2ac2e7b..702d6c2dc37b60706c919fc95ec384507d1bc5d1 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -522,7 +522,7 @@ pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
+@@ -513,7 +513,7 @@ pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
      let mut pieces = Vec::new();
      for item in content {
          match item {
@@ -887,10 +887,10 @@ index cf28c3322e4e731ef8611f5c2fb58b27139c6722..8e7b8abf9630cc003c68316220a5e316
                      pieces.push(text.as_str());
                  }
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 241e636ca6e1eb64693edf45824dee224692e18a..fc88f0503d0c9d742cbda9c51b8af385ef44987a 100644
+index 0ae9403682bf0f437cfd59feddd44b674e0cb83e..d24204dc558f65aeadbd47452bd8ae09788923f4 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
-@@ -731,7 +731,7 @@ fn message_text_token_count(item: &ResponseItem) -> usize {
+@@ -730,7 +730,7 @@ fn message_text_token_count(item: &ResponseItem) -> usize {
      content
          .iter()
          .map(|item| match item {
@@ -899,7 +899,7 @@ index 241e636ca6e1eb64693edf45824dee224692e18a..fc88f0503d0c9d742cbda9c51b8af385
                  approx_token_count(text)
              }
              ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => 0,
-@@ -739,6 +739,29 @@ fn message_text_token_count(item: &ResponseItem) -> usize {
+@@ -738,6 +738,29 @@ fn message_text_token_count(item: &ResponseItem) -> usize {
          .sum()
  }
  
@@ -929,7 +929,7 @@ index 241e636ca6e1eb64693edf45824dee224692e18a..fc88f0503d0c9d742cbda9c51b8af385
  fn truncate_message_text_to_token_budget(
      mut envelope: ResponseItemEnvelope,
      max_tokens: usize,
-@@ -749,19 +772,8 @@ fn truncate_message_text_to_token_budget(
+@@ -748,19 +771,8 @@ fn truncate_message_text_to_token_budget(
      let mut truncated_content = Vec::with_capacity(content.len());
      for mut content_item in content {
          match content_item.content_mut() {
@@ -951,7 +951,7 @@ index 241e636ca6e1eb64693edf45824dee224692e18a..fc88f0503d0c9d742cbda9c51b8af385
                      truncated_content.push(content_item);
                  }
              }
-@@ -1088,6 +1100,7 @@ mod tests {
+@@ -1087,6 +1099,7 @@ mod tests {
                      detail: None,
                  },
                  ContentItem::OutputText {
@@ -959,7 +959,7 @@ index 241e636ca6e1eb64693edf45824dee224692e18a..fc88f0503d0c9d742cbda9c51b8af385
                      text: "uvwxyz".to_string(),
                  },
                  ContentItem::InputText {
-@@ -1158,6 +1171,7 @@ mod tests {
+@@ -1157,6 +1170,7 @@ mod tests {
                          detail: None,
                      },
                      ContentItem::OutputText {
@@ -1603,10 +1603,10 @@ index fd163ec45922ad322e9bb18d76a8be9c00930d57..a50b3dbbd19ff30a2b7c7c688644da2b
          }],
          phase: None,
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index b3527fe16bdd79a25ea9b04da1529e4eb794607f..30a4ca1b53eddbaf0c996969a8c876dc19a1fffa 100644
+index 92ddf372b541e4feb813772af79fc3812afec898..107bdb9dc2f4f669265697a2d0e971639a8bc7ee 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -803,19 +803,22 @@ impl Session {
+@@ -799,19 +799,22 @@ impl Session {
          });
          // TODO (aibrahim): Consolidate config.model and config.model_reasoning_effort into config.collaboration_mode
          // to avoid extracting these fields separately and constructing CollaborationMode here.
@@ -1636,7 +1636,7 @@ index b3527fe16bdd79a25ea9b04da1529e4eb794607f..30a4ca1b53eddbaf0c996969a8c876dc
                  .or_else(|| {
                      resumed
                          .history
-@@ -865,6 +868,9 @@ impl Session {
+@@ -861,6 +864,9 @@ impl Session {
                  collaboration_mode,
                  reasoning_summary: config.model_reasoning_summary,
                  service_tier,
@@ -1746,10 +1746,10 @@ index c5c85bedcb197b9a057a35706ab37821e1857e22..fb60f4ad0b048dbb37f5f5bf6a11e4d6
              mode: ModeKind::Default,
              settings: Settings {
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 08513c362577dd29e7e38be8e712015659bbf350..481fe61798da18e5f9714071365302eba6fef9c3 100644
+index 5c606290f456e0749c239000e98c0c920dd29510..f8ecd654e7dcaa048f5e62c37c5239fff40a8058 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -399,6 +399,7 @@ fn assistant_message(text: &str) -> ResponseItem {
+@@ -398,6 +398,7 @@ fn assistant_message(text: &str) -> ResponseItem {
          id: None,
          role: "assistant".to_string(),
          content: vec![ContentItem::OutputText {
@@ -1757,7 +1757,7 @@ index 08513c362577dd29e7e38be8e712015659bbf350..481fe61798da18e5f9714071365302eb
              text: text.to_string(),
          }],
          phase: None,
-@@ -4434,6 +4435,7 @@ async fn set_rate_limits_retains_previous_credits() {
+@@ -4433,6 +4434,7 @@ async fn set_rate_limits_retains_previous_credits() {
          provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
          environments: Vec::new(),
          step_settings: Arc::new(StepSettings {
@@ -1765,7 +1765,7 @@ index 08513c362577dd29e7e38be8e712015659bbf350..481fe61798da18e5f9714071365302eb
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
              service_tier: None,
-@@ -4557,6 +4559,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
+@@ -4556,6 +4558,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
          provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
          environments: Vec::new(),
          step_settings: Arc::new(StepSettings {
@@ -1773,7 +1773,7 @@ index 08513c362577dd29e7e38be8e712015659bbf350..481fe61798da18e5f9714071365302eb
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
              service_tier: None,
-@@ -5181,6 +5184,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
+@@ -5180,6 +5183,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
          provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
          environments: Vec::new(),
          step_settings: Arc::new(StepSettings {
@@ -1781,7 +1781,7 @@ index 08513c362577dd29e7e38be8e712015659bbf350..481fe61798da18e5f9714071365302eb
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
              service_tier: None,
-@@ -6565,6 +6569,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
+@@ -6563,6 +6567,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
          ),
          environments: Vec::new(),
          step_settings: Arc::new(StepSettings {
@@ -1789,7 +1789,7 @@ index 08513c362577dd29e7e38be8e712015659bbf350..481fe61798da18e5f9714071365302eb
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
              service_tier: None,
-@@ -6793,6 +6798,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+@@ -6791,6 +6796,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
              Some(Arc::clone(&auth_manager)),
          ),
          step_settings: Arc::new(StepSettings {
@@ -1797,7 +1797,7 @@ index 08513c362577dd29e7e38be8e712015659bbf350..481fe61798da18e5f9714071365302eb
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
              service_tier: None,
-@@ -7120,6 +7126,7 @@ async fn make_session_with_config_and_rx(
+@@ -7118,6 +7124,7 @@ async fn make_session_with_config_and_rx(
              Some(Arc::clone(&auth_manager)),
          ),
          step_settings: Arc::new(StepSettings {
@@ -1805,7 +1805,7 @@ index 08513c362577dd29e7e38be8e712015659bbf350..481fe61798da18e5f9714071365302eb
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
              service_tier: None,
-@@ -7253,6 +7260,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
+@@ -7251,6 +7258,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
              Some(Arc::clone(&auth_manager)),
          ),
          step_settings: Arc::new(StepSettings {
@@ -1813,7 +1813,7 @@ index 08513c362577dd29e7e38be8e712015659bbf350..481fe61798da18e5f9714071365302eb
              collaboration_mode,
              reasoning_summary: config.model_reasoning_summary,
              service_tier: None,
-@@ -9064,6 +9072,7 @@ where
+@@ -9059,6 +9067,7 @@ where
              Some(Arc::clone(&auth_manager)),
          ),
          step_settings: Arc::new(StepSettings {
@@ -1842,10 +1842,10 @@ index 66296ae302c58a918be98c3baa2ad87174440fd2..0ff306e7d8dcae731bf4b1bf39a31639
              approval_policy,
              approvals_reviewer,
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 83cc464e3a7d5f125b72c2dba9a28231a7b092af..df043dd20b2c9c25d4838a021ed0530d65788659 100644
+index 8f6bb9f0571702ab2944ce5508557891ea4d18b7..6fb3e0fc8aaf457468c3ed70097549c77cdeb186 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -1677,6 +1677,7 @@ pub(crate) fn build_prompt(
+@@ -1671,6 +1671,7 @@ pub(crate) fn build_prompt(
              step_context.tool_router.model_visible_specs()
          },
          parallel_tool_calls: true,
@@ -1853,7 +1853,7 @@ index 83cc464e3a7d5f125b72c2dba9a28231a7b092af..df043dd20b2c9c25d4838a021ed0530d
          tool_admission: None,
          sampling_stop: None,
          prepared_request_admission: None,
-@@ -2198,12 +2199,7 @@ async fn maybe_emit_pending_agent_message_start(
+@@ -2193,12 +2194,7 @@ async fn maybe_emit_pending_agent_message_start(
  
  /// Agent messages are text-only today; concatenate all text entries.
  pub(super) fn agent_message_text(item: &codex_protocol::items::AgentMessageItem) -> String {
@@ -1867,7 +1867,7 @@ index 83cc464e3a7d5f125b72c2dba9a28231a7b092af..df043dd20b2c9c25d4838a021ed0530d
  }
  
  #[derive(Debug, PartialEq)]
-@@ -2318,6 +2314,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventTex
+@@ -2313,6 +2309,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventTex
          | EventMsg::EnteredReviewMode(_)
          | EventMsg::ExitedReviewMode(_)
          | EventMsg::RawResponseItem(_)
@@ -1875,7 +1875,7 @@ index 83cc464e3a7d5f125b72c2dba9a28231a7b092af..df043dd20b2c9c25d4838a021ed0530d
          | EventMsg::RawResponseCompleted(_)
          | EventMsg::ItemStarted(_)
          | EventMsg::HookStarted(_)
-@@ -2483,7 +2480,7 @@ async fn maybe_complete_plan_item_from_message(
+@@ -2478,7 +2475,7 @@ async fn maybe_complete_plan_item_from_message(
      {
          let mut text = String::new();
          for entry in content {
@@ -1884,7 +1884,7 @@ index 83cc464e3a7d5f125b72c2dba9a28231a7b092af..df043dd20b2c9c25d4838a021ed0530d
                  text.push_str(chunk);
              }
          }
-@@ -2509,7 +2506,7 @@ async fn emit_agent_message_in_plan_mode(
+@@ -2504,7 +2501,7 @@ async fn emit_agent_message_in_plan_mode(
  ) {
      let agent_message_id = agent_message.id.clone();
      let text = agent_message_text(&agent_message);
@@ -1893,7 +1893,7 @@ index 83cc464e3a7d5f125b72c2dba9a28231a7b092af..df043dd20b2c9c25d4838a021ed0530d
          state.pending_agent_message_items.remove(&agent_message_id);
          state.started_agent_message_items.remove(&agent_message_id);
          return;
-@@ -2526,6 +2523,7 @@ async fn emit_agent_message_in_plan_mode(
+@@ -2521,6 +2518,7 @@ async fn emit_agent_message_in_plan_mode(
              .remove(&agent_message_id)
              .unwrap_or_else(|| {
                  TurnItem::AgentMessage(codex_protocol::items::AgentMessageItem {
@@ -1901,7 +1901,7 @@ index 83cc464e3a7d5f125b72c2dba9a28231a7b092af..df043dd20b2c9c25d4838a021ed0530d
                      id: agent_message_id.clone(),
                      content: Vec::new(),
                      phase: None,
-@@ -2853,6 +2851,10 @@ async fn try_run_sampling_request(
+@@ -2852,6 +2850,10 @@ async fn try_run_sampling_request(
          record_turn_ttft_metric(&turn_context, &event).await;
  
          match event {
@@ -1912,7 +1912,7 @@ index 83cc464e3a7d5f125b72c2dba9a28231a7b092af..df043dd20b2c9c25d4838a021ed0530d
              ResponseEvent::Created { response_id } => {
                  if let Some(response_id) = response_id {
                      turn_context
-@@ -2943,6 +2945,8 @@ async fn try_run_sampling_request(
+@@ -2942,6 +2944,8 @@ async fn try_run_sampling_request(
                      | ResponseItem::CustomToolCallOutput { .. }
                      | ResponseItem::ToolSearchOutput { .. }
                      | ResponseItem::WebSearchCall { .. }
@@ -1921,7 +1921,7 @@ index 83cc464e3a7d5f125b72c2dba9a28231a7b092af..df043dd20b2c9c25d4838a021ed0530d
                      | ResponseItem::ImageGenerationCall { .. }
                      | ResponseItem::Compaction { .. }
                      | ResponseItem::ConfigurationUpdate { .. }
-@@ -3027,14 +3031,20 @@ async fn try_run_sampling_request(
+@@ -3026,14 +3030,20 @@ async fn try_run_sampling_request(
                          let mut seeded =
                              assistant_message_stream_parsers.seed_item_text(&item_id, &raw_text);
                          if let TurnItem::AgentMessage(agent_message) = &mut turn_item {
@@ -1971,7 +1971,7 @@ index 7b50720fe8e44f1b2aa9a9008ff4311b0ae9f940..4a350369281ad6e2f001f0cc1f7e66fa
          }],
          phase: None,
 diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
-index 611357dbdbdb7d0a7e1a64986091895f86ea3128..ee64183b4e123f2e4280f22d12c8fc62191224fb 100644
+index 20ea780e990fadb308e15f1b5f907c6ec6144c49..05b8827e97ce0bbb632890fd75f7478a41aa7671 100644
 --- a/codex-rs/core/src/stream_events_utils.rs
 +++ b/codex-rs/core/src/stream_events_utils.rs
 @@ -66,7 +66,7 @@ pub(crate) fn raw_assistant_output_text_from_item(item: &ResponseItem) -> Option
@@ -2054,7 +2054,7 @@ index 611357dbdbdb7d0a7e1a64986091895f86ea3128..ee64183b4e123f2e4280f22d12c8fc62
              agent_message.memory_citation = memory_citation;
          }
 diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
-index 4f9b63afc660e18d0603aa12cec0f30522787dee..83037c6ffbd840be033d5620706af131f77b3ab4 100644
+index aec39664b303cc937958d10381b695faf3fcb5b8..324bc8d4ca172bc120b09626ebd36f493f3616c2 100644
 --- a/codex-rs/core/src/stream_events_utils_tests.rs
 +++ b/codex-rs/core/src/stream_events_utils_tests.rs
 @@ -44,6 +44,7 @@ fn assistant_output_text_with_phase(text: &str, phase: Option<MessagePhase>) ->
@@ -2091,7 +2091,7 @@ index 4f9b63afc660e18d0603aa12cec0f30522787dee..83037c6ffbd840be033d5620706af131
          })
          .collect::<String>();
      assert_eq!(text, "hello world");
-@@ -555,3 +557,25 @@ fn completed_item_keeps_mailbox_delivery_open_for_commentary_messages() {
+@@ -553,3 +555,25 @@ fn completed_item_keeps_mailbox_delivery_open_for_commentary_messages() {
          &item, /*plan_mode*/ false,
      ));
  }
@@ -2234,10 +2234,10 @@ index 05fc159abc5a6d70e6817a6a802772bc040ec803..fb401fe8847b52f6eb101297a087dd3b
              }),
              user_location: Some(ResponsesApiWebSearchUserLocation {
 diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
-index 462c76ea7dcacfe1e8e8a9904fd76785491fe995..6df19d87c2e51e15e5d0f6e2fff42aa9c10f092a 100644
+index fb2fad72bd5fddf6ee6196c850fb31fb0692aa63..89602c1ce34f895fd573ddeda20ece9d79f416c1 100644
 --- a/codex-rs/core/src/tools/registry.rs
 +++ b/codex-rs/core/src/tools/registry.rs
-@@ -480,6 +480,9 @@ impl ToolRegistry {
+@@ -471,6 +471,9 @@ impl ToolRegistry {
                  ToolSpec::Function(_)
                  | ToolSpec::Freeform(_)
                  | ToolSpec::ToolSearch { .. }
@@ -2248,10 +2248,10 @@ index 462c76ea7dcacfe1e8e8a9904fd76785491fe995..6df19d87c2e51e15e5d0f6e2fff42aa9
              };
              if !description.trim().is_empty() {
 diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
-index 531a97b52a62b6018c0784bfcb970829c6742396..ca32c68f2144a4c74b872b8222c188047c13af4b 100644
+index 67c1850205f80b12ab6c55ef37f8d39a04d07122..55c73ca70f8b59320f78c1cc8ecd2dbdaa388f22 100644
 --- a/codex-rs/core/src/tools/router.rs
 +++ b/codex-rs/core/src/tools/router.rs
-@@ -190,7 +190,11 @@ impl ToolRouter {
+@@ -203,7 +203,11 @@ impl ToolRouter {
                              ResponsesApiNamespaceTool::Custom(tool) => tool.name == name.name,
                          })
                  }
@@ -2279,7 +2279,7 @@ index 05a1e2e65a3b18611b4accebb2787a4bb6f41d54..d6405e7bc69cdb5fa57aaab1a91f8b94
              | ToolSpec::Namespace(_) => None,
          })
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index 7f38777d3771a00f4098297bfd96fbbb60c90446..931d1663d318930ffbe0e106b790ca329e413ded 100644
+index 908fd01f8a2ebc9f48c4cfd6c81b200574504a6b..368cf0ff291a494ab67714d330871b2032ff01c9 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -171,12 +171,28 @@ pub(crate) async fn build_tool_router(
@@ -2323,7 +2323,7 @@ index 7f38777d3771a00f4098297bfd96fbbb60c90446..931d1663d318930ffbe0e106b790ca32
                  };
                  let owner = tool.runtime.mcp_server_name();
                  match namespace_owners.get(namespace_name) {
-@@ -1004,7 +1023,12 @@ fn register_code_mode_executors(
+@@ -1006,7 +1025,12 @@ fn register_code_mode_executors(
              ToolSpec::Namespace(namespace) if !namespace.tools.is_empty() => {
                  codex_tools::code_mode_name_for_tool_name(&tool_name)
              }
@@ -2338,7 +2338,7 @@ index 7f38777d3771a00f4098297bfd96fbbb60c90446..931d1663d318930ffbe0e106b790ca32
              }
          };
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index df3ae9d77ae163f97d45f40b7972ff0fc791ba4f..b681419d1f3c96b535b7f613a7508cec11ea430c 100644
+index 28a57f942e65e0996653c18d1adfd9f502ba89ba..26570c9f449e98fb5ec02cb7711180489a8cdf5b 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
 @@ -110,6 +110,9 @@ impl ToolPlanProbe {
@@ -2351,7 +2351,7 @@ index df3ae9d77ae163f97d45f40b7972ff0fc791ba4f..b681419d1f3c96b535b7f613a7508cec
                  | ToolSpec::WebSearch { .. }
                  | ToolSpec::Freeform(_) => None,
              })
-@@ -3299,3 +3302,83 @@ async fn selected_plan_cannot_admit_an_unknown_runtime() {
+@@ -3279,3 +3282,83 @@ async fn selected_plan_cannot_admit_an_unknown_runtime() {
          .is_err()
      );
  }
@@ -2916,7 +2916,7 @@ index e85d9a23519fc43c337ef9f5f4fa167c6b7e5ae1..36cb86a833ffd7b75fda37c36e5c7b78
          collaboration_mode: initial.collaboration_mode.with_updates(
              Some(PROTECTED_MODEL.to_string()),
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index b35c4ae26d33e087a7dac1656ba7ec935759e0b5..4faa8518e2c82f906038dd674ca007340e876ece 100644
+index e437119067e9640c166ac2dc1c9f220081fcc1ff..460ebfc117dfe5805e7c52fa29fa0faca22c72fb 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
 @@ -28,6 +28,7 @@ pub use codex_protocol::security_risk::SecurityRiskScore;
@@ -3361,10 +3361,10 @@ index 67c94762958d64f0216642fb4f0a142fd40cce54..5fe75c61d9b3c83a8ce8ed0a9ec2049c
                              text.starts_with("<subagent_notification>")
                                  || (text.starts_with("Message Type:")
 diff --git a/codex-rs/otel/src/agent_response.rs b/codex-rs/otel/src/agent_response.rs
-index dd2e04d511db456907357d7f91728420fcd55cee..efb62286684601568d5157cf601214505c03a01d 100644
+index c7164e1f2046752a59244d9cad096369cf57ba97..186cf6822635190eb6801df09490fc3c24f86f7f 100644
 --- a/codex-rs/otel/src/agent_response.rs
 +++ b/codex-rs/otel/src/agent_response.rs
-@@ -78,7 +78,7 @@ impl AgentResponseLogger {
+@@ -75,7 +75,7 @@ impl AgentResponseLogger {
          let text = content
              .iter()
              .filter_map(|content| match content {
@@ -3374,10 +3374,10 @@ index dd2e04d511db456907357d7f91728420fcd55cee..efb62286684601568d5157cf60121450
                  | ContentItem::InputImage { .. }
                  | ContentItem::InputAudio { .. } => None,
 diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
-index ae58956b026fd0598f07f334f63cfeff948a491c..a349f439d4fb1290496c4f5f18bdc5612293831f 100644
+index 06e8d2ffb69ca3acb3ef952b08c02045b2c7c3eb..b140ff80f3fc078876ec2fbd3ea8fcecff39b8ce 100644
 --- a/codex-rs/otel/src/events/session_telemetry.rs
 +++ b/codex-rs/otel/src/events/session_telemetry.rs
-@@ -1393,6 +1393,7 @@ impl SessionTelemetry {
+@@ -1387,6 +1387,7 @@ impl SessionTelemetry {
              ResponseEvent::ServerReasoningIncluded(_) => "server_reasoning_included".into(),
              ResponseEvent::RateLimits(_) => "rate_limits".into(),
              ResponseEvent::ApiRateLimits(_) => "api_rate_limits".into(),
@@ -3385,7 +3385,7 @@ index ae58956b026fd0598f07f334f63cfeff948a491c..a349f439d4fb1290496c4f5f18bdc561
              ResponseEvent::ModelsEtag(_) => "models_etag".into(),
          }
      }
-@@ -1411,6 +1412,8 @@ impl SessionTelemetry {
+@@ -1405,6 +1406,8 @@ impl SessionTelemetry {
              ResponseItem::CustomToolCall { .. } => "custom_tool_call".into(),
              ResponseItem::CustomToolCallOutput { .. } => "custom_tool_call_output".into(),
              ResponseItem::WebSearchCall { .. } => "web_search_call".into(),
@@ -3395,10 +3395,10 @@ index ae58956b026fd0598f07f334f63cfeff948a491c..a349f439d4fb1290496c4f5f18bdc561
              ResponseItem::Compaction { .. } => "compaction".into(),
              ResponseItem::ConfigurationUpdate { .. } => "configuration_update".into(),
 diff --git a/codex-rs/protocol/src/config_types.rs b/codex-rs/protocol/src/config_types.rs
-index 78f0cdab850358cab6a459a9102ad4f20b2a3760..3ee75c709cf98e99379af5574e81a0693dd22076 100644
+index 87ffe6dc8bea4d093822a8c1e868df477490e669..6b313ed221a3bcecfdea7737fd2f0c0890e301cd 100644
 --- a/codex-rs/protocol/src/config_types.rs
 +++ b/codex-rs/protocol/src/config_types.rs
-@@ -439,6 +439,19 @@ pub enum WebSearchContextSize {
+@@ -415,6 +415,19 @@ pub enum WebSearchContextSize {
      High,
  }
  
@@ -3418,7 +3418,7 @@ index 78f0cdab850358cab6a459a9102ad4f20b2a3760..3ee75c709cf98e99379af5574e81a069
  #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
  #[schemars(deny_unknown_fields)]
  pub struct WebSearchLocation {
-@@ -464,6 +477,9 @@ impl WebSearchLocation {
+@@ -440,6 +453,9 @@ impl WebSearchLocation {
  pub struct WebSearchToolConfig {
      pub context_size: Option<WebSearchContextSize>,
      pub allowed_domains: Option<Vec<String>>,
@@ -3428,7 +3428,7 @@ index 78f0cdab850358cab6a459a9102ad4f20b2a3760..3ee75c709cf98e99379af5574e81a069
      pub location: Option<WebSearchLocation>,
  }
  
-@@ -475,6 +491,10 @@ impl WebSearchToolConfig {
+@@ -451,6 +467,10 @@ impl WebSearchToolConfig {
                  .allowed_domains
                  .clone()
                  .or_else(|| self.allowed_domains.clone()),
@@ -3439,7 +3439,7 @@ index 78f0cdab850358cab6a459a9102ad4f20b2a3760..3ee75c709cf98e99379af5574e81a069
              location: match (&self.location, &other.location) {
                  (Some(location), Some(other_location)) => Some(location.merge(other_location)),
                  (Some(location), None) => Some(location.clone()),
-@@ -489,6 +509,9 @@ impl WebSearchToolConfig {
+@@ -465,6 +485,9 @@ impl WebSearchToolConfig {
  #[schemars(deny_unknown_fields)]
  pub struct WebSearchFilters {
      pub allowed_domains: Option<Vec<String>>,
@@ -3449,7 +3449,7 @@ index 78f0cdab850358cab6a459a9102ad4f20b2a3760..3ee75c709cf98e99379af5574e81a069
  }
  
  #[derive(
-@@ -535,10 +558,10 @@ impl From<WebSearchLocation> for WebSearchUserLocation {
+@@ -511,10 +534,10 @@ impl From<WebSearchLocation> for WebSearchUserLocation {
  impl From<WebSearchToolConfig> for WebSearchConfig {
      fn from(config: WebSearchToolConfig) -> Self {
          Self {
@@ -3464,7 +3464,7 @@ index 78f0cdab850358cab6a459a9102ad4f20b2a3760..3ee75c709cf98e99379af5574e81a069
                  }),
              user_location: config.location.map(Into::into),
              search_context_size: config.context_size,
-@@ -969,6 +992,7 @@ mod tests {
+@@ -945,6 +968,7 @@ mod tests {
      fn web_search_tool_config_merge_prefers_overlay_values() {
          let base = WebSearchToolConfig {
              context_size: Some(WebSearchContextSize::Low),
@@ -3472,7 +3472,7 @@ index 78f0cdab850358cab6a459a9102ad4f20b2a3760..3ee75c709cf98e99379af5574e81a069
              allowed_domains: Some(vec!["openai.com".to_string()]),
              location: Some(WebSearchLocation {
                  country: Some("US".to_string()),
-@@ -979,6 +1003,7 @@ mod tests {
+@@ -955,6 +979,7 @@ mod tests {
          };
          let overlay = WebSearchToolConfig {
              context_size: Some(WebSearchContextSize::High),
@@ -3480,7 +3480,7 @@ index 78f0cdab850358cab6a459a9102ad4f20b2a3760..3ee75c709cf98e99379af5574e81a069
              allowed_domains: None,
              location: Some(WebSearchLocation {
                  country: None,
-@@ -990,6 +1015,7 @@ mod tests {
+@@ -966,6 +991,7 @@ mod tests {
  
          let expected = WebSearchToolConfig {
              context_size: Some(WebSearchContextSize::High),
@@ -3489,7 +3489,7 @@ index 78f0cdab850358cab6a459a9102ad4f20b2a3760..3ee75c709cf98e99379af5574e81a069
              location: Some(WebSearchLocation {
                  country: Some("US".to_string()),
 diff --git a/codex-rs/protocol/src/items.rs b/codex-rs/protocol/src/items.rs
-index 2371cd6ddf5e0b8e15f894811ee1e6c76053c099..0fd3f69d8b8fc184b61e27e4a8f34d97190b56b5 100644
+index 0e48870650dd2f912ca4e09b595a4f541de9d585..3b531e049774523c183fff9440a77c503033eb76 100644
 --- a/codex-rs/protocol/src/items.rs
 +++ b/codex-rs/protocol/src/items.rs
 @@ -70,6 +70,8 @@ pub enum TurnItem {
@@ -3588,7 +3588,7 @@ index 2371cd6ddf5e0b8e15f894811ee1e6c76053c099..0fd3f69d8b8fc184b61e27e4a8f34d97
      #[serde(default, skip_serializing_if = "Option::is_none")]
      #[ts(optional)]
      pub saved_path: Option<AbsolutePathBuf>,
-@@ -753,6 +803,7 @@ impl TurnItem {
+@@ -750,6 +800,7 @@ impl TurnItem {
              TurnItem::ImageView(item) => item.id.clone(),
              TurnItem::Extension(item) => item.id().to_string(),
              TurnItem::ImageGeneration(item) => item.id.clone(),
@@ -3860,7 +3860,7 @@ index 1665c31e8f645ff632002a69bdd7bb45f1be7b07..378a0964b37bba98db60c9809b7b4ff4
                      queries: Some(vec!["weather seattle".into(), "seattle weather now".into()]),
                  }),
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 83007345f5c834bc3a330fd1fd2550793ca28901..98ce6c473f6ef73ca4c756636e9813f9845e3914 100644
+index 2eb1a223d10146b674319ae4037cd1f85a5250e4..91fc99c21d88e7e883fb89d120f6af476e2889cc 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
 @@ -558,6 +558,9 @@ pub struct ThreadSettingsOverrides {

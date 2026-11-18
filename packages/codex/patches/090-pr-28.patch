@@ -1,0 +1,3826 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index 50f2603d5c2e45611bb61c328452d1700e6892bc..f7a4d4ef3059e199b1ed9cb6a0dcf4b88a1d7bfa 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -4335,7 +4335,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "serde_with",
+- "sha2",
++ "sha2 0.10.9",
+  "strum 0.27.2",
+  "strum_macros 0.28.0",
+  "sys-locale",
+diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
+index 658f821df80a4f255415f82b9d6c26c10031d015..6451a1e65065568b38f2e35ee3f02fe63e27a416 100644
+--- a/codex-rs/app-server/src/notification_media.rs
++++ b/codex-rs/app-server/src/notification_media.rs
+@@ -67,6 +67,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
+                 | ResponseItem::CompactionTrigger { .. }
+                 | ResponseItem::ContextCompaction { .. }
+                 | ResponseItem::ItemReference { .. }
++                | ResponseItem::Program { .. }
++                | ResponseItem::ProgramOutput { .. }
+                 | ResponseItem::Other => {}
+             }
+             ServerNotification::RawResponseItemCompleted(notification)
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index abcdab1bdfcc6b83bb0c9e67940444e55d7a925e..7ca4096691ccfc9d1a518b71e1b21a216254520a 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -83,6 +83,8 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
+         | ResponseItem::ContextCompaction { .. }
+         | ResponseItem::AdditionalTools { .. }
+         | ResponseItem::ItemReference { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. }
+         | ResponseItem::Other => false,
+     }) {
+         return Err(invalid_request(REMOTE_IMAGE_URL_ERROR));
+diff --git a/codex-rs/codex-api/src/received_response_facts.rs b/codex-rs/codex-api/src/received_response_facts.rs
+index 98deade7ef7b47b97917731b5fe9f458b1989a6e..4eb3f7f16a75c7d99efc87ffb234a902eca34262 100644
+--- a/codex-rs/codex-api/src/received_response_facts.rs
++++ b/codex-rs/codex-api/src/received_response_facts.rs
+@@ -210,8 +210,22 @@ impl ApplicationModelStream {
+                 .into_iter()
+                 .map(|fact| ResponseEvent::ResponseFact(fact.into())),
+         );
++        let hosted_agent = event.raw.get("item").and_then(serde_json::Value::as_object)
++            .and_then(|item| {
++                let agent = item.get("agent")?.as_object()?;
++                let name = agent.get("agent_name")?.as_str()?.to_owned();
++                if name.is_empty() { return None; }
++                Some((name, item.get("phase").and_then(serde_json::Value::as_str).map(str::to_owned)))
++            });
+         let event =
+             crate::sse::process_responses_event(event).map_err(|error| error.into_api_error())?;
++        if let (Some((agent_name, phase)), Some(ResponseEvent::OutputItemDone(item))) = (hosted_agent, &event) {
++            let item_fingerprint = codex_protocol::response_facts::item_fingerprint(item)
++                .map_err(|_| invalid_application_stream("Could not identify hosted provider attribution"))?;
++            ready.push(ResponseEvent::ResponseFact(ResponseFact::HostedAgentAttribution {
++                item_fingerprint, agent_name, phase,
++            }.into()));
++        }
+         if let Some(ResponseEvent::Completed { response_id, .. }) = &event {
+             if response_id.trim().is_empty() {
+                 return Err(invalid_application_stream(
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 8fa09453f56d8bae1eeeb4bb18e18bb5e658a103..89fecbf5ba7abe7862ebb9554e1af74a92c81e65 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -131,6 +131,8 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
+             | ResponseItem::ItemReference { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => false,
+         },
+         RolloutItem::RealtimeItem(_)
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index b6bfd1710a925092c7fc119ad3c346b121c445f8..5df3b5c26f4d007e90483a309c6a765753be6b18 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -224,6 +224,7 @@ fn register_session_root_skips_threads_with_explicit_parent() {
+ 
+ fn spawn_agent_call(call_id: &str) -> ResponseItem {
+     ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "spawn_agent".to_string(),
+         namespace: None,
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 5d80314369f822cf14adc80754af97673e5aac96..a487e563042291373b892ac0d7f075bfe271c6a4 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1279,7 +1279,15 @@ impl ModelClient {
+                         "hosted tool choice is outside the final offered catalog".into(),
+                     )
+                 })?;
+-                if matches.next().is_some() {
++                if matches.next().is_some()
++                    && !matches!(
++                        choice,
++                        codex_protocol::model_request_controls::HostedToolChoice::Mcp {
++                            server_label: None,
++                            name: None
++                        }
++                    )
++                {
+                     return Err(CodexErr::InvalidRequest(
+                         "hosted tool choice is ambiguous in the final offered catalog".into(),
+                     ));
+@@ -1287,6 +1295,7 @@ impl ModelClient {
+                 Ok(selected)
+             })
+             .transpose()?;
++        validate_programmatic_tool_catalog(&prompt.tools, hosted_prompt.is_some())?;
+         let context_management =
+             controls.context_management_for_model((!prompt_owns_model).then_some(model_info));
+         if self.provider_history.is_some()
+@@ -3094,9 +3103,9 @@ impl ModelClientSession {
+                 payload.input = payload.input.borrow_with(input);
+             }
+             if !previous_response_id_from_untraced_warmup {
+-                if let Some(logical) = logical_history_input.as_deref() {
++                if let Some(logical) = logical_history_input.as_ref() {
+                     let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
+-                    let logical = payload.input.borrow_with(logical);
++                    let logical = payload.input.borrow_with(logical.as_ref());
+                     let wire = std::mem::replace(&mut payload.input, logical);
+                     inference_trace_attempt.record_started(&ws_request);
+                     let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
+@@ -4340,6 +4349,89 @@ impl WebsocketTelemetry for ApiTelemetry {
+ 
+ // Shared with native request construction: only metadata already omitted from
+ // this provider's actual wire request may be ignored by lineage comparison.
++fn validate_programmatic_tool_catalog(
++    tools: &[codex_tools::ToolSpec],
++    prompt_supplies_tools: bool,
++) -> Result<()> {
++    use codex_tools::ToolSpec;
++
++    let has_caller = |callers: Option<&[String]>, expected: &str| {
++        callers.is_some_and(|values| values.iter().any(|value| value == expected))
++    };
++    let function_callers = |tool: &codex_tools::ResponsesApiTool| {
++        let callers = tool.allowed_callers.as_deref().unwrap_or(&[]);
++        (
++            callers.contains(&codex_tools::ProviderToolCaller::Programmatic),
++            callers.contains(&codex_tools::ProviderToolCaller::Direct),
++        )
++    };
++    let mut declarations = 0;
++    let mut has_companion = false;
++    let mut requires_declaration = false;
++    for tool in tools {
++        let (programmatic, direct) = match tool {
++            ToolSpec::Function(tool) => function_callers(tool),
++            ToolSpec::Namespace(namespace) => {
++                for tool in &namespace.tools {
++                    if let codex_tools::ResponsesApiNamespaceTool::Function(tool) = tool {
++                        let (programmatic, direct) = function_callers(tool);
++                        has_companion |= programmatic;
++                        requires_declaration |= programmatic && !direct;
++                    }
++                }
++                continue;
++            }
++            ToolSpec::ProviderOnly(tool) if tool.tool_type() == "programmatic_tool_calling" => {
++                declarations += 1;
++                continue;
++            }
++            ToolSpec::ToolSearch { .. } | ToolSpec::ProviderToolSearch(_) => {
++                has_companion = true;
++                continue;
++            }
++            ToolSpec::CodeInterpreter(tool) => (
++                has_caller(tool.allowed_callers.as_deref(), "programmatic"),
++                has_caller(tool.allowed_callers.as_deref(), "direct"),
++            ),
++            ToolSpec::Shell(tool) => (
++                has_caller(tool.allowed_callers.as_deref(), "programmatic"),
++                has_caller(tool.allowed_callers.as_deref(), "direct"),
++            ),
++            ToolSpec::Mcp(tool) => {
++                let has_caller = |caller: &str| {
++                    tool.provider_data
++                        .get("allowed_callers")
++                        .and_then(serde_json::Value::as_array)
++                        .is_some_and(|values| {
++                            values.iter().any(|value| value.as_str() == Some(caller))
++                        })
++                };
++                (has_caller("programmatic"), has_caller("direct"))
++            }
++            _ => continue,
++        };
++        has_companion |= programmatic;
++        requires_declaration |= programmatic && !direct;
++    }
++    if declarations > 1 {
++        return Err(CodexErr::InvalidRequest(
++            "Only one provider programmatic tool declaration is allowed".into(),
++        ));
++    }
++    if declarations == 0 && requires_declaration {
++        return Err(CodexErr::InvalidRequest(
++            "Programmatic-only tools require a provider programmatic tool declaration".into(),
++        ));
++    }
++    if declarations == 1 && !has_companion && !prompt_supplies_tools {
++        return Err(CodexErr::InvalidRequest(
++            "A provider programmatic tool requires an offered programmatic caller or tool search"
++                .into(),
++        ));
++    }
++    Ok(())
++}
++
+ fn filter_provider_response_metadata(input: &mut [ResponseItem], is_openai: bool) {
+     if !is_openai {
+         for item in input {
+diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
+index fb966db84fab95b3b6a87ced94b743c309121c6b..4aaa1e19af03c7b51ebfab8c8fa5da838c7751d9 100644
+--- a/codex-rs/core/src/client/provider_history.rs
++++ b/codex-rs/core/src/client/provider_history.rs
+@@ -575,7 +575,7 @@ impl Cursor {
+         request_transport: Option<&codex_protocol::model_request_transport::RequestTransportOverrides>,
+         attempt: Option<std::sync::Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
+         history_transport: HistoryTransport<'_>,
+-    ) -> Result<Option<Vec<ResponseItem>>> {
++    ) -> Result<Option<codex_api::CacheAnnotatedInput<Vec<ResponseItem>>>> {
+         check_items(request.input.iter())?;
+         let canonical_input = request
+             .request_controls
+@@ -626,7 +626,7 @@ impl Cursor {
+             )
+         };
+         let full_len = request.input.len();
+-        let full_digest = input_digest(&request.input)?;
++        let full_digest = input_digest(request.input.as_ref())?;
+         let unsent = if let Some(window) = &saved.window {
+             let canonical = if let Some(canonical) = canonical_window(window) {
+                 if canonical_input.prefix_len + canonical_input.wire_input_indices.len() != full_len
+@@ -773,10 +773,11 @@ impl Cursor {
+         self.persist().await?;
+         let logical = unsent.map(|indices| {
+             let full = std::mem::take(&mut request.input);
+-            request.input = indices
++            let selected = indices
+                 .into_iter()
+                 .map(|index| full[index].clone())
+-                .collect();
++                .collect::<Vec<_>>();
++            request.input = full.with_items(selected);
+             full
+         });
+         request.request_controls.provider_history = Some(saved.selection);
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index a46e83f066673e1203fec053d06890dd3c7243bc..25eb202cee492d0e397557807eeeeb0eea263a8d 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -257,6 +257,8 @@ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
+             | ResponseItem::ItemReference { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => {}
+         }
+     }
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 1ae3d69d0a5b722a2b5fc74f59416255d9a7b688..9d1cd64f51668a23db93dc91a0a633057a7d9859 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -2427,6 +2427,7 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
+     let telemetry = test_session_telemetry();
+     let model_info = test_model_info();
+     let alpha = ResponsesApiTool {
++        allowed_callers: None,
+         name: "alpha".into(),
+         description: "Original".into(),
+         strict: false,
+@@ -2435,6 +2436,7 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
+         output_schema: None,
+     };
+     let beta = ResponsesApiTool {
++        allowed_callers: None,
+         name: "beta".into(),
+         ..alpha.clone()
+     };
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 45a430c315d003af9d87d5ddbb598f51d584c635..751905c38fd5f8e57824fdfaaff80d1e212cc5b6 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -1025,6 +1025,7 @@ mod tests {
+             message("assistant", "commentary", Some(MessagePhase::Commentary)),
+             message("assistant", "final", Some(MessagePhase::FinalAnswer)),
+             ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "shell_command".to_string(),
+                 namespace: None,
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index c6414bf91357bb720afc8faefc436e544832246b..9d467121959a2f089538decb3f50ad26a6f7defe 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -86,6 +86,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
+         .attach_to_compaction_prompt(&mut input);
+     input.push(ResponseItem::CompactionTrigger {});
+     let prompt = Prompt {
++        prompt_cache_annotations: Vec::new(),
+         request_controls: Default::default(),
+         prefer_buffered_response: sess
+             .services
+diff --git a/codex-rs/core/src/compact_tests.rs b/codex-rs/core/src/compact_tests.rs
+index 03f3c27287eaa592f7604b29c7c549e8945c96c5..08b173a31c0b785a33eaba68c6d1db81e7b91ff6 100644
+--- a/codex-rs/core/src/compact_tests.rs
++++ b/codex-rs/core/src/compact_tests.rs
+@@ -53,6 +53,7 @@ async fn local_compaction_respects_tool_metadata_state(
+         let arguments = json!({"plan": [{"step": "x".repeat(7 * 1024), "status": "completed"}]});
+         assert!(serde_json::to_vec(&arguments)?.len() < 8 * 1024);
+         items.push(ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "update_plan".to_string(),
+             namespace: None,
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 4bd96197ac09c96a96801b1f94bce6da9748e8cb..b782b3f8353f2076e6507a3b68f75b6d8bce01a3 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1182,6 +1182,8 @@ pub(crate) fn is_api_message(
+         | ResponseItem::WebSearchCall { .. }
+         | ResponseItem::McpListTools { .. }
+         | ResponseItem::McpCall { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. }
+         | ResponseItem::McpApprovalRequest { .. }
+         | ResponseItem::McpApprovalResponse { .. }
+         | ResponseItem::FileSearchCall { .. }
+@@ -1429,6 +1431,8 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
+             encrypted_content: None,
+             ..
+         } => 0,
++        ResponseItem::Program { code, .. } => text_bytes(code),
++        ResponseItem::ProgramOutput { result, .. } => text_bytes(result),
+         // Plaintext reasoning is excluded from replay accounting.
+         ResponseItem::Reasoning {
+             encrypted_content: None,
+@@ -1606,6 +1610,8 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
+         | ResponseItem::McpApprovalResponse { .. }
+         | ResponseItem::AgentMessage { .. }
+         | ResponseItem::ItemReference { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. }
+         | ResponseItem::Other => false,
+     }
+ }
+diff --git a/codex-rs/core/src/context_manager/history_tests.rs b/codex-rs/core/src/context_manager/history_tests.rs
+index 7acab46c78535983c84d8f3f2c28b1fe4653bd21..71903f61707cd755a28e6e353ca2accd9d9737df 100644
+--- a/codex-rs/core/src/context_manager/history_tests.rs
++++ b/codex-rs/core/src/context_manager/history_tests.rs
+@@ -1189,6 +1189,7 @@ fn for_prompt_strips_media_when_model_does_not_support_it() {
+             ),
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "view_image".to_string(),
+             namespace: None,
+@@ -1289,6 +1290,7 @@ fn for_prompt_strips_media_when_model_does_not_support_it() {
+             ),
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "view_image".to_string(),
+             namespace: None,
+@@ -1522,6 +1524,7 @@ fn estimate_token_count_with_base_instructions_uses_provided_text() {
+ fn remove_first_item_removes_matching_output_for_function_call() {
+     let items = vec![
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "do_it".to_string(),
+             namespace: None,
+@@ -1558,6 +1561,7 @@ fn remove_first_item_removes_matching_call_for_output() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "do_it".to_string(),
+             namespace: None,
+@@ -2399,6 +2403,7 @@ fn normalize_mixed_inserts_and_removals() {
+     let items = vec![
+         // Will get an inserted output
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "f1".to_string(),
+             namespace: None,
+@@ -2451,6 +2456,7 @@ fn normalize_mixed_inserts_and_removals() {
+         raw_items(&h),
+         vec![
+             ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "f1".to_string(),
+                 namespace: None,
+@@ -2513,6 +2519,7 @@ fn normalize_mixed_inserts_and_removals() {
+ #[test]
+ fn normalize_adds_missing_output_for_function_call_inserts_output() {
+     let items = vec![ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "do_it".to_string(),
+         namespace: None,
+@@ -2529,6 +2536,7 @@ fn normalize_adds_missing_output_for_function_call_inserts_output() {
+         raw_items(&h),
+         vec![
+             ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "do_it".to_string(),
+                 namespace: None,
+@@ -2570,6 +2578,7 @@ fn normalize_preserves_named_function_call_output_without_call_id() {
+ fn for_prompt_assigns_stable_id_to_synthetic_output_without_reordering_history() {
+     let items = vec![
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: Some(ResponseItemId::with_suffix("fc", "existing")),
+             name: "do_it".to_string(),
+             namespace: None,
+@@ -2785,6 +2794,7 @@ fn normalize_keeps_server_tool_search_output_without_matching_call() {
+ fn normalize_mixed_inserts_and_removals_panics_in_debug() {
+     let items = vec![
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "f1".to_string(),
+             namespace: None,
+diff --git a/codex-rs/core/src/event_mapping.rs b/codex-rs/core/src/event_mapping.rs
+index 546749724962f31caf1b5af79d2d05726fc04e69..9fcfdf72dcdce5e85a6a93e3367461a7597ab240 100644
+--- a/codex-rs/core/src/event_mapping.rs
++++ b/codex-rs/core/src/event_mapping.rs
+@@ -263,7 +263,9 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
+         | ResponseItem::ShellCall { id, .. }
+         | ResponseItem::ShellCallOutput { id, .. }
+         | ResponseItem::McpListTools { id, .. }
+-        | ResponseItem::McpCall { id, .. } => Some(TurnItem::HostedToolCall(
++        | ResponseItem::McpCall { id, .. }
++        | ResponseItem::Program { id, .. }
++        | ResponseItem::ProgramOutput { id, .. } => Some(TurnItem::HostedToolCall(
+             codex_protocol::items::HostedToolCallItem {
+                 id: id.as_deref()?.to_string(),
+                 item: item.clone(),
+diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
+index a0f475f3cc2a8f03f7e812e6dd24c48cceeb3310..dead0b13d08fb2b4ca76cdc85029f94b619ba2cc 100644
+--- a/codex-rs/core/src/guardian/tests.rs
++++ b/codex-rs/core/src/guardian/tests.rs
+@@ -263,6 +263,7 @@ async fn seed_guardian_parent_history(session: &Arc<Session>, turn: &Arc<TurnCon
+                     internal_chat_message_metadata_passthrough: None,
+                 },
+                 ResponseItem::FunctionCall {
++                    caller: None,
+                     id: None,
+                     name: "gh_repo_view".to_string(),
+                     namespace: None,
+@@ -1087,6 +1088,7 @@ fn collect_guardian_transcript_entries_includes_recent_tool_calls_and_output() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "read_file".to_string(),
+             namespace: None,
+@@ -1791,6 +1793,7 @@ fn build_guardian_transcript_reserves_separate_budget_for_tool_evidence() {
+     })
+     .collect::<Vec<_>>();
+     items.extend((0..12).map(|index| ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: format!("tool_{index}"),
+         namespace: None,
+@@ -1847,6 +1850,7 @@ fn build_guardian_transcript_preserves_recent_tool_context_when_user_history_is_
+         .collect::<Vec<_>>();
+     items.extend([
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "shell".to_string(),
+             namespace: None,
+diff --git a/codex-rs/core/src/image_preparation.rs b/codex-rs/core/src/image_preparation.rs
+index 51ea0673cc96bf49e143c4d555f739258422f85d..0d021023eb91ba4aa45231d44d2e175898252b66 100644
+--- a/codex-rs/core/src/image_preparation.rs
++++ b/codex-rs/core/src/image_preparation.rs
+@@ -298,6 +298,8 @@ pub(crate) async fn prepare_response_items(
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
+             | ResponseItem::ItemReference { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => None,
+         };
+         prepared_items.push(item);
+diff --git a/codex-rs/core/src/prepared_request.rs b/codex-rs/core/src/prepared_request.rs
+index 0b43812718c94f99f1404bfd2601b84955dc9050..f147ac483ee027f6c2efc8331c8adb0059779709 100644
+--- a/codex-rs/core/src/prepared_request.rs
++++ b/codex-rs/core/src/prepared_request.rs
+@@ -448,6 +448,7 @@ mod tests {
+ 
+     fn function(name: &str) -> ResponsesApiTool {
+         ResponsesApiTool {
++            allowed_callers: None,
+             name: name.into(),
+             description: "original".into(),
+             strict: false,
+diff --git a/codex-rs/core/src/realtime_conversation/tool_task.rs b/codex-rs/core/src/realtime_conversation/tool_task.rs
+index 5c18bf9463df5363eadc3ddc4b06024b4f47f20f..dedb090c389d078f16fa60505a63522c1008e76a 100644
+--- a/codex-rs/core/src/realtime_conversation/tool_task.rs
++++ b/codex-rs/core/src/realtime_conversation/tool_task.rs
+@@ -794,6 +794,7 @@ impl RealtimeToolCall {
+         let native_call_id = self.native_call_id.clone();
+         let ignored = runtime.ignores_handoff(&self.native_name, &native_call_id);
+         let mut item = ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: self.native_name.name.clone(),
+             namespace: self.native_name.namespace.clone(),
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 6c6b832e5a0ab193c960dcef1837e2f99a41e3cc..76892ef225de49b14c9f6257a42757c889b19f0a 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -5664,7 +5664,7 @@ impl Session {
+         received: codex_protocol::response_facts::ReceivedResponseFact,
+         capture_probabilities: bool,
+         budget: &mut codex_protocol::response_facts::ResponseFactBudget,
+-    ) -> CodexResult<()> {
++    ) -> CodexResult<Option<codex_protocol::response_facts::ResponseFactRecord>> {
+         use codex_protocol::response_facts::{ResponseFact, ResponseFactRecord};
+         let codex_protocol::response_facts::ReceivedResponseFact {
+             upstream_request_id,
+@@ -5676,7 +5676,7 @@ impl Session {
+                 ResponseFact::TextProbabilities { .. } | ResponseFact::MalformedProbabilities
+             )
+         {
+-            return Ok(());
++            return Ok(None);
+         }
+         let malformed = matches!(&fact, ResponseFact::MalformedProbabilities);
+         let malformed_error = || {
+@@ -5689,7 +5689,7 @@ impl Session {
+             return if malformed {
+                 Err(malformed_error())
+             } else {
+-                Ok(())
++                Ok(None)
+             };
+         }
+         let mut record = ResponseFactRecord {
+@@ -5747,7 +5747,7 @@ impl Session {
+             return if malformed {
+                 Err(malformed_error())
+             } else {
+-                Ok(())
++                Ok(None)
+             };
+         };
+         if matches!(fact, ResponseFact::CaptureTruncated) {
+@@ -5764,6 +5764,7 @@ impl Session {
+                 "Could not retain received response facts".into(),
+             ));
+         }
++        let retained = record.clone();
+         self.send_event_raw_with_persistence(
+             Event {
+                 id: turn_context.sub_id.clone(),
+@@ -5780,7 +5781,7 @@ impl Session {
+                     ),
+             );
+         }
+-        Ok(())
++        Ok(Some(retained))
+     }
+ 
+     pub(crate) fn private_disposable(&self) -> bool {
+diff --git a/codex-rs/core/src/session/model_attempts.rs b/codex-rs/core/src/session/model_attempts.rs
+index 302cedbfdcb8d0e815260ad546be7687c2f5873a..32f3f1904dfb47a5f240cd052da0680c1d0ece11 100644
+--- a/codex-rs/core/src/session/model_attempts.rs
++++ b/codex-rs/core/src/session/model_attempts.rs
+@@ -1,6 +1,6 @@
+ //! Logical-generation identity and accounting in the existing native turn store.
+ //! No transport or retry executor lives here; the sampling loop owns both.
+-use codex_extension_api::{ModelAttemptAdmission, TurnSamplingStop};
++use codex_extension_api::{ModelAttemptAdmission, ProviderRequestAccounting, TurnSamplingStop};
+ use codex_protocol::model_retry::{ModelAttemptSnapshot, ModelProducerFailure, ModelRetryBackoff};
+ use codex_protocol::protocol::TokenUsage;
+ use std::sync::atomic::{AtomicBool, Ordering};
+@@ -16,6 +16,7 @@ struct LedgerState {
+     snapshot: ModelAttemptSnapshot,
+     current: Option<Weak<Attempt>>,
+     last_settled: Option<String>,
++    open_provider_request: Option<String>,
+ }
+ 
+ #[derive(Debug)]
+@@ -47,6 +48,7 @@ pub(crate) struct RequestState {
+ #[derive(Debug, Default)]
+ struct Measurement {
+     settled: bool,
++    provider_managed: bool,
+     usage: Option<TokenUsage>,
+     failure: Option<ModelProducerFailure>,
+ }
+@@ -201,10 +203,10 @@ impl Attempt {
+ 
+     fn with_measurement<T>(
+         &self,
+-        update: impl FnOnce(&LedgerState, &mut Measurement) -> Result<T, String>,
++        update: impl FnOnce(&mut LedgerState, &mut Measurement) -> Result<T, String>,
+     ) -> Result<T, String> {
+         let ledger = &self.ledger;
+-        let state = ledger
++        let mut state = ledger
+             .0
+             .lock()
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
+@@ -223,7 +225,7 @@ impl Attempt {
+         if measurement.settled {
+             return Err("Native model usage owner is settled".into());
+         }
+-        update(&state, &mut measurement)
++        update(&mut state, &mut measurement)
+     }
+ 
+     pub(crate) fn failure(&self) -> Option<ModelProducerFailure> {
+@@ -330,7 +332,9 @@ impl ModelAttemptAdmission for Attempt {
+             if measurement.failure.is_some() {
+                 return Err("Native model failure already recorded".into());
+             }
+-            if let Some(usage) = &failure.usage {
++            if !measurement.provider_managed
++                && let Some(usage) = &failure.usage
++            {
+                 add_usage(&state.snapshot.usage.token_usage, usage)?;
+                 measurement.usage = Some(usage.clone());
+             }
+@@ -342,6 +346,9 @@ impl ModelAttemptAdmission for Attempt {
+     fn report_usage(&self, usage: TokenUsage) -> Result<(), String> {
+         validate_usage(&usage)?;
+         self.with_measurement(|state, measurement| {
++            if measurement.provider_managed {
++                return Ok(());
++            }
+             add_usage(&state.snapshot.usage.token_usage, &usage)?;
+             // Replaces only this attempt's measurement. Snapshot projection and
+             // final settlement never add repeated reports a second time.
+@@ -349,6 +356,71 @@ impl ModelAttemptAdmission for Attempt {
+             Ok(())
+         })
+     }
++
++    fn account_provider_request(
++        &self,
++        operation: ProviderRequestAccounting,
++    ) -> Result<Option<String>, String> {
++        self.with_measurement(|state, measurement| {
++            let usage = &mut state.snapshot.usage;
++            match operation {
++                ProviderRequestAccounting::Manage => {
++                    if measurement.provider_managed
++                        || measurement.usage.is_some()
++                        || measurement.failure.is_some()
++                    {
++                        return Err("Native model usage already has an owner".into());
++                    }
++                    // The sampler admitted a logical attempt. Only the transport
++                    // can tell whether it opens a new physical provider request.
++                    usage.requests -= 1;
++                    usage.requests_without_token_usage -= 1;
++                    measurement.provider_managed = true;
++                    Ok(None)
++                }
++                ProviderRequestAccounting::Create if measurement.provider_managed => {
++                    let requests = usage
++                        .requests
++                        .checked_add(1)
++                        .ok_or("Native provider request counter overflow")?;
++                    let missing = usage
++                        .requests_without_token_usage
++                        .checked_add(1)
++                        .ok_or("Native provider missing-usage counter overflow")?;
++                    let lineage = uuid::Uuid::new_v4().to_string();
++                    // A replacement abandons the preceding incomplete physical
++                    // request. Its counted request remains missing usage.
++                    state.open_provider_request = Some(lineage.clone());
++                    usage.requests = requests;
++                    usage.requests_without_token_usage = missing;
++                    Ok(Some(lineage))
++                }
++                ProviderRequestAccounting::Dispatch { lineage } if measurement.provider_managed => {
++                    if state.open_provider_request.as_deref() != Some(lineage.as_str()) {
++                        return Err("Native provider request owner mismatch".into());
++                    }
++                    self.mark_provider_effect();
++                    Ok(None)
++                }
++                ProviderRequestAccounting::Terminal {
++                    lineage,
++                    usage: measured,
++                } if measurement.provider_managed => {
++                    if state.open_provider_request.as_deref() != Some(lineage.as_str()) {
++                        return Err("Native provider request owner mismatch".into());
++                    }
++                    if let Some(measured) = measured {
++                        validate_usage(&measured)?;
++                        usage.token_usage = add_usage(&usage.token_usage, &measured)?;
++                        usage.requests_without_token_usage -= 1;
++                    }
++                    state.open_provider_request = None;
++                    Ok(None)
++                }
++                _ => Err("Native model attempt has no managed provider transport".into()),
++            }
++        })
++    }
+ }
+ 
+ fn validate_usage(usage: &TokenUsage) -> Result<(), String> {
+@@ -607,6 +679,133 @@ mod tests {
+         assert_eq!(usage.requests_without_token_usage, 0);
+     }
+ 
++    #[test]
++    fn managed_provider_request_retains_its_lineage_across_logical_attempts() {
++        use ProviderRequestAccounting::{Create, Manage, Terminal};
++
++        let ledger = Arc::new(AttemptLedger::default());
++        let parent = Arc::new(TurnSamplingStop::default());
++        let first = begin(&ledger, &parent);
++        assert!(first.account_provider_request(Create).is_err());
++        first.account_provider_request(Manage).unwrap();
++        assert!(first.account_provider_request(Manage).is_err());
++        let lineage = first.account_provider_request(Create).unwrap().unwrap();
++        ledger.settle(&first).unwrap();
++        assert!(first.account_provider_request(Create).is_err());
++
++        let second = begin(&ledger, &parent);
++        second.account_provider_request(Manage).unwrap();
++        assert_eq!(ledger.snapshot().usage.requests, 1);
++        assert_eq!(ledger.snapshot().usage.requests_without_token_usage, 1);
++        let foreign = Arc::new(AttemptLedger::default());
++        let unrelated = begin(&foreign, &parent);
++        unrelated.account_provider_request(Manage).unwrap();
++        assert!(
++            unrelated
++                .account_provider_request(Terminal {
++                    lineage: lineage.clone(),
++                    usage: None,
++                })
++                .is_err()
++        );
++        second
++            .account_provider_request(Terminal {
++                lineage: lineage.clone(),
++                usage: Some(TokenUsage {
++                    input_tokens: 3,
++                    output_tokens: 2,
++                    total_tokens: 5,
++                    ..Default::default()
++                }),
++            })
++            .unwrap();
++        assert!(
++            second
++                .account_provider_request(Terminal {
++                    lineage,
++                    usage: None
++                })
++                .is_err()
++        );
++        second.report_usage(TokenUsage::default()).unwrap();
++        ledger.settle(&second).unwrap();
++        let usage = ledger.snapshot().usage;
++        assert_eq!(usage.requests, 1);
++        assert_eq!(usage.requests_without_token_usage, 0);
++        assert_eq!(usage.token_usage.total_tokens, 5);
++    }
++
++    #[test]
++    fn only_the_current_managed_transport_can_fence_replay() {
++        use ProviderRequestAccounting::{Create, Dispatch, Manage};
++
++        let ledger = Arc::new(AttemptLedger::default());
++        let parent = Arc::new(TurnSamplingStop::default());
++        let first = begin(&ledger, &parent);
++        first.account_provider_request(Manage).unwrap();
++        let lineage = first.account_provider_request(Create).unwrap().unwrap();
++        first
++            .account_provider_request(Dispatch {
++                lineage: lineage.clone(),
++            })
++            .unwrap();
++        assert!(first.provider_effects.load(Ordering::Acquire));
++        ledger.settle(&first).unwrap();
++
++        let second = begin(&ledger, &parent);
++        assert!(
++            second
++                .account_provider_request(Dispatch {
++                    lineage: lineage.clone()
++                })
++                .is_err()
++        );
++        second.account_provider_request(Manage).unwrap();
++        assert!(
++            second
++                .account_provider_request(Dispatch {
++                    lineage: "wrong owner".to_owned()
++                })
++                .is_err()
++        );
++        assert!(!second.provider_effects.load(Ordering::Acquire));
++        second
++            .account_provider_request(Dispatch { lineage })
++            .unwrap();
++        assert!(second.provider_effects.load(Ordering::Acquire));
++        assert_eq!(ledger.snapshot().usage.requests, 1);
++    }
++
++    #[test]
++    fn managed_replacement_retains_preceding_unmeasured_request() {
++        use ProviderRequestAccounting::{Create, Manage, Terminal};
++
++        let ledger = Arc::new(AttemptLedger::default());
++        let parent = Arc::new(TurnSamplingStop::default());
++        let attempt = begin(&ledger, &parent);
++        attempt.account_provider_request(Manage).unwrap();
++        let abandoned = attempt.account_provider_request(Create).unwrap().unwrap();
++        let lineage = attempt.account_provider_request(Create).unwrap().unwrap();
++        assert!(
++            attempt
++                .account_provider_request(Terminal {
++                    lineage: abandoned,
++                    usage: Some(TokenUsage::default()),
++                })
++                .is_err()
++        );
++        attempt
++            .account_provider_request(Terminal {
++                lineage,
++                usage: Some(TokenUsage::default()),
++            })
++            .unwrap();
++        ledger.settle(&attempt).unwrap();
++        let usage = ledger.snapshot().usage;
++        assert_eq!(usage.requests, 2);
++        assert_eq!(usage.requests_without_token_usage, 1);
++    }
++
+     #[test]
+     fn fresh_restored_owner_does_not_recount_the_historical_attempt() {
+         let ledger = Arc::new(AttemptLedger::default());
+diff --git a/codex-rs/core/src/session/sdk_produced_items.rs b/codex-rs/core/src/session/sdk_produced_items.rs
+index 5f6bf406379b74a54933d2bc0c3797eaaa1bc552..dd893edc94715ad77859e0acc6ed7ec5f2adbf18 100644
+--- a/codex-rs/core/src/session/sdk_produced_items.rs
++++ b/codex-rs/core/src/session/sdk_produced_items.rs
+@@ -179,7 +179,9 @@ fn is_produced_response(item: &ResponseItem) -> bool {
+         | ResponseItem::ShellCallOutput { .. }
+         | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::McpListTools { .. }
+-        | ResponseItem::McpCall { .. } => true,
++        | ResponseItem::McpCall { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. } => true,
+         _ => false,
+     }
+ }
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 01374ad6efd92da8e84ec14fa20e27d742a06f8b..f360212f87fe8b53234837f872d3ea2e81e23f51 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -7843,6 +7843,7 @@ async fn request_permissions_tool_resolves_legacy_paths_against_selected_environ
+         async move {
+             handler
+                 .handle(ToolInvocation {
++                    provider_agent_metadata: None,
+                     session,
+                     step_context,
+                     turn: turn_context,
+@@ -7927,6 +7928,7 @@ async fn request_permissions_tool_rejects_invalid_requests(
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+     let result = RequestPermissionsHandler
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::new(session),
+             step_context,
+             turn: turn_context,
+@@ -14355,6 +14357,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+         .await;
+ 
+     let item = ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "test_tool".to_string(),
+         namespace: None,
+@@ -14373,7 +14376,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+         cancellation_token: CancellationToken::new(),
+     };
+ 
+-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
++    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, None)
+         .await
+         .expect("tool call should be handled");
+ 
+@@ -14640,6 +14643,7 @@ async fn unified_exec_rejects_escalated_permissions_when_policy_not_on_request()
+     let handler = ExecCommandHandler::default();
+     let resp = handler
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+             step_context,
+diff --git a/codex-rs/core/src/session/tests/guardian_tests.rs b/codex-rs/core/src/session/tests/guardian_tests.rs
+index 6eee4d39396ade3b4b6a5f66ebfabde35355ab19..099b7979996fae35b15de5abb9798b555db02a26 100644
+--- a/codex-rs/core/src/session/tests/guardian_tests.rs
++++ b/codex-rs/core/src/session/tests/guardian_tests.rs
+@@ -608,6 +608,7 @@ async fn guardian_allows_exec_command_additional_permissions_requests_past_polic
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+     let resp = handler
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+             step_context,
+@@ -732,6 +733,7 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_exec_command_policy_s
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+     let resp = handler
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+             step_context,
+@@ -884,6 +886,7 @@ async fn delayed_exec_command_uses_its_captured_authority_after_next_turn_starts
+     let command = "echo captured-action-authority";
+     let handler = crate::tools::handlers::ExecCommandHandler::default();
+     let invocation = handler.handle(ToolInvocation {
++        provider_agent_metadata: None,
+         session: Arc::clone(&session),
+         turn: Arc::clone(&action_turn),
+         step_context,
+@@ -1061,6 +1064,7 @@ async fn guardian_allows_unified_exec_additional_permissions_requests_past_polic
+     let handler = ExecCommandHandler::default();
+     let resp = handler
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+             step_context,
+@@ -1182,6 +1186,7 @@ async fn exec_command_allows_sticky_turn_permissions_without_inline_request_perm
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+     let resp = handler
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             turn: Arc::clone(&turn_context),
+             step_context,
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index a32677efc477f184a7954f31a44b29bf410efd44..9457d25de1224ea175c8db8a238be3bea9867ce8 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -4541,6 +4541,7 @@ fn sdk_request_may_have_provider_effects(
+                     | codex_tools::ToolSpec::CodeInterpreter(_)
+                     | codex_tools::ToolSpec::Shell(_)
+                     | codex_tools::ToolSpec::ImageGeneration(_)
++                    | codex_tools::ToolSpec::ProviderOnly(_)
+             )
+         })
+ }
+@@ -4568,6 +4569,12 @@ fn sdk_cold_recovery_classifies_provider_effect_capabilities() {
+         codex_tools::ToolSpec::ImageGeneration(
+             serde_json::from_value(serde_json::json!({})).unwrap(),
+         ),
++        codex_tools::ToolSpec::ProviderOnly(
++            codex_tools::ProviderToolDefinition::new(
++                serde_json::json!({"type":"programmatic_tool_calling"})
++                    .as_object().unwrap().clone(),
++            ).unwrap(),
++        ),
+     ];
+     for tool in hosted {
+         assert!(sdk_request_may_have_provider_effects(
+@@ -4591,8 +4598,215 @@ fn sdk_cold_recovery_classifies_provider_effect_capabilities() {
+     assert!(sdk_request_may_have_provider_effects(&prompt, &[]));
+ }
+ 
++// The existing analytics capture bounds distinct per-response tool IDs at 256.
++// Bound provider program admission independently at the same capacity.
++const MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE: usize = 256;
++
++fn retained_hosted_program_calls(prompt: &Prompt) -> HashMap<String, bool> {
++    let mut retained = HashMap::new();
++    for item in prompt.input.iter() {
++        match item {
++            ResponseItem::Program { call_id, .. } => {
++                retained.insert(call_id.clone(), false);
++            }
++            ResponseItem::ProgramOutput {
++                call_id, status, ..
++            } => {
++                retained.insert(
++                    call_id.clone(),
++                    matches!(
++                        status,
++                        codex_protocol::models::ProgramOutputStatus::Completed
++                    ),
++                );
++            }
++            _ => {}
++        }
++    }
++    retained
++}
++
+ // Provider actions have no local accepted-call deduplication owner. Unknown
+ // output has lost its raw type, so its replay safety cannot be established.
++fn admit_hosted_program_item(
++    prompt: &Prompt,
++    calls: &mut HashMap<String, bool>,
++    retained_calls: &mut Option<HashMap<String, bool>>,
++    item: &ResponseItem,
++) -> CodexResult<()> {
++    let opaque_prompt_catalog = prompt.tools.is_empty()
++        && prompt
++            .request_controls
++            .hosted_prompt
++            .as_ref()
++            .and_then(Option::as_ref)
++            .is_some_and(|hosted| hosted.omit_tools);
++    if !opaque_prompt_catalog
++        && !prompt.tools.iter().any(|tool| {
++            matches!(tool, codex_tools::ToolSpec::ProviderOnly(tool)
++            if tool.tool_type() == "programmatic_tool_calling")
++        })
++    {
++        return Err(CodexErr::InvalidRequest(
++            "Provider returned a program without an offered programmatic tool".into(),
++        ));
++    }
++    match item {
++        ResponseItem::Program { call_id, .. } => {
++            if call_id.is_empty() || calls.contains_key(call_id) {
++                return Err(CodexErr::InvalidRequest(
++                    "Invalid provider program call ID".into(),
++                ));
++            }
++            if calls.len() >= MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE {
++                return Err(CodexErr::InvalidRequest(
++                    "Too many provider program calls in one response".into(),
++                ));
++            }
++            calls.insert(call_id.clone(), false);
++        }
++        ResponseItem::ProgramOutput {
++            call_id, status, ..
++        } => {
++            if !calls.contains_key(call_id)
++                && calls.len() >= MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE
++            {
++                return Err(CodexErr::InvalidRequest(
++                    "Too many provider program calls in one response".into(),
++                ));
++            }
++            let prior = calls.entry(call_id.clone()).or_insert_with(|| {
++                // The retained prompt is immutable for this response. Index its latest state once.
++                retained_calls
++                    .get_or_insert_with(|| retained_hosted_program_calls(prompt))
++                    .get(call_id)
++                    .copied()
++                    .unwrap_or(true)
++            });
++            if *prior {
++                return Err(CodexErr::InvalidRequest(
++                    "Provider program output has no unfinished program with this call ID".into(),
++                ));
++            }
++            *prior = matches!(
++                status,
++                codex_protocol::models::ProgramOutputStatus::Completed
++            );
++        }
++        _ => unreachable!("program admission only handles program items"),
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod hosted_program_admission_tests {
++    use super::*;
++
++    fn prompt(input: Vec<ResponseItem>) -> Prompt {
++        let mut prompt = Prompt::default();
++        prompt.input = input.into();
++        prompt.request_controls.hosted_prompt = Some(Some(Default::default()));
++        prompt
++            .request_controls
++            .hosted_prompt
++            .as_mut()
++            .unwrap()
++            .as_mut()
++            .unwrap()
++            .omit_tools = true;
++        prompt
++    }
++    fn program(call_id: &str) -> ResponseItem {
++        serde_json::from_value(
++            serde_json::json!({"type":"program","call_id":call_id,"code":"pass"}),
++        )
++        .unwrap()
++    }
++    fn output(call_id: &str) -> ResponseItem {
++        serde_json::from_value(serde_json::json!({"type":"program_output","call_id":call_id,"result":"done","status":"completed"})).unwrap()
++    }
++
++    #[test]
++    fn retained_program_index_keeps_latest_state_and_current_response_ownership() {
++        let prompt = prompt(vec![program("closed"), output("closed"), program("open")]);
++        let mut calls = HashMap::new();
++        let mut retained = None;
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &output("closed"))
++                .is_err()
++        );
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &output("open")).is_ok()
++        );
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &output("open")).is_err()
++        );
++        let mut calls = HashMap::new();
++        let mut retained = None;
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &program("closed"))
++                .is_ok()
++        );
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &output("closed"))
++                .is_ok()
++        );
++    }
++
++    #[test]
++    fn many_retained_programs_share_one_index_without_a_lifetime_call_limit() {
++        let input = (0..4096)
++            .map(|index| program(&format!("retained-{index}")))
++            .collect::<Vec<_>>();
++        let prompt = prompt(input);
++        let before = serde_json::to_value(&*prompt.input).unwrap();
++        let mut calls = HashMap::new();
++        let mut retained = None;
++        for index in 0..MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE {
++            admit_hosted_program_item(
++                &prompt,
++                &mut calls,
++                &mut retained,
++                &output(&format!("retained-{index}")),
++            )
++            .unwrap();
++        }
++        assert_eq!(retained.as_ref().unwrap().len(), 4096);
++        assert_eq!(calls.len(), MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE);
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &output("retained-256"))
++                .is_err()
++        );
++        assert_eq!(serde_json::to_value(&*prompt.input).unwrap(), before);
++    }
++
++    #[test]
++    fn response_program_limit_rejects_another_call_before_growing_the_ledger() {
++        let prompt = prompt(vec![]);
++        let mut calls = HashMap::new();
++        let mut retained = None;
++        for index in 0..MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE {
++            admit_hosted_program_item(
++                &prompt,
++                &mut calls,
++                &mut retained,
++                &program(&format!("current-{index}")),
++            )
++            .unwrap();
++        }
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &program("too-many"))
++                .is_err()
++        );
++        assert_eq!(calls.len(), MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE);
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &output("current-0"))
++                .is_ok()
++        );
++        assert!(retained.is_none());
++    }
++}
++
+ fn provider_event_may_have_effects(event: &ResponseEvent, tools: &[codex_tools::ToolSpec]) -> bool {
+     match event {
+         ResponseEvent::OutputItemAdded(item) | ResponseEvent::OutputItemDone(item) => match item {
+@@ -4615,6 +4829,8 @@ fn provider_event_may_have_effects(event: &ResponseEvent, tools: &[codex_tools::
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::McpCall { .. }
+             | ResponseItem::ShellCallOutput { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => true,
+             _ => false,
+         },
+@@ -4829,6 +5045,10 @@ async fn try_run_sampling_request(
+         let mut response_fact_budget =
+             codex_protocol::response_facts::ResponseFactBudget::default();
+         let mut response_fact_response_id: Option<String> = None;
++        let mut pending_provider_agent: Option<codex_protocol::response_facts::ResponseFactRecord> = None;
++        // Admission is local to the provider request; nothing here executes its program.
++        let mut program_calls = HashMap::new();
++        let mut retained_program_calls = None;
+         loop {
+             let handle_responses = trace_span!(
+                 parent: &receiving_span,
+@@ -4932,7 +5152,12 @@ async fn try_run_sampling_request(
+                         )
+                         .await
+                     {
+-                        Ok(()) => {}
++                        Ok(Some(record)) => {
++                            if matches!(&record.received.fact, codex_protocol::response_facts::ResponseFact::HostedAgentAttribution { .. }) {
++                                pending_provider_agent = Some(record);
++                            }
++                        }
++                        Ok(None) => {}
+                         Err(error) => {
+                             tool_cancellation.cancel();
+                             drop(stream);
+@@ -4956,6 +5181,28 @@ async fn try_run_sampling_request(
+                     }
+                 }
+                 ResponseEvent::OutputItemDone(mut item) => {
++                    let provider_agent_metadata = pending_provider_agent.take().and_then(|record| {
++                        match record.received.fact {
++                            codex_protocol::response_facts::ResponseFact::HostedAgentAttribution {item_fingerprint, agent_name, phase}
++                                if codex_protocol::response_facts::item_fingerprint(&item).ok().as_ref() == Some(&item_fingerprint) => {
++                                    let mut value = serde_json::json!({"agent_name": agent_name});
++                                    if let Some(phase) = phase { value["phase"] = serde_json::Value::String(phase); }
++                                    Some(value)
++                                }
++                            _ => None,
++                        }
++                    });
++                    if matches!(item, ResponseItem::Program { .. } | ResponseItem::ProgramOutput { .. }) {
++                        admit_hosted_program_item(
++                            prompt,
++                            &mut program_calls,
++                            &mut retained_program_calls,
++                            &item,
++                        )?;
++                        if let Some(attempt) = &model_attempt {
++                            attempt.mark_unsafe_output();
++                        }
++                    }
+                     if matches!(&item, ResponseItem::Message { role, content, .. } if role == "assistant" && !content.is_empty())
+                     {
+                         if let Some(attempt) = &model_attempt {
+@@ -5070,12 +5317,14 @@ async fn try_run_sampling_request(
+                         | ResponseItem::CompactionTrigger { .. }
+                         | ResponseItem::ContextCompaction { .. }
+                         | ResponseItem::ItemReference { .. }
++                        | ResponseItem::Program { .. }
++                        | ResponseItem::ProgramOutput { .. }
+                         | ResponseItem::Other => false,
+                     };
+ 
+                     let direct_call = item.clone();
+                     let output_result =
+-                        match handle_output_item_done(&mut ctx, item, previously_streamed_item)
++                        match handle_output_item_done(&mut ctx, item, previously_streamed_item, provider_agent_metadata)
+                             .instrument(handle_responses)
+                             .await
+                         {
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 96a06e8ee6aa9597afa1a7a7910fab38770de095..5fd3271f733fa5d8a08adedb6c697d39b0ab0cb8 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -386,6 +386,7 @@ pub(crate) async fn handle_output_item_done(
+     ctx: &mut HandleOutputCtx,
+     item: ResponseItem,
+     previously_active_item: Option<TurnItem>,
++    provider_agent_metadata: Option<serde_json::Value>,
+ ) -> Result<OutputItemResult> {
+     let mut output = OutputItemResult::default();
+     let plan_mode = ctx.step_context.turn.mode() == ModeKind::Plan;
+@@ -404,6 +405,22 @@ pub(crate) async fn handle_output_item_done(
+         ));
+     }
+ 
++    let programmatic_declared = ctx
++        .step_context
++        .tool_router
++        .has_provider_programmatic_tool();
++    crate::tools::program_callers::observe(&ctx.turn_store, &item, programmatic_declared)
++        .map_err(CodexErr::InvalidRequest)?;
++    let provider_programmatic_call = match &item {
++        ResponseItem::FunctionCall {
++            caller: Some(codex_protocol::models::ProviderFunctionCaller::Program { caller_id }),
++            ..
++        } => Some(
++            crate::tools::program_callers::admit(&ctx.turn_store, caller_id, programmatic_declared)
++                .map_err(CodexErr::InvalidRequest)?,
++        ),
++        _ => None,
++    };
+     let mut routed = ctx.tool_runtime.build_model_tool_call(item.clone());
+     let passive = matches!(&routed, Ok(None));
+     // This turn store tracks completed stream items independently of provider
+@@ -466,7 +483,12 @@ pub(crate) async fn handle_output_item_done(
+             let tool_future: InFlightFuture<'static> = Box::pin(
+                 ctx.tool_runtime
+                     .clone()
+-                    .handle_tool_call(call, cancellation_token),
++                    .handle_tool_call_with_provider_admission(
++                        call,
++                        cancellation_token,
++                        provider_agent_metadata,
++                        provider_programmatic_call,
++                    ),
+             );
+ 
+             output.needs_follow_up = true;
+@@ -591,6 +613,8 @@ pub(crate) async fn handle_non_tool_response_item(
+         ResponseItem::CompactionTrigger { .. } => "compaction_trigger",
+         ResponseItem::ContextCompaction { .. } => "context_compaction",
+         ResponseItem::ItemReference { .. } => "item_reference",
++        ResponseItem::Program { .. } => "program",
++        ResponseItem::ProgramOutput { .. } => "program_output",
+         ResponseItem::Other => "other",
+     };
+     debug!(
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+index 3df413f81091212fec7a2244a5ea4f020efbfc4a..bc29ba4ed833d0d43f322e7302cf2951f621e0e3 100644
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -112,6 +112,7 @@ fn external_context_pollution_items_exclude_local_tool_calls() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "shell".to_string(),
+             namespace: None,
+@@ -322,7 +323,7 @@ async fn handle_output_item_done_returns_contributed_last_agent_message() {
+     let mut ctx = output_context(Arc::new(session), Arc::new(turn_context));
+     let item = assistant_output_text("original assistant text");
+ 
+-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
++    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, None)
+         .await
+         .expect("assistant message should complete");
+ 
+@@ -355,7 +356,7 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+             "arguments": arguments.to_string(),
+         }))
+         .expect("direct input");
+-        let result = handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None)
++        let result = handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, None)
+             .await
+             .expect("direct call should be handled");
+         assert!(result.needs_follow_up);
+@@ -414,7 +415,7 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+         }))
+         .expect("direct input");
+         pending.push(
+-            handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None)
++            handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, None)
+                 .await
+                 .expect("direct call should be handled")
+                 .tool_future
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+index 485431733015fbb1b2a00a5b49fdcb1b03d4f3f0..970c5333e6be2f9502b20f4ffac21fdccb89cc0d 100644
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -697,6 +697,7 @@ fn truncates_before_requested_user_message() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             call_id: "c1".to_string(),
+             name: "tool".to_string(),
+diff --git a/codex-rs/core/src/thread_rollout_truncation_tests.rs b/codex-rs/core/src/thread_rollout_truncation_tests.rs
+index 114cafeef3b42167a7393c93d5cb1ac118681b7c..028b3e551a6ecccb48dad65d68b7fe6ea5769477 100644
+--- a/codex-rs/core/src/thread_rollout_truncation_tests.rs
++++ b/codex-rs/core/src/thread_rollout_truncation_tests.rs
+@@ -282,6 +282,7 @@ fn truncates_rollout_from_start_before_nth_user_only() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             call_id: "c1".to_string(),
+             name: "tool".to_string(),
+diff --git a/codex-rs/core/src/tools/code_mode/delegate_tests.rs b/codex-rs/core/src/tools/code_mode/delegate_tests.rs
+index 1a8e575efdf058f39458b33766f7a8375cecc76c..8d529771f9b8afdcf168e2df3089621abae7033d 100644
+--- a/codex-rs/core/src/tools/code_mode/delegate_tests.rs
++++ b/codex-rs/core/src/tools/code_mode/delegate_tests.rs
+@@ -77,6 +77,7 @@ impl ToolExecutor<ToolInvocation> for TestHandler {
+ 
+     fn spec(&self) -> codex_tools::ToolSpec {
+         codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++            allowed_callers: None,
+             name: "audit_probe".to_string(),
+             description: "Return a marker for the code-mode dispatch test.".to_string(),
+             strict: false,
+diff --git a/codex-rs/core/src/tools/code_mode/wait_spec.rs b/codex-rs/core/src/tools/code_mode/wait_spec.rs
+index 01b713e515c1aed3a43d4aac5e0afae84db07958..fc2d9b8368604d383e2bb53745dc190e360fdea1 100644
+--- a/codex-rs/core/src/tools/code_mode/wait_spec.rs
++++ b/codex-rs/core/src/tools/code_mode/wait_spec.rs
+@@ -33,6 +33,7 @@ pub(crate) fn create_wait_tool(
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: codex_code_mode::WAIT_TOOL_NAME.to_string(),
+         description: description_override.map(str::to_owned).unwrap_or_else(|| {
+             format!(
+@@ -78,6 +79,7 @@ mod tests {
+         assert_eq!(
+             create_wait_tool(/*description_override*/ None, /*parameters_override*/ None),
+             ToolSpec::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: codex_code_mode::WAIT_TOOL_NAME.to_string(),
+                 description: format!(
+                     "Waits on a yielded `{}` cell and returns new output or completion.\n{}",
+diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
+index 0ec645eaca2a5df293de640b3bc0f98c3cf2df91..a7977536d7f0729fce0a892b3ac82eca8a67ef68 100644
+--- a/codex-rs/core/src/tools/context.rs
++++ b/codex-rs/core/src/tools/context.rs
+@@ -47,6 +47,9 @@ pub type SharedTurnDiffTracker = Arc<Mutex<TurnDiffTracker>>;
+ /// Delivery does not finish the call: post-tool hooks can still be cancelled.
+ #[derive(Default)]
+ pub(crate) struct ToolCallState {
++    pub(crate) provider_programmatic_call:
++        OnceLock<super::program_callers::ProgrammaticCallReceipt>,
++    pub(crate) provider_agent_metadata: OnceLock<serde_json::Value>,
+     pub(crate) terminal_outcome_reached: AtomicBool,
+     pub(crate) dispatch_started_at: OnceLock<std::time::Instant>,
+     pub(crate) builtin_sandbox_operation: OnceLock<codex_extension_api::BuiltinSandboxOperation>,
+@@ -69,6 +72,8 @@ pub enum ToolCallSource {
+ 
+ #[derive(Clone)]
+ pub struct ToolInvocation {
++    /// Observed provider attribution for this exact direct occurrence; never routing authority.
++    pub(crate) provider_agent_metadata: Option<serde_json::Value>,
+     pub session: Arc<Session>,
+     // TODO(sayan): Remove this compatibility field once handlers use `step_context.turn`.
+     pub turn: Arc<TurnContext>,
+diff --git a/codex-rs/core/src/tools/context_tests.rs b/codex-rs/core/src/tools/context_tests.rs
+index bd0cb0c5b57bda6b0d4c40b015d1228de40b1c82..31203a91508cee8cd83b016f2cf09a8a87745b17 100644
+--- a/codex-rs/core/src/tools/context_tests.rs
++++ b/codex-rs/core/src/tools/context_tests.rs
+@@ -348,6 +348,7 @@ fn tool_search_payloads_roundtrip_as_tool_search_outputs() {
+     };
+     let response = ToolSearchOutput {
+         tools: vec![LoadableToolSpec::Function(codex_tools::ResponsesApiTool {
++            allowed_callers: None,
+             name: "create_event".to_string(),
+             description: String::new(),
+             strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/apply_patch_tests.rs b/codex-rs/core/src/tools/handlers/apply_patch_tests.rs
+index 8fb831ce8fe0d9b452827e0a79c94b622247fb9f..aacaaebbe2d59d3a4b359271c46a0588422909ab 100644
+--- a/codex-rs/core/src/tools/handlers/apply_patch_tests.rs
++++ b/codex-rs/core/src/tools/handlers/apply_patch_tests.rs
+@@ -46,6 +46,7 @@ async fn invocation_for_payload(payload: ToolPayload) -> ToolInvocation {
+     let (session, turn) = make_session_and_context().await;
+     let turn = Arc::new(turn);
+     ToolInvocation {
++        provider_agent_metadata: None,
+         session: session.into(),
+         step_context: StepContext::for_test(Arc::clone(&turn)),
+         turn,
+diff --git a/codex-rs/core/src/tools/handlers/current_time.rs b/codex-rs/core/src/tools/handlers/current_time.rs
+index 527701b963e95831c7c9e06908418a54cacb4ab2..348dcbf6849bf53cc27f4a17a7064c89b28cd080 100644
+--- a/codex-rs/core/src/tools/handlers/current_time.rs
++++ b/codex-rs/core/src/tools/handlers/current_time.rs
+@@ -58,6 +58,7 @@ impl ToolExecutor<ToolInvocation> for CurrentTimeHandler {
+             name: NAMESPACE.to_string(),
+             description: "Tools for reading and waiting on time.".to_string(),
+             tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: TOOL_NAME.to_string(),
+                 description: "Return the current time in UTC.".to_string(),
+                 strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index f0bcf98aabed51d0adf5e94c2d881a71ddde9791..d736523bf622773b5e10202a7873e9f1f8824720 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -47,6 +47,10 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
+         self.0.spec()
+     }
+ 
++    fn allowed_provider_callers(&self) -> Option<codex_tools::ProviderToolCallers> {
++        self.0.allowed_provider_callers()
++    }
++
+     fn allowed_callers(&self) -> Option<codex_tools::ToolExposures> {
+         self.0.allowed_callers()
+     }
+@@ -273,7 +277,8 @@ async fn to_extension_call<'a>(
+             .map(ResponseItemEnvelope::into_item)
+             .collect()
+     })
+-    .with_realtime_tool_call(realtime_tool_call);
++    .with_realtime_tool_call(realtime_tool_call)
++    .with_provider_agent_metadata(invocation.provider_agent_metadata.clone());
+     let settings = &invocation.step_context.settings;
+     let codex_turn_metadata = invocation
+         .turn
+@@ -403,6 +408,7 @@ mod tests {
+ 
+         fn spec(&self) -> codex_tools::ToolSpec {
+             codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++                allowed_callers: None,
+                 name: "extension_echo".to_string(),
+                 description: "Echoes arguments.".to_string(),
+                 strict: true,
+@@ -450,6 +456,7 @@ mod tests {
+ 
+         fn spec(&self) -> codex_tools::ToolSpec {
+             codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++                allowed_callers: None,
+                 name: "extension_echo".to_string(),
+                 description: "Captures arguments.".to_string(),
+                 strict: false,
+@@ -522,6 +529,7 @@ mod tests {
+         let (session, turn) = crate::session::tests::make_session_and_context().await;
+         let turn = Arc::new(turn);
+         let invocation = ToolInvocation {
++            provider_agent_metadata: None,
+             session: session.into(),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+             turn,
+@@ -616,6 +624,7 @@ mod tests {
+         model_info.node_repl_disabled = !turn.model_info().node_repl_disabled;
+         let node_repl_disabled = model_info.node_repl_disabled;
+         let invocation = ToolInvocation {
++            provider_agent_metadata: None,
+             session,
+             step_context,
+             turn,
+diff --git a/codex-rs/core/src/tools/handlers/get_context_remaining_spec.rs b/codex-rs/core/src/tools/handlers/get_context_remaining_spec.rs
+index 102dfbd1388157e97632184e76bdb88ed990d116..3a7aaf2366f69f0876c6f303a7a3d97433ef5f7f 100644
+--- a/codex-rs/core/src/tools/handlers/get_context_remaining_spec.rs
++++ b/codex-rs/core/src/tools/handlers/get_context_remaining_spec.rs
+@@ -9,6 +9,7 @@ pub(crate) const GET_CONTEXT_REMAINING_TOOL_NAME: &str = "get_context_remaining"
+ 
+ pub fn create_get_context_remaining_tool() -> ToolSpec {
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: GET_CONTEXT_REMAINING_TOOL_NAME.to_string(),
+         description: "Get the remaining tokens in the current context window.".to_string(),
+         strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/list_available_plugins_to_install_spec.rs b/codex-rs/core/src/tools/handlers/list_available_plugins_to_install_spec.rs
+index ac3120753d442c124277bbf054a0be5bce6a6140..0d056c4a387ad93ba893626b637b732f7a1e06ad 100644
+--- a/codex-rs/core/src/tools/handlers/list_available_plugins_to_install_spec.rs
++++ b/codex-rs/core/src/tools/handlers/list_available_plugins_to_install_spec.rs
+@@ -10,6 +10,7 @@ pub(crate) fn create_list_available_plugins_to_install_tool() -> ToolSpec {
+     );
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: LIST_AVAILABLE_PLUGINS_TO_INSTALL_TOOL_NAME.to_string(),
+         description,
+         strict: false,
+@@ -29,6 +30,7 @@ mod tests {
+         assert_eq!(
+             create_list_available_plugins_to_install_tool(),
+             ToolSpec::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: "list_available_plugins_to_install".to_string(),
+                 description: "# List plugin/connector install candidates\n\nUse this tool only when both are true:\n- The user explicitly asks to use a specific plugin or connector that is not already available in the current context or active `tools` list.\n- `tool_search` is not available, or it has already been called and did not find or make the requested tool callable.\n\nReturns known plugins and connectors that can be passed to `request_plugin_install`. When both a plugin and a connector match, prefer the plugin; use the connector only when its corresponding plugin is already installed.\n".to_string(),
+                 strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/mcp.rs b/codex-rs/core/src/tools/handlers/mcp.rs
+index 75b40231a3c7b7fdfa7e00ab8381efd1ff26825d..7f44a7bfcbc74ad09eb302b0976d4d4b585b4721 100644
+--- a/codex-rs/core/src/tools/handlers/mcp.rs
++++ b/codex-rs/core/src/tools/handlers/mcp.rs
+@@ -688,6 +688,7 @@ mod tests {
+             .expect("MCP tool spec should build");
+         assert_eq!(
+             handler.pre_tool_use_payload(&ToolInvocation {
++                provider_agent_metadata: None,
+                 session: session.into(),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+@@ -722,6 +723,7 @@ mod tests {
+ 
+         assert_eq!(
+             handler.pre_tool_use_payload(&ToolInvocation {
++                provider_agent_metadata: None,
+                 session: session.into(),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+@@ -752,6 +754,7 @@ mod tests {
+         let invocation = handler
+             .with_updated_hook_input(
+                 ToolInvocation {
++                    provider_agent_metadata: None,
+                     session: session.into(),
+                     step_context: StepContext::for_test(Arc::clone(&turn)),
+                     turn,
+@@ -813,6 +816,7 @@ mod tests {
+         let handler = McpHandler::new(tool_info("filesystem", "filesystem", "read_file"))
+             .expect("MCP tool spec should build");
+         let invocation = ToolInvocation {
++            provider_agent_metadata: None,
+             session: session.into(),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+             turn,
+diff --git a/codex-rs/core/src/tools/handlers/mcp_resource_spec.rs b/codex-rs/core/src/tools/handlers/mcp_resource_spec.rs
+index 4c6d41f06b3375fc91d6a3565755f322074bdcd5..e85481b1eaed8b4f0ba5dffd84a60b1aa02c0441 100644
+--- a/codex-rs/core/src/tools/handlers/mcp_resource_spec.rs
++++ b/codex-rs/core/src/tools/handlers/mcp_resource_spec.rs
+@@ -22,6 +22,7 @@ pub fn create_list_mcp_resources_tool(messages: Option<&ToolMessage>) -> ToolSpe
+     ]);
+ 
+     let tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: "list_mcp_resources".to_string(),
+         description: "Lists resources provided by MCP servers. Resources allow servers to share data that provides context to language models, such as files, database schemas, or application-specific information. Prefer resources over web search when possible.".to_string(),
+         strict: false,
+@@ -51,6 +52,7 @@ pub fn create_list_mcp_resource_templates_tool(messages: Option<&ToolMessage>) -
+     ]);
+ 
+     let tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: "list_mcp_resource_templates".to_string(),
+         description: "Lists resource templates provided by MCP servers. Parameterized resource templates allow servers to share data that takes parameters and provides context to language models, such as files, database schemas, or application-specific information. Prefer resource templates over web search when possible.".to_string(),
+         strict: false,
+@@ -80,6 +82,7 @@ pub fn create_read_mcp_resource_tool(messages: Option<&ToolMessage>) -> ToolSpec
+     ]);
+ 
+     let tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: "read_mcp_resource".to_string(),
+         description:
+             "Read a specific resource from an MCP server given the server name and resource URI."
+diff --git a/codex-rs/core/src/tools/handlers/mcp_resource_spec_tests.rs b/codex-rs/core/src/tools/handlers/mcp_resource_spec_tests.rs
+index ec6839e4e85ab0998927ed95a8fb2693ccfd6d65..561d5e16f0a665cff3b5b9a20cbd7153189c77f3 100644
+--- a/codex-rs/core/src/tools/handlers/mcp_resource_spec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/mcp_resource_spec_tests.rs
+@@ -8,6 +8,7 @@ fn list_mcp_resources_tool_matches_expected_spec() {
+     assert_eq!(
+         create_list_mcp_resources_tool(/*messages*/ None),
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "list_mcp_resources".to_string(),
+             description: "Lists resources provided by MCP servers. Resources allow servers to share data that provides context to language models, such as files, database schemas, or application-specific information. Prefer resources over web search when possible.".to_string(),
+             strict: false,
+@@ -38,6 +39,7 @@ fn list_mcp_resource_templates_tool_matches_expected_spec() {
+     assert_eq!(
+         create_list_mcp_resource_templates_tool(/*messages*/ None),
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "list_mcp_resource_templates".to_string(),
+             description: "Lists resource templates provided by MCP servers. Parameterized resource templates allow servers to share data that takes parameters and provides context to language models, such as files, database schemas, or application-specific information. Prefer resource templates over web search when possible.".to_string(),
+             strict: false,
+@@ -68,6 +70,7 @@ fn read_mcp_resource_tool_matches_expected_spec() {
+     assert_eq!(
+         create_read_mcp_resource_tool(/*messages*/ None),
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "read_mcp_resource".to_string(),
+             description:
+                 "Read a specific resource from an MCP server given the server name and resource URI."
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
+index 92bae000c556729f1c93f4ee61f0c50c9b4e2798..49933e220044ad3c954dbac757ab16cbce6f529e 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
+@@ -89,6 +89,7 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
+         name: MULTI_AGENT_V1_NAMESPACE.to_string(),
+         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "spawn_agent".to_string(),
+             description: spawn_agent_tool_description(
+                 available_models_description.as_deref(),
+@@ -139,6 +140,7 @@ pub fn create_spawn_agent_tool_v2(
+     );
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "spawn_agent".to_string(),
+         description: spawn_agent_tool_description_v2(
+             available_models_description.as_deref(),
+@@ -190,6 +192,7 @@ pub fn create_send_input_tool_v1() -> ToolSpec {
+         name: MULTI_AGENT_V1_NAMESPACE.to_string(),
+         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "send_input".to_string(),
+             description: "Send a message to an existing agent. Use interrupt=true to redirect work immediately. You should reuse the agent by send_input if you believe your assigned task is highly dependent on the context of a previous task."
+                 .to_string(),
+@@ -219,6 +222,7 @@ pub fn create_send_message_tool() -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "send_message".to_string(),
+         description: "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn."
+             .to_string(),
+@@ -252,6 +256,7 @@ pub fn create_followup_task_tool() -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "followup_task".to_string(),
+         description: "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes."
+             .to_string(),
+@@ -272,6 +277,7 @@ pub fn create_resume_agent_tool() -> ToolSpec {
+         name: MULTI_AGENT_V1_NAMESPACE.to_string(),
+         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "resume_agent".to_string(),
+             description:
+                 "Resume a previously closed agent by id so it can receive send_input and wait_agent calls."
+@@ -289,6 +295,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
+         name: MULTI_AGENT_V1_NAMESPACE.to_string(),
+         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "wait_agent".to_string(),
+             description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
+                 .to_string(),
+@@ -302,6 +309,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
+ 
+ pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "wait_agent".to_string(),
+         description: "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline."
+             .to_string(),
+@@ -322,6 +330,7 @@ pub fn create_list_agents_tool() -> ToolSpec {
+     )]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "list_agents".to_string(),
+         description:
+             "List live agents in the current root thread tree. Optionally filter by task-path prefix."
+@@ -343,6 +352,7 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
+         name: MULTI_AGENT_V1_NAMESPACE.to_string(),
+         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "close_agent".to_string(),
+             description: "Close an agent and any open descendants when they are no longer needed, and return the target agent's previous status before shutdown was requested. Completed agents remain open and count toward the concurrency limit until closed. Don't keep agents open for too long if they are not needed anymore.".to_string(),
+             strict: false,
+@@ -367,6 +377,7 @@ pub fn create_interrupt_agent_tool_v2() -> ToolSpec {
+     )]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "interrupt_agent".to_string(),
+         description: "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.".to_string(),
+         strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+index 26320b920289296d876b618a8613704ff5d67bf3..7c75f34f1a5dd9c8243a32784209604d455bfbed 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -107,6 +107,7 @@ fn invocation(
+ ) -> ToolInvocation {
+     let step_context = StepContext::for_test(Arc::clone(&turn));
+     ToolInvocation {
++        provider_agent_metadata: None,
+         session,
+         step_context,
+         turn,
+diff --git a/codex-rs/core/src/tools/handlers/new_context_window_spec.rs b/codex-rs/core/src/tools/handlers/new_context_window_spec.rs
+index d2bde1f1377f0d4b1a2a6e2704460b481ae20bfb..418bb0f08417e4aa311f01011264ba101f6849c9 100644
+--- a/codex-rs/core/src/tools/handlers/new_context_window_spec.rs
++++ b/codex-rs/core/src/tools/handlers/new_context_window_spec.rs
+@@ -7,6 +7,7 @@ pub(crate) const NEW_CONTEXT_WINDOW_TOOL_NAME: &str = "new_context";
+ 
+ pub fn create_new_context_window_tool() -> ToolSpec {
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: NEW_CONTEXT_WINDOW_TOOL_NAME.to_string(),
+         description: "Start a new context window. Does not clear, reset, or otherwise affect environment state.".to_string(),
+         strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/plan_spec.rs b/codex-rs/core/src/tools/handlers/plan_spec.rs
+index d8ce95767b0e99657b72915d07677d6322313601..46f4ec862c4170c59a3ffadddae881b1ab1b69c7 100644
+--- a/codex-rs/core/src/tools/handlers/plan_spec.rs
++++ b/codex-rs/core/src/tools/handlers/plan_spec.rs
+@@ -40,6 +40,7 @@ pub fn create_update_plan_tool() -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "update_plan".to_string(),
+         description: r#"Updates the task plan.
+ Provide an optional explanation and a list of plan items, each with a step and status.
+diff --git a/codex-rs/core/src/tools/handlers/request_plugin_install_spec.rs b/codex-rs/core/src/tools/handlers/request_plugin_install_spec.rs
+index ec09be075fc50254bc29808334820e304eb3017c..d3e8c9ed149319e7551ffdc5f98922e1481c13e3 100644
+--- a/codex-rs/core/src/tools/handlers/request_plugin_install_spec.rs
++++ b/codex-rs/core/src/tools/handlers/request_plugin_install_spec.rs
+@@ -71,6 +71,7 @@ pub(crate) fn create_request_plugin_install_tool(
+     };
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: REQUEST_PLUGIN_INSTALL_TOOL_NAME.to_string(),
+         description,
+         strict: false,
+@@ -99,6 +100,7 @@ mod tests {
+         assert_eq!(
+             create_request_plugin_install_tool(ToolSuggestPresentation::ListTool),
+             ToolSpec::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: "request_plugin_install".to_string(),
+                 description: expected_description.to_string(),
+                 strict: false,
+@@ -158,6 +160,7 @@ mod tests {
+         assert_eq!(
+             create_request_plugin_install_tool(ToolSuggestPresentation::RecommendationContext),
+             ToolSpec::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: "request_plugin_install".to_string(),
+                 description: expected_description.to_string(),
+                 strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/request_plugin_install_tests.rs b/codex-rs/core/src/tools/handlers/request_plugin_install_tests.rs
+index b2f6c7b477e2e383372fb5b9bcfca338afc1ea60..7c647fd9e122a82b8a16757f4384ec1e9d57a370 100644
+--- a/codex-rs/core/src/tools/handlers/request_plugin_install_tests.rs
++++ b/codex-rs/core/src/tools/handlers/request_plugin_install_tests.rs
+@@ -58,6 +58,7 @@ async fn request_plugin_install_rejects_subagent_threads(presentation: ToolSugge
+ 
+     let result = RequestPluginInstallHandler::new(Vec::new(), presentation)
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::new(session),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+             turn,
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_async.rs b/codex-rs/core/src/tools/handlers/request_user_input_async.rs
+index f35e1d1a9aafed9f54f9b185205e89de914cace3..975307e115aa61427a6128194e5831c18fc3071f 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input_async.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_async.rs
+@@ -77,6 +77,7 @@ impl ToolExecutor<ToolInvocation> for RequestUserInputAsyncHandler {
+         }
+ 
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: TOOL_NAME.to_string(),
+             description: self.description.clone(),
+             strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_spec.rs b/codex-rs/core/src/tools/handlers/request_user_input_spec.rs
+index ede0d85bea5c2829939ca1575a25053425dcb59f..26187d346d736547977abf532652cc10cf290a52 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input_spec.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_spec.rs
+@@ -75,6 +75,7 @@ pub fn create_request_user_input_tool(description: String) -> ToolSpec {
+     let properties = BTreeMap::from([("questions".to_string(), questions_schema)]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: REQUEST_USER_INPUT_TOOL_NAME.to_string(),
+         description,
+         strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs b/codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs
+index 6d2e25ec0f1ac7bb2ae638acf6f7a5af27bd4193..181ba6bf3c932fcb223ede7b4fd50a3159991f48 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs
+@@ -24,6 +24,7 @@ fn request_user_input_tool_includes_questions_schema() {
+     assert_eq!(
+         create_request_user_input_tool("Ask the user to choose.".to_string()),
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "request_user_input".to_string(),
+             description: "Ask the user to choose.".to_string(),
+             strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_tests.rs b/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
+index 1c1dbfca169ba4f80410e22f52dc451ad2b06180..8fc5a990bb94856c058f90fc57d6818a674f7230 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
+@@ -40,6 +40,7 @@ async fn multi_agent_v2_request_user_input_rejects_subagent_threads() {
+         available_modes: Vec::new(),
+     }
+     .handle(ToolInvocation {
++        provider_agent_metadata: None,
+         session: Arc::new(session),
+         step_context: StepContext::for_test(Arc::clone(&turn)),
+         turn,
+@@ -118,6 +119,7 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode(
+                 available_modes: vec![ModeKind::Default],
+             }
+             .handle(ToolInvocation {
++                provider_agent_metadata: None,
+                 session,
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+@@ -239,6 +241,7 @@ async fn request_user_input_sets_blocking_from_turn_mode() {
+                 available_modes: vec![ModeKind::Plan],
+             }
+             .handle(ToolInvocation {
++                provider_agent_metadata: None,
+                 session,
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+diff --git a/codex-rs/core/src/tools/handlers/send_message_to_user_async.rs b/codex-rs/core/src/tools/handlers/send_message_to_user_async.rs
+index 075a7e7f65ae1ff81927d17e0a5dd4e6d4a86a0c..efb292baeebab5a86d75381e9d11a7e018abb2dc 100644
+--- a/codex-rs/core/src/tools/handlers/send_message_to_user_async.rs
++++ b/codex-rs/core/src/tools/handlers/send_message_to_user_async.rs
+@@ -42,6 +42,7 @@ impl ToolExecutor<ToolInvocation> for SendMessageToUserAsyncHandler {
+         )]);
+ 
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: TOOL_NAME.to_string(),
+             description: "Send a concise message that needs the user's attention during ongoing work. The tool returns immediately without ending the turn or waiting for a reply; any reply arrives asynchronously as a new user message. Use this tool to report a critical blocker or a finding that may change the task's direction, or to answer a user question or status request received while work is still in progress. Use this tool when a message needs the user's immediate attention; use commentary for routine progress and intermediate context. Use clear formatting, such as bolding questions, to make requests easy to notice and answer."
+                 .to_string(),
+diff --git a/codex-rs/core/src/tools/handlers/shell_spec.rs b/codex-rs/core/src/tools/handlers/shell_spec.rs
+index ac3dcf992655b18ea42bfa9c068d7b9b11b989d7..b92a85e2264273b1b2f5579a546ea5f8bfb9fbe9 100644
+--- a/codex-rs/core/src/tools/handlers/shell_spec.rs
++++ b/codex-rs/core/src/tools/handlers/shell_spec.rs
+@@ -93,6 +93,7 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
+     ));
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "exec_command".to_string(),
+         description: if include_windows_shell_guidance {
+             format!(
+@@ -143,6 +144,7 @@ pub fn create_write_stdin_tool() -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "write_stdin".to_string(),
+         description:
+             "Writes characters to an existing unified exec session and returns recent output."
+@@ -177,6 +179,7 @@ pub fn create_request_permissions_tool(description: String) -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "request_permissions".to_string(),
+         description,
+         strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/shell_spec_tests.rs b/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
+index c3d1afffffd49a7e8b22ea481ce2b55bc267317f..531cd3c073d6622cae0765b8039599ec4efee4de 100644
+--- a/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
+@@ -77,6 +77,7 @@ fn exec_command_tool_matches_expected_spec() {
+     assert_eq!(
+         tool,
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "exec_command".to_string(),
+             description,
+             strict: false,
+@@ -125,6 +126,7 @@ fn write_stdin_tool_matches_expected_spec() {
+     assert_eq!(
+         tool,
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "write_stdin".to_string(),
+             description:
+                 "Writes characters to an existing unified exec session and returns recent output."
+@@ -166,6 +168,7 @@ fn request_permissions_tool_includes_full_permission_schema() {
+     assert_eq!(
+         tool,
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "request_permissions".to_string(),
+             description: "Request extra permissions for this turn.".to_string(),
+             strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/sleep.rs b/codex-rs/core/src/tools/handlers/sleep.rs
+index 45db1a3b5795c7bc89701b6c4af670a2dc2c0dc2..bc87637a74a2830aa646ba5aa316ac03cddb01fc 100644
+--- a/codex-rs/core/src/tools/handlers/sleep.rs
++++ b/codex-rs/core/src/tools/handlers/sleep.rs
+@@ -47,6 +47,7 @@ fn create_sleep_tool() -> ToolSpec {
+         name: NAMESPACE.to_string(),
+         description: "Tools for reading and waiting on time.".to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: TOOL_NAME.to_string(),
+             description: "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time."
+                 .to_string(),
+diff --git a/codex-rs/core/src/tools/handlers/test_sync_spec.rs b/codex-rs/core/src/tools/handlers/test_sync_spec.rs
+index 33bd720c94fe0bfa62226ca2e14fb11945034abd..752d37ffb6a3ef15bf314d1f49c28d9d32c7aff4 100644
+--- a/codex-rs/core/src/tools/handlers/test_sync_spec.rs
++++ b/codex-rs/core/src/tools/handlers/test_sync_spec.rs
+@@ -56,6 +56,7 @@ pub fn create_test_sync_tool() -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "test_sync_tool".to_string(),
+         description: "Internal synchronization helper used by Codex integration tests.".to_string(),
+         strict: false,
+diff --git a/codex-rs/core/src/tools/handlers/test_sync_spec_tests.rs b/codex-rs/core/src/tools/handlers/test_sync_spec_tests.rs
+index adcb2a2eebe31722672b74ae910c0bfe6c3f226d..25246930dc1c16116d10cfcab27e73b762e344dc 100644
+--- a/codex-rs/core/src/tools/handlers/test_sync_spec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/test_sync_spec_tests.rs
+@@ -8,6 +8,7 @@ fn test_sync_tool_matches_expected_spec() {
+     assert_eq!(
+         create_test_sync_tool(),
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "test_sync_tool".to_string(),
+             description: "Internal synchronization helper used by Codex integration tests."
+                 .to_string(),
+diff --git a/codex-rs/core/src/tools/handlers/tool_search.rs b/codex-rs/core/src/tools/handlers/tool_search.rs
+index d0c086e5660ab0e961b03845e89242d193584de3..e33db501c8814141a6dd73104d45b5bc089ef519 100644
+--- a/codex-rs/core/src/tools/handlers/tool_search.rs
++++ b/codex-rs/core/src/tools/handlers/tool_search.rs
+@@ -431,6 +431,7 @@ mod tests {
+                     description: "Tools in the mcp__calendar namespace.".to_string(),
+                     tools: vec![
+                         ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                            allowed_callers: None,
+                             name: "create_event".to_string(),
+                             description: "Create events desktop tool".to_string(),
+                             strict: false,
+@@ -443,6 +444,7 @@ mod tests {
+                             output_schema: None,
+                         }),
+                         ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                            allowed_callers: None,
+                             name: "list_events".to_string(),
+                             description: "List events desktop tool".to_string(),
+                             strict: false,
+@@ -460,6 +462,7 @@ mod tests {
+                     name: "codex_app".to_string(),
+                     description: "Tools in the codex_app namespace.".to_string(),
+                     tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                        allowed_callers: None,
+                         name: "automation_update".to_string(),
+                         description: "Create, update, view, or delete recurring automations."
+                             .to_string(),
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec_tests.rs b/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
+index d834c249825cd532f7e29ba7d814a2e69f2b181a..aef687260932862991f33eec3bafcc1e88c92fa8 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
+@@ -35,6 +35,7 @@ async fn invocation_for_payload(
+     let (session, turn) = make_session_and_context().await;
+     let turn = Arc::new(turn);
+     ToolInvocation {
++        provider_agent_metadata: None,
+         session: session.into(),
+         step_context: StepContext::for_test(Arc::clone(&turn)),
+         turn,
+@@ -365,6 +366,7 @@ async fn exec_command_rejects_login_when_selected_environment_disallows_it() {
+ 
+     let turn = Arc::new(turn);
+     let invocation = ToolInvocation {
++        provider_agent_metadata: None,
+         session: session.into(),
+         step_context: StepContext::for_test(Arc::clone(&turn)),
+         turn,
+@@ -514,6 +516,7 @@ async fn exec_command_reuses_foreign_windows_grant() {
+     );
+     let response = ExecCommandHandler::default()
+         .handle(ToolInvocation {
++            provider_agent_metadata: None,
+             session: Arc::clone(&session),
+             step_context,
+             turn,
+@@ -554,6 +557,7 @@ async fn exec_command_pre_tool_use_payload_uses_raw_command() {
+ 
+     assert_eq!(
+         handler.pre_tool_use_payload(&ToolInvocation {
++            provider_agent_metadata: None,
+             session: session.into(),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+             turn,
+@@ -582,6 +586,7 @@ async fn exec_command_pre_tool_use_payload_skips_write_stdin() {
+ 
+     assert_eq!(
+         handler.pre_tool_use_payload(&ToolInvocation {
++            provider_agent_metadata: None,
+             session: session.into(),
+             step_context: StepContext::for_test(Arc::clone(&turn)),
+             turn,
+diff --git a/codex-rs/core/src/tools/handlers/view_image.rs b/codex-rs/core/src/tools/handlers/view_image.rs
+index 96f578c2a52570c1e9eb2298a5fd88d6fd41b95d..5523650c77d7bcb454a6487140ecc6de0d04874e 100644
+--- a/codex-rs/core/src/tools/handlers/view_image.rs
++++ b/codex-rs/core/src/tools/handlers/view_image.rs
+@@ -403,6 +403,7 @@ mod tests {
+ 
+         let result = ViewImageHandler::default()
+             .handle(ToolInvocation {
++                provider_agent_metadata: None,
+                 session: Arc::new(session),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+@@ -433,6 +434,7 @@ mod tests {
+ 
+         let result = ViewImageHandler::default()
+             .handle(ToolInvocation {
++                provider_agent_metadata: None,
+                 session: Arc::new(session),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+@@ -476,6 +478,7 @@ mod tests {
+ 
+         let result = ViewImageHandler::default()
+             .handle(ToolInvocation {
++                provider_agent_metadata: None,
+                 session: Arc::new(session),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+@@ -514,6 +517,7 @@ mod tests {
+ 
+         let result = ViewImageHandler::default()
+             .handle(ToolInvocation {
++                provider_agent_metadata: None,
+                 session: Arc::new(session),
+                 step_context: StepContext::for_test(Arc::clone(&turn)),
+                 turn,
+diff --git a/codex-rs/core/src/tools/handlers/view_image_spec.rs b/codex-rs/core/src/tools/handlers/view_image_spec.rs
+index 6107caf8f167d1df58b54d26e4865b5a869304ca..029040031041c46f50dcfcb8b78d7baf4abe38d8 100644
+--- a/codex-rs/core/src/tools/handlers/view_image_spec.rs
++++ b/codex-rs/core/src/tools/handlers/view_image_spec.rs
+@@ -40,6 +40,7 @@ pub fn create_view_image_tool(options: ViewImageToolOptions) -> ToolSpec {
+     }
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: VIEW_IMAGE_TOOL_NAME.to_string(),
+         description: "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk."
+             .to_string(),
+diff --git a/codex-rs/core/src/tools/handlers/wait_for_environment.rs b/codex-rs/core/src/tools/handlers/wait_for_environment.rs
+index 449413a3c5dffc063ad02d71ed1a1bf6b32c5d27..134b0b3d61be68bd8ab8a1ed92a3360c4cbe37f5 100644
+--- a/codex-rs/core/src/tools/handlers/wait_for_environment.rs
++++ b/codex-rs/core/src/tools/handlers/wait_for_environment.rs
+@@ -88,6 +88,7 @@ impl ToolExecutor<ToolInvocation> for WaitForEnvironmentHandler {
+ 
+     fn spec(&self) -> ToolSpec {
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: WAIT_FOR_ENVIRONMENT_TOOL_NAME.to_string(),
+             description: self.tool_description.clone(),
+             strict: false,
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+index 0b25a32342f91d06e1df19fbfc05591c47a1b1f9..642eefcfce8549f7efa000f50f9b7a3c5683caf8 100644
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -148,3 +148,5 @@ fn build_content_with_timeout(exec_output: &ExecToolCallOutput) -> String {
+         exec_output.aggregated_output.text.clone()
+     }
+ }
++
++pub(crate) mod program_callers;
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index a4cbd4291656575b27270141894f43280db54518..175b5a384d6d7baf56029dd0b5f1354394c22b9b 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -211,6 +211,30 @@ impl ToolCallRuntime {
+         self,
+         call: ToolCall,
+         cancellation_token: CancellationToken,
++    ) -> impl std::future::Future<Output = Result<DirectToolResult, CodexErr>> {
++        self.handle_tool_call_with_provider_metadata(call, cancellation_token, None)
++    }
++
++    pub(crate) fn handle_tool_call_with_provider_metadata(
++        self,
++        call: ToolCall,
++        cancellation_token: CancellationToken,
++        provider_agent_metadata: Option<serde_json::Value>,
++    ) -> impl std::future::Future<Output = Result<DirectToolResult, CodexErr>> {
++        self.handle_tool_call_with_provider_admission(
++            call,
++            cancellation_token,
++            provider_agent_metadata,
++            None,
++        )
++    }
++
++    pub(crate) fn handle_tool_call_with_provider_admission(
++        self,
++        call: ToolCall,
++        cancellation_token: CancellationToken,
++        provider_agent_metadata: Option<serde_json::Value>,
++        provider_programmatic_call: Option<super::program_callers::ProgrammaticCallReceipt>,
+     ) -> impl std::future::Future<Output = Result<DirectToolResult, CodexErr>> {
+         self.observe_requested_handoff(&call.tool_name, &call.call_id);
+         let ignored = self.ignores_handoff(&call.tool_name, &call.call_id);
+@@ -221,6 +245,12 @@ impl ToolCallRuntime {
+         let recorded_call = recorder.prepare_direct_call(&call, &source, &self.step_context);
+         let step_context = Arc::clone(&self.step_context);
+         let call_state = Arc::new(ToolCallState::default());
++        if let Some(receipt) = provider_programmatic_call {
++            let _ = call_state.provider_programmatic_call.set(receipt);
++        }
++        if let Some(metadata) = provider_agent_metadata {
++            let _ = call_state.provider_agent_metadata.set(metadata);
++        }
+         let retained_step_context = Arc::clone(&step_context);
+         let dispatch_call_state = Arc::clone(&call_state);
+         // Construct dispatch eagerly: manual tool requests can unblock the
+@@ -986,6 +1016,7 @@ mod tests {
+ 
+         fn spec(&self) -> codex_tools::ToolSpec {
+             codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++                allowed_callers: None,
+                 name: self.tool_name.name.clone(),
+                 description: "Immediate test tool.".to_string(),
+                 strict: false,
+diff --git a/codex-rs/core/src/tools/program_callers.rs b/codex-rs/core/src/tools/program_callers.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4275394e80546384e9d7417d829d662b5d875190
+--- /dev/null
++++ b/codex-rs/core/src/tools/program_callers.rs
+@@ -0,0 +1,193 @@
++use codex_extension_api::ExtensionData;
++use codex_protocol::models::{ProgramOutputStatus, ResponseItem};
++use std::collections::HashMap;
++use std::sync::{Arc, Mutex, Weak};
++
++const MAX_PROGRAMS: usize = 4096;
++const MAX_PROGRAM_BYTES: usize = 1024 * 1024;
++#[derive(Default)]
++struct LivePrograms {
++    entries: HashMap<String, bool>,
++    bytes: usize,
++    exhausted: bool,
++}
++#[derive(Default)]
++struct ProgramOwner(Mutex<LivePrograms>);
++
++/// Existing per-call state owns this after the exact live parent is admitted.
++#[derive(Clone)]
++pub(crate) struct ProgrammaticCallReceipt {
++    owner: Weak<ExtensionData>,
++}
++impl ProgrammaticCallReceipt {
++    pub(crate) fn belongs_to(&self, owner: &Arc<ExtensionData>) -> bool {
++        Weak::ptr_eq(&self.owner, &Arc::downgrade(owner))
++    }
++}
++
++pub(crate) fn observe(
++    store: &Arc<ExtensionData>,
++    item: &ResponseItem,
++    declared: bool,
++) -> Result<(), String> {
++    let (id, opening, settled) = match item {
++        ResponseItem::Program { call_id, .. } => (call_id, true, false),
++        ResponseItem::ProgramOutput {
++            call_id, status, ..
++        } => (
++            call_id,
++            false,
++            matches!(status, ProgramOutputStatus::Completed),
++        ),
++        _ => return Ok(()),
++    };
++    if id.is_empty() {
++        return Ok(());
++    }
++    let state = store.get_or_init(ProgramOwner::default);
++    let mut state = state
++        .0
++        .lock()
++        .map_err(|_| "Provider program owner poisoned")?;
++    if state.exhausted {
++        return Ok(());
++    }
++    if let Some(active) = state.entries.get_mut(id) {
++        if opening || settled {
++            *active = false;
++        }
++        return Ok(());
++    }
++    let cost = serde_json::to_vec(id)
++        .map_err(|_| "Invalid provider program identity")?
++        .len()
++        .saturating_add(64);
++    if state.entries.len() >= MAX_PROGRAMS || state.bytes.saturating_add(cost) > MAX_PROGRAM_BYTES {
++        state.entries.clear();
++        state.bytes = 0;
++        state.exhausted = true;
++        return Ok(());
++    }
++    state.bytes += cost;
++    state.entries.insert(id.clone(), opening && declared);
++    Ok(())
++}
++
++pub(crate) fn admit(
++    store: &Arc<ExtensionData>,
++    caller_id: &str,
++    declared: bool,
++) -> Result<ProgrammaticCallReceipt, String> {
++    if !declared {
++        return Err(
++            "Programmatic caller requires a currently declared provider program tool".into(),
++        );
++    }
++    let state = store
++        .get::<ProgramOwner>()
++        .ok_or("Programmatic caller has no live parent program")?;
++    if !state
++        .0
++        .lock()
++        .map_err(|_| "Provider program owner poisoned")?
++        .entries
++        .get(caller_id)
++        .copied()
++        .unwrap_or(false)
++    {
++        return Err("Programmatic caller has no unique active parent program".into());
++    }
++    Ok(ProgrammaticCallReceipt {
++        owner: Arc::downgrade(store),
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn program(id: &str) -> ResponseItem {
++        serde_json::from_value(serde_json::json!({"type":"program","call_id":id,"code":"passive"}))
++            .unwrap()
++    }
++    fn output(id: &str) -> ResponseItem {
++        serde_json::from_value(serde_json::json!({"type":"program_output","call_id":id,"status":"completed","result":"done"})).unwrap()
++    }
++    #[test]
++    fn receipts_require_a_unique_live_parent_in_the_exact_turn_owner() {
++        let owner = Arc::new(ExtensionData::default());
++        assert!(admit(&owner, "parent", true).is_err());
++        observe(&owner, &program("parent"), true).unwrap();
++        assert!(admit(&owner, "parent", false).is_err());
++        let receipt = admit(&owner, "parent", true).unwrap();
++        assert!(receipt.belongs_to(&owner));
++        assert!(!receipt.belongs_to(&Arc::new(ExtensionData::default())));
++        observe(&owner, &output("parent"), true).unwrap();
++        assert!(admit(&owner, "parent", true).is_err());
++        // Completion cannot revoke an already admitted occurrence.
++        assert!(receipt.belongs_to(&owner));
++        observe(&owner, &program("parent"), true).unwrap();
++        assert!(admit(&owner, "parent", true).is_err());
++        let weak = Arc::downgrade(&owner);
++        drop(owner);
++        assert!(weak.upgrade().is_none());
++    }
++    #[test]
++    fn repeated_and_unavailable_programs_do_not_grant_admission() {
++        let owner = Arc::new(ExtensionData::default());
++        observe(&owner, &program("duplicate"), true).unwrap();
++        observe(&owner, &program("duplicate"), true).unwrap();
++        assert!(admit(&owner, "duplicate", true).is_err());
++        observe(&owner, &program("undeclared"), false).unwrap();
++        assert!(admit(&owner, "undeclared", true).is_err());
++        observe(&owner, &output("closed"), true).unwrap();
++        observe(&owner, &program("closed"), true).unwrap();
++        assert!(admit(&owner, "closed", true).is_err());
++        observe(&owner, &program(""), true).unwrap();
++        assert!(admit(&owner, "", true).is_err());
++    }
++    #[test]
++    fn incomplete_outputs_preserve_only_an_already_admitted_live_parent() {
++        let owner = Arc::new(ExtensionData::default());
++        let progress = serde_json::from_value(serde_json::json!({"type":"program_output","call_id":"parent","status":"incomplete","result":"progress"})).unwrap();
++        observe(&owner, &program("parent"), true).unwrap();
++        for _ in 0..2 {
++            observe(&owner, &progress, true).unwrap();
++            assert!(admit(&owner, "parent", true).is_ok());
++            assert!(admit(&owner, "parent", false).is_err());
++        }
++        observe(&owner, &output("parent"), true).unwrap();
++        observe(&owner, &progress, true).unwrap();
++        assert!(admit(&owner, "parent", true).is_err());
++        let unknown = Arc::new(ExtensionData::default());
++        observe(&unknown, &progress, true).unwrap();
++        observe(&unknown, &program("parent"), true).unwrap();
++        assert!(admit(&unknown, "parent", true).is_err());
++        let undeclared = Arc::new(ExtensionData::default());
++        observe(&undeclared, &program("parent"), false).unwrap();
++        observe(&undeclared, &progress, true).unwrap();
++        assert!(admit(&undeclared, "parent", true).is_err());
++    }
++
++    #[test]
++    fn retained_parent_limits_fail_closed_without_rejecting_passive_items() {
++        for bytes in [false, true] {
++            let owner = Arc::new(ExtensionData::default());
++            observe(&owner, &program("first"), true).unwrap();
++            if bytes {
++                observe(&owner, &program(&"x".repeat(MAX_PROGRAM_BYTES)), true).unwrap();
++            } else {
++                for n in 0..MAX_PROGRAMS {
++                    observe(&owner, &program(&n.to_string()), true).unwrap();
++                }
++            }
++            assert!(admit(&owner, "first", true).is_err());
++            observe(&owner, &program("later"), true).unwrap();
++            assert!(admit(&owner, "later", true).is_err());
++            let state = owner.get::<ProgramOwner>().unwrap();
++            let state = state.0.lock().unwrap();
++            assert!(state.exhausted);
++            assert!(state.entries.is_empty());
++            assert_eq!(state.bytes, 0);
++        }
++    }
++}
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 563ebb2db047723d26a0230f8253d2bd9d180378..d91c6466fae401e14eaceed826b7cd168b9b987f 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -706,6 +706,29 @@ impl ToolRegistry {
+                 return Err(err);
+             }
+         };
++        if !matches!(
++            &invocation.source,
++            crate::tools::context::ToolCallSource::CodeMode { .. }
++        ) {
++            let programmatic = call_state
++                .as_ref()
++                .and_then(|state| state.provider_programmatic_call.get());
++            let policy = tool
++                .allowed_provider_callers()
++                .unwrap_or(codex_tools::ProviderToolCallers::DIRECT);
++            let allowed = match programmatic {
++                Some(receipt) => {
++                    receipt.belongs_to(&invocation.turn.extension_data)
++                        && policy.contains(codex_tools::ProviderToolCallers::PROGRAMMATIC)
++                }
++                None => policy.contains(codex_tools::ProviderToolCallers::DIRECT),
++            };
++            if !allowed {
++                return Err(FunctionCallError::Fatal(
++                    "Selected tool does not permit this provider caller".into(),
++                ));
++            }
++        }
+         if let Some(callers) = tool.allowed_callers() {
+             let allowed = match &invocation.source {
+                 crate::tools::context::ToolCallSource::CodeMode { .. } => {
+diff --git a/codex-rs/core/src/tools/registry_tests.rs b/codex-rs/core/src/tools/registry_tests.rs
+index f34f66f64aa48906f9a20aed3e7f1ad0f7667ad5..6e1171eeab2b93b73d6b2a9eefe10c5dc9f27bf0 100644
+--- a/codex-rs/core/src/tools/registry_tests.rs
++++ b/codex-rs/core/src/tools/registry_tests.rs
+@@ -124,6 +124,7 @@ impl CoreToolRuntime for LifecycleTestHandler {}
+ 
+ fn test_spec(tool_name: &codex_tools::ToolName) -> codex_tools::ToolSpec {
+     codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++        allowed_callers: None,
+         name: tool_name.name.clone(),
+         description: "Test tool.".to_string(),
+         strict: false,
+@@ -458,6 +459,7 @@ async fn function_tools_expose_default_hook_payloads_and_rewrites() -> anyhow::R
+         tool_name: tool_name.clone(),
+     };
+     let invocation = ToolInvocation {
++        provider_agent_metadata: None,
+         payload: ToolPayload::Function {
+             arguments: serde_json::json!({ "message": "hello" }).to_string(),
+         },
+@@ -504,6 +506,7 @@ async fn function_hook_input_defaults_empty_arguments_to_object() {
+         tool_name: tool_name.clone(),
+     };
+     let invocation = ToolInvocation {
++        provider_agent_metadata: None,
+         payload: ToolPayload::Function {
+             arguments: "  ".to_string(),
+         },
+@@ -536,6 +539,7 @@ async fn spawn_agent_function_tools_use_agent_matcher_alias() {
+             tool_name: tool_name.clone(),
+         };
+         let invocation = ToolInvocation {
++            provider_agent_metadata: None,
+             payload: ToolPayload::Function {
+                 arguments: serde_json::json!({ "message": "inspect this repo" }).to_string(),
+             },
+@@ -956,6 +960,7 @@ fn test_invocation(
+ ) -> ToolInvocation {
+     let step_context = StepContext::for_test(Arc::clone(&turn));
+     ToolInvocation {
++        provider_agent_metadata: None,
+         session,
+         step_context,
+         turn,
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+index 5e7642614af895ba48858730e564b7f3d0139d6c..93a46da54dd309b0e45f062e82aecabd7e9704e9 100644
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -400,6 +400,12 @@ impl ToolRouter {
+         }))
+     }
+ 
++    pub(crate) fn has_provider_programmatic_tool(&self) -> bool {
++        self.model_visible_specs.iter().any(|spec| {
++            matches!(spec, ToolSpec::ProviderOnly(tool) if tool.tool_type() == "programmatic_tool_calling")
++        })
++    }
++
+     /// Check the retained dispatch plan without hooks, accounting, or parse-error logging.
+     pub(crate) fn admits_response_item(&self, item: &ResponseItem) -> bool {
+         if let ResponseItem::McpApprovalRequest { server_label, .. } = item
+@@ -594,6 +600,7 @@ impl ToolRouter {
+         // Keep the legacy ToolInvocation.turn field tied to the same request state until handlers migrate.
+         let turn = Arc::clone(&step_context.turn);
+         let invocation = ToolInvocation {
++            provider_agent_metadata: call_state.as_ref().and_then(|state| state.provider_agent_metadata.get()).cloned(),
+             session,
+             turn,
+             step_context,
+diff --git a/codex-rs/core/src/tools/router_tests.rs b/codex-rs/core/src/tools/router_tests.rs
+index 6aac31301c5bfa6bcdd25b74dc6e88d0e26a660d..719f77125dab9963fa26fd5102c3a16807e00d44 100644
+--- a/codex-rs/core/src/tools/router_tests.rs
++++ b/codex-rs/core/src/tools/router_tests.rs
+@@ -164,6 +164,7 @@ impl<'call> ToolExecutor<ExtensionToolCall<'call>> for ExtensionEchoExecutor {
+             name: "extension/".to_string(),
+             description: default_namespace_description("extension/"),
+             tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: "echo".to_string(),
+                 description: "Echoes arguments through an extension tool.".to_string(),
+                 strict: true,
+@@ -394,6 +395,7 @@ async fn build_tool_call_uses_namespace_for_registry_name() -> anyhow::Result<()
+     let tool_name = "create_event".to_string();
+ 
+     let call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: tool_name.clone(),
+         namespace: Some("mcp__codex_apps__calendar".to_string()),
+@@ -457,6 +459,7 @@ async fn build_custom_tool_call_uses_namespace_for_registry_name() -> anyhow::Re
+ fn build_tool_call_normalizes_default_function_and_custom_namespaces() -> anyhow::Result<()> {
+     for namespace in [None, Some(""), Some(DEFAULT_FUNCTION_NAMESPACE)] {
+         let function_call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "lookup".to_string(),
+             namespace: namespace.map(str::to_string),
+@@ -770,6 +773,7 @@ async fn extension_tool_executors_are_model_visible_and_dispatchable() -> anyhow
+     );
+ 
+     let call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "echo".to_string(),
+         namespace: Some("extension/".to_string()),
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+index 8d9521a89a5298a3bac40f0440a022102d6119f2..8af5d105a503948aeff1c08042b21298c6c51935 100644
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -335,6 +335,7 @@ impl<'call> ToolExecutor<ExtensionToolCall<'call>> for TestNamespaceExtensionToo
+             name: self.namespace.to_string(),
+             description: "Test namespace.".to_string(),
+             tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: self.tool_name.to_string(),
+                 description: "Test namespace tool.".to_string(),
+                 strict: false,
+@@ -364,6 +365,7 @@ impl<'call> ToolExecutor<ExtensionToolCall<'call>> for DeferredExtensionTool {
+ 
+     fn spec(&self) -> ToolSpec {
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "extension_echo".to_string(),
+             description: "Echoes arguments through an extension tool.".to_string(),
+             strict: true,
+diff --git a/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs b/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs
+index 086ed3902cdd9e3b03270eabd5b521560aaa78ac..a2de08c06a9000794b5a3fbbba9cfd26e8f3459b 100644
+--- a/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs
++++ b/codex-rs/core/src/tools/tool_dispatch_trace_tests.rs
+@@ -39,6 +39,7 @@ impl ToolExecutor<ToolInvocation> for TestHandler {
+ 
+     fn spec(&self) -> codex_tools::ToolSpec {
+         codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++            allowed_callers: None,
+             name: self.tool_name.name.clone(),
+             description: "Test tool.".to_string(),
+             strict: false,
+@@ -356,6 +357,7 @@ fn test_invocation_with_payload(
+ ) -> ToolInvocation {
+     let step_context = StepContext::for_test(Arc::clone(&turn));
+     ToolInvocation {
++        provider_agent_metadata: None,
+         session,
+         step_context,
+         turn,
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index b1c11d9a00402eecfafffa608e007b8f21acac4a..c1d70c8a115687c139d997a48353af2eb25a5d8a 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -462,6 +462,8 @@ fn response_item_records_turn_ttft(item: &ResponseItem) -> bool {
+         | ResponseItem::McpApprovalResponse { .. }
+         | ResponseItem::ToolSearchOutput { .. }
+         | ResponseItem::ItemReference { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. }
+         | ResponseItem::Other => false,
+     }
+ }
+diff --git a/codex-rs/core/src/turn_timing_tests.rs b/codex-rs/core/src/turn_timing_tests.rs
+index c4a44b121ec2cfc2ff9364f63433279ff6b89427..66e5defc85381906e663785a0baa442f462ca5e8 100644
+--- a/codex-rs/core/src/turn_timing_tests.rs
++++ b/codex-rs/core/src/turn_timing_tests.rs
+@@ -151,6 +151,7 @@ async fn turn_timing_state_preserves_in_flight_items_after_turn_completion() {
+ fn response_item_records_turn_ttft_for_first_output_signals() {
+     assert!(response_item_records_turn_ttft(
+         &ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "shell".to_string(),
+             namespace: None,
+diff --git a/codex-rs/core/tests/suite/client.rs b/codex-rs/core/tests/suite/client.rs
+index 9baade382f034889b6488a203a9ccaf559e213f1..997484d22ae8ad047b0091d587039ace157d50a1 100644
+--- a/codex-rs/core/tests/suite/client.rs
++++ b/codex-rs/core/tests/suite/client.rs
+@@ -635,6 +635,7 @@ async fn synthetic_call_output_id_is_stable_across_resumes() -> anyhow::Result<(
+             timestamp: "2024-01-01T00:00:01.000Z".to_string(),
+             ordinal: None,
+             item: rollout_response_item(ResponseItem::FunctionCall {
++                caller: None,
+                 id: Some(ResponseItemId::with_suffix("fc", "existing")),
+                 name: "do_it".to_string(),
+                 namespace: None,
+@@ -1282,6 +1283,7 @@ async fn resume_replays_image_tool_outputs_with_detail() {
+             timestamp: "2024-01-01T00:00:01.000Z".to_string(),
+             ordinal: None,
+             item: rollout_response_item(ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "view_image".to_string(),
+                 namespace: None,
+@@ -3242,6 +3244,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
+         internal_chat_message_metadata_passthrough: None,
+     });
+     prompt.input.push(ResponseItem::FunctionCall {
++        caller: None,
+         id: Some(ResponseItemId::with_suffix("fc", "function-id")),
+         name: "do_thing".into(),
+         namespace: None,
+diff --git a/codex-rs/core/tests/suite/step_settings.rs b/codex-rs/core/tests/suite/step_settings.rs
+index 56cf9f9f2ee9b4134e263604c72d2fbf67c035b2..be6e4d66b4fc5d9f5f3368676ae30ee332490664 100644
+--- a/codex-rs/core/tests/suite/step_settings.rs
++++ b/codex-rs/core/tests/suite/step_settings.rs
+@@ -2996,6 +2996,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for SettingsEcho {
+ 
+     fn spec(&self) -> ToolSpec {
+         ToolSpec::Function(codex_tools::ResponsesApiTool {
++            allowed_callers: None,
+             name: "extension_settings".to_string(),
+             description: "Report the settings received by this extension.".to_string(),
+             strict: false,
+diff --git a/codex-rs/ext/agent-message-board/src/tools/spec.rs b/codex-rs/ext/agent-message-board/src/tools/spec.rs
+index 956494a717d35b428c28381a487504da8e3457c0..dc3074603f71e67775036c4ed6870c2f71ca1505 100644
+--- a/codex-rs/ext/agent-message-board/src/tools/spec.rs
++++ b/codex-rs/ext/agent-message-board/src/tools/spec.rs
+@@ -127,6 +127,7 @@ pub(super) fn tool(
+     }
+     let parameters = json!({"type":"object","properties":properties,"required":required,"additionalProperties":false});
+     let tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: name.into(),
+         description: description_override.unwrap_or(description).into(),
+         strict: false,
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index d4f0fed02a994affffdbd17861b1e544f7f2f8b7..21c61767309339b0c4228047b9a341aa2f2f7b19 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -166,6 +166,7 @@ pub use model_request::ModelResponseError;
+ pub use model_request::ModelResponseInterceptor;
+ pub use model_request::ModelResponseStream;
+ pub use model_request::ModelToolAdmission;
++pub use model_request::ProviderRequestAccounting;
+ pub use model_request::ProviderResponseAnchor;
+ pub use model_request::ResponseEvent;
+ pub use model_request::SdkProviderResponseSpanAdmission;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 87cd419ed11dee6bfec3fbda6ec6f1b212c61f54..f737617abb8503d271d2999d364ce0f776b28f3f 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -465,6 +465,22 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
+     }
+ }
+ 
++/// A private transport can continue one physical provider response across logical attempts.
++#[derive(Debug, Deserialize)]
++#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
++pub enum ProviderRequestAccounting {
++    Manage,
++    Create,
++    /// Fence replay before a hosted request or injection may reach the provider.
++    Dispatch {
++        lineage: String,
++    },
++    Terminal {
++        lineage: String,
++        usage: Option<codex_protocol::protocol::TokenUsage>,
++    },
++}
++
+ /// Measurement can settle during joined cleanup after executable reply authority expires.
+ /// Implementations reject mismatched identity and reports after physical settlement.
+ pub trait ModelAttemptAdmission: Send + Sync + std::fmt::Debug {
+@@ -487,6 +503,11 @@ pub trait ModelAttemptAdmission: Send + Sync + std::fmt::Debug {
+         failure: codex_protocol::model_retry::ModelProducerFailure,
+     ) -> Result<(), String>;
+     fn report_usage(&self, usage: codex_protocol::protocol::TokenUsage) -> Result<(), String>;
++    /// Admit physical request accounting through the current transport receipt.
++    fn account_provider_request(
++        &self,
++        operation: ProviderRequestAccounting,
++    ) -> Result<Option<String>, String>;
+     /// Only the native stream and admitted tool dispatcher publish these fences.
+     fn mark_response_started(&self);
+     fn mark_unsafe_output(&self);
+diff --git a/codex-rs/ext/goal/src/spec.rs b/codex-rs/ext/goal/src/spec.rs
+index 6d1d7a9230083a554bda372341337108a546c90a..bee67fa742a734092643acf22effe38cdc4d567b 100644
+--- a/codex-rs/ext/goal/src/spec.rs
++++ b/codex-rs/ext/goal/src/spec.rs
+@@ -12,6 +12,7 @@ pub const UPDATE_GOAL_TOOL_NAME: &str = "update_goal";
+ 
+ pub fn create_get_goal_tool() -> ToolSpec {
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: GET_GOAL_TOOL_NAME.to_string(),
+         description: "Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget."
+             .to_string(),
+@@ -41,6 +42,7 @@ pub fn create_create_goal_tool() -> ToolSpec {
+     ]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: CREATE_GOAL_TOOL_NAME.to_string(),
+         description: format!(
+             r#"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.
+@@ -70,6 +72,7 @@ pub fn create_update_goal_tool() -> ToolSpec {
+     )]);
+ 
+     ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: UPDATE_GOAL_TOOL_NAME.to_string(),
+         description: r#"Update the existing goal.
+ Set status to `paused` only at the user's explicit request to pause this goal, never on your own initiative. Ask if unclear; a later resume revokes that request. Report the returned status and stop goal work. Budget limits take precedence over pausing.
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
+index 27a36f512c063dc380c7935b46f237e51971e893..748e5878abf9fc3b60073ebdc061db09ad171217 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
+@@ -1438,6 +1438,7 @@ max_recent_non_user_entries = 8
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "list_dir".to_owned(),
+             namespace: None,
+@@ -1770,6 +1771,7 @@ async fn contributor_includes_transcript_images_by_default() -> Result<()> {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "screenshot".to_owned(),
+             namespace: None,
+@@ -1881,6 +1883,7 @@ async fn contributor_uses_model_defaults_and_preserves_local_overrides() -> Resu
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "list_dir".to_owned(),
+             namespace: None,
+@@ -2001,6 +2004,7 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "list_dir".to_owned(),
+             namespace: None,
+@@ -2020,6 +2024,7 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "read_file".to_owned(),
+             namespace: None,
+@@ -2906,6 +2911,7 @@ async fn contributor_preserves_final_assistant_messages_after_tool_eviction() ->
+         },
+     ];
+     history.extend((0..6).map(|index| ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_owned(),
+         namespace: None,
+@@ -2968,6 +2974,7 @@ async fn contributor_sends_compacted_conversation_history_to_luna() -> Result<()
+         let call_id = format!("call-{index}");
+         [
+             ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "exec_command".to_owned(),
+                 namespace: None,
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
+index 9331af7c92f605ed426dde47da55dad18534be8c..e0f3ab48eef65d6aa6641918753475b2ae965c72 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
+@@ -66,6 +66,7 @@ fn transcript_keeps_conversation_and_configured_sources() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "exec_command".to_string(),
+             namespace: None,
+@@ -340,6 +341,7 @@ fn transcript_preserves_recent_tool_evidence_when_protected_messages_fill_entry_
+         assistant_message(format!("final answer {index}"), MessagePhase::FinalAnswer)
+     }));
+     items.push(ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_string(),
+         namespace: None,
+@@ -397,6 +399,7 @@ fn transcript_reserves_five_recent_tool_entries_from_protected_messages() {
+     for index in 0..3 {
+         let call_id = format!("call-{index}");
+         items.push(ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "exec_command".to_string(),
+             namespace: None,
+@@ -582,6 +585,7 @@ fn transcript_preserves_latest_final_when_reserved_tools_fill_entry_window() {
+         user_message_item("Yes."),
+     ];
+     items.extend((0..3).map(|index| ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_string(),
+         namespace: None,
+@@ -659,6 +663,7 @@ fn transcript_does_not_protect_legacy_inter_agent_instructions() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "exec_command".to_string(),
+             namespace: None,
+@@ -713,6 +718,7 @@ fn transcript_reserves_separate_budget_for_recent_tool_evidence() {
+         })
+         .collect::<Vec<_>>();
+     items.extend((0..12).map(|index| ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_string(),
+         namespace: None,
+@@ -779,6 +785,7 @@ fn transcript_reserves_separate_budget_for_recent_tool_evidence() {
+         .expect("at least one tool entry should be retained")
+         .to_string();
+     items.push(ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_string(),
+         namespace: None,
+@@ -890,6 +897,7 @@ fn rejected_message_does_not_evict_retained_tool_entries() {
+         internal_chat_message_metadata_passthrough: None,
+     }];
+     items.extend((0..40).map(|index| ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_string(),
+         namespace: None,
+@@ -958,6 +966,7 @@ fn transcript_evicts_non_user_entries_in_cacheable_chunks() {
+         }];
+         items.extend(
+             (0..tool_call_count).map(|index| ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "exec_command".to_string(),
+                 namespace: None,
+@@ -1025,6 +1034,7 @@ fn transcript_truncates_tool_results_using_standard_budget() {
+     let output = format!("first {} last", "evidence ".repeat(5_000));
+     let items = vec![
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "node_repl__run".to_owned(),
+             namespace: None,
+@@ -1244,6 +1254,7 @@ fn transcript_preserves_encrypted_agent_messages_and_omits_other_encrypted_field
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "exec_command".to_string(),
+             namespace: None,
+diff --git a/codex-rs/ext/history-notes/src/tools.rs b/codex-rs/ext/history-notes/src/tools.rs
+index 114ee2ece854c1ee176cb50bf0d9f2afc2e4da56..62c9d4c151e533f782a93e1f87c2e675c21c69be 100644
+--- a/codex-rs/ext/history-notes/src/tools.rs
++++ b/codex-rs/ext/history-notes/src/tools.rs
+@@ -296,6 +296,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HistoryNotesTool {
+             name: self.action.namespace().to_string(),
+             description: self.action.namespace_description().to_string(),
+             tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: self.action.name().to_string(),
+                 description: self.action.description().to_string(),
+                 strict: false,
+diff --git a/codex-rs/ext/image-generation/src/tests.rs b/codex-rs/ext/image-generation/src/tests.rs
+index 77305846a03855da45f127a6af39158f9233ecb8..9db5ce61613d40cfe4d24e139eb7d8f6f23118c1 100644
+--- a/codex-rs/ext/image-generation/src/tests.rs
++++ b/codex-rs/ext/image-generation/src/tests.rs
+@@ -98,6 +98,7 @@ async fn recent_image_fallback_selects_newest_images_in_chronological_order() {
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "mcp_image".to_string(),
+             namespace: None,
+diff --git a/codex-rs/ext/image-generation/src/tool.rs b/codex-rs/ext/image-generation/src/tool.rs
+index a8d6d582ba9813f01af193fac8ea7ea3736ca94f..87237b74a8394aae7f4f038dcf37f7d68caf4e94 100644
+--- a/codex-rs/ext/image-generation/src/tool.rs
++++ b/codex-rs/ext/image-generation/src/tool.rs
+@@ -540,6 +540,8 @@ fn recent_images(
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
+             | ResponseItem::ItemReference { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => {}
+         }
+         for image in image_references {
+@@ -631,6 +633,7 @@ fn imagegen_tool_spec() -> ToolSpec {
+         name: IMAGE_GEN_NAMESPACE.to_string(),
+         description: default_namespace_description(IMAGE_GEN_NAMESPACE),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: IMAGEGEN_TOOL_NAME.to_string(),
+             description: IMAGEGEN_DESCRIPTION.to_string(),
+             strict: false,
+diff --git a/codex-rs/ext/memories/src/tools/mod.rs b/codex-rs/ext/memories/src/tools/mod.rs
+index 2852e3c6a7e4036ef2367c86c548d81b83038ad0..6800b47aa0080049eed2b425cbf6575c9e6cc4ff 100644
+--- a/codex-rs/ext/memories/src/tools/mod.rs
++++ b/codex-rs/ext/memories/src/tools/mod.rs
+@@ -61,6 +61,7 @@ pub(super) fn memory_function_tool<I: JsonSchema, O: JsonSchema>(
+     description: &str,
+ ) -> ToolSpec {
+     let tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: name.to_string(),
+         description: description.to_string(),
+         strict: false,
+diff --git a/codex-rs/ext/skills/src/tools/mod.rs b/codex-rs/ext/skills/src/tools/mod.rs
+index 64d2eaddde86d81e36d02a4392ba94923ee3bfc4..6e2a93c766d559136275036023a50e8208900378 100644
+--- a/codex-rs/ext/skills/src/tools/mod.rs
++++ b/codex-rs/ext/skills/src/tools/mod.rs
+@@ -297,6 +297,7 @@ fn skill_tool_name(name: &str) -> ToolName {
+ 
+ fn skill_function_tool<I: JsonSchema, O: JsonSchema>(name: &str, description: &str) -> ToolSpec {
+     let tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: name.to_string(),
+         description: description.to_string(),
+         strict: false,
+diff --git a/codex-rs/ext/web-search/src/history.rs b/codex-rs/ext/web-search/src/history.rs
+index b2a0af38ce7ec4fb68fe4aa723717d00152f6a5f..4b8f914ba79adb37033ef403e3f44bcad54ee33a 100644
+--- a/codex-rs/ext/web-search/src/history.rs
++++ b/codex-rs/ext/web-search/src/history.rs
+@@ -128,6 +128,7 @@ mod tests {
+             message(ASSISTANT_ROLE, "old assistant"),
+             previous_user,
+             ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "tool".to_string(),
+                 namespace: None,
+diff --git a/codex-rs/ext/web-search/src/tool.rs b/codex-rs/ext/web-search/src/tool.rs
+index 8de7a844ff43595b377f6313144e7e07b27da4e3..7652f111ceba6d6b761b0adb118c1b446ed822f3 100644
+--- a/codex-rs/ext/web-search/src/tool.rs
++++ b/codex-rs/ext/web-search/src/tool.rs
+@@ -67,6 +67,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for WebSearchTool {
+             name: WEB_NAMESPACE.to_string(),
+             description: default_namespace_description(WEB_NAMESPACE),
+             tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                allowed_callers: None,
+                 name: RUN_TOOL_NAME.to_string(),
+                 description: WEB_RUN_DESCRIPTION.to_string(),
+                 strict: false,
+diff --git a/codex-rs/external-agent-migration/src/sessions/append_tests.rs b/codex-rs/external-agent-migration/src/sessions/append_tests.rs
+index 72a42b4b7b1ec2fa4b1737d3b4eaa43e62edb6ab..f3ff579700a9f175c708a5ef0ec1672793d52382 100644
+--- a/codex-rs/external-agent-migration/src/sessions/append_tests.rs
++++ b/codex-rs/external-agent-migration/src/sessions/append_tests.rs
+@@ -89,6 +89,7 @@ fn requires_a_strict_nonempty_model_prefix() {
+     let mut with_tool_call = history;
+     with_tool_call.push(RolloutItem::ResponseItem(
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "native_tool".to_string(),
+             namespace: None,
+diff --git a/codex-rs/guardian-context/src/transcript.rs b/codex-rs/guardian-context/src/transcript.rs
+index 127bfe1bebc76ac4d93600ba1cd06ba6ce3697aa..b74295818dfca973d5a98bb012ef63d1d413426c 100644
+--- a/codex-rs/guardian-context/src/transcript.rs
++++ b/codex-rs/guardian-context/src/transcript.rs
+@@ -371,6 +371,8 @@ pub fn collect_transcript(
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
+             | ResponseItem::ItemReference { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => continue,
+         };
+ 
+diff --git a/codex-rs/guardian-context/src/transcript_tests.rs b/codex-rs/guardian-context/src/transcript_tests.rs
+index 288599971666e5ab9c1c3dcca3ce7e9541e9bc85..ac230877736f701d150edb52148a25786f5cd052 100644
+--- a/codex-rs/guardian-context/src/transcript_tests.rs
++++ b/codex-rs/guardian-context/src/transcript_tests.rs
+@@ -142,6 +142,7 @@ fn registered_transcript_filters_roles_and_preserves_node_repl_tool_attribution(
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "read_file".to_string(),
+             namespace: Some("mcp__node_repl__".to_string()),
+@@ -219,6 +220,7 @@ fn registered_transcript_filters_roles_and_preserves_node_repl_tool_attribution(
+ fn excluded_tool_calls_still_attribute_included_results() {
+     let history = vec![
+         ResponseItem::FunctionCall {
++            caller: None,
+             id: None,
+             name: "read_file".to_string(),
+             namespace: None,
+@@ -444,6 +446,7 @@ fn reused_registry_applies_current_history_sources_and_entry_limits() {
+     }
+ 
+     history.push(ResponseItem::FunctionCall {
++        caller: None,
+         id: None,
+         name: "exec_command".to_string(),
+         namespace: None,
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index eeaf0d96e4a43e34ebb7b92485a4e134885a53d1..977f877d5dc956ac4663a2284c5ffd2d95c3597f 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -1435,6 +1435,8 @@ impl SessionTelemetry {
+             ResponseItem::CompactionTrigger { .. } => "compaction_trigger".into(),
+             ResponseItem::ContextCompaction { .. } => "context_compaction".into(),
+             ResponseItem::ItemReference { .. } => "item_reference".into(),
++            ResponseItem::Program { .. } => "program".into(),
++            ResponseItem::ProgramOutput { .. } => "program_output".into(),
+             ResponseItem::Other => "other".into(),
+         }
+     }
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index 9f0181d26bf55c5b6d798ce96dc0f0d0585364cf..a092acccebcb00bf185b3a79a53bc7ec03f52483 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -34,6 +34,7 @@ pub enum PromptCacheMode {
+ #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+ pub enum HostedToolChoice {
+     WebSearch {},
++    WebSearchPreview {},
+     FileSearch {},
+     CodeInterpreter {},
+     ImageGeneration {},
+@@ -44,7 +45,9 @@ pub enum HostedToolChoice {
+     ToolSearch {},
+     ProgrammaticToolCalling {},
+     Mcp {
+-        server_label: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        server_label: Option<String>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         name: Option<String>,
+     },
+@@ -53,8 +56,9 @@ pub enum HostedToolChoice {
+ impl HostedToolChoice {
+     pub fn validate(&self) -> Result<(), String> {
+         if let Self::Mcp { server_label, name } = self
+-            && (server_label.trim().is_empty()
+-                || name.as_ref().is_some_and(|name| name.trim().is_empty()))
++            && (server_label.as_ref().is_some_and(|label| label.trim().is_empty())
++                || name.as_ref().is_some_and(|name| name.trim().is_empty())
++                || (server_label.is_none() && name.is_some()))
+         {
+             return Err(
+                 "hosted MCP choice needs a nonempty captured server and tool identity".into(),
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index 96192e151becba6d66cdae88c2fdcf16a1b99567..75968b41a678f2381e8a11979309c305cf24e3d0 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -1232,6 +1232,7 @@ pub enum ResponseItem {
+         #[ts(optional)]
+         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+     },
++    #[serde(deserialize_with = "deserialize_function_call")]
+     FunctionCall {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+@@ -1258,6 +1259,9 @@ pub enum ResponseItem {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        caller: Option<ProviderFunctionCaller>,
+     },
+     ToolSearchCall {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -1478,10 +1482,115 @@ pub enum ResponseItem {
+         #[ts(optional)]
+         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+     },
++    /// Provider-executed program. Its code is conversation data.
++    Program {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        id: Option<ResponseItemId>,
++        call_id: String,
++        code: String,
++        #[serde(flatten)]
++        provider_fields: std::collections::BTreeMap<String, serde_json::Value>,
++    },
++    /// Result of the provider-owned program with the same call ID.
++    ProgramOutput {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        id: Option<ResponseItemId>,
++        call_id: String,
++        status: ProgramOutputStatus,
++        result: String,
++        #[serde(flatten)]
++        provider_fields: std::collections::BTreeMap<String, serde_json::Value>,
++    },
+     #[serde(other)]
+     Other,
+ }
+ 
++/// Untrusted provider provenance; native runtime admission supplies execution authority.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
++pub enum ProviderFunctionCaller {
++    Direct,
++    Program { caller_id: String },
++}
++
++// Parsing retains provenance; native per-call admission grants execution authority.
++type FunctionCallFields = (
++    Option<ResponseItemId>,
++    String,
++    Option<String>,
++    String,
++    Option<Vec<String>>,
++    Option<bool>,
++    Option<String>,
++    String,
++    Option<InternalChatMessageMetadataPassthrough>,
++    Option<ProviderFunctionCaller>,
++);
++
++fn deserialize_function_call<'de, D>(deserializer: D) -> Result<FunctionCallFields, D::Error>
++where
++    D: Deserializer<'de>,
++{
++    #[derive(Deserialize)]
++    struct WireCall {
++        id: Option<ResponseItemId>,
++        name: String,
++        namespace: Option<String>,
++        arguments: String,
++        encrypted_function_args: Option<Vec<String>>,
++        #[serde(rename = "async")]
++        asynchronous: Option<bool>,
++        status: Option<String>,
++        call_id: String,
++        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
++        caller: Option<serde_json::Value>,
++    }
++
++    let call = WireCall::deserialize(deserializer)?;
++    let caller = match call.caller {
++        None | Some(serde_json::Value::Null) => None,
++        Some(serde_json::Value::Object(value)) => match value
++            .get("type")
++            .and_then(serde_json::Value::as_str)
++        {
++            Some("direct") => None,
++            Some("program") if value.len() == 2 => {
++                let caller_id = value
++                    .get("caller_id")
++                    .and_then(serde_json::Value::as_str)
++                    .filter(|id| !id.is_empty())
++                    .ok_or_else(|| serde::de::Error::custom("Invalid provider function caller"))?;
++                Some(ProviderFunctionCaller::Program {
++                    caller_id: caller_id.to_owned(),
++                })
++            }
++            _ => return Err(serde::de::Error::custom("Invalid provider function caller")),
++        },
++        _ => return Err(serde::de::Error::custom("Invalid provider function caller")),
++    };
++    Ok((
++        call.id,
++        call.name,
++        call.namespace,
++        call.arguments,
++        call.encrypted_function_args,
++        call.asynchronous,
++        call.status,
++        call.call_id,
++        call.internal_chat_message_metadata_passthrough,
++        caller,
++    ))
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "snake_case")]
++pub enum ProgramOutputStatus {
++    Completed,
++    Incomplete,
++}
++
+ impl ResponseItem {
+     /// Returns whether this item is an ordinary user-role message.
+     pub fn is_user_message(&self) -> bool {
+@@ -1503,6 +1612,8 @@ impl ResponseItem {
+             | Self::ComputerCall { id, .. }
+             | Self::McpListTools { id, .. }
+             | Self::McpCall { id, .. }
++            | Self::Program { id, .. }
++            | Self::ProgramOutput { id, .. }
+             | Self::McpApprovalRequest { id, .. }
+             | Self::McpApprovalResponse { id, .. }
+             | Self::ComputerCallOutput { id, .. }
+@@ -1540,6 +1651,8 @@ impl ResponseItem {
+             | Self::ComputerCall { id, .. }
+             | Self::McpListTools { id, .. }
+             | Self::McpCall { id, .. }
++            | Self::Program { id, .. }
++            | Self::ProgramOutput { id, .. }
+             | Self::McpApprovalRequest { id, .. }
+             | Self::McpApprovalResponse { id, .. }
+             | Self::ComputerCallOutput { id, .. }
+@@ -1578,6 +1691,8 @@ impl ResponseItem {
+             Self::ComputerCall { .. } => Some("cc"),
+             Self::McpListTools { .. } => Some("mcpl"),
+             Self::McpCall { .. } => Some("mcp"),
++            Self::Program { .. } => Some("program"),
++            Self::ProgramOutput { .. } => Some("program_output"),
+             Self::McpApprovalRequest { .. } => Some("mcpr"),
+             Self::McpApprovalResponse { .. } => Some("mcpa"),
+             Self::ComputerCallOutput { .. } => Some("cco"),
+@@ -1799,6 +1914,8 @@ impl ResponseItem {
+             | Self::CompactionTrigger { .. }
+             | Self::AdditionalTools { .. }
+             | Self::ItemReference { .. }
++            | Self::Program { .. }
++            | Self::ProgramOutput { .. }
+             | Self::Other => None,
+         }
+     }
+@@ -1915,6 +2032,8 @@ impl ResponseItem {
+             | Self::CompactionTrigger { .. }
+             | Self::AdditionalTools { .. }
+             | Self::ItemReference { .. }
++            | Self::Program { .. }
++            | Self::ProgramOutput { .. }
+             | Self::Other => None,
+         }
+     }
+@@ -2944,6 +3063,55 @@ impl std::fmt::Display for FunctionCallOutputPayload {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn function_call_caller_retains_typed_provenance_without_granting_dispatch() {
++        let plain = serde_json::json!({
++            "type": "function_call",
++            "id": "fc_native_call",
++            "name": "lookup",
++            "namespace": "functions",
++            "arguments": "{}",
++            "encrypted_function_args": ["opaque"],
++            "async": true,
++            "status": "completed",
++            "call_id": "call_lookup"
++        });
++        let absent: super::ResponseItem = serde_json::from_value(plain.clone()).unwrap();
++        let mut direct = plain.clone();
++        direct["caller"] = serde_json::json!({"type": "direct"});
++        let direct: super::ResponseItem = serde_json::from_value(direct).unwrap();
++        assert_eq!(absent, direct);
++        let mut direct_extra = plain.clone();
++        direct_extra["caller"] = serde_json::json!({"type":"direct","provider_field":"discarded"});
++        assert_eq!(
++            absent,
++            serde_json::from_value::<super::ResponseItem>(direct_extra).unwrap()
++        );
++        let mut null = plain.clone();
++        null["caller"] = serde_json::Value::Null;
++        assert_eq!(
++            absent,
++            serde_json::from_value::<super::ResponseItem>(null).unwrap()
++        );
++        assert_eq!(serde_json::to_value(absent).unwrap(), plain);
++
++        let mut program = plain.clone();
++        program["caller"] = serde_json::json!({"type":"program","caller_id":"pc_provider"});
++        let typed: super::ResponseItem = serde_json::from_value(program.clone()).unwrap();
++        assert_eq!(serde_json::to_value(typed).unwrap(), program);
++        for caller in [
++            serde_json::json!({"type": "program", "caller_id": ""}),
++            serde_json::json!({"type": "program"}),
++            serde_json::json!({"type": "programmatic", "program_call_id": "pc_provider"}),
++            serde_json::json!({"type": "unknown"}),
++            serde_json::json!(false),
++        ] {
++            let mut owned = plain.clone();
++            owned["caller"] = caller;
++            let error = serde_json::from_value::<super::ResponseItem>(owned).unwrap_err();
++            assert!(!error.to_string().is_empty());
++        }
++    }
+ 
+     #[test]
+     fn hosted_mcp_items_round_trip_provider_data_and_approval_reference() {
+@@ -3779,6 +3947,7 @@ mod tests {
+         assert_eq!(
+             item,
+             ResponseItem::FunctionCall {
++                caller: None,
+                 id: None,
+                 name: "mcp__codex_apps__gmail_get_recent_emails".to_string(),
+                 namespace: Some("mcp__codex_apps__gmail".to_string()),
+diff --git a/codex-rs/protocol/src/response_facts.rs b/codex-rs/protocol/src/response_facts.rs
+index 87b90e3d01b8a7927e4d34a340f10dc876fb9c8e..f95dcfe5413e0c346a6bbb10d94ea5dc68217681 100644
+--- a/codex-rs/protocol/src/response_facts.rs
++++ b/codex-rs/protocol/src/response_facts.rs
+@@ -58,6 +58,11 @@ pub enum ResponseFact {
+         tokens: Vec<ProbabilityToken>,
+         capture_complete: bool,
+     },
++    HostedAgentAttribution {
++        item_fingerprint: String,
++        agent_name: String,
++        phase: Option<String>,
++    },
+     MalformedProbabilities,
+     CaptureTruncated,
+ }
+@@ -78,6 +83,7 @@ impl std::fmt::Debug for ResponseFact {
+         f.write_str(match self {
+             Self::Refusal { .. } => "ResponseFact::Refusal(<private>)",
+             Self::TextProbabilities { .. } => "ResponseFact::TextProbabilities(<private>)",
++            Self::HostedAgentAttribution { .. } => "ResponseFact::HostedAgentAttribution(<private>)",
+             Self::MalformedProbabilities => "ResponseFact::MalformedProbabilities",
+             Self::CaptureTruncated => "ResponseFact::CaptureTruncated",
+         })
+@@ -112,6 +118,12 @@ pub struct ResponseFactRecord {
+     pub received: ReceivedResponseFact,
+ }
+ 
++/// Stable comparison of the exact canonical item, independent of repeated wire IDs.
++pub fn item_fingerprint(item: &crate::models::ResponseItem) -> Result<String, serde_json::Error> {
++    use sha2::{Digest, Sha256};
++    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(item)?)))
++}
++
+ /// One budget per actual sampling response, including all streaming frames.
+ /// Reserve one terminal capture marker. A truncated probability prefix always
+ /// contains whole tokens together with every supplied alternative for that token.
+diff --git a/codex-rs/protocol/tests/hosted_tool_choice.rs b/codex-rs/protocol/tests/hosted_tool_choice.rs
+index c2855f374ac788feb6846eb9b46953bd3fd8727d..9d666d873199d5e5157b7b7291c5c074c2f68421 100644
+--- a/codex-rs/protocol/tests/hosted_tool_choice.rs
++++ b/codex-rs/protocol/tests/hosted_tool_choice.rs
+@@ -39,8 +39,20 @@ fn hosted_tool_choice_rejects_function_shape_and_extra_authority() {
+             .is_err()
+     );
+     let choice = HostedToolChoice::Mcp {
+-        server_label: " ".into(),
++        server_label: Some(" ".into()),
+         name: None,
+     };
+     assert!(choice.validate().is_err());
+ }
++
++#[test]
++fn hosted_selector_preview_and_mcp_category_preserve_exact_wire() {
++    for value in [json!({"type":"web_search_preview"}), json!({"type":"mcp"})] {
++        let selected: HostedToolChoice = serde_json::from_value(value.clone()).unwrap();
++        selected.validate().unwrap();
++        assert_eq!(serde_json::to_value(selected).unwrap(), value);
++    }
++    let invalid: HostedToolChoice =
++        serde_json::from_value(json!({"type":"mcp","name":"lookup"})).unwrap();
++    assert!(invalid.validate().is_err());
++}
+diff --git a/codex-rs/rollout/src/persistence_metrics.rs b/codex-rs/rollout/src/persistence_metrics.rs
+index 6c05c4da401ea519bac3231d30d0c1f45b8ddde3..86e6803c18c28bf85bbda0ff81c75340a0dd71ce 100644
+--- a/codex-rs/rollout/src/persistence_metrics.rs
++++ b/codex-rs/rollout/src/persistence_metrics.rs
+@@ -349,6 +349,8 @@ fn response_item_type(item: &ResponseItemEnvelope) -> &'static str {
+         ResponseItem::CompactionTrigger { .. } => "response.compaction_trigger",
+         ResponseItem::ContextCompaction { .. } => "response.context_compaction",
+         ResponseItem::ItemReference { .. } => "response.item_reference",
++        ResponseItem::Program { .. } => "response.program",
++        ResponseItem::ProgramOutput { .. } => "response.program_output",
+         ResponseItem::Other => "response.other",
+     }
+ }
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index c7d1eb2fb5a252605f3ee4cef69c8bb5b04fb78a..aaebb48c56db2e26fc6f9e97c1ea3341d886be74 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -109,7 +109,9 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {
+         | ResponseItem::ConfigurationUpdate { .. }
+         | ResponseItem::Compaction { .. }
+         | ResponseItem::ContextCompaction { .. } => true,
+-        ResponseItem::ItemReference { .. } => true,
++        ResponseItem::ItemReference { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. } => true,
+         ResponseItem::CompactionTrigger { .. } | ResponseItem::Other => false,
+     }
+ }
+@@ -148,6 +150,8 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
+         | ResponseItem::CompactionTrigger { .. }
+         | ResponseItem::ContextCompaction { .. }
+         | ResponseItem::ItemReference { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. }
+         | ResponseItem::Other => false,
+     }
+ }
+diff --git a/codex-rs/tools/src/code_mode_tests.rs b/codex-rs/tools/src/code_mode_tests.rs
+index 135694bc95b1295c7b994fe536ed3935d9fef5c3..cf3699bd094e63eef0725babf1f8c9957346922a 100644
+--- a/codex-rs/tools/src/code_mode_tests.rs
++++ b/codex-rs/tools/src/code_mode_tests.rs
+@@ -51,6 +51,7 @@ fn code_mode_materializes_mcp_output_schemas() {
+     )
+     .unwrap();
+     let eager = ResponsesApiTool {
++        allowed_callers: None,
+         output_schema: Some(crate::mcp_call_tool_result_output_schema(output).into()),
+         ..parsed.clone()
+     };
+@@ -85,6 +86,7 @@ fn code_mode_tool_names_do_not_prefix_the_default_namespace() {
+ fn augment_tool_spec_for_code_mode_augments_function_tools() {
+     assert_eq!(
+         augment_tool_spec_for_code_mode(ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "lookup_order".to_string(),
+             description: "Look up an order".to_string(),
+             strict: false,
+@@ -109,6 +111,7 @@ fn augment_tool_spec_for_code_mode_augments_function_tools() {
+             ),
+         })),
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "lookup_order".to_string(),
+             description: r#"Look up an order
+ 
+diff --git a/codex-rs/tools/src/lib.rs b/codex-rs/tools/src/lib.rs
+index 3a73307fd3743acd28c48d3a816f7b6bcb2fbbc4..be5cb31480442110e196a773b271ecb1aad0e011 100644
+--- a/codex-rs/tools/src/lib.rs
++++ b/codex-rs/tools/src/lib.rs
+@@ -73,6 +73,7 @@ pub use response_history::truncate_assistant_output_text_to_token_budget;
+ pub use responses_api::FreeformTool;
+ pub use responses_api::FreeformToolFormat;
+ pub use responses_api::LoadableToolSpec;
++pub use responses_api::ProviderToolCaller;
+ pub use responses_api::ResponsesApiNamespace;
+ pub use responses_api::ResponsesApiNamespaceTool;
+ pub use responses_api::ResponsesApiTool;
+@@ -112,6 +113,7 @@ pub use tool_discovery::ToolSearchSourceInfo;
+ pub use tool_discovery::collect_request_plugin_install_entries;
+ pub use tool_discovery::filter_request_plugin_install_discoverable_tools_for_client;
+ pub use tool_executor::AcceptedToolOutcome;
++pub use tool_executor::ProviderToolCallers;
+ pub use tool_executor::ToolExecutor;
+ pub use tool_executor::ToolExecutorFuture;
+ pub use tool_executor::ToolExposure;
+diff --git a/codex-rs/tools/src/responses_api.rs b/codex-rs/tools/src/responses_api.rs
+index 6cf6c213cd2f17cb77e9c462e0cbfc4526471ad5..a524c2e5fed098e5e3846c13040322575c6e414a 100644
+--- a/codex-rs/tools/src/responses_api.rs
++++ b/codex-rs/tools/src/responses_api.rs
+@@ -33,8 +33,17 @@ pub struct FreeformToolFormat {
+     pub definition: String,
+ }
+ 
++#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(rename_all = "snake_case")]
++pub enum ProviderToolCaller {
++    Direct,
++    Programmatic,
++}
++
+ #[derive(Debug, Clone, Serialize, PartialEq)]
+ pub struct ResponsesApiTool {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub allowed_callers: Option<Vec<ProviderToolCaller>>,
+     pub name: String,
+     pub description: String,
+     /// TODO: Validation. When strict is set to true, the JSON schema,
+@@ -202,6 +211,7 @@ pub fn mcp_tool_to_deferred_responses_api_tool(
+ 
+ pub fn tool_definition_to_responses_api_tool(tool_definition: ToolDefinition) -> ResponsesApiTool {
+     ResponsesApiTool {
++        allowed_callers: None,
+         name: tool_definition.name,
+         description: tool_definition.description,
+         strict: false,
+diff --git a/codex-rs/tools/src/responses_api_tests.rs b/codex-rs/tools/src/responses_api_tests.rs
+index 8f97c70ed4ea75f71357b35e5eb7b877ee7a99e2..c70ffa69633d9e8b210ce1a4bee6f5d2ae7d12d6 100644
+--- a/codex-rs/tools/src/responses_api_tests.rs
++++ b/codex-rs/tools/src/responses_api_tests.rs
+@@ -62,6 +62,7 @@ fn tool_definition_to_responses_api_tool_omits_false_defer_loading() {
+             defer_loading: false,
+         }),
+         ResponsesApiTool {
++            allowed_callers: None,
+             name: "lookup_order".to_string(),
+             description: "Look up an order".to_string(),
+             strict: false,
+@@ -100,6 +101,7 @@ fn dynamic_tool_to_responses_api_tool_preserves_defer_loading() {
+     assert_eq!(
+         dynamic_tool_to_responses_api_tool(&tool).expect("convert dynamic tool"),
+         ResponsesApiTool {
++            allowed_callers: None,
+             name: "lookup_order".to_string(),
+             description: "Look up an order".to_string(),
+             strict: false,
+@@ -169,6 +171,7 @@ fn mcp_tool_to_deferred_responses_api_tool_sets_defer_loading() {
+         )
+         .expect("convert deferred tool"),
+         ResponsesApiTool {
++            allowed_callers: None,
+             name: "lookup_order".to_string(),
+             description: "Look up an order".to_string(),
+             strict: false,
+@@ -254,6 +257,7 @@ fn loadable_tool_spec_namespace_serializes_with_deferred_child_tools() {
+         name: "mcp__codex_apps__calendar".to_string(),
+         description: "Plan events".to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "create_event".to_string(),
+             description: "Create a calendar event.".to_string(),
+             strict: false,
+diff --git a/codex-rs/tools/src/tool_call.rs b/codex-rs/tools/src/tool_call.rs
+index 5e7edde1d4812333c683802f206f967df340b42a..9c93a6e4bf2fdad09704d8d22ca9ecc6bc6bfbf3 100644
+--- a/codex-rs/tools/src/tool_call.rs
++++ b/codex-rs/tools/src/tool_call.rs
+@@ -19,6 +19,7 @@ use std::sync::LazyLock;
+ pub struct ConversationHistory {
+     items: Arc<LazyLock<Box<[ResponseItem]>, HistoryLoader>>,
+     realtime_tool_call: Option<serde_json::Value>,
++    provider_agent_metadata: Option<serde_json::Value>,
+ }
+ 
+ type HistoryLoader = Box<dyn FnOnce() -> Box<[ResponseItem]> + Send + Sync>;
+@@ -34,6 +35,7 @@ impl ConversationHistory {
+         Self {
+             items: Arc::new(LazyLock::new(Box::new(move || load().into_boxed_slice()))),
+             realtime_tool_call: None,
++            provider_agent_metadata: None,
+         }
+     }
+ 
+@@ -47,6 +49,16 @@ impl ConversationHistory {
+         self
+     }
+ 
++    /// Read-only attribution captured with this exact invocation, never reconstructed by wire ID.
++    pub fn provider_agent_metadata(&self) -> Option<&serde_json::Value> {
++        self.provider_agent_metadata.as_ref()
++    }
++
++    pub fn with_provider_agent_metadata(mut self, value: Option<serde_json::Value>) -> Self {
++        self.provider_agent_metadata = value;
++        self
++    }
++
+     pub fn items(&self) -> &[ResponseItem] {
+         &self.items
+     }
+diff --git a/codex-rs/tools/src/tool_executor.rs b/codex-rs/tools/src/tool_executor.rs
+index 2d18890d62fc4e1ba59f50a88a9db51655accae5..ba03bc2fe18da70bc13f0767a5ade1dfa959f882 100644
+--- a/codex-rs/tools/src/tool_executor.rs
++++ b/codex-rs/tools/src/tool_executor.rs
+@@ -44,6 +44,16 @@ bitflags::bitflags! {
+     }
+ }
+ 
++bitflags::bitflags! {
++    /// Provider caller provenance is independent of local Code Mode exposure.
++    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
++    pub struct ProviderToolCallers: u8 {
++        const NONE = 0;
++        const DIRECT = 0b01;
++        const PROGRAMMATIC = 0b10;
++    }
++}
++
+ impl From<ToolExposureSurface> for ToolExposures {
+     fn from(surface: ToolExposureSurface) -> Self {
+         match surface {
+@@ -143,6 +153,11 @@ pub trait ToolExecutor<Invocation>: Send + Sync {
+     fn spec(&self) -> ToolSpec;
+ 
+     /// An explicit caller ceiling. None preserves the host's legacy behavior.
++    /// Frozen application policy; omitted provider policy retains direct-only.
++    fn allowed_provider_callers(&self) -> Option<ProviderToolCallers> {
++        None
++    }
++
+     fn allowed_callers(&self) -> Option<ToolExposures> {
+         None
+     }
+diff --git a/codex-rs/tools/src/tool_payload.rs b/codex-rs/tools/src/tool_payload.rs
+index 760b7a24a7fb04f1bf28255da719c7eaaa43f711..3dcfe6357a39594331cf0c6c682f24663537b2d2 100644
+--- a/codex-rs/tools/src/tool_payload.rs
++++ b/codex-rs/tools/src/tool_payload.rs
+@@ -190,6 +190,7 @@ mod client_search_tests {
+ 
+     fn entry(name: &str, namespace: Option<&str>, deferred: bool) -> ClientToolSearchEntry {
+         let function = crate::ResponsesApiTool {
++            allowed_callers: None,
+             name: name.into(),
+             description: "captured-schema-sentinel".into(),
+             strict: false,
+diff --git a/codex-rs/tools/src/tool_search_tests.rs b/codex-rs/tools/src/tool_search_tests.rs
+index 106c617868c6653405c840dfac588d8b9369e119..016175de046dce12c2754ed62ad0ea230485c5d7 100644
+--- a/codex-rs/tools/src/tool_search_tests.rs
++++ b/codex-rs/tools/src/tool_search_tests.rs
+@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
+ #[test]
+ fn shared_search_specs_preserve_results_and_release_the_source() {
+     let function = ResponsesApiTool {
++        allowed_callers: None,
+         name: "lookup".to_string(),
+         description: "Look up an item".to_string(),
+         strict: true,
+@@ -68,6 +69,7 @@ fn shared_search_specs_preserve_results_and_release_the_source() {
+ #[test]
+ fn top_level_function_search_results_use_the_default_namespace() {
+     let function_tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: "lookup_order".to_string(),
+         description: "Look up an order".to_string(),
+         strict: false,
+@@ -173,6 +175,7 @@ fn default_search_text_uses_model_visible_namespace_metadata_once() {
+         name: "codex_app".to_string(),
+         description: "Manage Codex automations.".to_string(),
+         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "automation_update".to_string(),
+             description: "Create or update automations.".to_string(),
+             strict: false,
+@@ -194,6 +197,7 @@ fn default_search_text_uses_model_visible_namespace_metadata_once() {
+ #[test]
+ fn mixed_namespaced_function_and_custom_tools_are_searchable() {
+     let function_tool = ResponsesApiTool {
++        allowed_callers: None,
+         name: "lookup_order".to_string(),
+         description: "Look up an order".to_string(),
+         strict: false,
+diff --git a/codex-rs/tools/src/tool_spec.rs b/codex-rs/tools/src/tool_spec.rs
+index 95e9e2ffd39408a46c3a664bf53e1cda68add988..2174e98196498ee1aee6f2ed77d8058fd0f105be 100644
+--- a/codex-rs/tools/src/tool_spec.rs
++++ b/codex-rs/tools/src/tool_spec.rs
+@@ -146,7 +146,7 @@ impl ToolSpec {
+     ) -> Option<codex_protocol::model_request_controls::HostedToolChoice> {
+         use codex_protocol::model_request_controls::HostedToolChoice as Choice;
+         let matches = match (self, choice) {
+-            (Self::WebSearch { .. }, Choice::WebSearch {})
++            (Self::WebSearch { .. }, Choice::WebSearch {} | Choice::WebSearchPreview {})
+             | (Self::FileSearch(_), Choice::FileSearch {})
+             | (Self::CodeInterpreter(_), Choice::CodeInterpreter {})
+             | (Self::ImageGeneration(_), Choice::ImageGeneration {})
+@@ -164,7 +164,8 @@ impl ToolSpec {
+                 return Some(Choice::ComputerUsePreview {});
+             }
+             (Self::Mcp(tool), Choice::Mcp { server_label, name }) => {
+-                tool.server_label == *server_label
++                server_label.as_ref().is_none_or(|label| tool.server_label == *label)
++                    && (server_label.is_some() || name.is_none())
+                     && name.as_ref().is_none_or(|name| {
+                         match tool.provider_data.get("allowed_tools") {
+                             None | Some(Value::Null) => true,
+diff --git a/codex-rs/tools/src/tool_spec_tests.rs b/codex-rs/tools/src/tool_spec_tests.rs
+index 917859e57c90a6753379c92f9181528a589d9425..fa0c3fe6f770dbeee22067856b1983307d2c5f1d 100644
+--- a/codex-rs/tools/src/tool_spec_tests.rs
++++ b/codex-rs/tools/src/tool_spec_tests.rs
+@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
+ fn tool_spec_name_covers_all_variants() {
+     assert_eq!(
+         ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "lookup_order".to_string(),
+             description: "Look up an order".to_string(),
+             strict: false,
+@@ -122,6 +123,7 @@ fn web_search_config_converts_to_responses_api_types() {
+ fn create_tools_json_for_responses_api_includes_top_level_name() {
+     assert_eq!(
+         create_tools_json_for_responses_api(&[ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "demo".to_string(),
+             description: "A demo tool".to_string(),
+             strict: false,
+@@ -151,6 +153,7 @@ fn create_tools_json_for_responses_api_includes_top_level_name() {
+ 
+ fn responses_lite_function(name: &str) -> ResponsesApiTool {
+     ResponsesApiTool {
++        allowed_callers: None,
+         name: name.to_string(),
+         description: format!("{name} tool"),
+         strict: false,
+@@ -253,6 +256,7 @@ fn responses_lite_does_not_add_an_empty_functions_namespace() {
+ #[test]
+ fn raw_tool_json_matches_value_encoding() {
+     let specs = vec![ToolSpec::Function(ResponsesApiTool {
++        allowed_callers: None,
+         name: "demo".to_string(),
+         description: "A demo tool".to_string(),
+         strict: false,
+@@ -281,6 +285,7 @@ fn namespace_tool_spec_serializes_expected_wire_shape() {
+             description: "Demo tools".to_string(),
+             tools: vec![
+                 ResponsesApiNamespaceTool::Function(ResponsesApiTool {
++                    allowed_callers: None,
+                     name: "lookup_order".to_string(),
+                     description: "Look up an order".to_string(),
+                     strict: false,
+diff --git a/codex-rs/tools/tests/hosted_tool_choice.rs b/codex-rs/tools/tests/hosted_tool_choice.rs
+index 19220b1520f093b07ef5f3f2440a669a261f4290..fd480e9f1d7e0d0999f9c1974c737d01ec4238ab 100644
+--- a/codex-rs/tools/tests/hosted_tool_choice.rs
++++ b/codex-rs/tools/tests/hosted_tool_choice.rs
+@@ -6,6 +6,7 @@ use serde_json::json;
+ fn hosted_tool_choice_never_promotes_same_name_or_deferred_functions() {
+     for deferred in [false, true] {
+         let function = ToolSpec::Function(ResponsesApiTool {
++            allowed_callers: None,
+             name: "web_search".into(),
+             description: "application callback".into(),
+             strict: false,
+@@ -45,7 +46,7 @@ fn hosted_tool_choice_mcp_respects_the_captured_server_and_allowed_names() {
+                 .clone(),
+     });
+     let select = |server: &str, name: &str| Choice::Mcp {
+-        server_label: server.into(),
++        server_label: Some(server.into()),
+         name: Some(name.into()),
+     };
+     assert!(
+@@ -85,3 +86,50 @@ fn hosted_mcp_filter_omission_does_not_create_an_empty_name_list() {
+         assert_eq!(spec.captured_hosted_choice(&choice).is_some(), allowed);
+     }
+ }
++
++#[test]
++fn mcp_category_never_promotes_a_name_without_its_server() {
++    let spec = ToolSpec::Mcp(crate::HostedMcpTool {
++        server_label: "search".into(),
++        provider_data:
++            json!({"server_url":"https://fixture.invalid/mcp","allowed_tools":["lookup"]})
++                .as_object()
++                .unwrap()
++                .clone(),
++    });
++    assert_eq!(
++        spec.captured_hosted_choice(&Choice::Mcp {
++            server_label: None,
++            name: None
++        }),
++        Some(Choice::Mcp {
++            server_label: None,
++            name: None
++        })
++    );
++    assert_eq!(
++        spec.captured_hosted_choice(&Choice::Mcp {
++            server_label: None,
++            name: Some("lookup".into())
++        }),
++        None
++    );
++}
++
++#[test]
++fn preview_search_selects_the_offered_hosted_search_without_renaming_it() {
++    let spec = ToolSpec::WebSearch {
++        external_web_access: None,
++        indexed_web_access: None,
++        filters: None,
++        user_location: None,
++        search_context_size: None,
++        image_settings: None,
++        search_content_types: None,
++    };
++    assert_eq!(
++        spec.captured_hosted_choice(&Choice::WebSearchPreview {}),
++        Some(Choice::WebSearchPreview {})
++    );
++    assert_eq!(serde_json::to_value(spec).unwrap()["type"], "web_search");
++}
+diff --git a/codex-rs/utils/audio/src/lib.rs b/codex-rs/utils/audio/src/lib.rs
+index 532ac54e0ae1c50f4b7f4740e4d35b6284955d0f..4eb8434ae3c3e1103904f5db80505634e6e6ca4b 100644
+--- a/codex-rs/utils/audio/src/lib.rs
++++ b/codex-rs/utils/audio/src/lib.rs
+@@ -97,6 +97,8 @@ pub fn prepare_response_items(items: &mut [ResponseItem]) {
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
+             | ResponseItem::ItemReference { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => {}
+         }
+     }

@@ -1,8 +1,8 @@
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index c73e30ab001a40056783bc7e444d8db055dba3fd..b8d6d9b37b706b0b71583b816d823ab5b2e2ad6d 100644
+index 5487af2de94af6d5150045a35ecacf989755c0f9..af80e1c2aa26941d361d1d0f1662f10942528eff 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -3613,6 +3613,14 @@ impl ModelClientSession {
+@@ -3569,6 +3569,14 @@ impl ModelClientSession {
          }
      }
  
@@ -18,10 +18,10 @@ index c73e30ab001a40056783bc7e444d8db055dba3fd..b8d6d9b37b706b0b71583b816d823ab5
          self.pending_http_response.is_some()
      }
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index e114f68a0d688b49be01398c06bbaf4920de4ef4..c1ed46ea8ae32e23a1184b1950b62ee4dbe7aa95 100644
+index 5c05fef6e1b5650cd4a6a4fb45c5b3275bbc25f6..324865279ceed7350b7c0c81e36536650b61bd7a 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
-@@ -1241,7 +1241,20 @@ impl CodexThread {
+@@ -1181,7 +1181,20 @@ impl CodexThread {
          items: Vec<String>,
      ) -> CodexResult<String> {
          self.session
@@ -414,10 +414,10 @@ index 5a8c9e1554f23d5a74d6cacfe685879283ad547c..4b71eedd29c19a5338183324dbc7f4d7
                              original: position,
                              projection: position,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index b2bad116e37903b00054f6458e6039c26e42a635..5499c81dd6126e675e45812fe5549cdc956dc58b 100644
+index f360212f87fe8b53234837f872d3ea2e81e23f51..d731f98a2a5007a804c627a7862644f06fd9f928 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -14377,7 +14377,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+@@ -14376,7 +14376,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
          cancellation_token: CancellationToken::new(),
      };
  
@@ -427,7 +427,7 @@ index b2bad116e37903b00054f6458e6039c26e42a635..5499c81dd6126e675e45812fe5549cdc
          .expect("tool call should be handled");
  
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 4d3578b96ecaf13f5f740ed7f81cdaa085fcf476..4a99d696d08488a772e23cb2c3a7561cb23d9670 100644
+index 2086c2cb9ae805809f7ac98a1fe81835a179d889..8a8e2e126995282e02576fb188b02ea1f0cb9c3d 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -45,11 +45,13 @@ use crate::skills::emit_explicit_skill_invocations;
@@ -581,7 +581,7 @@ index 4d3578b96ecaf13f5f740ed7f81cdaa085fcf476..4a99d696d08488a772e23cb2c3a7561c
                  let token_status = super::context_window::context_window_token_status(
                      sess.as_ref(),
                      turn_context.as_ref(),
-@@ -3032,6 +3065,7 @@ async fn run_sampling_request(
+@@ -3030,6 +3063,7 @@ async fn run_sampling_request(
                          settled_tools: SettledDirectTools::default(),
                          needs_follow_up: true,
                          last_agent_message: None,
@@ -589,7 +589,7 @@ index 4d3578b96ecaf13f5f740ed7f81cdaa085fcf476..4a99d696d08488a772e23cb2c3a7561c
                      },
                      std::mem::take(original_input),
                  ));
-@@ -3338,6 +3372,7 @@ struct SamplingRequestResult {
+@@ -3329,6 +3363,7 @@ struct SamplingRequestResult {
      settled_tools: SettledDirectTools,
      needs_follow_up: bool,
      last_agent_message: Option<String>,
@@ -597,7 +597,7 @@ index 4d3578b96ecaf13f5f740ed7f81cdaa085fcf476..4a99d696d08488a772e23cb2c3a7561c
  }
  
  /// Live authority created only by Core after validation and exact-turn reservation.
-@@ -4636,6 +4671,10 @@ async fn drain_in_flight(
+@@ -4627,6 +4662,10 @@ async fn drain_in_flight(
      Ok(())
  }
  
@@ -608,7 +608,7 @@ index 4d3578b96ecaf13f5f740ed7f81cdaa085fcf476..4a99d696d08488a772e23cb2c3a7561c
  fn assign_missing_streamed_response_item_id(
      item: &mut ResponseItem,
      active_item: Option<&TurnItem>,
-@@ -5084,6 +5123,15 @@ async fn try_run_sampling_request(
+@@ -5075,6 +5114,15 @@ async fn try_run_sampling_request(
      let mut needs_follow_up = false;
      let mut last_agent_message: Option<String> = None;
      let mut active_item: Option<TurnItem> = None;
@@ -624,7 +624,7 @@ index 4d3578b96ecaf13f5f740ed7f81cdaa085fcf476..4a99d696d08488a772e23cb2c3a7561c
      let mut active_tool_argument_diff_consumer: Option<(
          String,
          Box<dyn ToolArgumentDiffConsumer>,
-@@ -5234,6 +5282,7 @@ async fn try_run_sampling_request(
+@@ -5225,6 +5273,7 @@ async fn try_run_sampling_request(
                          settled_tools: SettledDirectTools::default(),
                          needs_follow_up: true,
                          last_agent_message,
@@ -632,7 +632,7 @@ index 4d3578b96ecaf13f5f740ed7f81cdaa085fcf476..4a99d696d08488a772e23cb2c3a7561c
                      });
                  }
                  Err(_) => break Err(CodexErr::TurnAborted),
-@@ -5456,7 +5505,15 @@ async fn try_run_sampling_request(
+@@ -5447,7 +5496,15 @@ async fn try_run_sampling_request(
  
                      let direct_call = item.clone();
                      let output_result =
@@ -649,7 +649,7 @@ index 4d3578b96ecaf13f5f740ed7f81cdaa085fcf476..4a99d696d08488a772e23cb2c3a7561c
                              .instrument(handle_responses)
                              .await
                          {
-@@ -5493,6 +5550,7 @@ async fn try_run_sampling_request(
+@@ -5484,6 +5541,7 @@ async fn try_run_sampling_request(
                              settled_tools: SettledDirectTools::default(),
                              needs_follow_up: true,
                              last_agent_message,
@@ -657,7 +657,7 @@ index 4d3578b96ecaf13f5f740ed7f81cdaa085fcf476..4a99d696d08488a772e23cb2c3a7561c
                          });
                      }
                  }
-@@ -5524,7 +5582,9 @@ async fn try_run_sampling_request(
+@@ -5515,7 +5573,9 @@ async fn try_run_sampling_request(
                      .await
                      {
                          let mut turn_item = turn_item;
@@ -668,7 +668,7 @@ index 4d3578b96ecaf13f5f740ed7f81cdaa085fcf476..4a99d696d08488a772e23cb2c3a7561c
                          let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;
                          let mut seeded_item_id: Option<String> = None;
                          if stream_item_to_client
-@@ -5793,6 +5853,7 @@ async fn try_run_sampling_request(
+@@ -5784,6 +5844,7 @@ async fn try_run_sampling_request(
                          settled_tools: SettledDirectTools::default(),
                          needs_follow_up,
                          last_agent_message,
@@ -923,7 +923,7 @@ index fa72a79ab7a2bb8b66eaad342223017c1771a7b8..2f029bae1dbd6aba18472dcb51a7aaa4
  
      /// Selects the start phase using the current thread policy. Disabled callbacks
 diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
-index ed153b3b6bccb9309068cbe7dff2cc797bb7e0b5..23cfe80a08a519c70dfe5c4dfa886ce37ab1597c 100644
+index 3982de3da6bb86aadd1553fcab01cb25a386ab9c..8b8d866311d6fb1aee42d3f8e689663077d53ae2 100644
 --- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
 +++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
 @@ -89,6 +89,13 @@ pub struct TurnCompletionInput<'a> {
@@ -941,10 +941,10 @@ index ed153b3b6bccb9309068cbe7dff2cc797bb7e0b5..23cfe80a08a519c70dfe5c4dfa886ce3
  pub struct TurnStopInput<'a> {
      /// Store scoped to the host session runtime.
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index d0a9f1a82bce762f420d09b12eb627ca6e948bb2..89bc10e1f473d4c2fd149232bcbfff8352234cf6 100644
+index 9832d9b1d7de13a2d4c8fa5ec1c59f57c1c627b5..c3aac9c288f313489898825704d4a8b8b84c1f81 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
-@@ -121,6 +121,7 @@ pub use contributors::ToolStartInput;
+@@ -120,6 +120,7 @@ pub use contributors::ToolStartInput;
  pub use contributors::ToolTimingBoundary;
  pub use contributors::ToolTimingInput;
  pub use contributors::TurnAbortInput;

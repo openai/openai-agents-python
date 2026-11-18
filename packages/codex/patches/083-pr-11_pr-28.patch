@@ -124,7 +124,7 @@ index 2635b104f3cc5dfa82e062d1f36757c539bcfd85..5e7642614af895ba48858730e564b7f3
                  ToolSpec::ProviderToolSearch(config) => !config.searches_on_provider() && name.is_default_namespace() && name.name == "tool_search",
              })
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index a48f89bd63dd5d37276ba509139a7d5f6971184d..10b0893f82dd6a921687bc6613980882da35248a 100644
+index fb1a630a33d1257176c71892868760802165c978..4224016501204fee35a02deadcc9abb1088db2af 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
 @@ -728,6 +728,7 @@ fn finalize_selected_tool_router(

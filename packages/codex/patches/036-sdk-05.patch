@@ -1,0 +1,223 @@
+diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
+index 46ccc3c3a338d2b2afdb98a4ff3df0cac5223e20..c878e95f6e713dff995a69ffa6f8c4db24163ff1 100644
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -248,7 +248,9 @@ impl<'de> Deserialize<'de> for RolloutItem {
+     where
+         D: Deserializer<'de>,
+     {
+-        rollout_payload::RolloutItemWire::deserialize(deserializer).map(Into::into)
++        let item = rollout_payload::RolloutItemWire::deserialize(deserializer)?;
++        item.validate().map_err(serde::de::Error::custom)?;
++        Ok(item.into())
+     }
+ }
+ 
+diff --git a/codex-rs/history/src/rollout_payload.rs b/codex-rs/history/src/rollout_payload.rs
+index fa4f6a8c63b68a350049cba4be95054bd7fba78b..a91c34c98209a5ae81cec9c7592367fe7b64f2ca 100644
+--- a/codex-rs/history/src/rollout_payload.rs
++++ b/codex-rs/history/src/rollout_payload.rs
+@@ -21,6 +21,8 @@ use crate::RetainedUserMessage;
+ use codex_protocol::ResponseItemId;
+ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::InternalChatMessageMetadataPassthrough;
++use codex_protocol::protocol::ModelAttemptEvent;
++use codex_protocol::protocol::TokenCountEvent;
+ use schemars::JsonSchema;
+ use serde::Deserialize;
+ use serde::Serialize;
+@@ -73,12 +75,56 @@ pub(super) enum RolloutItemWire<'a> {
+     },
+     EventMsg {
+         payload: Cow<'a, EventMsg>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        sdk_record: Option<SdkRolloutRecord<'a>>,
+     },
+     RealtimeItem {
+         payload: Cow<'a, RealtimeItem>,
+     },
+ }
+ 
++// Older SDKs accept an empty token-count event and ignore its extension fields.
++// Current readers recover the original model-invisible record before replay.
++#[derive(Serialize, Deserialize, JsonSchema)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
++pub(super) enum SdkRolloutRecord<'a> {
++    ModelAttempt(Cow<'a, ModelAttemptEvent>),
++    ResponseFact(Cow<'a, ResponseFactRecord>),
++}
++
++impl<'a> RolloutItemWire<'a> {
++    fn sdk_record(record: SdkRolloutRecord<'a>) -> Self {
++        Self::EventMsg {
++            payload: Cow::Owned(EventMsg::TokenCount(TokenCountEvent {
++                info: None,
++                rate_limits: None,
++                api_rate_limits: None,
++            })),
++            sdk_record: Some(record),
++        }
++    }
++
++    pub(super) fn validate(&self) -> Result<(), &'static str> {
++        if let Self::EventMsg {
++            payload,
++            sdk_record: Some(_),
++            ..
++        } = self
++            && !matches!(
++                payload.as_ref(),
++                EventMsg::TokenCount(TokenCountEvent {
++                    info: None,
++                    rate_limits: None,
++                    api_rate_limits: None,
++                })
++            )
++        {
++            return Err("SDK rollout records require an empty token-count carrier");
++        }
++        Ok(())
++    }
++}
++
+ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
+     fn from(item: &'a RolloutItem) -> Self {
+         match item {
+@@ -108,9 +154,9 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
+             RolloutItem::ResponseObservationRecord(payload) => Self::ResponseObservationRecord {
+                 payload: Cow::Borrowed(payload),
+             },
+-            RolloutItem::ResponseFactRecord(payload) => Self::ResponseFactRecord {
+-                payload: Cow::Borrowed(payload),
+-            },
++            RolloutItem::ResponseFactRecord(payload) => {
++                Self::sdk_record(SdkRolloutRecord::ResponseFact(Cow::Borrowed(payload)))
++            }
+             RolloutItem::TokenUsageRecord(payload) => Self::TokenUsageRecord {
+                 payload: Cow::Borrowed(payload),
+             },
+@@ -164,8 +210,12 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
+             RolloutItem::SecurityRiskScore(payload) => Self::SecurityRiskScore {
+                 payload: Cow::Borrowed(payload),
+             },
++            RolloutItem::EventMsg(EventMsg::SdkModelAttempt(payload)) => {
++                Self::sdk_record(SdkRolloutRecord::ModelAttempt(Cow::Borrowed(payload)))
++            }
+             RolloutItem::EventMsg(payload) => Self::EventMsg {
+                 payload: Cow::Borrowed(payload),
++                sdk_record: None,
+             },
+             RolloutItem::RealtimeItem(payload) => Self::RealtimeItem {
+                 payload: Cow::Borrowed(payload),
+@@ -247,7 +297,18 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
+             RolloutItemWire::SecurityRiskScore { payload } => {
+                 Self::SecurityRiskScore(payload.into_owned())
+             }
+-            RolloutItemWire::EventMsg { payload } => Self::EventMsg(payload.into_owned()),
++            RolloutItemWire::EventMsg {
++                payload,
++                sdk_record,
++            } => match sdk_record {
++                Some(SdkRolloutRecord::ModelAttempt(record)) => {
++                    Self::EventMsg(EventMsg::SdkModelAttempt(record.into_owned()))
++                }
++                Some(SdkRolloutRecord::ResponseFact(record)) => {
++                    Self::ResponseFactRecord(record.into_owned())
++                }
++                None => Self::EventMsg(payload.into_owned()),
++            },
+             RolloutItemWire::RealtimeItem { payload } => Self::RealtimeItem(payload.into_owned()),
+         }
+     }
+@@ -403,3 +464,91 @@ enum WindowIdWire<'a> {
+     Id(Cow<'a, str>),
+     LegacyWindowNumber(u64),
+ }
++
++#[cfg(test)]
++mod sdk_rollback_tests {
++    use super::*;
++    use serde_json::Value;
++    use serde_json::json;
++
++    fn records() -> [Value; 2] {
++        [
++            json!({"type": "event_msg", "payload": {
++                "type": "_sdk_model_attempt", "thread": "thread", "turn_id": "turn",
++                "data": {"attempt_id": "attempt", "phase": "finished",
++                    "owner_attempt_id": "attempt", "terminal_attempt_id": null,
++                    "usage": {"requests": 1, "token_usage": {
++                        "input_tokens": 7, "cached_input_tokens": 0,
++                        "cache_write_input_tokens": 0, "output_tokens": 3,
++                        "reasoning_output_tokens": 0, "total_tokens": 10
++                    }, "requests_without_token_usage": 0}}
++            }}),
++            json!({"type": "response_fact_record", "payload": {
++                "id": "fact", "thread_id": "00000000-0000-4000-8000-000000000001",
++                "turn_id": "turn", "request_id": "request", "response_id": "response",
++                "fact": {"kind": "refusal", "item_id": "item", "content_index": 0,
++                    "snapshot": true, "text": "Synthetic refusal", "capture_complete": true}
++            }}),
++        ]
++    }
++
++    #[test]
++    fn newer_records_round_trip_through_older_readable_carriers() {
++        for (original, kind) in records()
++            .into_iter()
++            .zip(["model_attempt", "response_fact"])
++        {
++            // Legacy alpha.8 direct records remain readable without changing their contents.
++            let item: RolloutItem = serde_json::from_value(original.clone()).unwrap();
++            let wire = serde_json::to_value(&item).unwrap();
++            assert_eq!(wire["type"], "event_msg");
++            assert_eq!(
++                wire["payload"],
++                json!({"type": "token_count", "info": null, "rate_limits": null})
++            );
++            assert_eq!(wire["sdk_record"]["kind"], kind);
++            let expected = if kind == "model_attempt" {
++                let mut data = original["payload"].clone();
++                data.as_object_mut().unwrap().remove("type");
++                data
++            } else {
++                original["payload"].clone()
++            };
++            assert_eq!(wire["sdk_record"]["data"], expected);
++            let restored: RolloutItem = serde_json::from_value(wire.clone()).unwrap();
++            if kind == "model_attempt" {
++                assert!(matches!(
++                    restored,
++                    RolloutItem::EventMsg(EventMsg::SdkModelAttempt(_))
++                ));
++            } else {
++                assert!(matches!(restored, RolloutItem::ResponseFactRecord(_)));
++            }
++            assert_eq!(serde_json::to_value(restored).unwrap(), wire);
++        }
++    }
++
++    #[test]
++    fn carrier_cannot_suppress_another_event_or_usage() {
++        let item: RolloutItem = serde_json::from_value(records()[0].clone()).unwrap();
++        let wire = serde_json::to_value(item).unwrap();
++        for payload in [
++            json!({"type": "task_complete", "turn_id": "turn", "last_agent_message": null}),
++            json!({"type": "token_count", "info": null, "rate_limits": null,
++                "api_rate_limits": {}}),
++            json!({"type": "token_count", "info": null, "rate_limits": {}}),
++        ] {
++            let mut invalid = wire.clone();
++            invalid["payload"] = payload;
++            assert!(serde_json::from_value::<RolloutItem>(invalid).is_err());
++        }
++    }
++
++    #[test]
++    fn ordinary_empty_token_count_keeps_its_wire_shape() {
++        let wire = json!({"type": "event_msg", "payload": {
++            "type": "token_count", "info": null, "rate_limits": null}});
++        let item: RolloutItem = serde_json::from_value(wire.clone()).unwrap();
++        assert_eq!(serde_json::to_value(item).unwrap(), wire);
++    }
++}

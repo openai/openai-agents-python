@@ -1,0 +1,428 @@
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 7dab6a3bc1cbf37ff7073bae31992aef157da640..bc618085b2373ee5be6b7d000dfe3d7e81baa885 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -177,6 +177,11 @@ impl Session {
+         result: DirectToolResult,
+     ) -> CodexResult<()> {
+         let observed = (!result.observers.is_empty()).then(|| result.envelope.clone());
++        let semantic = match &result.envelope.item {
++            item @ (ResponseItem::ToolSearchOutput { .. }
++            | ResponseItem::McpApprovalResponse { .. }) => Some(item.clone()),
++            _ => None,
++        };
+         self.record_annotated_items_with_exec(
+             turn_context,
+             model_info,
+@@ -184,6 +189,10 @@ impl Session {
+             result.pending_exec,
+         )
+         .await;
++        if let Some(item) = semantic {
++            crate::stream_events_utils::publish_semantic_tool_item(self, turn_context, &item)
++                .await?;
++        }
+         if let Some(output) = observed {
+             self.ensure_rollout_durable().await?;
+             for observer in result.observers {
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 89940b08a3aa6959c02c043fd52c03e058f2fb0a..b65c60923e8832d37e215bfa874e4acf4be8d99c 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -4269,6 +4269,7 @@ pub(super) enum RealtimeEventText {
+ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventText> {
+     match msg {
+         EventMsg::ResponseFact(_)
++        | EventMsg::SdkSemanticToolItem(_)
+         | EventMsg::SdkRawProviderEvent(_)
+         | EventMsg::SdkManagedToolStarted(_)
+         | EventMsg::SdkModelAttempt(_) => None,
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index b4cb21ebe9eb01496ab43875f0bced18d55f9d05..338ec3088478491aeff31d82105a44909d2ff83d 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -8,7 +8,11 @@ use codex_history::CodexHarnessMetadata;
+ use codex_history::ResponseItemEnvelope;
+ use codex_protocol::ResponseItemId;
+ use codex_protocol::config_types::ModeKind;
++use codex_protocol::items::HostedToolCallItem;
+ use codex_protocol::items::TurnItem;
++use codex_protocol::protocol::Event;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::ItemCompletedEvent;
+ use codex_utils_stream_parser::strip_citations;
+ use tokio_util::sync::CancellationToken;
+ 
+@@ -20,6 +24,7 @@ use crate::session::turn_context::TurnContext;
+ use crate::tools::call_trace;
+ use crate::tools::parallel::DirectToolResult;
+ use crate::tools::parallel::ToolCallRuntime;
++use crate::turn_timing::now_unix_timestamp_ms;
+ use codex_memories_read::citations::parse_memory_citation;
+ use codex_memories_read::citations::thread_ids_from_memory_citation;
+ use codex_protocol::error::CodexErr;
+@@ -84,7 +89,7 @@ pub(crate) async fn record_completed_response_item(
+     step_context: &StepContext,
+     item: &ResponseItem,
+     metadata: Option<CodexHarnessMetadata>,
+-) {
++) -> bool {
+     record_completed_response_item_with_finalized_facts(
+         sess,
+         step_context,
+@@ -92,16 +97,17 @@ pub(crate) async fn record_completed_response_item(
+         /*finalized_facts*/ None,
+         metadata,
+     )
+-    .await;
++    .await
+ }
+ 
++// A false result means staged terminal admission owns recording and publication.
+ pub(crate) async fn record_completed_response_item_with_finalized_facts(
+     sess: &Session,
+     step_context: &StepContext,
+     item: &ResponseItem,
+     finalized_facts: Option<&FinalizedTurnItemFacts>,
+     metadata: Option<CodexHarnessMetadata>,
+-) {
++) -> bool {
+     let turn_context = &step_context.turn;
+     if step_context.extension_data.get::<crate::session::staged_input_terminal::SampledSources>().is_some()
+         && crate::session::staged_input_terminal::queue_output(
+@@ -113,7 +119,7 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
+             session_telemetry: step_context.session_telemetry.clone(),
+         }),
+     ).await {
+-        return;
++        return false;
+     }
+     if let Some(metadata) = metadata {
+         sess.record_annotated_conversation_items(
+@@ -136,6 +142,7 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
+     publish_completed_response_facts(
+         sess, turn_context, &step_context.session_telemetry, item, finalized_facts,
+     ).await;
++    true
+ }
+ 
+ pub(crate) struct DeferredResponseFacts {
+@@ -428,6 +435,40 @@ pub(crate) struct HeldResponseItem {
+     metadata: Option<CodexHarnessMetadata>,
+ }
+ 
++/// Publish the live view of an accepted response item after canonical history owns it.
++pub(crate) async fn publish_semantic_tool_item(
++    sess: &Session,
++    turn_context: &TurnContext,
++    item: &ResponseItem,
++) -> Result<()> {
++    if !matches!(
++            item,
++            ResponseItem::ToolSearchCall { .. }
++                | ResponseItem::ToolSearchOutput { .. }
++                | ResponseItem::McpApprovalResponse { .. }
++        )
++    {
++        return Ok(());
++    }
++    sess.ensure_rollout_durable().await?;
++    let turn_id = turn_context.sub_id.clone();
++    sess.deliver_event_raw(Event {
++        id: turn_id.clone(),
++        msg: EventMsg::SdkSemanticToolItem(ItemCompletedEvent {
++            thread_id: sess.thread_id,
++            turn_id,
++            item: TurnItem::HostedToolCall(HostedToolCallItem {
++                id: uuid::Uuid::new_v4().to_string(),
++                item: item.clone(),
++            }),
++            started_at_ms: None,
++            completed_at_ms: now_unix_timestamp_ms(),
++        }),
++    })
++    .await;
++    Ok(())
++}
++
+ async fn publish_passive_response_item(
+     sess: &Session,
+     step: &StepContext,
+@@ -435,7 +476,7 @@ async fn publish_passive_response_item(
+     finalized: Option<FinalizedTurnItem>,
+     started: bool,
+     metadata: Option<CodexHarnessMetadata>,
+-) {
++) -> Result<()> {
+     let facts = finalized.as_ref().map(|item| item.facts.clone());
+     if let Some(finalized) = finalized {
+         if !started {
+@@ -445,8 +486,18 @@ async fn publish_passive_response_item(
+         sess.emit_turn_item_completed(&step.turn, finalized.turn_item)
+             .await;
+     }
+-    record_completed_response_item_with_finalized_facts(sess, step, item, facts.as_ref(), metadata)
+-    .await;
++    if record_completed_response_item_with_finalized_facts(
++        sess,
++        step,
++        item,
++        facts.as_ref(),
++        metadata,
++    )
++    .await
++    {
++        publish_semantic_tool_item(sess, &step.turn, item).await?;
++    }
++    Ok(())
+ }
+ 
+ pub(crate) async fn publish_held_response_items(
+@@ -471,7 +522,7 @@ pub(crate) async fn publish_held_response_items(
+         publish_passive_response_item(
+             sess, step, &item, finalized, /*started*/ false, metadata,
+         )
+-        .await;
++        .await?;
+     }
+     sess.ensure_rollout_durable().await
+ }
+@@ -576,7 +627,7 @@ pub(crate) async fn handle_output_item_done(
+                 metadata.sdk_application_tool = application_tool.map(str::to_owned);
+                 metadata.sdk_managed_agent_tool = managed_agent_tool;
+             }
+-            record_completed_response_item(
++            let recorded = record_completed_response_item(
+                 ctx.sess.as_ref(),
+                 ctx.step_context.as_ref(),
+                 &item,
+@@ -586,6 +637,9 @@ pub(crate) async fn handle_output_item_done(
+             if application_tool.is_some() {
+                 ctx.sess.ensure_rollout_durable().await?;
+             }
++            if recorded {
++                publish_semantic_tool_item(&ctx.sess, &ctx.step_context.turn, &item).await?;
++            }
+ 
+             let cancellation_token = ctx.cancellation_token.child_token();
+             let tool_future: InFlightFuture<'static> = Box::pin(
+@@ -646,7 +700,7 @@ pub(crate) async fn handle_output_item_done(
+                     previously_active_item.is_some(),
+                     metadata,
+                 )
+-                .await;
++                .await?;
+             }
+         }
+         // The tool request should be answered directly (or was denied); push that response into the transcript.
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 2212ffe3b50d112d1ea72ca0133bb01b82b257f2..86a4233d26b5e2e2cc0b82c66abda10131694a7f 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -301,6 +301,26 @@ pub(crate) async fn build_tool_router(
+ 
+     hosted_specs.extend(captured_hosted.tools.iter().cloned().map(ToolSpec::from));
+ 
++    // Keep the SDK's distinct File Search identity from the opening ceiling even
++    // when a profile or an operation narrows the currently offered catalog.
++    let hosted_file_search = ToolName::namespaced("_agents_sdk_hosted", "file_search");
++    let hosted_file_search = session
++        .tool_policy
++        .allowed_tools
++        .as_ref()
++        .filter(|names| names.contains(&hosted_file_search))
++        .map(|_| hosted_file_search);
++    if let Some(name) = &hosted_file_search
++        && registry
++            .entries()
++            .any(|entry| entry.runtime.tool_name() == *name)
++    {
++        return Err(CodexErrorDetails::InvalidRequest(
++            "The hosted File Search identity is reserved".into(),
++        )
++        .into());
++    }
++
+     // Keep one immutable selected plan with the issuing step, including helper
+     // identities. Every downstream catalog is derived from the retained registry.
+     let selection = if let Some(selected) = step_store.get::<SelectedStepTools>() {
+@@ -315,7 +335,11 @@ pub(crate) async fn build_tool_router(
+         let mut candidates = registry
+             .entries()
+             .map(|entry| entry.runtime.tool_name())
+-            .chain(hosted_specs.iter().map(hosted_tool_policy_name))
++            .chain(
++                hosted_specs
++                    .iter()
++                    .map(|spec| hosted_tool_policy_name(spec, hosted_file_search.as_ref())),
++            )
+             .collect::<Vec<_>>();
+         if matches!(
+             effective_tool_mode(turn_context, model_info),
+@@ -363,7 +387,22 @@ pub(crate) async fn build_tool_router(
+             }
+         }
+         if let Some(target) = forced_tool {
+-            let target = target.clone().with_default_namespace();
++            let target = if let Some(hosted) = hosted_file_search.as_ref()
++                && target.is_default_namespace()
++                && target.name == hosted.name
++                && step_store
++                    .get::<codex_extension_api::CapturedAgentProfile>()
++                    .is_some_and(|profile| {
++                        profile
++                            .profile
++                            .data
++                            .get::<codex_extension_api::AgentProfileHostedFileSearchRef>()
++                            .is_some()
++                    }) {
++                hosted.clone()
++            } else {
++                target.clone().with_default_namespace()
++            };
+             if !candidates
+                 .iter()
+                 .any(|candidate| candidate.clone().with_default_namespace() == target)
+@@ -391,7 +430,10 @@ pub(crate) async fn build_tool_router(
+             registry.remove(&name);
+         }
+         hosted_specs.retain(|spec| {
+-            selected.contains(&hosted_tool_policy_name(spec).with_default_namespace())
++            selected.contains(
++                &hosted_tool_policy_name(spec, hosted_file_search.as_ref())
++                    .with_default_namespace(),
++            )
+         });
+     }
+     let router = finalize_selected_tool_router(
+@@ -401,6 +443,7 @@ pub(crate) async fn build_tool_router(
+         hosted_specs,
+         &session.services.tool_search_handler_cache,
+         selection.0.as_ref(),
++        hosted_file_search.as_ref(),
+     )?;
+     if let Some(receipt) = step_store.get::<FinalStepBuiltinTools>()
+         && !receipt.capture(router.exposed_builtin_tool_names())
+@@ -622,12 +665,14 @@ pub(crate) fn finalize_tool_router(
+         hosted_specs,
+         tool_search_handler_cache,
+         None,
++        None,
+     )
+ }
+ 
+ // MCP's wire type is shared, but its authority is captured per server.
+-fn hosted_tool_policy_name(spec: &ToolSpec) -> ToolName {
++fn hosted_tool_policy_name(spec: &ToolSpec, hosted_file_search: Option<&ToolName>) -> ToolName {
+     match spec {
++        ToolSpec::FileSearch(_) if let Some(name) = hosted_file_search => name.clone(),
+         ToolSpec::Mcp(config) => {
+             ToolName::new(Some("hosted_mcp".into()), config.server_label.clone())
+         }
+@@ -642,11 +687,16 @@ fn finalize_selected_tool_router(
+     mut hosted_specs: Vec<ToolSpec>,
+     tool_search_handler_cache: &ToolSearchHandlerCache,
+     selected: Option<&HashSet<ToolName>>,
++    hosted_file_search: Option<&ToolName>,
+ ) -> CodexResult<ToolRouter> {
+     let allows = |name: &ToolName| {
+         selected.is_none_or(|names| names.contains(&name.clone().with_default_namespace()))
+     };
+-    hosted_specs.retain(|spec| registry.tool_policy.allows(&hosted_tool_policy_name(spec)));
++    hosted_specs.retain(|spec| {
++        registry
++            .tool_policy
++            .allows(&hosted_tool_policy_name(spec, hosted_file_search))
++    });
+     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
+     enforce_strict_3p_tools(turn_context, model_info, &mut registry);
+     for tool in registry.entries_mut() {
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index f7502727671e1cf032ce29c8db58b63eb57c8643..41255b05c03b91c6640490f9947304a092b6a68d 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -13,6 +13,7 @@ pub use provider_image_reference_policy::ProviderImageReferencePolicy;
+ pub use session_isolation::IsolatedSessionExtensions;
+ pub use session_isolation::SessionIsolation;
+ pub use tool_not_found::ToolNotFoundBehavior;
++pub use tool_policy::AgentProfileHostedFileSearchRef;
+ pub use tool_policy::FinalStepBuiltinTools;
+ pub use tool_policy::ToolPolicy;
+ 
+diff --git a/codex-rs/ext/extension-api/src/tool_policy.rs b/codex-rs/ext/extension-api/src/tool_policy.rs
+index 89f20494582e9bd52286658864ba4f6ebc69d137..dd22a8e616ea7455394b954759bef45e1d2e4dc5 100644
+--- a/codex-rs/ext/extension-api/src/tool_policy.rs
++++ b/codex-rs/ext/extension-api/src/tool_policy.rs
+@@ -24,6 +24,11 @@ impl FinalStepBuiltinTools {
+     }
+ }
+ 
++/// The frozen Agent profile permits its legacy default File Search name to
++/// select typed hosted File Search because it has no local function with that name.
++#[derive(Clone, Copy, Debug)]
++pub struct AgentProfileHostedFileSearchRef;
++
+ /// Supply through `ExtensionDataInit` before starting a thread. The host captures
+ /// the policy once; later extension-state changes cannot relax it. Callers must
+ /// supply it again when resuming a thread.
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index d64cdf33594a8e062808df28502b760d91df5bb5..ee1c818f8de667fa28d8657e506d0c485728dd01 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1956,6 +1956,12 @@ impl Event {
+                 },
+             }));
+         }
++        if let EventMsg::SdkSemanticToolItem(item) = &self.msg {
++            return serde_json::to_value(Event {
++                id: self.id.clone(),
++                msg: EventMsg::ItemCompleted(item.clone()),
++            });
++        }
+         serde_json::to_value(self)
+     }
+ }
+@@ -2041,6 +2047,11 @@ pub enum EventMsg {
+     #[schemars(skip)]
+     #[ts(skip)]
+     SdkRawProviderEvent(SdkRawProviderEvent),
++    /// A live SDK projection whose raw response item is already owned by canonical history.
++    #[serde(skip)]
++    #[schemars(skip)]
++    #[ts(skip)]
++    SdkSemanticToolItem(ItemCompletedEvent),
+     /// A managed child registration for a live SDK subscriber only.
+     #[serde(skip)]
+     #[schemars(skip)]
+diff --git a/codex-rs/rollout-trace/src/protocol_event.rs b/codex-rs/rollout-trace/src/protocol_event.rs
+index 616b338c0555fa8999561257b40cf593e16d4f29..21ff9129b1f7f9c681fb4d8ed8d11e99cadeb04f 100644
+--- a/codex-rs/rollout-trace/src/protocol_event.rs
++++ b/codex-rs/rollout-trace/src/protocol_event.rs
+@@ -269,6 +269,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
+     match event {
+         EventMsg::ResponseFact(_)
+         | EventMsg::SdkManagedToolStarted(_)
++        | EventMsg::SdkSemanticToolItem(_)
+         | EventMsg::SdkRawProviderEvent(_)
+         | EventMsg::SdkModelAttempt(_) => None,
+         EventMsg::ExecCommandBegin(event) if event.source != ExecCommandSource::UserShell => {
+@@ -436,6 +437,7 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
+     match event {
+         EventMsg::ResponseFact(_)
+         | EventMsg::SdkManagedToolStarted(_)
++        | EventMsg::SdkSemanticToolItem(_)
+         | EventMsg::SdkRawProviderEvent(_)
+         | EventMsg::SdkModelAttempt(_) => None,
+         EventMsg::SessionConfigured(_) => Some("session_configured"),
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index 83ba083a6cbc49ea9ccfc2fc4c08c93b26d25eae..fc34f52f1fb9fb8e930b74f7417c5b8a24e93b7e 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -252,6 +252,7 @@ pub fn persisted_event_msg(
+         | EventMsg::HookCompleted(_)
+         | EventMsg::ResponseFact(_)
+         | EventMsg::SdkManagedToolStarted(_)
++        | EventMsg::SdkSemanticToolItem(_)
+         | EventMsg::SdkRawProviderEvent(_)
+         | EventMsg::AgentMessageContentDelta(_)
+         | EventMsg::PlanDelta(_)

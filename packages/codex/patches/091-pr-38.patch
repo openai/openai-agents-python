@@ -1,5 +1,88 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index a487e563042291373b892ac0d7f075bfe271c6a4..5487af2de94af6d5150045a35ecacf989755c0f9 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -288,6 +288,14 @@ pub struct ModelClient {
+     api_key_cyber_access_programs: cyber_access_program::ApiKeyCyberAccessPrograms,
+ }
+ 
++/// Current SDK-owned inference authority. Core never persists this value.
++#[derive(Clone)]
++pub struct SdkAgentProfileProvider {
++    pub id: Arc<str>,
++    pub info: ModelProviderInfo,
++    pub auth_manager: Arc<AuthManager>,
++}
++
+ /// A turn-scoped streaming session created from a [`ModelClient`].
+ ///
+ /// The session establishes a Responses WebSocket connection lazily and reuses it across multiple
+@@ -695,6 +703,44 @@ impl ModelClient {
+         self
+     }
+ 
++    pub(crate) fn remote_compaction_support(&self) -> codex_model_provider::RemoteCompactionSupport {
++        self.state.provider.capabilities().remote_compaction
++    }
++
++    pub(crate) fn websocket_connect_timeout(&self) -> std::time::Duration {
++        self.state.provider.info().websocket_connect_timeout()
++    }
++
++    pub(crate) fn for_sdk_profile(&self, provider: &SdkAgentProfileProvider) -> Self {
++        let state = self.state.as_ref();
++        let mut client = Self::new(
++            Some(Arc::clone(&provider.auth_manager)),
++            self.agent_identity_policy,
++            state.thread_id,
++            provider.info.clone(),
++            state.session_source.clone(),
++            state.originator.clone(),
++            state.model_verbosity,
++            state.content_item_kinds_enabled,
++            state.reasoning_effort_override_enabled,
++            state.enable_request_compression,
++            state.include_timing_metrics,
++            state.beta_features_header.clone(),
++            state.concurrent_reasoning_summaries_enabled,
++            state.attestation_provider.clone(),
++            self.http_client_factory.clone(),
++            state.workspace_routing.clone(),
++            self.request_contributors.clone(),
++        );
++        client.prompt_cache_key_override = self.prompt_cache_key_override.clone();
++        client.codex_responses_headers = self.codex_responses_headers.clone();
++        client.event_sender = self.event_sender.clone();
++        client.restored_history = self.restored_history;
++        client.executed_tool_calls = self.executed_tool_calls.clone();
++        client.api_key_cyber_access_programs = self.api_key_cyber_access_programs;
++        client
++    }
++
+     pub(crate) fn reasoning_effort_override_enabled(&self, model_info: &ModelInfo) -> bool {
+         self.state.reasoning_effort_override_enabled
+             && self.state.provider.info().is_openai()
+@@ -1980,6 +2026,18 @@ impl Drop for ModelClientSession {
+ }
+ 
+ impl ModelClientSession {
++    pub(crate) fn selects_client(&self, client: &ModelClient) -> bool {
++        Arc::ptr_eq(&self.client.state, &client.state)
++    }
++
++    pub(crate) fn provider_info(&self) -> &ModelProviderInfo {
++        self.client.state.provider.info()
++    }
++
++    pub(crate) fn remote_compaction_support(&self) -> codex_model_provider::RemoteCompactionSupport {
++        self.client.remote_compaction_support()
++    }
++
+     fn request_transport_mode(prompt: &Prompt) -> codex_protocol::model_request_transport::RequestTransportMode {
+         prompt.request_controls.request_transport.as_ref().and_then(Option::as_ref)
+             .and_then(|transport| transport.mode.flatten()).unwrap_or_default()
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 80ba6c005c938de786ee55328f7a3e3847a94a90..626b93d76a35c0ffa22194892586bd6e26f5767d 100644
+index 7811f41db6785654daa4afe0c91e72771d984b36..626b93d76a35c0ffa22194892586bd6e26f5767d 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -406,9 +406,13 @@ pub(crate) async fn run_custom_post_turn_compaction(
@@ -101,8 +184,38 @@ index 80ba6c005c938de786ee55328f7a3e3847a94a90..626b93d76a35c0ffa22194892586bd6e
      let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
  
      let mut history = history.clone();
+@@ -825,11 +856,13 @@ async fn run_compact_task_inner_impl(
+             .into(),
+     );
+ 
+-    let max_retries = turn_context.provider.info().stream_max_retries();
+     let mut retries = 0;
+     // Reuse one client session so turn-scoped state (sticky routing and websocket incremental
+     // request tracking) survives retries within this compact turn.
+-    let mut client_session = sess.services.model_client.new_session();
++    let mut client_session = sess
++        .model_client_for_profile(source_step_context.settings.agent_profile.as_deref())
++        .new_session();
++    let max_retries = client_session.provider_info().stream_max_retries();
+     let sampling_stop = if matches!(compaction_metadata.trigger(), CompactionTrigger::Auto) {
+         crate::model_request::turn_sampling_stop(&turn_context.extension_data)
+     } else {
+@@ -899,12 +932,7 @@ async fn run_compact_task_inner_impl(
+                 return Err(e);
+             }
+             Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
+-                if sess
+-                    .services
+-                    .model_client
+-                    .auth_manager()
+-                    .is_some_and(|manager| manager.uses_app_managed_model_oauth())
+-                {
++                if client_session.uses_chatgpt_plan() {
+                     return Err(e);
+                 }
+                 if turn_input_len > 1 {
 diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
-index b02ecec834b4895c9dba68aad3057acadd7eef34..d143339f425fe922ab17dbf8e222188b47125c1b 100644
+index 9d467121959a2f089538decb3f50ad26a6f7defe..d143339f425fe922ab17dbf8e222188b47125c1b 100644
 --- a/codex-rs/core/src/compact_remote_v2_attempt.rs
 +++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
 @@ -39,6 +39,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
@@ -113,6 +226,31 @@ index b02ecec834b4895c9dba68aad3057acadd7eef34..d143339f425fe922ab17dbf8e222188b
      let turn_context = &step_context.turn;
      let mut history = sess.clone_retained_history().await?;
      let input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());
+@@ -128,9 +129,10 @@ pub(super) async fn run_remote_compact_v2_attempt(
+         "parallel_tool_calls": prompt.parallel_tool_calls,
+     }));
+     let mut owned_client_session = None;
++    let selected = sess.model_client_for_profile(step_context.settings.agent_profile.as_deref());
+     let client_session = match client_session {
+-        Some(client_session) => client_session,
+-        None => owned_client_session.insert(sess.services.model_client.new_session()),
++        Some(client_session) if client_session.selects_client(&selected) => client_session,
++        _ => owned_client_session.insert(selected.new_session()),
+     };
+     let compaction_output_result = run_remote_compaction_request_v2(
+         sess,
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 3ac5be17b199cca53e515ebc8ddcdca5a7342f9d..49b93df7e4cbbec2beda9906ff365d96cbbbb41d 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -251,6 +251,7 @@ pub use attestation::AttestationProvider;
+ pub use attestation::GenerateAttestationFuture;
+ pub use client::ModelClient;
+ pub use client::ModelClientSession;
++pub use client::SdkAgentProfileProvider;
+ pub use client::X_CODEX_INSTALLATION_ID_HEADER;
+ pub use client::X_CODEX_ROUTING_HINT_HEADER;
+ pub use client::X_CODEX_TURN_METADATA_HEADER;
 diff --git a/codex-rs/core/src/prepared_request.rs b/codex-rs/core/src/prepared_request.rs
 index f147ac483ee027f6c2efc8331c8adb0059779709..c8d06360bb5b23e27193bce213902cf8407cf073 100644
 --- a/codex-rs/core/src/prepared_request.rs
@@ -283,14 +421,15 @@ index f147ac483ee027f6c2efc8331c8adb0059779709..c8d06360bb5b23e27193bce213902cf8
          assert_eq!(provider_calls, 0);
      }
 diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
-index ee219966fcd7fb7f588cda7ae10ea6cd4de81f2c..3efebeb99261bb298e291027bc3886dbc985e13b 100644
+index 1dcc1061d7c4746efa7ecaf48b5a85f36b2ce48a..3efebeb99261bb298e291027bc3886dbc985e13b 100644
 --- a/codex-rs/core/src/session/agent_profile.rs
 +++ b/codex-rs/core/src/session/agent_profile.rs
-@@ -32,7 +32,20 @@ struct PersistedProfile {
+@@ -30,6 +30,33 @@ struct PersistedProfile {
+     presentation: Option<codex_protocol::agent_profile::AgentProfileHandoffPresentation>,
+ }
  
- /// The original native publication remains the projection boundary after idle updates.
- #[derive(Clone)]
--struct HandoffPresentationAnchor(ResponseItem);
++/// The original native publication remains the projection boundary after idle updates.
++#[derive(Clone)]
 +struct HandoffPresentationAnchor(ResponseItem, Arc<std::sync::atomic::AtomicBool>);
 +
 +impl HandoffPresentationAnchor {
@@ -305,10 +444,44 @@ index ee219966fcd7fb7f588cda7ae10ea6cd4de81f2c..3efebeb99261bb298e291027bc3886db
 +        .get::<HandoffPresentationAnchor>()
 +        .is_none_or(|anchor| anchor.1.load(std::sync::atomic::Ordering::Acquire))
 +}
++
++pub(super) fn handoff_presentation_anchor(profile: &AgentProfile) -> ResponseItem {
++    profile
++        .data
++        .get::<HandoffPresentationAnchor>()
++        .map_or_else(
++            || profile.application_instructions.item.clone(),
++            |anchor| anchor.0.clone(),
++        )
++}
++
+ struct TaskFence {
+     context: Arc<TurnContext>,
+     done: Arc<Notify>,
+@@ -40,6 +67,17 @@ fn invalid(message: impl Into<String>) -> CodexErr {
+     CodexErr::InvalidRequest(message.into())
+ }
  
- pub(super) fn handoff_presentation_anchor(profile: &AgentProfile) -> ResponseItem {
-     profile
-@@ -137,6 +150,9 @@ pub(super) fn profile_after_history_replacement(
++fn restored_profile_identity(
++    settings: &codex_extension_api::AgentProfileModelSettings,
++) -> codex_extension_api::AgentProfileModelSettings {
++    let mut identity = settings.for_persistence();
++    // The host has rebound these settings from the current declaration.
++    identity.request_controls.retry = None;
++    identity.request_controls.attempt_timeout_ms = None;
++    identity.invocation_timeout_ms = None;
++    identity
++}
++
+ fn persistence_failure() -> CodexErr {
+     CodexErr::Fatal(
+         "Canonical Agent profile persistence failed; execution stopped pending recovery"
+@@ -108,22 +146,30 @@ pub(super) fn profile_after_history_replacement(
+         .data
+         .get::<AgentProfileHandoffPresentation>()
+         .is_none()
+-        || retains_publication(replacement, &captured.profile.application_instructions.item)
++        || retains_publication(replacement, &handoff_presentation_anchor(&captured.profile))
      {
          return Arc::clone(captured);
      }
@@ -317,12 +490,35 @@ index ee219966fcd7fb7f588cda7ae10ea6cd4de81f2c..3efebeb99261bb298e291027bc3886db
 +    }
      let mut profile = captured.profile.as_ref().clone();
      profile.data.remove::<AgentProfileHandoffPresentation>();
-     profile.data.remove::<HandoffPresentationAnchor>();
-@@ -162,13 +178,24 @@ fn persisted_profile(items: &[RolloutItem]) -> CodexResult<Option<RestoredProfil
++    profile.data.remove::<HandoffPresentationAnchor>();
+     Arc::new(CapturedAgentProfile {
+         receipt: captured.receipt.clone(),
+         profile: Arc::new(profile),
+     })
+ }
+ 
+-fn persisted_profile(
+-    items: &[RolloutItem],
+-) -> CodexResult<Option<(&ResponseItemEnvelope, PersistedProfile)>> {
+-    let mut latest: Option<(&ResponseItemEnvelope, PersistedProfile)> = None;
++struct RestoredProfile<'a> {
++    envelope: &'a ResponseItemEnvelope,
++    record: PersistedProfile,
++    presentation_anchor: Option<&'a ResponseItem>,
++}
++
++fn persisted_profile(items: &[RolloutItem]) -> CodexResult<Option<RestoredProfile<'_>>> {
++    let mut latest: Option<RestoredProfile<'_>> = None;
+     let mut accepted_handoffs = Vec::new();
+     for item in items {
+         if let RolloutItem::Compacted(checkpoint) = item {
+@@ -132,11 +178,24 @@ fn persisted_profile(
              if matches!(
                  checkpoint.sdk_originals.as_ref(),
                  Some(codex_history::sdk_originals::SdkOriginalHistoryCheckpoint::Replace(_))
 -            ) && let Some(replacement) = checkpoint.replacement_history.as_ref()
+-                && let Some((envelope, record)) = latest.as_mut()
+-                && !retains_publication(replacement, &envelope.item)
 +            ) || (matches!(
 +                checkpoint.sdk_originals.as_ref(),
 +                Some(
@@ -334,17 +530,70 @@ index ee219966fcd7fb7f588cda7ae10ea6cd4de81f2c..3efebeb99261bb298e291027bc3886db
 +                && checkpoint.window_id.is_some())
 +            {
 +                if let Some(replacement) = checkpoint.replacement_history.as_ref()
-                 && let Some(profile) = latest.as_mut()
-                 && let Some(anchor) = profile.presentation_anchor
-                 && !retains_publication(replacement, anchor)
++                && let Some(profile) = latest.as_mut()
++                && let Some(anchor) = profile.presentation_anchor
++                && !retains_publication(replacement, anchor)
              {
-                 profile.record.presentation = None;
-                 profile.presentation_anchor = None;
+-                record.presentation = None;
++                profile.record.presentation = None;
++                profile.presentation_anchor = None;
 +                }
              }
              continue;
          }
-@@ -245,6 +272,59 @@ fn persisted_profile(items: &[RolloutItem]) -> CodexResult<Option<RestoredProfil
+@@ -169,6 +228,7 @@ fn persisted_profile(
+         if record.profile_id.is_empty() || record.model.model.is_empty() {
+             return Err(invalid("Invalid persisted Agent profile identity"));
+         }
++        let mut presentation_anchor = None;
+         if let Some(presentation) = &record.presentation {
+             crate::prepared_request::validate_handoff_presentation(presentation)
+                 .map_err(invalid)?;
+@@ -176,21 +236,27 @@ fn persisted_profile(
+                 profile_id: record.profile_id.clone(),
+                 epoch: record.epoch,
+             };
+-            if !presentation.belongs_to(&destination)
+-                || !accepted_handoffs.contains(&&presentation.handoff)
+-                || latest.as_ref().is_none_or(|(_, previous)| {
+-                    let previous: &PersistedProfile = previous;
+-                    presentation.handoff.source.profile_id != previous.profile_id
+-                        || presentation.handoff.source.epoch != previous.epoch
++            if presentation.belongs_to(&destination)
++                && accepted_handoffs.contains(&&presentation.handoff)
++                && latest.as_ref().is_some_and(|previous| {
++                    presentation.handoff.source.profile_id == previous.record.profile_id
++                        && presentation.handoff.source.epoch == previous.record.epoch
+                 })
+             {
++                presentation_anchor = Some(&envelope.item);
++            } else if let Some(previous) = &latest
++                && record.profile_id == previous.record.profile_id
++                && previous.record.presentation.as_ref() == Some(presentation)
++                && let Some(anchor) = previous.presentation_anchor
++            {
++                presentation_anchor = Some(anchor);
++            } else {
+                 return Err(invalid("Persisted handoff presentation has another owner"));
+             }
+         }
+-        if let Some((_, previous)) = &latest {
+-            let previous: &PersistedProfile = previous;
++        if let Some(previous) = &latest {
+             if record.epoch
+-                != previous
++                != previous.record
+                     .epoch
+                     .checked_add(1)
+                     .ok_or_else(|| invalid("Agent profile epoch exhausted"))?
+@@ -200,12 +266,65 @@ fn persisted_profile(
+         } else if record.epoch != 0 {
+             return Err(invalid("Persisted Agent profile has no initial receipt"));
+         }
+-        latest = Some((envelope, record));
++        latest = Some(RestoredProfile { envelope, record, presentation_anchor });
+     }
+     Ok(latest)
  }
  
  impl Session {
@@ -404,23 +653,67 @@ index ee219966fcd7fb7f588cda7ae10ea6cd4de81f2c..3efebeb99261bb298e291027bc3886db
      pub(crate) fn validate_handoff_input_retention(&self, enabled: bool) -> CodexResult<()> {
          if enabled
              && self
-@@ -614,7 +694,9 @@ impl Session {
+@@ -539,9 +658,10 @@ impl Session {
+             .map_err(|_| persistence_failure())?;
+         let previous = persisted_profile(&saved.items)?;
+         if restored {
+-            if let Some((envelope, record)) = previous {
++            if let Some(RestoredProfile { envelope, record, presentation_anchor }) = previous {
+                 if record.profile_id != target.profile_id
+-                    || record.model.for_persistence() != target.model.for_persistence()
++                    || restored_profile_identity(&record.model)
++                        != restored_profile_identity(&target.model)
+                     || envelope.item != target.application_instructions.item
+                     || envelope
+                         .metadata
+@@ -573,6 +693,11 @@ impl Session {
+                     }
                      let mut restored_target = (*target).clone();
                      restored_target.data.insert(presentation);
-                     if let Some(anchor) = presentation_anchor {
--                        restored_target.data.insert(HandoffPresentationAnchor(anchor.clone()));
++                    if let Some(anchor) = presentation_anchor {
 +                        restored_target
 +                            .data
 +                            .insert(HandoffPresentationAnchor::new(anchor.clone()));
-                     }
++                    }
                      Arc::new(restored_target)
                  } else {
-@@ -702,8 +784,13 @@ impl Session {
-             if let Some(anchor) = inherited {
-                 Arc::make_mut(&mut target)
-                     .data
--                    .insert(HandoffPresentationAnchor(anchor.clone()));
--            } else if !expected_transfer {
+                     if target
+@@ -624,7 +749,7 @@ impl Session {
+             }
+         } else if previous
+             .as_ref()
+-            .map(|(_, record)| (&record.profile_id, record.epoch))
++            .map(|profile| (&profile.record.profile_id, profile.record.epoch))
+             != expected
+                 .as_ref()
+                 .map(|receipt| (&receipt.profile_id, receipt.epoch))
+@@ -644,14 +769,30 @@ impl Session {
+         let presentation = target
+             .data
+             .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>();
+-        if presentation.as_ref().is_some_and(|presentation| {
+-            task_fence.is_none()
+-                || !presentation.belongs_to(&receipt)
+-                || expected.as_ref() != Some(&presentation.handoff.source)
+-        }) {
+-            return Err(invalid(
+-                "Handoff presentation differs from committed destination",
+-            ));
++        let mut target = target;
++        if let Some(presentation) = &presentation {
++            let expected_transfer = task_fence.is_some()
++                && presentation.belongs_to(&receipt)
++                && expected.as_ref() == Some(&presentation.handoff.source);
++            let inherited = previous.as_ref().and_then(|previous| {
++                (task_fence.is_none()
++                    && previous.record.profile_id == receipt.profile_id
++                    && previous.record.presentation.as_ref() == Some(presentation.as_ref()))
++                .then_some(previous.presentation_anchor)
++                .flatten()
++            });
++            if let Some(anchor) = inherited {
++                Arc::make_mut(&mut target)
++                    .data
 +                    .insert(HandoffPresentationAnchor::new(anchor.clone()));
 +            } else if expected_transfer {
 +                let anchor = target.application_instructions.item.clone();
@@ -428,28 +721,170 @@ index ee219966fcd7fb7f588cda7ae10ea6cd4de81f2c..3efebeb99261bb298e291027bc3886db
 +                    .data
 +                    .insert(HandoffPresentationAnchor::new(anchor));
 +            } else {
-                 return Err(invalid("Handoff presentation differs from committed destination"));
-             }
++                return Err(invalid("Handoff presentation differs from committed destination"));
++            }
          }
-@@ -967,7 +1054,12 @@ impl Session {
+         self.validate_handoff_input_retention(
+             presentation.is_some()
+@@ -807,6 +948,16 @@ fn handoff_prefix_digest(items: &[&ResponseItem]) -> CodexResult<String> {
+ 
+ impl Session {
+     pub(crate) async fn record_handoff_input_frontier(&self, context: &Arc<TurnContext>) -> CodexResult<()> {
++        self.capture_handoff_input_frontier(context, false).await
++    }
++
++    pub(super) async fn rebase_handoff_input_frontier(&self, context: &Arc<TurnContext>) -> CodexResult<()> {
++        self.capture_handoff_input_frontier(context, true).await
++    }
++
++    async fn capture_handoff_input_frontier(
++        &self, context: &Arc<TurnContext>, rebased: bool,
++    ) -> CodexResult<()> {
+         if self.services.thread_extension_data.get::<
+             codex_protocol::agent_profile::AgentProfileHandoffInputCapture,
+         >().is_none() { return Ok(()); }
+@@ -814,18 +965,27 @@ impl Session {
+         crate::prepared_request::check_handoff_budget(history.raw_items()).map_err(invalid)?;
+         let items: Vec<_> = history.raw_items().collect();
+         let owner = context.extension_data.get_or_init(HandoffInputFrontierOwner::default);
+-        let mut prior = owner.0.lock().map_err(|_| invalid("Handoff frontier owner poisoned"))?.clone();
+-        if prior.is_none() {
+-            prior = self.restored_handoff_input_frontier(context).await?;
+-        }
+-        let (root_count, root_sha256) = if let Some(prior) = prior {
+-            if prior.root_count > items.len() || handoff_prefix_digest(&items[..prior.root_count])? != prior.root_sha256 {
+-                return Err(invalid("Handoff original input prefix changed"));
++        let sample_sha256 = handoff_prefix_digest(&items)?;
++        let (root_count, root_sha256) = if rebased {
++            // The committed replacement is the only remaining input prefix.
++            (items.len(), sample_sha256.clone())
++        } else {
++            let prior = owner.0.lock().map_err(|_| invalid("Handoff frontier owner poisoned"))?.clone();
++            let prior = match prior {
++                Some(prior) => Some(prior),
++                None => self.restored_handoff_input_frontier(context).await?,
++            };
++            if let Some(prior) = prior {
++                if prior.root_count > items.len() || handoff_prefix_digest(&items[..prior.root_count])? != prior.root_sha256 {
++                    return Err(invalid("Handoff original input prefix changed"));
++                }
++                (prior.root_count, prior.root_sha256)
++            } else {
++                (items.len(), sample_sha256.clone())
+             }
+-            (prior.root_count, prior.root_sha256)
+-        } else { (items.len(), handoff_prefix_digest(&items)?) };
++        };
+         let frontier = HandoffInputFrontiers { root_count, root_sha256,
+-            sample_count:items.len(), sample_sha256:handoff_prefix_digest(&items)? };
++            sample_count:items.len(), sample_sha256 };
+         *owner.0.lock().map_err(|_| invalid("Handoff frontier owner poisoned"))? = Some(frontier);
+         Ok(())
+     }
+@@ -894,9 +1054,14 @@ impl Session {
          let mut input = values(&items[..frontier.root_count])?;
          let mut previous = values(&items[frontier.root_count..frontier.sample_count])?;
          if let Some(source) = source {
 -            if let Some(presentation) = source.profile.data.get::<AgentProfileHandoffPresentation>() {
+-                if !presentation.belongs_to(&source.receipt) { return Err(invalid("Source handoff presentation is stale")); }
+-                let publication = &source.profile.application_instructions.item;
 +            if let Some(presentation) = source
 +                .profile
 +                .data
 +                .get::<AgentProfileHandoffPresentation>()
 +                .filter(|_| handoff_presentation_is_live(&source.profile))
 +            {
-                 let publication = handoff_presentation_anchor(&source.profile);
-                 let publication = &publication;
++                let publication = handoff_presentation_anchor(&source.profile);
++                let publication = &publication;
                  let anchors: Vec<_> = items.iter().enumerate().filter_map(|(index,item)|
+                     (item.id() == publication.id()).then_some(index)).collect();
+                 if anchors.len() != 1 || *items[anchors[0]] != *publication || anchors[0] >= frontier.sample_count {
+@@ -1071,9 +1236,25 @@ mod tests {
+             RolloutItem::ResponseItem(accepted_result.clone()),
+             envelope(&destination, 1, Some(presentation.clone())),
+         ];
+-        let (_, restored) = persisted_profile(&history).unwrap().unwrap();
++        let restored = persisted_profile(&history).unwrap().unwrap().record;
+         assert_eq!(restored.presentation, Some(presentation.clone()));
+         assert_eq!(history.len(), 3); // No effect item has been replaced.
++        let mut updated = history.clone();
++        updated.push(envelope(&destination, 2, Some(presentation.clone())));
++        let updated_profile = persisted_profile(&updated).unwrap().unwrap();
++        assert_eq!(updated_profile.record.epoch, 2);
++        assert_eq!(updated_profile.record.presentation, Some(presentation.clone()));
++        let RolloutItem::ResponseItem(first_publication) = &history[2] else {
++            panic!("expected the original destination publication");
++        };
++        assert_eq!(updated_profile.presentation_anchor, Some(&first_publication.item));
++
++        let mut injected = presentation.clone();
++        injected.input.clear();
++        updated.pop();
++        updated.push(envelope(&destination, 2, Some(injected)));
++        assert!(persisted_profile(&updated).is_err());
++
+         // Mutation of any persisted group cannot mint fresh HostedMCP authority.
+         for group in 0..3 {
+             let mut rejected = presentation.clone();
+@@ -1132,7 +1313,7 @@ mod tests {
+                 .unwrap();
+             let mut edited = history.clone();
+             edited.push(RolloutItem::Compacted(checkpoint));
+-            let (_, restored) = persisted_profile(&edited).unwrap().unwrap();
++            let restored = persisted_profile(&edited).unwrap().unwrap().record;
+             assert_eq!(restored.presentation.is_some(), retained);
+             // The original admitted transfer and presentation remain audit facts.
+             assert_eq!(edited[..history.len()], history);
+@@ -1570,7 +1751,7 @@ for line in sys.stdin:
+             .load_history(true)
+             .await
+             .unwrap();
+-        let (_, persisted) = persisted_profile(&history.items).unwrap().unwrap();
++        let persisted = persisted_profile(&history.items).unwrap().unwrap().record;
+         assert_eq!((persisted.profile_id.as_str(), persisted.epoch), ("a", 2));
+         assert!(
+             session
+@@ -2153,7 +2334,7 @@ for line in sys.stdin:
+             .load_history(true)
+             .await
+             .unwrap();
+-        let (_, persisted) = persisted_profile(&saved.items).unwrap().unwrap();
++        let persisted = persisted_profile(&saved.items).unwrap().unwrap().record;
+         assert_eq!(persisted.profile_id, receipt.profile_id);
+         assert_eq!(persisted.epoch, receipt.epoch);
+         session
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 3cbf65b6d259c2022b02347daeeb6b0d500ab07d..a2f9eda294aab6694fa194a52668e4a27f8ad909 100644
+index 76892ef225de49b14c9f6257a42757c889b19f0a..a2f9eda294aab6694fa194a52668e4a27f8ad909 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -4926,6 +4926,19 @@ impl Session {
+@@ -3729,6 +3729,26 @@ impl Session {
+         }
+     }
+ 
++    pub(crate) fn model_client_for_profile(
++        &self,
++        profile: Option<&codex_extension_api::CapturedAgentProfile>,
++    ) -> crate::client::ModelClient {
++        struct ProfileClients(std::sync::Mutex<HashMap<Arc<str>, crate::client::ModelClient>>);
++
++        let root = &self.services.model_client;
++        let provider = profile.and_then(|profile| {
++            profile.profile.data.get::<crate::client::SdkAgentProfileProvider>()
++        });
++        let Some(provider) = provider else { return root.clone(); };
++        let clients = self.services.thread_extension_data.get_or_init(|| {
++            ProfileClients(std::sync::Mutex::new(HashMap::new()))
++        });
++        clients.0.lock().expect("profile model clients poisoned")
++            .entry(Arc::clone(&provider.id))
++            .or_insert_with(|| root.for_sdk_profile(&provider))
++            .clone()
++    }
++
+     pub(crate) fn response_item_create_time() -> serde_json::Number {
+         let create_time = SystemTime::now()
+             .duration_since(UNIX_EPOCH)
+@@ -4906,6 +4926,19 @@ impl Session {
          // Retirement can take the active slot after admission. It joins finalization
          // before settling the task, and steering remains free during the writer wait.
          drop(active_turn);
@@ -469,7 +904,7 @@ index 3cbf65b6d259c2022b02347daeeb6b0d500ab07d..a2f9eda294aab6694fa194a52668e4a2
          let (compacted_item, window_ids) = {
              let mut state = state;
              let (window_number, window_ids) = metadata.window.unwrap_or_else(|| {
-@@ -5013,6 +5026,15 @@ impl Session {
+@@ -4993,6 +5026,15 @@ impl Session {
          let persisted = self.persist_rollout_items(&rollout_items).await;
          // Once admitted, the task owns this checkpoint through the writer's
          // durability barrier. Abort waits on the same gate before retiring it.
@@ -485,7 +920,7 @@ index 3cbf65b6d259c2022b02347daeeb6b0d500ab07d..a2f9eda294aab6694fa194a52668e4a2
          if let (Some(turn), Some(source)) = (registered_turn, source_step_context) {
              let flushed = self
                  .flush_rollout()
-@@ -5053,6 +5075,25 @@ impl Session {
+@@ -5033,6 +5075,25 @@ impl Session {
                      });
              }
          }
@@ -511,11 +946,318 @@ index 3cbf65b6d259c2022b02347daeeb6b0d500ab07d..a2f9eda294aab6694fa194a52668e4a2
          if persisted && let Some(revision) = mcp_revision {
              self.services
                  .executed_tool_calls
+diff --git a/codex-rs/core/src/session/startup_prewarm.rs b/codex-rs/core/src/session/startup_prewarm.rs
+index e0dae20e81e6aa678c447345ef3edeb2fa9c34d2..a55375f1b9a19b7f31f617d3d94248d4ad170c11 100644
+--- a/codex-rs/core/src/session/startup_prewarm.rs
++++ b/codex-rs/core/src/session/startup_prewarm.rs
+@@ -207,11 +207,14 @@ impl SessionStartupPrewarmHandle {
+ 
+ impl Session {
+     pub(crate) async fn schedule_startup_prewarm(self: &Arc<Self>, input: PrewarmInput) {
+-        let websocket_connect_timeout = self.provider().await.websocket_connect_timeout();
+         let mut state = self.state.lock().await;
+         if state.shutting_down {
+             return;
+         }
++        let model_client = self.model_client_for_profile(
++            state.session_configuration.agent_profile.as_deref(),
++        );
++        let websocket_connect_timeout = model_client.websocket_connect_timeout();
+         // Publish the warmup before another turn can be admitted. No network work
+         // or awaits occur while these guards are held.
+         let Ok(active_turn) = self.active_turn.try_lock() else {
+@@ -241,10 +244,9 @@ impl Session {
+             });
+         }
+ 
+-        if !self.services.model_client.responses_websocket_enabled() {
++        if !model_client.responses_websocket_enabled() {
+             // Without websocket prewarm, resolve auth once so Agent Identity bootstrap can
+             // register or engage this session's bearer fallback before the first user request.
+-            let model_client = self.services.model_client.clone();
+             tokio::spawn(async move {
+                 if let Err(err) = model_client.prewarm_auth().await {
+                     warn!("startup auth prewarm failed: {err:#}");
+@@ -258,7 +260,7 @@ impl Session {
+         let startup_prewarm_session = Arc::clone(self);
+         let startup_prewarm = tokio::spawn(
+             async move {
+-                let result = schedule_startup_prewarm_inner(startup_prewarm_session, input).await;
++                let result = schedule_startup_prewarm_inner(startup_prewarm_session, model_client, input).await;
+                 let status = if result.is_ok() { "ready" } else { "failed" };
+                 session_telemetry.record_startup_phase(
+                     "startup_prewarm_total",
+@@ -304,10 +306,11 @@ impl Session {
+ 
+ async fn schedule_startup_prewarm_inner(
+     session: Arc<Session>,
++    model_client: crate::client::ModelClient,
+     input: PrewarmInput,
+ ) -> CodexResult<ModelClientSession> {
+     let prewarm_started_at = Instant::now();
+-    let mut client_session = session.services.model_client.new_session();
++    let mut client_session = model_client.new_session();
+     let websocket_ready = client_session.is_websocket_prewarmed().await;
+     // Count the decision before preparation can fail; fresh clients also need prewarm.
+     session.services.session_telemetry.counter(
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index e2208daddb992a80d54ee173452c84bdb5aa2ae5..4d3578b96ecaf13f5f740ed7f81cdaa085fcf476 100644
+index 9457d25de1224ea175c8db8a238be3bea9867ce8..2086c2cb9ae805809f7ac98a1fe81835a179d889 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -2522,6 +2522,9 @@ async fn run_sampling_request(
+@@ -193,6 +193,11 @@ pub(crate) async fn run_turn(
+ 
+     let mut client_session =
+         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
++    select_sdk_profile_client(
++        &sess,
++        turn_context.next_step_settings.load().agent_profile.as_deref(),
++        &mut client_session,
++    );
+     let initial_window = if initial_step.is_some() {
+         Some(sess.current_window().await)
+     } else {
+@@ -778,6 +783,11 @@ pub(crate) async fn run_turn(
+             sess.ensure_rollout_durable().await?;
+             staged.acknowledge();
+         }
++        select_sdk_profile_client(
++            &sess,
++            step_context.settings.agent_profile.as_deref(),
++            &mut client_session,
++        );
+         let sampling_request_result: CodexResult<_> = async {
+             super::time_reminder::maybe_record_current_time_reminder(
+                 sess.as_ref(),
+@@ -1755,7 +1765,7 @@ async fn pre_sampling_compaction_or_report(
+             .await;
+         // Publish the failure only after prompt hooks finish, so clients cannot react to
+         // an error by steering follow-up input into a turn still preserving its prompt.
+-        let message_prefix = match turn_context.provider.capabilities().remote_compaction {
++        let message_prefix = match client_session.remote_compaction_support() {
+             RemoteCompactionSupport::V2 => Some("Error running remote compact task".to_string()),
+             RemoteCompactionSupport::Unsupported => None,
+         };
+@@ -2038,7 +2048,7 @@ async fn run_auto_compact(
+     reason: CompactionReason,
+     phase: CompactionPhase,
+ ) -> CodexResult<()> {
+-    let turn_context = &step_context.turn;
++    let turn_context = Arc::clone(&step_context.turn);
+     if sess
+         .services
+         .extensions
+@@ -2060,6 +2070,15 @@ async fn run_auto_compact(
+     {
+         return Ok(());
+     }
++    let previous_window = if matches!(phase, CompactionPhase::MidTurn)
++        && sess.services.thread_extension_data.get::<
++            codex_protocol::agent_profile::AgentProfileHandoffInputCapture,
++        >().is_some()
++    {
++        Some(sess.current_window().await.2)
++    } else {
++        None
++    };
+     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
+     let _compaction_span = trace_span!(
+         "codex.compaction",
+@@ -2076,54 +2095,62 @@ async fn run_auto_compact(
+             world_state,
+         )
+         .await?;
+-        return Ok(());
+-    }
+-
+-    if crate::model_request::turn_sampling_stop(&turn_context.extension_data)
+-        .is_some_and(|stop| stop.requested())
+-    {
+-        // The native interrupt still owns task cancellation and cleanup.
+-        cancellation_token.cancelled().await;
+-        return Err(CodexErr::TurnAborted);
+-    }
+-
+-    match turn_context.provider.capabilities().remote_compaction {
+-        RemoteCompactionSupport::V2 => {
+-            emit_compact_metric(
+-                &sess.services.session_telemetry,
+-                "remote_v2",
+-                /*manual*/ false,
+-            );
+-            run_inline_remote_auto_compact_task_v2(
+-                Arc::clone(sess),
+-                step_context,
+-                replacement_step_context,
+-                client_session,
+-                world_state,
+-                reason,
+-                phase,
+-                cancellation_token,
+-            )
+-            .await?;
++    } else {
++        if crate::model_request::turn_sampling_stop(&turn_context.extension_data)
++            .is_some_and(|stop| stop.requested())
++        {
++            // The native interrupt still owns task cancellation and cleanup.
++            cancellation_token.cancelled().await;
++            return Err(CodexErr::TurnAborted);
+         }
+-        RemoteCompactionSupport::Unsupported => {
+-            emit_compact_metric(
+-                &sess.services.session_telemetry,
+-                "local",
+-                /*manual*/ false,
+-            );
+-            run_inline_auto_compact_task(
+-                Arc::clone(sess),
+-                Arc::clone(&step_context),
+-                replacement_step_context,
+-                world_state,
+-                reason,
+-                phase,
+-                cancellation_token,
+-            )
+-            .await?;
++
++        let compaction_client = sess.model_client_for_profile(
++            step_context.settings.agent_profile.as_deref(),
++        );
++        match compaction_client.remote_compaction_support() {
++            RemoteCompactionSupport::V2 => {
++                emit_compact_metric(
++                    &sess.services.session_telemetry,
++                    "remote_v2",
++                    /*manual*/ false,
++                );
++                run_inline_remote_auto_compact_task_v2(
++                    Arc::clone(sess),
++                    step_context,
++                    replacement_step_context,
++                    client_session,
++                    world_state,
++                    reason,
++                    phase,
++                    cancellation_token,
++                )
++                .await?;
++            }
++            RemoteCompactionSupport::Unsupported => {
++                emit_compact_metric(
++                    &sess.services.session_telemetry,
++                    "local",
++                    /*manual*/ false,
++                );
++                run_inline_auto_compact_task(
++                    Arc::clone(sess),
++                    Arc::clone(&step_context),
++                    replacement_step_context,
++                    world_state,
++                    reason,
++                    phase,
++                    cancellation_token,
++                )
++                .await?;
++            }
+         }
+     }
++    if let Some(previous) = previous_window
++        && sess.current_window().await.2 != previous
++        && sess.rebase_handoff_input_frontier(&turn_context).await.is_err()
++    {
++        super::agent_profile::forget_handoff_sampling_frontier(&turn_context.extension_data);
++    }
+     Ok(())
+ }
+ 
+@@ -2178,6 +2205,42 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
+     connector_ids
+ }
+ 
++fn select_sdk_profile_client(
++    sess: &Session,
++    profile: Option<&codex_extension_api::CapturedAgentProfile>,
++    current: &mut ModelClientSession,
++) {
++    let next = sess.model_client_for_profile(profile);
++    if !current.selects_client(&next) {
++        *current = next.new_session();
++    }
++}
++
++// Keep native wire selection with the same immutable profile as model and tools.
++pub(super) fn selected_profile_output_schema(
++    profile: Option<&codex_extension_api::CapturedAgentProfile>,
++    control: Option<&codex_extension_api::AgentProfileOutputControl>,
++    turn_schema: Option<&serde_json::Value>,
++    thread_id: &str,
++) -> Result<Option<serde_json::Value>, String> {
++    let Some(schema) = profile.and_then(|profile| {
++        profile
++            .profile
++            .data
++            .get::<codex_extension_api::AgentProfileOutputSchema>()
++    }) else {
++        return Ok(turn_schema.cloned());
++    };
++    let control = control
++        .filter(|control| control.thread_id == thread_id)
++        .ok_or("Per-profile output schemas require their managed SDK thread scope")?;
++    Ok(if control.preserve_turn_output {
++        turn_schema.cloned()
++    } else {
++        schema.0.clone()
++    })
++}
++
+ #[instrument(level = "trace", skip_all)]
+ pub(crate) fn build_prompt(
+     input: Vec<ResponseItem>,
+@@ -2269,7 +2332,7 @@ async fn run_sampling_request(
+         Arc::clone(&step_context),
+         Arc::clone(&turn_diff_tracker),
+     );
+-    let max_retries = turn_context.provider.info().stream_max_retries();
++    let max_retries = client_session.provider_info().stream_max_retries();
+     let stop_at_saved_login_limit = client_session.saved_login_limits_need_attention();
+     let mut retry_state = ResponsesStreamRetryState::default();
+     let mut recovery_attempt = 0;
+@@ -2352,6 +2415,17 @@ async fn run_sampling_request(
+                 step_context.as_ref(),
+                 base_instructions.clone(),
+             );
++            let output_control = step_context
++                .turn
++                .extension_data
++                .get::<codex_extension_api::AgentProfileOutputControl>();
++            prompt.output_schema = selected_profile_output_schema(
++                step_context.settings.agent_profile.as_deref(),
++                output_control.as_deref(),
++                prompt.output_schema.as_ref(),
++                &sess.thread_id.to_string(),
++            )
++            .map_err(CodexErr::InvalidRequest)?;
+             let mut canonical = sess
+                 .services
+                 .model_client
+@@ -2382,6 +2456,16 @@ async fn run_sampling_request(
+                     .output_schema_strict
+                     .unwrap_or(prompt.output_schema_strict);
+             }
++            // Bind schema and strictness to the same admitted output owner.
++            // The private value does not change the persisted model identity.
++            if output_control.as_deref().is_some_and(|control| {
++                control.thread_id == sess.thread_id.to_string() && !control.preserve_turn_output
++            }) && let Some(strict) = step_context.settings.agent_profile.as_ref().and_then(
++                |profile| profile.profile.data.get::<codex_extension_api::AgentProfileOutputStrict>(),
++            ) {
++                prompt.output_schema_strict = strict.0;
++                prompt.request_controls.output_schema_strict = Some(strict.0);
++            }
+             if prompt.tool_choice == codex_protocol::config_types::ToolChoice::Required
+                 && tool_choice_reset_applies(&step_context.settings, &turn_context.extension_data)
+             {
+@@ -2436,6 +2520,9 @@ async fn run_sampling_request(
                          .profile
                          .data
                          .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>()
@@ -525,11 +1267,174 @@ index e2208daddb992a80d54ee173452c84bdb5aa2ae5..4d3578b96ecaf13f5f740ed7f81cdaa0
                          .map(|presentation| (profile, presentation))
                  })
                  .map(|(profile, presentation)| {
-@@ -2534,6 +2537,7 @@ async fn run_sampling_request(
+@@ -2446,7 +2533,8 @@ async fn run_sampling_request(
+                     crate::prepared_request::apply_handoff_presentation(
+                         &prompt,
                          &presentation,
-                         &presentation.destination,
-                         &super::agent_profile::handoff_presentation_anchor(&profile.profile),
-+                        &profile.profile.application_instructions.item,
+-                        &profile.receipt,
++                        &presentation.destination,
++                        &super::agent_profile::handoff_presentation_anchor(&profile.profile),
+                         &profile.profile.application_instructions.item,
                      )
                  })
-                 .transpose()
+@@ -2469,7 +2557,7 @@ async fn run_sampling_request(
+                     ));
+                 }
+                 if editors.len() != 1
+-                    || turn_context.provider.info().supports_websockets
++                    || client_session.provider_info().supports_websockets
+                     || step_context.settings.model_info.use_responses_lite
+                     || step_context.realtime.active
+                     || turn_context.config.features.enabled(Feature::CodeMode)
+@@ -2560,6 +2648,41 @@ async fn run_sampling_request(
+                     }
+                     sampling_prompt.to_mut().prepared_request_admission = Some(output.admission);
+                 }
++                if let Some(guidance) = step_context
++                    .settings
++                    .agent_profile
++                    .as_ref()
++                    .and_then(|profile| {
++                        profile
++                            .profile
++                            .data
++                            .get::<codex_extension_api::AgentProfileOutputGuidance>()
++                    })
++                {
++                    let control = output_control
++                        .as_deref()
++                        .filter(|control| control.thread_id == sess.thread_id.to_string())
++                        .ok_or_else(|| {
++                            CodexErr::InvalidRequest(
++                                "Per-profile output guidance requires its managed SDK thread scope"
++                                    .into(),
++                            )
++                        })?;
++                    if !control.preserve_turn_output {
++                        let id = uuid::Uuid::new_v5(
++                            &uuid::Uuid::NAMESPACE_OID,
++                            format!("{}:{}:{}", sess.thread_id, turn_context.sub_id, guidance.0)
++                                .as_bytes(),
++                        );
++                        sampling_prompt.to_mut().input.push(ResponseItem::Message {
++                            id: Some(ResponseItemId::with_suffix("msg", id)),
++                            role: "developer".into(),
++                            content: vec![ContentItem::InputText { text: guidance.0.clone() }],
++                            phase: None,
++                            internal_chat_message_metadata_passthrough: None,
++                        });
++                    }
++                }
+                 crate::file_admission::validate_response_items(
+                     sess.captured_provider_image_reference_policy(),
+                     &step_context.settings.model_info,
+@@ -4889,7 +5012,7 @@ async fn try_run_sampling_request(
+     let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(
+         turn_context.sub_id.as_str(),
+         step_context.settings.model_info.slug.as_str(),
+-        turn_context.provider.info().name.as_str(),
++        client_session.provider_info().name.as_str(),
+     );
+     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
+     if client_session.inference_tools_changed(&step_context.tool_router.model_visible_specs()) {
+@@ -4906,7 +5029,7 @@ async fn try_run_sampling_request(
+         .config
+         .features
+         .enabled(Feature::ConcurrentReasoningSummaries)
+-        && turn_context.provider.info().is_openai();
++        && client_session.provider_info().is_openai();
+     let mut preempt = step_context.preempt.clone().unwrap_or_default();
+     let effort = sess
+         .reasoning_effort_for_request(&step_context.settings, super::RequestEffortUsage::Sampling)
+diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
+index e96bc2ae76d44de8f7e94bba3b75e9936e0486c2..309a86df441159d551e3ce30fa402e0be93f5dd1 100644
+--- a/codex-rs/core/src/session/turn_input.rs
++++ b/codex-rs/core/src/session/turn_input.rs
+@@ -1001,8 +1001,26 @@ impl Session {
+         // Compare JSON values directly instead of serialized schema text.
+         // Value equality ignores object key order while preserving array and
+         // scalar distinctions; broader JSON Schema equivalence is out of scope.
++        let current_profile = self
++            .state
++            .lock()
++            .await
++            .session_configuration
++            .agent_profile
++            .clone();
++        let output_control = active_task
++            .turn_context
++            .extension_data
++            .get::<codex_extension_api::AgentProfileOutputControl>();
++        let active_schema = super::turn::selected_profile_output_schema(
++            current_profile.as_deref(),
++            output_control.as_deref(),
++            active_task.turn_context.final_output_json_schema.as_ref(),
++            &self.thread_id.to_string(),
++        )
++        .map_err(|_| NotSubmittedReason::ActiveTurnOutputSchemaMismatch)?;
+         if let Some(required_schema) = required_final_output_json_schema
+-            && active_task.turn_context.final_output_json_schema.as_ref() != Some(required_schema)
++            && active_schema.as_ref() != Some(required_schema)
+         {
+             return Err(NotSubmittedReason::ActiveTurnOutputSchemaMismatch);
+         }
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 72a5d7bc5b66929ddbe9fe0e7c50e9431bbfd0b2..fa72a79ab7a2bb8b66eaad342223017c1771a7b8 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -71,6 +71,10 @@ pub use turn_lifecycle::AgentProfileDecisionHandoffTools;
+ pub use turn_lifecycle::AgentProfileHandoffTools;
+ pub use turn_lifecycle::AgentProfileInstructions;
+ pub use turn_lifecycle::AgentProfileModelSettings;
++pub use turn_lifecycle::AgentProfileOutputControl;
++pub use turn_lifecycle::AgentProfileOutputGuidance;
++pub use turn_lifecycle::AgentProfileOutputSchema;
++pub use turn_lifecycle::AgentProfileOutputStrict;
+ pub use turn_lifecycle::AgentProfileReceipt;
+ pub use turn_lifecycle::CapturedAgentProfile;
+ pub use turn_lifecycle::HeldToolCompletionResults;
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 1af8bc2fa7add59fbab3ad7285d8448e1ba3a8a7..3982de3da6bb86aadd1553fcab01cb25a386ab9c 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -260,6 +260,25 @@ impl AgentProfileModelSettings {
+     }
+ }
+ 
++/// Native wire schema selection owned by an admitted SDK profile.
++#[derive(Clone, Debug)]
++pub struct AgentProfileOutputSchema(pub Option<serde_json::Value>);
++
++/// In-process wire strictness from the exact admitted SDK declaration.
++#[derive(Clone, Debug)]
++pub struct AgentProfileOutputStrict(pub bool);
++
++/// Per-sampling output instructions owned by the active SDK profile.
++#[derive(Clone, Debug)]
++pub struct AgentProfileOutputGuidance(pub String);
++
++/// Live output selection scoped to its actual managed SDK thread.
++#[derive(Clone, Debug)]
++pub struct AgentProfileOutputControl {
++    pub thread_id: String,
++    pub preserve_turn_output: bool,
++}
++
+ /// Immutable in-process profile supplied by an admitted host roster.
+ #[derive(Clone)]
+ pub struct AgentProfile {
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 21c61767309339b0c4228047b9a341aa2f2f7b19..9832d9b1d7de13a2d4c8fa5ec1c59f57c1c627b5 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -58,6 +58,10 @@ pub use contributors::AgentProfileDecisionHandoffTools;
+ pub use contributors::AgentProfileHandoffTools;
+ pub use contributors::AgentProfileInstructions;
+ pub use contributors::AgentProfileModelSettings;
++pub use contributors::AgentProfileOutputControl;
++pub use contributors::AgentProfileOutputGuidance;
++pub use contributors::AgentProfileOutputSchema;
++pub use contributors::AgentProfileOutputStrict;
+ pub use contributors::AgentProfileReceipt;
+ pub use contributors::ApprovalDecision;
+ pub use contributors::ApprovalDecisionInput;

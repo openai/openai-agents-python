@@ -1,1564 +1,659 @@
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
-index 3c8005eddf97a3e312fc9a8ca2e632a1b158545b..eb55712d51dc0d8c3afa49c12b7bc28ff0638581 100644
+index f568624766818632511d290aff46bcbe1d37bf7e..7591d179fa9f61aa019628d5a017a525ffc171a5 100644
 --- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
-@@ -221,6 +221,7 @@ enum WsCommand {
-         response_id: String,
-         require_hosted: bool,
-         native_call: Option<String>,
-+        preserve_after_interrupt: bool,
-         expected: Option<Arc<super::readiness::RealtimeAcceptedConfiguration>>,
-         tx_result: oneshot::Sender<Result<bool, WsError>>,
-     },
-@@ -364,14 +365,12 @@ impl WsStream {
-                                     Err(error)=>{report_write_policy_error(&error);let _=tx_result.send(Err(error));break;}
-                                 }
-                             }
--                            WsCommand::CreateAfterTools {response_id,require_hosted,native_call,expected,tx_result} => {
-+                            WsCommand::CreateAfterTools {response_id,require_hosted,native_call,expected,preserve_after_interrupt,tx_result} => {
-                                 let Some(observer) = &readiness_observer else { let _ = tx_result.send(Ok(false)); continue; };
-                                 let configuration = observer.configuration();
--                                let permitted = if let Some(call_id) = native_call.as_deref() {
--                                    configuration.function_response_create(&response_id, call_id)
--                                } else {
--                                    configuration.tools_response_create(&response_id, require_hosted, expected.as_ref())
--                                };
-+                                let permitted = configuration.tools_response_create_inner(
-+                                    &response_id, require_hosted, expected.as_ref(), native_call.as_deref(), preserve_after_interrupt,
-+                                );
-                                 if !permitted {let _=tx_result.send(Ok(false));continue;}
-                                 let mut event = configuration.pending_tools_response_create_event();
-                                 configuration.identify_response_create(&mut event);
-@@ -919,14 +918,14 @@ impl RealtimeWebsocketWriter {
-         &self,
-         response_id: &str,
-     ) -> Result<bool, ApiError> {
--        self.send_response_create_after_tools_inner(response_id, true, None, None)
-+        self.send_response_create_after_tools_inner(response_id, true, None, None, false)
-             .await
-     }
-     pub async fn send_response_create_after_tools(
-         &self,
-         response_id: &str,
-     ) -> Result<bool, ApiError> {
--        self.send_response_create_after_tools_inner(response_id, false, None, None)
-+        self.send_response_create_after_tools_inner(response_id, false, None, None, false)
-             .await
-     }
-     pub async fn send_response_create_after_tools_at_configuration(
-@@ -939,6 +938,7 @@ impl RealtimeWebsocketWriter {
-             false,
-             Some(Arc::clone(expected)),
-             None,
-+            false,
-         )
-         .await
-     }
-@@ -953,6 +953,25 @@ impl RealtimeWebsocketWriter {
-             false,
-             None,
-             Some(call_id.to_owned()),
-+            false,
-+        )
-+        .await
-+    }
-+    /// Continue an SDK-owned call after checking its live native ownership.
-+    /// Accepted handoff configurations retain the whole-batch terminal barrier.
-+    pub async fn send_response_create_after_native_tools(
-+        &self,
-+        response_id: &str,
-+        call_id: &str,
-+        expected: Option<&Arc<super::readiness::RealtimeAcceptedConfiguration>>,
-+        preserve_after_interrupt: bool,
-+    ) -> Result<bool, ApiError> {
-+        self.send_response_create_after_tools_inner(
-+            response_id,
-+            false,
-+            expected.cloned(),
-+            expected.is_none().then(|| call_id.to_owned()),
-+            preserve_after_interrupt,
-         )
-         .await
-     }
-@@ -962,12 +981,14 @@ impl RealtimeWebsocketWriter {
-         require_hosted: bool,
-         expected: Option<Arc<super::readiness::RealtimeAcceptedConfiguration>>,
-         native_call: Option<String>,
-+        preserve_after_interrupt: bool,
-     ) -> Result<bool, ApiError> {
-         self.stream
-             .request(|tx_result| WsCommand::CreateAfterTools {
-                 response_id: response_id.to_owned(),
-                 require_hosted,
-                 native_call,
-+                preserve_after_interrupt,
-                 expected,
-                 tx_result,
-             })
-@@ -2666,6 +2687,7 @@ mod tests {
-         assert_eq!(
-             parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
-             Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
-+                sdk_ownership_id: None,
-                 response_id: None,
-                 handoff_id: "handoff_123".to_string(),
-                 item_id: "item_123".to_string(),
-@@ -2892,6 +2914,7 @@ mod tests {
-         });
-         events.update_active_transcript(&mut covered).await;
-         let mut handoff = RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
-+            sdk_ownership_id: None,
-             response_id: None,
-             handoff_id: "handoff_1".to_string(),
-             item_id: "item_1".to_string(),
-@@ -2902,6 +2925,7 @@ mod tests {
-         assert_eq!(
-             handoff,
-             RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
-+                sdk_ownership_id: None,
-                 response_id: None,
-                 handoff_id: "handoff_1".to_string(),
-                 item_id: "item_1".to_string(),
-@@ -3382,6 +3406,7 @@ mod tests {
-         assert_eq!(
-             parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
-             Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
-+                sdk_ownership_id: None,
-                 response_id: None,
-                 handoff_id: "call_123".to_string(),
-                 item_id: "item_123".to_string(),
-@@ -4294,6 +4319,7 @@ mod tests {
-         assert_eq!(
-             added_event,
-             RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
-+                sdk_ownership_id: None,
-                 response_id: None,
-                 handoff_id: "handoff_1".to_string(),
-                 item_id: "item_2".to_string(),
-diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi.rs
-index c755224fcd85e5dbd3134cd403dbf690b46b93f8..6694247f1c4085d01dc28b119fd272558f7c7883 100644
---- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi.rs
-+++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi.rs
-@@ -111,6 +111,7 @@ fn parse_delegation_created(parsed: &Value) -> Option<RealtimeEvent> {
-         .collect::<String>();
+@@ -1864,6 +1864,8 @@ fn contains_transcript_entry(entries: &[RealtimeTranscriptEntry], role: &str, te
+ }
  
-     Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
-+        sdk_ownership_id: None,
-         response_id: None,
-         handoff_id: item_id.clone(),
-         item_id,
-diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi_tests.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi_tests.rs
-index d7c66388b0e1b6e02e9dafa21d1c0540c30406bf..17a4a31af3f73917e0744f7eefb4a65ca0a159a6 100644
---- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi_tests.rs
-+++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi_tests.rs
-@@ -6,6 +6,7 @@ use codex_protocol::protocol::RealtimeHandoffRequested;
- #[test]
- fn legacy_and_frameless_delegations_decode_to_the_same_handoff() {
-     let expected = Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
-+        sdk_ownership_id: None,
-         response_id: None,
-         handoff_id: "handoff-123".to_string(),
-         item_id: "handoff-123".to_string(),
-diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v1.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v1.rs
-index 0e8bcaa3826a9398bc78e715f5edfca22f88484b..b814d5c4ece6339419e7b9ec0ff4ecf71f896ef7 100644
---- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v1.rs
-+++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v1.rs
-@@ -81,6 +81,7 @@ pub(super) fn parse_realtime_event_v1(payload: &str) -> Option<RealtimeEvent> {
-                 .and_then(Value::as_str)
-                 .map(str::to_string)?;
-             Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
-+                sdk_ownership_id: None,
-                 response_id: None,
-                 handoff_id,
-                 item_id,
-diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
-index 4c854a767a19b6deea4e4f5c784e41bb243afbe9..0b81667c774b269e3aa99a4af296d0509dea3c16 100644
---- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
-+++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
-@@ -244,6 +244,7 @@ fn parse_handoff_requested_event(item: &JsonMap<String, Value>) -> Option<Realti
-     let arguments = item.get("arguments").and_then(Value::as_str).unwrap_or("");
- 
-     Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
-+        sdk_ownership_id: None,
-         response_id: None,
-         handoff_id: call_id.to_string(),
-         item_id,
-diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
-index d80aee244e251a120c9f6c73733802aacf43f822..792c8cb096cd852eba5514559eed390b294e9777 100644
---- a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
-+++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
-@@ -925,23 +925,26 @@ impl RealtimeConfiguration {
-             .hosted_mcp
-             .function_output_sent(call_id);
-     }
-+    #[cfg(test)]
-     pub(super) fn tools_response_create(
-         &self,
-         response_id: &str,
-         require_hosted: bool,
-         expected: Option<&Arc<RealtimeAcceptedConfiguration>>,
-     ) -> bool {
--        self.tools_response_create_inner(response_id, require_hosted, expected, None)
-+        self.tools_response_create_inner(response_id, require_hosted, expected, None, false)
-     }
-+    #[cfg(test)]
-     pub(super) fn function_response_create(&self, response_id: &str, call_id: &str) -> bool {
--        self.tools_response_create_inner(response_id, false, None, Some(call_id))
-+        self.tools_response_create_inner(response_id, false, None, Some(call_id), false)
-     }
--    fn tools_response_create_inner(
-+    pub(super) fn tools_response_create_inner(
-         &self,
-         response_id: &str,
-         require_hosted: bool,
-         expected: Option<&Arc<RealtimeAcceptedConfiguration>>,
-         native_call: Option<&str>,
-+        preserve_after_interrupt: bool,
-     ) -> bool {
-         let mut state = self.inner.state.lock().unwrap();
-         let request_owner = state
-@@ -983,7 +986,7 @@ impl RealtimeConfiguration {
-             && state.response_contexts.iter().any(|r| {
-                 r.id.as_ref() == response_id
-                     && (!require_hosted || r.configuration.hosted_owned)
--                    && !r.output_guard.is_retired()
-+                    && (preserve_after_interrupt || !r.output_guard.is_retired())
-             })
-             && (if require_hosted {
-                 state.hosted_mcp.has_calls(response_id)
-@@ -4885,6 +4888,27 @@ mod tests {
-             );
+ pub struct RealtimeWebsocketClient {
++    connection_url: Option<Url>,
++    connection_headers: Option<HeaderMap>,
+     provider: Provider,
+     http_client_factory: HttpClientFactory,
+     webrtc_sideband_base_url: String,
+@@ -1884,6 +1886,8 @@ enum RealtimeSessionInitialization {
+ impl RealtimeWebsocketClient {
+     pub fn new(provider: Provider, http_client_factory: HttpClientFactory) -> Self {
+         Self {
++            connection_url: None,
++            connection_headers: None,
+             provider,
+             http_client_factory,
+             webrtc_sideband_base_url: OPENAI_REALTIME_API_BASE_URL.to_string(),
+@@ -1895,6 +1899,13 @@ impl RealtimeWebsocketClient {
          }
+     }
+ 
++    /// Override one trusted built-in WebSocket connection without inheriting headers.
++    pub fn with_connection_options(mut self, url: Option<Url>, headers: Option<HeaderMap>) -> Self {
++        self.connection_url = url;
++        self.connection_headers = headers;
++        self
++    }
++
+     /// Use trusted application I/O under the existing native V2 protocol owner.
+     pub fn with_adapter(mut self, adapter: Arc<dyn RealtimeAdapter>) -> Self {
+         self.adapter = Some(adapter);
+@@ -2097,6 +2108,13 @@ impl RealtimeWebsocketClient {
+         session_initialization: RealtimeSessionInitialization,
+         transcript_state: RealtimeTranscriptState,
+     ) -> Result<RealtimeWebsocketConnection, ApiError> {
++        let ws_url = self.connection_url.clone().unwrap_or(ws_url);
++        let empty_provider_headers = HeaderMap::new();
++        let provider_headers = if self.connection_url.is_some() {
++            &empty_provider_headers
++        } else {
++            &self.provider.headers
++        };
+         // One expected payload serves both initialization and readiness. The
+         // native session identifier belongs in headers, not provider settings.
+         let expected = if config.event_parser == RealtimeEventParser::RealtimeV2
+@@ -2138,11 +2156,14 @@ impl RealtimeWebsocketClient {
+         let (stream, rx_message) = if let Some(adapter) = &self.adapter {
+             let cancellation = tokio_util::sync::CancellationToken::new();
+             let cancel_on_failure = cancellation.clone().drop_guard();
+-            let headers = merge_request_headers(
+-                &self.provider.headers,
+-                with_session_id_header(extra_headers, config.session_id.as_deref())?,
+-                default_headers,
+-            );
++            let headers = match &self.connection_headers {
++                Some(headers) => headers.clone(),
++                None => merge_request_headers(
++                    provider_headers,
++                    with_session_id_header(extra_headers, config.session_id.as_deref())?,
++                    default_headers,
++                ),
++            };
+             let connection = adapter
+                 .connect(RealtimeAdapterContext {
+                     url: ws_url.to_string(),
+@@ -2174,11 +2195,14 @@ impl RealtimeWebsocketClient {
+             let mut request = ws_url.as_str().into_client_request().map_err(|err| {
+                 ApiError::Stream(format!("failed to build websocket request: {err}"))
+             })?;
+-            let headers = merge_request_headers(
+-                &self.provider.headers,
+-                with_session_id_header(extra_headers, config.session_id.as_deref())?,
+-                default_headers,
+-            );
++            let headers = match &self.connection_headers {
++                Some(headers) => headers.clone(),
++                None => merge_request_headers(
++                    provider_headers,
++                    with_session_id_header(extra_headers, config.session_id.as_deref())?,
++                    default_headers,
++                ),
++            };
+             request.headers_mut().extend(headers);
+ 
+             info!("connecting realtime websocket");
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+index 9adc157c05fee080dd7b71ae795423a6dedc0908..4c96eee633fc1002ed66636cfea8cce9bcde14ee 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+@@ -83,6 +83,41 @@ fn format_value(format: RealtimeAudioFormat) -> Value {
+ }
+ 
+ fn validate(settings: &RealtimeV2SessionSettings) -> serde_json::Result<()> {
++    let provider_data = match &settings.turn_detection {
++        Some(Some(
++            RealtimeTurnDetection::ServerVad { provider_data, .. }
++            | RealtimeTurnDetection::SemanticVad { provider_data, .. },
++        )) => provider_data.as_ref(),
++        _ => None,
++    };
++    if provider_data.is_some_and(|data| {
++        data.keys().any(|key| {
++            matches!(
++                key.as_str(),
++                "type"
++                    | "model_version"
++                    | "modelVersion"
++                    | "create_response"
++                    | "createResponse"
++                    | "interrupt_response"
++                    | "interruptResponse"
++                    | "threshold"
++                    | "prefix_padding_ms"
++                    | "prefixPaddingMs"
++                    | "silence_duration_ms"
++                    | "silenceDurationMs"
++                    | "idle_timeout_ms"
++                    | "idleTimeoutMs"
++                    | "eagerness"
++                    | "provider_data"
++                    | "providerData"
++            )
++        })
++    }) {
++        return Err(serde::ser::Error::custom(
++            "VAD provider data cannot override typed settings",
++        ));
++    }
+     let threshold = match &settings.turn_detection {
+         Some(Some(RealtimeTurnDetection::ServerVad { threshold, .. })) => *threshold,
+         _ => None,
+@@ -123,6 +158,11 @@ pub(super) fn apply(
+     put(&mut input, "noise_reduction", &settings.noise_reduction)?;
+     put(&mut input, "transcription", &settings.transcription)?;
+     put(&mut input, "turn_detection", &settings.turn_detection)?;
++    if let Some(Value::Object(vad)) = input.get_mut("turn_detection")
++        && let Some(Value::Object(data)) = vad.remove("provider_data")
++    {
++        vad.extend(data);
++    }
+     let mut output = Map::new();
+     if let Some(format) = settings.output_format {
+         output.insert("format".into(), format_value(format));
+@@ -595,6 +635,7 @@ mod tests {
+             let update = RealtimeSessionUpdate {
+                 settings: RealtimeV2SessionSettings {
+                     turn_detection: Some(Some(RealtimeTurnDetection::ServerVad {
++                        provider_data: None,
+                         model_version: None,
+                         threshold: Some(number),
+                         create_response: None,
+@@ -837,4 +878,60 @@ mod tests {
+             })
+         );
      }
 +    #[test]
-+    fn preserved_native_continuation_outlives_media_but_not_new_user_input() {
-+        for (preserve, user_input) in [(false, false), (true, false), (true, true)] {
-+            let observer = native_pair_observer();
-+            let config = observer.configuration();
-+            config.function_output_sent("one");
-+            config
-+                .prepare_interrupt(Some("a"), None, None, false)
-+                .unwrap();
-+            if user_input {
-+                config.observe_user_input();
-+            }
++    fn vad_provider_data_uses_existing_sparse_settings_owner() {
++        for mode in ["server_vad", "semantic_vad"] {
++            let settings: RealtimeV2SessionSettings = serde_json::from_value(json!({
++                "turn_detection": {"type": mode, "provider_data": {
++                    "vendor_tuning": {"enabled": false, "delay_ms": 0}
++                }}
++            }))
++            .unwrap();
++            let mut session = Map::new();
++            apply(&settings, &mut session).unwrap();
 +            assert_eq!(
-+                config.tools_response_create_inner("a", false, None, Some("one"), preserve),
-+                preserve && !user_input,
++                session["audio"]["input"]["turn_detection"],
++                json!({
++                    "type": mode, "vendor_tuning": {"enabled": false, "delay_ms": 0}
++                })
 +            );
-+            assert!(config.response_output_guard("a").unwrap().is_retired());
-+            assert!(!config.tools_response_create_inner("a", false, None, Some("one"), preserve));
++            let retained = session.clone();
++            apply(&RealtimeV2SessionSettings::default(), &mut session).unwrap();
++            assert_eq!(session, retained);
++            for reset in [json!({}), Value::Null] {
++                let update = serde_json::from_value(json!({"turn_detection": {
++                    "type": mode, "provider_data": reset
++                }}))
++                .unwrap();
++                apply(&update, &mut session).unwrap();
++                assert_eq!(
++                    session["audio"]["input"]["turn_detection"],
++                    json!({"type":mode})
++                );
++            }
++            let disabled = serde_json::from_value(json!({"turn_detection":null})).unwrap();
++            apply(&disabled, &mut session).unwrap();
++            assert_eq!(session["audio"]["input"]["turn_detection"], Value::Null);
 +        }
 +    }
 +
-     #[test]
-     fn native_function_continuation_preserves_per_call_timing_but_waits_for_hosted_approval() {
-         for mixed in [false, true] {
-diff --git a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
-index 8723be77e3becc1e74fa0264406284c7805f572c..da303f11215ce2865fa7508d3d5f73015c4cc96f 100644
---- a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
-+++ b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
-@@ -672,6 +672,7 @@ async fn realtime_ws_e2e_realtime_v2_parser_emits_handoff_requested() {
-     assert_eq!(
-         event,
-         RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
-+            sdk_ownership_id: None,
-             response_id: None,
-             handoff_id: "call_123".to_string(),
-             item_id: "item_123".to_string(),
++    #[test]
++    fn vad_provider_data_cannot_override_typed_fields_before_mutation() {
++        for key in [
++            "type",
++            "threshold",
++            "interrupt_response",
++            "interruptResponse",
++            "provider_data",
++        ] {
++            let settings = serde_json::from_value(json!({"turn_detection":{
++                "type":"server_vad", "provider_data":{key:true}
++            }}))
++            .unwrap();
++            let mut session = json!({"model":"original"}).as_object().unwrap().clone();
++            let original = session.clone();
++            assert!(apply(&settings, &mut session).is_err());
++            assert_eq!(session, original);
++        }
++    }
+ }
 diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
-index 15cf5233360bf37dc632d76a8328fce99f894d42..7efdef7e572c419aec24ca0bfec479d33334c002 100644
+index e4a67869c7b2427f9f5aaa55a59180472fbdedb1..7efdef7e572c419aec24ca0bfec479d33334c002 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
 +++ b/codex-rs/core/src/realtime_conversation.rs
-@@ -480,6 +480,8 @@ pub(crate) enum SdkRealtimeCommand {
-         handoff_id: String,
-     },
-     Interrupt {
-+        cancel_tools: bool,
-+        owned_handoffs: Vec<(String, Option<String>, String)>,
-         response_id: Option<String>,
-         event_id: Option<String>,
-         playback: Option<codex_protocol::protocol::RealtimePlaybackPosition>,
-@@ -548,6 +550,8 @@ struct SdkSeenCall {
-     response_id: Option<String>,
-     accepted_configuration: Option<Arc<codex_api::RealtimeAcceptedConfiguration>>,
-     function_fingerprint: Option<[u8; 32]>,
-+    preserve_on_response_cancel: bool,
-+    ownership_id: String,
+@@ -1524,6 +1524,8 @@ struct ConversationState {
  }
  
- #[derive(Debug)]
-@@ -757,16 +761,40 @@ impl SdkRealtimeState {
-         &self,
-         retire_generation: bool,
-         response_id: Option<&str>,
-+        preserve_media_calls: bool,
-     ) -> SdkToolRetirement {
-         if retire_generation {
-             self.active.store(false, Ordering::Release);
-         }
-+        let mut calls = self.function_calls.lock().await;
-+        let mut seen = self.seen.lock().await;
-+        let mut pending = self.pending.lock().await;
-+        let protected: std::collections::HashSet<_> = seen
-+            .iter()
-+            .filter(|(id, call)| {
-+                preserve_media_calls
-+                    && !retire_generation
-+                    && call.preserve_on_response_cancel
-+                    && (pending.contains_key(*id) || call.output_published)
-+            })
-+            .map(|(id, _)| id.clone())
-+            .collect();
-+        for (id, call) in seen.iter_mut() {
-+            if response_id.is_none_or(|target| call.response_id.as_deref() == Some(target))
-+                && !protected.contains(id)
-+            {
-+                call.preserve_on_response_cancel = false;
-+            }
-+        }
-+        let protected_batches: Vec<_> = calls
-+            .iter()
-+            .filter(|(id, _)| protected.contains(*id))
-+            .filter_map(|(_, call)| call.batch.clone())
-+            .collect();
-         self.history
-             .lock()
-             .unwrap()
--            .retire_caller_calls(response_id);
--        let mut calls = self.function_calls.lock().await;
--        let mut pending = self.pending.lock().await;
-+            .retire_caller_calls_preserving(response_id, &protected);
-         let mut work = SdkToolRetirement {
-             retire_generation,
-             ..Default::default()
-@@ -782,12 +810,22 @@ impl SdkRealtimeState {
-                         .or(call.request.response_id.as_deref())
-                         == response_id
-             })
-+            .filter(|call| !protected.contains(&call.request.call_id))
-             .filter_map(|call| {
-                 pending.remove(&call.request.call_id);
-                 work.call_ids.insert(call.request.call_id.clone());
--                work.batches.extend(call.batch.clone());
-+                let shared_batch = call.batch.as_ref().is_some_and(|batch| {
-+                    protected_batches
-+                        .iter()
-+                        .any(|protected| Arc::ptr_eq(protected, batch))
-+                });
-+                if !shared_batch {
-+                    work.batches.extend(call.batch.clone());
-+                }
-                 work.preparations.extend(call.preparation.clone());
--                if let Some(batch) = &call.batch {
-+                if let Some(batch) = &call.batch
-+                    && !shared_batch
-+                {
-                     batch.automatic_retired.store(true, Ordering::Release);
-                     batch.pending_create.store(false, Ordering::Release);
-                     if response_id.is_none() || retire_generation {
-@@ -801,6 +839,63 @@ impl SdkRealtimeState {
-         work.roots = candidates;
-         work
-     }
-+    async fn preserve_admitted_tools(
-+        &self,
-+        response_id: Option<&str>,
-+        owned_handoffs: &[(String, Option<String>, String)],
-+    ) -> Vec<(String, String, bool)> {
-+        let calls = self.function_calls.lock().await;
-+        let mut seen = self.seen.lock().await;
-+        let pending = self.pending.lock().await;
-+        seen.iter_mut()
-+            .filter(|(id, call)| {
-+                pending.contains_key(*id)
-+                    && response_id.is_none_or(|target| call.response_id.as_deref() == Some(target))
-+                    && match calls.get(*id) {
-+                        Some(function) => function.claimed && function.native_turn_id.is_some(),
-+                        None => {
-+                            call.function_fingerprint.is_none()
-+                                && owned_handoffs.iter().any(|(owned_id, source, ownership)| {
-+                                    owned_id == *id
-+                                        && source == &call.response_id
-+                                        && ownership == &call.ownership_id
-+                                })
-+                        }
-+                    }
-+            })
-+            .map(|(id, call)| {
-+                let previous = call.preserve_on_response_cancel;
-+                call.preserve_on_response_cancel = true;
-+                (id.clone(), call.ownership_id.clone(), previous)
-+            })
-+            .collect()
-+    }
-+    async fn restore_media_preservation(&self, previous: &[(String, String, bool)]) {
-+        let mut seen = self.seen.lock().await;
-+        for (id, ownership, was_preserved) in previous {
-+            if !was_preserved
-+                && let Some(call) = seen.get_mut(id)
-+                && &call.ownership_id == ownership
-+            {
-+                call.preserve_on_response_cancel = false;
-+            }
-+        }
-+    }
-+    async fn media_independent_calls(
-+        &self,
-+        response_id: Option<&str>,
-+    ) -> std::collections::HashSet<String> {
-+        let seen = self.seen.lock().await;
-+        let pending = self.pending.lock().await;
-+        seen.iter()
-+            .filter(|(id, call)| {
-+                call.preserve_on_response_cancel
-+                    && pending.contains_key(*id)
-+                    && response_id.is_none_or(|target| call.response_id.as_deref() == Some(target))
-+            })
-+            .map(|(id, _)| id.clone())
-+            .collect()
-+    }
-     async fn eligible_retired_roots(
-         &self,
-         roots: &std::collections::HashSet<String>,
-@@ -921,6 +1016,8 @@ impl SdkRealtimeState {
-                 response_id: response_id.map(str::to_owned),
-                 accepted_configuration: None,
-                 function_fingerprint: None,
-+                preserve_on_response_cancel: false,
-+                ownership_id: uuid::Uuid::new_v4().to_string(),
-             },
-         );
-         self.pending.lock().await.insert(id.to_owned(), false);
-@@ -1157,6 +1254,8 @@ struct NativeResponseRequest {
-     response_id: String,
-     call_id: String,
-     accepted: Option<Arc<codex_api::RealtimeAcceptedConfiguration>>,
-+    ownership_id: Option<String>,
-+    origin: Option<Arc<RealtimeFunctionBatch>>,
+ struct RealtimeStart {
++    connection_url: Option<url::Url>,
++    connection_headers: Option<HeaderMap>,
+     adapter: Option<Arc<dyn codex_api::RealtimeAdapter>>,
+     connection_auth: Option<crate::client::RealtimeConnectionAuth>,
+     hosted_mcp_auto_response: bool,
+@@ -2453,6 +2455,8 @@ impl RealtimeConversationManager {
+         mode_instructions: RealtimeModeInstructions,
+     ) -> CodexResult<RealtimeStartOutput> {
+         let RealtimeStart {
++            connection_url,
++            connection_headers,
+             adapter,
+             connection_auth,
+             hosted_mcp_auto_response,
+@@ -2540,7 +2544,9 @@ impl RealtimeConversationManager {
+             audio_rx,
+         };
+ 
+-        let client = RealtimeWebsocketClient::new(api_provider, http_client_factory);
++        let override_sideband_headers = connection_url.is_some() || connection_headers.is_some();
++        let client = RealtimeWebsocketClient::new(api_provider, http_client_factory)
++            .with_connection_options(connection_url, connection_headers);
+         let client = if handoff.sdk.is_some() {
+             let client = client.with_bounded_events();
+             match native_source {
+@@ -2670,6 +2676,7 @@ impl RealtimeConversationManager {
+         } else if let Some(existing_call_id) = existing_call_id {
+             call_id = Some(existing_call_id.clone());
+             let attaching = existing_call::attach(existing_call::ExistingCallAttachment {
++                override_sideband_headers,
+                 client,
+                 model_client,
+                 connection_auth,
+@@ -3758,6 +3765,8 @@ async fn cancel_sdk_tool_work_with_policy(
  }
  
- #[derive(Debug)]
-@@ -1232,6 +1331,7 @@ impl RealtimeResponseCreateQueue {
-         &mut self,
-         writer: &RealtimeWebsocketWriter,
-         reason: &str,
-+        sdk: Option<&SdkRealtimeState>,
-     ) -> anyhow::Result<()> {
-         self.active_default_response = false;
-         if !self.pending_create || response_create_pending(writer) {
-@@ -1243,7 +1343,8 @@ impl RealtimeResponseCreateQueue {
-         if explicit.is_none()
-             && let Some(native) = native
-         {
--            self.active_default_response = send_native_response_request(writer, &native).await?;
-+            self.active_default_response =
-+                send_native_response_request(writer, &native, sdk).await?;
-             if !self.active_default_response
-                 && writer.configuration().is_some_and(|configuration| {
-                     configuration.response_tools_pending(&native.response_id)
-@@ -1623,6 +1724,7 @@ impl RealtimeConversationManager {
-         generation: &str,
-         retire_generation: bool,
-         response_id: Option<&str>,
-+        preserve_media_calls: bool,
-     ) -> Option<(Arc<SdkRealtimeState>, SdkToolRetirement)> {
-         let sdk = self
-             .state
-@@ -1635,7 +1737,9 @@ impl RealtimeConversationManager {
-             .as_ref()
-             .filter(|sdk| sdk.generation == generation)?
-             .clone();
--        let work = sdk.retire_tool_work(retire_generation, response_id).await;
-+        let work = sdk
-+            .retire_tool_work(retire_generation, response_id, preserve_media_calls)
-+            .await;
-         Some((sdk, work))
-     }
-     #[cfg(test)]
-@@ -1646,7 +1750,7 @@ impl RealtimeConversationManager {
-         response_id: Option<&str>,
-     ) -> Vec<String> {
-         match self
--            .capture_sdk_tool_retirement(generation, retire_generation, response_id)
-+            .capture_sdk_tool_retirement(generation, retire_generation, response_id, false)
-             .await
-         {
-             Some((sdk, work)) => {
-@@ -1784,6 +1888,8 @@ impl RealtimeConversationManager {
-         }
-         drop(calls);
-         if let SdkRealtimeCommand::Interrupt {
-+            cancel_tools,
-+            owned_handoffs,
-             response_id,
-             playback,
-             feedback,
-@@ -1797,6 +1903,25 @@ impl RealtimeConversationManager {
-                     "Playback and feedback require the RealtimeV2 protocol".into(),
-                 ));
-             }
-+            let mut unique = HashSet::new();
-+            if owned_handoffs.len() > SDK_HANDOFF_LIMIT
-+                || (*cancel_tools && !owned_handoffs.is_empty())
-+                || owned_handoffs.iter().any(|(id, source, ownership)| {
-+                    id.is_empty()
-+                        || ownership.is_empty()
-+                        || source.as_ref().is_some_and(String::is_empty)
-+                        || !unique.insert(id)
-+                })
+ struct PreparedRealtimeConversationStart {
++    connection_url: Option<url::Url>,
++    connection_headers: Option<HeaderMap>,
+     connection_auth: Option<crate::client::RealtimeConnectionAuth>,
+     hosted_mcp_auto_response: bool,
+     provider_event_observation: codex_protocol::protocol::RealtimeProviderEventObservation,
+@@ -3792,7 +3801,8 @@ async fn prepare_realtime_start(
+     params: ConversationStartParams,
+     sdk_owned: bool,
+ ) -> CodexResult<PreparedRealtimeConversationStart> {
+-    prepare_realtime_start_with_source(sess, params, sdk_owned, None, None).await
++    prepare_realtime_start_with_source(sess, params, sdk_owned, None, None, Default::default())
++        .await
+ }
+ 
+ async fn prepare_realtime_start_with_source(
+@@ -3801,7 +3811,53 @@ async fn prepare_realtime_start_with_source(
+     sdk_owned: bool,
+     frozen: Option<(Arc<Config>, ModelProviderInfo)>,
+     api_key: Option<String>,
++    connection_options: codex_protocol::protocol::RealtimeConversationConnectionOptions,
+ ) -> CodexResult<PreparedRealtimeConversationStart> {
++    let connection_url = connection_options
++        .url
++        .as_deref()
++        .map(|value| {
++            let url = url::Url::parse(value)
++                .map_err(|_| CodexErr::InvalidRequest("Invalid Realtime WebSocket URL".into()))?;
++            if !matches!(url.scheme(), "ws" | "wss")
++                || url.host_str().is_none()
++                || !url.username().is_empty()
++                || url.password().is_some()
++                || url.fragment().is_some()
 +            {
 +                return Err(CodexErr::InvalidRequest(
-+                    "Invalid owned Realtime handoff identities".into(),
++                    "Realtime URL requires ws or wss without credentials or fragments".into(),
 +                ));
 +            }
-+            if !*cancel_tools && state.handoff.event_parser != RealtimeEventParser::RealtimeV2 {
-+                return Err(CodexErr::InvalidRequest(
-+                    "Speech-only interruption requires the RealtimeV2 protocol".into(),
-+                ));
++            Ok(url)
++        })
++        .transpose()?;
++    let connection_headers = connection_options
++        .headers
++        .map(|headers| {
++            let mut result = HeaderMap::new();
++            for (name, value) in headers {
++                let name = http::header::HeaderName::from_bytes(name.as_bytes())
++                    .map_err(|_| CodexErr::InvalidRequest("Invalid Realtime header name".into()))?;
++                let mut value = HeaderValue::from_str(&value).map_err(|_| {
++                    CodexErr::InvalidRequest("Invalid Realtime header value".into())
++                })?;
++                value.set_sensitive(true);
++                result.insert(name, value);
 +            }
-             if feedback.is_some() && response_id.is_none() {
-                 return Err(CodexErr::InvalidRequest(
-                     "Guardrail feedback requires an explicit response ID".into(),
-@@ -3475,6 +3600,8 @@ pub(crate) async fn dispatch_interrupt_sdk(
-     event_id: Option<String>,
-     playback: Option<codex_protocol::protocol::RealtimePlaybackPosition>,
-     feedback: Option<String>,
-+    cancel_tools: bool,
-+    owned_handoffs: Vec<(String, Option<String>, String)>,
-     reply: tokio::sync::oneshot::Sender<
-         CodexResult<codex_protocol::protocol::RealtimeInterruptReceipt>,
-     >,
-@@ -3486,6 +3613,8 @@ pub(crate) async fn dispatch_interrupt_sdk(
-         .sdk_enqueue(
-             &generation,
-             SdkRealtimeCommand::Interrupt {
-+                cancel_tools,
-+                owned_handoffs,
-                 response_id,
-                 event_id,
-                 playback,
-@@ -3610,10 +3739,25 @@ async fn cancel_sdk_tool_work(
-     generation: &str,
-     retire_generation: bool,
-     response_id: Option<&str>,
-+) {
-+    cancel_sdk_tool_work_with_policy(sess, generation, retire_generation, response_id, false).await;
-+}
-+
-+async fn cancel_sdk_tool_work_with_policy(
-+    sess: &Arc<Session>,
-+    generation: &str,
-+    retire_generation: bool,
-+    response_id: Option<&str>,
-+    preserve_media_calls: bool,
- ) {
-     if let Some((sdk, work)) = sess
-         .conversation
--        .capture_sdk_tool_retirement(generation, retire_generation, response_id)
-+        .capture_sdk_tool_retirement(
-+            generation,
-+            retire_generation,
-+            response_id,
-+            preserve_media_calls,
++            Ok::<_, CodexErr>(result)
++        })
++        .transpose()?;
++    if (connection_url.is_some() || connection_headers.is_some())
++        && matches!(
++            params.transport,
++            Some(ConversationStartTransport::Webrtc { .. })
 +        )
-         .await
-     {
-         let _ = work.join(sess, &sdk).await;
-@@ -4326,11 +4470,12 @@ async fn handle_start_inner_with_adapter(
-             if sdk_owned {
-                 match &event {
-                     RealtimeEvent::ResponseCancelled(response) => {
--                        cancel_sdk_tool_work(
-+                        cancel_sdk_tool_work_with_policy(
-                             &sess_clone,
-                             &sub_id,
-                             false,
-                             response.response_id.as_deref(),
-+                            true,
-                         )
-                         .await
-                     }
-@@ -5367,31 +5512,94 @@ async fn request_sdk_response_create(
- async fn send_native_response_request(
-     writer: &RealtimeWebsocketWriter,
-     request: &NativeResponseRequest,
-+    sdk: Option<&SdkRealtimeState>,
- ) -> Result<bool, ApiError> {
--    match &request.accepted {
--        Some(accepted) => {
--            writer
--                .send_response_create_after_tools_at_configuration(&request.response_id, accepted)
--                .await
++    {
++        return Err(CodexErr::InvalidRequest(
++            "WebSocket connection options cannot configure WebRTC calls".into(),
++        ));
++    }
+     let frozen_provider = frozen.is_some();
+     let (config, current_provider) = match frozen {
+         Some(frozen) => frozen,
+@@ -3839,6 +3895,8 @@ async fn prepare_realtime_start_with_source(
+             Some(CodexAuth::from_api_key(&key)),
+             config.http_client_factory(),
+         )
++    } else if connection_url.is_some() || connection_headers.is_some() {
++        (None, config.http_client_factory())
+     } else {
+         match auth_manager.auth_with_http_client_factory().await {
+             Some((auth, captured_factory)) if auth.is_chatgpt_auth() || auth.is_api_key_auth() => (
+@@ -3945,39 +4003,31 @@ async fn prepare_realtime_start_with_source(
+     let requested_realtime_session_id = session_config.session_id.clone();
+     let event_parser = session_config.event_parser;
+     let originator = sess.originator().await;
+-    let mut extra_headers = match transport {
+-        ConversationStartTransport::Websocket => {
+-            if let Some(header) = explicit_authorization {
+-                let mut headers = realtime_request_headers(
+-                    requested_realtime_session_id.as_deref(),
+-                    None,
+-                    event_parser,
+-                    originator.as_str(),
+-                )?
+-                .unwrap_or_default();
+-                headers.insert(http::header::AUTHORIZATION, header);
+-                Some(headers)
+-            } else {
+-                let realtime_api_key = realtime_api_key(auth.as_ref(), &provider)?;
+-                realtime_request_headers(
+-                    requested_realtime_session_id.as_deref(),
+-                    Some(realtime_api_key.as_str()),
+-                    event_parser,
+-                    originator.as_str(),
+-                )?
+-            }
+-        }
+-        ConversationStartTransport::Webrtc { .. }
+-        | ConversationStartTransport::ExistingCall { .. } => {
+-            realtime_request_headers(
+-                requested_realtime_session_id.as_deref(),
+-                /*api_key*/ None,
+-                event_parser,
+-                originator.as_str(),
+-            )?
++    let mut extra_headers = if let Some(headers) = &connection_headers {
++        headers.clone()
++    } else {
++        let api_key = if matches!(transport, ConversationStartTransport::Websocket)
++            && explicit_authorization.is_none()
++            && connection_url.is_none()
++        {
++            Some(realtime_api_key(auth.as_ref(), &provider)?)
++        } else {
++            None
++        };
++        let mut headers = realtime_request_headers(
++            requested_realtime_session_id.as_deref(),
++            api_key.as_deref(),
++            event_parser,
++            originator.as_str(),
++        )?
++        .unwrap_or_default();
++        if (matches!(transport, ConversationStartTransport::Websocket) || connection_url.is_some())
++            && let Some(header) = explicit_authorization
++        {
++            headers.insert(http::header::AUTHORIZATION, header);
+         }
+-    }
+-    .unwrap_or_default();
++        headers
++    };
+     extra_headers.extend(build_session_headers(
+         Some(sess.session_id().to_string()),
+         Some(sess.thread_id().to_string()),
+@@ -3986,7 +4036,8 @@ async fn prepare_realtime_start_with_source(
+         value.set_sensitive(true);
+     }
+     // Voice calls can span zero or many backing turns; send only the saved thread source.
+-    if let Some(thread_source) = sess.thread_config_snapshot().await.thread_source
++    if connection_url.is_none()
++        && let Some(thread_source) = sess.thread_config_snapshot().await.thread_source
+         && thread_source.as_str().len() <= REALTIME_THREAD_SOURCE_MAX_BYTES
+         && let Ok(metadata) = to_ascii_json_string(&json!({ THREAD_SOURCE_KEY: thread_source }))
+         && let Ok(metadata) = HeaderValue::from_str(&metadata)
+@@ -3994,6 +4045,8 @@ async fn prepare_realtime_start_with_source(
+         extra_headers.insert(X_CODEX_TURN_METADATA_HEADER, metadata);
+     }
+     Ok(PreparedRealtimeConversationStart {
++        connection_url,
++        connection_headers,
+         connection_auth,
+         hosted_mcp_auto_response: true,
+         provider_event_observation: Default::default(),
+@@ -4244,6 +4297,8 @@ async fn handle_start_inner_with_adapter(
+     adapter: Option<Arc<dyn codex_api::RealtimeAdapter>>,
+ ) -> CodexResult<RealtimeConversationStartResult> {
+     let PreparedRealtimeConversationStart {
++        connection_url,
++        connection_headers,
+         connection_auth,
+         hosted_mcp_auto_response,
+         provider_event_observation,
+@@ -4278,6 +4333,8 @@ async fn handle_start_inner_with_adapter(
+     };
+     let sdk_owned = sdk_generation.is_some();
+     let start = RealtimeStart {
++        connection_url,
++        connection_headers,
+         adapter,
+         connection_auth,
+         hosted_mcp_auto_response,
+diff --git a/codex-rs/core/src/realtime_conversation/existing_call.rs b/codex-rs/core/src/realtime_conversation/existing_call.rs
+index af920a4373ad07ae0d62ba21ba26c14fb113821d..ac47911647c8df9b689f0d560050c8a47c01a62c 100644
+--- a/codex-rs/core/src/realtime_conversation/existing_call.rs
++++ b/codex-rs/core/src/realtime_conversation/existing_call.rs
+@@ -22,6 +22,7 @@ use tokio::task::JoinHandle;
+ use tokio_util::sync::CancellationToken;
+ 
+ pub(super) struct ExistingCallAttachment {
++    pub(super) override_sideband_headers: bool,
+     pub(super) client: Arc<RealtimeWebsocketClient>,
+     pub(super) model_client: ModelClient,
+     pub(super) connection_auth: Option<crate::client::RealtimeConnectionAuth>,
+@@ -41,6 +42,7 @@ pub(super) struct ExistingCallAttachment {
+ 
+ pub(super) async fn attach(attachment: ExistingCallAttachment) -> CodexResult<JoinHandle<()>> {
+     let ExistingCallAttachment {
++        override_sideband_headers,
+         client,
+         model_client,
+         connection_auth,
+@@ -57,14 +59,18 @@ pub(super) async fn attach(attachment: ExistingCallAttachment) -> CodexResult<Jo
+         transcript_tail_flush,
+         stop_token,
+     } = attachment;
+-    let sideband_headers = match connection_auth {
+-        Some(auth) => {
+-            crate::client::realtime_sideband_headers_with_connection_auth(extra_headers, &auth)
 -        }
 -        None => {
--            writer
--                .send_response_create_after_function(&request.response_id, &request.call_id)
--                .await
--        }
-+    let Some(sdk) = sdk else {
-+        return Ok(false);
-+    };
-+    let calls = sdk.function_calls.lock().await;
-+    let seen = sdk.seen.lock().await;
-+    if !sdk.active.load(Ordering::Acquire)
-+        || request
-+            .origin
-+            .as_ref()
-+            .is_some_and(|batch| batch.automatic_retired.load(Ordering::Acquire))
-+    {
-+        return Ok(false);
-     }
-+    let preserve_after_interrupt = if request.call_id.is_empty() {
-+        let Some(origin) = &request.origin else {
-+            return Ok(false);
-+        };
-+        let mut owned = origin
-+            .call_ids
-+            .iter()
-+            .filter_map(|id| {
-+                let call = calls.get(id)?;
-+                if !call
-+                    .batch
-+                    .as_ref()
-+                    .is_some_and(|batch| Arc::ptr_eq(batch, origin))
-+                {
-+                    return None;
-+                }
-+                seen.get(id).filter(|known| {
-+                    known.response_id.as_deref() == Some(request.response_id.as_str())
-+                        && known.output_published
-+                })
-+            })
-+            .peekable();
-+        if owned.peek().is_none() {
-+            return Ok(false);
-+        }
-+        owned.any(|known| known.preserve_on_response_cancel)
+-            model_client
+-                .realtime_sideband_headers(extra_headers)
+-                .await?
++    let sideband_headers = if override_sideband_headers {
++        extra_headers
 +    } else {
-+        let Some(known) = seen.get(&request.call_id).filter(|known| {
-+            request.ownership_id.as_deref() == Some(known.ownership_id.as_str())
-+                && known.response_id.as_deref() == Some(request.response_id.as_str())
-+                && known.output_published
-+        }) else {
-+            return Ok(false);
-+        };
-+        known.preserve_on_response_cancel
-+    };
-+    drop(seen);
-+    drop(calls);
-+    writer
-+        .send_response_create_after_native_tools(
-+            &request.response_id,
-+            &request.call_id,
-+            request.accepted.as_ref(),
-+            preserve_after_interrupt,
-+        )
-+        .await
- }
- 
- async fn request_sdk_native_response(
-     sdk: &SdkRealtimeState,
-     writer: &RealtimeWebsocketWriter,
-     responses: &mut RealtimeResponseCreateQueue,
--    request: NativeResponseRequest,
--    origin: Option<&RealtimeFunctionBatch>,
-+    mut request: NativeResponseRequest,
-+    origin: Option<&Arc<RealtimeFunctionBatch>>,
- ) -> anyhow::Result<()> {
-     if origin.is_some_and(|batch| batch.automatic_retired.load(Ordering::Acquire)) {
-         return Ok(());
-     }
-+    if request.origin.is_none() {
-+        request.origin = origin.cloned();
-+    }
-+    if !request.call_id.is_empty() && request.ownership_id.is_none() {
-+        request.ownership_id = sdk
-+            .seen
-+            .lock()
-+            .await
-+            .get(&request.call_id)
-+            .filter(|known| known.response_id.as_deref() == Some(request.response_id.as_str()))
-+            .map(|known| known.ownership_id.clone());
-+        if request.ownership_id.is_none() {
-+            return Ok(());
-+        }
-+    }
-     let held = sdk
-         .function_calls
-         .lock()
-@@ -5428,7 +5636,7 @@ async fn request_sdk_native_response(
-         }
-         return Ok(());
-     }
--    if send_native_response_request(writer, &request).await? {
-+    if send_native_response_request(writer, &request, Some(sdk)).await? {
-         responses.active_default_response = true;
-         responses.pending_create = false;
-         responses.pending_native_create = None;
-@@ -5747,6 +5955,8 @@ async fn handle_sdk_realtime_command(
-                             response_id: intent.batch.response_id.clone(),
-                             call_id: String::new(),
-                             accepted: Some(Arc::clone(&accepted)),
-+                            ownership_id: None,
-+                            origin: None,
-                         },
-                         Some(&intent.batch),
-                     )
-@@ -5876,6 +6086,8 @@ async fn handle_sdk_realtime_command(
-                         response_id,
-                         call_id: handoff_id,
-                         accepted,
-+                        ownership_id: None,
-+                        origin: None,
-                     },
-                     None,
-                 )
-@@ -5940,8 +6152,10 @@ async fn handle_sdk_realtime_command(
-                             response_id,
-                             call_id,
-                             accepted: None,
-+                            ownership_id: None,
-+                            origin: None,
-                         },
--                        origin.as_deref(),
-+                        origin.as_ref(),
-                     )
-                     .await?;
-                 }
-@@ -6000,13 +6214,17 @@ async fn handle_sdk_realtime_command(
-                         response_id,
-                         call_id: handoff_id,
-                         accepted: None,
-+                        ownership_id: None,
-+                        origin: None,
-                     },
--                    origin.as_deref(),
-+                    origin.as_ref(),
-                 )
-                 .await?;
-             }
-         }
-         SdkRealtimeCommand::Interrupt {
-+            cancel_tools,
-+            owned_handoffs,
-             response_id,
-             event_id,
-             playback,
-@@ -6014,6 +6232,14 @@ async fn handle_sdk_realtime_command(
-             reply,
-         } => {
-             let requested = response_id.clone();
-+            let preservation = if cancel_tools {
-+                Vec::new()
-+            } else {
-+                sdk.preserve_admitted_tools(requested.as_deref(), &owned_handoffs)
-+                    .await
-+            };
-+            let preserved: std::collections::HashSet<_> =
-+                preservation.iter().map(|(id, _, _)| id.clone()).collect();
-             let result = if handoff.event_parser == RealtimeEventParser::RealtimeV2 {
-                 match writer
-                     .interrupt_response(
-@@ -6030,6 +6256,7 @@ async fn handle_sdk_realtime_command(
-                 {
-                     Ok(result) => Some(result),
-                     Err(ApiError::InvalidRequest { message }) => {
-+                        sdk.restore_media_preservation(&preservation).await;
-                         if let Some(reply) = reply.and_then(|reply| reply.lock().unwrap().take()) {
-                             let _ = reply.send(Err(CodexErr::InvalidRequest(message)));
-                         }
-@@ -6042,6 +6269,11 @@ async fn handle_sdk_realtime_command(
-             };
-             let receipt = codex_protocol::protocol::RealtimeInterruptReceipt {
-                 joined_root_turn_ids: Vec::new(),
-+                preserved_call_ids: {
-+                    let mut ids: Vec<_> = preserved.iter().cloned().collect();
-+                    ids.sort();
-+                    ids
-+                },
-                 cancelled_response_id: result
-                     .as_ref()
-                     .and_then(|result| result.cancelled_response_id.clone()),
-@@ -6056,6 +6288,21 @@ async fn handle_sdk_realtime_command(
-                 responses.pending_native_create = None;
-                 responses.pending_guardrail_response = None;
-                 responses.pending_hosted_response = None;
-+            } else if cancel_tools
-+                && responses
-+                    .pending_native_create
-+                    .as_ref()
-+                    .is_some_and(|request| {
-+                        Some(request.response_id.as_str()) == requested.as_deref()
-+                    })
-+            {
-+                responses.pending_native_create = None;
-+                if responses.pending_user_create.is_none()
-+                    && responses.pending_guardrail_response.is_none()
-+                    && responses.pending_hosted_response.is_none()
-+                {
-+                    responses.pending_create = false;
-+                }
-             }
-             let calls = sdk.function_calls.lock().await;
-             let seen = sdk.seen.lock().await;
-@@ -6068,7 +6315,7 @@ async fn handle_sdk_realtime_command(
-                         .or_else(|| seen.get(id).and_then(|known| known.response_id.as_deref()))
-                         == Some(target)
-                 });
--                if matched {
-+                if matched && !preserved.contains(id) {
-                     if let Some(call) = calls.get(id) {
-                         call.cancel.cancel();
-                     }
-@@ -6080,7 +6327,9 @@ async fn handle_sdk_realtime_command(
-             drop(pending);
-             drop(seen);
-             drop(calls);
--            let work = sdk.retire_tool_work(false, requested.as_deref()).await;
-+            let work = sdk
-+                .retire_tool_work(false, requested.as_deref(), !cancel_tools)
-+                .await;
-             let calls = sdk.function_calls.lock().await;
-             let release_user = requested.as_ref().and_then(|_| {
-                 calls
-@@ -6226,7 +6475,7 @@ async fn maybe_continue_hosted_mcp(
-         return Ok(());
-     }
-     let created = if let Some(request) = &responses.pending_native_create {
--        send_native_response_request(writer, request).await?
-+        send_native_response_request(writer, request, Some(sdk)).await?
-     } else if responses.pending_create {
-         writer.send_response_create_after_tools(response_id).await?
-     } else {
-@@ -6485,12 +6734,13 @@ async fn handle_realtime_server_event_with_configuration(
-                     .context("SDK speech event has no accepted configuration")?
-                     .interrupts_on_speech_started()
-             {
--                let work = sdk.retire_tool_work(false, None).await;
-+                let work = sdk.retire_tool_work(false, None, false).await;
-                 if !work.has_joined_work() {
-                     let completion = SdkInterruptCompletion {
-                         work,
-                         receipt: codex_protocol::protocol::RealtimeInterruptReceipt {
-                             joined_root_turn_ids: Vec::new(),
-+                            preserved_call_ids: Vec::new(),
-                             cancelled_response_id: None,
-                             retired_response_ids: Vec::new(),
-                         },
-@@ -6563,10 +6813,11 @@ async fn handle_realtime_server_event_with_configuration(
-                 return Ok(());
-             }
-             if let (Some(sdk), Some(id)) = (&handoff_state.sdk, response.response_id.as_deref()) {
-+                let preserved = sdk.media_independent_calls(Some(id)).await;
-                 sdk.history
-                     .lock()
-                     .unwrap()
--                    .finish_caller_response(id, /*cancelled*/ true);
-+                    .finish_caller_response_preserving(id, true, &preserved);
-             }
-             defer_sdk_create_until_handoff(handoff_state, response_create_queue).await;
-             if response.response_id == response_create_queue.sdk_response_id {
-@@ -6577,7 +6828,7 @@ async fn handle_realtime_server_event_with_configuration(
-                 RealtimeSessionKind::V1 => {}
-                 RealtimeSessionKind::V2 => {
-                     response_create_queue
--                        .mark_finished(writer, "deferred")
-+                        .mark_finished(writer, "deferred", handoff_state.sdk.as_deref())
-                         .await?;
-                 }
-             }
-@@ -6687,7 +6938,7 @@ async fn handle_realtime_server_event_with_configuration(
-                 RealtimeSessionKind::V1 => {}
-                 RealtimeSessionKind::V2 => {
-                     response_create_queue
--                        .mark_finished(writer, "deferred")
-+                        .mark_finished(writer, "deferred", handoff_state.sdk.as_deref())
-                         .await?;
-                 }
-             }
-@@ -6955,8 +7206,18 @@ async fn handle_realtime_server_event_with_configuration(
-                 {
-                     return Ok(());
-                 }
-+                let mut admitted = handoff.clone();
-+                admitted.sdk_ownership_id = Some(
-+                    sdk.seen
-+                        .lock()
-+                        .await
-+                        .get(&handoff.handoff_id)
-+                        .context("SDK handoff has no admitted owner")?
-+                        .ownership_id
-+                        .clone(),
-+                );
-                 events_tx
--                    .send(event)
-+                    .send(RealtimeEvent::HandoffRequested(admitted))
-                     .await
-                     .context("SDK Realtime event channel closed")?;
-                 return Ok(());
-@@ -7024,7 +7285,11 @@ async fn handle_realtime_server_event_with_configuration(
-                 && response_create_queue.sdk_response_id.is_none()
-             {
-                 response_create_queue
--                    .mark_finished(writer, "provider rejected response creation")
-+                    .mark_finished(
-+                        writer,
-+                        "provider rejected response creation",
-+                        handoff_state.sdk.as_deref(),
-+                    )
-                     .await?;
-             }
-             false
-@@ -7040,10 +7305,11 @@ async fn handle_realtime_server_event_with_configuration(
-                 _ => None,
-             };
-             if let (Some(sdk), Some((id, cancelled))) = (&handoff_state.sdk, terminal) {
-+                let preserved = sdk.media_independent_calls(Some(id)).await;
-                 sdk.history
-                     .lock()
-                     .unwrap()
--                    .finish_caller_response(id, cancelled);
-+                    .finish_caller_response_preserving(id, cancelled, &preserved);
-             }
-             false
-         }
-@@ -7085,7 +7351,7 @@ async fn handle_realtime_server_event_with_configuration(
-     if advances_response_queue && !response_create_pending(writer) {
-         if !response_create_queue.active_default_response {
-             response_create_queue
--                .mark_finished(writer, "deferred")
-+                .mark_finished(writer, "deferred", handoff_state.sdk.as_deref())
-                 .await?;
-             if let (Some(sdk), Some(id)) = (
-                 &handoff_state.sdk,
-diff --git a/codex-rs/core/src/realtime_conversation/item_deletion.rs b/codex-rs/core/src/realtime_conversation/item_deletion.rs
-index e9f70c69e588ce1aeadb54454945bec8e434349f..e65fc491ee28fec99a753e9b43d44c1644165356 100644
---- a/codex-rs/core/src/realtime_conversation/item_deletion.rs
-+++ b/codex-rs/core/src/realtime_conversation/item_deletion.rs
-@@ -737,6 +737,8 @@ mod tests {
-                 response_id: None,
-                 accepted_configuration: None,
-                 function_fingerprint: None,
-+                preserve_on_response_cancel: false,
-+                ownership_id: uuid::Uuid::new_v4().to_string(),
-             },
-         );
-         assert!(
-@@ -984,6 +986,7 @@ mod reserved_and_approval_tests {
-         state
-             .observe(&RealtimeEvent::HandoffRequested(
-                 codex_protocol::protocol::RealtimeHandoffRequested {
-+                    sdk_ownership_id: None,
-                     response_id: Some("response".into()),
-                     handoff_id: "background-call".into(),
-                     item_id: "background-item".into(),
-diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
-index c036d9de0747085db97c1d6c549c66defdb29b0b..a85869d9c10039450fa4a11f8d02cf4bcfd91cca 100644
---- a/codex-rs/core/src/realtime_conversation/provider_history.rs
-+++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
-@@ -944,7 +944,17 @@ impl State {
-     }
- 
-     pub(super) fn retire_caller_calls(&mut self, response_id: Option<&str>) {
--        for call in self.replayed_calls.values_mut() {
-+        self.retire_caller_calls_preserving(response_id, &std::collections::HashSet::new());
-+    }
-+    pub(super) fn retire_caller_calls_preserving(
-+        &mut self,
-+        response_id: Option<&str>,
-+        preserved: &std::collections::HashSet<String>,
-+    ) {
-+        for (id, call) in self.replayed_calls.iter_mut() {
-+            if preserved.contains(id) {
-+                continue;
++        match connection_auth {
++            Some(auth) => {
++                crate::client::realtime_sideband_headers_with_connection_auth(extra_headers, &auth)
 +            }
-             if call.caller.as_ref().is_some_and(|caller| {
-                 response_id.is_none_or(|response| caller.response_id == response)
-             }) {
-@@ -954,14 +964,26 @@ impl State {
-     }
- 
-     pub(super) fn finish_caller_response(&mut self, response_id: &str, cancelled: bool) {
--        for call in self.replayed_calls.values_mut() {
-+        self.finish_caller_response_preserving(
-+            response_id,
-+            cancelled,
-+            &std::collections::HashSet::new(),
-+        );
++            None => {
++                model_client
++                    .realtime_sideband_headers(extra_headers)
++                    .await?
++            }
+         }
+     };
+     let transcript_state = RealtimeTranscriptState::default();
+diff --git a/codex-rs/core/src/realtime_conversation/preparation.rs b/codex-rs/core/src/realtime_conversation/preparation.rs
+index 6105958a696aea48c1c57d35a799419309d51a73..5f40ecacfbecf4dd0cd4501774250aa71eb56748 100644
+--- a/codex-rs/core/src/realtime_conversation/preparation.rs
++++ b/codex-rs/core/src/realtime_conversation/preparation.rs
+@@ -274,6 +274,7 @@ pub(crate) async fn handle_activate_sdk(
+     sess: &Arc<Session>,
+     generation: String,
+     api_key: Option<RealtimeConversationApiKey>,
++    connection_options: codex_protocol::protocol::RealtimeConversationConnectionOptions,
+     reply: StartReply,
+ ) {
+     let mut reply = Some(reply);
+@@ -321,6 +322,7 @@ pub(crate) async fn handle_activate_sdk(
+                     &worker_preparation,
+                     input,
+                     api_key,
++                    connection_options,
+                 );
+                 let result = std::panic::AssertUnwindSafe(result)
+                     .catch_unwind()
+@@ -372,6 +374,7 @@ async fn run_prepared_start(
+     preparation: &Arc<SdkStartPreparation>,
+     input: SdkPreparedInput,
+     api_key: Option<String>,
++    connection_options: codex_protocol::protocol::RealtimeConversationConnectionOptions,
+ ) -> CodexResult<RealtimeConversationStartResult> {
+     let SdkPreparedInput {
+         draft,
+@@ -385,6 +388,13 @@ async fn run_prepared_start(
+         provider,
+         adapter,
+     } = input;
++    if adapter.is_some()
++        && (connection_options.url.is_some() || connection_options.headers.is_some())
++    {
++        return Err(CodexErr::InvalidRequest(
++            "Built-in WebSocket options cannot configure custom adapters".into(),
++        ));
 +    }
-+    pub(super) fn finish_caller_response_preserving(
-+        &mut self,
-+        response_id: &str,
-+        cancelled: bool,
-+        preserved: &std::collections::HashSet<String>,
-+    ) {
-+        for (id, call) in self.replayed_calls.iter_mut() {
-             if let Some(caller) = call
-                 .caller
-                 .as_mut()
-                 .filter(|caller| caller.response_id == response_id)
-             {
-                 caller.response_finished = true;
--                if cancelled || caller.detached {
-+                if (cancelled && !preserved.contains(id)) || caller.detached {
-                     call.confirmed = false;
-                 }
-             }
-diff --git a/codex-rs/core/src/realtime_conversation/raw_event.rs b/codex-rs/core/src/realtime_conversation/raw_event.rs
-index 82ba858344ced1f722463b4baedf9111fd0d63d2..bb98b6f6bb465aaee6d7589b6e7198122d6e2f64 100644
---- a/codex-rs/core/src/realtime_conversation/raw_event.rs
-+++ b/codex-rs/core/src/realtime_conversation/raw_event.rs
-@@ -278,6 +278,8 @@ pub(crate) async fn handle_send_event_sdk(
-                 event_id,
-                 None,
-                 None,
-+                true,
-+                Vec::new(),
-                 completion(reply, |receipt: RealtimeInterruptReceipt| {
-                     Some(serde_json::json!(receipt))
-                 }),
+     params.client_managed_handoffs = true;
+     params.backend_reasoning_status = false;
+     let config = Arc::clone(draft.inputs.config());
+@@ -415,6 +425,7 @@ async fn run_prepared_start(
+             true,
+             Some((config, provider)),
+             api_key,
++            connection_options,
+         )
+         .await?;
+         if let Some(instructions) = inherited_call_instructions {
+@@ -473,7 +484,7 @@ pub(crate) async fn dispatch_start_sdk(
+     )
+     .await
+     {
+-        Ok(_) => handle_activate_sdk(sess, generation, None, reply).await,
++        Ok(_) => handle_activate_sdk(sess, generation, None, Default::default(), reply).await,
+         Err(error) => {
+             let _ = reply.send(Err(error));
+         }
 diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
-index 716e634df8f0a196b70373eb7dab9fce25216e5b..4cc6e1f636f4383e43296db45afde536fd81c1e5 100644
+index c417577cc5ea10fad110395f3b674744d0b4fab1..4cc6e1f636f4383e43296db45afde536fd81c1e5 100644
 --- a/codex-rs/core/src/realtime_conversation_tests.rs
 +++ b/codex-rs/core/src/realtime_conversation_tests.rs
-@@ -32,6 +32,7 @@ use tokio::sync::Mutex;
- #[test]
- fn prefers_handoff_input_transcript_over_active_transcript() {
-     let handoff = RealtimeHandoffRequested {
-+        sdk_ownership_id: None,
-         response_id: None,
-         handoff_id: "handoff_1".to_string(),
-         item_id: "item_1".to_string(),
-@@ -56,6 +57,7 @@ fn prefers_handoff_input_transcript_over_active_transcript() {
- #[test]
- fn extracts_text_from_handoff_request_active_transcript_if_input_missing() {
-     let handoff = RealtimeHandoffRequested {
-+        sdk_ownership_id: None,
-         response_id: None,
-         handoff_id: "handoff_1".to_string(),
-         item_id: "item_1".to_string(),
-@@ -74,6 +76,7 @@ fn extracts_text_from_handoff_request_active_transcript_if_input_missing() {
- #[test]
- fn wraps_handoff_with_transcript_delta() {
-     let handoff = RealtimeHandoffRequested {
-+        sdk_ownership_id: None,
-         response_id: None,
-         handoff_id: "handoff_1".to_string(),
-         item_id: "item_1".to_string(),
-@@ -101,6 +104,7 @@ fn wraps_handoff_with_transcript_delta() {
- #[test]
- fn extracts_text_from_handoff_request_input_transcript_if_messages_missing() {
-     let handoff = RealtimeHandoffRequested {
-+        sdk_ownership_id: None,
-         response_id: None,
-         handoff_id: "handoff_1".to_string(),
-         item_id: "item_1".to_string(),
-@@ -116,6 +120,7 @@ fn extracts_text_from_handoff_request_input_transcript_if_messages_missing() {
- #[test]
- fn ignores_empty_handoff_request_input_transcript() {
-     let handoff = RealtimeHandoffRequested {
-+        sdk_ownership_id: None,
-         response_id: None,
-         handoff_id: "handoff_1".to_string(),
-         item_id: "item_1".to_string(),
-@@ -472,6 +477,8 @@ async fn sdk_full_command_queue_does_not_consume_a_handoff() {
-             .sdk_enqueue(
-                 "voice-1",
-                 SdkRealtimeCommand::Interrupt {
-+                    cancel_tools: true,
-+                    owned_handoffs: Vec::new(),
-                     event_id: None,
-                     reply: None,
-                     playback: None,
-@@ -523,6 +530,8 @@ async fn sdk_close_is_idempotent_and_stale_close_cannot_stop_current_owner() {
-             .sdk_enqueue(
-                 "voice-2",
-                 super::SdkRealtimeCommand::Interrupt {
-+                    cancel_tools: true,
-+                    owned_handoffs: Vec::new(),
-                     event_id: None,
-                     reply: None,
-                     playback: None,
-@@ -816,6 +825,8 @@ async fn sdk_v2_writes_only_exact_accepted_result_and_deduplicates_cancel_case()
-     sdk.register("pending-after-done").await.unwrap();
-     super::handle_sdk_realtime_command(
-         Ok(SdkRealtimeCommand::Interrupt {
-+            cancel_tools: true,
-+            owned_handoffs: Vec::new(),
-             event_id: None,
-             reply: None,
-             playback: None,
-@@ -832,6 +843,8 @@ async fn sdk_v2_writes_only_exact_accepted_result_and_deduplicates_cancel_case()
-     assert!(sdk.pending.lock().await.contains_key("pending-after-done"));
-     super::handle_sdk_realtime_command(
-         Ok(SdkRealtimeCommand::Interrupt {
-+            cancel_tools: true,
-+            owned_handoffs: Vec::new(),
-             event_id: None,
-             reply: None,
-             playback: None,
-@@ -849,6 +862,8 @@ async fn sdk_v2_writes_only_exact_accepted_result_and_deduplicates_cancel_case()
-     for response in ["old-response", "new-response", "new-response"] {
-         super::handle_sdk_realtime_command(
-             Ok(SdkRealtimeCommand::Interrupt {
-+                cancel_tools: true,
-+                owned_handoffs: Vec::new(),
-                 event_id: None,
-                 reply: None,
-                 playback: None,
-@@ -896,6 +911,7 @@ async fn sdk_duplicate_handoff_is_emitted_once_without_steering_ack() {
-     for _ in 0..2 {
-         super::handle_realtime_server_event(
-             codex_api::RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
-+                sdk_ownership_id: None,
-                 response_id: None,
-                 handoff_id: "call-1".into(),
-                 item_id: "item-1".into(),
-@@ -931,6 +947,7 @@ async fn sdk_duplicate_handoff_is_emitted_once_without_steering_ack() {
- #[test]
- fn sdk_delegation_input_retains_accumulated_voice_context() {
-     let handoff = RealtimeHandoffRequested {
-+        sdk_ownership_id: None,
-         response_id: None,
-         handoff_id: "call-1".into(),
-         item_id: "item-1".into(),
-@@ -952,6 +969,7 @@ fn sdk_delegation_input_retains_accumulated_voice_context() {
-     assert!(input.contains("Tuesday is available"));
-     assert_eq!(input, realtime_delegation_from_handoff(&handoff).unwrap());
-     let empty = RealtimeHandoffRequested {
-+        sdk_ownership_id: None,
-         response_id: None,
-         input_transcript: String::new(),
-         active_transcript: vec![],
-@@ -2691,6 +2709,8 @@ async fn sdk_scoped_interrupt_preserves_b_and_uncorrelated_native_work() {
-         .clone();
-     super::handle_sdk_realtime_command(
-         Ok(SdkRealtimeCommand::Interrupt {
-+            cancel_tools: true,
-+            owned_handoffs: Vec::new(),
-             event_id: None,
-             reply: None,
-             response_id: Some("a".into()),
-@@ -2948,6 +2968,8 @@ async fn sdk_interrupt_completion_reports_actual_source_after_execution() {
-         .sdk_enqueue(
-             "receipt-1",
-             SdkRealtimeCommand::Interrupt {
-+                cancel_tools: true,
-+                owned_handoffs: Vec::new(),
-                 event_id: None,
-                 response_id: None,
-                 playback: None,
-@@ -4245,6 +4267,8 @@ async fn sdk_wire_pending_handoff_case(interrupt: bool, full_terminal_queue: boo
-     if interrupt {
-         super::handle_sdk_realtime_command(
-             Ok(super::SdkRealtimeCommand::Interrupt {
-+                cancel_tools: true,
-+                owned_handoffs: Vec::new(),
-                 event_id: None,
-                 response_id: Some("handoff-source".into()),
-                 playback: None,
-@@ -4714,6 +4738,7 @@ async fn sdk_terminal_handoff_rollover_preserves_recent_duplicates() {
-     for index in 0..super::SDK_HANDOFF_LIMIT + 4 {
-         let id = format!("terminal-handoff-{index}");
-         let request = RealtimeHandoffRequested {
-+            sdk_ownership_id: None,
-             response_id: Some(format!("response-{index}")),
-             handoff_id: id.clone(),
-             item_id: format!("item-{index}"),
-@@ -4731,10 +4756,15 @@ async fn sdk_terminal_handoff_rollover_preserves_recent_duplicates() {
-         )
-         .await
-         .unwrap();
--        assert!(matches!(
--            rx.try_recv().unwrap(),
--            RealtimeEvent::HandoffRequested(_)
--        ));
-+        let RealtimeEvent::HandoffRequested(mut admitted) = rx.try_recv().unwrap() else {
-+            panic!("SDK handoff has no admitted event");
-+        };
-+        assert_eq!(
-+            admitted.sdk_ownership_id.as_deref(),
-+            Some(sdk.seen.lock().await[&id].ownership_id.as_str()),
-+        );
-+        assert!(admitted.sdk_ownership_id.take().is_some());
-+        assert_eq!(admitted, request);
-         // The actual command path marks accepted publication before removing pending.
-         sdk.seen.lock().await.get_mut(&id).unwrap().output_published = true;
-         sdk.pending.lock().await.remove(&id);
-@@ -4742,6 +4772,7 @@ async fn sdk_terminal_handoff_rollover_preserves_recent_duplicates() {
-             let before = sdk.seen.lock().await.keys().cloned().collect::<Vec<_>>();
-             super::handle_realtime_server_event(
-                 RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
-+                    sdk_ownership_id: None,
-                     response_id: Some("response-0".into()),
-                     handoff_id: "terminal-handoff-0".into(),
-                     item_id: "item-0".into(),
-@@ -5097,3 +5128,289 @@ async fn sdk_sip_config_uses_native_source_and_serializer_without_reserving_voic
-         .await
-         .unwrap();
- }
-+
-+async fn register_media_interrupt_test_call(
-+    sdk: &super::SdkRealtimeState,
-+    id: &str,
-+    response: &str,
-+    claimed: bool,
-+    root: Option<&str>,
-+    batch: Option<Arc<super::RealtimeFunctionBatch>>,
-+) {
-+    assert!(sdk.register_for_response(id, Some(response)).await.unwrap());
-+    sdk.function_calls.lock().await.insert(
-+        id.into(),
-+        super::SdkFunctionCall {
-+            preparation: None,
-+            configuration: batch.as_ref().map(|batch| batch.configuration.clone()),
-+            batch,
-+            request: codex_protocol::protocol::RealtimeFunctionCallRequested {
-+                source_profile: None,
-+                namespace: None,
-+                call_id: id.into(),
-+                item_id: format!("item-{id}"),
-+                name: "lookup".into(),
-+                arguments: "{}".into(),
-+                response_id: Some(response.into()),
-+            },
-+            claimed,
-+            native_turn_id: root.map(str::to_owned),
-+            cancel: tokio_util::sync::CancellationToken::new(),
-+            completed: tokio_util::sync::CancellationToken::new(),
-+        },
-+    );
-+}
-+
-+#[tokio::test]
-+async fn media_interrupt_protects_only_admitted_unresolved_calls_in_its_response() {
-+    let sdk = super::SdkRealtimeState::new("media-admission".into());
-+    register_media_interrupt_test_call(&sdk, "admitted", "a", true, Some("root"), None).await;
-+    register_media_interrupt_test_call(&sdk, "unclaimed", "a", false, None, None).await;
-+    register_media_interrupt_test_call(&sdk, "unrooted", "a", true, None, None).await;
-+    register_media_interrupt_test_call(&sdk, "other", "b", true, Some("root"), None).await;
-+    register_media_interrupt_test_call(&sdk, "settled", "a", true, Some("root"), None).await;
-+    sdk.pending.lock().await.remove("settled");
-+    assert!(
-+        sdk.register_for_response("handoff", Some("a"))
-+            .await
-+            .unwrap()
-+    );
-+    let ownership = sdk.seen.lock().await["handoff"].ownership_id.clone();
-+    let mut admitted = sdk
-+        .preserve_admitted_tools(
-+            Some("a"),
-+            &[("handoff".into(), Some("a".into()), ownership)],
-+        )
-+        .await;
-+    admitted.sort();
-+    assert_eq!(
-+        admitted
-+            .iter()
-+            .map(|(id, _, previous)| (id.as_str(), *previous))
-+            .collect::<Vec<_>>(),
-+        vec![("admitted", false), ("handoff", false)]
-+    );
-+    let mut retained: Vec<_> = sdk
-+        .media_independent_calls(Some("a"))
-+        .await
-+        .into_iter()
-+        .collect();
-+    retained.sort();
-+    assert_eq!(retained, vec!["admitted", "handoff"]);
-+    assert!(sdk.media_independent_calls(Some("b")).await.is_empty());
-+    assert!(
-+        !sdk.pending.lock().await["admitted"],
-+        "unresolved false is not absence of admission"
-+    );
-+}
-+
-+#[tokio::test]
-+async fn deferred_native_continuation_keeps_original_call_ownership() {
-+    let (connection, _, server) = sdk_wire_connection().await;
-+    let writer = connection.writer();
-+    let sdk = super::SdkRealtimeState::new("deferred-owner".into());
-+    assert!(sdk.register_for_response("owned", Some("a")).await.unwrap());
-+    let original = sdk.seen.lock().await["owned"].ownership_id.clone();
-+    sdk.seen.lock().await.shift_remove("owned");
-+    sdk.pending.lock().await.remove("owned");
-+    assert!(sdk.register_for_response("owned", Some("a")).await.unwrap());
-+    {
-+        let mut seen = sdk.seen.lock().await;
-+        let replacement = seen.get_mut("owned").unwrap();
-+        assert_ne!(replacement.ownership_id, original);
-+        replacement.output_published = true;
-+        replacement.preserve_on_response_cancel = true;
-+    }
-+    let mut responses = super::RealtimeResponseCreateQueue::default();
-+    responses.active_default_response = true;
-+    super::request_sdk_native_response(
-+        &sdk,
-+        &writer,
-+        &mut responses,
-+        super::NativeResponseRequest {
-+            response_id: "a".into(),
-+            call_id: "owned".into(),
-+            accepted: None,
-+            ownership_id: Some(original.clone()),
-+            origin: None,
-+        },
-+        None,
-+    )
-+    .await
-+    .unwrap();
-+    assert_eq!(
-+        responses
-+            .pending_native_create
-+            .as_ref()
-+            .unwrap()
-+            .ownership_id
-+            .as_ref(),
-+        Some(&original)
-+    );
-+    responses
-+        .mark_finished(&writer, "retired owner", Some(&sdk))
-+        .await
-+        .unwrap();
-+    assert!(!responses.active_default_response);
-+    assert!(responses.pending_native_create.is_none());
-+    server.abort();
-+}
-+
-+#[tokio::test]
-+async fn media_preservation_keeps_published_continuation_until_tool_retirement() {
-+    let sdk = super::SdkRealtimeState::new("media-published".into());
-+    register_media_interrupt_test_call(&sdk, "owned", "a", true, Some("root"), None).await;
-+    sdk.preserve_admitted_tools(Some("a"), &[]).await;
-+    sdk.pending.lock().await.remove("owned");
-+    sdk.seen
-+        .lock()
-+        .await
-+        .get_mut("owned")
-+        .unwrap()
-+        .output_published = true;
-+    sdk.retire_tool_work(false, Some("a"), true).await;
-+    assert!(sdk.seen.lock().await["owned"].preserve_on_response_cancel);
-+    assert!(
-+        !sdk.function_calls.lock().await["owned"]
-+            .cancel
-+            .is_cancelled()
-+    );
-+    sdk.retire_tool_work(false, Some("a"), false).await;
-+    assert!(!sdk.seen.lock().await["owned"].preserve_on_response_cancel);
-+    assert!(
-+        sdk.function_calls.lock().await["owned"]
-+            .cancel
-+            .is_cancelled()
-+    );
-+}
-+
-+#[tokio::test]
-+async fn media_interrupt_rejection_rolls_back_only_new_protection() {
-+    let sdk = super::SdkRealtimeState::new("media-rollback".into());
-+    register_media_interrupt_test_call(&sdk, "prior", "a", true, Some("root"), None).await;
-+    sdk.preserve_admitted_tools(Some("a"), &[]).await;
-+    register_media_interrupt_test_call(&sdk, "new", "a", true, Some("root"), None).await;
-+    let attempted = sdk.preserve_admitted_tools(Some("a"), &[]).await;
-+    sdk.restore_media_preservation(&attempted).await;
-+    assert_eq!(
-+        sdk.media_independent_calls(None).await,
-+        std::collections::HashSet::from(["prior".to_owned()])
-+    );
-+    sdk.retire_tool_work(false, None, false).await;
-+    assert!(
-+        sdk.function_calls.lock().await["prior"]
-+            .cancel
-+            .is_cancelled()
-+    );
-+    assert!(sdk.function_calls.lock().await["new"].cancel.is_cancelled());
-+    assert!(sdk.media_independent_calls(None).await.is_empty());
-+}
-+
-+#[tokio::test]
-+async fn media_interrupt_preserves_shared_batch_without_protecting_other_calls() {
-+    use std::sync::atomic::{AtomicBool, Ordering};
-+    let (connection, _, server) = sdk_wire_connection().await;
-+    let sdk = super::SdkRealtimeState::new("media-shared".into());
-+    let batch = Arc::new(super::RealtimeFunctionBatch {
-+        completed: std::sync::OnceLock::new(),
-+        root_dispatch: std::sync::OnceLock::new(),
-+        response_id: "a".into(),
-+        call_ids: vec!["protected".into(), "unclaimed".into()],
-+        configuration: connection
-+            .writer()
-+            .configuration()
-+            .unwrap()
-+            .accepted()
-+            .unwrap(),
-+        handoff_pending: AtomicBool::new(false),
-+        handoff_accepted: AtomicBool::new(false),
-+        pending_create: AtomicBool::new(true),
-+        user_create: std::sync::Mutex::new(None),
-+        automatic_retired: AtomicBool::new(false),
-+        committed_target: std::sync::Mutex::new(None),
-+        update_reserved: AtomicBool::new(false),
-+        continued: AtomicBool::new(false),
-+    });
-+    register_media_interrupt_test_call(
-+        &sdk,
-+        "protected",
-+        "a",
-+        true,
-+        Some("shared"),
-+        Some(batch.clone()),
-+    )
-+    .await;
-+    register_media_interrupt_test_call(&sdk, "unclaimed", "a", false, None, Some(batch.clone()))
-+        .await;
-+    register_media_interrupt_test_call(&sdk, "other", "b", true, Some("shared"), None).await;
-+    sdk.preserve_admitted_tools(Some("a"), &[]).await;
-+    let retired = sdk.retire_tool_work(false, None, true).await;
-+    assert!(
-+        sdk.eligible_retired_roots(&retired.roots, false)
-+            .await
-+            .is_empty(),
-+        "a shared root must retain its admitted protected call"
-+    );
-+    let calls = sdk.function_calls.lock().await;
-+    assert!(!calls["protected"].cancel.is_cancelled());
-+    assert!(calls["unclaimed"].cancel.is_cancelled());
-+    assert!(calls["other"].cancel.is_cancelled());
-+    assert!(
-+        retired.batches.is_empty(),
-+        "sibling cleanup must not join the retained batch"
-+    );
-+    assert!(!batch.automatic_retired.load(Ordering::Acquire));
-+    assert!(batch.pending_create.load(Ordering::Acquire));
-+    drop(calls);
-+    sdk.retire_tool_work(true, None, true).await;
-+    assert!(!sdk.active.load(Ordering::Acquire));
-+    assert!(
-+        sdk.function_calls.lock().await["protected"]
-+            .cancel
-+            .is_cancelled()
-+    );
-+    assert!(batch.automatic_retired.load(Ordering::Acquire));
-+    server.abort();
-+}
-+
-+#[tokio::test]
-+async fn media_interrupt_does_not_admit_unowned_or_reused_legacy_handoffs() {
-+    for source in [None, Some("a")] {
-+        let sdk = super::SdkRealtimeState::new("media-owner-lag".into());
-+        assert!(sdk.register_for_response("unread", source).await.unwrap());
-+        assert!(sdk.preserve_admitted_tools(None, &[]).await.is_empty());
-+        assert!(sdk.register_for_response("owned", source).await.unwrap());
-+        let original_owner = sdk.seen.lock().await["owned"].ownership_id.clone();
-+        let captured = [(
-+            "owned".to_owned(),
-+            source.map(str::to_owned),
-+            original_owner.clone(),
-+        )];
-+        let original_grant = sdk.preserve_admitted_tools(None, &captured).await;
-+        assert_eq!(
-+            original_grant,
-+            vec![("owned".to_owned(), original_owner.clone(), false)]
-+        );
-+        sdk.seen.lock().await.shift_remove("owned");
-+        sdk.pending.lock().await.remove("owned");
-+        assert!(sdk.register_for_response("owned", source).await.unwrap());
-+        let replacement_owner = sdk.seen.lock().await["owned"].ownership_id.clone();
-+        assert_ne!(original_owner, replacement_owner);
-+        assert!(
-+            sdk.preserve_admitted_tools(None, &captured)
-+                .await
-+                .is_empty()
-+        );
-+        let replacement = [(
-+            "owned".to_owned(),
-+            source.map(str::to_owned),
-+            replacement_owner,
-+        )];
-+        let replacement_grant = sdk.preserve_admitted_tools(None, &replacement).await;
-+        assert_eq!(replacement_grant.len(), 1);
-+        sdk.restore_media_preservation(&original_grant).await;
-+        assert!(sdk.seen.lock().await["owned"].preserve_on_response_cancel);
-+        sdk.restore_media_preservation(&replacement_grant).await;
-+        assert!(!sdk.seen.lock().await["owned"].preserve_on_response_cancel);
-+    }
-+}
+@@ -2808,7 +2808,13 @@ async fn sdk_response_batch_runs_two_native_calls_under_one_source_without_model
+     assert!(
+         session
+             .conversation
+-            .claim_sdk_tools("tools-generation", "provider-response", &ids[..1], &[], "wrong")
++            .claim_sdk_tools(
++                "tools-generation",
++                "provider-response",
++                &ids[..1],
++                &[],
++                "wrong"
++            )
+             .await
+             .is_err()
+     );
+@@ -3572,6 +3578,7 @@ async fn prepared_close_with_provider_credential(missing_env: bool) {
+         Some(codex_protocol::protocol::RealtimeConversationApiKey::new(
+             "private-voice-key".into(),
+         )),
++        Default::default(),
+         reply,
+     )
+     .await;
+@@ -3626,6 +3633,7 @@ async fn sdk_malformed_credential_fails_before_native_mcp_or_transport_preparati
+         Some(codex_protocol::protocol::RealtimeConversationApiKey::new(
+             "secret\ninvalid".into(),
+         )),
++        Default::default(),
+         reply,
+     )
+     .await;
 diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
-index 1a637396edd053ca457ac377322c590279e960ec..fba304b90a0f221f8d00ad3a9196474d2d6d4818 100644
+index e1c8482d3c7f421da5ccd9d7bb59e59416c01e66..fba304b90a0f221f8d00ad3a9196474d2d6d4818 100644
 --- a/codex-rs/core/src/session/handlers.rs
 +++ b/codex-rs/core/src/session/handlers.rs
-@@ -887,6 +887,8 @@ pub(super) async fn submission_loop(
-                 }
-                 Op::RealtimeConversationInterruptSdk {
+@@ -590,10 +590,15 @@ pub(super) async fn submission_loop(
+                 Op::RealtimeConversationActivateSdk {
                      generation,
-+                    cancel_tools,
-+                    owned_handoffs,
-                     response_id,
-                     playback,
-                     feedback,
-@@ -899,6 +901,8 @@ pub(super) async fn submission_loop(
-                         None,
-                         playback,
-                         feedback,
-+                        cancel_tools,
-+                        owned_handoffs,
-                         reply,
+                     api_key,
++                    connection_options,
+                     reply,
+                 } => {
+                     crate::realtime_conversation::handle_activate_sdk(
+-                        &sess, generation, api_key, reply,
++                        &sess,
++                        generation,
++                        api_key,
++                        connection_options,
++                        reply,
                      )
                      .await;
-diff --git a/codex-rs/core/tests/suite/realtime_conversation.rs b/codex-rs/core/tests/suite/realtime_conversation.rs
-index e06f8f61b36ab0dcd1a20a1c1ddcc09c12d16fe5..53eb11f7f66896b305b5604c7608a623530238f2 100644
---- a/codex-rs/core/tests/suite/realtime_conversation.rs
-+++ b/codex-rs/core/tests/suite/realtime_conversation.rs
-@@ -1480,6 +1480,7 @@ async fn conversation_webrtc_live_reconnects_sideband_after_unclean_disconnect(
-     assert_eq!(
-         handoff,
-         RealtimeHandoffRequested {
-+            sdk_ownership_id: None,
-             response_id: None,
-             handoff_id: "handoff_reconnect".to_string(),
-             item_id: "handoff_reconnect".to_string(),
-diff --git a/codex-rs/core/tests/suite/turn_input_submission.rs b/codex-rs/core/tests/suite/turn_input_submission.rs
-index 7ac2270878c45d9b5f73e9909eb951c24973299f..7a182c086dbbd4be408726086a172d7211c30ae7 100644
---- a/codex-rs/core/tests/suite/turn_input_submission.rs
-+++ b/codex-rs/core/tests/suite/turn_input_submission.rs
-@@ -437,6 +437,7 @@ async fn host_drain_closes_realtime_after_handoff_error() -> anyhow::Result<()>
-     for expected in [
-         EventMsg::RealtimeConversationRealtime(RealtimeConversationRealtimeEvent {
-             payload: RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
-+                sdk_ownership_id: None,
-                 response_id: None,
-                 handoff_id: "rejected".to_string(),
-                 item_id: "rejected".to_string(),
+                     false
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index dcde450bb89fbadbf3565dfb386ec3f76f97066d..c6a0aaa2057c89d36eb6b011c7923b3dbe647f5c 100644
+index fe07139bb7f944b35fa0178f6d06be38eacbefad..435ac9ba9df65b84f822bb835547f6727534f3ed 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -458,6 +458,9 @@ pub struct RealtimeInterruptReceipt {
-     /// Exact tools roots whose admission is sealed and terminal cleanup has joined.
-     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-     pub joined_root_turn_ids: Vec<String>,
-+    /// Exact admitted tool calls retained by a speech-only interruption.
-+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-+    pub preserved_call_ids: Vec<String>,
+@@ -221,6 +221,20 @@ impl std::fmt::Debug for RealtimeConversationApiKey {
+     }
  }
  
- #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
-@@ -554,6 +557,8 @@ pub struct RealtimeTranscriptEntry {
- 
- #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
- pub struct RealtimeHandoffRequested {
-+    #[serde(default, skip_serializing_if = "Option::is_none")]
-+    pub sdk_ownership_id: Option<String>,
-     #[serde(default, skip_serializing_if = "Option::is_none")]
-     pub response_id: Option<String>,
-     pub handoff_id: String,
-@@ -1129,6 +1134,8 @@ pub enum Op {
-     /// SDK-owned Realtime operation, fenced by connection generation.
-     RealtimeConversationInterruptSdk {
++/// Trusted application inputs for one built-in WebSocket connection.
++/// These values are never persisted or included in diagnostics.
++#[derive(Default, Clone, serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct RealtimeConversationConnectionOptions {
++    pub url: Option<String>,
++    pub headers: Option<BTreeMap<String, String>>,
++}
++impl std::fmt::Debug for RealtimeConversationConnectionOptions {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("RealtimeConversationConnectionOptions([REDACTED])")
++    }
++}
++
+ /// Retained SDK startup receipt; it does not depend on observing lifecycle events.
+ #[derive(Debug, Clone, Serialize)]
+ pub struct RealtimeConversationStartResult {
+@@ -985,6 +999,7 @@ pub enum Op {
+     RealtimeConversationActivateSdk {
          generation: String,
-+        cancel_tools: bool,
-+        owned_handoffs: Vec<(String, Option<String>, String)>,
-         response_id: Option<String>,
-         playback: Option<RealtimePlaybackPosition>,
-         feedback: Option<String>,
+         api_key: Option<RealtimeConversationApiKey>,
++        connection_options: RealtimeConversationConnectionOptions,
+         reply: oneshot::Sender<CodexResult<RealtimeConversationStartResult>>,
+     },
+ 
+diff --git a/codex-rs/protocol/src/realtime_settings.rs b/codex-rs/protocol/src/realtime_settings.rs
+index ac3a851c22736f21c34d7bea8f6738c4fbf16d0a..c63b084273a8c97945fea19d8f8d16b0446d4c97 100644
+--- a/codex-rs/protocol/src/realtime_settings.rs
++++ b/codex-rs/protocol/src/realtime_settings.rs
+@@ -383,6 +383,9 @@ pub enum RealtimeImageDetail {
+ #[serde(tag = "type", rename_all = "snake_case")]
+ pub enum RealtimeTurnDetection {
+     ServerVad {
++        /// Vendor tuning merged only inside this VAD object; typed keys are protected.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        provider_data: Option<BTreeMap<String, Value>>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         model_version: Option<String>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -399,6 +402,8 @@ pub enum RealtimeTurnDetection {
+         idle_timeout_ms: Option<u32>,
+     },
+     SemanticVad {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        provider_data: Option<BTreeMap<String, Value>>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         model_version: Option<String>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]

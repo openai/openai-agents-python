@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
-index d1b0ab89756d38579d0d976ee72a5ee80cc216f2..0498fcce2f7792c415725c18591ce6c5cb4dd842 100644
+index 09731cd0dfd6a92334913baa44b1bfe8a54d2047..cf0d580ec2aa3a8b72b0f9d586e413d0110a2997 100644
 --- a/codex-rs/app-server/src/bespoke_event_handling.rs
 +++ b/codex-rs/app-server/src/bespoke_event_handling.rs
 @@ -869,6 +869,7 @@ pub(crate) async fn apply_bespoke_event_handling(
@@ -4840,7 +4840,7 @@ index 2e2735ba2138174ee9736dc7c8b3e1de83398f2e..1acd116f119642a1556a78d84cc70c2a
      assert_eq!(
          (reloaded_instructions.user, reloaded_instructions.thread),
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 859d1cd0ad4db87b8b6b5b0b90c5e6d83265c80f..80dc5e608f85856650f50abe12552e1430549373 100644
+index e6159f969a2b11e829401cd7b0e0860951c36fd2..8ef4b0bf834fda94d95f4257841bcf943b43a053 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -71,6 +71,7 @@ use codex_thread_store::ThreadStoreResult;
@@ -4878,7 +4878,7 @@ index 859d1cd0ad4db87b8b6b5b0b90c5e6d83265c80f..80dc5e608f85856650f50abe12552e14
      /// Returns extension-owned data attached to this thread runtime.
      pub fn thread_extension_data(&self) -> &codex_extension_api::ExtensionData {
          &self.session.services.thread_extension_data
-@@ -1131,6 +1145,74 @@ impl CodexThread {
+@@ -1129,6 +1143,74 @@ impl CodexThread {
          self.session.inspect_selected_capability_roots()
      }
  
@@ -5397,7 +5397,7 @@ index af9d3d05b6c73edb90d0282350ad87a8903e9c38..d63a7c23097e7ce1fea5cfdf5f11f0de
                  &turn_context.config,
                  auth.as_ref(),
 diff --git a/codex-rs/core/src/mcp_tool_call_tests.rs b/codex-rs/core/src/mcp_tool_call_tests.rs
-index b0d029dcf471d028319062e3c7df9bd24e3b9c9b..9b85b3c2d7d66ebd79215f3770935d319a38425e 100644
+index 5aec67a19310da2ba51005b5559847a03c5abd6d..c09af8f45f2d29d21b6815b0346d236879d6369b 100644
 --- a/codex-rs/core/src/mcp_tool_call_tests.rs
 +++ b/codex-rs/core/src/mcp_tool_call_tests.rs
 @@ -1585,6 +1585,91 @@ fn codex_apps_auth_classification_requires_the_trusted_server_and_connector() {
@@ -7231,7 +7231,7 @@ index 28c099f20527a299e453894fb630d835a6a8d9e9..7a13517f30b86ccc3f0740024b6d3c3c
 +    );
 +}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 3046f1b8d91f6a090908cb2af6cb4e22c4ad95d0..d8ffb4ef7cd8f299009d3ff445f34c162cf41536 100644
+index 5256df2414b06a51fa02dec61fb588304c92968c..0e8369c388c2a7afad537c49207e67726bd23996 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -245,6 +245,7 @@ mod reasoning_effort;
@@ -7242,7 +7242,7 @@ index 3046f1b8d91f6a090908cb2af6cb4e22c4ad95d0..d8ffb4ef7cd8f299009d3ff445f34c16
  mod input_queue;
  mod mcp;
  mod mcp_prewarm;
-@@ -647,6 +648,20 @@ impl Session {
+@@ -648,6 +649,20 @@ impl Session {
              )
          };
  
@@ -7263,7 +7263,7 @@ index 3046f1b8d91f6a090908cb2af6cb4e22c4ad95d0..d8ffb4ef7cd8f299009d3ff445f34c16
          let mut config = Arc::new(config);
          let refresh_strategy = if session_source.is_non_root_agent() {
              codex_models_manager::manager::RefreshStrategy::Offline
-@@ -2296,8 +2311,10 @@ impl Session {
+@@ -2291,8 +2306,10 @@ impl Session {
          self.services
              .rollout_thread_trace
              .record_tool_call_event(turn_context.sub_id.clone(), &legacy_source);
@@ -7275,7 +7275,7 @@ index 3046f1b8d91f6a090908cb2af6cb4e22c4ad95d0..d8ffb4ef7cd8f299009d3ff445f34c16
              msg,
          };
          // Private reviewers have no app-server listener; publicly resumed Guardian threads do.
-@@ -2786,7 +2803,23 @@ impl Session {
+@@ -2780,7 +2797,23 @@ impl Session {
              let mut active = self.active_turn.lock().await;
              match active.as_mut() {
                  Some(at) => {
@@ -7299,7 +7299,7 @@ index 3046f1b8d91f6a090908cb2af6cb4e22c4ad95d0..d8ffb4ef7cd8f299009d3ff445f34c16
                      ts.insert_pending_approval(effective_approval_id.clone(), tx_approve)
                  }
                  None => None,
-@@ -2870,7 +2903,23 @@ impl Session {
+@@ -2864,7 +2897,23 @@ impl Session {
              let mut active = self.active_turn.lock().await;
              match active.as_mut() {
                  Some(at) => {
@@ -7358,10 +7358,10 @@ index 8d16c6b9fc235cbfe0ad0fb03e60a47ddc1010f4..f4663fbfadf7f31e8c2de7407d5e3e64
              sess.follow_inherited_environment_configurations(
                  &inherited_environments,
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index c4f1b3d851cdb1dfd57aa07e6b7bff73f21095da..ef861ed4de8cdd71d2506e049dc35b38cc4012ee 100644
+index 5c504e47e3458beb1888e159a586209195e1af55..fdde2ca9c317baf954fa9e4a733e2d3b73719d1f 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -2109,7 +2109,8 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventTex
+@@ -2158,7 +2158,8 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventTex
                  .ok()
                  .map(|request| RealtimeEventText::Handoff(format!("{message}\n\n{request}"), None))
          }
@@ -7954,7 +7954,7 @@ index 1a409c4931c6b1e538224f0f694f05309fea41da..6c72351b9b6c9854082b67166235bf94
  /// MCP extensions supplied by the client that created a Codex session.
  #[derive(Clone, Debug, Default, Eq, PartialEq)]
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index b3b5f3aaf3619f176c15b19b70f97f0fce1a0e69..d79d21f78249f186d55f2f958d2ef440829f30e4 100644
+index 8277ed8384f0ac2380f8edfb2bcb8a8bea70b43c..2f3003e58fe5754c3963708b7c235cf5741492a2 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
 @@ -1495,6 +1495,13 @@ pub enum EventMsg {

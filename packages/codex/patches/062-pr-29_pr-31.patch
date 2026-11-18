@@ -1,0 +1,169 @@
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index 0ca5b826e82299be836f93ef2fc78ebf0e9ceee6..f568624766818632511d290aff46bcbe1d37bf7e 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -1534,6 +1534,12 @@ impl RealtimeWebsocketEvents {
+                                 RealtimeEvent::ResponseCreated(event) => {
+                                     event.profile_receipt = receipt
+                                 }
++                                RealtimeEvent::ResponseDone(event) => {
++                                    event.profile_receipt = receipt
++                                }
++                                RealtimeEvent::ResponseCancelled(event) => {
++                                    event.profile_receipt = receipt
++                                }
+                                 RealtimeEvent::AudioOut(event) => event.profile_receipt = receipt,
+                                 RealtimeEvent::OutputTranscriptDelta(event) => {
+                                     event.profile_receipt = receipt
+@@ -3583,6 +3589,7 @@ mod tests {
+             parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
+             Some(RealtimeEvent::ResponseCancelled(
+                 RealtimeResponseCancelled {
++                    profile_receipt: None,
+                     response_id: Some("resp_cancelled_1".to_string()),
+                 }
+             ))
+@@ -3608,6 +3615,7 @@ mod tests {
+         assert_eq!(
+             parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
+             Some(RealtimeEvent::ResponseDone(RealtimeResponseDone {
++                profile_receipt: None,
+                 usage: None,
+                 function_call_ids: Vec::new(),
+                 response_id: None
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
+index ac8d1b02cc34b8e437a2324fcedb7cd6cbaf44da..0b81667c774b269e3aa99a4af296d0509dea3c16 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
+@@ -82,10 +82,12 @@ pub(super) fn parse_realtime_event_v2(payload: &str) -> Option<RealtimeEvent> {
+         })),
+         "response.cancelled" => Some(RealtimeEvent::ResponseCancelled(
+             RealtimeResponseCancelled {
++                profile_receipt: None,
+                 response_id: parse_response_event_response_id(&parsed),
+             },
+         )),
+         "response.done" => Some(RealtimeEvent::ResponseDone(RealtimeResponseDone {
++            profile_receipt: None,
+             usage: parsed
+                 .get("response")
+                 .and_then(|response| response.get("usage"))
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 2abbd62a8d4992680ac0a933a287f7b54473c1f1..e4a67869c7b2427f9f5aaa55a59180472fbdedb1 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -6065,7 +6065,7 @@ async fn handle_sdk_realtime_command(
+                 text
+             };
+             writer
+-                .send_conversation_function_call_output(call_id.clone(), text)
++                .send_conversation_function_call_output(call_id.clone(), text.clone())
+                 .await?;
+             if sdk.pending.lock().await.remove(&call_id) != Some(true) {
+                 return Ok(());
+@@ -6081,6 +6081,7 @@ async fn handle_sdk_realtime_command(
+                 .send(RealtimeEvent::FunctionCallFinished {
+                     call_id: call_id.clone(),
+                     succeeded: succeeded && !cancelled,
++                    output: Some(text),
+                 })
+                 .await
+                 .context("SDK function status route closed")?;
+@@ -6139,6 +6140,7 @@ async fn handle_sdk_realtime_command(
+                     .send(RealtimeEvent::FunctionCallFinished {
+                         call_id: handoff_id.clone(),
+                         succeeded: false,
++                        output: Some(failure.to_owned()),
+                     })
+                     .await
+                     .context("SDK function status route closed")?;
+diff --git a/codex-rs/core/src/realtime_conversation/item_deletion.rs b/codex-rs/core/src/realtime_conversation/item_deletion.rs
+index ce0d8bcbf67f278a8bcc392f99754f67f9de9ed4..e65fc491ee28fec99a753e9b43d44c1644165356 100644
+--- a/codex-rs/core/src/realtime_conversation/item_deletion.rs
++++ b/codex-rs/core/src/realtime_conversation/item_deletion.rs
+@@ -661,6 +661,7 @@ mod tests {
+             .observe(&RealtimeEvent::FunctionCallFinished {
+                 call_id: "native-call".into(),
+                 succeeded: true,
++                output: None,
+             })
+             .unwrap();
+         state.admit_retrieved_item(&value).unwrap();
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index 46926db3d08647dbd1e14148c51d349c887a34b4..c417577cc5ea10fad110395f3b674744d0b4fab1 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -2230,6 +2230,7 @@ async fn sdk_function_duplicates_never_bind_to_latest_response() {
+         }),
+         RealtimeEvent::FunctionCallRequested(request.clone()),
+         RealtimeEvent::ResponseDone(RealtimeResponseDone {
++            profile_receipt: None,
+             usage: None,
+             response_id: Some("A".into()),
+             // The uncorrelated call is not an authoritative member of A.
+@@ -2654,12 +2655,14 @@ async fn sdk_stale_response_terminal_does_not_release_active_response_or_create_
+     responses.pending_create = true;
+     for event in [
+         codex_api::RealtimeEvent::ResponseDone(codex_protocol::protocol::RealtimeResponseDone {
++            profile_receipt: None,
+             usage: None,
+             response_id: Some("stale".into()),
+             function_call_ids: Vec::new(),
+         }),
+         codex_api::RealtimeEvent::ResponseCancelled(
+-            codex_protocol::protocol::RealtimeResponseCancelled { response_id: None },
++            codex_protocol::protocol::RealtimeResponseCancelled {
++                profile_receipt: None, response_id: None },
+         ),
+     ] {
+         super::handle_realtime_server_event(
+@@ -2795,6 +2798,7 @@ async fn sdk_response_batch_runs_two_native_calls_under_one_source_without_model
+     })
+     .await;
+     let done = RealtimeEvent::ResponseDone(RealtimeResponseDone {
++        profile_receipt: None,
+         usage: None,
+         response_id: Some("provider-response".into()),
+         function_call_ids: ids.clone(),
+@@ -3250,6 +3254,7 @@ async fn sdk_handoff_ack_race(interrupt: bool, queued_user: bool) {
+         batch.handoff_accepted.store(true, Ordering::Release);
+         let stale = codex_api::RealtimeEvent::ResponseDone(
+             codex_protocol::protocol::RealtimeResponseDone {
++                profile_receipt: None,
+                 usage: None,
+                 response_id: Some("stale-response".into()),
+                 function_call_ids: Vec::new(),
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index f848ed3fdcc46d047fdece807ab3c64b4cd5c584..fe07139bb7f944b35fa0178f6d06be38eacbefad 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -584,6 +584,9 @@ pub struct RealtimeInputAudioSpeechStarted {
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+ pub struct RealtimeResponseCancelled {
++    /// The retained configuration that issued this response.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub profile_receipt: Option<crate::agent_profile::AgentProfileReceipt>,
+     pub response_id: Option<String>,
+ }
+ 
+@@ -644,6 +647,9 @@ pub struct RealtimeHostedMcpCallCompleted {
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+ pub struct RealtimeResponseDone {
++    /// The retained configuration that issued this response.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub profile_receipt: Option<crate::agent_profile::AgentProfileReceipt>,
+     /// Provider-reported counters. Absence is unknown, never a measured zero.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub usage: Option<Value>,
+@@ -755,6 +761,9 @@ pub enum RealtimeEvent {
+     FunctionCallFinished {
+         call_id: String,
+         succeeded: bool,
++        /// Exact model-visible text accepted by the native output writer.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        output: Option<String>,
+     },
+     /// Correlated unavailable function output, published without executing a callback.
+     FunctionCallRejected {

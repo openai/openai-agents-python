@@ -1,0 +1,1714 @@
+diff --git a/codex-rs/core/src/agent/control/completion.rs b/codex-rs/core/src/agent/control/completion.rs
+index 8e041dcf70ce0c974d7cd99137c4f4c1c56ca3cb..4712f7104851634818f5693eb094814652de4848 100644
+--- a/codex-rs/core/src/agent/control/completion.rs
++++ b/codex-rs/core/src/agent/control/completion.rs
+@@ -116,15 +116,19 @@ impl LocalAgentControl {
+         );
+         let context =
+             AgentCommunicationContext::new(AgentCommunicationKind::Result, outcome.thread_id);
+-        if let Err(err) = self
+-            .send_inter_agent_communication(
++        // Canonical completion activity above must finish even during shutdown. Queue-only
++        // notification is best effort: a canceled parent's bounded SQ is no longer drained.
++        let delivery = tokio::select! {
++            biased;
++            _ = self.runtime.shutdown.cancelled() => return,
++            result = self.send_inter_agent_communication(
+                 parent_thread_id,
+                 communication,
+                 context,
+                 TurnStartOptions::default(),
+-            )
+-            .await
+-        {
++            ) => result,
++        };
++        if let Err(err) = delivery {
+             debug!("failed to notify parent thread {parent_thread_id}: {err}");
+             return;
+         }
+diff --git a/codex-rs/core/src/agent/control/runtime.rs b/codex-rs/core/src/agent/control/runtime.rs
+index bf50a59550618f6196d93a6d96b78938b56c0136..4a37b39d14e72d099a3bd3c03230fdf3aaaeaa17 100644
+--- a/codex-rs/core/src/agent/control/runtime.rs
++++ b/codex-rs/core/src/agent/control/runtime.rs
+@@ -28,6 +28,8 @@ use tokio_util::task::task_tracker::TaskTrackerToken;
+ #[derive(Debug, Default)]
+ pub(crate) struct AgentTreeShutdownState {
+     members: TaskTracker,
++    // Physical task futures include detached completion delivery and final persistence.
++    tasks: TaskTracker,
+     failed: AtomicBool,
+     managed_process_shutdown_failed: AtomicBool,
+ }
+@@ -216,7 +218,28 @@ impl LocalAgentRuntime {
+         Ok(membership)
+     }
+ 
++    /// Owns the whole task future, including terminal delivery after its active slot is cleared.
++    pub(crate) fn admit_task(&self) -> Option<TaskTrackerToken> {
++        if self.shutdown_state.tasks.is_closed() || self.shutdown.is_cancelled() {
++            return None;
++        }
++        let task = self.shutdown_state.tasks.token();
++        // TaskTracker tokens can be created after close. A racing registration must either
++        // retain the barrier before it closes or refuse to start any task afterward.
++        if self.shutdown_state.tasks.is_closed() || self.shutdown.is_cancelled() {
++            return None;
++        }
++        Some(task)
++    }
++
++    pub(crate) async fn wait_for_tasks_before_writer_shutdown(&self) {
++        if self.shutdown_state.tasks.is_closed() {
++            self.shutdown_state.tasks.wait().await;
++        }
++    }
++
+     pub(crate) fn request_shutdown(&self) -> Arc<AgentTreeShutdownState> {
++        self.shutdown_state.tasks.close();
+         self.shutdown_state.members.close();
+         self.shutdown.cancel();
+         self.mailboxes.close();
+diff --git a/codex-rs/core/src/agent/control/runtime_tests.rs b/codex-rs/core/src/agent/control/runtime_tests.rs
+index 6f035271936b4fec7c9c315ade6e052fd4e2d9e7..23de453fd6955ce690bf79a0fc3bcdcd18dbc1ac 100644
+--- a/codex-rs/core/src/agent/control/runtime_tests.rs
++++ b/codex-rs/core/src/agent/control/runtime_tests.rs
+@@ -54,3 +54,28 @@ async fn managed_process_shutdown_waits_for_members_and_reports_failure() {
+         .await
+         .expect_err("tree shutdown also failed");
+ }
++
++#[tokio::test]
++async fn writer_shutdown_joins_tasks_without_waiting_for_session_membership() {
++    let runtime = LocalAgentRuntime::new(Weak::default(), default_thread_id_generator(), None);
++    let session = runtime.admit_start().expect("session admitted");
++    let task = runtime.admit_task().expect("task admitted");
++    let shutdown = runtime.request_shutdown();
++    assert!(
++        runtime.admit_task().is_none(),
++        "tree fence rejects later tasks"
++    );
++    let writers = runtime.wait_for_tasks_before_writer_shutdown();
++    futures::pin_mut!(writers);
++    assert!(futures::poll!(writers.as_mut()).is_pending());
++    drop(task);
++    writers.await;
++    // The live session still owns its writer. Waiting for sessions here would deadlock.
++    let sessions = shutdown.wait();
++    futures::pin_mut!(sessions);
++    assert!(futures::poll!(sessions.as_mut()).is_pending());
++    drop(session);
++    sessions
++        .await
++        .expect("session teardown finishes separately");
++}
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 6b5ebc4d090b9ca0d4d16d2e43df215be93d50be..e8444181c92a8d46eb6a4270b4e346b244f73ff9 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -5808,3 +5808,134 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails()
+         .await
+         .expect("tree shutdown after partial subtree resume should succeed");
+ }
++
++#[tokio::test]
++async fn tree_shutdown_preserves_sibling_completion_activity_with_full_parent_queue() {
++    let harness = AgentControlHarness::new().await;
++    let (parent_id, original_parent) = harness.start_thread().await;
++    let runtime = original_parent.session.services.local_agent_runtime.clone();
++    let control = runtime.control(Default::default());
++    let state = runtime.upgrade().expect("manager lives");
++    // Replace only the loaded parent's SQ. Retain its real sender so the actual session
++    // loop stays alive and can exercise tree shutdown while this bounded fixture stays full.
++    let registered = state
++        .threads
++        .write()
++        .await
++        .remove(&parent_id)
++        .expect("registered parent");
++    drop(original_parent);
++    let mut parent = match Arc::try_unwrap(registered) {
++        Ok(parent) => parent,
++        Err(_) => panic!("fixture parent unexpectedly shared"),
++    };
++    let (tx_sub, _rx_sub) = async_channel::bounded(1);
++    let _original_sender = std::mem::replace(&mut parent.io.tx_sub, tx_sub.clone());
++    tx_sub
++        .try_send(crate::session::Submission {
++            id: "fill-parent-queue".to_owned(),
++            op: Op::ReloadUserConfig,
++            trace: None,
++            turn_extension_init: None,
++            parent_turn_id: None,
++            root_turn_id: None,
++            residency_guard: None,
++        })
++        .expect("fill parent queue");
++    let parent = Arc::new(parent);
++    state
++        .threads
++        .write()
++        .await
++        .insert(parent_id, parent.clone());
++    let first_token = runtime
++        .admit_task()
++        .expect("first child finalizer admitted");
++    let second_token = runtime
++        .admit_task()
++        .expect("second child finalizer admitted");
++    let outcome = |turn: &str| crate::agent::api::AgentTurnOutcome {
++        thread_id: ThreadId::new(),
++        turn_id: turn.to_owned(),
++        source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++            parent_thread_id: parent_id,
++            depth: 1,
++            agent_path: Some(AgentPath::try_from(format!("/root/{turn}")).expect("child path")),
++            agent_nickname: None,
++            agent_role: None,
++        }),
++        parent_turn_id: Some("parent-turn".to_owned()),
++        initiating_agent_path: None,
++        status: AgentStatus::Completed(Some("finished".to_owned())),
++        error_info: None,
++    };
++    let first = outcome("first");
++    let first_control = control.clone();
++    let first_delivery = tokio::spawn(async move {
++        let _task = first_token;
++        first_control
++            .notify_parent_of_terminal_turn(
++                first,
++                &codex_rollout_trace::ThreadTraceContext::disabled(),
++            )
++            .await;
++    });
++    // Observing the real completion event proves its canonical append preceded the
++    // queue-only notification. The notification then parks on the full parent SQ.
++    timeout(Duration::from_secs(5), async {
++        loop {
++            if let EventMsg::ItemCompleted(event) =
++                parent.next_event().await.expect("parent event").msg
++                && event.item.id() == "subagent-completed-first"
++            {
++                break;
++            }
++        }
++    })
++    .await
++    .expect("first activity persisted");
++    assert!(
++        !first_delivery.is_finished(),
++        "full queue must park notification"
++    );
++    runtime.request_shutdown();
++    timeout(Duration::from_secs(5), first_delivery)
++        .await
++        .expect("cancellation releases queued notification")
++        .expect("first finalizer");
++    // The first rejected notification must not evict the still-live parent from the
++    // manager. Its writer remains available for the independently finishing sibling.
++    assert!(
++        state.get_thread(parent_id).await.is_ok(),
++        "parent retained during finalizers"
++    );
++    {
++        let _task = second_token;
++        control
++            .notify_parent_of_terminal_turn(
++                outcome("second"),
++                &codex_rollout_trace::ThreadTraceContext::disabled(),
++            )
++            .await;
++    }
++    timeout(
++        Duration::from_secs(5),
++        parent.io.session_loop_termination.clone(),
++    )
++    .await
++    .expect("writer shutdown after both finalizers");
++    let (history, _, parse_errors) = codex_rollout::RolloutRecorder::load_rollout_items(
++        &parent.rollout_path().expect("local parent rollout"),
++    )
++    .await
++    .expect("read canonical history after writer close");
++    assert_eq!(parse_errors, 0, "canonical history parses cleanly");
++    for turn in ["first", "second"] {
++        let id = format!("subagent-completed-{turn}");
++        assert_eq!(history.iter().filter(|item| matches!(item,
++            RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
++                if matches!(&event.item, TurnItem::SubAgentActivity(activity)
++                    if activity.id == id && activity.kind == codex_protocol::protocol::SubAgentActivityKind::Completed)
++        )).count(), 1, "one durable sibling completion after close: {turn}");
++    }
++}
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index f7f2376c537e33f87a240caf1d1ffc132b3595d3..f50892eca9a6505244c582d393d1dee0a93e01be 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -844,6 +844,7 @@ async fn drain_to_completed(
+     prompt: &Prompt,
+     phase: CompactionPhase,
+ ) -> CodexResult<CompactionResponse> {
++    sess.ensure_rollout_durable().await?;
+     let mut stream = client_session
+         .stream(
+             prompt,
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 289e77118b53854d43593b774c283f8096cda796..58fa41947881c8f465c506a32cac58ab173b8f71 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -407,6 +407,7 @@ async fn run_remote_compaction_request_v2(
+         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
+     let mut retry_state = ResponsesStreamRetryState::default();
+     loop {
++        sess.ensure_rollout_durable().await?;
+         let result = match client_session
+             .stream(
+                 prompt,
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index 6d9ef6062d18204471842512af5b0c01baa04bf1..ae32eac33a093d535792d4aa82d072dc089e09d0 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -298,6 +298,21 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
+     }
+     let _ = sess.conversation.shutdown().await;
+     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
++    {
++        // A normally completed task can already have detached its active handle. Join its
++        // terminal delivery and idle flush before any shutdown work releases the writer.
++        let finalization = sess
++            .services
++            .thread_extension_data
++            .get_or_init(crate::tasks::TaskFinalization::default);
++        let _finalization = finalization.0.lock().await;
++    }
++    // Tree cancellation keeps all writers open until every task has delivered its child
++    // completion activity. The session-members tracker is deliberately a separate barrier.
++    sess.services
++        .local_agent_runtime
++        .wait_for_tasks_before_writer_shutdown()
++        .await;
+     let shell_snapshot_prewarm = sess.state.lock().await.shell_snapshot_prewarm.take();
+     if let Some(shell_snapshot_prewarm) = shell_snapshot_prewarm {
+         shell_snapshot_prewarm.abort();
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 98fa5b847ea82f40c104da39d900837247deb2fe..7fb3e7d9c504b278562f223da58232f04647dcda 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -1468,6 +1468,20 @@ impl Session {
+         }
+     }
+ 
++    /// Fence accepted history before dependent model or tool execution.
++    pub(crate) async fn ensure_rollout_durable(&self) -> CodexResult<()> {
++        let failure = |_| {
++            CodexErr::Fatal(
++                "Canonical thread persistence failed; execution stopped pending recovery"
++                    .to_string(),
++            )
++        };
++        self.try_ensure_rollout_materialized(PersistContext::Standard)
++            .await
++            .map_err(failure)?;
++        self.flush_rollout().await.map_err(failure)
++    }
++
+     pub(crate) async fn try_ensure_rollout_materialized(
+         &self,
+         context: PersistContext,
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index f8ecd654e7dcaa048f5e62c37c5239fff40a8058..1e27983f17cf538391e6014b366f8ea9bc861e2b 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -67,6 +67,8 @@ use codex_model_provider_info::built_in_model_providers;
+ use codex_models_manager::model_info;
+ use codex_models_manager::test_support::construct_model_info_offline_for_tests;
+ use codex_models_manager::test_support::get_model_offline_for_tests;
++use codex_otel::current_span_w3c_trace_context;
++use codex_otel::set_parent_from_w3c_trace_context;
+ use codex_prompts::render_model_instructions;
+ use codex_protocol::AgentPath;
+ use codex_protocol::ResponseItemId;
+@@ -13680,3 +13682,188 @@ async fn response_integrity_reason_tracks_the_originating_terminal_error_event()
+ }
+ #[path = "context_metadata_tests.rs"]
+ mod context_metadata_tests;
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn interrupting_regular_error_publication_uses_the_abort_owner() {
++    use crate::session::turn::ReportedTurnError;
++    use tokio::sync::Notify;
++
++    struct ErrorGate {
++        entered: Arc<Notify>,
++        release: Arc<Notify>,
++    }
++    impl codex_extension_api::TurnLifecycleContributor for ErrorGate {
++        fn on_turn_error<'a>(
++            &'a self,
++            _input: codex_extension_api::TurnErrorInput<'a>,
++        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
++            Box::pin(async move {
++                self.entered.notify_one();
++                self.release.notified().await;
++            })
++        }
++    }
++    struct Dropped(Arc<Notify>);
++    impl Drop for Dropped {
++        fn drop(&mut self) {
++            self.0.notify_one();
++        }
++    }
++    struct ObservedRegularTask(Arc<Notify>);
++    impl SessionTask for ObservedRegularTask {
++        fn kind(&self) -> TaskKind {
++            TaskKind::Regular
++        }
++        fn span_name(&self) -> &'static str {
++            "test.regular_error_publication"
++        }
++        async fn run(
++            self: Arc<Self>,
++            session: Arc<Session>,
++            turn: Arc<TurnContext>,
++            input: Vec<TurnInput>,
++            cancellation: CancellationToken,
++        ) -> SessionTaskResult {
++            let _dropped = Dropped(Arc::clone(&self.0));
++            Arc::new(crate::tasks::RegularTask::new())
++                .run(session, turn, input, cancellation)
++                .await
++        }
++    }
++
++    tokio::time::timeout(Duration::from_secs(30), async {
++        for hold_delivery in [false, true] {
++            let (server, _) = start_streaming_sse_server(vec![vec![StreamingSseChunk {
++                gate: None,
++                body: responses::sse_failed(
++                    "bounded-error-response",
++                    "server_error",
++                    "bounded fixture failure",
++                ),
++            }]])
++            .await;
++            let mut provider = built_in_model_providers(None)["openai"].clone();
++            provider.base_url = Some(format!("{}/v1", server.uri()));
++            provider.supports_websockets = false;
++            provider.request_max_retries = Some(0);
++            provider.stream_max_retries = Some(0);
++            let uri = server.uri().to_string();
++            let (mut session, turn, _) = make_session_and_context_with_auth_and_config_and_rx(
++                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++                Vec::new(),
++                move |config| {
++                    config.model = Some("gpt-5.2".to_string());
++                    config.model_provider = provider;
++                    config.chatgpt_base_url = uri;
++                    let _ = config.features.disable(Feature::TokenBudget);
++                    let _ = config.features.disable(Feature::EnableRequestCompression);
++                },
++            )
++            .await;
++            let entered = Arc::new(Notify::new());
++            let release = Arc::new(Notify::new());
++            let dropped = Arc::new(Notify::new());
++            let mut builder = codex_extension_api::ExtensionRegistryBuilder::<Config>::new();
++            builder.turn_lifecycle_contributor(Arc::new(ErrorGate {
++                entered: Arc::clone(&entered),
++                release: Arc::clone(&release),
++            }));
++            // A bounded event channel lets the test hold Error delivery without
++            // replacing send_event or constructing a publication marker itself.
++            let (tx, events) = async_channel::bounded(1);
++            let inner = Arc::get_mut(&mut session).expect("unshared test session");
++            inner.services.extensions = Arc::new(builder.build());
++            inner.tx_event = tx;
++            session
++                .spawn_task(
++                    Arc::clone(&turn),
++                    vec![TurnInput::UserInput {
++                        metadata: Default::default(),
++                        content: vec![UserInput::Text {
++                            text: "fail one real sampling request".to_string(),
++                            text_elements: Vec::new(),
++                        }],
++                        client_id: None,
++                    }],
++                    ObservedRegularTask(Arc::clone(&dropped)),
++                )
++                .await;
++            let mut observed = Vec::new();
++            loop {
++                tokio::select! {
++                    _ = entered.notified() => break,
++                    event = events.recv() => observed.push(event.expect("turn event").msg),
++                }
++            }
++            while let Ok(event) = events.try_recv() {
++                observed.push(event.msg);
++            }
++            if hold_delivery {
++                session
++                    .tx_event
++                    .try_send(Event {
++                        id: turn.sub_id.clone(),
++                        msg: EventMsg::Warning(WarningEvent {
++                            message: "test delivery gate".to_string(),
++                        }),
++                    })
++                    .expect("fill the single event slot while lifecycle is held");
++                release.notify_one();
++                // send_event sets status before its awaited publication path.
++                // The full channel prevents that Error from reaching its receiver.
++                while turn.terminal_error.lock().await.is_none() {
++                    tokio::task::yield_now().await;
++                }
++            }
++            assert!(turn.extension_data.get::<ReportedTurnError>().is_none());
++            let abort = tokio::spawn({
++                let session = Arc::clone(&session);
++                async move {
++                    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
++                }
++            });
++            // Wait for the actual RegularTask future to drop before opening
++            // delivery; it must not publish a late Error when capacity returns.
++            dropped.notified().await;
++            assert!(turn.extension_data.get::<ReportedTurnError>().is_none());
++            loop {
++                let event = events.recv().await.expect("abort owner event");
++                let terminal = matches!(event.msg, EventMsg::TurnAborted(_));
++                observed.push(event.msg);
++                if terminal {
++                    break;
++                }
++            }
++            abort.await.expect("joined abort owner");
++            while let Ok(event) = events.try_recv() {
++                observed.push(event.msg);
++            }
++            assert_eq!(
++                observed
++                    .iter()
++                    .filter(|event| matches!(event, EventMsg::Error(_)))
++                    .count(),
++                0
++            );
++            assert_eq!(
++                observed
++                    .iter()
++                    .filter(|event| matches!(event, EventMsg::TurnComplete(_)))
++                    .count(),
++                0
++            );
++            assert_eq!(
++                observed
++                    .iter()
++                    .filter(|event| matches!(event, EventMsg::TurnAborted(_)))
++                    .count(),
++                1
++            );
++            assert_eq!(server.requests().await.len(), 1);
++            assert!(session.active_turn.lock().await.is_none());
++            server.shutdown().await;
++        }
++    })
++    .await
++    .expect("bounded real publication cancellation must settle");
++}
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index c914b03a376a197645213dc90fd0087c2bdcf8dc..39e4926b2e8445de32bbed6f94bcb3fcde22ccb2 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -142,6 +142,10 @@ use tracing::warn;
+ 
+ const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
+ 
++/// The regular turn owner finished its error lifecycle and event publication attempt.
++/// Stored only in this turn's live ExtensionData, never in a turn initializer or history.
++pub(crate) struct ReportedTurnError;
++
+ /// Explicit MCP startup requirements retained across restarts within one user turn.
+ #[derive(Default)]
+ pub(crate) struct McpStartupRequirements {
+@@ -220,6 +224,7 @@ pub(crate) async fn run_turn(
+             EventMsg::Error(err.to_error_event(message_prefix)),
+         )
+         .await;
++        turn_context.extension_data.insert(ReportedTurnError);
+         error!("Failed to run pre-sampling compact");
+         return Ok(None);
+     }
+@@ -875,6 +880,7 @@ pub(crate) async fn run_turn(
+                     codex_error_info: Some(error),
+                 });
+                 sess.send_event(&turn_context, event).await;
++                turn_context.extension_data.insert(ReportedTurnError);
+                 break;
+             }
+             Err(e) => {
+@@ -891,6 +897,7 @@ pub(crate) async fn run_turn(
+                 sess.track_turn_codex_error(turn_context.as_ref(), &e);
+                 let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
+                 sess.send_event(&turn_context, event).await;
++                turn_context.extension_data.insert(ReportedTurnError);
+                 // let the user continue the conversation
+                 break;
+             }
+@@ -2638,9 +2645,7 @@ async fn drain_in_flight(
+                 sess.record_tool_result(turn_context, &step_context.settings.model_info, result)
+                     .await;
+             }
+-            Err(err) => {
+-                error_or_panic(format!("in-flight tool future failed during drain: {err}"));
+-            }
++            Err(err) => return Err(err),
+         }
+     }
+     Ok(())
+@@ -2740,6 +2745,8 @@ async fn try_run_sampling_request(
+             turn_context.extension_data.insert(LastSdkReceipt(receipt));
+         }
+     }
++    // Every request, including a stream retry, depends on accepted durable history.
++    sess.ensure_rollout_durable().await?;
+     let mut stream = client_session
+         .stream(
+             prompt,
+@@ -3383,6 +3390,9 @@ async fn try_run_sampling_request(
+         drain_in_flight(&mut in_flight, sess.clone(), &step_context).await?;
+     }
+ 
++    // Tool effects have completed. Save their results before any dependent work.
++    sess.ensure_rollout_durable().await?;
++
+     if should_emit_token_count {
+         // A tool call such as request_user_input can intentionally pause the turn. Emit token
+         // counts only after pending tools resolve so clients do not see progress events while the
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 32a4adbbce586d4f0a0e7a7cb6f92abf3e45553e..4e7f1e8aff62f22697f06448932421f9373ef01e 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -31,6 +31,7 @@ use crate::context::ContextualUserFragment;
+ use crate::hook_runtime::run_turn_interrupt_hooks;
+ use crate::session::TurnInput;
+ use crate::session::session::Session;
++use crate::session::turn::ReportedTurnError;
+ use crate::session::turn::run_hooks_and_record_inputs;
+ use crate::session::turn_context::NewTurnContextOptions;
+ use crate::session::turn_context::TurnContext;
+@@ -60,6 +61,7 @@ use codex_protocol::protocol::WarningEvent;
+ use codex_thread_store::PersistContext;
+ 
+ use codex_features::Feature;
++use codex_protocol::error::CodexErr;
+ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::error::Result as CodexResult;
+ pub(crate) use compact::CompactTask;
+@@ -75,6 +77,10 @@ static ACTIVE_TURNS: Gauge = Gauge::new("core.turns.active");
+ 
+ pub(crate) type SessionTaskResult = CodexResult<Option<String>>;
+ 
++/// Keeps a detached task's terminal delivery and final flush ahead of its writer shutdown.
++#[derive(Default)]
++pub(crate) struct TaskFinalization(pub(crate) Mutex<()>);
++
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum InterruptedTurnHistoryMarker {
+     Disabled,
+@@ -291,6 +297,10 @@ impl Session {
+         input: Vec<TurnInput>,
+         task: T,
+     ) {
++        let Some(tree_task) = self.services.local_agent_runtime.admit_task() else {
++            return;
++        };
++
+         self.activate_plugin_selection(&turn_context).await;
+         // Inherited or recovered roots are applied before task start. Otherwise this
+         // task owns its turn, including background work. Later mail cannot change it.
+@@ -365,18 +375,24 @@ impl Session {
+         );
+         let storage_originator = AuthStorageOriginator::from_client_name(&turn_context.originator);
+         let task_future = async move {
++            // Retain membership until on_task_finished has delivered to ancestors and flushed.
++            let _tree_task = tree_task;
+             let ctx_for_finish = Arc::clone(&ctx);
+-            let task_result = match session.begin_owned_child_stdio(&ctx, &task_cancellation_token).await {
+-                Ok(()) => task_for_run
+-                    .run(
+-                        Arc::clone(&session),
+-                        ctx,
+-                        task_input,
+-                        task_cancellation_token.child_token(),
+-                    )
+-                    .instrument(trace_span!("session_task.run"))
+-                    .await,
+-                Err(error) => Err(error),
++            let mut task_result = if session.services.local_agent_runtime.shutdown.is_cancelled() {
++                Err(CodexErr::TurnAborted)
++            } else {
++                match session.begin_owned_child_stdio(&ctx, &task_cancellation_token).await {
++                    Ok(()) => task_for_run
++                        .run(
++                            Arc::clone(&session),
++                            ctx,
++                            task_input,
++                            task_cancellation_token.child_token(),
++                        )
++                        .instrument(trace_span!("session_task.run"))
++                        .await,
++                    Err(error) => Err(error),
++                }
+             };
+             let sess = Arc::clone(&session);
+             // Private reviewers save their transcript together with the terminal event.
+@@ -387,12 +403,14 @@ impl Session {
+                 && let Err(err) = sess.flush_rollout().await
+             {
+                 warn!("failed to flush rollout before completing turn: {err}");
++                task_result = Err(CodexErr::Fatal(
++                    "Canonical thread persistence failed; turn completion stopped".to_string(),
++                ));
+                 sess.send_event(
+                     ctx_for_finish.as_ref(),
+                     EventMsg::Warning(WarningEvent {
+-                        message: format!(
+-                            "Failed to save the conversation transcript; Codex will continue retrying. Error: {err}"
+-                        ),
++                        message: "Canonical thread persistence failed; execution stopped pending recovery"
++                            .to_string(),
+                     }),
+                 )
+                 .await;
+@@ -625,6 +643,11 @@ impl Session {
+         turn_context: Arc<TurnContext>,
+         task_result: SessionTaskResult,
+     ) {
++        let finalization = self
++            .services
++            .thread_extension_data
++            .get_or_init(TaskFinalization::default);
++        let _finalization = finalization.0.lock().await;
+         // Retire before terminal delivery or automatic follow-up admission. Preserve the
+         // original task error if shutdown also fails, and retain the failed cleanup receipt.
+         let task_result = match self.end_owned_child_stdio(&turn_context).await {
+@@ -644,18 +667,28 @@ impl Session {
+             }
+             Err(err) => {
+                 warn!(%err, "session task returned an unexpected error");
+-                self.emit_turn_error_lifecycle(
+-                    turn_context.as_ref(),
+-                    err.to_codex_protocol_error(),
+-                    err.details(),
+-                )
+-                .await;
+-                self.track_turn_codex_error(turn_context.as_ref(), &err);
+-                self.send_event(
+-                    turn_context.as_ref(),
+-                    EventMsg::Error(err.to_error_event(/*message_prefix*/ None)),
+-                )
+-                .await;
++                // A regular turn can report its primary error before the final flush fails.
++                // Preserve that completed publication and its terminal error; the final flush
++                // and child cleanup above still run and retain their failure receipts.
++                if turn_context
++                    .extension_data
++                    .get::<ReportedTurnError>()
++                    .is_none()
++                    || turn_context.terminal_error.lock().await.is_none()
++                {
++                    self.emit_turn_error_lifecycle(
++                        turn_context.as_ref(),
++                        err.to_codex_protocol_error(),
++                        err.details(),
++                    )
++                    .await;
++                    self.track_turn_codex_error(turn_context.as_ref(), &err);
++                    self.send_event(
++                        turn_context.as_ref(),
++                        EventMsg::Error(err.to_error_event(/*message_prefix*/ None)),
++                    )
++                    .await;
++                }
+                 (None, None)
+             }
+         };
+diff --git a/codex-rs/core/src/tasks/mod_tests.rs b/codex-rs/core/src/tasks/mod_tests.rs
+index 94c2373519e906c000525bd705d44e36230f5966..6616f1881c56fb4b1c0417a065cd26f80ddbd970 100644
+--- a/codex-rs/core/src/tasks/mod_tests.rs
++++ b/codex-rs/core/src/tasks/mod_tests.rs
+@@ -479,3 +479,160 @@ fn emit_compact_metric_records_auto_local() {
+         ])
+     );
+ }
++
++/// Exercise finalization's observable event/lifecycle ownership separately from
++/// the binding's strict real observation-append failure tests.
++#[tokio::test]
++async fn finalization_preserves_only_a_completed_regular_error_publication() {
++    use crate::session::turn::ReportedTurnError;
++    use codex_protocol::protocol::EventMsg;
++
++    struct Recorder {
++        errors: Arc<std::sync::Mutex<usize>>,
++        idle: Arc<std::sync::Mutex<Vec<codex_extension_api::ThreadIdleCause>>>,
++    }
++    impl codex_extension_api::TurnLifecycleContributor for Recorder {
++        fn on_turn_error<'a>(
++            &'a self,
++            _input: codex_extension_api::TurnErrorInput<'a>,
++        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
++            Box::pin(async move {
++                *self.errors.lock().unwrap() += 1;
++            })
++        }
++    }
++    impl codex_extension_api::ThreadLifecycleContributor<crate::config::Config> for Recorder {
++        fn on_thread_idle<'a>(
++            &'a self,
++            input: codex_extension_api::ThreadIdleInput<'a>,
++        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
++            Box::pin(async move {
++                self.idle.lock().unwrap().push(input.cause);
++            })
++        }
++    }
++
++    tokio::time::timeout(std::time::Duration::from_secs(15), async {
++        // (prior error event, completed owner publication): a status marker alone
++        // must not suppress the first required finalization lifecycle callback.
++        // A marker without a terminal payload must not suppress one either.
++        for (prior_event, marker) in [(false, false), (true, false), (true, true), (false, true)] {
++            let reported = prior_event && marker;
++            let (mut session, turn, receiver) = make_session_and_context_with_rx().await;
++            let errors = Arc::new(std::sync::Mutex::new(0));
++            let idle = Arc::new(std::sync::Mutex::new(Vec::new()));
++            let recorder = Arc::new(Recorder {
++                errors: Arc::clone(&errors),
++                idle: Arc::clone(&idle),
++            });
++            let mut builder =
++                codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
++            builder.turn_lifecycle_contributor(recorder.clone());
++            builder.thread_lifecycle_contributor(recorder);
++            Arc::get_mut(&mut session).unwrap().services.extensions = Arc::new(builder.build());
++            session
++                .spawn_task(Arc::clone(&turn), Vec::new(), PendingTask)
++                .await;
++            let primary = CodexErr::InvalidRequest("primary failure".to_string());
++            let primary_event = primary.to_error_event(None);
++            if reported {
++                session
++                    .emit_turn_error_lifecycle(
++                        &turn,
++                        primary.to_codex_protocol_error(),
++                        primary.details(),
++                    )
++                    .await;
++                session.track_turn_codex_error(&turn, &primary);
++            }
++            if prior_event {
++                session
++                    .send_event(&turn, EventMsg::Error(primary_event.clone()))
++                    .await;
++            }
++            if marker {
++                turn.extension_data.insert(ReportedTurnError);
++            }
++            let final_error = CodexErr::Fatal("finalization failure".to_string());
++            let final_event = final_error.to_error_event(None);
++            session
++                .on_task_finished(Arc::clone(&turn), Err(final_error))
++                .await;
++            let mut events = Vec::new();
++            while let Ok(event) = receiver.try_recv() {
++                events.push(event.msg);
++            }
++            let observed = events
++                .iter()
++                .filter_map(|event| match event {
++                    EventMsg::Error(error) => Some(error.message.as_str()),
++                    _ => None,
++                })
++                .collect::<Vec<_>>();
++            let expected = if reported {
++                vec![primary_event.message.as_str()]
++            } else if prior_event {
++                vec![primary_event.message.as_str(), final_event.message.as_str()]
++            } else {
++                vec![final_event.message.as_str()]
++            };
++            assert_eq!(observed, expected);
++            let terminals = events
++                .iter()
++                .filter_map(|event| match event {
++                    EventMsg::TurnComplete(event) => Some(event),
++                    _ => None,
++                })
++                .collect::<Vec<_>>();
++            assert_eq!(terminals.len(), 1);
++            let expected_terminal = if reported {
++                &primary_event.message
++            } else {
++                &final_event.message
++            };
++            assert_eq!(
++                &terminals[0].error.as_ref().unwrap().message,
++                expected_terminal
++            );
++            assert_eq!(*errors.lock().unwrap(), 1);
++            assert_eq!(
++                *idle.lock().unwrap(),
++                vec![codex_extension_api::ThreadIdleCause::Failed]
++            );
++
++            if reported {
++                // A genuinely new turn in the same session must publish its own
++                // failure, even though the previous context stays alive here.
++                let next = session
++                    .new_turn_with_default_settings(
++                        "following-turn".to_string(),
++                        Default::default(),
++                    )
++                    .await;
++                session
++                    .spawn_task(Arc::clone(&next), Vec::new(), PendingTask)
++                    .await;
++                let next_error = CodexErr::Fatal("new turn failure".to_string());
++                let next_message = next_error.to_error_event(None).message;
++                session.on_task_finished(next, Err(next_error)).await;
++                let mut next_errors = Vec::new();
++                let mut next_terminals = 0;
++                while let Ok(event) = receiver.try_recv() {
++                    match event.msg {
++                        EventMsg::Error(error) => next_errors.push(error.message),
++                        EventMsg::TurnComplete(event) => {
++                            next_terminals += 1;
++                            assert_eq!(event.error.unwrap().message, next_message);
++                        }
++                        _ => {}
++                    }
++                }
++                assert_eq!(next_errors, vec![next_message]);
++                assert_eq!(next_terminals, 1);
++                assert_eq!(*errors.lock().unwrap(), 2);
++            }
++        }
++    })
++    .await
++    .expect("finalization ownership checks must finish");
++}
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index 379f99b3dfb1678a91f67a34410c1cc849d77b59..7780e8bb1959757b8e2e7c9232c4c245629f4176 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -1397,6 +1397,15 @@ impl ThreadManager {
+                 .collect::<Vec<_>>()
+         };
+ 
++        // Fence and signal every captured tree before closing any of its writers. Descendant
++        // finalizers may still append completion activity to an ancestor's canonical history.
++        for (_, thread) in &threads {
++            thread
++                .session
++                .services
++                .local_agent_runtime
++                .request_shutdown();
++        }
+         let mut shutdowns = threads
+             .into_iter()
+             .map(|(thread_id, thread)| async move {
+diff --git a/codex-rs/core/src/thread_manager/shutdown.rs b/codex-rs/core/src/thread_manager/shutdown.rs
+index 9526a48b31f73a23870252d91c6e880dc5a4b633..c9fd9b61270e2fb88b5b4d5c29e65ef74f0a6b12 100644
+--- a/codex-rs/core/src/thread_manager/shutdown.rs
++++ b/codex-rs/core/src/thread_manager/shutdown.rs
+@@ -47,13 +47,19 @@ impl ThreadManager {
+ }
+ 
+ impl CodexThread {
++    /// Fence and signal this handle's exact tree without waiting for its writers to close.
++    #[doc(hidden)]
++    pub fn request_agent_tree_shutdown(&self) -> AgentTreeShutdown {
++        AgentTreeShutdown {
++            state: self.session.services.local_agent_runtime.request_shutdown(),
++        }
++    }
++
+     /// Shut down this handle's exact tree and report unconfirmed managed process cleanup.
+     #[doc(hidden)]
+     pub async fn shutdown_agent_tree_and_check_managed_processes(&self) -> CodexResult<()> {
+-        self.session
+-            .services
+-            .local_agent_runtime
+-            .request_shutdown()
++        self.request_agent_tree_shutdown()
++            .state
+             .wait_for_managed_process_shutdown()
+             .await
+     }
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 313d03490bcfeccd928f7d49b5ee1ae0d4d308d7..0bf1e4d48ac7b13812be3626a6e7471973dc6824 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -251,6 +251,13 @@ impl ToolCallRuntime {
+                 } else {
+                     Either::Right(lock.write().await)
+                 };
++                // A recorded call is not permission to execute until its history is durable.
++                // This also fences nested code-mode dispatches before entering their handler.
++                session.ensure_rollout_durable().await.map_err(|_| {
++                    FunctionCallError::Fatal(
++                        "Canonical thread persistence failed; tool execution stopped".to_string(),
++                    )
++                })?;
+                 // Admission through the parallel-execution gate marks the end
+                 // of dispatch waiting and the start of handler execution.
+                 if let Some(execution_started_at) = execution_started_at {
+diff --git a/codex-rs/rollout/src/recorder.rs b/codex-rs/rollout/src/recorder.rs
+index ea61f5a709082b1b6ff542cce005435c8813d475..78edb878291446656e2f01ee18fb0ce7d9e416ec 100644
+--- a/codex-rs/rollout/src/recorder.rs
++++ b/codex-rs/rollout/src/recorder.rs
+@@ -976,6 +976,7 @@ impl RolloutRecorder {
+                     rollout_path: path,
+                     ordinal_state,
+                     last_logged_error: None,
++                    unacknowledged: None,
+                 }
+             }
+             RolloutRecorderParams::Resume { path } => {
+@@ -990,6 +991,7 @@ impl RolloutRecorder {
+                     rollout_path: path,
+                     ordinal_state,
+                     last_logged_error: None,
++                    unacknowledged: None,
+                 }
+             }
+         };
+@@ -1744,7 +1746,7 @@ fn precompute_new_rollout_path(
+     Ok((path, timestamp))
+ }
+ 
+-fn open_log_file(path: &Path) -> std::io::Result<File> {
++fn open_log_file(path: &Path, repair_newline: bool) -> std::io::Result<File> {
+     let refresh_modified_time = !compression::plain_rollout_path(path).try_exists()?;
+     let path = compression::materialize_rollout_for_append_blocking(path)?;
+     let Some(parent) = path.parent() else {
+@@ -1762,7 +1764,9 @@ fn open_log_file(path: &Path) -> std::io::Result<File> {
+     if refresh_modified_time {
+         file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
+     }
+-    ensure_rollout_is_newline_terminated(&mut file)?;
++    if repair_newline {
++        ensure_rollout_is_newline_terminated(&mut file)?;
++    }
+     Ok(file)
+ }
+ 
+@@ -1781,6 +1785,8 @@ struct RolloutWriterState {
+     rollout_path: PathBuf,
+     ordinal_state: RolloutOrdinalState,
+     last_logged_error: Option<String>,
++    // The writer retains the original bytes and offset until it acknowledges the line.
++    unacknowledged: Option<PendingLine>,
+ }
+ 
+ impl RolloutWriterState {
+@@ -1866,7 +1872,7 @@ impl RolloutWriterState {
+             return Ok(());
+         }
+ 
+-        let file = open_log_file(self.rollout_path.as_path())?;
++        let file = open_log_file(self.rollout_path.as_path(), self.unacknowledged.is_none())?;
+         self.writer = Some(JsonlWriter {
+             file: tokio::fs::File::from_std(file),
+         });
+@@ -1880,6 +1886,7 @@ impl RolloutWriterState {
+         };
+         write_session_meta(
+             self.writer.as_mut(),
++            &mut self.unacknowledged,
+             &mut self.ordinal_state,
+             session_meta,
+             &self.cwd,
+@@ -1910,7 +1917,10 @@ impl RolloutWriterState {
+         let mut write_result = Ok(());
+         for item in &self.pending_items {
+             match self.ordinal_state.current() {
+-                Ok(ordinal) => match writer.write_rollout_item(item, ordinal).await {
++                Ok(ordinal) => match writer
++                    .write_rollout_item(item, ordinal, &mut self.unacknowledged)
++                    .await
++                {
+                     Ok(()) => self.ordinal_state.advance(),
+                     Err(err) => {
+                         write_result = Err(err);
+@@ -1971,6 +1981,7 @@ async fn rollout_writer(
+ 
+ async fn write_session_meta(
+     mut writer: Option<&mut JsonlWriter>,
++    unacknowledged: &mut Option<PendingLine>,
+     ordinal_state: &mut RolloutOrdinalState,
+     session_meta: SessionMeta,
+     cwd: &Path,
+@@ -1992,7 +2003,9 @@ async fn write_session_meta(
+     let rollout_item = RolloutItem::SessionMeta(session_meta_line);
+     if let Some(writer) = writer.as_mut() {
+         let ordinal = ordinal_state.current()?;
+-        writer.write_rollout_item(&rollout_item, ordinal).await?;
++        writer
++            .write_rollout_item(&rollout_item, ordinal, unacknowledged)
++            .await?;
+         ordinal_state.advance();
+     }
+     Ok(())
+@@ -2011,7 +2024,7 @@ pub async fn append_rollout_item_to_path(
+         open_rollout_for_append(rollout_path, /*writer_lock*/ None).await?;
+     let ordinal = ordinal_state.current()?;
+     let mut writer = JsonlWriter { file };
+-    writer.write_rollout_item(item, ordinal).await
++    writer.write_rollout_item(item, ordinal, &mut None).await
+ }
+ 
+ async fn open_rollout_for_append(
+@@ -2049,12 +2062,36 @@ fn ensure_rollout_is_newline_terminated(file: &mut File) -> std::io::Result<()>
+     let mut final_byte = [0];
+     file.read_exact(&mut final_byte)?;
+     if final_byte[0] != b'\n' {
++        // Older writers could omit the final newline. Admit a complete record
++        // but do not turn a torn write into a line that history readers skip.
++        let end = file.metadata()?.len();
++        let mut start = end;
++        let mut chunk = [0; 4096];
++        while start > 0 {
++            let count = start.min(chunk.len() as u64) as usize;
++            start -= count as u64;
++            file.seek(SeekFrom::Start(start))?;
++            file.read_exact(&mut chunk[..count])?;
++            if let Some(newline) = chunk[..count].iter().rposition(|&byte| byte == b'\n') {
++                start += newline as u64 + 1;
++                break;
++            }
++        }
++        file.seek(SeekFrom::Start(start))?;
++        serde_json::from_reader::<_, serde::de::IgnoredAny>(&mut *file).map_err(|_| {
++            IoError::new(std::io::ErrorKind::InvalidData, "incomplete rollout tail")
++        })?;
+         file.write_all(b"\n")?;
+         file.flush()?;
+     }
+     Ok(())
+ }
+ 
++struct PendingLine {
++    offset: u64,
++    bytes: Vec<u8>,
++}
++
+ struct JsonlWriter {
+     file: tokio::fs::File,
+ }
+@@ -2073,7 +2110,13 @@ impl JsonlWriter {
+         &mut self,
+         rollout_item: &RolloutItem,
+         ordinal: Option<u64>,
++        unacknowledged: &mut Option<PendingLine>,
+     ) -> std::io::Result<()> {
++        if let Some(line) = unacknowledged.as_ref() {
++            self.finish_interrupted_line(line).await?;
++            *unacknowledged = None;
++            return Ok(());
++        }
+         let timestamp_format: &[FormatItem] = format_description!(
+             "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+         );
+@@ -2086,14 +2129,42 @@ impl JsonlWriter {
+             ordinal,
+             item: rollout_item,
+         };
+-        self.write_line(&line).await
+-    }
+-    async fn write_line(&mut self, item: &impl serde::Serialize) -> std::io::Result<()> {
+-        let mut json = serde_json::to_string(item)?;
+-        json.push('\n');
+-        self.file.write_all(json.as_bytes()).await?;
+-        self.file.flush().await?;
+-        Ok(())
++        let mut bytes = serde_json::to_vec(&line)?;
++        bytes.push(b'\n');
++        let offset = self.file.metadata().await?.len();
++        let written = async {
++            self.file.write_all(&bytes).await?;
++            self.file.flush().await
++        }
++        .await;
++        if written.is_err() {
++            *unacknowledged = Some(PendingLine { offset, bytes });
++        }
++        written
++    }
++
++    /// Only the fenced writer may extend the file. A failed flush may have
++    /// already written the entire line or any prefix, including zero bytes.
++    async fn finish_interrupted_line(&mut self, line: &PendingLine) -> std::io::Result<()> {
++        use tokio::io::AsyncReadExt;
++        use tokio::io::AsyncSeekExt;
++
++        let length = self.file.metadata().await?.len();
++        let present = length
++            .checked_sub(line.offset)
++            .and_then(|n| usize::try_from(n).ok())
++            .filter(|&n| n <= line.bytes.len())
++            .ok_or_else(|| IoError::other("rollout changed during write recovery"))?;
++        self.file.seek(SeekFrom::Start(line.offset)).await?;
++        let mut prefix = vec![0; present];
++        self.file.read_exact(&mut prefix).await?;
++        if prefix != line.bytes[..present] {
++            return Err(IoError::other(
++                "rollout contents changed during write recovery",
++            ));
++        }
++        self.file.write_all(&line.bytes[present..]).await?;
++        self.file.flush().await
+     }
+ }
+ 
+diff --git a/codex-rs/rollout/src/recorder_tests.rs b/codex-rs/rollout/src/recorder_tests.rs
+index a5aa2bde6fdec7fe7773a26d8cce5c6da6e0dda2..9372f4626d36e11151bd42bd5721b0f52e02a52b 100644
+--- a/codex-rs/rollout/src/recorder_tests.rs
++++ b/codex-rs/rollout/src/recorder_tests.rs
+@@ -148,8 +148,8 @@ fn append_repair_terminates_nonempty_rollout_tail() -> std::io::Result<()> {
+     let home = TempDir::new().expect("temp dir");
+     let rollout_path = home.path().join("rollout.jsonl");
+     fs::write(&rollout_path, b"{\"type\":\"event_msg\"}")?;
+-    drop(open_log_file(&rollout_path)?);
+-    drop(open_log_file(&rollout_path)?);
++    drop(open_log_file(&rollout_path, true)?);
++    drop(open_log_file(&rollout_path, true)?);
+ 
+     assert_eq!(fs::read(&rollout_path)?, b"{\"type\":\"event_msg\"}\n");
+     Ok(())
+@@ -166,7 +166,7 @@ async fn opening_existing_rollout_preserves_modified_time() -> std::io::Result<(
+         .open(&rollout_path)?
+         .set_times(std::fs::FileTimes::new().set_modified(modified))?;
+ 
+-    drop(open_log_file(&rollout_path)?);
++    drop(open_log_file(&rollout_path, true)?);
+     assert_eq!(fs::metadata(&rollout_path)?.modified()?, modified);
+ 
+     drop(open_rollout_for_append(&rollout_path, /*writer_lock*/ None).await?);
+@@ -1005,6 +1005,7 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
+         rollout_path: rollout_path.clone(),
+         ordinal_state: RolloutOrdinalState::Legacy,
+         last_logged_error: None,
++        unacknowledged: None,
+     };
+     state.add_items(vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
+         AgentMessageEvent {
+@@ -1111,54 +1112,29 @@ async fn resumed_paginated_rollout_continues_after_decimal_token_count() -> std:
+ }
+ 
+ #[tokio::test]
+-async fn resumed_paginated_rollout_repairs_unsafe_tail() -> std::io::Result<()> {
+-    let valid_unterminated = serde_json::to_string(&RolloutLine {
++async fn resumed_paginated_rollout_preserves_complete_unterminated_tail() -> std::io::Result<()> {
++    let home = TempDir::new().expect("temp dir");
++    let config = test_config(home.path());
++    let path = home.path().join("rollout.jsonl");
++    write_paginated_rollout(&path, ThreadId::new(), &[4])?;
++    let tail = serde_json::to_string(&RolloutLine {
+         timestamp: "2026-07-09T00:00:05Z".to_string(),
+         ordinal: Some(5),
+         item: agent_message_item("valid unterminated"),
+     })?;
+-    for (name, tail, expected_ordinals) in [
+-        (
+-            "valid unterminated",
+-            valid_unterminated,
+-            vec![Some(0), Some(4), Some(5), Some(6)],
+-        ),
+-        (
+-            "invalid unterminated",
+-            "{\"timestamp\":\"unterminated\"".to_string(),
+-            vec![Some(0), Some(4), Some(5)],
+-        ),
+-    ] {
+-        let home = TempDir::new().expect("temp dir");
+-        let config = test_config(home.path());
+-        let rollout_path = home.path().join("rollout.jsonl");
+-        write_paginated_rollout(&rollout_path, ThreadId::new(), &[4])?;
+-        let mut file = fs::OpenOptions::new().append(true).open(&rollout_path)?;
+-        write!(file, "{tail}")?;
+-        drop(file);
+-
+-        let recorder =
+-            RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path.clone()))
+-                .await?;
+-        recorder
+-            .record_canonical_items(&[agent_message_item("after-tail-repair")])
+-            .await?;
+-        recorder.flush().await?;
+-
+-        let contents = fs::read_to_string(&rollout_path)?;
+-        assert!(contents.ends_with('\n'), "{name} tail should be terminated");
+-        let ordinals = contents
+-            .lines()
+-            .filter_map(|line| crate::parse_rollout_line(line).ok())
+-            .map(|line| line.ordinal)
+-            .collect::<Vec<_>>();
+-        assert_eq!(
+-            ordinals, expected_ordinals,
+-            "unexpected ordinals after repairing {name} tail"
+-        );
+-        recorder.shutdown().await?;
+-    }
+-    Ok(())
++    write!(fs::OpenOptions::new().append(true).open(&path)?, "{tail}")?;
++    let recorder =
++        RolloutRecorder::new(&config, RolloutRecorderParams::resume(path.clone())).await?;
++    recorder
++        .record_canonical_items(&[agent_message_item("after-tail-repair")])
++        .await?;
++    recorder.flush().await?;
++    let ordinals = read_rollout_lines(&path)?
++        .into_iter()
++        .map(|line| line.ordinal)
++        .collect::<Vec<_>>();
++    assert_eq!(ordinals, vec![Some(0), Some(4), Some(5), Some(6)]);
++    recorder.shutdown().await
+ }
+ 
+ #[tokio::test]
+@@ -1932,3 +1908,94 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
+     );
+     Ok(())
+ }
++
++#[tokio::test]
++async fn ambiguous_rollout_write_commits_exactly_one_original_line() -> std::io::Result<()> {
++    let home = TempDir::new().expect("temp dir");
++    let path = home.path().join("rollout.jsonl");
++    let old = b"existing line\n";
++    let next = b"original serialized item\n";
++    for count in [0, 5, next.len()] {
++        fs::write(&path, [old.as_slice(), &next[..count]].concat())?;
++        let mut writer = JsonlWriter {
++            file: tokio::fs::File::from_std(open_log_file(&path, false)?),
++        };
++        let mut pending = Some(PendingLine {
++            offset: old.len() as u64,
++            bytes: next.to_vec(),
++        });
++        writer
++            .write_rollout_item(&agent_message_item("retry"), Some(1), &mut pending)
++            .await?;
++        assert!(pending.is_none());
++        assert_eq!(fs::read(&path)?, [old.as_slice(), next.as_slice()].concat());
++    }
++    fs::write(&path, [old.as_slice(), b"unexpected"].concat())?;
++    let mut writer = JsonlWriter {
++        file: tokio::fs::File::from_std(open_log_file(&path, false)?),
++    };
++    let mut pending = Some(PendingLine {
++        offset: old.len() as u64,
++        bytes: next.to_vec(),
++    });
++    assert!(
++        writer
++            .write_rollout_item(&agent_message_item("retry"), Some(1), &mut pending)
++            .await
++            .is_err()
++    );
++    assert!(pending.is_some());
++    assert_eq!(fs::read(&path)?, [old.as_slice(), b"unexpected"].concat());
++    Ok(())
++}
++
++#[test]
++fn reopening_a_torn_rollout_rejects_it_without_modifying_history() -> std::io::Result<()> {
++    let home = TempDir::new().expect("temp dir");
++    let path = home.path().join("rollout.jsonl");
++    let interrupted = b"{\"type\":\"event_msg\"}\n{\"payload\":";
++    fs::write(&path, interrupted)?;
++    assert_eq!(
++        open_log_file(&path, true).unwrap_err().kind(),
++        std::io::ErrorKind::InvalidData
++    );
++    assert_eq!(fs::read(path)?, interrupted);
++    Ok(())
++}
++
++#[tokio::test]
++async fn writer_advances_once_after_an_acknowledgment_is_lost() -> std::io::Result<()> {
++    let home = TempDir::new().expect("temp dir");
++    let path = home.path().join("rollout.jsonl");
++    let first = agent_message_item("first");
++    let bytes = format!(
++        "{}\n",
++        serde_json::to_string(&RolloutLineRef {
++            timestamp: "2026-11-04T00:00:00.000Z".into(),
++            ordinal: Some(0),
++            item: &first,
++        })?
++    )
++    .into_bytes();
++    fs::write(&path, &bytes)?;
++    let mut state = RolloutWriterState {
++        writer: None,
++        deferred_creation: false,
++        pending_items: vec![first, agent_message_item("second")],
++        meta: None,
++        cwd: home.path().to_path_buf(),
++        rollout_path: path.clone(),
++        ordinal_state: RolloutOrdinalState::Paginated { next: Some(0) },
++        last_logged_error: None,
++        unacknowledged: Some(PendingLine { offset: 0, bytes }),
++    };
++    state.flush().await?;
++    state.flush().await?;
++    let lines = read_rollout_lines(&path)?;
++    assert_eq!(
++        lines.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
++        vec![Some(0), Some(1)]
++    );
++    assert!(state.pending_items.is_empty());
++    Ok(())
++}
+diff --git a/codex-rs/thread-store/src/live_thread.rs b/codex-rs/thread-store/src/live_thread.rs
+index ab18df6d8e19a709f299b14dd7d70a76df439133..f4c1140dbc6b2577fa8a6a1b7177afd934b2030b 100644
+--- a/codex-rs/thread-store/src/live_thread.rs
++++ b/codex-rs/thread-store/src/live_thread.rs
+@@ -1,6 +1,8 @@
+ use std::future::Future;
+ use std::path::PathBuf;
+ use std::sync::Arc;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
+ 
+ use codex_protocol::ThreadId;
+ use codex_protocol::protocol::ThreadHistoryMode;
+@@ -41,6 +43,7 @@ pub struct LiveThread {
+     thread_store: Arc<dyn ThreadStore>,
+     metadata_sync: Arc<Mutex<ThreadMetadataSync>>,
+     persistence_telemetry: RolloutPersistenceTelemetry,
++    canonical_history_failed: Arc<AtomicBool>,
+ }
+ 
+ /// Owns persistence acquisition and its live thread while initialization is still fallible.
+@@ -145,6 +148,7 @@ impl LiveThread {
+             thread_store,
+             metadata_sync: Arc::new(Mutex::new(metadata_sync)),
+             persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
++            canonical_history_failed: Arc::new(AtomicBool::new(false)),
+         })
+     }
+ 
+@@ -207,6 +211,7 @@ impl LiveThread {
+                 thread_store,
+                 metadata_sync: Arc::new(Mutex::new(metadata_sync)),
+                 persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
++                canonical_history_failed: Arc::new(AtomicBool::new(false)),
+             },
+             history,
+         ))
+@@ -228,13 +233,15 @@ impl LiveThread {
+             .await
+             .observe_appended_items(items.as_slice());
+         if let Some(update) = update {
+-            self.thread_store
++            let result = self
++                .thread_store
+                 .record_thread_metadata(UpdateThreadMetadataParams {
+                     thread_id: self.thread_id,
+                     patch: update.patch.clone(),
+                     include_archived: true,
+                 })
+-                .await?;
++                .await;
++            self.retain_canonical_result(result)?;
+             self.metadata_sync
+                 .lock()
+                 .await
+@@ -258,12 +265,15 @@ impl LiveThread {
+         } else {
+             (persisted_rollout_items(raw_items, self.history_mode), None)
+         };
+-        self.thread_store
++        self.check_canonical_history()?;
++        let result = self
++            .thread_store
+             .append_items(AppendThreadItemsParams {
+                 thread_id: self.thread_id,
+                 items: raw_items.to_vec(),
+             })
+-            .await?;
++            .await;
++        self.retain_canonical_result(result)?;
+         if let Some(measurement) = measurement.as_ref() {
+             self.persistence_telemetry
+                 .record_batch(raw_items, measurement);
+@@ -280,24 +290,62 @@ impl LiveThread {
+                 .take_pending_update_for_existing_history();
+             self.apply_pending_metadata_update(update, context).await?;
+         }
+-        self.thread_store
++        self.check_canonical_history()?;
++        let result = self
++            .thread_store
+             .persist_thread(self.thread_id, context)
+-            .await?;
++            .await;
++        self.retain_canonical_result(result)?;
+         let update = self.metadata_sync.lock().await.take_pending_update();
+         self.apply_pending_metadata_update(update, context).await
+     }
+ 
+     pub async fn flush(&self) -> ThreadStoreResult<()> {
+-        self.thread_store.flush_thread(self.thread_id).await?;
++        let result = self.thread_store.flush_thread(self.thread_id).await;
++        self.retain_canonical_result(result)?;
+         self.flush_pending_metadata_update_for_existing_history()
+             .await
+     }
+ 
++    fn check_canonical_history(&self) -> ThreadStoreResult<()> {
++        if self.canonical_history_failed.load(Ordering::Acquire) {
++            return Err(ThreadStoreError::Internal {
++                message: "Canonical thread persistence failed; execution requires recovery"
++                    .to_string(),
++            });
++        }
++        Ok(())
++    }
++
++    fn retain_canonical_result<T>(&self, result: ThreadStoreResult<T>) -> ThreadStoreResult<T> {
++        if result.is_err() {
++            self.canonical_history_failed.store(true, Ordering::Release);
++        }
++        let value = result?;
++        self.check_canonical_history()?;
++        Ok(value)
++    }
++
+     pub async fn shutdown(&self) -> ThreadStoreResult<()> {
+         let metadata_result = self
+             .flush_pending_metadata_update_for_existing_history()
+             .await;
++        // Always close the backend, including after a failed append. A successful close
++        // cannot prove that history omitted by an earlier failed write was repaired.
+         let shutdown_result = self.thread_store.shutdown_thread(self.thread_id).await;
++        if shutdown_result.is_err() {
++            // A failed flush may leave a backend writer alive. Close is terminal for this
++            // handle: release ownership without discarding already committed history.
++            if let Err(discard_error) = self.thread_store.discard_thread(self.thread_id).await {
++                self.canonical_history_failed.store(true, Ordering::Release);
++                return Err(ThreadStoreError::Internal {
++                    message: format!(
++                        "thread shutdown failed and writer release failed: {discard_error}"
++                    ),
++                });
++            }
++        }
++        let shutdown_result = self.retain_canonical_result(shutdown_result);
+         match (metadata_result, shutdown_result) {
+             (Err(metadata_error), Err(shutdown_error)) => Err(ThreadStoreError::Internal {
+                 message: format!(
+@@ -344,8 +392,10 @@ impl LiveThread {
+         mode: ThreadMemoryMode,
+         include_archived: bool,
+     ) -> ThreadStoreResult<()> {
++        self.check_canonical_history()?;
+         self.flush_pending_metadata_update().await?;
+-        self.thread_store
++        let result = self
++            .thread_store
+             .update_thread_metadata(UpdateThreadMetadataParams {
+                 thread_id: self.thread_id,
+                 patch: ThreadMetadataPatch {
+@@ -354,7 +404,8 @@ impl LiveThread {
+                 },
+                 include_archived,
+             })
+-            .await?;
++            .await;
++        self.retain_canonical_result(result)?;
+         Ok(())
+     }
+ 
+@@ -367,15 +418,17 @@ impl LiveThread {
+         patch: ThreadMetadataPatch,
+         include_archived: bool,
+     ) -> ThreadStoreResult<StoredThread> {
++        self.check_canonical_history()?;
+         self.flush_pending_metadata_update().await?;
+-        let updated = self
++        let result = self
+             .thread_store
+             .update_thread_metadata(UpdateThreadMetadataParams {
+                 thread_id: self.thread_id,
+                 patch,
+                 include_archived,
+             })
+-            .await?;
++            .await;
++        let updated = self.retain_canonical_result(result)?;
+         match updated {
+             Some(thread) => Ok(thread),
+             None => {
+@@ -426,16 +479,21 @@ impl LiveThread {
+         let Some(update) = update else {
+             return Ok(());
+         };
++        self.check_canonical_history()?;
+         let params = UpdateThreadMetadataParams {
+             thread_id: self.thread_id,
+             patch: update.patch.clone(),
+             include_archived: true,
+         };
+-        if context == PersistContext::Standard {
+-            self.thread_store.update_thread_metadata(params).await?;
++        let result = if context == PersistContext::Standard {
++            self.thread_store
++                .update_thread_metadata(params)
++                .await
++                .map(|_| ())
+         } else {
+-            self.thread_store.record_thread_metadata(params).await?;
+-        }
++            self.thread_store.record_thread_metadata(params).await
++        };
++        self.retain_canonical_result(result)?;
+         self.metadata_sync
+             .lock()
+             .await
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 0ed72ba6d49d561b16ced3323d863756163db7f5..6c1c7b903efca5b28ae076e0a7641490b91e9ba6 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -849,6 +849,124 @@ mod tests {
+     use crate::local::test_support::write_session_file;
+     use crate::local::test_support::write_session_file_with_history_mode;
+ 
++    #[tokio::test]
++    async fn live_thread_keeps_failed_append_through_flush_and_close() {
++        let home = TempDir::new().expect("temp dir");
++        let store = Arc::new(LocalThreadStore::new(test_config(home.path()), None));
++        let thread_id = ThreadId::default();
++        let live = LiveThread::create(store.clone(), create_thread_params(thread_id))
++            .await
++            .expect("create live thread");
++        let clone = live.clone();
++        store
++            .discard_thread(thread_id)
++            .await
++            .expect("remove live writer");
++        live.append_items(&[user_message_item("accepted input")])
++            .await
++            .expect_err("missing writer rejects canonical append");
++        // The backend recovers, but the missing append is still unresolved. Successful
++        // backend barriers must not erase the failure retained by either live handle.
++        store
++            .create_thread(create_thread_params(thread_id))
++            .await
++            .expect("recover backend writer");
++        store
++            .flush_thread(thread_id)
++            .await
++            .expect("backend flush succeeds");
++        clone
++            .flush()
++            .await
++            .expect_err("retain append failure across clones");
++        live.persist(PersistContext::Standard)
++            .await
++            .expect_err("stop dependent execution");
++        live.shutdown()
++            .await
++            .expect_err("close must retain failure");
++        assert!(
++            !store.live_recorders.lock().await.contains_key(&thread_id),
++            "close releases the backend writer despite the retained error"
++        );
++    }
++
++    #[tokio::test]
++    async fn live_thread_retains_canonical_metadata_failure_after_successful_history_flush() {
++        for path in ["direct", "memory"] {
++            let home = TempDir::new().expect("temp dir");
++            let config = test_config(home.path());
++            let runtime = codex_state::StateRuntime::init(
++                config.sqlite.clone(),
++                config.default_model_provider_id.clone(),
++            )
++            .await
++            .expect("state db");
++            let store = Arc::new(LocalThreadStore::new(config, Some(runtime.clone())));
++            let id = ThreadId::new();
++            let mut params = create_thread_params(id);
++            params.history_mode = ThreadHistoryMode::Paginated;
++            let live = LiveThread::create(store.clone(), params)
++                .await
++                .expect("live thread");
++            live.persist(PersistContext::Standard)
++                .await
++                .expect("initial persistence");
++            live.append_items(&[user_message_item("accepted user input")])
++                .await
++                .expect("accept input");
++            // Materialize history without consuming the LiveThread's pending metadata.
++            store
++                .persist_thread(id, PersistContext::Standard)
++                .await
++                .expect("persist history");
++            store.flush_thread(id).await.expect("flush history");
++            live.flush()
++                .await
++                .expect("commit staged metadata before fault");
++            runtime.close().await;
++            let result = match path {
++                "direct" => live
++                    .update_metadata(
++                        ThreadMetadataPatch {
++                            memory_mode: Some(ThreadMemoryMode::Enabled),
++                            ..Default::default()
++                        },
++                        false,
++                    )
++                    .await
++                    .map(|_| ()),
++                "memory" => {
++                    live.update_memory_mode(ThreadMemoryMode::Enabled, false)
++                        .await
++                }
++                _ => unreachable!(),
++            };
++            result.expect_err(&format!("canonical metadata update fails in {path}"));
++            store
++                .flush_thread(id)
++                .await
++                .expect("primary history flush still succeeds");
++            live.clone()
++                .flush()
++                .await
++                .expect_err("clone retains metadata failure");
++            live.append_items(&[user_message_item("must not run")])
++                .await
++                .expect_err("later append refused");
++            live.persist(PersistContext::Standard)
++                .await
++                .expect_err("later durable boundary refused");
++            live.shutdown()
++                .await
++                .expect_err("shutdown retains first failure");
++            assert!(
++                !store.live_recorders.lock().await.contains_key(&id),
++                "shutdown releases writer after {path}"
++            );
++        }
++    }
++
+     #[tokio::test]
+     async fn live_writer_lifecycle_writes_and_closes() {
+         let home = TempDir::new().expect("temp dir");
