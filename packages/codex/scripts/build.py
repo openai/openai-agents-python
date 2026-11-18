@@ -5,16 +5,63 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import sysconfig
+import threading
+from contextlib import ExitStack, suppress
 from pathlib import Path
 
 # Resolve this trusted sibling even when PYTHONSAFEPATH omits the script directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from native_env import build_environment, cargo_build_options
-from native_helpers import native_helpers, remove_obsolete_helpers
+from native_helpers import stage_helpers
 from source_integrity import verify_pristine_source, verify_rmcp_source
+
+
+def build_pgo_with_helpers(command, project, environment, build_helpers, binaries):
+    # The trainer stages helpers after the temporary wheel has finished using the source tree.
+    read_fd, write_fd = os.pipe()
+    with (
+        os.fdopen(read_fd, "rb") as reader,
+        os.fdopen(write_fd, "wb") as writer,
+        ExitStack() as cleanup,
+    ):
+        if (
+            threading.current_thread() is threading.main_thread()
+            and signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+        ):
+
+            def terminate(signum, _frame):
+                raise SystemExit(128 + signum)
+
+            cleanup.callback(
+                signal.signal, signal.SIGTERM, signal.signal(signal.SIGTERM, terminate)
+            )
+        wheel_environment = {**environment, "OPENAI_AGENTS_PGO_HELPER_FD": str(reader.fileno())}
+        with subprocess.Popen(
+            command,
+            cwd=project,
+            env=wheel_environment,
+            pass_fds=(reader.fileno(),),
+            start_new_session=True,
+        ) as wheel:
+            try:
+                build_helpers()
+                writer.write(os.fsencode(binaries))
+                writer.close()
+                # Keep the child PID reserved until its whole group is cleaned on failure.
+                status = os.waitid(os.P_PID, wheel.pid, os.WEXITED | os.WNOWAIT)
+                if status.si_code != os.CLD_EXITED or status.si_status:
+                    code = (
+                        status.si_status if status.si_code == os.CLD_EXITED else -status.si_status
+                    )
+                    raise subprocess.CalledProcessError(code, command)
+            except BaseException:
+                with suppress(ProcessLookupError):
+                    os.killpg(wheel.pid, signal.SIGKILL)
+                raise
 
 
 def training_python_digest(project):
@@ -107,36 +154,30 @@ def main():
     flags = ["--release"] if args.release else []
     cargo_timings = ["--timings"] if environment.get("OPENAI_AGENTS_NATIVE_TIMINGS") == "1" else []
     cargo_options, build_target = cargo_build_options(root, environment)
-    subprocess.run(
-        [
-            "cargo",
-            "build",
-            "--locked",
-            "--bin",
-            "codex-sdk-runtime",
-            "--bin",
-            "codex-code-mode-host",
-            *cargo_options,
-            *flags,
-            *cargo_timings,
-        ],
-        cwd=root,
-        env=environment,
-        check=True,
-    )
-    verify_pristine_source(root)
-    verify_rmcp_source(root)
+    helper_command = [
+        "cargo",
+        "build",
+        "--locked",
+        "--bin",
+        "codex-sdk-runtime",
+        "--bin",
+        "codex-code-mode-host",
+        *cargo_options,
+        *flags,
+        *cargo_timings,
+    ]
+
+    def build_helpers():
+        subprocess.run(helper_command, cwd=root, env=environment, check=True)
+        verify_pristine_source(root)
+        verify_rmcp_source(root)
+
     target_dir = Path(environment["CARGO_TARGET_DIR"])
     if not target_dir.is_absolute():
         target_dir = root / target_dir
     if build_target:
         target_dir /= Path(build_target).stem
     binaries = target_dir / ("release" if args.release else "debug")
-    destination = project / "src/agents/bin"
-    destination.mkdir(parents=True, exist_ok=True)
-    remove_obsolete_helpers(destination, sys.platform)
-    for name, source in native_helpers(sys.platform).items():
-        shutil.copy2(binaries / source, destination / name)
     mode = "develop" if args.develop else "build"
     output = ["--out", str(args.out.resolve())] if args.out is not None else []
     # Maturin defaults to a CPython abi3 wheel without an explicit interpreter.
@@ -145,24 +186,27 @@ def main():
         sys.implementation.name == "pypy" or sysconfig.get_config_var("Py_GIL_DISABLED") == 1
     ):
         output.extend(["--interpreter", sys.executable])
+    wheel_environment = environment
     if pgo:
         # Keep instrumented/profile-use dependencies out of ordinary Cargo caches.
-        environment["CARGO_TARGET_DIR"] = str(Path(environment["CARGO_TARGET_DIR"]) / "pgo")
+        wheel_environment = dict(environment)
+        wheel_environment["CARGO_TARGET_DIR"] = str(Path(environment["CARGO_TARGET_DIR"]) / "pgo")
         # Export frozen pins without rewriting public lock URLs for a CI mirror.
-        environment.pop("UV_LOCKED", None)
-        environment["UV_FROZEN"] = "true"
-        environment["UV_NO_DEFAULT_GROUPS"] = "true"
+        wheel_environment.pop("UV_LOCKED", None)
+        wheel_environment["UV_FROZEN"] = "true"
+        wheel_environment["UV_NO_DEFAULT_GROUPS"] = "true"
         cargo_options = [*cargo_options, "--target", host, "--pgo"]
     manylinux = environment.get("OPENAI_AGENTS_NATIVE_MANYLINUX")
     if mode == "build" and manylinux:
         # Qualify the same Linux glibc baseline even if Maturin detects an older one.
         output.extend(["--compatibility", manylinux])
-    subprocess.run(
-        ["maturin", mode, "--locked", *cargo_options, *flags, *output],
-        cwd=project,
-        env=environment,
-        check=True,
-    )
+    command = ["maturin", mode, "--locked", *cargo_options, *flags, *output]
+    if pgo:
+        build_pgo_with_helpers(command, project, wheel_environment, build_helpers, binaries)
+    else:
+        build_helpers()
+        stage_helpers(binaries, project / "src/agents/bin", sys.platform)
+        subprocess.run(command, cwd=project, env=wheel_environment, check=True)
     verify_pristine_source(root)
     verify_rmcp_source(root)
     if pgo and training_python_digest(project) != provenance["training_python_sha256"]:

@@ -254,7 +254,23 @@ async def main() -> None:
     assert totals == [427, 460, 33]
 
 
+def stage_trained_wheel_helpers(helper_fd: int) -> None:
+    with os.fdopen(helper_fd, "rb") as ready:
+        helper_directory = ready.read()
+    if not helper_directory:
+        raise RuntimeError("The ordinary native helper build did not finish")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from native_helpers import stage_helpers
+
+    stage_helpers(Path(os.fsdecode(helper_directory)), ROOT / "src/agents/bin", sys.platform)
+
+
 if __name__ == "__main__":
+    helper_fd = os.environ.pop("OPENAI_AGENTS_PGO_HELPER_FD", None)
+    if helper_fd is not None:
+        os.set_inheritable(int(helper_fd), False)
     prepare_imports()
     # Return normally so LLVM can flush its process-exit profile.
     asyncio.run(main())
+    if helper_fd is not None:
+        stage_trained_wheel_helpers(int(helper_fd))
