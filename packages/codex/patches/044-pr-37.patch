@@ -1,0 +1,511 @@
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 7c6c07405af19a6009da861d35eecf8048685c10..c13f7f4f8ef76312d068c0cabfd6fa528ef710ba 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -626,13 +626,28 @@ impl LocalAgentControl {
+         {
+             Some(parent.session.inherited_instructions().await)
+         } else {
+-            self.runtime
++            // The registered root has been supplying its applied user base and current
++            // resource appendix. Thread providers have been retaining their sharing policy.
++            let (user, user_appendix) = if let Some(root_id) =
++                self.runtime.registry.agent_id_for_path(&AgentPath::root())
++                && let Ok(root) = state.get_thread(root_id).await
++            {
++                let instructions = root.session.inherited_instructions().await;
++                (instructions.user, instructions.user_appendix)
++            } else {
++                (None, None)
++            };
++            let thread_provider = self
++                .runtime
+                 .shared_thread_instructions_provider
+                 .get()
+-                .map(|provider| SessionInstructions {
+-                    thread_provider: Some(Arc::clone(provider)),
+-                    ..Default::default()
+-                })
++                .cloned();
++            (user.is_some() || user_appendix.is_some() || thread_provider.is_some()).then_some(SessionInstructions {
++                user,
++                user_appendix,
++                thread_provider,
++                ..Default::default()
++            })
+         };
+         // Reserving a slot can evict an idle nested parent. Capture its instructions
+         // alongside its authority so the child does not depend on a later live lookup.
+diff --git a/codex-rs/core/src/agents_md.rs b/codex-rs/core/src/agents_md.rs
+index a5d05a31252ab745356bc18ffc87aa7cb80e4e85..9406e967b33272ed598bd01e3fd0a07e91bb27ca 100644
+--- a/codex-rs/core/src/agents_md.rs
++++ b/codex-rs/core/src/agents_md.rs
+@@ -315,6 +315,9 @@ pub struct LoadedAgentsMd {
+     /// Account- or home-scoped instructions supplied by the host.
+     user_instructions: Option<Instructions>,
+ 
++    /// Current source-less per-opening appendix; never part of the captured user base.
++    user_instructions_appendix: Option<String>,
++
+     /// Thread-scoped instructions supplied by the host.
+     thread_instructions: Option<Instructions>,
+ 
+@@ -333,6 +336,7 @@ impl LoadedAgentsMd {
+                 text: contents,
+                 source: Some(path),
+             }),
++            user_instructions_appendix: None,
+             thread_instructions: None,
+             entries: Vec::new(),
+         }
+@@ -342,6 +346,7 @@ impl LoadedAgentsMd {
+         Self {
+             user_instructions: user_instructions
+                 .filter(|instructions| !instructions.text.trim().is_empty()),
++            user_instructions_appendix: None,
+             thread_instructions: None,
+             entries: Vec::new(),
+         }
+@@ -351,9 +356,12 @@ impl LoadedAgentsMd {
+         mut self,
+         user_instructions: Option<Instructions>,
+         thread_instructions: Option<Instructions>,
++        user_instructions_appendix: Option<String>,
+     ) -> Option<Self> {
+         self.user_instructions =
+             user_instructions.filter(|instructions| !instructions.text.trim().is_empty());
++        self.user_instructions_appendix =
++            user_instructions_appendix.filter(|text| !text.trim().is_empty());
+         self.thread_instructions =
+             thread_instructions.filter(|instructions| !instructions.text.trim().is_empty());
+         (!self.is_empty()).then_some(self)
+@@ -370,6 +378,7 @@ impl LoadedAgentsMd {
+         }
+         Self {
+             user_instructions: None,
++            user_instructions_appendix: None,
+             thread_instructions: None,
+             entries: vec![InstructionEntry {
+                 contents,
+@@ -380,6 +389,7 @@ impl LoadedAgentsMd {
+ 
+     fn is_empty(&self) -> bool {
+         self.user_instructions.is_none()
++            && self.user_instructions_appendix.is_none()
+             && self.thread_instructions.is_none()
+             && self
+                 .entries
+@@ -400,15 +410,21 @@ impl LoadedAgentsMd {
+         let mut output = String::new();
+         let mut has_previous = false;
+         let mut previous_was_project = false;
+-        for instructions in self
++        for text in self
+             .user_instructions
+             .iter()
+-            .chain(self.thread_instructions.iter())
++            .map(|instructions| instructions.text.as_str())
++            .chain(self.user_instructions_appendix.as_deref())
++            .chain(
++                self.thread_instructions
++                    .iter()
++                    .map(|instructions| instructions.text.as_str()),
++            )
+         {
+             if has_previous {
+                 output.push_str("\n\n");
+             }
+-            output.push_str(&instructions.text);
++            output.push_str(text);
+             has_previous = true;
+         }
+         for entry in &self.entries {
+@@ -435,15 +451,21 @@ impl LoadedAgentsMd {
+         let mut output = String::new();
+         let mut has_previous = false;
+         let mut previous_environment: Option<(&str, &PathUri)> = None;
+-        for instructions in self
++        for text in self
+             .user_instructions
+             .iter()
+-            .chain(self.thread_instructions.iter())
++            .map(|instructions| instructions.text.as_str())
++            .chain(self.user_instructions_appendix.as_deref())
++            .chain(
++                self.thread_instructions
++                    .iter()
++                    .map(|instructions| instructions.text.as_str()),
++            )
+         {
+             if has_previous {
+                 output.push_str("\n\n");
+             }
+-            output.push_str(&instructions.text);
++            output.push_str(text);
+             has_previous = true;
+         }
+         for entry in &self.entries {
+diff --git a/codex-rs/core/src/agents_md_manager.rs b/codex-rs/core/src/agents_md_manager.rs
+index 4aaa1d0c3c382aab877e4d885d5a9a5d5cda1595..0ac5f993f9373d33551e4b2efb8e374fbbdb042e 100644
+--- a/codex-rs/core/src/agents_md_manager.rs
++++ b/codex-rs/core/src/agents_md_manager.rs
+@@ -28,6 +28,7 @@ pub(crate) struct AgentsMdManager {
+ #[derive(Clone, Default)]
+ pub(crate) struct SessionInstructions {
+     pub(crate) user: Option<Instructions>,
++    pub(crate) user_appendix: Option<String>,
+     pub(crate) thread: Option<Instructions>,
+     pub(crate) user_provider: Option<Arc<dyn UserInstructionsProvider>>,
+     pub(crate) thread_provider: Option<Arc<dyn ThreadInstructionsProvider>>,
+@@ -48,6 +49,9 @@ struct AgentsMdCache {
+ impl AgentsMdManager {
+     pub(crate) fn new(mut instructions: SessionInstructions) -> Self {
+         instructions.user = normalize_instructions(instructions.user);
++        instructions.user_appendix = instructions
++            .user_appendix
++            .filter(|text| !text.trim().is_empty());
+         instructions.thread = normalize_instructions(instructions.thread);
+         Self {
+             refresh_lock: Semaphore::new(/*permits*/ 1),
+@@ -109,12 +113,16 @@ impl AgentsMdManager {
+         }
+ 
+         let result = async {
++            if let Some(input) = &instructions.user_appendix {
++                validate_thread_instruction_size(input.len())?;
++            }
+             if let Some(input) = &instructions.thread {
+                 validate_thread_instruction_size(input.text.len())?;
+             }
+             if !refresh_repository {
+                 let state = self.state.lock().await;
+                 if state.instructions.user == instructions.user
++                    && state.instructions.user_appendix == instructions.user_appendix
+                     && state.instructions.thread == instructions.thread
+                 {
+                     return Ok(cached);
+@@ -128,7 +136,11 @@ impl AgentsMdManager {
+             } else {
+                 cached.as_deref().cloned().unwrap_or_default()
+             }
+-            .with_instructions(instructions.user.clone(), instructions.thread.clone())
++            .with_instructions(
++                instructions.user.clone(),
++                instructions.thread.clone(),
++                instructions.user_appendix.clone(),
++            )
+             .map(Arc::new);
+             let mut state = self.state.lock().await;
+             state.instructions = instructions;
+@@ -151,6 +163,7 @@ impl AgentsMdManager {
+         let state = self.state.lock().await;
+         SessionInstructions {
+             user: state.instructions.user.clone(),
++            user_appendix: state.instructions.user_appendix.clone(),
+             thread: state.instructions.thread.clone(),
+             thread_provider: state
+                 .instructions
+diff --git a/codex-rs/core/src/agents_md_tests.rs b/codex-rs/core/src/agents_md_tests.rs
+index 353da532c8319d5c603e5c83c74d94f6aa1aaff3..2549dde047de2f3a49d1d0916259007ac92ce12f 100644
+--- a/codex-rs/core/src/agents_md_tests.rs
++++ b/codex-rs/core/src/agents_md_tests.rs
+@@ -422,6 +422,7 @@ fn foreign_agents_md_uses_environment_native_paths() {
+     };
+     let source_path = cwd.join("AGENTS.md").expect("AGENTS.md URI");
+     let loaded = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: None,
+         thread_instructions: None,
+         entries: vec![InstructionEntry {
+@@ -456,6 +457,7 @@ fn multi_environment_agents_md_renders_mixed_path_conventions() {
+         .join("AGENTS.md")
+         .expect("Windows AGENTS.md URI");
+     let loaded = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: None,
+         thread_instructions: None,
+         entries: vec![
+@@ -614,6 +616,7 @@ fn empty_loaded_instructions_are_empty() {
+ #[test]
+ fn loaded_instructions_with_only_empty_or_whitespace_entries_are_empty() {
+     let empty = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: None,
+         thread_instructions: None,
+         entries: vec![InstructionEntry {
+@@ -622,6 +625,7 @@ fn loaded_instructions_with_only_empty_or_whitespace_entries_are_empty() {
+         }],
+     };
+     let whitespace = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: None,
+         thread_instructions: None,
+         entries: vec![InstructionEntry {
+@@ -694,6 +698,7 @@ async fn total_byte_limit_truncates_later_project_docs() {
+ 
+     let loaded = load_agents_md(&config).await.expect("project instructions");
+     let expected = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: None,
+         thread_instructions: None,
+         entries: vec![
+@@ -1387,6 +1392,7 @@ async fn concatenates_root_and_cwd_docs() {
+     let root_agents = repo.path().join("AGENTS.md").abs();
+     let crate_agents = cfg.cwd.join("AGENTS.md");
+     let expected = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: None,
+         thread_instructions: None,
+         entries: vec![
+@@ -1524,6 +1530,7 @@ async fn instruction_sources_include_global_before_agents_md_docs() {
+     let project_agents = cfg.cwd.join("AGENTS.md");
+ 
+     let expected = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: Some(Instructions {
+             text: "global doc".to_string(),
+             source: Some(global_agents.clone()),
+@@ -1797,3 +1804,46 @@ fn create_skill(codex_home: PathBuf, name: &str, description: &str) {
+     let content = format!("---\nname: {name}\ndescription: {description}\n---\n\n# Body\n");
+     fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+ }
++
++#[test]
++fn user_appendix_replaces_only_its_current_snapshot() {
++    let directory = tempfile::tempdir().expect("instruction source directory");
++    let source = AbsolutePathBuf::try_from(directory.path().join("AGENTS.md"))
++        .expect("absolute instruction source");
++    let user = Instructions {
++        text: "original user".to_owned(),
++        source: Some(source),
++    };
++    let thread = Instructions {
++        text: "original thread".to_owned(),
++        source: None,
++    };
++    let first = LoadedAgentsMd::default()
++        .with_instructions(
++            Some(user.clone()),
++            Some(thread.clone()),
++            Some("guide A".to_owned()),
++        )
++        .expect("first instruction snapshot");
++    let sources = first.sources().collect::<Vec<_>>();
++    let receipts = first.sdk_file_receipts(|text| text.to_owned());
++    let second = first
++        .with_instructions(
++            Some(user.clone()),
++            Some(thread.clone()),
++            Some("guide B".to_owned()),
++        )
++        .expect("replacement instruction snapshot");
++    assert_eq!(second.text(), "original user\n\nguide B\n\noriginal thread");
++    assert_eq!(second.sources().collect::<Vec<_>>(), sources);
++    assert_eq!(second.sdk_file_receipts(|text| text.to_owned()), receipts);
++    let cleared = second
++        .with_instructions(Some(user), Some(thread), None)
++        .expect("original sources remain");
++    assert_eq!(cleared.text(), "original user\n\noriginal thread");
++    assert!(
++        LoadedAgentsMd::default()
++            .with_instructions(None, None, Some(" \t".to_owned()))
++            .is_none()
++    );
++}
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index da14dbb7a57e7f20d4ffc8c0f0e595c92336f10c..f78368cd2d728b7c2514a7a5a5c71443fcab3be8 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -12,7 +12,9 @@ use codex_extension_api::{
+ use codex_history::{ResponseItemEnvelope, RolloutItem};
+ use codex_protocol::error::{CodexErr, Result as CodexResult};
+ use codex_protocol::models::ResponseItem;
+-use codex_protocol::protocol::{EventMsg, ThreadSettingsAppliedEvent};
++use codex_protocol::protocol::{
++    AgentProfileChangedEvent, Event, EventMsg, ThreadSettingsAppliedEvent,
++};
+ use serde::{Deserialize, Serialize};
+ use std::sync::Arc;
+ use tokio::sync::Notify;
+@@ -533,6 +535,28 @@ impl Session {
+         if task_fence.is_some() {
+             context.next_step_settings.store(Arc::new(destination));
+         }
++        drop(state);
++        // The profile persistence gate remains held through delivery, preserving
++        // committed transition order even when several handoffs share one turn.
++        // Rebinding the same identity can refresh configuration without changing
++        // the displayed Agent. Initial and restored bindings are silent.
++        if let Some(previous) = expected
++            .as_ref()
++            .filter(|previous| previous.profile_id != receipt.profile_id)
++        {
++            let turn_id = task_fence.as_ref().map(|_| context.sub_id.clone());
++            self.send_event_raw(Event {
++                id: turn_id.clone().unwrap_or_default(),
++                msg: EventMsg::AgentProfileChanged(AgentProfileChangedEvent {
++                    thread_id: self.thread_id(),
++                    turn_id,
++                    profile_id: receipt.profile_id.clone(),
++                    profile_epoch: receipt.epoch,
++                    previous_profile_id: Some(previous.profile_id.clone()),
++                }),
++            })
++            .await;
++        }
+         Ok(receipt)
+     }
+ }
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 9b725b3e3f0cbeccedc2da98c35b1d4d8eb41e53..c554df4de07f69070ea358ac74e073ef792f1b02 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2904,6 +2904,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventTex
+         | EventMsg::ThreadRolledBack(_)
+         | EventMsg::TurnStarted(_)
+         | EventMsg::ThreadSettingsApplied(_)
++        | EventMsg::AgentProfileChanged(_)
+         | EventMsg::TurnComplete(_)
+         | EventMsg::TokenCount(_)
+         | EventMsg::UserMessage(_)
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index b99ef00d8acc0191b88557175d5120820b47beb2..33154fb4ae8acf29dfa48788f4a7d2175f58b984 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -287,6 +287,9 @@ pub struct StartThreadOptions {
+     pub inherited_environments: Option<TurnEnvironmentSnapshot>,
+     /// Explicit global instructions carried by an internal caller instead of loading them again.
+     pub user_instructions: Option<LoadedUserInstructions>,
++    /// Current source-less root context, separate from global/provider instruction text.
++    /// New roots replace or clear this appendix; ordinary children inherit the applied snapshot.
++    pub user_instructions_appendix: Option<String>,
+     pub thread_extension_init: ExtensionDataInit,
+     /// Host-supplied data captured by each new turn. This is not persisted.
+     pub turn_extension_init: ExtensionDataInit,
+@@ -314,6 +317,7 @@ impl StartThreadOptions {
+             environments: None,
+             inherited_environments: None,
+             user_instructions: None,
++            user_instructions_appendix: None,
+             thread_extension_init: ExtensionDataInit::default(),
+             turn_extension_init: ExtensionDataInit::default(),
+             client_mcp_extensions: ClientMcpExtensions::default(),
+@@ -2114,6 +2118,7 @@ impl ThreadManagerState {
+             environments,
+             inherited_environments: captured_environments,
+             user_instructions: supplied_user_instructions,
++            user_instructions_appendix,
+             mut thread_extension_init,
+             turn_extension_init,
+             client_mcp_extensions,
+@@ -2308,6 +2313,11 @@ impl ThreadManagerState {
+                 )
+             };
+         let mut instructions = instructions;
++        // Root openings use only their current capture, including omission/clear.
++        // An inherited appendix is never folded into the original user base.
++        if !session_source.is_non_root_agent() || user_instructions_appendix.is_some() {
++            instructions.user_appendix = user_instructions_appendix;
++        }
+         if let Some(supplied) = supplied_user_instructions {
+             instructions.user = supplied.instructions;
+             instructions.user_provider = None;
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index 8bb98c3c6501419953aa26a1af442981c608d5b9..40f3c32c3148b9764da5129af569eaa4329b89c1 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -51,6 +51,10 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
+         self.0.exposure()
+     }
+ 
++    fn managed_agent_role(&self) -> Option<&str> {
++        self.0.managed_agent_role()
++    }
++
+     fn supports_parallel_tool_calls(&self) -> bool {
+         self.0.supports_parallel_tool_calls()
+     }
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 8b6b9cc930cad599c9352230c9a154dec2643969..55343efaab733a76c670dc625154663062e85551 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -713,7 +713,12 @@ fn apply_direct_model_only_namespace_overrides(
+         return;
+     }
+ 
++    let allow_declared_roles = turn_context.config.features.enabled(Feature::CodeMode);
+     for tool in registry.entries_mut() {
++        // Keep explicitly declared SDK roles callable from Code Mode.
++        if allow_declared_roles && tool.runtime.managed_agent_role().is_some() {
++            continue;
++        }
+         let configured = tool
+             .runtime
+             .tool_name()
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 8e1173c29b02c84c882ba609d3e69e4bfb7d4c3b..8eb251f36c1fa982f5a825b45300cee844024900 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1963,6 +1963,9 @@ pub enum EventMsg {
+     /// been applied to the session configuration.
+     ThreadSettingsApplied(ThreadSettingsAppliedEvent),
+ 
++    /// A committed change of captured Agent identity; initial binding is silent.
++    AgentProfileChanged(AgentProfileChangedEvent),
++
+     /// Agent has completed all actions.
+     /// v1 wire format uses `task_complete`; accept `turn_complete` for v2 interop.
+     #[serde(rename = "task_complete", alias = "turn_complete")]
+@@ -2785,6 +2788,18 @@ pub struct TurnStartedEvent {
+     pub collaboration_mode_kind: ModeKind,
+ }
+ 
++#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
++pub struct AgentProfileChangedEvent {
++    pub thread_id: ThreadId,
++    /// None for an idle activation, never a synthetic sampling turn.
++    pub turn_id: Option<String>,
++    pub profile_id: String,
++    pub profile_epoch: u64,
++    /// The previous committed identity. Older wire events may omit it.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub previous_profile_id: Option<String>,
++}
++
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ pub struct ThreadSettingsAppliedEvent {
+     /// Logical task that owns this snapshot, independent of the physical rollout file.
+diff --git a/codex-rs/rollout-trace/src/protocol_event.rs b/codex-rs/rollout-trace/src/protocol_event.rs
+index 40ac594156869a7d01d23dfb24183075dbfbd8d5..c6e954a0b6f36ac353fd9566e390913cb7bc94f1 100644
+--- a/codex-rs/rollout-trace/src/protocol_event.rs
++++ b/codex-rs/rollout-trace/src/protocol_event.rs
+@@ -372,6 +372,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
+         | EventMsg::ThreadQueueChanged(_)
+         | EventMsg::TurnStarted(_)
+         | EventMsg::ThreadSettingsApplied(_)
++        | EventMsg::AgentProfileChanged(_)
+         | EventMsg::TurnComplete(_)
+         | EventMsg::TokenCount(_)
+         | EventMsg::AgentMessage(_)
+@@ -452,6 +453,7 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
+         | EventMsg::TurnModerationMetadata(_)
+         | EventMsg::ContextCompacted(_)
+         | EventMsg::ThreadSettingsApplied(_)
++        | EventMsg::AgentProfileChanged(_)
+         | EventMsg::EnvironmentConnected(_)
+         | EventMsg::EnvironmentDisconnected(_)
+         | EventMsg::TokenCount(_)
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index daae0a31633520406edd87bd9f55708b2e4ee488..4412e42123821a1015a65519d45a84f2d5e41630 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -169,7 +169,8 @@ pub fn persisted_event_msg(
+             .then_some(Cow::Borrowed(ev)),
+ 
+         // Transient, non-durable events.
+-        EventMsg::Error(_)
++        EventMsg::AgentProfileChanged(_)
++        | EventMsg::Error(_)
+         | EventMsg::ThreadQueueChanged(_)
+         | EventMsg::GuardianAssessment(_)
+         | EventMsg::ExecCommandEnd(_)

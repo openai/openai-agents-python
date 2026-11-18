@@ -1,0 +1,86 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index ac9a02e5535592b68f45d5a6144956c99383ba00..ccf3a70cc71bcf2a9df7e1111c9e3e08c1c86bfb 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1780,6 +1780,7 @@ impl ModelClientSession {
+                 client_setup.api_auth,
+             )
+             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
++            crate::model_request::wait_if_sampling_stopped(prompt.tool_admission.as_deref()).await;
+             crate::model_request::admit_request(&interceptors).map_err(CodexErr::InvalidRequest)?;
+             let stream_result = client.stream_request(request, options).await;
+ 
+@@ -2092,6 +2093,7 @@ impl ModelClientSession {
+                     ),
+                 ],
+             );
++            crate::model_request::wait_if_sampling_stopped(prompt.tool_admission.as_deref()).await;
+             crate::model_request::admit_request(&interceptors).map_err(CodexErr::InvalidRequest)?;
+             let stream_result = websocket_connection
+                 .stream_request(
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index c59b85ab821f9c1178ff4e88abadbc9c44e97af9..e254bace2300873ae5e6b84c796ffd9dc8471bc8 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -7,10 +7,21 @@ use codex_extension_api::ModelRequestKind;
+ use codex_extension_api::ModelResponseInterceptor;
+ use codex_extension_api::ModelResponseStream;
+ use codex_extension_api::ModelToolAdmission;
++use codex_extension_api::TurnSamplingStop;
+ use codex_protocol::models::ResponseItem;
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ 
++pub(crate) async fn wait_if_sampling_stopped(admission: Option<&dyn ModelToolAdmission>) {
++    if admission
++        .and_then(|admission| admission.turn_store().get::<TurnSamplingStop>())
++        .is_some_and(|stop| stop.requested())
++    {
++        // Keep the native interrupt responsible for aborting the task and joining cleanup.
++        std::future::pending::<()>().await;
++    }
++}
++
+ pub(crate) fn prepare(
+     contributors: &[Arc<dyn ModelRequestContributor>],
+     thread_id: &str,
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 525c31b370a2e476f6328c8fbd112859b32c84fb..fd7dd1f2535e36c85b47beac41a931a5b601e154 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -125,6 +125,7 @@ pub use model_request::ModelResponseInterceptor;
+ pub use model_request::ModelResponseStream;
+ pub use model_request::ModelToolAdmission;
+ pub use model_request::ResponseEvent;
++pub use model_request::TurnSamplingStop;
+ 
+ /// SDK host context for recording the settings used to prepare a sampling request.
+ pub struct SdkTurnReceiptSeed {
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 692de0b4f44326b0d3835da4a8b72e51fced5638..45fa289c1d3a458daa5305abc634e79a47c7b1e5 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -6,6 +6,23 @@ use codex_protocol::models::ResponseItem;
+ use futures::stream::BoxStream;
+ use std::collections::HashMap;
+ use std::sync::Arc;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
++
++/// Stops admission to model requests while the host interrupts this turn.
++/// Install in the turn store and retain that same receipt when requesting stop.
++#[derive(Debug, Default)]
++pub struct TurnSamplingStop(AtomicBool);
++
++impl TurnSamplingStop {
++    pub fn request(&self) {
++        self.0.store(true, Ordering::Release);
++    }
++
++    pub fn requested(&self) -> bool {
++        self.0.load(Ordering::Acquire)
++    }
++}
+ 
+ /// Model response events owned by an interceptor or its downstream consumer.
+ pub type ModelResponseStream = BoxStream<'static, Result<ResponseEvent, ModelResponseError>>;

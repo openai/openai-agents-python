@@ -1,0 +1,134 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 8af3cee5db8c3ce075c14c71a153f789da376910..a1d6a49155a50469a03edd70a993a00f50d120ae 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -3632,12 +3632,10 @@ impl ModelClientSession {
+             .and_then(|admission| admission.step_store())
+             .and_then(|store| store.get::<crate::session::staged_input_terminal::SampledSources>());
+         let websocket_enabled = self.websocket_for_prompt(prompt)?;
+-        if staged_sources.is_some()
+-            && (model_info.use_responses_lite
+-                || prompt.request_controls.hosted_prompt.as_ref().and_then(Option::as_ref).is_some())
+-        {
++        if staged_sources.is_some() && model_info.use_responses_lite {
+             return Err(CodexErr::InvalidRequest(
+-                "Selected staged input requires ordinary Responses without a hosted prompt".into()));
++                "Selected staged input requires the standard Responses formatter".into(),
++            ));
+         }
+         let mut source_origins = (0..prompt.input.len()).map(Some).collect::<Vec<_>>();
+         self.allow_http_fallback = Self::request_transport_mode(prompt) != codex_protocol::model_request_transport::RequestTransportMode::Websocket;
+diff --git a/codex-rs/core/src/session/staged_input_terminal.rs b/codex-rs/core/src/session/staged_input_terminal.rs
+index b72d4f0cdad7bc5673be87680fb412a52dad110f..b5466455058647d9e32695c1e7886254b9890140 100644
+--- a/codex-rs/core/src/session/staged_input_terminal.rs
++++ b/codex-rs/core/src/session/staged_input_terminal.rs
+@@ -422,18 +422,25 @@ pub(crate) async fn append(
+             let originals = batch
+                 .items_for(&step.turn.sub_id)
+                 .ok_or("The staged batch does not belong to this pending turn")?;
+-            // This first owner does not perform image/file preparation before a
+-            // provider accepts the request. Broader media routes retain their gates.
+-            if originals.iter().any(|item| {
+-                !matches!(
+-                    item, ResponseItem::Message { role, content, .. }
+-                    if matches!(role.as_str(), "user" | "developer" | "system") && content.iter().all(|part|
+-                        matches!(part, ContentItem::InputText { .. }))
+-                )
++            // File inputs use the current provider's ordinary wire validation. Core
++            // does not fetch or transform them before the provider accepts the batch.
++            if originals.iter().any(|item| match item {
++                ResponseItem::Message { role, content, .. }
++                    if matches!(role.as_str(), "user" | "developer" | "system") =>
++                {
++                    !content.iter().all(|part| match part {
++                        ContentItem::InputText { .. } => true,
++                        ContentItem::InputFile { .. } => role == "user",
++                        _ => false,
++                    })
++                }
++                // Legacy shell outputs remain detached historical data. Ordinary
++                // function outputs require a matching canonical call before they
++                // may survive the next request's history normalization.
++                ResponseItem::LocalShellCallOutput { .. } => false,
++                _ => true,
+             }) {
+-                return Err(
+-                    "Terminal staged admission currently requires text message rows".to_string(),
+-                );
++                return Err("Unsupported item in terminal staged input".to_string());
+             }
+             let annotated = originals
+                 .iter()
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index d119df820115c606761a803b8e95092394967572..fb640f9a864e44494c8a6ceadfe3e87aa37a7b8f 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -222,6 +222,13 @@ async fn run_turn_agent_owned(
+     agent_owner: Option<Arc<SdkAgentSpanOwner>>,
+ ) -> CodexResult<Option<String>> {
+     sess.check_agent_profile_admission()?;
++    if let Some(seed) = turn_context.extension_data
++        .get::<Option<Arc<codex_extension_api::FreshStagedInput>>>()
++        .and_then(|entry| entry.as_ref().as_ref().cloned())
++        && let Some(batch) = seed.claim(&sess.thread_id.to_string(), &turn_context.sub_id)
++    {
++        turn_context.extension_data.insert(batch);
++    }
+     check_provider_history_budget(&sess, &input).await?;
+ 
+     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index e60b586b6af977dfb6958b721e23d17635ec835e..4765e3bfddf98616806500a1940ccafc68139c49 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -245,3 +245,5 @@ mod model_provider_metadata;
+ pub use model_provider_metadata::{
+     CapturedModelProviderOutput, ModelOutputProviderMetadata, ModelProviderMetadataBudget,
+ };
++
++pub use model_request::FreshStagedInput;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index d242c7d2e30511aacbcff5e40f23f54e496c58f2..87b11c2c6544643882e81969d4837a8330a31865 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -226,6 +226,11 @@ impl StagedInputBatch {
+         }).map(|_| ()).map_err(|_| "Staged terminal writer is pending or failed".into())
+     }
+ 
++    /// A settled native provider transaction, never a checkpoint field.
++    pub fn terminal_was_accepted(&self) -> bool {
++        self.terminal_write.load(Ordering::Acquire) == 2
++    }
++
+     pub fn finish_terminal_write(&self, success: bool) {
+         self.terminal_write.store(if success { 2 } else { 3 }, Ordering::Release);
+     }
+@@ -297,6 +302,28 @@ impl StagedInputBatch {
+     }
+ }
+ 
++/// One native fresh admission claims an existing caller-owned pending mask.
++pub struct FreshStagedInput {
++    thread_id: String,
++    batch: StagedInputBatch,
++    current_turn: Arc<std::sync::Mutex<String>>,
++    claimed: AtomicBool,
++}
++impl FreshStagedInput {
++    pub fn new(thread_id: String, batch: StagedInputBatch,
++        current_turn: Arc<std::sync::Mutex<String>>) -> Result<Self, String> {
++        if !batch.projects_occurrences() { return Err("Fresh staged input requires selected occurrence ownership".into()); }
++        Ok(Self { thread_id, batch, current_turn, claimed: AtomicBool::new(false) })
++    }
++    /// Core claims only after its atomic fresh-root admission, before sampling.
++    pub fn claim(&self, thread_id: &str, turn_id: &str) -> Option<StagedInputBatch> {
++        if self.thread_id != thread_id || self.claimed.compare_exchange(false, true,
++            Ordering::AcqRel, Ordering::Acquire).is_err() { return None; }
++        *self.current_turn.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = turn_id.to_owned();
++        Some(StagedInputBatch { turn_id: turn_id.to_owned(), ..self.batch.clone() })
++    }
++}
++
+ /// Core publishes this view only after the next sampling agent has been selected.
+ pub struct SelectedStagedInput(pub Arc<StagedInputBatch>);
+ 

@@ -1,0 +1,3451 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index 9d999272c38a92fdd9d36ceba6016f8ab3324e8c..50f2603d5c2e45611bb61c328452d1700e6892bc 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -4335,6 +4335,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "serde_with",
++ "sha2",
+  "strum 0.27.2",
+  "strum_macros 0.28.0",
+  "sys-locale",
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index 54897998c94e9eac47bfe156dedb38a083c08f5a..495692e32b2bdcf6863ba6649c1e309666b1df9b 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -374,7 +374,7 @@ pub struct ResponsesApiRequest {
+     pub stream: bool,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub service_tier: Option<String>,
+-    pub input: Vec<ResponseItem>,
++    pub input: crate::CacheAnnotatedInput<Vec<ResponseItem>>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub tools: Option<ResponsesApiTools>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+@@ -404,7 +404,7 @@ impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
+         Self {
+             model: request.model.as_deref(),
+             previous_response_id: None,
+-            input: &request.input,
++            input: request.input.borrow_with(request.input.as_ref()),
+             tools: request.tools.as_ref().map(ResponsesApiTools::as_raw_value),
+             tool_choice: request.tool_choice.as_deref(),
+             request_controls: request.request_controls.clone(),
+@@ -435,7 +435,7 @@ pub struct ResponseCreateWsRequest<'a> {
+     pub service_tier: Option<&'a str>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub previous_response_id: Option<String>,
+-    pub input: &'a [ResponseItem],
++    pub input: crate::CacheAnnotatedInput<&'a [ResponseItem]>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub tools: Option<&'a RawValue>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
+index a4fea21c738037be46b870ea44e15625808167f9..ae31dec555769e8cdaa8a53f4d2c8c55f62baeda 100644
+--- a/codex-rs/codex-api/src/endpoint/responses.rs
++++ b/codex-rs/codex-api/src/endpoint/responses.rs
+@@ -41,6 +41,7 @@ pub struct ResponsesOptions {
+     pub turn_state: Option<Arc<OnceLock<String>>>,
+     pub terminal_limit_errors: bool,
+     pub observe_raw_provider_events: bool,
++    pub text_demand: Option<Arc<crate::TextDeltaDemand>>,
+ }
+ 
+ impl<T: HttpTransport> ResponsesClient<T> {
+@@ -164,6 +165,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             options.turn_state,
+             options.terminal_limit_errors,
+             options.observe_raw_provider_events,
++            options.text_demand,
+         )
+         .await
+     }
+@@ -259,6 +261,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             turn_state,
+             /*terminal_limit_errors*/ false,
+             /*observe_raw_provider_events*/ false,
++            /*text_demand*/ None,
+         )
+         .await
+     }
+@@ -271,6 +274,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         turn_state: Option<Arc<OnceLock<String>>>,
+         terminal_limit_errors: bool,
+         observe_raw_provider_events: bool,
++        text_demand: Option<Arc<crate::TextDeltaDemand>>,
+     ) -> Result<ResponseStream, ApiError> {
+         let stream_response = self
+             .send_encoded(
+@@ -290,6 +294,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             turn_state,
+             terminal_limit_errors,
+             observe_raw_provider_events,
++            text_demand,
+         ))
+     }
+     async fn send_encoded(
+diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+index 5ec63a3e19ab2cbd8e020e6cf1daaa837121bb15..78b12f84636b010596ba08cc76f6fc8e72d03622 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+@@ -40,6 +40,7 @@ fn from_bytes(body: Vec<u8>) -> BoxStream<'static, Result<ResponseEvent, ApiErro
+         },
+         Duration::from_secs(5),
+         None,
++        false,
+     )
+     .1
+ }
+@@ -267,6 +268,7 @@ async fn lazy_body_is_not_polled_at_headers_and_drop_releases_pending_body_direc
+             },
+             Duration::from_secs(5),
+             None,
++            false,
+         );
+         assert_eq!(polls.load(Ordering::SeqCst), 0);
+         if stage > 0 {
+@@ -305,6 +307,7 @@ async fn body_timeout_transport_error_and_truncation_are_stream_failures_without
+         },
+         Duration::from_millis(1),
+         None,
++        false,
+     );
+     let reset = pending.next().await;
+     assert!(default_header_reset(reset.as_ref()));
+@@ -323,6 +326,7 @@ async fn body_timeout_transport_error_and_truncation_are_stream_failures_without
+         },
+         Duration::from_secs(5),
+         None,
++        false,
+     );
+     let events: Events = events.collect().await;
+     assert!(default_header_reset(events.first()));
+@@ -350,6 +354,7 @@ async fn body_size_error_retains_its_nonretryable_transport_classification() {
+         },
+         Duration::from_secs(5),
+         None,
++        false,
+     );
+     let events: Events = events.collect().await;
+     assert!(default_header_reset(events.first()));
+@@ -399,7 +404,7 @@ fn request() -> crate::ResponsesApiRequest {
+         model: Some("synthetic-json-model".into()),
+         stream: false,
+         service_tier: None,
+-        input: Vec::new(),
++        input: (Vec::new()).into(),
+         tools: None,
+         tool_choice: Some("auto".into()),
+         parallel_tool_calls: Some(false),
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..20a6df2fc0d0feddb6e5fc255baaa9865a46456c 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -296,6 +296,7 @@ impl ResponsesWebsocketConnection {
+             turn_state,
+             observe_raw_provider_events,
+             None,
++            /*text_demand*/ None,
+         )
+         .await
+     }
+@@ -314,6 +315,7 @@ impl ResponsesWebsocketConnection {
+         turn_state: Option<Arc<OnceLock<String>>>,
+         observe_raw_provider_events: bool,
+         send_observer: Option<Arc<dyn Fn() + Send + Sync>>,
++        text_demand: Option<Arc<crate::TextDeltaDemand>>,
+     ) -> Result<ResponseStream, ApiError> {
+         let (tx_event, rx_event) =
+             mpsc::channel::<std::result::Result<ResponseEvent, ApiError>>(1600);
+@@ -408,6 +410,7 @@ impl ResponsesWebsocketConnection {
+                             rx_interrupt,
+                             observe_raw_provider_events && !timing_log_context.warmup,
+                             send_observer.as_deref(),
++                            text_demand.filter(|_| !observe_raw_provider_events && !timing_log_context.warmup),
+                         ) => result,
+                         _ = &mut stopped => Err(ApiError::Stream("local response invocation stopped".into())),
+                         _ = tx_event.closed() => Err(ApiError::Stream(
+@@ -892,6 +895,7 @@ async fn run_websocket_response_stream(
+     interrupt: oneshot::Receiver<()>,
+     observe_raw_provider_events: bool,
+     send_observer: Option<&(dyn Fn() + Send + Sync)>,
++    text_demand: Option<Arc<crate::TextDeltaDemand>>,
+ ) -> Result<(), ApiError> {
+     let mut last_server_model: Option<String> = None;
+     let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
+@@ -910,10 +914,23 @@ async fn run_websocket_response_stream(
+     // A response owns its interrupt, and create must be sent before interrupt.
+     let mut interrupt = interrupt.fuse();
+     let mut response_id = None;
++    let mut pending_text = crate::text_delta::TextDeltaBuffer::new(text_demand);
++    let demand = pending_text.demand.clone();
++    let result = async {
+     loop {
+-        let poll_start = Instant::now();
+-        let response = tokio::select! {
+-            response = websocket_phase_timeout(receive_timeout, ws_stream.next()) => {
++        let mut poll_start = Instant::now();
++        let mut expires = receive_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
++        let response = loop { break tokio::select! {
++            _ = async { if let Some(demand) = &demand { demand.cancelled().await; } }, if pending_text.enabled() => {
++                pending_text.activate(&tx_event).await.map_err(|_| ApiError::Stream("response event consumer dropped".into()))?;
++                continue;
++            }
++            response = async {
++                match expires {
++                    Some(deadline) => tokio::time::timeout_at(deadline, ws_stream.next()).await,
++                    None => Ok(ws_stream.next().await),
++                }
++            } => {
+                 response.map_err(|_| ApiError::Stream("idle timeout waiting for websocket".into()))
+             }
+             Ok(()) = &mut interrupt, if response_id.is_some() => {
+@@ -929,9 +946,11 @@ async fn run_websocket_response_stream(
+                     timing_log_context.connection_reused,
+                 )
+                 .await?;
++                expires = receive_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
++                poll_start = Instant::now();
+                 continue;
+             }
+-        };
++        }; };
+         if let Some(t) = telemetry.as_ref() {
+             t.on_ws_event(&response, poll_start.elapsed());
+         }
+@@ -982,9 +1001,11 @@ async fn run_websocket_response_stream(
+                             payload_bytes = text.len(),
+                             "Failed to parse WebSocket event"
+                         );
++                        pending_text.flush(&tx_event).await.map_err(|_| ApiError::Stream("response event consumer dropped".into()))?;
+                         continue;
+                     }
+                 };
++                if pending_text.push(&event, &tx_event).await.map_err(|_| ApiError::Stream("response event consumer dropped".into()))? { continue; }
+                 emit_responses_websocket_timing_event(
+                     event.kind(),
+                     text.as_str(),
+@@ -1113,6 +1134,12 @@ async fn run_websocket_response_stream(
+     }
+ 
+     Ok(())
++    }.await;
++    pending_text
++        .flush(&tx_event)
++        .await
++        .map_err(|_| ApiError::Stream("response event consumer dropped".into()))?;
++    result
+ }
+ 
+ fn emit_responses_websocket_timing_event(
+@@ -1598,7 +1625,7 @@ mod tests {
+         let request = ResponsesApiRequest {
+             request_controls: Default::default(),
+             model: Some("test-model".into()),
+-            input: Vec::new(),
++            input: (Vec::new()).into(),
+             tools: None,
+             tool_choice: Some("auto".into()),
+             parallel_tool_calls: Some(false),
+@@ -1678,13 +1705,15 @@ mod tests {
+             &mut stream,
+             tx_event,
+             "{}".to_string(),
+-            Duration::from_secs(1),
++            Some(Duration::from_secs(1)),
++            Some(Duration::from_secs(1)),
+             None,
+             None,
+             &context,
+             rx_interrupt,
+             /*observe_raw_provider_events*/ false,
+             /*send_observer*/ None,
++            /*text_demand*/ None,
+         )
+         .await
+         .unwrap_err();
+@@ -1714,7 +1743,7 @@ mod tests {
+         let api_request = ResponsesApiRequest {
+             request_controls: Default::default(),
+             model: Some("gpt-test".to_string()),
+-            input: vec![ResponseItem::Message {
++            input: (vec![ResponseItem::Message {
+                 id: Some(ResponseItemId::with_suffix("msg", "1")),
+                 role: "user".to_string(),
+                 content: vec![ContentItem::InputText {
+@@ -1722,7 +1751,7 @@ mod tests {
+                 }],
+                 phase: None,
+                 internal_chat_message_metadata_passthrough: None,
+-            }],
++            }]).into(),
+             tools: Some(
+                 Arc::<RawValue>::from(
+                     to_raw_value(&vec![json!({
+@@ -2093,13 +2122,15 @@ mod tests {
+                 &mut stream,
+                 tx_event,
+                 "{}".to_string(),
+-                Duration::from_secs(1),
++                Some(Duration::from_secs(1)),
++                Some(Duration::from_secs(1)),
+                 None,
+                 None,
+                 &context,
+                 rx_interrupt,
+                 /*observe_raw_provider_events*/ false,
+                 /*send_observer*/ None,
++                /*text_demand*/ None,
+             )
+             .await
+             .unwrap_err();
+@@ -2129,3 +2160,206 @@ mod tests {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod text_demand_tests {
++    use super::*;
++    #[tokio::test]
++    async fn actual_websocket_parser_flushes_text_before_tool_and_terminal() {
++        let (tx_command, mut rx_command) = mpsc::channel(1);
++        let (tx_message, rx_message) = mpsc::unbounded_channel();
++        let pump_task = tokio::spawn(async move {
++            let Some(WsCommand::Send { tx_result, .. }) = rx_command.recv().await else {
++                panic!("missing create");
++            };
++            tx_result.send(Ok(())).unwrap();
++        });
++        for event in [
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"a", "logprobs":[]}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"b", "logprobs":[]}),
++            serde_json::json!({"type":"response.output_item.done", "item":{"type":"function_call", "id":"f", "call_id":"call", "name":"tool", "arguments":"{}"}}),
++            serde_json::json!({"type":"response.completed", "response":{"id":"r", "status":"completed"}}),
++        ] {
++            tx_message
++                .send(Ok(Message::Text(event.to_string().into())))
++                .unwrap();
++        }
++        drop(tx_message);
++        let mut stream = WsStream {
++            tx_command,
++            rx_message,
++            pump_task,
++            upgrade_rate_limits: None,
++        };
++        let (tx, mut rx) = mpsc::channel(32);
++        let (_interrupt, interrupted) = oneshot::channel();
++        let context = ResponsesWebsocketTimingLogContext {
++            model: "test".into(),
++            session_id: None,
++            thread_id: None,
++            turn_id: None,
++            traceparent: None,
++            previous_response_id: None,
++            request_start_ms: None,
++            warmup: false,
++            connection_reused: false,
++        };
++        run_websocket_response_stream(
++            &mut stream,
++            tx,
++            "{}".into(),
++            Some(Duration::from_secs(1)),
++            Some(Duration::from_secs(1)),
++            None,
++            None,
++            &context,
++            interrupted,
++            false,
++            None,
++            Some(Arc::default()),
++        )
++        .await
++        .unwrap();
++        let mut tags = Vec::new();
++        let mut text = String::new();
++        while let Some(event) = rx.recv().await {
++            match event.unwrap() {
++                ResponseEvent::OutputTextDelta(s) => {
++                    text.push_str(&s);
++                    tags.push("text");
++                }
++                ResponseEvent::ResponseFact(_) => tags.push("fact"),
++                ResponseEvent::OutputItemDone(
++                    codex_protocol::models::ResponseItem::FunctionCall { call_id, .. },
++                ) => {
++                    assert_eq!(call_id, "call");
++                    tags.push("tool");
++                }
++                ResponseEvent::ResponseObserved(_) => tags.push("observed"),
++                ResponseEvent::Completed { .. } => tags.push("completed"),
++                other => panic!("unexpected {other:?}"),
++            }
++        }
++        assert_eq!(text, "ab");
++        assert_eq!(
++            tags,
++            ["fact", "text", "text", "tool", "observed", "completed"]
++        );
++        (&mut stream.pump_task).await.unwrap();
++    }
++    #[tokio::test(start_paused = true)]
++    async fn demand_wakes_pending_websocket_without_restarting_idle_deadline() {
++        assert_pending_websocket_text_demand(Some(Duration::from_secs(10))).await;
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn demand_wakes_pending_websocket_with_receive_deadline_disabled() {
++        assert_pending_websocket_text_demand(None).await;
++    }
++
++    async fn assert_pending_websocket_text_demand(receive_timeout: Option<Duration>) {
++        let (tx_command, mut rx_command) = mpsc::channel(1);
++        let (tx_message, rx_message) = mpsc::unbounded_channel();
++        let pump_task = tokio::spawn(async move {
++            let Some(WsCommand::Send { tx_result, .. }) = rx_command.recv().await else {
++                panic!("missing create");
++            };
++            tx_result.send(Ok(())).unwrap();
++        });
++        for event in [
++            serde_json::json!({"type":"response.created", "response":{"id":"r"}}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"a"}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"b"}),
++        ] {
++            tx_message
++                .send(Ok(Message::Text(event.to_string().into())))
++                .unwrap();
++        }
++        let mut stream = WsStream {
++            tx_command,
++            rx_message,
++            pump_task,
++            upgrade_rate_limits: None,
++        };
++        let (tx, mut rx) = mpsc::channel(16);
++        let (_interrupt, interrupted) = oneshot::channel();
++        let demand = Arc::new(crate::TextDeltaDemand::default());
++        let producer_demand = demand.clone();
++        let producer = tokio::spawn(async move {
++            let context = ResponsesWebsocketTimingLogContext {
++                model: "test".into(),
++                session_id: None,
++                thread_id: None,
++                turn_id: None,
++                traceparent: None,
++                previous_response_id: None,
++                request_start_ms: None,
++                warmup: false,
++                connection_reused: false,
++            };
++            let result = run_websocket_response_stream(
++                &mut stream,
++                tx,
++                "{}".into(),
++                Some(Duration::from_secs(10)),
++                receive_timeout,
++                None,
++                None,
++                &context,
++                interrupted,
++                false,
++                None,
++                Some(producer_demand),
++            )
++            .await;
++            (&mut stream.pump_task).await.unwrap();
++            result
++        });
++        assert!(matches!(
++            rx.recv().await.unwrap().unwrap(),
++            ResponseEvent::Created { .. }
++        ));
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(t) if t=="a")
++        );
++        tokio::task::yield_now().await;
++        tokio::time::advance(Duration::from_secs(6)).await;
++        demand.cancel();
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(t) if t=="b")
++        );
++        tokio::time::advance(Duration::from_secs(5)).await;
++        tokio::task::yield_now().await;
++        if receive_timeout.is_some() {
++            assert!(
++                producer.is_finished(),
++                "observation demand restarted the idle deadline"
++            );
++            assert!(
++                matches!(producer.await.unwrap(), Err(ApiError::Stream(message)) if message.contains("idle timeout"))
++            );
++        } else {
++            assert!(
++                !producer.is_finished(),
++                "disabled receive deadline expired after observation demand"
++            );
++            tx_message
++                .send(Ok(Message::Text(
++                    serde_json::json!({"type":"response.completed", "response":{"id":"r", "status":"completed"}})
++                        .to_string()
++                        .into(),
++                )))
++                .unwrap();
++            assert!(matches!(
++                rx.recv().await.unwrap().unwrap(),
++                ResponseEvent::ResponseObserved(_)
++            ));
++            assert!(matches!(
++                rx.recv().await.unwrap().unwrap(),
++                ResponseEvent::Completed { response_id, .. } if response_id == "r"
++            ));
++            assert!(producer.await.unwrap().is_ok());
++        }
++        drop(tx_message);
++    }
++}
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 793d30a9d75d090699711e5837a93d1e244dfb78..30598aa96470797ad82ce399859e0bf69c2d3512 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -8,6 +8,8 @@ pub(crate) mod error;
+ pub(crate) mod files;
+ pub(crate) mod images;
+ pub(crate) mod provider;
++mod request_input;
++pub use request_input::CacheAnnotatedInput;
+ mod request_transport;
+ pub(crate) mod rate_limits;
+ mod received_response_facts;
+@@ -184,3 +186,6 @@ pub struct SdkWebsocketTlsSelector(
+ );
+ 
+ pub use common::ProviderHistoryInputProjection;
++
++mod text_delta;
++pub use text_delta::TextDeltaDemand;
+diff --git a/codex-rs/codex-api/src/request_input.rs b/codex-rs/codex-api/src/request_input.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e61dbab90a95c2adc89b1a52445158794cf8841f
+--- /dev/null
++++ b/codex-rs/codex-api/src/request_input.rs
+@@ -0,0 +1,222 @@
++//! Request-only cache annotation projection; canonical content retains its existing representation.
++use codex_protocol::models::ResponseItem;
++use codex_protocol::prompt_cache::{PromptCacheAnnotation, PromptCacheProjection};
++use serde::Serialize;
++use serde::ser::SerializeSeq;
++use std::collections::BTreeMap;
++use std::ops::{Deref, DerefMut};
++use std::sync::Arc;
++
++#[derive(Debug, Clone, PartialEq)]
++pub struct CacheAnnotatedInput<T> {
++    items: T,
++    annotations: Arc<Vec<PromptCacheAnnotation>>,
++}
++
++impl<T> CacheAnnotatedInput<T> {
++    pub fn with_annotations(items: T, annotations: Vec<PromptCacheAnnotation>) -> Self {
++        Self {
++            items,
++            annotations: Arc::new(annotations),
++        }
++    }
++
++    pub fn with_items<U>(&self, items: U) -> CacheAnnotatedInput<U> {
++        CacheAnnotatedInput {
++            items,
++            annotations: self.annotations.clone(),
++        }
++    }
++
++    pub fn borrow_with<'a>(
++        &self,
++        items: &'a [ResponseItem],
++    ) -> CacheAnnotatedInput<&'a [ResponseItem]> {
++        CacheAnnotatedInput {
++            items,
++            annotations: self.annotations.clone(),
++        }
++    }
++}
++
++impl IntoIterator for CacheAnnotatedInput<Vec<ResponseItem>> {
++    type Item = ResponseItem;
++    type IntoIter = std::vec::IntoIter<ResponseItem>;
++
++    fn into_iter(self) -> Self::IntoIter {
++        self.items.into_iter()
++    }
++}
++
++impl From<Vec<ResponseItem>> for CacheAnnotatedInput<Vec<ResponseItem>> {
++    fn from(items: Vec<ResponseItem>) -> Self {
++        Self::with_annotations(items, Vec::new())
++    }
++}
++
++impl<'a> From<&'a [ResponseItem]> for CacheAnnotatedInput<&'a [ResponseItem]> {
++    fn from(items: &'a [ResponseItem]) -> Self {
++        Self::with_annotations(items, Vec::new())
++    }
++}
++
++impl<'a> From<&'a Vec<ResponseItem>> for CacheAnnotatedInput<&'a [ResponseItem]> {
++    fn from(items: &'a Vec<ResponseItem>) -> Self {
++        Self::from(items.as_slice())
++    }
++}
++
++impl<'a, const N: usize> From<&'a [ResponseItem; N]> for CacheAnnotatedInput<&'a [ResponseItem]> {
++    fn from(items: &'a [ResponseItem; N]) -> Self {
++        Self::from(items.as_slice())
++    }
++}
++
++impl Default for CacheAnnotatedInput<Vec<ResponseItem>> {
++    fn default() -> Self {
++        Vec::new().into()
++    }
++}
++
++impl<T> Deref for CacheAnnotatedInput<T> {
++    type Target = T;
++    fn deref(&self) -> &T {
++        &self.items
++    }
++}
++
++impl<T> DerefMut for CacheAnnotatedInput<T> {
++    fn deref_mut(&mut self) -> &mut T {
++        &mut self.items
++    }
++}
++
++impl<T: AsRef<[ResponseItem]>> AsRef<[ResponseItem]> for CacheAnnotatedInput<T> {
++    fn as_ref(&self) -> &[ResponseItem] {
++        self.items.as_ref()
++    }
++}
++
++impl<T: AsRef<[ResponseItem]> + Serialize> Serialize for CacheAnnotatedInput<T> {
++    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
++        if self.annotations.is_empty() {
++            return self.items.serialize(serializer);
++        }
++        let mut annotations = BTreeMap::<&str, Option<&PromptCacheAnnotation>>::new();
++        for annotation in self.annotations.iter() {
++            annotations
++                .entry(&annotation.occurrence)
++                .and_modify(|value| *value = None)
++                .or_insert(Some(annotation));
++        }
++        let mut occurrences = BTreeMap::<String, usize>::new();
++        for item in self.items.as_ref() {
++            if let Some(id) = item.id() {
++                *occurrences.entry(id.to_string()).or_default() += 1;
++            }
++        }
++        let mut seq = serializer.serialize_seq(Some(self.items.as_ref().len()))?;
++        for item in self.items.as_ref() {
++            let occurrence = item.id().map(ToString::to_string);
++            let annotation = occurrence
++                .as_ref()
++                .and_then(|id| {
++                    (occurrences.get(id) == Some(&1))
++                        .then(|| annotations.get(id.as_str()))
++                        .flatten()
++                })
++                .and_then(|annotation| *annotation);
++            if let Some(annotation) = annotation.filter(|annotation| !annotation.parts.is_empty()) {
++                match annotation
++                    .project(&annotation.occurrence, item)
++                    .map_err(serde::ser::Error::custom)?
++                {
++                    PromptCacheProjection::Annotated(wire) => {
++                        seq.serialize_element(&wire)?;
++                        continue;
++                    }
++                    PromptCacheProjection::Refused => {}
++                }
++            }
++            // Refused annotations have been leaving the canonical payload untouched.
++            seq.serialize_element(item)?;
++        }
++        seq.end()
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use codex_protocol::model_request_controls::PromptCacheMode;
++    use codex_protocol::models::ContentItem;
++    use codex_protocol::prompt_cache::PromptCacheBreakpoint;
++    use serde_json::json;
++
++    fn input(id: &str, text: &str) -> ResponseItem {
++        serde_json::from_value(json!({"type":"message","id":id,"role":"user","content":[{"type":"input_text","text":text}]})).unwrap()
++    }
++    fn annotation(item: &ResponseItem) -> PromptCacheAnnotation {
++        let ResponseItem::Message { content, .. } = item else {
++            panic!()
++        };
++        assert!(matches!(&content[0], ContentItem::InputText { .. }));
++        PromptCacheAnnotation::bind(
++            item.id().unwrap().to_string(),
++            content,
++            &[(
++                0,
++                PromptCacheBreakpoint {
++                    mode: PromptCacheMode::Explicit,
++                },
++            )],
++        )
++        .unwrap()
++        .unwrap()
++    }
++
++    #[test]
++    fn owned_and_websocket_views_keep_occurrence_across_reorder() {
++        let first = input("msg_first", "first");
++        let second = input("msg_second", "second");
++        let cached = annotation(&first);
++        let mut owned = CacheAnnotatedInput::with_annotations(vec![first, second], vec![cached]);
++        owned.swap(0, 1);
++        let wire = serde_json::to_value(&owned).unwrap();
++        assert!(
++            wire[0]["content"][0]
++                .get("prompt_cache_breakpoint")
++                .is_none()
++        );
++        assert_eq!(
++            wire[1]["content"][0]["prompt_cache_breakpoint"],
++            json!({"mode":"explicit"})
++        );
++        assert_eq!(
++            serde_json::to_value(owned.borrow_with(&owned[1..])).unwrap(),
++            json!([wire[1]])
++        );
++    }
++
++    #[test]
++    fn duplicated_occurrence_refuses_only_its_annotation() {
++        let item = input("msg_duplicate", "same");
++        let cached = annotation(&item);
++        let input =
++            CacheAnnotatedInput::with_annotations(vec![item.clone(), item.clone()], vec![cached]);
++        assert_eq!(
++            serde_json::to_value(input).unwrap(),
++            serde_json::to_value(vec![item.clone(), item]).unwrap()
++        );
++    }
++
++    #[test]
++    fn ordinary_input_has_identical_serialization() {
++        let items = vec![input("msg_plain", "plain")];
++        let expected = serde_json::to_string(&items).unwrap();
++        assert_eq!(
++            serde_json::to_string(&CacheAnnotatedInput::from(items)).unwrap(),
++            expected
++        );
++    }
++}
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index e480b8df4f3f4f45ef015402e9a68cc1690901b2..259185d48d0ddd0e1d1d800db74d519a59b58330 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -29,7 +29,6 @@ use std::sync::OnceLock;
+ use std::time::Duration;
+ use tokio::sync::mpsc;
+ use tokio::time::Instant;
+-use tokio::time::timeout;
+ use tracing::debug;
+ use tracing::trace;
+ 
+@@ -46,6 +45,7 @@ pub fn spawn_response_stream(
+     turn_state: Option<Arc<OnceLock<String>>>,
+     terminal_limit_errors: bool,
+     observe_raw_provider_events: bool,
++    text_demand: Option<Arc<crate::TextDeltaDemand>>,
+ ) -> ResponseStream {
+     let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
+     let api_rate_limits = parse_api_rate_limits(&stream_response.headers);
+@@ -112,6 +112,7 @@ pub fn spawn_response_stream(
+             safety_buffering_treatment,
+             terminal_limit_errors,
+             observe_raw_provider_events,
++            text_demand.filter(|_| !observe_raw_provider_events),
+         )
+         .await;
+             } => {},
+@@ -716,6 +717,7 @@ pub async fn process_sse(
+         SafetyBufferingTreatment::default(),
+         /*terminal_limit_errors*/ false,
+         /*observe_raw_provider_events*/ false,
++        /*text_demand*/ None,
+     )
+     .await;
+ }
+@@ -728,18 +730,31 @@ async fn process_sse_with_treatment(
+     safety_buffering_treatment: SafetyBufferingTreatment,
+     terminal_limit_errors: bool,
+     observe_raw_provider_events: bool,
++    text_demand: Option<Arc<crate::TextDeltaDemand>>,
+ ) {
++    let mut pending_text = crate::text_delta::TextDeltaBuffer::new(text_demand);
++    let demand = pending_text.demand.clone();
+     let mut stream = stream.eventsource();
+     let mut response_error: Option<ApiError> = None;
+     let mut last_server_model: Option<String> = None;
+ 
+     loop {
+         let start = Instant::now();
+-        let response = tokio::select! {
+-            biased;
+-            _ = tx_event.closed() => return,
+-            response = timeout(idle_timeout, stream.next()) => response,
++        let expires = Instant::now() + idle_timeout;
++        let response = loop {
++            break tokio::select! {
++                biased;
++                _ = tx_event.closed() => return,
++                _ = async { if let Some(demand) = &demand { demand.cancelled().await; } }, if pending_text.enabled() => {
++                    if pending_text.activate(&tx_event).await.is_err() { return; }
++                    continue;
++                }
++                response = tokio::time::timeout_at(expires, stream.next()) => response,
++            };
+         };
++        if !matches!(&response, Ok(Some(Ok(_)))) && pending_text.flush(&tx_event).await.is_err() {
++            return;
++        }
+         if let Some(t) = telemetry.as_ref() {
+             t.on_sse_poll(&response, start.elapsed());
+         }
+@@ -798,9 +813,17 @@ async fn process_sse_with_treatment(
+                     payload_bytes = sse.data.len(),
+                     "Failed to parse SSE event"
+                 );
++                if pending_text.flush(&tx_event).await.is_err() {
++                    return;
++                }
+                 continue;
+             }
+         };
++        match pending_text.push(&event, &tx_event).await {
++            Ok(true) => continue,
++            Ok(false) => {}
++            Err(()) => return,
++        }
+         if let Some(snapshot) = event.api_rate_limits()
+             && tx_event
+                 .send(Ok(ResponseEvent::ApiRateLimits(snapshot)))
+@@ -2041,6 +2064,7 @@ mod tests {
+             /*turn_state*/ None,
+             /*terminal_limit_errors*/ false,
+             /*observe_raw_provider_events*/ false,
++            /*text_demand*/ None,
+         );
+         assert_eq!(stream.upstream_request_id.as_deref(), Some("req-1"));
+         let event = stream
+@@ -2083,6 +2107,7 @@ mod tests {
+             /*turn_state*/ None,
+             /*terminal_limit_errors*/ false,
+             /*observe_raw_provider_events*/ false,
++            /*text_demand*/ None,
+         );
+         let mut events = Vec::new();
+         while let Some(event) = stream.rx_event.recv().await {
+@@ -2551,3 +2576,118 @@ mod tests {
+ 
+     const CYBER_RESTRICTED_MODEL_FOR_TESTS: &str = "gpt-5.3-codex";
+ }
++
++#[cfg(test)]
++mod text_demand_tests {
++    use super::*;
++    #[tokio::test]
++    async fn actual_sse_parser_keeps_raw_and_flushes_before_terminal_facts() {
++        let events = vec![
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"a", "logprobs":[]}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"b", "logprobs":[]}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"c", "logprobs":[]}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"d", "logprobs":[{"token":"d","logprob":-0.1}]}),
++            serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"e", "logprobs":{"invalid":true}}),
++            serde_json::json!({"type":"response.completed", "response":{"id":"r", "status":"completed"}}),
++        ];
++        for raw in [false, true] {
++            let body = events
++                .iter()
++                .map(|e| format!("data: {e}\n\n"))
++                .collect::<String>();
++            let bytes: ByteStream = Box::pin(futures::stream::iter([Ok(bytes::Bytes::from(body))]));
++            let (tx, mut rx) = mpsc::channel(32);
++            let demand = (!raw).then(|| Arc::new(crate::TextDeltaDemand::default()));
++            process_sse_with_treatment(
++                bytes,
++                tx,
++                Duration::from_secs(1),
++                None,
++                SafetyBufferingTreatment::default(),
++                false,
++                raw,
++                demand,
++            )
++            .await;
++            let mut tags = Vec::new();
++            let mut texts = Vec::new();
++            let mut raws = Vec::new();
++            while let Some(event) = rx.recv().await {
++                match event.unwrap() {
++                    ResponseEvent::RawProvider(e) => {
++                        tags.push("raw");
++                        raws.push(e.payload);
++                    }
++                    ResponseEvent::ResponseFact(_) => tags.push("fact"),
++                    ResponseEvent::OutputTextDelta(t) => {
++                        tags.push("text");
++                        texts.push(t);
++                    }
++                    ResponseEvent::ResponseObserved(_) => tags.push("observed"),
++                    ResponseEvent::Completed { .. } => tags.push("completed"),
++                    e => panic!("unexpected {e:?}"),
++                }
++            }
++            assert_eq!(texts.concat(), "abcde");
++            if raw {
++                assert_eq!(raws, events);
++                assert_eq!(texts, ["a", "b", "c", "d", "e"]);
++            } else {
++                assert_eq!(texts, ["a", "bc", "d", "e"]);
++                assert_eq!(
++                    tags,
++                    [
++                        "fact",
++                        "text",
++                        "text",
++                        "fact",
++                        "text",
++                        "fact",
++                        "text",
++                        "observed",
++                        "completed"
++                    ]
++                );
++            }
++        }
++    }
++    #[tokio::test(start_paused = true)]
++    async fn demand_wakes_pending_sse_without_restarting_idle_deadline() {
++        let (input, mut incoming) =
++            mpsc::channel::<Result<bytes::Bytes, codex_client::TransportError>>(8);
++        let bytes: ByteStream =
++            Box::pin(futures::stream::poll_fn(move |cx| incoming.poll_recv(cx)));
++        let (tx, mut rx) = mpsc::channel(16);
++        let demand = Arc::new(crate::TextDeltaDemand::default());
++        let owner_demand = demand.clone();
++        let producer = tokio::spawn(process_sse_with_treatment(
++            bytes,
++            tx,
++            Duration::from_secs(10),
++            None,
++            SafetyBufferingTreatment::default(),
++            false,
++            false,
++            Some(owner_demand),
++        ));
++        for text in ["a", "b"] {
++            input.send(Ok(bytes::Bytes::from(format!("data: {{\"type\":\"response.output_text.delta\",\"item_id\":\"i\",\"output_index\":0,\"content_index\":0,\"delta\":\"{text}\"}}\n\n")))).await.unwrap();
++        }
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(t) if t=="a")
++        );
++        tokio::task::yield_now().await;
++        tokio::time::advance(Duration::from_secs(6)).await;
++        demand.cancel();
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(t) if t=="b")
++        );
++        tokio::time::advance(Duration::from_secs(5)).await;
++        tokio::task::yield_now().await;
++        // A reset at activation would still be pending at this point.
++        assert!(
++            matches!(rx.try_recv().unwrap(), Err(ApiError::Stream(message)) if message.contains("idle timeout"))
++        );
++        producer.await.unwrap();
++    }
++}
+diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+index 96ddb9b147037e13dc96d9163c51fa387d738181..1a9dbf1611c57ad70866a368844626dc726650fc 100644
+--- a/codex-rs/codex-api/src/sse/responses_error_tests.rs
++++ b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+@@ -44,6 +44,7 @@ async fn flex_failure_with_retry_header_ends_stream_immediately() {
+             /*turn_state*/ None,
+             /*terminal_limit_errors*/ false,
+             /*observe_raw_provider_events*/ false,
++            /*text_demand*/ None,
+         );
+         let mut observed_failures = 0;
+         let error = loop {
+diff --git a/codex-rs/codex-api/src/text_delta.rs b/codex-rs/codex-api/src/text_delta.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a4a70f18059b743bf8e4e30bae9bb8fa6a5eb520
+--- /dev/null
++++ b/codex-rs/codex-api/src/text_delta.rs
+@@ -0,0 +1,285 @@
++//! Request-local accumulation; the original parser task keeps transport ownership.
++use crate::sse::ResponsesStreamEvent;
++use crate::{ApiError, ResponseEvent};
++use std::sync::Arc;
++use tokio::sync::mpsc;
++
++/// A sticky observation-demand latch, never a task cancellation owner.
++pub type TextDeltaDemand = tokio_util::sync::CancellationToken;
++
++pub(crate) struct TextDeltaBuffer {
++    pub(crate) demand: Option<Arc<TextDeltaDemand>>,
++    identity: Option<(String, u64, u64)>,
++    text: String,
++}
++impl TextDeltaBuffer {
++    pub(crate) fn new(demand: Option<Arc<TextDeltaDemand>>) -> Self {
++        Self {
++            demand,
++            identity: None,
++            text: String::new(),
++        }
++    }
++    pub(crate) fn enabled(&self) -> bool {
++        self.demand.is_some()
++    }
++    pub(crate) async fn activate(
++        &mut self,
++        tx: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
++    ) -> Result<(), ()> {
++        self.demand = None;
++        self.flush(tx).await
++    }
++    pub(crate) async fn flush(
++        &mut self,
++        tx: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
++    ) -> Result<(), ()> {
++        if !self.text.is_empty() {
++            tx.send(Ok(ResponseEvent::OutputTextDelta(std::mem::take(
++                &mut self.text,
++            ))))
++            .await
++            .map_err(|_| ())?;
++        }
++        Ok(())
++    }
++    // The wire identity is still present here; OutputTextDelta itself has none.
++    pub(crate) async fn push(
++        &mut self,
++        event: &ResponsesStreamEvent,
++        tx: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
++    ) -> Result<bool, ()> {
++        let Some(demand) = &self.demand else {
++            return Ok(false);
++        };
++        if demand.is_cancelled() {
++            self.activate(tx).await?;
++            return Ok(false);
++        }
++        let raw = &event.raw;
++        let candidate = (|| {
++            if raw.get("type")?.as_str()? != "response.output_text.delta" {
++                return None;
++            }
++            if raw.as_object()?.keys().any(|key| {
++                !matches!(
++                    key.as_str(),
++                    "type"
++                        | "item_id"
++                        | "output_index"
++                        | "content_index"
++                        | "delta"
++                        | "logprobs"
++                        | "sequence_number"
++                        | "obfuscation"
++                )
++            }) {
++                return None;
++            }
++            let item = raw.get("item_id")?.as_str()?;
++            if item.is_empty() || item.len() > 256 {
++                return None;
++            }
++            match raw.get("logprobs") {
++                None | Some(serde_json::Value::Null) => {}
++                Some(serde_json::Value::Array(tokens)) if tokens.is_empty() => {}
++                _ => return None,
++            }
++            let delta = raw.get("delta")?.as_str()?;
++            if delta.is_empty() {
++                return None;
++            }
++            Some((
++                (
++                    item,
++                    raw.get("output_index")?.as_u64()?,
++                    raw.get("content_index")?.as_u64()?,
++                ),
++                delta,
++            ))
++        })();
++        let Some((identity, delta)) = candidate else {
++            self.flush(tx).await?;
++            self.identity = None;
++            return Ok(false);
++        };
++        if self
++            .identity
++            .as_ref()
++            .map(|(item, output, content)| (item.as_str(), *output, *content))
++            != Some(identity)
++        {
++            self.flush(tx).await?;
++            self.identity = Some((identity.0.to_owned(), identity.1, identity.2));
++            return Ok(false); // First delta for this item/content remains immediate.
++        }
++        const MAX_BYTES: usize = 16 * 1024;
++        if self.text.len().saturating_add(delta.len()) > MAX_BYTES {
++            self.flush(tx).await?;
++        }
++        if delta.len() > MAX_BYTES {
++            return Ok(false);
++        }
++        self.text.push_str(delta);
++        // Replacing sends must not remove cooperative cancellation progress.
++        tokio::task::consume_budget().await;
++        Ok(true)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn delta(text: &str, item: &str, probability: serde_json::Value) -> ResponsesStreamEvent {
++        ResponsesStreamEvent::from_wire(serde_json::json!({"type":"response.output_text.delta", "item_id":item, "output_index":0, "content_index":0, "delta":text, "logprobs":probability})).unwrap()
++    }
++    #[tokio::test]
++    async fn first_identity_probability_and_size_barriers_preserve_text() {
++        let (tx, mut rx) = mpsc::channel(32);
++        let mut buffer = TextDeltaBuffer::new(Some(Arc::default()));
++        assert!(
++            !buffer
++                .push(&delta("", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            !buffer
++                .push(&delta("first", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            buffer
++                .push(&delta("second", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            !buffer
++                .push(&delta("new", "b", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(s) if s=="second")
++        );
++        assert!(
++            buffer
++                .push(&delta("pending", "b", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        for probability in [
++            serde_json::json!([{"token":"x","logprob":-1.0}]),
++            serde_json::json!({"invalid":true}),
++        ] {
++            assert!(
++                !buffer
++                    .push(&delta("sensitive", "b", probability), &tx)
++                    .await
++                    .unwrap()
++            );
++        }
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(s) if s=="pending")
++        );
++        assert!(
++            !buffer
++                .push(&delta("first", "b", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        let block = "x".repeat(16 * 1024);
++        assert!(
++            buffer
++                .push(&delta(&block, "b", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            buffer
++                .push(&delta("tail", "b", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(s) if s==block)
++        );
++        buffer.flush(&tx).await.unwrap();
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(s) if s=="tail")
++        );
++        assert!(rx.try_recv().is_err());
++    }
++    #[tokio::test]
++    async fn observation_is_sticky_and_wakes_an_already_pending_wait() {
++        let demand = Arc::new(TextDeltaDemand::default());
++        let (tx, mut rx) = mpsc::channel(8);
++        let mut buffer = TextDeltaBuffer::new(Some(demand.clone()));
++        assert!(
++            !buffer
++                .push(&delta("a", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(
++            buffer
++                .push(&delta("b", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        let waiter = demand.cancelled();
++        tokio::pin!(waiter);
++        assert!(futures::poll!(waiter.as_mut()).is_pending());
++        demand.cancel();
++        waiter.await;
++        buffer.activate(&tx).await.unwrap();
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(), ResponseEvent::OutputTextDelta(s) if s=="b")
++        );
++        assert!(
++            !buffer
++                .push(&delta("c", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        let mut next_request = TextDeltaBuffer::new(Some(demand.clone()));
++        assert!(
++            !next_request
++                .push(&delta("d", "a", serde_json::json!([])), &tx)
++                .await
++                .unwrap()
++        );
++        assert!(!next_request.enabled());
++    }
++}
++
++#[cfg(test)]
++mod cooperative_tests {
++    use super::*;
++    #[tokio::test]
++    async fn skipped_sends_yield_and_leave_the_pending_buffer_owned() {
++        let (tx, mut rx) = mpsc::channel(8);
++        let mut buffer = TextDeltaBuffer::new(Some(Arc::default()));
++        let event = ResponsesStreamEvent::from_wire(serde_json::json!({"type":"response.output_text.delta", "item_id":"i", "output_index":0, "content_index":0, "delta":"x"})).unwrap();
++        assert!(!buffer.push(&event, &tx).await.unwrap());
++        let attempts = std::cell::Cell::new(0);
++        tokio::task::yield_now().await;
++        tokio::select! {
++            biased;
++            _ = async {
++                for _ in 0..4096 {
++                    attempts.set(attempts.get()+1);
++                    assert!(buffer.push(&event,&tx).await.unwrap());
++                }
++            } => panic!("ready skipped sends starved a ready sibling"),
++            _ = std::future::ready(()) => {},
++        }
++        assert!(attempts.get() > 0 && attempts.get() < 4096);
++        buffer.flush(&tx).await.unwrap();
++        assert!(
++            matches!(rx.recv().await.unwrap().unwrap(),ResponseEvent::OutputTextDelta(text) if text=="x".repeat(attempts.get()))
++        );
++    }
++}
+diff --git a/codex-rs/codex-api/tests/clients.rs b/codex-rs/codex-api/tests/clients.rs
+index 501b5e32c37a4b3fae96b37f9eeada8214925210..d996a00d476ead580b08dd1f7b85301e7e4c0fab 100644
+--- a/codex-rs/codex-api/tests/clients.rs
++++ b/codex-rs/codex-api/tests/clients.rs
+@@ -316,7 +316,7 @@ async fn responses_client_bounds_json_response_bodies() -> Result<()> {
+     let request = ResponsesApiRequest {
+         request_controls: Default::default(),
+         model: "gpt-test".into(),
+-        input: Vec::new(),
++        input: (Vec::new()).into(),
+         tools: None,
+         tool_choice: "auto".into(),
+         parallel_tool_calls: false,
+@@ -383,7 +383,7 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
+             content: vec![ContentItem::InputText { text: "hi".into() }],
+             phase: None,
+             internal_chat_message_metadata_passthrough: None,
+-        }],
++        }].into(),
+         tools: Some(empty_tools().into()),
+         tool_choice: Some("auto".into()),
+         parallel_tool_calls: Some(false),
+@@ -438,7 +438,7 @@ async fn responses_client_stream_request_sends_routing_fields_ahead_of_large_inp
+             content: vec![ContentItem::InputText { text: large_input }],
+             phase: None,
+             internal_chat_message_metadata_passthrough: None,
+-        }],
++        }].into(),
+         tools: None,
+         tool_choice: Some("auto".into()),
+         parallel_tool_calls: Some(false),
+@@ -529,7 +529,7 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
+     let request = ResponsesApiRequest {
+         request_controls: Default::default(),
+         model: Some("gpt-test".into()),
+-        input: Vec::new(),
++        input: (Vec::new()).into(),
+         tools: Some(empty_tools().into()),
+         tool_choice: Some("auto".into()),
+         parallel_tool_calls: Some(false),
+@@ -650,7 +650,7 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
+             content: vec![ContentItem::InputText { text: "hi".into() }],
+             phase: None,
+             internal_chat_message_metadata_passthrough: None,
+-        }],
++        }].into(),
+         tools: Some(empty_tools().into()),
+         tool_choice: Some("auto".into()),
+         parallel_tool_calls: Some(false),
+diff --git a/codex-rs/codex-api/tests/hosted_tool_choice.rs b/codex-rs/codex-api/tests/hosted_tool_choice.rs
+index 26dc1b06ed4b0a884195d03408f7d14a8c0931d5..17f89a9a3e3b0fe907e07089c4235b348d8f7007 100644
+--- a/codex-rs/codex-api/tests/hosted_tool_choice.rs
++++ b/codex-rs/codex-api/tests/hosted_tool_choice.rs
+@@ -8,7 +8,7 @@ fn hosted_tool_choice_uses_one_structured_member_for_http_and_websocket() {
+         model: Some("fixture-model".into()),
+         stream: true,
+         service_tier: None,
+-        input: Vec::new(),
++        input: (Vec::new()).into(),
+         tools: None,
+         tool_choice: None,
+         request_controls: ResponsesRequestControls {
+diff --git a/codex-rs/codex-api/tests/provider_history.rs b/codex-rs/codex-api/tests/provider_history.rs
+index bf2ec0377bc7675b8181cb059591c62427837de2..10f575ef901e4cc981f971c6e1c8e46d445847cd 100644
+--- a/codex-rs/codex-api/tests/provider_history.rs
++++ b/codex-rs/codex-api/tests/provider_history.rs
+@@ -10,7 +10,7 @@ fn history_selection_projects_one_wire_member_without_changing_storage() {
+         model: "fixture-model".to_owned().into(),
+         stream: true,
+         service_tier: None,
+-        input: Vec::new(),
++        input: (Vec::new()).into(),
+         tools: None,
+         tool_choice: Some("auto".into()),
+         request_controls: ResponsesRequestControls::default(),
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index b6bfd1710a925092c7fc119ad3c346b121c445f8..a0cd4a6b4e33308904c8cfbac4ff0bd5910b106b 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -348,7 +348,8 @@ fn has_subagent_notification<'a>(
+             }
+             ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => false,
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => false,
+         })
+     })
+ }
+@@ -368,7 +369,8 @@ fn history_contains_text<'a>(
+             }
+             ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => false,
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => false,
+         })
+     })
+ }
+@@ -417,7 +419,8 @@ fn history_contains_assistant_inter_agent_communication<'a>(
+             ContentItem::InputText { .. }
+             | ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => false,
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => false,
+         })
+     })
+ }
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index cfbcf51ddd6ab83a7f51ca6df08458366dd0d1dc..8225ccf284b5dbfb6d7a5a74a75420822c6d93f5 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -803,6 +803,11 @@ impl ModelClient {
+     }
+ 
+     fn prompt_cache_key(&self, responses_metadata: &CodexResponsesMetadata) -> String {
++        if !self.state.session_source.is_non_root_agent()
++            && let Some(key) = &responses_metadata.sdk_prompt_cache_key
++        {
++            return key.clone();
++        }
+         if let Some(prompt_cache_key) = &self.prompt_cache_key_override {
+             return prompt_cache_key.clone();
+         }
+@@ -1305,6 +1310,9 @@ impl ModelClient {
+             ));
+         }
+         let mut input = prompt.get_formatted_input_for_request(model_info);
++        let prompt_cache_annotations = codex_protocol::prompt_cache::after_in_place_item_preparation(
++            &prompt.prompt_cache_annotations, &prompt.input, &input,
++        );
+         let mut wire_input_indices = self.provider_history.as_ref().map(|_| Vec::new());
+         let mut input_index = 0;
+         let allow_reasoning_overrides = self.reasoning_effort_override_enabled(model_info);
+@@ -1459,7 +1467,7 @@ impl ModelClient {
+         let client_metadata = responses_metadata.client_metadata(include_internal);
+         let request = ResponsesApiRequest {
+             model: (!prompt_owns_model).then(|| model_info.slug.clone()),
+-            input,
++            input: codex_api::CacheAnnotatedInput::with_annotations(input, prompt_cache_annotations),
+             tools: tools.filter(|_| {
+                 !hosted_prompt.is_some_and(|hosted| hosted.omit_tools && prompt.tools.is_empty())
+             }),
+@@ -2091,6 +2099,7 @@ impl ModelClientSession {
+             turn_state: Some(Arc::clone(&self.turn_state)),
+             terminal_limit_errors: self.terminal_limit_errors(responses_metadata.request_kind),
+             observe_raw_provider_events,
++            text_demand: None,
+         }
+     }
+ 
+@@ -2305,9 +2314,15 @@ impl ModelClientSession {
+         .map_err(|message| ApiError::InvalidRequest { message })?;
+         let connection_key = ResponsesConnectionKey::new(&api_provider, auth_revision)
+             .with_request_transport(&api_provider, request_transport)?;
++        // Include the effective routing header when deciding if the socket can be reused.
++        let mut connection_headers = build_session_headers(
++            Some(self.client.responses_session_id(responses_metadata)),
++            None,
++        );
++        connection_headers.extend(responses_headers.clone());
+         let reset_reason = match self.websocket_session.connection.as_ref() {
+             Some(_)
+-                if self.websocket_session.responses_headers != *responses_headers
++                if self.websocket_session.responses_headers != connection_headers
+                     || self.websocket_session.connection_key.as_ref() != Some(&connection_key) =>
+             {
+                 Some("other")
+@@ -2349,7 +2364,7 @@ impl ModelClientSession {
+                 .await?;
+             self.websocket_session.connection = Some(new_conn);
+             self.websocket_session.physical_connection = Some(Arc::new(()));
+-            self.websocket_session.responses_headers = responses_headers.clone();
++            self.websocket_session.responses_headers = connection_headers;
+             self.websocket_session.auth_owner_generation = auth_owner_generation;
+             self.websocket_session.connection_key = Some(connection_key);
+             self.websocket_session
+@@ -2585,7 +2600,7 @@ impl ModelClientSession {
+                 if let Some(recorder) = &self.client.executed_tool_calls {
+                     recorder.invalidate_wire_inventory_loss(&request.input, &input);
+                 }
+-                request.input = input;
++                request.input = request.input.with_items(input);
+             }
+             if let Some(logical) = logical_history_input {
+                 let wire = std::mem::replace(&mut request.input, logical);
+@@ -2656,6 +2671,11 @@ impl ModelClientSession {
+             )
+             .await
+             .map_err(CodexErr::Fatal)?;
++            options.text_demand = text_delta_demand(
++                request.request_controls.top_logprobs,
++                options.observe_raw_provider_events,
++                &interceptors,
++            );
+             let stream_result = if let Some(events) = produced {
+                 Ok((None, None, events, None, None))
+             } else if prompt.prefer_buffered_response {
+@@ -3063,7 +3083,7 @@ impl ModelClientSession {
+             };
+             let mut ws_payload = ResponseCreateWsRequest {
+                 previous_response_id,
+-                input: incremental_items.as_deref().unwrap_or(&request.input),
++                input: request.input.borrow_with(incremental_items.as_deref().unwrap_or(request.input.as_ref())),
+                 generate: if warmup { Some(false) } else { None },
+                 client_metadata: response_create_client_metadata(
+                     Some(client_metadata),
+@@ -3080,17 +3100,18 @@ impl ModelClientSession {
+             let mut ws_request = ResponsesWsRequest::ResponseCreate(ws_payload);
+             stamp_ws_stream_request_start_ms(&mut ws_request);
+             let ResponsesWsRequest::ResponseCreate(payload) = &ws_request;
+-            let bounded_input = tool_metadata::bounded_input(&ws_request, payload.input);
++            let bounded_input = tool_metadata::bounded_input(&ws_request, payload.input.as_ref());
+             if let Some(input) = bounded_input.as_deref() {
+                 if let Some(recorder) = &self.client.executed_tool_calls {
+-                    recorder.invalidate_wire_inventory_loss(payload.input, input);
++                    recorder.invalidate_wire_inventory_loss(payload.input.as_ref(), input);
+                 }
+                 let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
+-                payload.input = input;
++                payload.input = payload.input.borrow_with(input);
+             }
+             if !previous_response_id_from_untraced_warmup {
+                 if let Some(logical) = logical_history_input.as_deref() {
+                     let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
++                    let logical = payload.input.borrow_with(logical);
+                     let wire = std::mem::replace(&mut payload.input, logical);
+                     inference_trace_attempt.record_started(&ws_request);
+                     let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
+@@ -3185,6 +3206,16 @@ impl ModelClientSession {
+                     );
+                 }) as Arc<dyn Fn() + Send + Sync>
+             });
++            let ResponsesWsRequest::ResponseCreate(payload) = &ws_request;
++            let text_demand = if warmup {
++                None
++            } else {
++                text_delta_demand(
++                    payload.request_controls.top_logprobs,
++                    prompt.observe_raw_provider_events,
++                    &interceptors,
++                )
++            };
+             let stream_result = websocket_connection
+                 .stream_request_with_send_observer(
+                     ws_request,
+@@ -3192,6 +3223,7 @@ impl ModelClientSession {
+                     Some(Arc::clone(&self.turn_state)),
+                     prompt.observe_raw_provider_events,
+                     send_observer,
++                    text_demand,
+                 )
+                 .await;
+             if stream_result.is_err()
+@@ -3642,6 +3674,24 @@ fn add_responses_lite_header(headers: &mut ApiHeaderMap, use_responses_lite: boo
+ }
+ 
+ const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 1600;
++fn text_delta_demand(
++    top_logprobs: Option<u8>,
++    raw: bool,
++    interceptors: &[Box<dyn codex_extension_api::ModelResponseInterceptor>],
++) -> Option<Arc<codex_api::TextDeltaDemand>> {
++    if top_logprobs.is_some() || raw {
++        return None;
++    }
++    let demand = interceptors.first()?.text_delta_demand()?;
++    interceptors
++        .iter()
++        .all(|i| {
++            i.text_delta_demand()
++                .is_some_and(|d| Arc::ptr_eq(&d, &demand))
++        })
++        .then_some(demand)
++}
++
+ const STREAM_DROPPED_REASON: &str = "response stream dropped before provider terminal event";
+ 
+ fn map_response_stream(
+@@ -4465,3 +4515,40 @@ fn provider_window_rejects_schema_bearing_history() {
+ #[cfg(test)]
+ #[path = "client_tests.rs"]
+ mod tests;
++
++#[test]
++fn text_grouping_requires_exact_shared_capability_and_no_capture() {
++    use codex_extension_api::{ModelResponseInterceptor, ModelResponseStream};
++    struct Known(Arc<codex_api::TextDeltaDemand>);
++    impl ModelResponseInterceptor for Known {
++        fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {
++            Some(self.0.clone())
++        }
++        fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
++            stream
++        }
++    }
++    struct Unknown;
++    impl ModelResponseInterceptor for Unknown {
++        fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
++            stream
++        }
++    }
++    let signal = Arc::new(codex_api::TextDeltaDemand::default());
++    let mut interceptors: Vec<Box<dyn ModelResponseInterceptor>> = vec![
++        Box::new(Known(signal.clone())),
++        Box::new(Known(signal.clone())),
++    ];
++    assert!(Arc::ptr_eq(
++        &text_delta_demand(None, false, &interceptors).unwrap(),
++        &signal
++    ));
++    assert!(text_delta_demand(Some(0), false, &interceptors).is_none());
++    assert!(text_delta_demand(Some(3), false, &interceptors).is_none());
++    assert!(text_delta_demand(None, true, &interceptors).is_none());
++    interceptors.push(Box::new(Known(Arc::default())));
++    assert!(text_delta_demand(None, false, &interceptors).is_none());
++    interceptors.pop();
++    interceptors.push(Box::new(Unknown));
++    assert!(text_delta_demand(None, false, &interceptors).is_none());
++}
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index 732189aa5077242a56adffcba354d4d903fc772f..5e36cddd2b7107fef4061f18a27980722aa9e388 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -47,6 +47,8 @@ pub struct Prompt {
+     /// Canonical occurrence data captured before sampling-only callbacks.
+     pub(crate) canonical_history_input: Option<Arc<codex_api::ProviderHistoryInputProjection>>,
+ 
++    pub(crate) prompt_cache_annotations: Vec<codex_protocol::prompt_cache::PromptCacheAnnotation>,
++
+     /// Request-scoped host ownership, checked independently of response policies.
+     pub(crate) prepared_request_admission:
+         Option<Arc<dyn codex_extension_api::PreparedRequestAdmission>>,
+@@ -81,6 +83,7 @@ impl Default for Prompt {
+             sampling_stop: None,
+             prepared_request_admission: None,
+             canonical_history_input: None,
++            prompt_cache_annotations: Vec::new(),
+             parallel_tool_calls: false,
+             tool_choice: Default::default(),
+             request_controls: Default::default(),
+diff --git a/codex-rs/core/src/client_common_tests.rs b/codex-rs/core/src/client_common_tests.rs
+index ab8708e408231d87af40c33a4be2a46798747ff3..46cf4c8ad7c57194bd9bd8870ede0950728a6030 100644
+--- a/codex-rs/core/src/client_common_tests.rs
++++ b/codex-rs/core/src/client_common_tests.rs
+@@ -114,7 +114,7 @@ fn serializes_text_verbosity_when_set() {
+     let req = ResponsesApiRequest {
+         request_controls: Default::default(),
+         model: Some("gpt-5.4".to_string()),
+-        input,
++        input: input.into(),
+         tools: Some(empty_tools().into()),
+         tool_choice: Some("auto".to_string()),
+         parallel_tool_calls: Some(true),
+@@ -162,7 +162,7 @@ fn serializes_text_schema_with_strict_format() {
+     let req = ResponsesApiRequest {
+         request_controls: Default::default(),
+         model: Some("gpt-5.4".to_string()),
+-        input,
++        input: input.into(),
+         tools: Some(empty_tools().into()),
+         tool_choice: Some("auto".to_string()),
+         parallel_tool_calls: Some(true),
+@@ -224,7 +224,7 @@ fn omits_text_when_not_set() {
+     let req = ResponsesApiRequest {
+         request_controls: Default::default(),
+         model: Some("gpt-5.4".to_string()),
+-        input,
++        input: input.into(),
+         tools: Some(empty_tools().into()),
+         tool_choice: Some("auto".to_string()),
+         parallel_tool_calls: Some(true),
+@@ -249,7 +249,7 @@ fn serializes_flex_service_tier_when_set() {
+     let req = ResponsesApiRequest {
+         request_controls: Default::default(),
+         model: Some("gpt-5.4".to_string()),
+-        input: vec![],
++        input: (vec![]).into(),
+         tools: Some(empty_tools().into()),
+         tool_choice: Some("auto".to_string()),
+         parallel_tool_calls: Some(true),
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 5b3c6147a0bdad1ceb44f88fa39122361cbe41ee..5998d1430eed73e17990ad9465ba033824557260 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -1505,6 +1505,24 @@ fn internal_session_prompt_cache_key_is_scoped_to_parent_thread() {
+     );
+ }
+ 
++#[test]
++fn sdk_cache_affinity_keeps_body_and_routing_key_separate_from_thread_identity() {
++    let client = test_model_client(SessionSource::Cli);
++    let mut metadata = test_responses_metadata_for_client(
++        &client, Some("turn-cache"), "window-cache".to_string(), None,
++        TestCodexResponsesRequestKind::Turn,
++    );
++    let original = metadata.session_id.clone();
++    let key = "agents-sdk:group:0123456789abcdef0123456789abcdef";
++    metadata.sdk_prompt_cache_key = Some(key.into());
++    assert_eq!(client.prompt_cache_key(&metadata), key);
++    assert_eq!(client.responses_session_id(&metadata), key);
++    assert_eq!(metadata.session_id, original);
++    assert!(!metadata.turn_metadata_json().unwrap().contains(key));
++    metadata.sdk_prompt_cache_key = None;
++    assert_eq!(client.prompt_cache_key(&metadata), original);
++}
++
+ #[test]
+ fn build_subagent_headers_sets_internal_memory_consolidation_label() {
+     let client = test_model_client(SessionSource::Internal(
+@@ -2381,6 +2399,7 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
+         attempt,
+         test_model_provider(),
+         vec![Box::new(ReplaceOutput)],
++        None,
+         false,
+     );
+     let mut delivered = Vec::new();
+diff --git a/codex-rs/core/src/client_tool_metadata_tests.rs b/codex-rs/core/src/client_tool_metadata_tests.rs
+index 4c4a81fb7d7c5a11f5da404b9d91f771ccf7f001..6e263cb8d80c37544bb5dc7c00098db47a0865ba 100644
+--- a/codex-rs/core/src/client_tool_metadata_tests.rs
++++ b/codex-rs/core/src/client_tool_metadata_tests.rs
+@@ -45,7 +45,7 @@ fn request_with_metadata_and_source(
+     ResponsesApiRequest {
+         request_controls: Default::default(),
+         model: Some("test".to_string()),
+-        input: vec![output],
++        input: (vec![output]).into(),
+         tools: None,
+         tool_choice: Some("auto".to_string()),
+         parallel_tool_calls: Some(true),
+@@ -131,7 +131,7 @@ fn http_message_budget_preserves_resources_until_the_message_still_exceeds_limit
+             }
+         }
+         assert_eq!(bounded_ordinary, ordinary);
+-        request.input = bounded;
++        request.input = request.input.with_items(bounded);
+         // The last case cannot fit even without raw metadata: ordinary content is never cut.
+         assert_eq!(
+             serialized_json_bytes(&request).unwrap() > MAX_RESPONSE_MESSAGE_BYTES,
+@@ -187,7 +187,7 @@ fn message_budget_removes_residual_values_and_markers_when_ordinary_input_fits()
+                 let bounded = bounded_input(&message, &request.input)
+                     .expect("optional result metadata must not keep a fitting message oversized");
+                 let ResponsesWsRequest::ResponseCreate(payload) = &mut message;
+-                payload.input = &bounded;
++                payload.input = payload.input.borrow_with(&bounded);
+                 let expected_message =
+                     ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest::from(&expected));
+                 assert_eq!(
+@@ -205,13 +205,13 @@ fn message_budget_removes_residual_values_and_markers_when_ordinary_input_fits()
+                 let bounded = bounded_input(&request, &request.input)
+                     .expect("optional result metadata must not keep a fitting message oversized");
+                 let mut message = request.clone();
+-                message.input = bounded.clone();
++                message.input = message.input.with_items(bounded.clone());
+                 assert_eq!(message, expected);
+                 assert!(serialized_json_bytes(&message).unwrap() <= MAX_RESPONSE_MESSAGE_BYTES);
+                 bounded
+             };
+             // Whole-input equality covers sources, calls, completion and ordinary output.
+-            assert_eq!(bounded, expected.input);
++            assert_eq!(bounded.as_slice(), expected.input.as_ref());
+             assert_eq!(request.input, original_input);
+         }
+     }
+@@ -252,9 +252,9 @@ fn residual_marker_removal_preserves_earlier_resources_and_stops_when_message_fi
+     assert!(serialized_json_bytes(&request).unwrap() > MAX_RESPONSE_MESSAGE_BYTES);
+     let original_input = request.input.clone();
+     let bounded = bounded_input(&request, &request.input).unwrap();
+-    assert_eq!(bounded, expected.input);
++    assert_eq!(bounded.as_slice(), expected.input.as_ref());
+     assert_eq!(request.input, original_input);
+-    request.input = bounded;
++    request.input = request.input.with_items(bounded);
+     assert_eq!(request, expected);
+     assert_eq!(
+         serialized_json_bytes(&request).unwrap(),
+@@ -273,7 +273,7 @@ fn websocket_budget_uses_the_actual_delta_and_does_not_mutate_logical_history()
+     let delta = &request.input[1..];
+     let delta_message = ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest {
+         previous_response_id: Some("previous-response".to_string()),
+-        input: delta,
++        input: (delta).into(),
+         ..ResponseCreateWsRequest::from(&request)
+     });
+     assert!(serialized_json_bytes(&request).unwrap() > MAX_RESPONSE_MESSAGE_BYTES);
+@@ -283,7 +283,7 @@ fn websocket_budget_uses_the_actual_delta_and_does_not_mutate_logical_history()
+     let mut full = ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest::from(&request));
+     let bounded = bounded_input(&full, &request.input).unwrap();
+     let ResponsesWsRequest::ResponseCreate(payload) = &mut full;
+-    payload.input = &bounded;
++    payload.input = payload.input.borrow_with(&bounded);
+     assert_eq!(bounded[0], request.input[0]);
+     let mut ordinary = request.input[1].clone();
+     let mut bounded_ordinary = bounded[1].clone();
+@@ -318,9 +318,9 @@ fn inventory_only_message_budget_counts_the_complete_encoded_envelope() {
+                 ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest::from(&request));
+             let bounded = bounded_input(&message, &request.input)
+                 .expect("inventory without raw results must not keep the message oversized");
+-            assert_eq!(bounded, ordinary.input);
++            assert_eq!(bounded.as_slice(), ordinary.input.as_ref());
+             let ResponsesWsRequest::ResponseCreate(payload) = &mut message;
+-            payload.input = &bounded;
++            payload.input = payload.input.borrow_with(&bounded);
+             assert_eq!(
+                 serialized_json_bytes(&message).unwrap(),
+                 MAX_RESPONSE_MESSAGE_BYTES
+@@ -328,9 +328,9 @@ fn inventory_only_message_budget_counts_the_complete_encoded_envelope() {
+         } else {
+             let bounded = bounded_input(&request, &request.input)
+                 .expect("inventory without raw results must not keep the message oversized");
+-            assert_eq!(bounded, ordinary.input);
++            assert_eq!(bounded.as_slice(), ordinary.input.as_ref());
+             let mut message = request.clone();
+-            message.input = bounded;
++            message.input = message.input.with_items(bounded);
+             assert_eq!(message, ordinary);
+             assert_eq!(
+                 serialized_json_bytes(&message).unwrap(),
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index c30f06ee4cab4f1f1a3d952a4b1e0330409fe42d..e1bd821815295a5579a6ed486c4a3671ce66e23d 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -636,8 +636,27 @@ impl ContextManager {
+             // Only the prompt projection changes; saved audit envelopes remain untouched.
+             self.items = Arc::new(model_items.to_vec());
+         }
++        let cache_annotations = self.items.iter().filter_map(|envelope| envelope.metadata.as_ref()
++            .and_then(|metadata| metadata.prompt_cache.clone())).collect::<Vec<_>>();
++        let cache_source = if cache_annotations.is_empty() { Vec::new() } else {
++            self.items.iter().map(|envelope| envelope.item.clone()).collect()
++        };
+         self.normalize_history(input_modalities);
+-        Arc::unwrap_or_clone(self.items)
++        let mut items = Arc::unwrap_or_clone(self.items);
++        if !cache_annotations.is_empty() {
++            let prepared = items.iter().map(|envelope| envelope.item.clone()).collect::<Vec<_>>();
++            let updated = codex_protocol::prompt_cache::after_in_place_item_preparation(
++                &cache_annotations, &cache_source, &prepared,
++            );
++            for envelope in &mut items {
++                if let Some(metadata) = &mut envelope.metadata
++                    && let Some(annotation) = &metadata.prompt_cache
++                {
++                    metadata.prompt_cache = updated.iter().find(|updated| updated.occurrence == annotation.occurrence).cloned();
++                }
++            }
++        }
++        items
+     }
+ 
+     /// Unnormalized model window, excluding the audit prefix before a provider compaction.
+diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
+index a0f475f3cc2a8f03f7e812e6dd24c48cceeb3310..20608ff2aa6bd7e2ead2ca29418de14ae5bc39a0 100644
+--- a/codex-rs/core/src/guardian/tests.rs
++++ b/codex-rs/core/src/guardian/tests.rs
+@@ -309,7 +309,8 @@ fn response_item_contains_message_text(item: &ResponseItem, needle: &str) -> boo
+         }
+         ContentItem::InputFile { .. }
+         | ContentItem::InputImage { .. }
+-        | ContentItem::InputAudio { .. } => false,
++        | ContentItem::InputAudio { .. }
++        | ContentItem::InputVideo { .. } => false,
+     })
+ }
+ 
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index ac4cd0f5a81ded0c35f7104bf3085eb38d706b1c..71e63fbc1acadf521a6d2f2985aa4fda60bc6151 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -103,6 +103,10 @@ struct BoundInterceptor {
+     admission: Option<Arc<dyn ModelToolAdmission>>,
+ }
+ impl ModelResponseInterceptor for BoundInterceptor {
++    fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {
++        self.inner.text_delta_demand()
++    }
++
+     fn preserves_provider_message_window(&self) -> bool {
+         self.inner.preserves_provider_message_window()
+     }
+diff --git a/codex-rs/core/src/responses_metadata.rs b/codex-rs/core/src/responses_metadata.rs
+index d7124cc71d81cbb214ecbe046b5ad17fc2adbf04..d8a4f6a5f420ac2e6089d3d452b785d4ce672d74 100644
+--- a/codex-rs/core/src/responses_metadata.rs
++++ b/codex-rs/core/src/responses_metadata.rs
+@@ -234,6 +234,8 @@ pub struct CodexResponsesMetadata {
+     pub(crate) parent_response_id: Option<String>,
+     pub(crate) installation_id: String,
+     pub(crate) session_id: String,
++    // Private routing preference; excluded from serialized turn metadata.
++    pub(crate) sdk_prompt_cache_key: Option<String>,
+     pub(crate) thread_id: String,
+     pub(crate) agent_name: Option<String>,
+     pub(crate) turn_id: Option<String>,
+@@ -281,6 +283,7 @@ impl CodexResponsesMetadata {
+             parent_response_id: None,
+             installation_id,
+             session_id,
++            sdk_prompt_cache_key: None,
+             thread_id,
+             agent_name: None,
+             turn_id: None,
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index ddfedb4202110e36be473826c7ee673450512865..e686abc3073498e18368dbe72d90dd57e7b4bcba 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -222,6 +222,12 @@ impl Session {
+         let mut annotated_items = Vec::with_capacity(items.len());
+         let mut image_preparations = Vec::new();
+         for envelope in items {
++            let cache_source = envelope.metadata.as_ref()
++                .and_then(|metadata| metadata.prompt_cache.as_ref())
++                .and_then(|_| match &envelope.item {
++                    ResponseItem::Message { content, .. } => Some(content.clone()),
++                    _ => None,
++                });
+             let (prepared_items, prepared_images) = self
+                 .prepare_conversation_items_for_history(
+                     turn_context,
+@@ -231,12 +237,24 @@ impl Session {
+                 .await;
+             image_preparations.extend(prepared_images);
+ 
++            let one_item = prepared_items.len() == 1;
+             let mut metadata = envelope.metadata;
+             annotated_items.extend(prepared_items.into_owned().into_iter().map(|item| {
+-                ResponseItemEnvelope {
+-                    item,
+-                    metadata: metadata.take(),
++                let mut item_metadata = metadata.take();
++                if let Some(metadata) = &mut item_metadata
++                    && let Some(annotation) = &metadata.prompt_cache
++                {
++                    metadata.prompt_cache = match (one_item, &cache_source, &item) {
++                        (true, Some(source), ResponseItem::Message { id: Some(id), content, .. })
++                            if source.len() == content.len() => {
++                            let destinations = (0..source.len()).map(|index| (index,index)).collect::<Vec<_>>();
++                            annotation.after_preparation(id.as_str(), source, content, &destinations)
++                                .ok().flatten()
++                        }
++                        _ => None,
++                    };
+                 }
++                ResponseItemEnvelope { item, metadata: item_metadata }
+             }));
+         }
+         (annotated_items, image_preparations)
+@@ -522,11 +540,24 @@ impl Session {
+                 }
+                 let mut originals = current.prefix(keep);
+                 for original in appended {
++                    let cache_breakpoints = codex_protocol::prompt_cache::response_breakpoints(&original)
++                        .map_err(|_| invalid("Invalid canonical history cache breakpoint"))?;
+                     let projection = input_projection(&original)
+                         .map_err(|_| invalid("Invalid canonical history item"))?
+                         .map(|mut item| {
+                             Self::assign_missing_response_item_id(&mut item);
+-                            self.annotate_client_response_item(item)
++                            let mut envelope = self.annotate_client_response_item(item);
++                            if !cache_breakpoints.is_empty()
++                                && let (Some(id), ResponseItem::Message { content, .. }) =
++                                    (envelope.item.id(), &envelope.item)
++                                && let Ok(Some(annotation)) = codex_protocol::prompt_cache::PromptCacheAnnotation::bind(
++                                    id.to_string(), content, &cache_breakpoints,
++                                )
++                            {
++                                envelope.metadata.get_or_insert_with(codex_history::CodexHarnessMetadata::default)
++                                    .prompt_cache = Some(annotation);
++                            }
++                            envelope
+                         });
+                     originals.append(SdkOriginalItem {
+                         original,
+diff --git a/codex-rs/core/src/session/input_queue.rs b/codex-rs/core/src/session/input_queue.rs
+index 65c76c51b762f3b9f142604acad1ffc6729c2d74..7833adc23f658c9ef7f8b69f6b94acb1e07eacb9 100644
+--- a/codex-rs/core/src/session/input_queue.rs
++++ b/codex-rs/core/src/session/input_queue.rs
+@@ -30,8 +30,10 @@ use tracing::Span;
+ use tracing::info_span;
+ 
+ /// Host capture metadata belonging to one input, including steers within another turn.
+-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
++#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+ pub struct UserInputMetadata {
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub prompt_cache_breakpoints: Vec<codex_protocol::prompt_cache::InputCacheBreakpoint>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub acceptance_order: Option<u64>,
+     #[serde(
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 9965d9b10ff282aa9b7e249bf9ee83ea0937ec41..a0fb5dcbe1a61199030c7514310b27a2c2339d9b 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -3855,10 +3855,22 @@ impl Session {
+         input: Vec<UserInput>,
+         user_image_content_indices: &mut HashMap<usize, usize>,
+     ) -> ResponseItem {
+-        let mut item = ResponseItem::from(ResponseInputItem::from_user_input(
++        self.response_item_from_user_input_with_content_positions(
++            input, user_image_content_indices, &mut HashMap::new(),
++        )
++    }
++
++    fn response_item_from_user_input_with_content_positions(
++        &self,
++        input: Vec<UserInput>,
++        user_image_content_indices: &mut HashMap<usize, usize>,
++        user_content_indices: &mut HashMap<usize, usize>,
++    ) -> ResponseItem {
++        let mut item = ResponseItem::from(ResponseInputItem::from_user_input_with_content_positions(
+             input,
+             LocalImagePreparation::Defer,
+             user_image_content_indices,
++            user_content_indices,
+         ));
+         if let ResponseItem::Message {
+             content,
+@@ -6036,9 +6048,11 @@ impl Session {
+         // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
+         // those spans, and `record_response_item_and_emit_turn_item` would drop them.
+         let mut user_image_content_indices = HashMap::new();
+-        let mut response_item = self.response_item_from_user_input_with_image_positions(
++        let mut user_content_indices = HashMap::new();
++        let mut response_item = self.response_item_from_user_input_with_content_positions(
+             input.to_vec(),
+             &mut user_image_content_indices,
++            &mut user_content_indices,
+         );
+         if metadata.origin == codex_history::UserInputOrigin::Heartbeat
+             && let ResponseItem::Message {
+@@ -6052,16 +6066,32 @@ impl Session {
+                 codex_history::HEARTBEAT_CONTENT_KIND.to_owned(),
+             )]);
+         }
++        let mut history_metadata = metadata.acceptance_order.map(|order| CodexHarnessMetadata {
++            user_input_order: Some(order),
++            ..Default::default()
++        });
++        if !metadata.prompt_cache_breakpoints.is_empty() {
++            Self::assign_missing_response_item_id(&mut response_item);
++            let breakpoints = metadata.prompt_cache_breakpoints.iter().map(|marker| {
++                user_content_indices.get(&marker.input_index)
++                    .map(|index| (*index, marker.breakpoint))
++            }).collect::<Option<Vec<_>>>();
++            if let (Some(breakpoints), Some(id), ResponseItem::Message { content, .. }) =
++                (breakpoints, response_item.id(), &response_item)
++                && let Ok(Some(annotation)) = codex_protocol::prompt_cache::PromptCacheAnnotation::bind(
++                    id.to_string(), content, &breakpoints,
++                )
++            {
++                history_metadata.get_or_insert_with(CodexHarnessMetadata::default).prompt_cache = Some(annotation);
++            }
++        }
+         let (prepared_items, image_preparations) = self
+             .prepare_annotated_conversation_items_for_history(
+                 turn_context,
+                 model_info,
+                 vec![ResponseItemEnvelope {
+                     item: response_item,
+-                    metadata: metadata.acceptance_order.map(|order| CodexHarnessMetadata {
+-                        user_input_order: Some(order),
+-                        ..Default::default()
+-                    }),
++                    metadata: history_metadata,
+                 }],
+             )
+             .await;
+diff --git a/codex-rs/core/src/session/model_attempts.rs b/codex-rs/core/src/session/model_attempts.rs
+index 32f3f1904dfb47a5f240cd052da0680c1d0ece11..28eaa6cf1eea2a12f3eed758a0dfa8fcee023087 100644
+--- a/codex-rs/core/src/session/model_attempts.rs
++++ b/codex-rs/core/src/session/model_attempts.rs
+@@ -1,7 +1,9 @@
+ //! Logical-generation identity and accounting in the existing native turn store.
+ //! No transport or retry executor lives here; the sampling loop owns both.
+ use codex_extension_api::{ModelAttemptAdmission, ProviderRequestAccounting, TurnSamplingStop};
+-use codex_protocol::model_retry::{ModelAttemptSnapshot, ModelProducerFailure, ModelRetryBackoff};
++use codex_protocol::model_retry::{
++    ModelAttemptSnapshot, ModelProducerFailure, ModelProviderRequestUsage, ModelRetryBackoff,
++};
+ use codex_protocol::protocol::TokenUsage;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{Arc, Mutex, Weak};
+@@ -16,7 +18,8 @@ struct LedgerState {
+     snapshot: ModelAttemptSnapshot,
+     current: Option<Weak<Attempt>>,
+     last_settled: Option<String>,
+-    open_provider_request: Option<String>,
++    open_provider_request: Option<ModelProviderRequestUsage>,
++    provider_request_usage: Vec<ModelProviderRequestUsage>,
+ }
+ 
+ #[derive(Debug)]
+@@ -293,6 +296,21 @@ impl ModelAttemptAdmission for Attempt {
+     fn snapshot(&self) -> Result<ModelAttemptSnapshot, String> {
+         Ok(self.ledger.snapshot())
+     }
++    fn take_provider_request_usage(&self) -> Option<Vec<ModelProviderRequestUsage>> {
++        let mut state = self
++            .ledger
++            .0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        debug_assert_eq!(state.last_settled.as_deref(), Some(self.id.as_str()));
++        let measurement = self
++            .measurement
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        measurement
++            .provider_managed
++            .then(|| std::mem::take(&mut state.provider_request_usage))
++    }
+     fn observe_request(
+         &self,
+         transport: &str,
+@@ -390,13 +408,24 @@ impl ModelAttemptAdmission for Attempt {
+                     let lineage = uuid::Uuid::new_v4().to_string();
+                     // A replacement abandons the preceding incomplete physical
+                     // request. Its counted request remains missing usage.
+-                    state.open_provider_request = Some(lineage.clone());
++                    let request = ModelProviderRequestUsage {
++                        request_id: lineage.clone(),
++                        request_ordinal: requests,
++                        token_usage: None,
++                    };
++                    state.provider_request_usage.push(request.clone());
++                    state.open_provider_request = Some(request);
+                     usage.requests = requests;
+                     usage.requests_without_token_usage = missing;
+                     Ok(Some(lineage))
+                 }
+                 ProviderRequestAccounting::Dispatch { lineage } if measurement.provider_managed => {
+-                    if state.open_provider_request.as_deref() != Some(lineage.as_str()) {
++                    if state
++                        .open_provider_request
++                        .as_ref()
++                        .map(|request| &request.request_id)
++                        != Some(&lineage)
++                    {
+                         return Err("Native provider request owner mismatch".into());
+                     }
+                     self.mark_provider_effect();
+@@ -406,15 +435,31 @@ impl ModelAttemptAdmission for Attempt {
+                     lineage,
+                     usage: measured,
+                 } if measurement.provider_managed => {
+-                    if state.open_provider_request.as_deref() != Some(lineage.as_str()) {
++                    if state
++                        .open_provider_request
++                        .as_ref()
++                        .map(|request| &request.request_id)
++                        != Some(&lineage)
++                    {
+                         return Err("Native provider request owner mismatch".into());
+                     }
+-                    if let Some(measured) = measured {
+-                        validate_usage(&measured)?;
+-                        usage.token_usage = add_usage(&usage.token_usage, &measured)?;
++                    if let Some(measured) = &measured {
++                        validate_usage(measured)?;
++                        usage.token_usage = add_usage(&usage.token_usage, measured)?;
+                         usage.requests_without_token_usage -= 1;
+                     }
+-                    state.open_provider_request = None;
++                    let mut request = state.open_provider_request.take().expect("matched lineage");
++                    if measured.is_some() {
++                        request.token_usage = measured;
++                        if let Some(pending) = state.provider_request_usage.last_mut()
++                            && pending.request_id == lineage
++                        {
++                            *pending = request;
++                        } else {
++                            // A later logical attempt can settle the original request.
++                            state.provider_request_usage.push(request);
++                        }
++                    }
+                     Ok(None)
+                 }
+                 _ => Err("Native model attempt has no managed provider transport".into()),
+diff --git a/codex-rs/core/src/session/startup_prewarm.rs b/codex-rs/core/src/session/startup_prewarm.rs
+index e0dae20e81e6aa678c447345ef3edeb2fa9c34d2..364e36811d2de4a6b973709d75f9458afb5d29f0 100644
+--- a/codex-rs/core/src/session/startup_prewarm.rs
++++ b/codex-rs/core/src/session/startup_prewarm.rs
+@@ -505,6 +505,7 @@ mod transport_boundary_tests {
+             let provider = codex_api::Provider {
+                 name: "startup-boundary".into(),
+                 base_url: format!("{}/v1", server.uri()),
++                websocket_base_url: None,
+                 query_params: None,
+                 headers: http::HeaderMap::new(),
+                 retry: codex_api::RetryConfig {
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index e4984008a995aa70243c584dc499c3b0d8d2b266..9ccf713bc7f6a111eee9f079ce98e431a098beaf 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -12080,6 +12080,7 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
+         Arc::new(session.build_world_state_for_step(&fallback).await.unwrap()),
+         CompactionReason::ModelDownshift,
+         CompactionPhase::PreTurn,
++        &CancellationToken::new(),
+     )
+     .await;
+     match first_attempt {
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 233cd70120c7200c1c0ae69a47a7048208ec7c2c..99d13a7dc31ae1e8b881cc89a598dc1e62078be5 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2203,6 +2203,7 @@ pub(crate) fn build_prompt(
+         sampling_stop: None,
+         prepared_request_admission: None,
+         canonical_history_input: None,
++        prompt_cache_annotations: Vec::new(),
+         base_instructions,
+         output_schema: turn_context.final_output_json_schema.clone(),
+         output_schema_strict: !crate::guardian::is_basic_session_source(
+@@ -2361,7 +2362,24 @@ async fn run_sampling_request(
+                 ) = retained.retained();
+             }
+             prompt.canonical_history_input = canonical.map(Arc::new);
++            {
++                let history = sess.clone_history().await;
++                if history.model_items().iter().any(|envelope| envelope.metadata.as_ref()
++                    .is_some_and(|metadata| metadata.prompt_cache.is_some()))
++                {
++                    prompt.prompt_cache_annotations = history
++                        .for_prompt_annotated(&step_context.settings.model_info.input_modalities)
++                        .into_iter().filter_map(|envelope| envelope.metadata.and_then(|metadata| metadata.prompt_cache))
++                        .collect();
++                }
++            }
+             prompt.request_controls = step_context.settings.request_controls().clone();
++            if !crate::guardian::is_basic_session_source(&turn_context.session_source) {
++                prompt.output_schema_strict = prompt
++                    .request_controls
++                    .output_schema_strict
++                    .unwrap_or(prompt.output_schema_strict);
++            }
+             if prompt.tool_choice == codex_protocol::config_types::ToolChoice::Required
+                 && tool_choice_reset_applies(&step_context.settings, &turn_context.extension_data)
+             {
+@@ -2993,6 +3011,13 @@ async fn publish_model_attempt(
+                 attempt_id: attempt.id().to_owned(),
+                 phase,
+                 snapshot,
++                provider_requests: if phase
++                    == codex_protocol::model_retry::ModelAttemptPhase::Finished
++                {
++                    attempt.take_provider_request_usage()
++                } else {
++                    None
++                },
+             },
+         }),
+     )
+diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
+index ff10d5068d707879b1e2a10b3e0c834f9868d617..e96bc2ae76d44de8f7e94bba3b75e9936e0486c2 100644
+--- a/codex-rs/core/src/session/turn_input.rs
++++ b/codex-rs/core/src/session/turn_input.rs
+@@ -368,6 +368,7 @@ async fn start_or_steer(
+         start,
+         additional_context,
+         responsesapi_client_metadata,
++        prompt_cache_breakpoints,
+         ..
+     } = request;
+     let origin = UserInputOrigin::from_turn_trigger(start.turn_trigger.as_deref());
+@@ -403,6 +404,7 @@ async fn start_or_steer(
+             settings.start_options.model_settings_override.as_ref(),
+             responsesapi_client_metadata.clone(),
+             origin,
++            &prompt_cache_breakpoints,
+         )
+         .await
+     {
+@@ -453,7 +455,7 @@ async fn start_or_steer(
+             let mut task_input = merge_additional_context_input(session, additional_context).await;
+             if has_explicit_input {
+                 task_input
+-                    .push(pending_turn_input(session, input, &turn_context.sub_id, origin).await);
++                    .push(pending_turn_input(session, input, &turn_context.sub_id, origin, &prompt_cache_breakpoints).await);
+             }
+             session
+                 .spawn_task(turn_context, task_input, RegularTask::new())
+@@ -571,6 +573,7 @@ async fn start_if_idle_inner(
+         start,
+         additional_context,
+         responsesapi_client_metadata,
++        prompt_cache_breakpoints,
+         ..
+     } = request;
+     let origin = UserInputOrigin::from_turn_trigger(start.turn_trigger.as_deref());
+@@ -757,7 +760,7 @@ async fn start_if_idle_inner(
+             if let SubmittedTurnInput::UserInput { content, .. } = &input {
+                 turn_context.session_telemetry.user_prompt(content);
+             }
+-            task_input.push(pending_turn_input(session, input, &turn_context.sub_id, origin).await);
++            task_input.push(pending_turn_input(session, input, &turn_context.sub_id, origin, &prompt_cache_breakpoints).await);
+         }
+         TurnStartKind::Automatic | TurnStartKind::Recovery => {
+             // Empty automatic user input resumes sampling without a new message.
+@@ -767,7 +770,7 @@ async fn start_if_idle_inner(
+                     .extend_pending_input_for_turn_state(
+                         turn_state.as_ref(),
+                         vec![
+-                            pending_turn_input(session, input, &turn_context.sub_id, origin).await,
++                            pending_turn_input(session, input, &turn_context.sub_id, origin, &prompt_cache_breakpoints).await,
+                         ],
+                     )
+                     .await;
+@@ -808,6 +811,7 @@ async fn steer(
+         start,
+         additional_context,
+         responsesapi_client_metadata,
++        prompt_cache_breakpoints,
+         ..
+     } = request;
+     let origin = UserInputOrigin::from_turn_trigger(start.turn_trigger.as_deref());
+@@ -835,6 +839,7 @@ async fn steer(
+             settings.start_options.model_settings_override.as_ref(),
+             responsesapi_client_metadata,
+             origin,
++            &prompt_cache_breakpoints,
+         )
+         .await
+     {
+@@ -940,6 +945,7 @@ impl Session {
+         >,
+         responsesapi_client_metadata: Option<HashMap<String, String>>,
+         origin: UserInputOrigin,
++        prompt_cache_breakpoints: &[codex_protocol::prompt_cache::InputCacheBreakpoint],
+     ) -> Result<String, NotSubmittedReason> {
+         let mut active = self.active_turn.lock().await;
+         let Some(active_turn) = active.as_mut() else {
+@@ -1019,12 +1025,13 @@ impl Session {
+                     content: std::mem::take(content),
+                     client_id: client_id.clone(),
+                     metadata: super::UserInputMetadata {
++                    prompt_cache_breakpoints: prompt_cache_breakpoints.to_vec(),
+                         acceptance_order: Some(self.reserve_user_input_order().await),
+                         origin,
+                     },
+                 }
+             }
+-            input => pending_turn_input(self, input.clone(), active_turn_id, origin).await,
++            input => pending_turn_input(self, input.clone(), active_turn_id, origin, prompt_cache_breakpoints).await,
+         };
+         pending_input.push(input);
+         self.input_queue
+@@ -1057,12 +1064,14 @@ async fn pending_turn_input(
+     input: SubmittedTurnInput,
+     turn_id: &str,
+     origin: UserInputOrigin,
++    prompt_cache_breakpoints: &[codex_protocol::prompt_cache::InputCacheBreakpoint],
+ ) -> TurnInput {
+     match input {
+         SubmittedTurnInput::UserInput { content, client_id } => TurnInput::UserInput {
+             content,
+             client_id,
+             metadata: super::UserInputMetadata {
++                    prompt_cache_breakpoints: prompt_cache_breakpoints.to_vec(),
+                 acceptance_order: Some(session.reserve_user_input_order().await),
+                 origin,
+             },
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+index d8e59a2327f4182d24908675a4b0b0758e4ab198..6620218121678aec216662cf2b0816fcae7779ca 100644
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -184,6 +184,7 @@ fn settled_test_calls() -> SettledDirectTools {
+                 .unwrap()
+             })
+             .collect(),
++        outcomes: vec![Some(true); 3],
+         all_succeeded: true,
+     }
+ }
+@@ -205,6 +206,7 @@ async fn terminal_policy_selects_the_first_eligible_call_in_model_order() {
+         &session,
+         &step,
+         &settled_test_calls(),
++        false,
+         &CancellationToken::new(),
+     )
+     .await
+@@ -230,8 +232,9 @@ async fn terminal_policy_never_runs_for_failed_siblings() {
+     let step = StepContext::for_test(Arc::new(turn));
+     let mut tools = settled_test_calls();
+     tools.all_succeeded = false;
++    tools.outcomes[0] = Some(false);
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, false, &CancellationToken::new())
+             .await
+             .unwrap()
+             .is_none()
+@@ -252,6 +255,7 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+             &session,
+             &step,
+             &settled_test_calls(),
++            false,
+             &CancellationToken::new(),
+         )
+         .await
+@@ -270,6 +274,7 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+         &session,
+         &step,
+         &settled_test_calls(),
++        false,
+         &CancellationToken::new(),
+     )
+     .await
+@@ -284,7 +289,7 @@ async fn terminal_policy_rejects_a_mismatched_accepted_receipt() {
+     let mut tools = settled_test_calls();
+     tools.outputs.swap(0, 1);
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, false, &CancellationToken::new())
+             .await
+             .is_err()
+     );
+@@ -534,7 +539,7 @@ async fn tool_terminal_recovery_saved_success_alone_has_no_completion_authority(
+     let (session, turn) = crate::session::tests::make_session_and_context().await;
+     let step = StepContext::for_test(Arc::new(turn));
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, false, &CancellationToken::new())
+             .await
+             .unwrap()
+             .is_none()
+diff --git a/codex-rs/core/src/tools/context_tests.rs b/codex-rs/core/src/tools/context_tests.rs
+index bd0cb0c5b57bda6b0d4c40b015d1228de40b1c82..fa6f183ac6a88ed5ea98866d0e2556a3490e508d 100644
+--- a/codex-rs/core/src/tools/context_tests.rs
++++ b/codex-rs/core/src/tools/context_tests.rs
+@@ -2,6 +2,7 @@ use super::*;
+ use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
+ use codex_protocol::models::ImageReference;
+ use codex_protocol::models::SearchToolCallParams;
++use codex_tools::LoadableToolSpec;
+ use core_test_support::assert_regex_match;
+ use pretty_assertions::assert_eq;
+ use serde_json::json;
+diff --git a/codex-rs/core/src/turn_metadata.rs b/codex-rs/core/src/turn_metadata.rs
+index ddd96eda5b7eb946b9bfb00c26373e3cda2b21be..77b06af61e65862225c129dc212e9852030b3d1a 100644
+--- a/codex-rs/core/src/turn_metadata.rs
++++ b/codex-rs/core/src/turn_metadata.rs
+@@ -52,6 +52,7 @@ const WORKSPACE_KIND_KEY: &str = "workspace_kind";
+ 
+ /// Captured execution settings shared by Responses and MCP metadata.
+ pub(crate) struct ExecutionMetadata<'a> {
++    pub(crate) sdk_prompt_cache_key: Option<&'a str>,
+     pub(crate) model: &'a str,
+     pub(crate) reasoning_effort: Option<ReasoningEffortConfig>,
+     pub(crate) node_repl_disabled: bool,
+@@ -62,6 +63,11 @@ pub(crate) struct ExecutionMetadata<'a> {
+ impl<'a> ExecutionMetadata<'a> {
+     pub(crate) fn from_settings(settings: &'a ResolvedStepSettings) -> Self {
+         Self {
++            sdk_prompt_cache_key: settings
++                .request_controls()
++                .prompt_cache_key
++                .as_ref()
++                .and_then(Option::as_deref),
+             model: settings.model_info.slug.as_str(),
+             reasoning_effort: settings.effective_reasoning_effort(),
+             node_repl_disabled: settings.model_info.node_repl_disabled,
+@@ -74,6 +80,7 @@ impl<'a> ExecutionMetadata<'a> {
+     }
+ 
+     pub(crate) fn apply_to(&self, metadata: &mut CodexResponsesMetadata) {
++        metadata.sdk_prompt_cache_key = self.sdk_prompt_cache_key.map(str::to_owned);
+         metadata.auto_review_enabled = Some(self.auto_review_enabled);
+         metadata.node_repl_auto_review_required = Some(self.node_repl_auto_review_required);
+         metadata.node_repl_disabled = Some(self.node_repl_disabled);
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index f737617abb8503d271d2999d364ce0f776b28f3f..94b80fe39a28ddc6f08b70098c42bfc62c46d1b2 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -491,6 +491,12 @@ pub trait ModelAttemptAdmission: Send + Sync + std::fmt::Debug {
+     fn cancellation(&self) -> tokio_util::sync::CancellationToken;
+     fn sampling_stop(&self) -> Arc<TurnSamplingStop>;
+     fn snapshot(&self) -> Result<codex_protocol::model_retry::ModelAttemptSnapshot, String>;
++    /// Drain observation-only transport receipts after the sampler joins.
++    fn take_provider_request_usage(
++        &self,
++    ) -> Option<Vec<codex_protocol::model_retry::ModelProviderRequestUsage>> {
++        None
++    }
+     /// Only trusted request construction supplies these small native request facts.
+     fn observe_request(
+         &self,
+@@ -542,6 +548,12 @@ pub struct ModelAttemptInput {
+ /// Interceptors compose in registration order; dropping their stream must release unfinished work.
+ /// Trusted host implementations must bound any model-visible content they synthesize.
+ pub trait ModelResponseInterceptor: Send + Sync {
++    /// Attest safe pre-interceptor text grouping and uncaptured empty-fact omission.
++    /// Unknown/text-sensitive interceptors preserve the original stream by default.
++    fn text_delta_demand(&self) -> Option<Arc<codex_api::TextDeltaDemand>> {
++        None
++    }
++
+     /// Attest unchanged completed messages, reasoning and response IDs.
+     /// Core additionally rejects every other output kind when issuing lineage.
+     /// This native assertion must not cover application rewrites or producers.
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+index acccd2ea9c9020c7f0f66d3e66adf2f7c6efc1e9..505c2a8413ac3283633a486103f2354c19ae1ac6 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+@@ -228,7 +228,7 @@ impl LunaSampler {
+         let api_request = ResponsesApiRequest {
+             request_controls: Default::default(),
+             model: Some(MODEL.to_owned()),
+-            input,
++        input: input.into(),
+             tools: None,
+             tool_choice: Some("none".to_owned()),
+             parallel_tool_calls: Some(false),
+diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
+index adad060fc05955eff341ebe64b7226eb90356dc3..005d052f11a3d033d84d4b79675f79dd35f48ba5 100644
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -70,6 +70,10 @@ pub struct ManagedAgentToolOrigin {
+ ///
+ #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+ pub struct CodexHarnessMetadata {
++    /// Input cache annotations for one exact native history occurrence.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub prompt_cache: Option<codex_protocol::prompt_cache::PromptCacheAnnotation>,
++
+     /// Accepted native background-result disposition; absent means foreground.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub sdk_start_response: Option<bool>,
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index 0087076f2578ef327c0120e1d96114bd59a060f7..f152a249c492c2201d1d14ca219a99b0a190441c 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -50,10 +50,17 @@ pub struct SdkOriginalItem {
+ 
+ impl SdkOriginalItem {
+     pub fn from_native(projection: ResponseItemEnvelope) -> Self {
+-        Self {
+-            original: serde_json::to_string(&projection.item).expect("response items serialize"),
+-            projection: Some(projection),
+-        }
++        let cached = projection.metadata.as_ref().and_then(|metadata| metadata.prompt_cache.as_ref())
++            .and_then(|annotation| projection.item.id().and_then(|id| annotation.project(id.as_str(), &projection.item).ok()))
++            .and_then(|projection| match projection {
++                codex_protocol::prompt_cache::PromptCacheProjection::Annotated(value) => Some(value),
++                codex_protocol::prompt_cache::PromptCacheProjection::Refused => None,
++            });
++        let original = match cached {
++            Some(value) => serde_json::to_string(&value).expect("cache annotations serialize"),
++            None => serde_json::to_string(&projection.item).expect("response items serialize"),
++        };
++        Self { original, projection: Some(projection) }
+     }
+ }
+ 
+diff --git a/codex-rs/protocol/Cargo.toml b/codex-rs/protocol/Cargo.toml
+index a68fdef9ff98ba268105f52d9ccf3159f223086b..8922be2fc9d63be2a9a086e12b069d2ae57925ee 100644
+--- a/codex-rs/protocol/Cargo.toml
++++ b/codex-rs/protocol/Cargo.toml
+@@ -39,6 +39,7 @@ schemars = { workspace = true }
+ serde = { workspace = true, features = ["derive"] }
+ serde_json = { workspace = true }
+ serde_with = { workspace = true, features = ["macros", "base64"] }
++sha2 = { workspace = true }
+ strum = { workspace = true }
+ strum_macros = { workspace = true }
+ sys-locale = { workspace = true }
+diff --git a/codex-rs/protocol/src/lib.rs b/codex-rs/protocol/src/lib.rs
+index e238ca26358ca25435129d9832f2e488ac7d4985..bbe9ea0658ca12b70d95b7e376df2339293ddf57 100644
+--- a/codex-rs/protocol/src/lib.rs
++++ b/codex-rs/protocol/src/lib.rs
+@@ -38,6 +38,7 @@ pub mod memory_citation;
+ mod memory_version;
+ pub use memory_version::MemoryVersion;
+ pub mod model_request_controls;
++pub mod prompt_cache;
+ pub mod model_request_transport;
+ pub mod model_retry;
+ pub mod models;
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index c052889a30ab6df2515065d8835060f643490474..a092acccebcb00bf185b3a79a53bc7ec03f52483 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -171,6 +171,11 @@ impl RunModelSettingsOverride {
+ #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ #[serde(deny_unknown_fields)]
+ pub struct ModelRequestControls {
++    /// Captured SDK output contract; local validation remains independent.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub output_schema_strict: Option<bool>,
++
+     /// Request-scoped headers and query; never provider body fields or credentials.
+     #[serde(
+         default,
+@@ -338,6 +343,15 @@ pub struct ModelRequestControls {
+     #[ts(optional = nullable, as = "Option<PromptCacheTtl>")]
+     #[schemars(with = "Option<PromptCacheTtl>")]
+     pub prompt_cache_ttl: Option<Option<PromptCacheTtl>>,
++    /// SDK-generated logical-run cache affinity; it never changes thread identity.
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, as = "Option<String>")]
++    #[schemars(with = "Option<String>")]
++    pub prompt_cache_key: Option<Option<String>>,
+     #[serde(
+         default,
+         skip_serializing_if = "Option::is_none",
+@@ -381,7 +395,8 @@ impl ModelRequestControls {
+     }
+ 
+     pub fn is_empty(&self) -> bool {
+-        self.request_transport.is_none()
++        self.output_schema_strict.is_none()
++            && self.request_transport.is_none()
+             && self.retry.is_none()
+             && self.attempt_timeout_ms.is_none()
+             && self.hosted_prompt.is_none()
+@@ -402,12 +417,17 @@ impl ModelRequestControls {
+             && self.prompt_cache_retention.is_none()
+             && self.prompt_cache_ttl.is_none()
+             && self.prompt_cache_mode.is_none()
++            && self.prompt_cache_key.is_none()
+             && self.named_tool_choice.is_none()
+             && self.hosted_tool_choice.is_none()
+             && self.reset_tool_choice.is_none()
+     }
+ 
+     pub fn apply_patch(&mut self, patch: &Self) {
++        if patch.output_schema_strict.is_some() {
++            self.output_schema_strict = patch.output_schema_strict;
++        }
++
+         match (&mut self.request_transport, &patch.request_transport) {
+             (Some(Some(current)), Some(Some(update))) => current.apply_patch(update),
+             (_, Some(update)) => self.request_transport = Some(update.clone()),
+@@ -476,6 +496,9 @@ impl ModelRequestControls {
+         if patch.prompt_cache_mode.is_some() {
+             self.prompt_cache_mode = patch.prompt_cache_mode;
+         }
++        if patch.prompt_cache_key.is_some() {
++            self.prompt_cache_key = patch.prompt_cache_key.clone();
++        }
+         if patch.hosted_tool_choice.is_some() {
+             self.hosted_tool_choice = patch.hosted_tool_choice.clone();
+         }
+@@ -492,6 +515,19 @@ impl ModelRequestControls {
+         if let Some(Some(transport)) = &self.request_transport {
+             transport.validate()?;
+         }
++        if let Some(Some(key)) = &self.prompt_cache_key {
++            let digest = key
++                .strip_prefix("agents-sdk:conversation:")
++                .or_else(|| key.strip_prefix("agents-sdk:group:"));
++            if !digest.is_some_and(|value| {
++                value.len() == 32
++                    && value
++                        .bytes()
++                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
++            }) {
++                return Err("Invalid SDK prompt cache affinity".into());
++            }
++        }
+         if let Some(Some(prompt)) = &self.hosted_prompt {
+             if prompt
+                 .reference
+@@ -761,6 +797,24 @@ mod sdk_extension_tests {
+         );
+     }
+ 
++    #[test]
++    fn cache_affinity_preserves_omission_and_explicit_clearing() {
++        let key = "agents-sdk:conversation:0123456789abcdef0123456789abcdef";
++        let mut controls: ModelRequestControls =
++            serde_json::from_value(json!({"prompt_cache_key": key})).unwrap();
++        controls.validate_shape().unwrap();
++        assert!(!controls.is_empty());
++        controls.apply_patch(&ModelRequestControls::default());
++        assert_eq!(controls.prompt_cache_key, Some(Some(key.into())));
++        let clear: ModelRequestControls =
++            serde_json::from_value(json!({"prompt_cache_key": null})).unwrap();
++        controls.apply_patch(&clear);
++        assert_eq!(controls.prompt_cache_key, Some(None));
++        let bad: ModelRequestControls =
++            serde_json::from_value(json!({"prompt_cache_key": "invalid"})).unwrap();
++        assert!(bad.validate_shape().is_err());
++    }
++
+     #[test]
+     fn empty_extra_body_is_a_patch_without_wire_values() {
+         for body in [json!({}), serde_json::Value::Null] {
+@@ -884,4 +938,23 @@ mod explicit_prompt_cache_tests {
+             .is_err()
+         );
+     }
++    #[test]
++    fn output_strictness_is_an_owned_sparse_control() {
++        let loose: ModelRequestControls =
++            serde_json::from_value(serde_json::json!({"output_schema_strict": false})).unwrap();
++        assert!(!loose.is_empty());
++        let mut controls = ModelRequestControls::default();
++        controls.apply_patch(&loose);
++        controls.apply_patch(&ModelRequestControls::default());
++        assert_eq!(controls.output_schema_strict, Some(false));
++        assert_eq!(
++            serde_json::to_value(&controls).unwrap()["output_schema_strict"],
++            false
++        );
++        controls.apply_patch(
++            &serde_json::from_value(serde_json::json!({"output_schema_strict": true})).unwrap(),
++        );
++        assert_eq!(controls.output_schema_strict, Some(true));
++    }
++
+ }
+diff --git a/codex-rs/protocol/src/model_retry.rs b/codex-rs/protocol/src/model_retry.rs
+index 319a00d5bcaa6b80866c545140a884714b429e5a..80cfc548e2cde48a7368dcdfd8b8a4879a8ef386 100644
+--- a/codex-rs/protocol/src/model_retry.rs
++++ b/codex-rs/protocol/src/model_retry.rs
+@@ -171,6 +171,16 @@ pub struct ModelRetryContext {
+     pub usage: Option<TokenUsage>,
+ }
+ 
++/// A transport-admitted request, updated only by its matching terminal response.
++#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ModelProviderRequestUsage {
++    pub request_id: String,
++    #[ts(type = "number")]
++    pub request_ordinal: u64,
++    pub token_usage: Option<TokenUsage>,
++}
++
+ /// Cumulative native facts for one exact turn. Explicit host reports stay separate.
+ /// Live events, final results and checkpoints carry the same authoritative totals.
+ #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index 6045b8849ed77276e5e25045b21fa2bdb984ba69..4430c7064cffa720b91c00eb33651b1a8458c789 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -2492,6 +2492,19 @@ impl ResponseInputItem {
+         local_image_preparation: LocalImagePreparation,
+         user_image_content_indices: &mut HashMap<usize, usize>,
+     ) -> Self {
++        Self::from_user_input_with_content_positions(
++            items, local_image_preparation, user_image_content_indices, &mut HashMap::new(),
++        )
++    }
++
++    /// Exact generated content endpoint for each source input, including local media framing.
++    pub fn from_user_input_with_content_positions(
++        items: Vec<UserInput>,
++        local_image_preparation: LocalImagePreparation,
++        user_image_content_indices: &mut HashMap<usize, usize>,
++        user_content_indices: &mut HashMap<usize, usize>,
++    ) -> Self {
++        user_content_indices.clear();
+         user_image_content_indices.clear();
+         let mut image_index = 0;
+         let mut audio_index = 0;
+@@ -2562,6 +2575,9 @@ impl ResponseInputItem {
+                     user_image_content_indices.insert(input_index, content.len() + offset);
+                 }
+             }
++            if !generated.is_empty() {
++                user_content_indices.insert(input_index, content.len() + generated.len() - 1);
++            }
+             content.extend(generated);
+         }
+         Self::Message {
+diff --git a/codex-rs/protocol/src/prompt_cache.rs b/codex-rs/protocol/src/prompt_cache.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6be26958f1eedf9b60d3a312daa8a33ca0ff01d2
+--- /dev/null
++++ b/codex-rs/protocol/src/prompt_cache.rs
+@@ -0,0 +1,615 @@
++//! Content cache annotations, separate from canonical content and tool authority.
++use crate::model_request_controls::PromptCacheMode;
++use crate::models::ContentItem;
++use crate::models::ResponseItem;
++use schemars::JsonSchema;
++use serde::{Deserialize, Serialize};
++use sha2::{Digest, Sha256};
++use std::collections::{HashMap, HashSet};
++use ts_rs::TS;
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct PromptCacheBreakpoint {
++    pub mode: PromptCacheMode,
++}
++
++#[derive(Debug, Clone, Deserialize)]
++pub struct PromptCacheUserInput {
++    #[serde(flatten)]
++    pub input: crate::user_input::UserInput,
++    #[serde(default, deserialize_with = "present_breakpoint")]
++    pub prompt_cache_breakpoint: Option<PromptCacheBreakpoint>,
++}
++
++fn present_breakpoint<'de, D: serde::Deserializer<'de>>(
++    deserializer: D,
++) -> Result<Option<PromptCacheBreakpoint>, D::Error> {
++    PromptCacheBreakpoint::deserialize(deserializer).map(Some)
++}
++
++pub fn split_user_input(
++    input: Vec<PromptCacheUserInput>,
++) -> (Vec<crate::user_input::UserInput>, Vec<InputCacheBreakpoint>) {
++    let mut content = Vec::with_capacity(input.len());
++    let mut breakpoints = Vec::new();
++    for (input_index, part) in input.into_iter().enumerate() {
++        if let Some(breakpoint) = part.prompt_cache_breakpoint {
++            breakpoints.push(InputCacheBreakpoint {
++                input_index,
++                breakpoint,
++            });
++        }
++        content.push(part.input);
++    }
++    (content, breakpoints)
++}
++
++/// Fresh canonical-history input; annotations remain data beside the typed projection.
++pub fn response_breakpoints(
++    raw: &str,
++) -> Result<Vec<(usize, PromptCacheBreakpoint)>, serde_json::Error> {
++    if !raw.contains("prompt_cache_breakpoint") {
++        return Ok(Vec::new());
++    }
++    let value: serde_json::Value = serde_json::from_str(raw)?;
++    if value.get("type").and_then(serde_json::Value::as_str) != Some("message") {
++        return Ok(Vec::new());
++    }
++    let Some(content) = value.get("content").and_then(serde_json::Value::as_array) else {
++        return Ok(Vec::new());
++    };
++    content
++        .iter()
++        .enumerate()
++        .filter_map(|(index, part)| {
++            part.get("prompt_cache_breakpoint").map(|marker| {
++                serde_json::from_value(marker.clone()).map(|breakpoint| (index, breakpoint))
++            })
++        })
++        .collect()
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct InputCacheBreakpoint {
++    pub input_index: usize,
++    pub breakpoint: PromptCacheBreakpoint,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct BoundCacheBreakpoint {
++    pub content_index: usize,
++    pub content_sha256: String,
++    pub breakpoint: PromptCacheBreakpoint,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct PromptCacheAnnotation {
++    pub occurrence: String,
++    pub parts: Vec<BoundCacheBreakpoint>,
++}
++
++/// Annotation-only refusal; underlying content and request policy remain available.
++#[derive(Debug, PartialEq)]
++pub enum PromptCacheProjection {
++    Annotated(serde_json::Value),
++    Refused,
++}
++
++pub fn content_fingerprint(content: &ContentItem) -> Result<String, serde_json::Error> {
++    Ok(format!(
++        "{:x}",
++        Sha256::digest(serde_json::to_vec(content)?)
++    ))
++}
++
++impl PromptCacheAnnotation {
++    pub fn bind(
++        occurrence: String,
++        content: &[ContentItem],
++        breakpoints: &[(usize, PromptCacheBreakpoint)],
++    ) -> Result<Option<Self>, serde_json::Error> {
++        if occurrence.is_empty() || breakpoints.is_empty() || breakpoints.len() > content.len() {
++            return Ok(None);
++        }
++        let mut indices = HashSet::with_capacity(breakpoints.len());
++        if breakpoints
++            .iter()
++            .any(|(index, _)| *index >= content.len() || !indices.insert(*index))
++        {
++            return Ok(None);
++        }
++        let parts = breakpoints
++            .iter()
++            .map(|(index, breakpoint)| {
++                Ok(BoundCacheBreakpoint {
++                    content_index: *index,
++                    content_sha256: content_fingerprint(&content[*index])?,
++                    breakpoint: *breakpoint,
++                })
++            })
++            .collect::<Result<Vec<_>, serde_json::Error>>()?;
++        Ok(Some(Self { occurrence, parts }))
++    }
++
++    /// An explicit source-to-prepared map, without content searches or inferred anchors.
++    pub fn after_preparation(
++        &self,
++        occurrence: &str,
++        original: &[ContentItem],
++        prepared: &[ContentItem],
++        destinations: &[(usize, usize)],
++    ) -> Result<Option<Self>, serde_json::Error> {
++        if occurrence != self.occurrence
++            || occurrence.is_empty()
++            || self.parts.len() > original.len()
++            || self.parts.len() > prepared.len()
++        {
++            return Ok(None);
++        }
++        let mut sources = HashSet::with_capacity(self.parts.len());
++        if self
++            .parts
++            .iter()
++            .any(|part| !sources.insert(part.content_index))
++        {
++            return Ok(None);
++        }
++        let mut mappings = HashMap::<usize, Option<usize>>::with_capacity(self.parts.len());
++        for (from, to) in destinations {
++            if sources.contains(from) {
++                mappings
++                    .entry(*from)
++                    .and_modify(|target| *target = None)
++                    .or_insert(Some(*to));
++            }
++        }
++        let mut source_counts = None;
++        let mut target_counts = None;
++        let mut targets = HashSet::with_capacity(self.parts.len());
++        let mut breakpoints = Vec::with_capacity(self.parts.len());
++        for part in &self.parts {
++            let Some(source) = original.get(part.content_index) else {
++                return Ok(None);
++            };
++            let source_fingerprint = content_fingerprint(source)?;
++            if source_fingerprint != part.content_sha256 {
++                return Ok(None);
++            }
++            let Some(target) = mappings.get(&part.content_index).copied().flatten() else {
++                return Ok(None);
++            };
++            let Some(prepared_part) = prepared.get(target) else {
++                return Ok(None);
++            };
++            if !targets.insert(target) {
++                return Ok(None);
++            }
++            let same_prepared_content = match (source, prepared_part) {
++                (ContentItem::InputImage { .. }, ContentItem::InputImage { .. }) => true,
++                _ => source == prepared_part,
++            };
++            if !same_prepared_content {
++                return Ok(None);
++            }
++            if target != part.content_index {
++                if source_counts.is_none() {
++                    source_counts = Some(fingerprint_counts(original)?);
++                    target_counts = Some(fingerprint_counts(prepared)?);
++                }
++                let target_fingerprint = content_fingerprint(prepared_part)?;
++                if source_counts
++                    .as_ref()
++                    .and_then(|counts| counts.get(&source_fingerprint))
++                    != Some(&1)
++                    || target_counts
++                        .as_ref()
++                        .and_then(|counts| counts.get(&target_fingerprint))
++                        != Some(&1)
++                {
++                    return Ok(None);
++                }
++            }
++            breakpoints.push((target, part.breakpoint));
++        }
++        Self::bind(self.occurrence.clone(), prepared, &breakpoints)
++    }
++
++    pub fn project(
++        &self,
++        occurrence: &str,
++        item: &ResponseItem,
++    ) -> Result<PromptCacheProjection, serde_json::Error> {
++        let ResponseItem::Message { content, .. } = item else {
++            return Ok(PromptCacheProjection::Refused);
++        };
++        if occurrence != self.occurrence
++            || occurrence.is_empty()
++            || self.parts.len() > content.len()
++        {
++            return Ok(PromptCacheProjection::Refused);
++        }
++        let mut indices = HashSet::with_capacity(self.parts.len());
++        for binding in &self.parts {
++            let Some(part) = content.get(binding.content_index) else {
++                return Ok(PromptCacheProjection::Refused);
++            };
++            if matches!(part, ContentItem::OutputText { .. })
++                || !indices.insert(binding.content_index)
++                || content_fingerprint(part)? != binding.content_sha256
++            {
++                return Ok(PromptCacheProjection::Refused);
++            }
++        }
++        let mut wire = serde_json::to_value(item)?;
++        for binding in &self.parts {
++            // ResponseItem::Message fixes this shape; validation above fixes every index.
++            wire["content"][binding.content_index]["prompt_cache_breakpoint"] =
++                serde_json::to_value(binding.breakpoint)?;
++        }
++        Ok(PromptCacheProjection::Annotated(wire))
++    }
++}
++
++fn fingerprint_counts(
++    content: &[ContentItem],
++) -> Result<HashMap<String, usize>, serde_json::Error> {
++    let mut counts = HashMap::new();
++    for part in content {
++        *counts.entry(content_fingerprint(part)?).or_default() += 1;
++    }
++    Ok(counts)
++}
++
++fn unique_items(items: &[ResponseItem]) -> HashMap<String, Option<&ResponseItem>> {
++    let mut indexed = HashMap::new();
++    for item in items {
++        if let Some(id) = item.id() {
++            indexed
++                .entry(id.to_string())
++                .and_modify(|value| *value = None)
++                .or_insert(Some(item));
++        }
++    }
++    indexed
++}
++
++/// The caller owns an in-place preparation step; item identities and part counts remain fixed.
++pub fn after_in_place_item_preparation(
++    annotations: &[PromptCacheAnnotation],
++    original: &[ResponseItem],
++    prepared: &[ResponseItem],
++) -> Vec<PromptCacheAnnotation> {
++    if annotations.is_empty() {
++        return Vec::new();
++    }
++    let mut occurrences = HashSet::with_capacity(annotations.len());
++    let mut duplicates = HashSet::new();
++    for annotation in annotations {
++        if !occurrences.insert(annotation.occurrence.as_str()) {
++            duplicates.insert(annotation.occurrence.as_str());
++        }
++    }
++    let sources = unique_items(original);
++    let targets = unique_items(prepared);
++    annotations
++        .iter()
++        .filter_map(|annotation| {
++            if duplicates.contains(annotation.occurrence.as_str()) {
++                return None;
++            }
++            let source = sources.get(&annotation.occurrence).copied().flatten()?;
++            let target = targets.get(&annotation.occurrence).copied().flatten()?;
++            let (
++                ResponseItem::Message {
++                    content: source, ..
++                },
++                ResponseItem::Message {
++                    content: target, ..
++                },
++            ) = (source, target)
++            else {
++                return None;
++            };
++            if source.len() != target.len() {
++                return None;
++            }
++            let destinations = (0..source.len())
++                .map(|index| (index, index))
++                .collect::<Vec<_>>();
++            annotation
++                .after_preparation(&annotation.occurrence, source, target, &destinations)
++                .ok()
++                .flatten()
++        })
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    fn item(parts: serde_json::Value) -> ResponseItem {
++        serde_json::from_value(json!({"type":"message", "role":"user", "content":parts})).unwrap()
++    }
++    fn marker() -> PromptCacheBreakpoint {
++        PromptCacheBreakpoint {
++            mode: PromptCacheMode::Explicit,
++        }
++    }
++    fn bind(occurrence: &str, item: &ResponseItem, index: usize) -> PromptCacheAnnotation {
++        let ResponseItem::Message { content, .. } = item else {
++            panic!()
++        };
++        PromptCacheAnnotation::bind(occurrence.into(), content, &[(index, marker())])
++            .unwrap()
++            .unwrap()
++    }
++
++    #[test]
++    fn portable_binding_preserves_canonical_content_and_exact_occurrence() {
++        let original = item(json!([
++            {"type":"input_text","text":"first"},
++            {"type":"input_text","text":"second"}
++        ]));
++        let canonical = serde_json::to_value(&original).unwrap();
++        let saved = bind("occurrence-a", &original, 1);
++        let restored: PromptCacheAnnotation =
++            serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
++        let PromptCacheProjection::Annotated(wire) =
++            restored.project("occurrence-a", &original).unwrap()
++        else {
++            panic!()
++        };
++        assert_eq!(
++            wire["content"][1]["prompt_cache_breakpoint"],
++            json!({"mode":"explicit"})
++        );
++        assert!(wire["content"][0].get("prompt_cache_breakpoint").is_none());
++        assert_eq!(serde_json::to_value(&original).unwrap(), canonical);
++        assert_eq!(
++            restored.project("occurrence-b", &original).unwrap(),
++            PromptCacheProjection::Refused
++        );
++    }
++
++    #[test]
++    fn reorder_and_changed_payload_refuse_annotation_without_mutating_content() {
++        let original = item(json!([
++            {"type":"input_text","text":"first"},
++            {"type":"input_text","text":"second"}
++        ]));
++        let saved = bind("occurrence-a", &original, 1);
++        for content in [
++            json!([{"type":"input_text","text":"second"},{"type":"input_text","text":"first"}]),
++            json!([{"type":"input_text","text":"first"},{"type":"input_text","text":"changed"}]),
++        ] {
++            let changed = item(content);
++            let before = serde_json::to_value(&changed).unwrap();
++            assert_eq!(
++                saved.project("occurrence-a", &changed).unwrap(),
++                PromptCacheProjection::Refused
++            );
++            assert_eq!(serde_json::to_value(&changed).unwrap(), before);
++        }
++    }
++
++    #[test]
++    fn duplicate_content_keeps_exact_part_anchor() {
++        let repeated = item(json!([
++            {"type":"input_text","text":"same"},
++            {"type":"input_text","text":"same"}
++        ]));
++        let saved = bind("occurrence-a", &repeated, 1);
++        let PromptCacheProjection::Annotated(wire) =
++            saved.project("occurrence-a", &repeated).unwrap()
++        else {
++            panic!()
++        };
++        assert!(wire["content"][0].get("prompt_cache_breakpoint").is_none());
++        assert_eq!(
++            wire["content"][1]["prompt_cache_breakpoint"],
++            json!({"mode":"explicit"})
++        );
++    }
++    #[test]
++    fn supported_media_keeps_its_canonical_shape() {
++        for part in [
++            json!({"type":"input_text","text":"<user_instructions>untrusted</user_instructions>"}),
++            json!({"type":"input_image","file_id":"file_synthetic_image"}),
++            json!({"type":"input_audio","audio_url":"data:audio/wav;base64,UklGRg=="}),
++            json!({"type":"input_file","file_id":"file_synthetic_document"}),
++        ] {
++            let original = item(json!([part]));
++            let canonical = serde_json::to_value(&original).unwrap();
++            let binding = bind("occurrence-media", &original, 0);
++            let PromptCacheProjection::Annotated(mut projected) =
++                binding.project("occurrence-media", &original).unwrap()
++            else {
++                panic!()
++            };
++            projected["content"][0]
++                .as_object_mut()
++                .unwrap()
++                .remove("prompt_cache_breakpoint");
++            assert_eq!(projected, canonical);
++        }
++    }
++
++    #[test]
++    fn explicit_reorder_map_preserves_unique_occurrence_without_guessing() {
++        let original = item(
++            json!([{"type":"input_text","text":"first"},{"type":"input_text","text":"second"}]),
++        );
++        let prepared = item(
++            json!([{"type":"input_text","text":"second"},{"type":"input_text","text":"first"}]),
++        );
++        let binding = bind("occurrence-a", &original, 1);
++        let ResponseItem::Message {
++            content: source, ..
++        } = &original
++        else {
++            panic!()
++        };
++        let ResponseItem::Message {
++            content: target, ..
++        } = &prepared
++        else {
++            panic!()
++        };
++        let mapped = binding
++            .after_preparation("occurrence-a", source, target, &[(1, 0)])
++            .unwrap()
++            .unwrap();
++        let PromptCacheProjection::Annotated(projected) =
++            mapped.project("occurrence-a", &prepared).unwrap()
++        else {
++            panic!()
++        };
++        assert_eq!(
++            projected["content"][0]["prompt_cache_breakpoint"],
++            json!({"mode":"explicit"})
++        );
++        assert!(
++            projected["content"][1]
++                .get("prompt_cache_breakpoint")
++                .is_none()
++        );
++    }
++
++    #[test]
++    fn ambiguous_update_refuses_only_annotation_and_preserves_original_anchor() {
++        let repeated =
++            item(json!([{"type":"input_text","text":"same"},{"type":"input_text","text":"same"}]));
++        let binding = bind("occurrence-a", &repeated, 1);
++        let before = binding.clone();
++        let ResponseItem::Message { content, .. } = &repeated else {
++            panic!()
++        };
++        assert!(
++            binding
++                .after_preparation("occurrence-a", content, content, &[(1, 0)])
++                .unwrap()
++                .is_none()
++        );
++        assert_eq!(binding, before);
++        assert_eq!(
++            serde_json::to_value(&repeated).unwrap()["content"],
++            json!([{"type":"input_text","text":"same"},{"type":"input_text","text":"same"}])
++        );
++    }
++
++    #[test]
++    fn invalid_breakpoint_shape_has_no_annotation() {
++        assert!(
++            serde_json::from_value::<PromptCacheBreakpoint>(json!({"mode":"invalid"})).is_err()
++        );
++        assert!(
++            serde_json::from_value::<PromptCacheBreakpoint>(
++                json!({"mode":"explicit","extra":true})
++            )
++            .is_err()
++        );
++    }
++
++    #[test]
++    fn duplicate_part_bindings_refuse_only_the_annotation() {
++        let original = item(json!([{"type":"input_text","text":"unchanged"}]));
++        let before = serde_json::to_value(&original).unwrap();
++        let mut binding = bind("msg_duplicate_parts", &original, 0);
++        binding.parts.push(binding.parts[0].clone());
++        assert_eq!(
++            binding.project("msg_duplicate_parts", &original).unwrap(),
++            PromptCacheProjection::Refused
++        );
++        let ResponseItem::Message { content, .. } = &original else {
++            panic!()
++        };
++        assert!(
++            binding
++                .after_preparation("msg_duplicate_parts", content, content, &[(0, 0)])
++                .unwrap()
++                .is_none()
++        );
++        assert!(
++            PromptCacheAnnotation::bind(
++                "msg_duplicate_parts".into(),
++                content,
++                &[(0, marker()), (0, marker())]
++            )
++            .unwrap()
++            .is_none()
++        );
++        assert_eq!(serde_json::to_value(&original).unwrap(), before);
++    }
++
++    #[test]
++    fn large_annotated_part_fixture_stays_within_native_frame_budget() {
++        const PARTS: usize = 32_768;
++        let content = (0..PARTS)
++            .map(|index| ContentItem::InputText {
++                text: format!("part-{index}"),
++            })
++            .collect::<Vec<_>>();
++        let breakpoints = (0..PARTS)
++            .map(|index| (index, marker()))
++            .collect::<Vec<_>>();
++        let binding = PromptCacheAnnotation::bind("msg_many_parts".into(), &content, &breakpoints)
++            .unwrap()
++            .unwrap();
++        assert!(serde_json::to_vec(&(&content, &binding)).unwrap().len() < 8 * 1024 * 1024);
++        let original = item(serde_json::to_value(&content).unwrap());
++        let destinations = (0..PARTS).map(|index| (index, index)).collect::<Vec<_>>();
++        let prepared = binding
++            .after_preparation("msg_many_parts", &content, &content, &destinations)
++            .unwrap()
++            .unwrap();
++        let PromptCacheProjection::Annotated(projected) =
++            prepared.project("msg_many_parts", &original).unwrap()
++        else {
++            panic!()
++        };
++        assert_eq!(prepared.parts.len(), PARTS);
++        for index in [0, PARTS - 1] {
++            assert_eq!(
++                projected["content"][index]["prompt_cache_breakpoint"],
++                json!({"mode":"explicit"})
++            );
++            assert_eq!(projected["content"][index]["text"], format!("part-{index}"));
++        }
++    }
++
++    #[test]
++    fn many_occurrences_keep_unique_annotations_and_refuse_ambiguous_owners() {
++        let original = (0..4096).map(|index| serde_json::from_value(json!({"type":"message","role":"user","id":format!("msg_many_{index}"),"content":[{"type":"input_text","text":"unchanged"}]})).unwrap()).collect::<Vec<ResponseItem>>();
++        let annotations = original
++            .iter()
++            .enumerate()
++            .map(|(index, item)| bind(&format!("msg_many_{index}"), item, 0))
++            .collect::<Vec<_>>();
++        let retained = after_in_place_item_preparation(&annotations, &original, &original);
++        assert_eq!(retained, annotations);
++        let mut duplicates = annotations.clone();
++        duplicates.push(annotations[0].clone());
++        let retained = after_in_place_item_preparation(&duplicates, &original, &original);
++        assert_eq!(retained.len(), annotations.len() - 1);
++        assert!(
++            retained
++                .iter()
++                .all(|annotation| annotation.occurrence != "msg_many_0")
++        );
++        let mut duplicated_source = original.clone();
++        duplicated_source.push(original[0].clone());
++        let retained = after_in_place_item_preparation(&annotations, &duplicated_source, &original);
++        assert_eq!(retained.len(), annotations.len() - 1);
++        assert!(
++            retained
++                .iter()
++                .all(|annotation| annotation.occurrence != "msg_many_0")
++        );
++    }
++}
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 9376fefe6c43ccb8054923c4a636072c2e96104a..d64cdf33594a8e062808df28502b760d91df5bb5 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -2902,6 +2902,10 @@ pub struct ModelAttemptFact {
+     pub phase: crate::model_retry::ModelAttemptPhase,
+     #[serde(flatten)]
+     pub snapshot: crate::model_retry::ModelAttemptSnapshot,
++    /// Physical requests admitted or settled since the preceding finished fact.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub provider_requests: Option<Vec<crate::model_retry::ModelProviderRequestUsage>>,
+ }
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+@@ -2994,7 +2998,7 @@ pub struct ThreadSettingsSnapshot {
+     pub invocation_timeout_ms: Option<u32>,
+     #[serde(
+         default,
+-        skip_serializing_if = "crate::model_request_controls::ModelRequestControls::is_empty",
++        skip_serializing_if = "persisted_request_controls::is_empty",
+         serialize_with = "persisted_request_controls::serialize",
+         deserialize_with = "persisted_request_controls::deserialize"
+     )]
+@@ -7462,6 +7466,10 @@ mod persisted_request_controls {
+     use crate::model_request_controls::ModelRequestControls;
+     use serde::{Deserialize, Deserializer, Serialize, Serializer};
+ 
++    pub fn is_empty(value: &ModelRequestControls) -> bool {
++        value.for_persistence().is_empty()
++    }
++
+     pub fn serialize<S: Serializer>(
+         value: &ModelRequestControls,
+         serializer: S,
+diff --git a/codex-rs/protocol/src/turn_input.rs b/codex-rs/protocol/src/turn_input.rs
+index 7eef9238382445b1feae775aa8d53ef164f3e96a..9731aeebf5d4ac4be10dc11b78808a84599cceac 100644
+--- a/codex-rs/protocol/src/turn_input.rs
++++ b/codex-rs/protocol/src/turn_input.rs
+@@ -45,6 +45,7 @@ pub enum TurnInput {
+ #[derive(Clone, Debug)]
+ pub struct TurnInputRequest {
+     pub input: TurnInput,
++    pub prompt_cache_breakpoints: Vec<crate::prompt_cache::InputCacheBreakpoint>,
+     pub thread_settings: ThreadSettingsOverrides,
+     pub start: TurnStartOptions,
+     pub additional_context: BTreeMap<String, AdditionalContextEntry>,
+@@ -75,6 +76,7 @@ impl TurnInputRequest {
+     pub fn new(input: TurnInput) -> Self {
+         Self {
+             input,
++            prompt_cache_breakpoints: Vec::new(),
+             thread_settings: ThreadSettingsOverrides::default(),
+             start: TurnStartOptions::default(),
+             additional_context: BTreeMap::new(),
+@@ -83,6 +85,15 @@ impl TurnInputRequest {
+         }
+     }
+ 
++    /// Content-part cache markers for this exact accepted input.
++    pub fn with_prompt_cache_breakpoints(
++        mut self,
++        breakpoints: Vec<crate::prompt_cache::InputCacheBreakpoint>,
++    ) -> Self {
++        self.prompt_cache_breakpoints = breakpoints;
++        self
++    }
++
+     /// Creates ordinary user input without a client-provided message id.
+     pub fn user_input(content: Vec<UserInput>) -> Self {
+         Self::new(TurnInput::UserInput {

@@ -1,0 +1,163 @@
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index 9caad4c54c21257ee3365c3d338da47a17a31886..fe264d831ee22f27d15f0bee63d689f243a36cf5 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -113,12 +113,57 @@ impl Prompt {
+             &mut input,
+             reference_policy,
+         );
++        normalize_sdk_application_instruction_revisions(&mut input);
+         normalize_image_details(&mut input, model_info);
+         filter_response_metadata_for_input(&mut input);
+         input
+     }
+ }
+ 
++// The receipt revision belongs to native history, not to the model's instructions.
++// Normalize only SDK-tagged parts on the request copy; retain IDs and occurrence
++// metadata so provider history can still map each item to its canonical source.
++fn normalize_sdk_application_instruction_revisions(items: &mut [ResponseItem]) {
++    for item in items {
++        let ResponseItem::Message {
++            role,
++            content,
++            internal_chat_message_metadata_passthrough: Some(metadata),
++            ..
++        } = item
++        else {
++            continue;
++        };
++        let Some(kinds) = &metadata.content_item_kinds else {
++            continue;
++        };
++        if role != "developer" || kinds.len() != content.len() {
++            continue;
++        }
++        for (part, kind) in content.iter_mut().zip(kinds) {
++            if !matches!(
++                kind.0.as_str(),
++                "sdk_application.accepted" | "sdk_application.instructions"
++            ) {
++                continue;
++            }
++            let ContentItem::InputText { text } = part else {
++                continue;
++            };
++            if let Some((revision, body)) = text
++                .strip_prefix(
++                    "<application_instructions>Native instruction revision: msg_sdk_application_",
++                )
++                .and_then(|text| text.split_once('\n'))
++                && uuid::Uuid::try_parse(revision).is_ok()
++                && body.ends_with("</application_instructions>")
++            {
++                *text = format!("<application_instructions>{body}");
++            }
++        }
++    }
++}
++
+ // Responses accepts the documented annotation and search source variants as input.
+ // Keep future output-only metadata in history while omitting it from replay.
+ pub(crate) fn filter_response_metadata_for_input(items: &mut [ResponseItem]) {
+diff --git a/codex-rs/core/src/client_common_tests.rs b/codex-rs/core/src/client_common_tests.rs
+index 46cf4c8ad7c57194bd9bd8870ede0950728a6030..ba83ae5fc3c99c6981f0c13e35d1c4dd6e83779f 100644
+--- a/codex-rs/core/src/client_common_tests.rs
++++ b/codex-rs/core/src/client_common_tests.rs
+@@ -333,3 +333,84 @@ fn retained_provider_references_follow_current_profile_without_changing_history(
+     prompt.provider_image_reference_policy = None;
+     assert_eq!(prompt.get_formatted_input_for_request(&model), standard);
+ }
++
++#[test]
++fn sdk_application_instruction_request_text_is_stable_without_rewriting_receipts() {
++    let model = model_info_from_slug("gpt-5.4");
++    for kind in ["sdk_application.accepted", "sdk_application.instructions"] {
++        let mut projected = Vec::new();
++        for revision in [
++            "00000000-0000-7000-8000-000000000001",
++            "00000000-0000-7000-8000-000000000002",
++        ] {
++            let id = format!("msg_sdk_application_{revision}");
++            let text = format!(
++                "<application_instructions>Native instruction revision: {id}\nThe following application instructions replace all earlier application instructions. An empty value clears them.\nAnswer.\nNative instruction revision: caller text</application_instructions>"
++            );
++            let item: ResponseItem = serde_json::from_value(serde_json::json!({
++                "type": "message", "id": id, "role": "developer",
++                "content": [{"type": "input_text", "text": text}],
++                "internal_chat_message_metadata_passthrough": {"content_item_kinds": [kind]}
++            }))
++            .unwrap();
++            let prompt = Prompt {
++                input: vec![item.clone()],
++                ..Default::default()
++            };
++            let formatted = prompt.get_formatted_input_for_request(&model);
++            assert_eq!(prompt.input, vec![item.clone()]);
++            assert_eq!(formatted[0].id(), item.id());
++            let ResponseItem::Message {
++                content,
++                internal_chat_message_metadata_passthrough,
++                ..
++            } = &formatted[0]
++            else {
++                panic!("expected message");
++            };
++            let ResponseItem::Message {
++                internal_chat_message_metadata_passthrough: original_metadata,
++                ..
++            } = &item
++            else {
++                panic!("expected message");
++            };
++            assert_eq!(
++                internal_chat_message_metadata_passthrough,
++                original_metadata
++            );
++            assert_eq!(content, &[ContentItem::InputText { text: "<application_instructions>The following application instructions replace all earlier application instructions. An empty value clears them.\nAnswer.\nNative instruction revision: caller text</application_instructions>".into() }]);
++            projected.push(content.clone());
++        }
++        assert_eq!(projected[0], projected[1]);
++    }
++}
++
++#[test]
++fn sdk_instruction_request_formatting_preserves_caller_lookalikes() {
++    let model = model_info_from_slug("gpt-5.4");
++    for (role, kinds) in [
++        ("developer", serde_json::json!(["caller.instructions"])),
++        ("developer", serde_json::json!(null)),
++        (
++            "developer",
++            serde_json::json!(["sdk_application.instructions"]),
++        ),
++        (
++            "developer",
++            serde_json::json!(["sdk_application.instructions", "other"]),
++        ),
++        ("user", serde_json::json!(["sdk_application.instructions"])),
++    ] {
++        let item: ResponseItem = serde_json::from_value(serde_json::json!({
++            "type": "message", "role": role,
++            "content": [{"type": "input_text", "text": "<application_instructions>Native instruction revision: msg_sdk_application_caller\nCaller text</application_instructions>"}],
++            "internal_chat_message_metadata_passthrough": {"content_item_kinds": kinds}
++        })).unwrap();
++        let prompt = Prompt {
++            input: vec![item.clone()],
++            ..Default::default()
++        };
++        assert_eq!(prompt.get_formatted_input_for_request(&model), vec![item]);
++    }
++}
+diff --git a/codex-rs/core/src/config/execution.rs b/codex-rs/core/src/config/execution.rs
+index bcd8b12192ca85577abc4e70d391efc6eccf3d10..f752b935f2d2f2edb4383093b3ad2ba88575816b 100644
+--- a/codex-rs/core/src/config/execution.rs
++++ b/codex-rs/core/src/config/execution.rs
+@@ -160,6 +160,7 @@ fn supported_flags(value: &toml::Value) -> bool {
+         | "service_tier"
+         | "include_environment_context"
+         | "include_permissions_instructions"
++        | "include_collaboration_mode_instructions"
+         | "project_doc_max_bytes"
+         | "web_search" => true,
+         "model_providers" => value.as_table().is_some_and(|providers| {

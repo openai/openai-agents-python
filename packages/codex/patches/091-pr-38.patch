@@ -1,0 +1,535 @@
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 80ba6c005c938de786ee55328f7a3e3847a94a90..626b93d76a35c0ffa22194892586bd6e26f5767d 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -406,9 +406,13 @@ pub(crate) async fn run_custom_post_turn_compaction(
+     }
+     sess.ensure_rollout_durable().await?;
+     let history = sess.clone_retained_history().await?;
+-    let items = history
+-        .clone()
+-        .for_prompt(&step_context.settings.model_info.input_modalities);
++    let (items, filtered_handoff) = sess
++        .project_handoff_compaction_input(
++            history
++                .clone()
++                .for_prompt(&step_context.settings.model_info.input_modalities),
++        )
++        .await?;
+     let candidate_indexes = compaction_candidate_indexes(&items);
+     let input = codex_extension_api::CompactionInput {
+         step_store: Some(&step_context.extension_data),
+@@ -425,9 +429,12 @@ pub(crate) async fn run_custom_post_turn_compaction(
+         automatic: true,
+         optional: true,
+         candidate_indexes: &candidate_indexes,
+-        provider_response: sess
+-            .provider_response_for_window(&step_context, &history)
+-            .await,
++        provider_response: if filtered_handoff {
++            None
++        } else {
++            sess.provider_response_for_window(&step_context, &history)
++                .await
++        },
+         items: &items,
+     };
+     for contributor in contributors {
+@@ -510,9 +517,15 @@ async fn try_custom_compaction_with_history(
+     let input = match captured_input {
+         Some(input) => input,
+         None => {
+-            items = history
+-                .clone()
+-                .for_prompt(&source_step_context.settings.model_info.input_modalities);
++            let projected = sess
++                .project_handoff_compaction_input(
++                    history
++                        .clone()
++                        .for_prompt(&source_step_context.settings.model_info.input_modalities),
++                )
++                .await?;
++            items = projected.0;
++            let filtered_handoff = projected.1;
+             indexes = compaction_candidate_indexes(&items);
+             current_input = codex_extension_api::CompactionInput {
+                 step_store: Some(&source_step_context.extension_data),
+@@ -529,9 +542,12 @@ async fn try_custom_compaction_with_history(
+                 automatic: matches!(metadata.trigger(), CompactionTrigger::Auto),
+                 optional: matches!(metadata.phase(), CompactionPhase::PostTurn),
+                 candidate_indexes: &indexes,
+-                provider_response: sess
+-                    .provider_response_for_window(source_step_context, history)
+-                    .await,
++                provider_response: if filtered_handoff {
++                    None
++                } else {
++                    sess.provider_response_for_window(source_step_context, history)
++                        .await
++                },
+                 items: &items,
+             };
+             &current_input
+@@ -668,7 +684,21 @@ async fn publish_compaction_summary(
+         .as_ref()
+         .and_then(|_| turn_context.model_info().comp_hash.clone());
+     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
+-    let user_messages = collect_annotated_user_messages(history_items);
++    let (_, filtered_handoff) = sess
++        .project_handoff_compaction_input(
++            history_items
++                .iter()
++                .map(|envelope| envelope.item.clone())
++                .collect(),
++        )
++        .await?;
++    // A custom summary of a filtered view is a detached replacement. Keeping
++    // canonical user records here would reintroduce data the callback never saw.
++    let user_messages = if filtered_handoff {
++        Vec::new()
++    } else {
++        collect_annotated_user_messages(history_items)
++    };
+ 
+     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
+     if let Some(summary_item) = new_history.last_mut() {
+@@ -811,6 +841,7 @@ async fn run_compact_task_inner_impl(
+             "Admitted application compaction did not return a replacement".into(),
+         ));
+     }
++    sess.validate_native_compaction_view().await?;
+     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
+ 
+     let mut history = history.clone();
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index b02ecec834b4895c9dba68aad3057acadd7eef34..d143339f425fe922ab17dbf8e222188b47125c1b 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -39,6 +39,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
+     compaction_metadata: CompactionTurnMetadata,
+     analytics_details: &mut CompactionAnalyticsDetails,
+ ) -> CodexResult<RemoteCompactV2Attempt> {
++    sess.validate_native_compaction_view().await?;
+     let turn_context = &step_context.turn;
+     let mut history = sess.clone_retained_history().await?;
+     let input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());
+diff --git a/codex-rs/core/src/prepared_request.rs b/codex-rs/core/src/prepared_request.rs
+index f147ac483ee027f6c2efc8331c8adb0059779709..c8d06360bb5b23e27193bce213902cf8407cf073 100644
+--- a/codex-rs/core/src/prepared_request.rs
++++ b/codex-rs/core/src/prepared_request.rs
+@@ -217,6 +217,7 @@ pub(crate) fn apply_handoff_presentation(
+     presentation: &codex_protocol::agent_profile::AgentProfileHandoffPresentation,
+     committed: &codex_extension_api::AgentProfileReceipt,
+     publication: &ResponseItem,
++    current_publication: &ResponseItem,
+ ) -> Result<Prompt, String> {
+     if !presentation.belongs_to(committed) {
+         return Err("Handoff presentation belongs to another committed destination".into());
+@@ -237,10 +238,29 @@ pub(crate) fn apply_handoff_presentation(
+     if anchors.len() != 1 || original.input[anchors[0]] != *publication {
+         return Err("Handoff destination publication is missing, ambiguous or changed".into());
+     }
++    // The view boundary can predate a same-profile instruction update. Only
++    // the actual current publication owns SDK application instructions.
++    let current_id = current_publication
++        .id()
++        .ok_or("Handoff current instruction publication lacks identity")?;
++    let current: Vec<_> = original
++        .input
++        .iter()
++        .filter(|item| item.id() == Some(current_id))
++        .collect();
++    if current.len() != 1 || current[0] != current_publication {
++        return Err(
++            "Handoff current instruction publication is missing, ambiguous or changed".into(),
++        );
++    }
+     let mut input: Vec<_> = original
+         .input
+         .iter()
+-        .filter(|item| protected_handoff_item(item))
++        .filter(|item| {
++            protected_handoff_item(item)
++                && (!crate::context_manager::is_sdk_model_only_instruction(item, None)
++                    || *item == current_publication)
++        })
+         .cloned()
+         .collect();
+     if projected.iter().any(|item| {
+@@ -322,7 +342,7 @@ mod tests {
+     fn handoff_sampling_keeps_publication_and_settled_pair_across_steps() {
+         let (original, presentation, receipt, publication) = handoff_case();
+         let projected =
+-            apply_handoff_presentation(&original, &presentation, &receipt, &publication).unwrap();
++            apply_handoff_presentation(&original, &presentation, &receipt, &publication, &publication).unwrap();
+         assert_eq!(projected.input[0], publication);
+         for (index, group) in [
+             &presentation.input,
+@@ -351,7 +371,7 @@ mod tests {
+         let mut later = original.clone();
+         later.input.push(parse_preserving(json!({"type":"message","role":"user","content":[{"type":"input_text","text":"later input"}]})).unwrap());
+         let second =
+-            apply_handoff_presentation(&later, &presentation, &receipt, &publication).unwrap();
++            apply_handoff_presentation(&later, &presentation, &receipt, &publication, &publication).unwrap();
+         assert_eq!(&second.input[4..], &later.input[2..]);
+         assert!(
+             serde_json::to_string(&original.input)
+@@ -377,12 +397,88 @@ mod tests {
+             ]);
+             assert!(validate_handoff_presentation(&rejected).is_err());
+             assert!(
+-                apply_handoff_presentation(&original, &rejected, &receipt, &publication).is_err()
++                apply_handoff_presentation(&original, &rejected, &receipt, &publication, &publication).is_err()
+             );
+         }
+         assert!(validate_handoff_presentation(&presentation).is_ok());
+     }
+ 
++    #[test]
++    fn handoff_keeps_current_sdk_instructions_and_ordinary_protected_policy() {
++        let (mut original, presentation, receipt, _) = handoff_case();
++        let sdk = |id: &str, text: &str, kind: &str| {
++            let mut item = parse_preserving(json!({
++                "type":"message", "id":id, "role":"developer",
++                "content":[{"type":"input_text","text":text}]
++            }))
++            .unwrap();
++            if let ResponseItem::Message {
++                internal_chat_message_metadata_passthrough,
++                ..
++            } = &mut item
++            {
++                let mut metadata = internal_chat_message_metadata_passthrough
++                    .take()
++                    .unwrap_or_default();
++                metadata.content_item_kinds = Some(serde_json::from_value(json!([kind])).unwrap());
++                *internal_chat_message_metadata_passthrough = Some(metadata);
++            }
++            assert!(crate::context_manager::is_sdk_model_only_instruction(
++                &item, None
++            ));
++            item
++        };
++        let old_source = sdk(
++            "msg_source",
++            "old source instructions",
++            "sdk_application.accepted",
++        );
++        let old_projection = sdk(
++            "msg_source_projection",
++            "old source instructions",
++            "sdk_application.instructions",
++        );
++        let anchor = sdk(
++            "msg_destination",
++            "old destination instructions",
++            "sdk_application.accepted",
++        );
++        let current = sdk(
++            "msg_current",
++            "current destination instructions",
++            "sdk_application.accepted",
++        );
++        let policy = parse_preserving(json!({
++            "type":"message", "id":"msg_policy", "role":"developer",
++            "content":[{"type":"input_text","text":"ordinary protected policy"}],
++            "content_item_kinds":["application.policy"]
++        }))
++        .unwrap();
++        let effects = original.input[2..].to_vec();
++        original.input = vec![old_source, old_projection, policy.clone(), anchor.clone()];
++        original.input.extend(effects.clone());
++        original.input.push(current.clone());
++        let before = original.input.clone();
++        let projected =
++            apply_handoff_presentation(&original, &presentation, &receipt, &anchor, &current)
++                .unwrap();
++        assert_eq!(projected.input[0], policy);
++        assert_eq!(projected.input[1], current);
++        assert_eq!(&projected.input[5..], effects.as_slice());
++        let wire = serde_json::to_string(&projected.input).unwrap();
++        assert!(!wire.contains("old source instructions"));
++        assert!(!wire.contains("old destination instructions"));
++        assert!(wire.contains("current destination instructions"));
++        assert_eq!(projected.tools, original.tools);
++        assert_eq!(original.input, before);
++        let mut missing = original.clone();
++        missing.input.pop();
++        assert!(
++            apply_handoff_presentation(&missing, &presentation, &receipt, &anchor, &current,)
++                .is_err()
++        );
++    }
++
+     #[test]
+     fn handoff_rejects_invalid_or_over_budget_snapshot_before_sampling() {
+         let (original, presentation, receipt, publication) = handoff_case();
+@@ -398,7 +494,7 @@ mod tests {
+         stale.destination.epoch = 2;
+         let mut provider_calls = 0;
+         for rejected in [invalid, discarded, over_count, over_bytes, stale] {
+-            let result = apply_handoff_presentation(&original, &rejected, &receipt, &publication)
++            let result = apply_handoff_presentation(&original, &rejected, &receipt, &publication, &publication)
+                 .map(|_| {
+                     provider_calls += 1;
+                 });
+@@ -407,7 +503,7 @@ mod tests {
+         let mut missing = original.clone();
+         missing.input.remove(1);
+         assert!(
+-            apply_handoff_presentation(&missing, &presentation, &receipt, &publication).is_err()
++            apply_handoff_presentation(&missing, &presentation, &receipt, &publication, &publication).is_err()
+         );
+         assert_eq!(provider_calls, 0);
+     }
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index ee219966fcd7fb7f588cda7ae10ea6cd4de81f2c..3efebeb99261bb298e291027bc3886dbc985e13b 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -32,7 +32,20 @@ struct PersistedProfile {
+ 
+ /// The original native publication remains the projection boundary after idle updates.
+ #[derive(Clone)]
+-struct HandoffPresentationAnchor(ResponseItem);
++struct HandoffPresentationAnchor(ResponseItem, Arc<std::sync::atomic::AtomicBool>);
++
++impl HandoffPresentationAnchor {
++    fn new(item: ResponseItem) -> Self {
++        Self(item, Arc::new(std::sync::atomic::AtomicBool::new(true)))
++    }
++}
++
++pub(super) fn handoff_presentation_is_live(profile: &AgentProfile) -> bool {
++    profile
++        .data
++        .get::<HandoffPresentationAnchor>()
++        .is_none_or(|anchor| anchor.1.load(std::sync::atomic::Ordering::Acquire))
++}
+ 
+ pub(super) fn handoff_presentation_anchor(profile: &AgentProfile) -> ResponseItem {
+     profile
+@@ -137,6 +150,9 @@ pub(super) fn profile_after_history_replacement(
+     {
+         return Arc::clone(captured);
+     }
++    if let Some(anchor) = captured.profile.data.get::<HandoffPresentationAnchor>() {
++        anchor.1.store(false, std::sync::atomic::Ordering::Release);
++    }
+     let mut profile = captured.profile.as_ref().clone();
+     profile.data.remove::<AgentProfileHandoffPresentation>();
+     profile.data.remove::<HandoffPresentationAnchor>();
+@@ -162,13 +178,24 @@ fn persisted_profile(items: &[RolloutItem]) -> CodexResult<Option<RestoredProfil
+             if matches!(
+                 checkpoint.sdk_originals.as_ref(),
+                 Some(codex_history::sdk_originals::SdkOriginalHistoryCheckpoint::Replace(_))
+-            ) && let Some(replacement) = checkpoint.replacement_history.as_ref()
++            ) || (matches!(
++                checkpoint.sdk_originals.as_ref(),
++                Some(
++                    codex_history::sdk_originals::SdkOriginalHistoryCheckpoint::Preserve {
++                        preserve: true
++                    }
++                )
++            ) && checkpoint.window_number.is_some()
++                && checkpoint.window_id.is_some())
++            {
++                if let Some(replacement) = checkpoint.replacement_history.as_ref()
+                 && let Some(profile) = latest.as_mut()
+                 && let Some(anchor) = profile.presentation_anchor
+                 && !retains_publication(replacement, anchor)
+             {
+                 profile.record.presentation = None;
+                 profile.presentation_anchor = None;
++                }
+             }
+             continue;
+         }
+@@ -245,6 +272,59 @@ fn persisted_profile(items: &[RolloutItem]) -> CodexResult<Option<RestoredProfil
+ }
+ 
+ impl Session {
++    pub(crate) async fn project_handoff_compaction_input(
++        &self,
++        input: Vec<ResponseItem>,
++    ) -> CodexResult<(Vec<ResponseItem>, bool)> {
++        let Some(captured) = self.captured_agent_profile().await? else {
++            return Ok((input, false));
++        };
++        let Some(presentation) = captured
++            .profile
++            .data
++            .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>()
++            .filter(|_| handoff_presentation_is_live(&captured.profile))
++        else {
++            return Ok((input, false));
++        };
++        self.validate_handoff_input_retention(true)?;
++        let original = crate::client_common::Prompt {
++            input,
++            ..Default::default()
++        };
++        let projected = crate::prepared_request::apply_handoff_presentation(
++            &original,
++            &presentation,
++            &presentation.destination,
++            &handoff_presentation_anchor(&captured.profile),
++            &captured.profile.application_instructions.item,
++        )
++        .map_err(invalid)?;
++        let changed = !original
++            .input
++            .iter()
++            .filter(|item| {
++                !matches!(item,
++            ResponseItem::Message { role, .. } if role != "user" && role != "assistant")
++            })
++            .eq(projected.input.iter().filter(|item| {
++                !matches!(item,
++                ResponseItem::Message { role, .. } if role != "user" && role != "assistant")
++            }));
++        Ok((projected.input, changed))
++    }
++
++    pub(crate) async fn validate_native_compaction_view(&self) -> CodexResult<()> {
++        let input = self.clone_history().await.raw_items().cloned().collect();
++        let (_, filtered) = self.project_handoff_compaction_input(input).await?;
++        if filtered {
++            return Err(invalid(
++                "Native compaction cannot combine with a filtered handoff presentation",
++            ));
++        }
++        Ok(())
++    }
++
+     pub(crate) fn validate_handoff_input_retention(&self, enabled: bool) -> CodexResult<()> {
+         if enabled
+             && self
+@@ -614,7 +694,9 @@ impl Session {
+                     let mut restored_target = (*target).clone();
+                     restored_target.data.insert(presentation);
+                     if let Some(anchor) = presentation_anchor {
+-                        restored_target.data.insert(HandoffPresentationAnchor(anchor.clone()));
++                        restored_target
++                            .data
++                            .insert(HandoffPresentationAnchor::new(anchor.clone()));
+                     }
+                     Arc::new(restored_target)
+                 } else {
+@@ -702,8 +784,13 @@ impl Session {
+             if let Some(anchor) = inherited {
+                 Arc::make_mut(&mut target)
+                     .data
+-                    .insert(HandoffPresentationAnchor(anchor.clone()));
+-            } else if !expected_transfer {
++                    .insert(HandoffPresentationAnchor::new(anchor.clone()));
++            } else if expected_transfer {
++                let anchor = target.application_instructions.item.clone();
++                Arc::make_mut(&mut target)
++                    .data
++                    .insert(HandoffPresentationAnchor::new(anchor));
++            } else {
+                 return Err(invalid("Handoff presentation differs from committed destination"));
+             }
+         }
+@@ -967,7 +1054,12 @@ impl Session {
+         let mut input = values(&items[..frontier.root_count])?;
+         let mut previous = values(&items[frontier.root_count..frontier.sample_count])?;
+         if let Some(source) = source {
+-            if let Some(presentation) = source.profile.data.get::<AgentProfileHandoffPresentation>() {
++            if let Some(presentation) = source
++                .profile
++                .data
++                .get::<AgentProfileHandoffPresentation>()
++                .filter(|_| handoff_presentation_is_live(&source.profile))
++            {
+                 let publication = handoff_presentation_anchor(&source.profile);
+                 let publication = &publication;
+                 let anchors: Vec<_> = items.iter().enumerate().filter_map(|(index,item)|
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 3cbf65b6d259c2022b02347daeeb6b0d500ab07d..a2f9eda294aab6694fa194a52668e4a27f8ad909 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -4926,6 +4926,19 @@ impl Session {
+         // Retirement can take the active slot after admission. It joins finalization
+         // before settling the task, and steering remains free during the writer wait.
+         drop(active_turn);
++        let compaction_profile = state
++            .session_configuration
++            .agent_profile
++            .as_ref()
++            .filter(|captured| {
++                captured
++                    .profile
++                    .data
++                    .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>()
++                    .is_some()
++                    && agent_profile::handoff_presentation_is_live(&captured.profile)
++            })
++            .cloned();
+         let (compacted_item, window_ids) = {
+             let mut state = state;
+             let (window_number, window_ids) = metadata.window.unwrap_or_else(|| {
+@@ -5013,6 +5026,15 @@ impl Session {
+         let persisted = self.persist_rollout_items(&rollout_items).await;
+         // Once admitted, the task owns this checkpoint through the writer's
+         // durability barrier. Abort waits on the same gate before retiring it.
++        // Only an admitted live view adds the idle durability barrier.
++        if registered_turn.is_none()
++            && compaction_profile.is_some()
++            && (!persisted || self.flush_rollout().await.is_err())
++        {
++            return Err(CodexErr::Fatal(
++                "Canonical compaction commit outcome is uncertain".into(),
++            ));
++        }
+         if let (Some(turn), Some(source)) = (registered_turn, source_step_context) {
+             let flushed = self
+                 .flush_rollout()
+@@ -5053,6 +5075,25 @@ impl Session {
+                     });
+             }
+         }
++        if let Some(expected) = compaction_profile {
++            let replacement = rollout_items
++                .iter()
++                .find_map(|record| match record {
++                    RolloutItem::Compacted(checkpoint) => checkpoint.replacement_history.as_deref(),
++                    _ => None,
++                })
++                .expect("Native compaction has a replacement");
++            let mut state = self.state.lock().await;
++            if let Some(current) = state.session_configuration.agent_profile.as_ref()
++                && current.receipt == expected.receipt
++                && agent_profile::handoff_presentation_anchor(&current.profile)
++                    == agent_profile::handoff_presentation_anchor(&expected.profile)
++            {
++                state.session_configuration.agent_profile = Some(
++                    agent_profile::profile_after_history_replacement(current, replacement),
++                );
++            }
++        }
+         if persisted && let Some(revision) = mcp_revision {
+             self.services
+                 .executed_tool_calls
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index e2208daddb992a80d54ee173452c84bdb5aa2ae5..4d3578b96ecaf13f5f740ed7f81cdaa085fcf476 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2522,6 +2522,9 @@ async fn run_sampling_request(
+                         .profile
+                         .data
+                         .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>()
++                        .filter(|_| {
++                            super::agent_profile::handoff_presentation_is_live(&profile.profile)
++                        })
+                         .map(|presentation| (profile, presentation))
+                 })
+                 .map(|(profile, presentation)| {
+@@ -2534,6 +2537,7 @@ async fn run_sampling_request(
+                         &presentation,
+                         &presentation.destination,
+                         &super::agent_profile::handoff_presentation_anchor(&profile.profile),
++                        &profile.profile.application_instructions.item,
+                     )
+                 })
+                 .transpose()

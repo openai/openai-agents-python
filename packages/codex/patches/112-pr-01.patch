@@ -1,0 +1,315 @@
+diff --git a/codex-rs/core-api/src/lib.rs b/codex-rs/core-api/src/lib.rs
+index aac630ae6dbc90b15bd2e94f628de55716a5962f..ffcfaf6a1c14256ff952aaaa4453aada3b2d827f 100644
+--- a/codex-rs/core-api/src/lib.rs
++++ b/codex-rs/core-api/src/lib.rs
+@@ -32,6 +32,7 @@ pub use codex_core::AgentTreeShutdown;
+ pub use codex_core::CodexAppsToolsCache;
+ pub use codex_core::CodexThread;
+ pub use codex_core::CodexThreadSettingsOverrides;
++pub use codex_core::ConfirmRemoteProcessTermination;
+ pub use codex_core::EnvironmentConfig;
+ pub use codex_core::EnvironmentMcpPolicy;
+ pub use codex_core::EnvironmentNetworkPolicy;
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index f672aa828192269218bd23eb4887872e627d56bc..8a87b92bf8485139720cdfb84c00980268803ac5 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -249,6 +249,11 @@ pub struct BackgroundTerminalInfo {
+     pub cwd: PathUri,
+ }
+ 
++/// Require confirmed remote command cleanup for this SDK-owned thread.
++#[doc(hidden)]
++#[derive(Default)]
++pub struct ConfirmRemoteProcessTermination;
++
+ /// The SDK-local command cleanup could not prove that the named turn stopped.
+ #[derive(Clone, Debug)]
+ pub struct ManagedLocalExecCancelFailure(pub(crate) String);
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 49b93df7e4cbbec2beda9906ff365d96cbbbb41d..d1825e8dd253cf9a054d0af7c4fc3220f34daf1a 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -57,6 +57,7 @@ pub use codex_protocol::mcp_policy::EnvironmentMcpPolicy;
+ pub use codex_protocol::protocol::EnvironmentConfig;
+ pub use codex_thread::BackgroundTerminalInfo;
+ pub use codex_thread::CodexThread;
++pub use codex_thread::ConfirmRemoteProcessTermination;
+ pub use codex_thread::ManagedLocalExecCancelFailure;
+ mod owned_question;
+ pub use codex_thread::CodexThreadSettingsOverrides;
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index c522dcd4fc78c5ca555383a54a7cd00bf54b05dc..6a8eaa41f732af90adedada48e96d9bd36675542 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -1566,16 +1566,21 @@ impl Session {
+             .extension_data
+             .get::<Arc<crate::session::model_invocation_deadline::ModelInvocationDeadline>>();
+         let join_local_commands = reason == TurnAbortReason::Interrupted
+-            && self
++            && (self
+                 .services
+-                .turn_environments
+-                .environment_manager()
+-                .try_local_environment()
+-                .is_some_and(|environment| {
+-                    environment
+-                        .local_runtime_paths()
+-                        .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
+-                });
++                .thread_extension_data
++                .get::<crate::ConfirmRemoteProcessTermination>()
++                .is_some()
++                || self
++                    .services
++                    .turn_environments
++                    .environment_manager()
++                    .try_local_environment()
++                    .is_some_and(|environment| {
++                        environment
++                            .local_runtime_paths()
++                            .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
++                    }));
+         // Tools roots own source-specific batch futures and physical callback
+         // release receipts. Their cancellation must drain beyond the ordinary
+         // 100ms grace rather than dropping the owner and certifying a false join.
+diff --git a/codex-rs/core/src/tools/builtin_result_policy.rs b/codex-rs/core/src/tools/builtin_result_policy.rs
+index 66316e2ace94ae4a2c81add6f94b91adde4b16dc..f98f0a8124293785c44e5537faae5ac9bd56feec 100644
+--- a/codex-rs/core/src/tools/builtin_result_policy.rs
++++ b/codex-rs/core/src/tools/builtin_result_policy.rs
+@@ -144,14 +144,20 @@ pub(crate) fn tracks_local_exec(invocation: &ToolInvocation) -> bool {
+     invocation
+         .session
+         .services
+-        .turn_environments
+-        .environment_manager()
+-        .try_local_environment()
+-        .is_some_and(|environment| {
+-            environment
+-                .local_runtime_paths()
+-                .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
+-        })
++        .thread_extension_data
++        .get::<crate::ConfirmRemoteProcessTermination>()
++        .is_some()
++        || invocation
++            .session
++            .services
++            .turn_environments
++            .environment_manager()
++            .try_local_environment()
++            .is_some_and(|environment| {
++                environment
++                    .local_runtime_paths()
++                    .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
++            })
+ }
+ 
+ pub(crate) async fn pending_local_exec(
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 87f3be68781a5f576f9ef3265f5e72a544577ac7..98670a216721da36344ccceba38c1ef8fa59166c 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -1800,10 +1800,16 @@ impl UnifiedExecProcessManager {
+                 }
+             };
+             if environment.is_remote()
+-                && environment
+-                    .local_runtime_paths()
+-                    .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
+                 && let Some(context) = tool_ctx
++                && (context
++                    .session
++                    .services
++                    .thread_extension_data
++                    .get::<crate::ConfirmRemoteProcessTermination>()
++                    .is_some()
++                    || environment
++                        .local_runtime_paths()
++                        .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt))
+             {
+                 let started = {
+                     let turn = &context.step_context.turn.extension_data;
+diff --git a/codex-rs/exec-server/src/client_refresh.rs b/codex-rs/exec-server/src/client_refresh.rs
+index bb1ef6e06882cb6aa9cf07a1cac5605b0c60bfe7..bc276a2f36cad36b674cad271ac0759ec82617dc 100644
+--- a/codex-rs/exec-server/src/client_refresh.rs
++++ b/codex-rs/exec-server/src/client_refresh.rs
+@@ -32,7 +32,7 @@ use super::ExecServerClient;
+ use super::ExecServerError;
+ use super::Inner;
+ use super::LazyRemoteExecServerClient;
+-use super::fail_all_in_flight_work;
++use super::fail_all_sessions;
+ use crate::EnvironmentConnectionState;
+ use crate::NoiseChannelPublicKey;
+ use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT;
+@@ -257,33 +257,56 @@ impl LazyRemoteExecServerClient {
+ }
+ 
+ impl LazyRemoteExecServerClient {
++    fn fence_current_connection(&self) -> Option<ExecServerClient> {
++        let reconnect = self
++            .reconnect
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        let current = self
++            .current_client
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        // Use the same lock order as attempt admission and installation.
++        self.retired.cancel();
++        self.startup.cancelled.cancel();
++        if let Some(attempt) = reconnect.as_ref() {
++            attempt.cancelled.cancel();
++        }
++        current.clone()
++    }
++
+     pub(crate) async fn retire_current_connection(&self) {
+-        let client = {
+-            let reconnect = self
+-                .reconnect
+-                .lock()
+-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+-            let current = self
+-                .current_client
+-                .lock()
+-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+-            // Use the same lock order as attempt admission and installation.
+-            self.retired.cancel();
+-            self.startup.cancelled.cancel();
+-            if let Some(attempt) = reconnect.as_ref() {
+-                attempt.cancelled.cancel();
+-            }
+-            current.clone()
+-        };
+-        if let Some(client) = client {
++        if let Some(client) = self.fence_current_connection() {
+             client.inner.retire().await;
+         }
+     }
++
++    pub(crate) fn retire_on_scope_drop(&self) {
++        if let Some(client) = self.fence_current_connection() {
++            client.inner.begin_retirement();
++            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
++                runtime.spawn(async move {
++                    client
++                        .inner
++                        .fail_all_http_body_streams(RETIRED_MESSAGE.to_owned())
++                        .await;
++                });
++            }
++        }
++    }
+ }
+ 
++const RETIRED_MESSAGE: &str = "exec-server executor was replaced";
++
+ impl Inner {
+     async fn retire(self: &Arc<Self>) {
+-        let message = "exec-server executor was replaced".to_string();
++        self.begin_retirement();
++        self.fail_all_http_body_streams(RETIRED_MESSAGE.to_owned())
++            .await;
++    }
++
++    fn begin_retirement(self: &Arc<Self>) {
++        let message = RETIRED_MESSAGE.to_owned();
+         let rpc_client = {
+             let mut connection = self
+                 .connection
+@@ -305,9 +328,9 @@ impl Inner {
+         self.connection_changed.send_replace(());
+         // Drain pending RPCs before stream cleanup, which may wait for other work.
+         if let Some(rpc_client) = rpc_client {
+-            rpc_client.close_transport().await;
++            rpc_client.close_transport_now();
+         }
+-        fail_all_in_flight_work(self, message).await;
++        fail_all_sessions(self, message);
+     }
+ }
+ 
+diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
+index 11fc05711ee6952b08a3f61a2ea7bd206b10bf35..49b14e36617b82272cb22461ece8ef5d0e52b416 100644
+--- a/codex-rs/exec-server/src/environment.rs
++++ b/codex-rs/exec-server/src/environment.rs
+@@ -127,6 +127,9 @@ impl Drop for ScopedEnvironment {
+                 scoped.remove(&self.id);
+             }
+         }
++        if let Some(client) = &self.environment.remote_client {
++            client.retire_on_scope_drop();
++        }
+     }
+ }
+ 
+@@ -467,6 +470,35 @@ impl EnvironmentManager {
+             .and_then(Weak::upgrade)
+     }
+ 
++    /// Retires this runtime's remote connections after all managed work stops.
++    ///
++    /// Call only from the owner of this manager. Explicit scopes own their
++    /// registrations even when their connection refers to a borrowed sandbox.
++    #[doc(hidden)]
++    pub async fn retire_owned_executor_connections(&self) {
++        let environments = {
++            let configured = self
++                .environments
++                .read()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            let scoped = self
++                .scoped_environments
++                .read()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            configured
++                .values()
++                .cloned()
++                .chain(scoped.values().filter_map(Weak::upgrade))
++                .collect::<Vec<_>>()
++        };
++        futures::future::join_all(
++            environments
++                .iter()
++                .map(|environment| environment.retire_current_connection()),
++        )
++        .await;
++    }
++
+     /// Registers a host-owned local executor without selecting it by default.
+     pub fn register_scoped_local_environment(
+         self: &Arc<Self>,
+@@ -2132,8 +2164,16 @@ mod tests {
+                 .upsert_environment(id.to_owned(), url.clone(), None)
+                 .is_err()
+         );
++        let scope = Arc::new(scope);
++        let retained_owner = Arc::clone(&scope);
+         drop(scope);
++        assert!(manager.get_environment(id).is_some());
++        drop(retained_owner);
+         assert!(manager.get_environment(id).is_none());
++        assert!(matches!(
++            retained.wait_until_ready().await,
++            Err(crate::ExecServerError::Disconnected(_))
++        ));
+         let next = attach().expect("scope can register again after retirement");
+         let current = manager.get_environment(id).expect("fresh scoped executor");
+         assert!(!Arc::ptr_eq(&retained, &current));
+diff --git a/codex-rs/exec-server/src/rpc.rs b/codex-rs/exec-server/src/rpc.rs
+index b1ed87a76cfc617ed2bf7030cf0d02e16eb964a1..5769228febe68a84f97b7f97a6a23ca5ac268e1e 100644
+--- a/codex-rs/exec-server/src/rpc.rs
++++ b/codex-rs/exec-server/src/rpc.rs
+@@ -521,6 +521,10 @@ impl RpcClient {
+     }
+ 
+     pub(crate) async fn close_transport(&self) {
++        self.close_transport_now();
++    }
++
++    pub(crate) fn close_transport_now(&self) {
+         self.closed.store(true, Ordering::Release);
+         self.transport.terminate();
+         for task in &self.transport_tasks {

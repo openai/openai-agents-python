@@ -1,0 +1,1008 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 24f2964ffe566faa7a9de34636e11a528123c6c1..b013cf69524230e466a0782dcb5d102b05a077b3 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1763,6 +1763,7 @@ impl ModelClientSession {
+                 &model_info.slug,
+                 codex_extension_api::ModelRequestKind::Generation,
+                 &mut request.client_metadata,
++                prompt.tool_admission.clone(),
+             );
+             let inference_trace_attempt = inference_trace.start_attempt();
+             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
+@@ -1779,6 +1780,7 @@ impl ModelClientSession {
+                 client_setup.api_auth,
+             )
+             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
++            crate::model_request::admit_request(&interceptors).map_err(CodexErr::InvalidRequest)?;
+             let stream_result = client.stream_request(request, options).await;
+ 
+             match stream_result {
+@@ -2054,6 +2056,7 @@ impl ModelClientSession {
+                     codex_extension_api::ModelRequestKind::Generation
+                 },
+                 &mut ws_payload.client_metadata,
++                prompt.tool_admission.clone(),
+             );
+             let mut ws_request = ResponsesWsRequest::ResponseCreate(ws_payload);
+             stamp_ws_stream_request_start_ms(&mut ws_request);
+@@ -2089,6 +2092,7 @@ impl ModelClientSession {
+                     ),
+                 ],
+             );
++            crate::model_request::admit_request(&interceptors).map_err(CodexErr::InvalidRequest)?;
+             let stream_result = websocket_connection
+                 .stream_request(
+                     ws_request,
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index 7a870f415150220f672610c802eb8fdd127c8db3..e7162e45b6434dea9cba490c0bcb50b7271cd53d 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -27,6 +27,9 @@ pub struct Prompt {
+     /// Tool definitions to inject into this request, empty when supplied by history.
+     pub(crate) tools: Arc<[ToolSpec]>,
+ 
++    /// Retained executable plan and owner; never serialized to the provider.
++    pub(crate) tool_admission: Option<Arc<dyn codex_extension_api::ModelToolAdmission>>,
++
+     /// Whether parallel tool calls are permitted for this prompt.
+     pub(crate) parallel_tool_calls: bool,
+ 
+@@ -46,6 +49,7 @@ impl Default for Prompt {
+         Self {
+             input: Vec::new(),
+             tools: Arc::default(),
++            tool_admission: None,
+             parallel_tool_calls: false,
+             base_instructions: BaseInstructions::default(),
+             output_schema: None,
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index ee4b3d900cdcec8f3637e8d03f86b216d63d4e55..0d81a7ddd209f2ba02c06de762c3077dc9444d4a 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -71,15 +71,19 @@ pub(super) async fn run_remote_compact_v2_attempt(
+     let trace_input_history = compaction_trace
+         .is_enabled()
+         .then(|| history.raw_items().cloned().collect());
++    let tool_router = &step_context.tool_router;
++    let selected = crate::tools::spec_plan::has_selected_tool_plan(&step_context.extension_data);
+     let (mut input, prompt_input_metadata): (Vec<_>, Vec<_>) = history
+         .for_prompt_annotated(&turn_context.model_info().input_modalities)
+         .into_iter()
+-        .map(|envelope| (envelope.item, envelope.metadata))
++        .filter_map(|mut envelope| {
++            (!selected || tool_router.project_tool_catalog_item(&mut envelope.item))
++                .then_some((envelope.item, envelope.metadata))
++        })
+         .unzip();
+     sess.services
+         .executed_tool_calls
+         .attach_to_compaction_prompt(&mut input);
+-    let tool_router = &step_context.tool_router;
+     input.push(ResponseItem::CompactionTrigger {});
+     let prompt = Prompt {
+         input,
+@@ -88,6 +92,11 @@ pub(super) async fn run_remote_compact_v2_attempt(
+         } else {
+             tool_router.model_visible_specs()
+         },
++        tool_admission: Some(crate::model_request::tool_admission(
++            sess.thread_id.to_string(),
++            Arc::clone(&turn_context.extension_data),
++            Arc::clone(tool_router),
++        )),
+         parallel_tool_calls: true,
+         base_instructions,
+         output_schema: None,
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index 8b13422bc7281c02a4d8c49d042657949c17d0ad..c59b85ab821f9c1178ff4e88abadbc9c44e97af9 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -1,9 +1,13 @@
+ //! Compose request-scoped response interceptors before tracing and response bookkeeping.
++use crate::tools::router::ToolRouter;
++use codex_extension_api::ExtensionData;
+ use codex_extension_api::ModelRequestContributor;
+ use codex_extension_api::ModelRequestInput;
+ use codex_extension_api::ModelRequestKind;
+ use codex_extension_api::ModelResponseInterceptor;
+ use codex_extension_api::ModelResponseStream;
++use codex_extension_api::ModelToolAdmission;
++use codex_protocol::models::ResponseItem;
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ 
+@@ -13,6 +17,7 @@ pub(crate) fn prepare(
+     model: &str,
+     kind: ModelRequestKind,
+     metadata: &mut Option<HashMap<String, String>>,
++    tool_admission: Option<Arc<dyn ModelToolAdmission>>,
+ ) -> Vec<Box<dyn ModelResponseInterceptor>> {
+     contributors
+         .iter()
+@@ -31,11 +36,72 @@ pub(crate) fn prepare(
+                     }
+                 }
+             }
+-            interceptor
++            interceptor.map(|inner| {
++                Box::new(BoundInterceptor {
++                    inner,
++                    admission: tool_admission.clone(),
++                }) as Box<dyn ModelResponseInterceptor>
++            })
+         })
+         .collect()
+ }
+ 
++struct BoundInterceptor {
++    inner: Box<dyn ModelResponseInterceptor>,
++    admission: Option<Arc<dyn ModelToolAdmission>>,
++}
++impl ModelResponseInterceptor for BoundInterceptor {
++    fn admit_request(&self) -> Result<(), String> {
++        self.inner.admit_request()
++    }
++    fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
++        self.inner
++            .intercept_with_tool_admission(stream, self.admission)
++    }
++}
++
++struct StepToolAdmission {
++    thread_id: String,
++    turn_store: Arc<ExtensionData>,
++    router: Arc<ToolRouter>,
++}
++impl std::fmt::Debug for StepToolAdmission {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("StepToolAdmission")
++    }
++}
++impl ModelToolAdmission for StepToolAdmission {
++    fn thread_id(&self) -> &str {
++        &self.thread_id
++    }
++    fn turn_store(&self) -> &ExtensionData {
++        &self.turn_store
++    }
++    fn admits(&self, item: &ResponseItem) -> bool {
++        self.router.admits_response_item(item)
++    }
++}
++pub(crate) fn tool_admission(
++    thread_id: String,
++    turn_store: Arc<ExtensionData>,
++    router: Arc<ToolRouter>,
++) -> Arc<dyn ModelToolAdmission> {
++    Arc::new(StepToolAdmission {
++        thread_id,
++        turn_store,
++        router,
++    })
++}
++
++pub(crate) fn admit_request(
++    interceptors: &[Box<dyn ModelResponseInterceptor>],
++) -> Result<(), String> {
++    for interceptor in interceptors {
++        interceptor.admit_request()?;
++    }
++    Ok(())
++}
++
+ pub(crate) fn intercept_stream(
+     mut stream: ModelResponseStream,
+     interceptors: Vec<Box<dyn ModelResponseInterceptor>>,
+diff --git a/codex-rs/core/src/model_request_tests.rs b/codex-rs/core/src/model_request_tests.rs
+index 84ab5014d18ebc0232b3cdbb52730a38761420e8..3a0354128911d78c0f6db2ea43dbaf16c2dd4859 100644
+--- a/codex-rs/core/src/model_request_tests.rs
++++ b/codex-rs/core/src/model_request_tests.rs
+@@ -40,7 +40,13 @@ async fn interceptors_forward_before_completion_in_order_and_cancel_upstream() {
+                 })
+             }),
+         ),
+-        vec![Box::new(Append("a")), Box::new(Append("b"))],
++        vec![
++            Box::new(BoundInterceptor {
++                inner: Box::new(Append("a")),
++                admission: None,
++            }),
++            Box::new(Append("b")),
++        ],
+     );
+     tx_event
+         .send(Ok(ResponseEvent::OutputTextDelta("text".into())))
+@@ -90,7 +96,8 @@ fn contributor_metadata_preserves_core_fields_and_existing_values() {
+             "thread",
+             "model",
+             ModelRequestKind::Generation,
+-            &mut metadata
++            &mut metadata,
++            None
+         )
+         .is_empty()
+     );
+@@ -103,3 +110,188 @@ fn contributor_metadata_preserves_core_fields_and_existing_values() {
+         ]))
+     );
+ }
++
++struct AdmissionRuntime {
++    name: &'static str,
++    custom: bool,
++}
++impl codex_tools::ToolExecutor<crate::tools::context::ToolInvocation> for AdmissionRuntime {
++    fn tool_name(&self) -> codex_tools::ToolName {
++        codex_tools::ToolName::plain(self.name)
++    }
++    fn spec(&self) -> codex_tools::ToolSpec {
++        panic!("admission must not inspect advertised specifications")
++    }
++    fn handle<'a>(
++        &'a self,
++        _: crate::tools::context::ToolInvocation,
++    ) -> codex_tools::ToolExecutorFuture<'a>
++    where
++        crate::tools::context::ToolInvocation: 'a,
++    {
++        panic!("admission must not dispatch")
++    }
++}
++impl crate::tools::registry::CoreToolRuntime for AdmissionRuntime {
++    fn matches_kind(&self, payload: &codex_tools::ToolPayload) -> bool {
++        matches!(
++            (self.custom, payload),
++            (false, codex_tools::ToolPayload::Function { .. })
++                | (true, codex_tools::ToolPayload::Custom { .. })
++        )
++    }
++}
++fn admission_router(
++    name: &'static str,
++    custom: bool,
++    exposure: codex_tools::ToolExposure,
++) -> Arc<ToolRouter> {
++    let mut registry = crate::tools::registry::ToolRegistry::default();
++    registry.add_with_exposure(AdmissionRuntime { name, custom }, exposure);
++    Arc::new(ToolRouter::from_parts(
++        registry,
++        vec![],
++        codex_protocol::openai_models::ToolMode::Direct,
++        Default::default(),
++        None,
++        &[],
++    ))
++}
++#[test]
++fn retained_admission_uses_runtime_kind_and_independent_hidden_or_deferred_plans() {
++    let first_store = Arc::new(ExtensionData::new("same-textual-turn-id"));
++    let second_store = Arc::new(ExtensionData::new("same-textual-turn-id"));
++    let first = tool_admission(
++        "root".into(),
++        first_store.clone(),
++        admission_router("exec_command", false, codex_tools::ToolExposure::Hidden),
++    );
++    let second = tool_admission(
++        "child".into(),
++        second_store.clone(),
++        admission_router("apply_patch", true, codex_tools::ToolExposure::Deferred),
++    );
++    let function: ResponseItem = serde_json::from_value(serde_json::json!({
++        "type":"function_call", "call_id":"same-call", "name":"exec_command",
++        "namespace":"functions", "arguments":"{}"
++    }))
++    .unwrap();
++    let custom: ResponseItem = serde_json::from_value(serde_json::json!({
++        "type":"custom_tool_call", "call_id":"same-call", "name":"apply_patch", "input":"patch"
++    }))
++    .unwrap();
++    let wrong_kind: ResponseItem = serde_json::from_value(serde_json::json!({
++        "type":"function_call", "call_id":"same-call", "name":"apply_patch", "arguments":"{}"
++    }))
++    .unwrap();
++    assert!(first.admits(&function));
++    assert!(!first.admits(&custom));
++    assert!(second.admits(&custom));
++    assert!(!second.admits(&function));
++    assert!(!second.admits(&wrong_kind));
++    let malformed_search: ResponseItem = serde_json::from_value(serde_json::json!({
++        "type":"tool_search_call", "call_id":"same-call", "execution":"client", "arguments":null
++    }))
++    .unwrap();
++    assert!(!first.admits(&malformed_search));
++    assert!(std::ptr::eq(first.turn_store(), first_store.as_ref()));
++    assert!(std::ptr::eq(second.turn_store(), second_store.as_ref()));
++    assert_ne!(first.thread_id(), second.thread_id());
++    // A later independent plan cannot replace the first retained runtime.
++    assert!(first.admits(&function));
++}
++
++struct AdmissionProbe(Arc<dyn ModelToolAdmission>);
++impl ModelResponseInterceptor for AdmissionProbe {
++    fn intercept(self: Box<Self>, _: ModelResponseStream) -> ModelResponseStream {
++        panic!("bound request must supply its retained admission")
++    }
++    fn intercept_with_tool_admission(
++        self: Box<Self>,
++        stream: ModelResponseStream,
++        admission: Option<Arc<dyn ModelToolAdmission>>,
++    ) -> ModelResponseStream {
++        assert!(Arc::ptr_eq(&self.0, &admission.unwrap()));
++        stream
++    }
++}
++#[derive(Debug)]
++struct AdmissionContributor(Arc<dyn ModelToolAdmission>);
++impl ModelRequestContributor for AdmissionContributor {
++    fn request(&self, _: ModelRequestInput<'_>) -> Option<Box<dyn ModelResponseInterceptor>> {
++        Some(Box::new(AdmissionProbe(self.0.clone())))
++    }
++}
++#[tokio::test]
++async fn prepared_interceptors_keep_the_original_admission_across_overlapping_requests() {
++    let router = admission_router("exec_command", false, codex_tools::ToolExposure::Hidden);
++    let first = tool_admission(
++        "root".into(),
++        Arc::new(ExtensionData::new("same-turn")),
++        router.clone(),
++    );
++    let second = tool_admission(
++        "child".into(),
++        Arc::new(ExtensionData::new("same-turn")),
++        router,
++    );
++    let make = |admission: Arc<dyn ModelToolAdmission>| {
++        let contributors: Vec<Arc<dyn ModelRequestContributor>> =
++            vec![Arc::new(AdmissionContributor(admission.clone()))];
++        prepare(
++            &contributors,
++            admission.thread_id(),
++            "model",
++            ModelRequestKind::Generation,
++            &mut None,
++            Some(admission.clone()),
++        )
++    };
++    let first_interceptors = make(first);
++    let second_interceptors = make(second);
++    for interceptors in [second_interceptors, first_interceptors] {
++        let mut stream = intercept_stream(
++            Box::pin(futures::stream::iter([Ok(ResponseEvent::OutputTextDelta(
++                "kept".into(),
++            ))])),
++            interceptors,
++        );
++        assert!(
++            matches!(stream.next().await, Some(Ok(ResponseEvent::OutputTextDelta(text))) if text == "kept")
++        );
++    }
++}
++
++#[test]
++fn request_admission_rechecks_the_captured_interceptor_before_transport() {
++    use std::sync::atomic::{AtomicBool, Ordering};
++    struct Captured(Arc<AtomicBool>);
++    impl ModelResponseInterceptor for Captured {
++        fn admit_request(&self) -> Result<(), String> {
++            if self.0.load(Ordering::Acquire) {
++                Err("original request revoked".into())
++            } else {
++                Ok(())
++            }
++        }
++        fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
++            stream
++        }
++    }
++    let stopped = Arc::new(AtomicBool::new(false));
++    let original: Vec<Box<dyn ModelResponseInterceptor>> = vec![Box::new(BoundInterceptor {
++        inner: Box::new(Captured(stopped.clone())),
++        admission: None,
++    })];
++    let successor: Vec<Box<dyn ModelResponseInterceptor>> = vec![Box::new(BoundInterceptor {
++        inner: Box::new(Captured(Arc::new(AtomicBool::new(false)))),
++        admission: None,
++    })];
++    assert!(admit_request(&original).is_ok());
++    stopped.store(true, Ordering::Release);
++    assert_eq!(
++        admit_request(&original).unwrap_err(),
++        "original request revoked"
++    );
++    assert!(admit_request(&successor).is_ok());
++}
+diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
+index 9bc54aec5318d1c0879289f54a1dffcc6699a9a7..53e295061c291d02677873d8eb581a891b950f02 100644
+--- a/codex-rs/core/src/session/step_context.rs
++++ b/codex-rs/core/src/session/step_context.rs
+@@ -51,6 +51,9 @@ pub(crate) struct StepContext {
+ impl StepContext {
+     pub(crate) fn uses_incremental_tools(&self) -> bool {
+         self.settings.model_info.use_responses_lite
++            // Append-only schema deltas cannot retract a selected step's tools.
++            // The existing full-catalog route replaces the provider roster.
++            && !crate::tools::spec_plan::has_selected_tool_plan(&self.extension_data)
+             && self
+                 .turn
+                 .config
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 8e13dbf102466ef98ce6e04bcd450f1760860c16..ce39ef5e422fcced96ac7650109eb982df16ba2e 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -12941,7 +12941,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+         cancellation_token: CancellationToken::new(),
+     };
+ 
+-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
++    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, None)
+         .await
+         .expect("tool call should be handled");
+ 
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 27ca3657e72bde67b0e09ef0f429a66a577fee0b..c4f1b3d851cdb1dfd57aa07e6b7bff73f21095da 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1575,6 +1575,10 @@ pub(crate) fn build_prompt(
+     base_instructions: BaseInstructions,
+ ) -> Prompt {
+     let turn_context = &step_context.turn;
++    let mut input = input;
++    if crate::tools::spec_plan::has_selected_tool_plan(&step_context.extension_data) {
++        input.retain_mut(|item| step_context.tool_router.project_tool_catalog_item(item));
++    }
+     Prompt {
+         input,
+         tools: if step_context.uses_incremental_tools() {
+@@ -1583,6 +1587,7 @@ pub(crate) fn build_prompt(
+             step_context.tool_router.model_visible_specs()
+         },
+         parallel_tool_calls: true,
++        tool_admission: None,
+         base_instructions,
+         output_schema: turn_context.final_output_json_schema.clone(),
+         output_schema_strict: !crate::guardian::is_basic_session_source(
+@@ -1656,6 +1661,11 @@ async fn run_sampling_request(
+             step_context.as_ref(),
+             base_instructions.clone(),
+         );
++        prompt.tool_admission = Some(crate::model_request::tool_admission(
++            sess.thread_id.to_string(),
++            Arc::clone(&step_context.turn.extension_data),
++            Arc::clone(&step_context.tool_router),
++        ));
+         let responses_metadata = sess
+             .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Turn)
+             .await;
+@@ -1853,16 +1863,19 @@ pub(crate) async fn built_tools(
+             .instrument(trace_span!("built_tools.load_discoverable_tools"))
+             .await
+         };
+-    Ok(Arc::new(build_tool_router(
+-        sess,
+-        turn_context,
+-        model_info,
+-        environments,
+-        mcp,
+-        apps_enabled,
+-        step_store,
+-        tool_suggest_candidates.as_ref(),
+-    )?))
++    Ok(Arc::new(
++        build_tool_router(
++            sess,
++            turn_context,
++            model_info,
++            environments,
++            mcp,
++            apps_enabled,
++            step_store,
++            tool_suggest_candidates.as_ref(),
++        )
++        .await?,
++    ))
+ }
+ 
+ #[derive(Debug)]
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+index aec39664b303cc937958d10381b695faf3fcb5b8..00de4eac1526dae38473b0479a2e124bc14adf24 100644
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -317,7 +317,7 @@ async fn handle_output_item_done_returns_contributed_last_agent_message() {
+     let mut ctx = output_context(Arc::new(session), Arc::new(turn_context));
+     let item = assistant_output_text("original assistant text");
+ 
+-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
++    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, None)
+         .await
+         .expect("assistant message should complete");
+ 
+@@ -350,7 +350,7 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+             "arguments": arguments.to_string(),
+         }))
+         .expect("direct input");
+-        let result = handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None)
++        let result = handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, None)
+             .await
+             .expect("direct call should be handled");
+         assert!(result.needs_follow_up);
+@@ -409,7 +409,7 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+         }))
+         .expect("direct input");
+         pending.push(
+-            handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None)
++            handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, None)
+                 .await
+                 .expect("direct call should be handled")
+                 .tool_future
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+index fbf0e773be5b2d00031db23ce3b97aa170448d48..531a97b52a62b6018c0784bfcb970829c6742396 100644
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -206,6 +206,36 @@ impl ToolRouter {
+             })
+     }
+ 
++    /// Projects only schema-addition metadata for a complete selected catalog.
++    /// Call IDs, arguments, results and stored history remain unchanged.
++    pub(crate) fn project_tool_catalog_item(&self, item: &mut ResponseItem) -> bool {
++        match item {
++            ResponseItem::AdditionalTools { .. } => false,
++            ResponseItem::ToolSearchOutput { tools, .. } => {
++                tools.retain_mut(|spec| {
++                    let Some(name) = spec["name"].as_str().map(str::to_owned) else {
++                        return false;
++                    };
++                    if spec["type"] == "namespace" {
++                        let Some(members) = spec["tools"].as_array_mut() else {
++                            return false;
++                        };
++                        members.retain(|member| {
++                            member["name"].as_str().is_some_and(|leaf| {
++                                self.exposes_tool(&ToolName::namespaced(&name, leaf))
++                            })
++                        });
++                        !members.is_empty()
++                    } else {
++                        self.exposes_tool(&ToolName::plain(name))
++                    }
++                });
++                true
++            }
++            _ => true,
++        }
++    }
++
+     pub(crate) fn deferred_tool_namespaces(&self) -> BTreeMap<String, String> {
+         self.registry.deferred_tool_namespaces()
+     }
+@@ -246,6 +276,23 @@ impl ToolRouter {
+ 
+     #[instrument(level = "trace", skip_all, err)]
+     pub fn build_tool_call(item: ResponseItem) -> Result<Option<ToolCall>, FunctionCallError> {
++        Self::parse_tool_call(item)
++    }
++
++    /// Check the retained dispatch plan without hooks, accounting, or parse-error logging.
++    pub(crate) fn admits_response_item(&self, item: &ResponseItem) -> bool {
++        Self::parse_tool_call(item.clone())
++            .ok()
++            .flatten()
++            .and_then(|call| {
++                self.registry
++                    .tool(&call.tool_name)
++                    .map(|runtime| (runtime, call))
++            })
++            .is_some_and(|(runtime, call)| runtime.matches_kind(&call.payload))
++    }
++
++    fn parse_tool_call(item: ResponseItem) -> Result<Option<ToolCall>, FunctionCallError> {
+         match item {
+             ResponseItem::FunctionCall {
+                 name,
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index e5ab1500eebd33dd64b361d2ec6dddd6780302fb..95c339c24ccc299aae7440a97992d3dbce768746 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -120,7 +120,7 @@ struct CoreToolPlanContext<'a> {
+ 
+ #[instrument(level = "trace", skip_all)]
+ #[allow(clippy::too_many_arguments)]
+-pub(crate) fn build_tool_router(
++pub(crate) async fn build_tool_router(
+     session: &Session,
+     turn_context: &TurnContext,
+     model_info: &ModelInfo,
+@@ -172,21 +172,102 @@ pub(crate) fn build_tool_router(
+         &mut registry,
+     );
+     append_dynamic_tool_runtimes(&turn_context.dynamic_tools, &mut registry);
+-    let hosted_specs = hosted_model_tool_specs(
++    let mut hosted_specs = hosted_model_tool_specs(
+         turn_context,
+         model_info,
+         standalone_web_search_tool.as_slice(),
+     );
+ 
+-    finalize_tool_router(
++    // Keep one immutable selected plan with the issuing step, including helper
++    // identities. Every downstream catalog is derived from the retained registry.
++    let selection = if let Some(selected) = step_store.get::<SelectedStepTools>() {
++        selected
++    } else {
++        let mut candidates = registry
++            .entries()
++            .map(|entry| entry.runtime.tool_name())
++            .chain(hosted_specs.iter().map(|spec| ToolName::plain(spec.name())))
++            .collect::<Vec<_>>();
++        if matches!(
++            effective_tool_mode(turn_context, model_info),
++            ToolMode::CodeMode | ToolMode::CodeModeOnly
++        ) {
++            candidates.extend([
++                ToolName::plain(codex_code_mode::PUBLIC_TOOL_NAME),
++                ToolName::plain(codex_code_mode::WAIT_TOOL_NAME),
++            ]);
++        }
++        if model_info.supports_search_tool
++            && registry.entries().any(|tool| tool.exposure.is_deferred())
++        {
++            candidates.push(ToolName::plain(TOOL_SEARCH_TOOL_NAME));
++        }
++        let mut selected = None;
++        for contributor in session.services.extensions.tool_contributors().iter() {
++            if let Some(names) = contributor
++                .select_tools_for_step(
++                    &session.services.session_extension_data,
++                    &session.services.thread_extension_data,
++                    &turn_context.extension_data,
++                    step_store,
++                    &candidates,
++                )
++                .await
++                .map_err(CodexErrorDetails::InvalidRequest)?
++            {
++                let names = names
++                    .into_iter()
++                    .map(ToolName::with_default_namespace)
++                    .collect::<HashSet<_>>();
++                if names.iter().any(|name| {
++                    !candidates
++                        .iter()
++                        .any(|candidate| candidate.clone().with_default_namespace() == *name)
++                }) {
++                    return Err(CodexErrorDetails::InvalidRequest(
++                        "Step selection exceeds admitted tools".into(),
++                    )
++                    .into());
++                }
++                candidates.retain(|name| names.contains(&name.clone().with_default_namespace()));
++                selected = Some(names);
++            }
++        }
++        step_store.insert(SelectedStepTools(selected));
++        step_store
++            .get::<SelectedStepTools>()
++            .expect("selected step plan")
++    };
++    if let Some(selected) = &selection.0 {
++        let removed = registry
++            .entries()
++            .map(|entry| entry.runtime.tool_name())
++            .filter(|name| !selected.contains(&name.clone().with_default_namespace()))
++            .collect::<Vec<_>>();
++        for name in removed {
++            registry.remove(&name);
++        }
++        hosted_specs.retain(|spec| {
++            selected.contains(&ToolName::plain(spec.name()).with_default_namespace())
++        });
++    }
++    finalize_selected_tool_router(
+         turn_context,
+         model_info,
+         registry,
+         hosted_specs,
+         &session.services.tool_search_handler_cache,
++        selection.0.as_ref(),
+     )
+ }
+ 
++struct SelectedStepTools(Option<HashSet<ToolName>>);
++
++pub(crate) fn has_selected_tool_plan(step: &ExtensionData) -> bool {
++    step.get::<SelectedStepTools>()
++        .is_some_and(|selected| selected.0.is_some())
++}
++
+ /// Use the effective mode because the model can override the thread's configured mode.
+ fn code_mode_only_strict_3p_tools(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
+     effective_tool_mode(turn_context, model_info) == ToolMode::CodeModeOnly
+@@ -367,13 +448,35 @@ pub(crate) fn extension_tool_executors<'a>(
+ }
+ 
+ #[instrument(level = "trace", skip_all)]
++#[cfg(test)]
+ pub(crate) fn finalize_tool_router(
++    turn_context: &TurnContext,
++    model_info: &ModelInfo,
++    registry: ToolRegistry,
++    hosted_specs: Vec<ToolSpec>,
++    tool_search_handler_cache: &ToolSearchHandlerCache,
++) -> CodexResult<ToolRouter> {
++    finalize_selected_tool_router(
++        turn_context,
++        model_info,
++        registry,
++        hosted_specs,
++        tool_search_handler_cache,
++        None,
++    )
++}
++
++fn finalize_selected_tool_router(
+     turn_context: &TurnContext,
+     model_info: &ModelInfo,
+     mut registry: ToolRegistry,
+     mut hosted_specs: Vec<ToolSpec>,
+     tool_search_handler_cache: &ToolSearchHandlerCache,
++    selected: Option<&HashSet<ToolName>>,
+ ) -> CodexResult<ToolRouter> {
++    let allows = |name: &ToolName| {
++        selected.is_none_or(|names| names.contains(&name.clone().with_default_namespace()))
++    };
+     hosted_specs.retain(|spec| registry.tool_policy.allows(&ToolName::plain(spec.name())));
+     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
+     enforce_strict_3p_tools(turn_context, model_info, &mut registry);
+@@ -390,7 +493,8 @@ pub(crate) fn finalize_tool_router(
+         }
+     }
+     let tool_search_name = ToolName::plain(TOOL_SEARCH_TOOL_NAME);
+-    if model_info.supports_search_tool
++    if allows(&tool_search_name)
++        && model_info.supports_search_tool
+         && registry.entries().any(|tool| {
+             tool.runtime.tool_name() != tool_search_name
+                 && tool.exposure.is_deferred()
+@@ -434,6 +538,15 @@ pub(crate) fn finalize_tool_router(
+     .map_err(|error| CodexErrorDetails::InvalidRequest(error.to_string()))?;
+     let code_mode_tool_names =
+         register_code_mode_executors(turn_context, model_info, &mut registry, &indirect_prefixes);
++    for name in [
++        codex_code_mode::PUBLIC_TOOL_NAME,
++        codex_code_mode::WAIT_TOOL_NAME,
++    ] {
++        let name = ToolName::plain(name);
++        if !allows(&name) {
++            registry.remove(&name);
++        }
++    }
+     let include_tool_namespaces_info = turn_context
+         .config
+         .tool_registry
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+index 952d1a7866dc689ef35ef8ef3d4c3e367408ff54..df3ae9d77ae163f97d45f40b7972ff0fc791ba4f 100644
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -601,6 +601,7 @@ async fn reviewer_tool_policy_exclude_optional_core_tools() {
+         &turn.extension_data,
+         /*tool_suggest_candidates*/ None,
+     )
++    .await
+     .expect("build internal Guardian tool router");
+ 
+     assert_eq!(
+@@ -653,6 +654,7 @@ async fn reviewer_tool_policy_respect_managed_shell_restrictions() {
+             &turn.extension_data,
+             /*tool_suggest_candidates*/ None,
+         )
++        .await
+         .expect("build internal Guardian tool router");
+ 
+         assert_eq!(
+@@ -689,6 +691,7 @@ async fn reviewer_tool_policy_preserve_code_mode() {
+         &turn.extension_data,
+         /*tool_suggest_candidates*/ None,
+     )
++    .await
+     .expect("build internal Guardian tool router");
+ 
+     assert!(
+@@ -759,6 +762,7 @@ async fn reviewer_tool_policy_require_managed_secondary_environments() {
+             &turn.extension_data,
+             /*tool_suggest_candidates*/ None,
+         )
++        .await
+         .expect("build internal Guardian tool router");
+ 
+         assert_eq!(
+@@ -3205,3 +3209,93 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
+ 
+ #[path = "spec_plan_strict_third_party_tests.rs"]
+ mod strict_third_party;
++
++struct StepSelector {
++    calls: std::sync::atomic::AtomicUsize,
++    names: Vec<ToolName>,
++}
++
++impl codex_extension_api::ToolContributor for StepSelector {
++    fn tools(
++        &self,
++        _: &codex_extension_api::ExtensionData,
++        _: &codex_extension_api::ExtensionData,
++    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>> {
++        Vec::new()
++    }
++
++    fn select_tools_for_step<'a>(
++        &'a self,
++        _: &'a codex_extension_api::ExtensionData,
++        _: &'a codex_extension_api::ExtensionData,
++        _: &'a codex_extension_api::ExtensionData,
++        _: &'a codex_extension_api::ExtensionData,
++        _: &'a [ToolName],
++    ) -> codex_extension_api::ExtensionFuture<'a, Result<Option<Vec<ToolName>>, String>> {
++        Box::pin(async move {
++            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++            Ok(Some(self.names.clone()))
++        })
++    }
++}
++
++#[tokio::test]
++async fn selected_empty_plan_removes_builtin_runtimes_and_generated_helpers() {
++    let (mut session, mut turn) = make_session_and_context().await;
++    Arc::make_mut(&mut turn.config).update_plan_enabled = true;
++    set_feature(&mut turn, Feature::CodeMode, true);
++    let selector = Arc::new(StepSelector {
++        calls: Default::default(),
++        names: Vec::new(),
++    });
++    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::default();
++    extensions.tool_contributor(selector.clone());
++    session.services.extensions = Arc::new(extensions.build());
++    let turn = Arc::new(turn);
++    let step = StepContext::for_test(turn);
++    for _ in 0..2 {
++        let router = super::build_tool_router(
++            &session,
++            step.turn.as_ref(),
++            &step.settings.model_info,
++            &step.environments,
++            &step.mcp,
++            false,
++            &step.extension_data,
++            None,
++        )
++        .await
++        .expect("empty selected plan");
++        assert!(router.model_visible_specs().is_empty());
++        for name in ["update_plan", "exec", "wait", "tool_search"] {
++            assert!(!router.exposes_tool(&ToolName::plain(name)), "{name}");
++        }
++    }
++    assert_eq!(selector.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
++}
++
++#[tokio::test]
++async fn selected_plan_cannot_admit_an_unknown_runtime() {
++    let (mut session, turn) = make_session_and_context().await;
++    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::default();
++    extensions.tool_contributor(Arc::new(StepSelector {
++        calls: Default::default(),
++        names: vec![ToolName::plain("outside_opening")],
++    }));
++    session.services.extensions = Arc::new(extensions.build());
++    let step = StepContext::for_test(Arc::new(turn));
++    assert!(
++        super::build_tool_router(
++            &session,
++            step.turn.as_ref(),
++            &step.settings.model_info,
++            &step.environments,
++            &step.mcp,
++            false,
++            &step.extension_data,
++            None,
++        )
++        .await
++        .is_err()
++    );
++}
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index ccec0ab9905d865ce90e6f8662c7fd61b00b3e2f..518590bfb981dc8e8cdf3455a486a7a085d3d891 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -7,6 +7,7 @@ use codex_protocol::items::TurnItem;
+ use codex_protocol::protocol::TokenUsageInfo;
+ use codex_tools::ToolCall;
+ use codex_tools::ToolExecutor;
++use codex_tools::ToolName;
+ 
+ use crate::ExtensionData;
+ use crate::ExtensionMetrics;
+@@ -351,6 +352,19 @@ pub trait ToolContributor: Send + Sync {
+         thread_store: &ExtensionData,
+     ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>>;
+ 
++    /// Narrows the complete candidate catalog before a sampling step is finalized.
++    /// An error prevents sampling. None preserves the admitted catalog.
++    fn select_tools_for_step<'a>(
++        &'a self,
++        _session_store: &'a ExtensionData,
++        _thread_store: &'a ExtensionData,
++        _turn_store: &'a ExtensionData,
++        _step_store: &'a ExtensionData,
++        _candidates: &'a [ToolName],
++    ) -> ExtensionFuture<'a, Result<Option<Vec<ToolName>>, String>> {
++        Box::pin(async { Ok(None) })
++    }
++
+     /// Returns native tools bound to one sampling step.
+     fn tools_for_step(
+         &self,
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index b9404fcff17be53c18637a950e1e94a66cb853d5..4e48e52d715d0f455977a35f1296b79161018ebf 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -122,4 +122,5 @@ pub use model_request::ModelRequestKind;
+ pub use model_request::ModelResponseError;
+ pub use model_request::ModelResponseInterceptor;
+ pub use model_request::ModelResponseStream;
++pub use model_request::ModelToolAdmission;
+ pub use model_request::ResponseEvent;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 67803d28d34c72db2d131daa6497cd87f1f708c6..692de0b4f44326b0d3835da4a8b72e51fced5638 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -1,8 +1,11 @@
+ //! Request-scoped interception of model response streams.
++use crate::ExtensionData;
+ pub use codex_api::ApiError as ModelResponseError;
+ pub use codex_api::ResponseEvent;
++use codex_protocol::models::ResponseItem;
+ use futures::stream::BoxStream;
+ use std::collections::HashMap;
++use std::sync::Arc;
+ 
+ /// Model response events owned by an interceptor or its downstream consumer.
+ pub type ModelResponseStream = BoxStream<'static, Result<ResponseEvent, ModelResponseError>>;
+@@ -34,10 +37,37 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+     fn request(&self, input: ModelRequestInput<'_>) -> Option<Box<dyn ModelResponseInterceptor>>;
+ }
+ 
++/// Immutable routing and owner evidence captured for one issuing model request.
++/// Admission only parses and checks the retained runtime; it must not execute tools or hooks.
++pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
++    /// Thread that owns the captured routing plan.
++    fn thread_id(&self) -> &str;
++    /// Original turn store, allowing hosts to compare their retained owner by object identity.
++    fn turn_store(&self) -> &ExtensionData;
++    /// Whether the exact selected runtime accepts this model item's payload kind.
++    fn admits(&self, item: &ResponseItem) -> bool;
++}
++
+ /// Owns request state until consumed by the response stream or dropped on failure.
+ /// Interceptors compose in registration order; dropping their stream must release unfinished work.
+ /// Trusted host implementations must bound any model-visible content they synthesize.
+ pub trait ModelResponseInterceptor: Send + Sync {
++    /// Admit this captured request immediately before provider transport starts.
++    /// Hosts may revoke its original owner without affecting a later request.
++    fn admit_request(&self) -> Result<(), String> {
++        Ok(())
++    }
++
++    /// Bind immutable routing evidence before wrapping this request's stream.
++    /// Existing interceptors keep their behavior; configured policies can reject missing evidence.
++    fn intercept_with_tool_admission(
++        self: Box<Self>,
++        stream: ModelResponseStream,
++        _admission: Option<Arc<dyn ModelToolAdmission>>,
++    ) -> ModelResponseStream {
++        self.intercept(stream)
++    }
++
+     /// Wrap the response stream, optionally buffering, inspecting, or transforming events.
+     /// The returned stream must own request state and propagate cancellation by dropping upstream.
+     fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream;

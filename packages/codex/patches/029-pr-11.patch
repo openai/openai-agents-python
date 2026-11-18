@@ -1,0 +1,1151 @@
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index 77068bab535240e2821f0fc03c96d05857dd75a2..a8232d2a3e5b3192547bbe006ccd7c70fd0c04b0 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -283,6 +283,12 @@ impl Serialize for ResponsesApiTools {
+ /// Effective wire values. Cleared and omitted SDK settings emit no member here.
+ #[derive(Debug, Default, Serialize, Clone, PartialEq)]
+ pub struct ResponsesRequestControls {
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub truncation: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub context_management: Option<Vec<serde_json::Value>>,
++    #[serde(flatten)]
++    pub extra_body: std::collections::BTreeMap<String, serde_json::Value>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub max_output_tokens: Option<u64>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 5188fd100baacaf82d395bec206d581bf3d8333c..d56651838d6e84361ffcd1498ead05d918372a1c 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -43,6 +43,8 @@ pub use crate::common::ReasoningContext;
+ pub use crate::common::ReasoningSummaryDelivery;
+ pub use crate::common::ResponseCreateWsRequest;
+ pub use crate::common::ResponseEvent;
++pub use crate::received_response_facts::ApplicationModelStream;
++pub use crate::received_response_facts::completed_model_response;
+ pub use crate::common::ResponseId;
+ pub use crate::common::ResponseStream;
+ pub use crate::common::ResponsesApiRequest;
+diff --git a/codex-rs/codex-api/src/received_response_facts.rs b/codex-rs/codex-api/src/received_response_facts.rs
+index 12dd69e8f44fd200d572169821c830f7a1cb3a79..98deade7ef7b47b97917731b5fe9f458b1989a6e 100644
+--- a/codex-rs/codex-api/src/received_response_facts.rs
++++ b/codex-rs/codex-api/src/received_response_facts.rs
+@@ -1,4 +1,9 @@
+ //! Select only typed provider refusal/probability members, never arbitrary bodies.
++use crate::{ApiError, ResponseEvent};
++use codex_protocol::models::ResponseItem;
++use codex_protocol::protocol::ResponsesEventTransport;
++use codex_protocol::protocol::SdkRawProviderEvent;
++use codex_protocol::protocol::SdkRawProviderSource;
+ use codex_protocol::response_facts::{ProbabilityToken, ResponseFact};
+ use serde_json::Value;
+ 
+@@ -131,3 +136,396 @@ pub(crate) fn contains_refusal(item: &Value) -> bool {
+                 })
+             })
+ }
++
++const MAX_APPLICATION_STREAM_BYTES: usize = 8 * 1024 * 1024;
++
++/// Projects a native application model stream without admitting unfinished tool calls.
++#[derive(Default)]
++pub struct ApplicationModelStream {
++    observe_raw_provider_events: bool,
++    deferred: Vec<ResponseEvent>,
++    deferred_bytes: usize,
++    completion: Option<ResponseEvent>,
++    failure: Option<ApiError>,
++}
++
++impl ApplicationModelStream {
++    pub fn new(observe_raw_provider_events: bool) -> Self {
++        Self {
++            observe_raw_provider_events,
++            ..Self::default()
++        }
++    }
++
++    /// Returns ready events and whether the application should advance its iterator.
++    pub fn push(&mut self, json: &str) -> (Vec<ResponseEvent>, bool) {
++        let mut ready = Vec::new();
++        let mut raw = None;
++        if self.failure.is_none() {
++            self.failure = self.project(json, &mut ready, &mut raw).err();
++        }
++        // Raw observations follow producer order even while tool effects are deferred.
++        if let Some(raw) = raw {
++            ready.insert(0, ResponseEvent::RawProvider(raw));
++        }
++        (ready, self.failure.is_none())
++    }
++
++    fn project(
++        &mut self,
++        json: &str,
++        ready: &mut Vec<ResponseEvent>,
++        raw: &mut Option<SdkRawProviderEvent>,
++    ) -> Result<(), ApiError> {
++        if self.completion.is_some() {
++            return Err(invalid_application_stream(
++                "Native model stream yielded after completion",
++            ));
++        }
++        if json.len() > MAX_APPLICATION_STREAM_BYTES {
++            return Err(invalid_application_stream(
++                "Native model stream event exceeds the byte limit",
++            ));
++        }
++        let event: crate::sse::ResponsesStreamEvent = serde_json::from_str(json)
++            .map_err(|_| invalid_application_stream("Malformed native model response event"))?;
++        if self.observe_raw_provider_events {
++            *raw = Some(SdkRawProviderEvent {
++                source: SdkRawProviderSource::Responses,
++                transport: ResponsesEventTransport::Json,
++                payload: event.raw.clone(),
++            });
++        }
++        if event.kind == "error" {
++            return Err(invalid_application_stream(
++                "Native model stream reported a provider error",
++            ));
++        }
++        let interrupted = event.kind == "response.incomplete";
++        if let Some(observation) = event.response_observation() {
++            ready.push(ResponseEvent::ResponseObserved(observation));
++        }
++        ready.extend(
++            event_facts(&event.raw)
++                .into_iter()
++                .map(|fact| ResponseEvent::ResponseFact(fact.into())),
++        );
++        let event =
++            crate::sse::process_responses_event(event).map_err(|error| error.into_api_error())?;
++        if let Some(ResponseEvent::Completed { response_id, .. }) = &event {
++            if response_id.trim().is_empty() {
++                return Err(invalid_application_stream(
++                    "Native model stream completed without a response ID",
++                ));
++            }
++            if interrupted {
++                self.deferred.clear();
++            }
++            self.completion = event;
++            return Ok(());
++        }
++        // Finalized non-message items can trigger native tool execution. Keep them
++        // and the rest of the stream in provider order until the iterator ends.
++        let can_call_tool = matches!(
++            &event,
++            Some(ResponseEvent::OutputItemDone(item))
++                if !matches!(item, ResponseItem::Message { .. } | ResponseItem::Reasoning { .. })
++        );
++        if self.deferred.is_empty() && !can_call_tool {
++            ready.extend(event);
++            return Ok(());
++        }
++        let count = ready.len() + usize::from(event.is_some());
++        if count == 0 {
++            return Ok(());
++        }
++        self.deferred_bytes = self
++            .deferred_bytes
++            .saturating_add(json.len())
++            .saturating_add(count.saturating_mul(std::mem::size_of::<ResponseEvent>()));
++        if self.deferred_bytes > MAX_APPLICATION_STREAM_BYTES {
++            ready.clear();
++            return Err(invalid_application_stream(
++                "Native model stream deferred output exceeds its limit",
++            ));
++        }
++        self.deferred.append(ready);
++        self.deferred.extend(event);
++        Ok(())
++    }
++
++    /// Returns the usage from the accepted terminal frame before producer settlement.
++    pub fn completed_usage(&self) -> Option<&codex_protocol::protocol::TokenUsage> {
++        match self.completion.as_ref() {
++            Some(ResponseEvent::Completed { token_usage, .. }) => token_usage.as_ref(),
++            _ => None,
++        }
++    }
++
++    /// Takes the deferred output and terminal event after the iterator has ended.
++    pub fn finish(mut self, producer_error: Option<&str>) -> Result<Vec<ResponseEvent>, ApiError> {
++        if let Some(error) = self.failure.take() {
++            return Err(error);
++        }
++        if let Some(message) = producer_error {
++            return Err(invalid_application_stream(message));
++        }
++        let completion = self.completion.take().ok_or_else(|| {
++            invalid_application_stream("Native model stream ended without a terminal response")
++        })?;
++        self.deferred.push(completion);
++        Ok(self.deferred)
++    }
++}
++
++fn invalid_application_stream(message: &str) -> ApiError {
++    ApiError::InvalidRequest {
++        message: message.into(),
++    }
++}
++
++#[cfg(test)]
++mod application_stream_retention_tests {
++    use super::*;
++    use serde_json::json;
++
++    #[test]
++    fn raw_observations_keep_provider_order_across_deferred_tool_output() {
++        let mut stream = ApplicationModelStream::new(true);
++        let frames = [
++            json!({
++                "type": "response.output_item.done",
++                "item": {"type": "function_call", "call_id": "call", "name": "lookup", "arguments": "{}"}
++            }),
++            json!({"type": "response.sdk_fixture.opaque", "extension": [false, null, 0]}),
++            json!({"type": "response.completed", "response": {"id": "resp_raw"}}),
++        ];
++        for frame in frames {
++            let (ready, advance) = stream.push(&frame.to_string());
++            assert!(advance);
++            assert!(matches!(
++                ready.first(),
++                Some(ResponseEvent::RawProvider(event)) if event.payload == frame
++            ));
++            assert!(!ready.iter().any(|event| matches!(
++                event,
++                ResponseEvent::OutputItemDone(_) | ResponseEvent::Completed { .. }
++            )));
++        }
++        let accepted = stream.finish(None).unwrap();
++        assert!(
++            accepted
++                .iter()
++                .any(|event| matches!(event, ResponseEvent::OutputItemDone(_)))
++        );
++        assert!(matches!(
++            accepted.last(),
++            Some(ResponseEvent::Completed { .. })
++        ));
++        assert!(
++            !accepted
++                .iter()
++                .any(|event| matches!(event, ResponseEvent::RawProvider(_)))
++        );
++    }
++
++    fn deferred_tool() -> ApplicationModelStream {
++        let mut stream = ApplicationModelStream::default();
++        let (ready, advance) = stream.push(
++            &json!({
++                "type":"response.output_item.done", "output_index":0,
++                "item":{"type":"function_call", "call_id":"call", "name":"lookup", "arguments":"{}"}
++            })
++            .to_string(),
++        );
++        assert!(ready.is_empty());
++        assert!(advance);
++        stream
++    }
++
++    #[test]
++    fn many_small_deferred_deltas_remain_valid() {
++        let mut stream = deferred_tool();
++        let delta = json!({"type":"response.output_text.delta", "delta":"x"}).to_string();
++        for _ in 0..5000 {
++            let (ready, advance) = stream.push(&delta);
++            assert!(ready.is_empty());
++            assert!(advance);
++        }
++        let (_, advance) = stream
++            .push(&json!({"type":"response.completed", "response":{"id":"response"}}).to_string());
++        assert!(advance);
++        let events = stream.finish(None).unwrap();
++        assert!(matches!(
++            events.first(),
++            Some(ResponseEvent::OutputItemDone(_))
++        ));
++        assert_eq!(
++            events
++                .iter()
++                .filter(|event| matches!(event, ResponseEvent::OutputTextDelta(_)))
++                .count(),
++            5000
++        );
++        assert!(matches!(
++            events.last(),
++            Some(ResponseEvent::Completed { .. })
++        ));
++    }
++
++    #[test]
++    fn retained_storage_budget_rejects_without_admitting_tool_events() {
++        let mut stream = deferred_tool();
++        let delta = json!({"type":"response.output_text.delta", "delta":"x"}).to_string();
++        let mut rejected = false;
++        for _ in 0..100_000 {
++            let (ready, advance) = stream.push(&delta);
++            assert!(ready.is_empty());
++            if !advance {
++                rejected = true;
++                break;
++            }
++        }
++        assert!(rejected);
++        assert!(matches!(
++            stream.finish(None),
++            Err(ApiError::InvalidRequest { .. })
++        ));
++    }
++}
++
++/// Convert one completed application model response through the provider fact policy.
++/// Validate the complete output before admitting any tool-bearing item.
++pub fn completed_model_response(
++    response_id: String,
++    output: Vec<Value>,
++    token_usage: Option<codex_protocol::protocol::TokenUsage>,
++) -> Vec<Result<crate::ResponseEvent, crate::ApiError>> {
++    use crate::{ApiError, ResponseEvent};
++    use codex_protocol::error::ResponseIntegrityReason;
++    let mut events = vec![Ok(ResponseEvent::Created {
++        response_id: Some(response_id.clone()),
++    })];
++    for (index, item) in output.iter().enumerate() {
++        events.extend(
++            output_item_facts(item, u64::try_from(index).ok(), true)
++                .into_iter()
++                .map(|fact| Ok(ResponseEvent::ResponseFact(fact.into()))),
++        );
++    }
++    if output.iter().any(contains_refusal) {
++        events.push(Err(ApiError::ResponseIntegrity {
++            reason: ResponseIntegrityReason::ProviderRefusal,
++        }));
++        return events;
++    }
++    let items = output
++        .into_iter()
++        .map(serde_json::from_value::<codex_protocol::models::ResponseItem>)
++        .collect::<Result<Vec<_>, _>>();
++    let items = match items {
++        Ok(items) => items,
++        Err(_) => {
++            events.push(Err(ApiError::ResponseIntegrity {
++                reason: ResponseIntegrityReason::UndecodableOutputItem,
++            }));
++            return events;
++        }
++    };
++    events.extend(
++        items
++            .into_iter()
++            .map(|item| Ok(ResponseEvent::OutputItemDone(item))),
++    );
++    events.push(Ok(ResponseEvent::Completed {
++        response_id,
++        token_usage,
++        usage_metadata: None,
++        end_turn: None,
++    }));
++    events
++}
++
++#[cfg(test)]
++mod completed_model_response_tests {
++    use super::*;
++    use crate::{ApiError, ResponseEvent};
++    use codex_protocol::error::ResponseIntegrityReason;
++    use serde_json::json;
++    fn call() -> Value {
++        json!({"type":"function_call", "call_id":"call", "name":"echo", "arguments":"{}"})
++    }
++    fn no_items_or_terminal(events: &[Result<ResponseEvent, ApiError>]) {
++        assert!(!events.iter().any(|event| matches!(
++            event,
++            Ok(ResponseEvent::OutputItemDone(_) | ResponseEvent::Completed { .. })
++        )));
++    }
++    #[test]
++    fn later_refusal_preserves_fact_before_failure_and_admits_no_tool() {
++        let events = completed_model_response(
++            "response".into(),
++            vec![
++                call(),
++                json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"private refusal"}]}),
++            ],
++            None,
++        );
++        assert!(matches!(
++            events.first(),
++            Some(Ok(ResponseEvent::Created { .. }))
++        ));
++        assert!(
++            events
++                .iter()
++                .any(|event| matches!(event, Ok(ResponseEvent::ResponseFact(_))))
++        );
++        assert!(matches!(
++            events.last(),
++            Some(Err(ApiError::ResponseIntegrity {
++                reason: ResponseIntegrityReason::ProviderRefusal
++            }))
++        ));
++        no_items_or_terminal(&events);
++    }
++    #[test]
++    fn malformed_later_item_admits_no_tool() {
++        let events = completed_model_response(
++            "response".into(),
++            vec![
++                call(),
++                json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":7}]}),
++            ],
++            None,
++        );
++        assert!(matches!(
++            events.last(),
++            Some(Err(ApiError::ResponseIntegrity {
++                reason: ResponseIntegrityReason::UndecodableOutputItem
++            }))
++        ));
++        no_items_or_terminal(&events);
++    }
++    #[test]
++    fn probabilities_precede_output_and_completion() {
++        let events = completed_model_response(
++            "response".into(),
++            vec![
++                json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"ok", "logprobs":[{"token":"ok", "bytes":[111,107], "logprob":-0.1, "top_logprobs":[]}]}]}),
++            ],
++            None,
++        );
++        assert!(matches!(
++            events.get(1),
++            Some(Ok(ResponseEvent::ResponseFact(_)))
++        ));
++        assert!(matches!(
++            events.get(2),
++            Some(Ok(ResponseEvent::OutputItemDone(_)))
++        ));
++        assert!(matches!(
++            events.last(),
++            Some(Ok(ResponseEvent::Completed { .. }))
++        ));
++    }
++}
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 0c2fee260e79ca92612d4f9bf6968d6602034180..57eef697c56f320786211d44bfab630453809e29 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1189,8 +1189,14 @@ impl ModelClient {
+                 _ => {}
+             }
+         }
++        if let Some(Some(additional)) = &controls.include {
++            for field in additional {
++                if !include.contains(field) {
++                    include.push(field.clone());
++                }
++            }
++        }
+         let verbosity = if let Some(explicit) = controls.verbosity.flatten() {
+-            // validate_profile rejects authoritative false; fallback metadata is unknown.
+             Some(explicit)
+         } else if model_info.support_verbosity {
+             self.state.model_verbosity.or(model_info.default_verbosity)
+@@ -1240,6 +1246,9 @@ impl ModelClient {
+                 prompt.tool_choice.to_string()
+             },
+             request_controls: codex_api::ResponsesRequestControls {
++                truncation: controls.truncation.clone().flatten(),
++                context_management: controls.context_management.clone().flatten(),
++                extra_body: controls.extra_body.clone().flatten().unwrap_or_default(),
+                 max_output_tokens: controls.max_output_tokens.flatten(),
+                 temperature: controls.temperature.flatten(),
+                 top_p: controls.top_p.flatten(),
+@@ -2139,7 +2148,12 @@ impl ModelClientSession {
+                     },
+                 )
+             };
+-            let stream_result = if prompt.prefer_buffered_response {
++            let produced = crate::model_request::produce_response(
++                &interceptors, &request,
++            ).await.map_err(CodexErr::Fatal)?;
++            let stream_result = if let Some(events) = produced {
++                Ok((None, None, events, None, None))
++            } else if prompt.prefer_buffered_response {
+                 client
+                     .json_request(request, options)
+                     .await
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index efc747efd44162137005b2592c8525cb78476480..fa144767f2e50b69eae9f19b35942bf62b497f4b 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -89,6 +89,15 @@ struct BoundInterceptor {
+     admission: Option<Arc<dyn ModelToolAdmission>>,
+ }
+ impl ModelResponseInterceptor for BoundInterceptor {
++    fn produces_response(&self) -> bool { self.inner.produces_response() }
++    fn produce_response<'a>(
++        &'a self,
++        request: serde_json::Value,
++        _: Option<Arc<dyn ModelToolAdmission>>,
++    ) -> Option<futures::future::BoxFuture<'a, Result<ModelResponseStream, String>>> {
++        self.inner.produce_response(request, self.admission.clone())
++    }
++
+     fn admit_request(&self) -> Result<(), String> {
+         self.inner.admit_request()
+     }
+@@ -187,3 +196,17 @@ pub(crate) fn intercept_stream(
+ #[cfg(test)]
+ #[path = "model_request_tests.rs"]
+ mod tests;
++
++/// Resolve exactly one producer after native request admission. No provider
++/// transport may run when a selected producer fails or is cancelled.
++pub(crate) async fn produce_response(
++    interceptors: &[Box<dyn ModelResponseInterceptor>],
++    request: &impl serde::Serialize,
++) -> Result<Option<ModelResponseStream>, String> {
++    let mut producers = interceptors.iter().filter(|interceptor| interceptor.produces_response());
++    let Some(selected) = producers.next() else { return Ok(None); };
++    if producers.next().is_some() { return Err("Multiple native model producers selected".into()); }
++    let request = serde_json::to_value(request).map_err(|_| "Native model request serialization failed")?;
++    let producer = selected.produce_response(request, None).ok_or("Selected native model producer is unavailable")?;
++    producer.await.map(Some)
++}
+diff --git a/codex-rs/core/src/realtime_conversation/tool_task.rs b/codex-rs/core/src/realtime_conversation/tool_task.rs
+index 1c059a6a6fd49ab314f01ca395d9c10c7fa23979..52ce6a3581f1a7c1328760dcbf94be8e7b7b5ae3 100644
+--- a/codex-rs/core/src/realtime_conversation/tool_task.rs
++++ b/codex-rs/core/src/realtime_conversation/tool_task.rs
+@@ -706,6 +706,18 @@ pub(crate) struct RealtimeToolsDispatch {
+     receiver: async_channel::Receiver<RealtimeBatchWork>,
+ }
+ impl RealtimeToolsDispatch {
++    #[cfg(test)]
++    pub(crate) fn for_settlement_test(generation: &str) -> Self {
++        let (sender, receiver) = async_channel::bounded(super::SDK_FUNCTION_CALL_LIMIT);
++        Self {
++            root_id: Default::default(),
++            settled: CancellationToken::new(),
++            generation: generation.to_owned(),
++            sender,
++            receiver,
++        }
++    }
++
+     pub(crate) fn bind_root(&self, root: &str) {
+         self.root_id.get_or_init(|| root.to_owned());
+     }
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index 4d2dc92f942136d8f349ae3578617985c7440984..7da95340ac7f7b432b9db2dd3c730345523eeb84 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -909,12 +909,30 @@ for line in sys.stdin:
+                 epoch: 0
+             }
+         );
+-        let second = profile(&context, "b", "b1");
++        let mut second = profile(&context, "b", "b1").as_ref().clone();
++        second.model.invocation_timeout_ms = Some(1234);
++        second.model.request_controls.max_output_tokens = Some(Some(17));
++        let expected_controls = second.model.request_controls.clone();
+         let receipt_b = session
+-            .activate_agent_profile(Some(receipt.clone()), second)
++            .activate_agent_profile(Some(receipt.clone()), Arc::new(second))
+             .await
+             .unwrap();
+         assert_eq!(receipt_b.epoch, 1);
++        {
++            let state = session.state.lock().await;
++            let selected = &state.session_configuration.step_settings;
++            assert_eq!(selected.invocation_timeout_ms, Some(1234));
++            assert_eq!(selected.request_controls, expected_controls);
++        }
++        let future_b = session.new_inject_items_context().await;
++        assert_eq!(
++            future_b.next_step_settings.load().invocation_timeout_ms(),
++            Some(1234)
++        );
++        assert_eq!(
++            future_b.next_step_settings.load().request_controls(),
++            &expected_controls
++        );
+         assert_eq!(
+             session.agent_profile_receipt().await.unwrap(),
+             Some(receipt_b.clone())
+@@ -947,6 +965,14 @@ for line in sys.stdin:
+                 .receipt,
+             receipt_a
+         );
++        assert_eq!(
++            future.next_step_settings.load().invocation_timeout_ms(),
++            None
++        );
++        assert_eq!(
++            future.next_step_settings.load().request_controls(),
++            &Default::default()
++        );
+         let history = session
+             .live_thread()
+             .unwrap()
+diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
+index 97c8d9538338baae28f410752045bf36b53b1b70..5f00339c2696f7b350855b1d226e5fd8c92e045e 100644
+--- a/codex-rs/core/src/session/step_settings.rs
++++ b/codex-rs/core/src/session/step_settings.rs
+@@ -64,10 +64,13 @@ impl ResolvedStepSettings {
+     /// Derives request values from selected settings and pinned metadata.
+     pub(super) fn new(
+         selected: Arc<StepSettings>,
+-        model_info: Arc<ModelInfo>,
++        mut model_info: Arc<ModelInfo>,
+         fast_mode_enabled: bool,
+         context_window_override: Option<i64>,
+     ) -> Self {
++        if let Some(Some(modalities)) = &selected.request_controls.input_modalities {
++            Arc::make_mut(&mut model_info).input_modalities = modalities.clone();
++        }
+         let reasoning_summary = selected
+             .reasoning_summary
+             .unwrap_or(model_info.default_reasoning_summary);
+@@ -178,6 +181,8 @@ impl ResolvedStepSettings {
+         let model_info = if selected.collaboration_mode.model()
+             == self.selected.collaboration_mode.model()
+             && selected.personality == self.selected.personality
++            && selected.request_controls.input_modalities
++                == self.selected.request_controls.input_modalities
+         {
+             Arc::clone(&self.model_info)
+         } else {
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 7b5b5bca9361f527a9ed43824dcdaa48c6257b20..5f39ad50591ac369a26b49b0d0dc0f7d4e12f52c 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2150,7 +2150,7 @@ async fn run_sampling_request(
+         }
+     };
+     let outcome = match &invocation_deadline {
+-        Some(owner) => owner.run(invocation).await,
++        Some(owner) => owner.run(Box::pin(invocation)).await,
+         None => invocation.await,
+     };
+     if invocation_deadline
+@@ -4016,7 +4016,7 @@ async fn try_run_sampling_request(
+     let outcome: CodexResult<SamplingRequestResult> = if has_logical_deadline {
+         sampling.await
+     } else {
+-        deadline.run(sampling).await
++        deadline.run(Box::pin(sampling)).await
+     };
+     // A final success (including preemption) or nonretryable error owns its
+     // outcome before cleanup. Only a retryable failure retains the logical clock.
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index 2f7c872bfe473445c342ab08ed8d7c8a33eabdc1..d87b3e6913c21b2848650cedeb0f17d316a2dddf 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -1234,6 +1234,8 @@ impl Session {
+         settings.service_tier = selected.service_tier.clone();
+         settings.tool_choice = selected.tool_choice.clone();
+         settings.personality = selected.personality;
++        settings.invocation_timeout_ms = selected.invocation_timeout_ms;
++        settings.request_controls = selected.request_controls.clone();
+         settings.collaboration_mode = selected.collaboration_mode.clone();
+         configuration.step_settings = Arc::new(settings);
+         configuration.agent_profile = source.agent_profile.clone();
+diff --git a/codex-rs/core/src/tools/code_mode/delegate_tests.rs b/codex-rs/core/src/tools/code_mode/delegate_tests.rs
+index 79f9d5c91073f4af5738ae0b3b6d1bf3b682ff4e..1a8e575efdf058f39458b33766f7a8375cecc76c 100644
+--- a/codex-rs/core/src/tools/code_mode/delegate_tests.rs
++++ b/codex-rs/core/src/tools/code_mode/delegate_tests.rs
+@@ -1186,11 +1186,15 @@ struct OwnedCancellationTask {
+     observed_cancel: CancellationToken,
+     return_after_cancel: CancellationToken,
+     publish_primary: bool,
++    realtime: Option<crate::realtime_conversation::RealtimeToolsDispatch>,
+ }
+ impl crate::tasks::SessionTask for OwnedCancellationTask {
+     fn kind(&self) -> crate::state::TaskKind {
+         crate::state::TaskKind::Regular
+     }
++    fn realtime_tools(&self) -> Option<crate::realtime_conversation::RealtimeToolsDispatch> {
++        self.realtime.clone()
++    }
+     fn span_name(&self) -> &'static str {
+         "test.owned_callback_failure"
+     }
+@@ -1257,6 +1261,7 @@ fn owned_task(publish_primary: bool) -> OwnedCancellationTask {
+         observed_cancel: CancellationToken::new(),
+         return_after_cancel: CancellationToken::new(),
+         publish_primary,
++        realtime: None,
+     }
+ }
+ async fn owner_gate_is_held(session: &Arc<crate::session::session::Session>) {
+@@ -1279,9 +1284,16 @@ async fn owner_gate_is_held(session: &Arc<crate::session::session::Session>) {
+ 
+ #[tokio::test]
+ async fn self_cancelled_owned_fatal_settles_without_an_external_abort_and_preserves_primary() {
+-    for prior_primary in [false, true] {
++    for (prior_primary, realtime) in [(false, false), (true, false), (false, true), (true, true)] {
+         let (session, turn, events, records) = owned_spawn_session().await;
+-        let task = owned_task(prior_primary);
++        let mut task = owned_task(prior_primary);
++        let dispatch = realtime.then(|| {
++            crate::realtime_conversation::RealtimeToolsDispatch::for_settlement_test("self-fatal")
++        });
++        if let Some(dispatch) = &dispatch {
++            dispatch.bind_root(&turn.sub_id);
++        }
++        task.realtime = dispatch.clone();
+         session
+             .spawn_task(Arc::clone(&turn), Vec::new(), task.clone())
+             .await;
+@@ -1327,6 +1339,17 @@ async fn self_cancelled_owned_fatal_settles_without_an_external_abort_and_preser
+         session.cancel_code_mode_owner(&turn).await;
+         task.return_after_cancel.cancel();
+         owner_gate_is_held(&session).await;
++        if let Some(dispatch) = &dispatch {
++            assert!(
++                tokio::time::timeout(
++                    std::time::Duration::from_millis(25),
++                    dispatch.wait_settled(),
++                )
++                .await
++                .is_err(),
++                "realtime settlement preceded owned receipt drain"
++            );
++        }
+         release_late.cancel();
+         late_done.cancelled().await;
+         backend.terminate_release.cancel();
+@@ -1372,6 +1395,11 @@ async fn self_cancelled_owned_fatal_settles_without_an_external_abort_and_preser
+         })
+         .await
+         .unwrap();
++        if let Some(dispatch) = &dispatch {
++            tokio::time::timeout(std::time::Duration::from_secs(10), dispatch.wait_settled())
++                .await
++                .expect("self-cancelled owned fatal did not settle its realtime root");
++        }
+     }
+ }
+ 
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 147e74fe2184ee6ecc29a2492e96a2abd8cb9532..f2c2e259a1f5897c2096095525664a26ff499e2e 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -147,9 +147,12 @@ pub struct AgentProfileModelSettings {
+     pub service_tier: Option<String>,
+     pub tool_choice: Option<codex_protocol::config_types::ToolChoice>,
+     pub personality: Option<codex_protocol::config_types::Personality>,
+-    #[serde(default)]
++    #[serde(
++        default,
++        skip_serializing_if = "codex_protocol::model_request_controls::ModelRequestControls::is_empty"
++    )]
+     pub request_controls: codex_protocol::model_request_controls::ModelRequestControls,
+-    #[serde(default)]
++    #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub invocation_timeout_ms: Option<u32>,
+ }
+ 
+@@ -194,3 +197,35 @@ pub struct AgentProfileBoundaryInput<'a> {
+     pub thread_store: &'a ExtensionData,
+     pub turn_store: &'a ExtensionData,
+ }
++
++#[cfg(test)]
++mod profile_model_settings_tests {
++    use super::AgentProfileModelSettings;
++
++    #[test]
++    fn old_profile_model_shape_preserves_fingerprint_and_new_values_roundtrip() {
++        let old = serde_json::json!({
++            "model": "profile-model", "reasoning_effort": null,
++            "reasoning_summary": null, "service_tier": null,
++            "tool_choice": null, "personality": null
++        });
++        let mut settings: AgentProfileModelSettings = serde_json::from_value(old.clone()).unwrap();
++        assert_eq!(serde_json::to_value(&settings).unwrap(), old);
++        settings.invocation_timeout_ms = Some(1234);
++        settings.request_controls.max_output_tokens = Some(Some(17));
++        settings.request_controls.named_tool_choice = Some(None);
++        let encoded = serde_json::to_value(&settings).unwrap();
++        assert_eq!(encoded["invocation_timeout_ms"], 1234);
++        assert_eq!(encoded["request_controls"]["max_output_tokens"], 17);
++        assert!(
++            encoded["request_controls"]
++                .as_object()
++                .unwrap()
++                .contains_key("named_tool_choice")
++        );
++        assert_eq!(
++            serde_json::from_value::<AgentProfileModelSettings>(encoded).unwrap(),
++            settings
++        );
++    }
++}
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index e634eb8f1ef25ee23f9799e4a0d130b679e15baf..f952c8a767e612f51185467ac7f349da7222c69b 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -149,6 +149,7 @@ pub use model_request::ModelResponseInterceptor;
+ pub use model_request::ModelResponseStream;
+ pub use model_request::ModelToolAdmission;
+ pub use model_request::ResponseEvent;
++pub use codex_api::completed_model_response;
+ pub use model_request::ToolsOnlyCallInput;
+ pub use model_request::ToolsOnlyWorkCancellation;
+ pub use model_request::TurnSamplingStop;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index cd6722b05433f967cab50ef7bdfb54dbcadef562..15ddc9c6cfd32893c3c6dd8ab33dcfc96265b3d6 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -188,6 +188,19 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
+ /// Interceptors compose in registration order; dropping their stream must release unfinished work.
+ /// Trusted host implementations must bound any model-visible content they synthesize.
+ pub trait ModelResponseInterceptor: Send + Sync {
++    /// Select a model producer before materializing the detached request JSON.
++    fn produces_response(&self) -> bool { false }
++    /// Optional native model producer. Core retains canonical history, tools, and
++    /// response processing. A producer must join its application work on cancellation.
++    /// Returning None retains ordinary provider transport.
++    fn produce_response<'a>(
++        &'a self,
++        _request: Value,
++        _admission: Option<Arc<dyn ModelToolAdmission>>,
++    ) -> Option<BoxFuture<'a, Result<ModelResponseStream, String>>> {
++        None
++    }
++
+     /// Admit this captured request immediately before provider transport starts.
+     /// Hosts may revoke its original owner without affecting a later request.
+     fn admit_request(&self) -> Result<(), String> {
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index 6b15fb169d9d2080e869a2b310e5cbd6e0f5d8cb..fb4bd92a3f640b60d241fd87d9122a0ce98063ff 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -1,6 +1,7 @@
+ //! Explicit native request preferences. These values never grant tool authority.
+ use crate::ToolName;
+ use crate::config_types::Verbosity;
++use crate::openai_models::InputModality;
+ use schemars::JsonSchema;
+ use serde::{Deserialize, Serialize};
+ use std::collections::BTreeMap;
+@@ -27,6 +28,48 @@ pub enum PromptCacheTtl {
+ #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ #[serde(deny_unknown_fields)]
+ pub struct ModelRequestControls {
++    /// Declared input support for the selected model; never a provider request field.
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, type = "Array<'text' | 'image' | 'audio'> | null")]
++    #[schemars(with = "Option<Vec<InputModality>>")]
++    pub input_modalities: Option<Option<Vec<InputModality>>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, type = "unknown")]
++    #[schemars(with = "Option<String>")]
++    pub truncation: Option<Option<String>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, type = "unknown")]
++    #[schemars(with = "Option<Vec<String>>")]
++    pub include: Option<Option<Vec<String>>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, type = "unknown")]
++    #[schemars(with = "Option<Vec<serde_json::Value>>")]
++    pub context_management: Option<Option<Vec<serde_json::Value>>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, type = "unknown")]
++    #[schemars(with = "Option<BTreeMap<String, serde_json::Value>>")]
++    pub extra_body: Option<Option<BTreeMap<String, serde_json::Value>>>,
++
+     #[serde(
+         default,
+         skip_serializing_if = "Option::is_none",
+@@ -51,7 +94,7 @@ pub struct ModelRequestControls {
+     #[ts(optional = nullable, as = "Option<f64>")]
+     #[schemars(with = "Option<f64>")]
+     pub top_p: Option<Option<f64>>,
+-    /// Request chosen-token probabilities and up to this many alternatives (0..=20).
++    /// Request chosen-token probabilities and this many alternatives.
+     #[serde(
+         default,
+         skip_serializing_if = "Option::is_none",
+@@ -120,7 +163,12 @@ pub struct ModelRequestControls {
+ 
+ impl ModelRequestControls {
+     pub fn is_empty(&self) -> bool {
+-        self.max_output_tokens.is_none()
++        self.input_modalities.is_none()
++            && self.truncation.is_none()
++            && self.include.is_none()
++            && self.context_management.is_none()
++            && self.extra_body.is_none()
++            && self.max_output_tokens.is_none()
+             && self.temperature.is_none()
+             && self.top_p.is_none()
+             && self.top_logprobs.is_none()
+@@ -134,6 +182,22 @@ impl ModelRequestControls {
+     }
+ 
+     pub fn apply_patch(&mut self, patch: &Self) {
++        if patch.input_modalities.is_some() {
++            self.input_modalities = patch.input_modalities.clone();
++        }
++        if patch.truncation.is_some() {
++            self.truncation = patch.truncation.clone();
++        }
++        if patch.include.is_some() {
++            self.include = patch.include.clone();
++        }
++        if patch.context_management.is_some() {
++            self.context_management = patch.context_management.clone();
++        }
++        if patch.extra_body.is_some() {
++            self.extra_body = patch.extra_body.clone();
++        }
++
+         if patch.max_output_tokens.is_some() {
+             self.max_output_tokens = patch.max_output_tokens;
+         }
+@@ -171,33 +235,70 @@ impl ModelRequestControls {
+ 
+     /// Check wire shapes independently of uncertain model-level support.
+     pub fn validate_shape(&self) -> Result<(), String> {
++        if let Some(Some(modalities)) = &self.input_modalities {
++            if modalities.is_empty()
++                || modalities
++                    .iter()
++                    .enumerate()
++                    .any(|(index, value)| modalities[..index].contains(value))
++            {
++                return Err(
++                    "input_modalities must be a nonempty list of distinct modalities".into(),
++                );
++            }
++        }
+         if self
+-            .max_output_tokens
+-            .flatten()
+-            .is_some_and(|value| value == 0 || value > 9_007_199_254_740_991)
++            .truncation
++            .as_ref()
++            .and_then(Option::as_deref)
++            .is_some_and(|value| !matches!(value, "auto" | "disabled"))
+         {
+-            return Err("max_output_tokens must be a positive safe integer".into());
++            return Err("truncation must be auto or disabled".into());
+         }
+-        if self.top_logprobs.flatten().is_some_and(|value| value > 20) {
+-            return Err("top_logprobs must be an integer between zero and 20".into());
+-        }
+-        for (name, value, upper) in [
+-            ("temperature", self.temperature.flatten(), 2.0),
+-            ("top_p", self.top_p.flatten(), 1.0),
+-        ] {
+-            if value.is_some_and(|value| !value.is_finite() || !(0.0..=upper).contains(&value)) {
+-                return Err(format!(
+-                    "{name} must be finite and between zero and {upper}"
+-                ));
++        if let Some(Some(body)) = &self.extra_body {
++            const RESERVED: &[&str] = &[
++                "input_modalities",
++                "type",
++                "generate",
++                "model",
++                "stream",
++                "input",
++                "instructions",
++                "tools",
++                "tool_choice",
++                "parallel_tool_calls",
++                "reasoning",
++                "store",
++                "stream_options",
++                "include",
++                "prompt_cache_key",
++                "text",
++                "client_metadata",
++                "access_programs",
++                "previous_response_id",
++                "conversation",
++                "service_tier",
++                "max_output_tokens",
++                "temperature",
++                "top_p",
++                "top_logprobs",
++                "metadata",
++                "prompt_cache_retention",
++                "prompt_cache_options",
++                "truncation",
++                "context_management",
++            ];
++            if body.keys().any(|key| RESERVED.contains(&key.as_str())) {
++                return Err("extra_body cannot replace native request fields; use the corresponding model setting".into());
+             }
+         }
+-        if let Some(Some(metadata)) = &self.metadata {
+-            if metadata.len() > 16
+-                || metadata
+-                    .iter()
+-                    .any(|(key, value)| key.chars().count() > 64 || value.chars().count() > 512)
+-            {
+-                return Err("metadata allows at most 16 string pairs, 64 characters per key and 512 per value".into());
++
++        for (name, value) in [
++            ("temperature", self.temperature.flatten()),
++            ("top_p", self.top_p.flatten()),
++        ] {
++            if value.is_some_and(|value| !value.is_finite()) {
++                return Err(format!("{name} must be finite"));
+             }
+         }
+         if let Some(Some(target)) = &self.named_tool_choice {
+@@ -222,18 +323,27 @@ impl ModelRequestControls {
+                 "explicit request controls require standard Responses, not Responses Lite".into(),
+             );
+         }
+-        if self.verbosity.flatten().is_some()
+-            && !model.support_verbosity
+-            && !model.used_fallback_model_metadata
+-        {
+-            return Err("the selected model metadata explicitly excludes verbosity".into());
+-        }
+         Ok(())
+     }
+ 
+     /// A known lossy formatter must reject requested wire values. A clear emits none.
+     pub fn has_wire_values(&self) -> bool {
+-        self.max_output_tokens.as_ref().is_some_and(Option::is_some)
++        self.truncation.as_ref().is_some_and(Option::is_some)
++            || self
++                .include
++                .as_ref()
++                .and_then(Option::as_ref)
++                .is_some_and(|include| !include.is_empty())
++            || self
++                .context_management
++                .as_ref()
++                .is_some_and(Option::is_some)
++            || self
++                .extra_body
++                .as_ref()
++                .and_then(Option::as_ref)
++                .is_some_and(|body| !body.is_empty())
++            || self.max_output_tokens.as_ref().is_some_and(Option::is_some)
+             || self.temperature.as_ref().is_some_and(Option::is_some)
+             || self.top_p.as_ref().is_some_and(Option::is_some)
+             || self.top_logprobs.as_ref().is_some_and(Option::is_some)
+@@ -252,3 +362,86 @@ impl ModelRequestControls {
+             || self.named_tool_choice.as_ref().is_some_and(Option::is_some)
+     }
+ }
++
++#[cfg(test)]
++mod sdk_extension_tests {
++    use super::ModelRequestControls;
++    use serde_json::json;
++
++    #[test]
++    fn extended_controls_preserve_omission_clears_and_values() {
++        let mut controls: ModelRequestControls = serde_json::from_value(json!({
++            "truncation": "auto", "include": ["message.output_text.logprobs"],
++            "context_management": [{"type": "compaction", "compact_threshold": 1024}],
++            "extra_body": {"provider_feature": {"mode": "captured"}}
++        }))
++        .unwrap();
++        controls.validate_shape().unwrap();
++        assert!(controls.has_wire_values());
++        let original = controls.clone();
++        controls.apply_patch(&ModelRequestControls::default());
++        assert_eq!(controls, original);
++        let clear: ModelRequestControls = serde_json::from_value(json!({
++            "truncation": null, "include": null, "context_management": null, "extra_body": null
++        }))
++        .unwrap();
++        controls.apply_patch(&clear);
++        assert!(!controls.has_wire_values());
++        assert!(!controls.is_empty());
++        assert_eq!(
++            serde_json::to_value(controls).unwrap(),
++            serde_json::to_value(clear).unwrap()
++        );
++    }
++
++    #[test]
++    fn empty_extra_body_is_a_patch_without_wire_values() {
++        for body in [json!({}), serde_json::Value::Null] {
++            let controls: ModelRequestControls =
++                serde_json::from_value(json!({"extra_body": body})).unwrap();
++            controls.validate_shape().unwrap();
++            assert!(!controls.is_empty());
++            assert!(!controls.has_wire_values());
++        }
++        let controls: ModelRequestControls =
++            serde_json::from_value(json!({"extra_body": {"provider_feature": null}})).unwrap();
++        assert!(controls.has_wire_values());
++    }
++
++    #[test]
++    fn body_extensions_cannot_replace_native_history_or_tools() {
++        for key in [
++            "type",
++            "generate",
++            "input",
++            "tools",
++            "instructions",
++            "model",
++            "stream",
++            "previous_response_id",
++            "include",
++        ] {
++            let controls: ModelRequestControls =
++                serde_json::from_value(json!({"extra_body": {key: "replacement"}})).unwrap();
++            assert!(controls.validate_shape().is_err(), "{key}");
++        }
++    }
++}
++
++#[cfg(test)]
++mod empty_include_wire_tests {
++    #[test]
++    fn explicit_empty_include_is_a_patch_without_wire_values() {
++        for include in [serde_json::json!([]), serde_json::Value::Null] {
++            let controls: super::ModelRequestControls =
++                serde_json::from_value(serde_json::json!({"include":include})).unwrap();
++            controls.validate_shape().unwrap();
++            assert!(!controls.is_empty());
++            assert!(!controls.has_wire_values());
++        }
++        let controls: super::ModelRequestControls =
++            serde_json::from_value(serde_json::json!({"include":["message.output_text.logprobs"]}))
++                .unwrap();
++        assert!(controls.has_wire_values());
++    }
++}

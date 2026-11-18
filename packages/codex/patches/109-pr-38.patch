@@ -1,0 +1,273 @@
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index 37b5d359e070c36ae076856812ff66bac6d539a0..8ec1040f7c233ba3e83610a60674d99b9203aa82 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -971,6 +971,7 @@ impl Session {
+         let presentation = target
+             .data
+             .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>();
++        let mut presentation = presentation;
+         let mut target = target;
+         if let Some(presentation) = &presentation {
+             let expected_transfer = task_fence.is_some()
+@@ -1027,6 +1028,38 @@ impl Session {
+         } else {
+             None
+         };
++        if let Some(replacement) = &history_replacement
++            && !replacement.reconciled_calls.is_empty()
++            && let Some(view) = presentation.as_ref()
++        {
++            let mut view = view.as_ref().clone();
++            // A complete model-only pair stays intact. Drop a lone half in the
++            // generated view only when it belongs to the reconciled current pair.
++            let lone = replacement
++                .reconciled_calls
++                .iter()
++                .filter_map(|(id, retained)| {
++                    let matching = view
++                        .input
++                        .iter()
++                        .chain(&view.previous)
++                        .chain(&view.generated)
++                        .filter(|row| {
++                            matches!(
++                                row.get("type").and_then(serde_json::Value::as_str),
++                                Some("function_call" | "function_call_output")
++                            ) && row.get("call_id").and_then(serde_json::Value::as_str)
++                                == Some(id.as_str())
++                        });
++                    (matching.take(2).count() == 1).then_some(retained)
++                })
++                .collect::<Vec<_>>();
++            if !lone.is_empty() {
++                view.generated.retain(|row| !lone.contains(&row));
++            }
++            Arc::make_mut(&mut target).data.insert(view.clone());
++            presentation = Some(Arc::new(view));
++        }
+         let mut envelope = target.application_instructions.clone();
+         if saved.items.iter().any(|item| matches!(item, RolloutItem::ResponseItem(prior) if prior.item.id() == envelope.item.id())) {
+             return Err(invalid("Agent activation requires a fresh instruction publication identity"));
+diff --git a/codex-rs/core/src/session/handoff_history.rs b/codex-rs/core/src/session/handoff_history.rs
+index 5114cd632892bf8cb293bdd502e788364e6351f5..5e3e5f8f4eed6c7f1af59994a33796ec98001e03 100644
+--- a/codex-rs/core/src/session/handoff_history.rs
++++ b/codex-rs/core/src/session/handoff_history.rs
+@@ -1,10 +1,12 @@
+-//! Canonical removal of current, occurrence-bound records at an accepted transfer.
++//! Canonical history edits at an accepted transfer.
+ use std::collections::HashMap;
+ use std::collections::HashSet;
+ 
++use codex_history::CodexHarnessMetadata;
+ use codex_history::CompactedItem;
+ use codex_history::ResponseItemEnvelope;
+ use codex_history::sdk_originals::SdkOriginalHistory;
++use codex_history::sdk_originals::SdkOriginalItem;
+ use codex_history::sdk_originals::client_tool_pair_part;
+ use codex_protocol::agent_profile::AgentProfileHandoffPresentation;
+ use codex_protocol::error::CodexErr;
+@@ -18,6 +20,7 @@ pub(super) struct Replacement {
+     pub checkpoint: CompactedItem,
+     pub originals: SdkOriginalHistory,
+     pub envelopes: Vec<ResponseItemEnvelope>,
++    pub reconciled_calls: HashMap<String, serde_json::Value>,
+ }
+ 
+ fn droppable_function_pair_part(row: &ResponseItemEnvelope) -> Option<(&str, bool)> {
+@@ -27,6 +30,15 @@ fn droppable_function_pair_part(row: &ResponseItemEnvelope) -> Option<(&str, boo
+     ) || row.metadata.as_ref().is_some_and(|metadata| {
+         metadata.sdk_agent_handoff.is_some()
+             || metadata.sdk_managed_agent_tool.is_some()
++            || metadata.sdk_application_tool.is_some()
++            // Restore may attach an empty cumulative MCP checkpoint to
++            // the next ordinary result. Keep populated or error receipts.
++            || metadata
++                .mcp_attribution
++                .as_ref()
++                .is_some_and(|receipt| *receipt != Default::default())
++            || metadata.realtime_tool_call.is_some()
++            || metadata.sdk_start_response.is_some()
+             || metadata.delivered_assistant_message.is_some()
+     }) {
+         return None;
+@@ -37,6 +49,28 @@ fn droppable_function_pair_part(row: &ResponseItemEnvelope) -> Option<(&str, boo
+     (!id.is_empty()).then_some((id, is_call))
+ }
+ 
++/// Match the full recorded payload, substituting only the Core-projected body
++/// when history admission truncated a function result for the model window.
++fn matches_recorded_function_payload(
++    raw: &str,
++    projected: &ResponseItem,
++    source: &serde_json::Value,
++) -> bool {
++    let Ok(mut recorded) = serde_json::from_str::<serde_json::Value>(raw) else {
++        return false;
++    };
++    if let ResponseItem::FunctionCallOutput { output, .. } = projected {
++        let Some(body) = recorded.get_mut("output") else {
++            return false;
++        };
++        let Ok(projected_body) = serde_json::to_value(output) else {
++            return false;
++        };
++        *body = projected_body;
++    }
++    &recorded == source
++}
++
+ impl Session {
+     /// The caller retains the profile persistence/task gates through publication.
+     pub(super) async fn prepare_handoff_history_replacement(
+@@ -60,7 +94,9 @@ impl Session {
+                 "Canonical handoff history has another source selection",
+             ));
+         }
+-        if selection.keep.len() == source.generated.len() {
++        if selection.keep.len() == source.generated.len()
++            && selection.append_assistant_text.is_empty()
++        {
+             return Ok(None);
+         }
+         let current = self.sdk_load_original_history().await?;
+@@ -113,7 +149,7 @@ impl Session {
+         {
+             return Err(invalid("Canonical handoff generated occurrences changed"));
+         }
+-        let keep = selection.keep.iter().copied().collect::<HashSet<_>>();
++        let mut keep = selection.keep.iter().copied().collect::<HashSet<_>>();
+         let mut function_parts: HashMap<&str, Vec<(usize, bool)>> = HashMap::new();
+         for (ordinal, (index, _)) in generated.iter().enumerate() {
+             if let Some((id, is_call)) = droppable_function_pair_part(&rows[*index]) {
+@@ -123,9 +159,23 @@ impl Session {
+                     .push((ordinal, is_call));
+             }
+         }
++        // The saved transcript must not retain one half of an ordinary settled pair.
++        // Only the complete pair in this native generated group can be removed.
++        let mut reconciled_calls = HashMap::new();
++        for (id, parts) in &function_parts {
++            if *id != selection.handoff.call_id
++                && let [(call, true), (output, false)] = parts.as_slice()
++                && (keep.contains(call) != keep.contains(output))
++            {
++                let retained = if keep.contains(call) { *call } else { *output };
++                keep.remove(call);
++                keep.remove(output);
++                reconciled_calls.insert((*id).to_owned(), generated[retained].1.clone());
++            }
++        }
+         let mut drop_rows = HashSet::new();
+         let mut drop_originals = HashSet::new();
+-        for (ordinal, (index, _)) in generated.iter().enumerate() {
++        for (ordinal, (index, source_value)) in generated.iter().enumerate() {
+             if keep.contains(&ordinal) {
+                 continue;
+             }
+@@ -141,15 +191,23 @@ impl Session {
+                         "Canonical handoff history can omit only an entire settled current tool pair",
+                     ));
+                 }
+-                // The native suffix is pinned by the handoff sampling frontier.
+-                // Reject ambiguous equality instead of editing an earlier use
+-                // of the same call ID or dropping an unrelated raw record.
++                // Resolve only the occurrence pinned by the native sampling frontier.
++                // Reject multiple matching records even when truncation makes their bodies equal.
+                 current
+                     .items
+                     .iter()
+                     .enumerate()
+                     .filter_map(|(index, original)| {
+-                        (original.projection.as_ref() == Some(row)).then_some(index)
++                        let projection = original.projection.as_ref()?;
++                        (droppable_function_pair_part(projection)
++                            == droppable_function_pair_part(row)
++                            && projection.item.id() == row.item.id()
++                            && matches_recorded_function_payload(
++                                &original.original,
++                                &projection.item,
++                                source_value,
++                            ))
++                        .then_some(index)
+                     })
+                     .collect::<Vec<_>>()
+             } else {
+@@ -202,7 +260,7 @@ impl Session {
+             }
+             drop_rows.insert(*index);
+         }
+-        let envelopes = rows
++        let mut envelopes = rows
+             .iter()
+             .enumerate()
+             .filter_map(|(index, row)| (!drop_rows.contains(&index)).then(|| row.clone()))
+@@ -213,6 +271,48 @@ impl Session {
+                 originals.append(original);
+             }
+         }
++        let mut original_bytes = originals
++            .items
++            .iter()
++            .map(|item| item.original.len())
++            .sum::<usize>();
++        for text in &selection.append_assistant_text {
++            if text.is_empty() || text.iter().any(String::is_empty) {
++                return Err(invalid(
++                    "Canonical handoff can add only nonempty assistant text",
++                ));
++            }
++            let mut item = ResponseItem::Message {
++                id: None,
++                role: "assistant".into(),
++                content: text
++                    .iter()
++                    .map(|text| ContentItem::OutputText {
++                        text: text.clone(),
++                        annotations: None,
++                    })
++                    .collect(),
++                phase: None,
++                internal_chat_message_metadata_passthrough: None,
++            };
++            Self::assign_missing_response_item_id(&mut item);
++            let envelope = ResponseItemEnvelope {
++                item,
++                metadata: Some(CodexHarnessMetadata {
++                    client_authored: true,
++                    ..Default::default()
++                }),
++            };
++            let original = SdkOriginalItem::from_native(envelope.clone());
++            original_bytes += original.original.len();
++            if originals.items.len() >= 4096 || original_bytes > 8 * 1024 * 1024 {
++                return Err(invalid(
++                    "Canonical handoff history exceeds 4096 records or 8 MiB",
++                ));
++            }
++            envelopes.push(envelope);
++            originals.append(original);
++        }
+         let checkpoint = CompactedItem {
+             sdk_originals: Some(originals.clone().into()),
+             message: String::new(),
+@@ -239,6 +339,7 @@ impl Session {
+             checkpoint,
+             originals,
+             envelopes,
++            reconciled_calls,
+         }))
+     }
+ }
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 87b11c2c6544643882e81969d4837a8330a31865..914046395eb676e0755326ed56d023fefbd3a64c 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -136,6 +136,7 @@ pub enum ModelRequestKind {
+ pub struct HandoffGeneratedHistorySelection {
+     pub handoff: codex_protocol::agent_profile::AgentProfileHandoff,
+     pub keep: Vec<usize>,
++    pub append_assistant_text: Vec<Vec<String>>,
+ }
+ 
+ /// Request identity and additional metadata supplied before sending to the provider.

@@ -1,0 +1,1366 @@
+diff --git a/codex-rs/codex-api/src/sse/responses_error.rs b/codex-rs/codex-api/src/sse/responses_error.rs
+index 12df487a9d91ac7f6ea63ebc8929e57b659b69dc..577af7a5ee1e5c06013028e058627c151f5ff875 100644
+--- a/codex-rs/codex-api/src/sse/responses_error.rs
++++ b/codex-rs/codex-api/src/sse/responses_error.rs
+@@ -51,7 +51,8 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
+             | "credit_balance_exhausted"
+             | "organization_spend_limit_exceeded"
+             | "project_spend_limit_exceeded"
+-            | "organization_usage_limit_exceeded",
++            | "organization_usage_limit_exceeded"
++            | "subscription_sharing_usage_limit_exceeded",
+         ) => ApiError::QuotaExceeded,
+         Some("usage_not_included") => ApiError::UsageNotIncluded,
+         Some("cyber_policy") => ApiError::CyberPolicy {
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 6aa1f046d67094df2ccaabd8f1f3a3a1b35e2b21..334a174de7ebe898af9a6fbc78ed8c3fa35c6d7e 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -151,6 +151,7 @@ use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
+ use codex_model_provider_info::ModelProviderInfo;
+ use codex_model_provider_info::WireApi;
+ use codex_protocol::error::CodexErr;
++use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::error::Result;
+ use codex_response_debug_context::extract_response_debug_context;
+ use codex_response_debug_context::extract_response_debug_context_from_api_error;
+@@ -1529,18 +1530,28 @@ impl ModelClientSession {
+                 Err(ApiError::Transport(unauthorized_transport))
+                     if provider.is_recoverable_auth_error(&unauthorized_transport) =>
+                 {
+-                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+-                        handle_unauthorized(
+-                            unauthorized_transport,
+-                            &mut auth_recovery,
+-                            &mut provider_auth_recovery_attempted,
+-                            session_telemetry,
+-                            &provider,
+-                            self.client.event_sender.as_ref(),
+-                            responses_metadata.turn_id.as_deref(),
+-                        )
+-                        .await?,
+-                    );
++                    match handle_unauthorized(
++                        unauthorized_transport,
++                        &mut auth_recovery,
++                        &mut provider_auth_recovery_attempted,
++                        session_telemetry,
++                        &provider,
++                        self.client.event_sender.as_ref(),
++                        responses_metadata.turn_id.as_deref(),
++                    )
++                    .await
++                    {
++                        Ok(recovery) => {
++                            pending_retry = PendingUnauthorizedRetry::from_recovery(recovery);
++                        }
++                        // No prompt was sent: negotiate HTTP after auth recovery is exhausted.
++                        Err(error) if matches!(error.details(), CodexErrorDetails::UnexpectedStatus(response) if response.status == StatusCode::UNAUTHORIZED) =>
++                        {
++                            self.try_switch_fallback_transport(session_telemetry, model_info);
++                            return Ok(());
++                        }
++                        Err(error) => return Err(error),
++                    }
+                 }
+                 Err(err) => return Err(provider.map_api_error(err)),
+             }
+@@ -1669,13 +1680,8 @@ impl ModelClientSession {
+         service_tier: Option<String>,
+         responses_metadata: &CodexResponsesMetadata,
+         inference_trace: &InferenceTraceContext,
++        auth_recovery: &mut RequestAuthRecovery,
+     ) -> Result<ResponseStream> {
+-        let auth_manager = self.client.state.provider.auth_manager();
+-        let mut auth_recovery = auth_manager
+-            .as_ref()
+-            .map(AuthManager::unauthorized_recovery);
+-        let mut provider_auth_recovery_attempted = false;
+-        let mut pending_retry = PendingUnauthorizedRetry::default();
+         loop {
+             let client_setup = self
+                 .client
+@@ -1699,7 +1705,7 @@ impl ModelClientSession {
+                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                 client_setup.api_auth.as_ref(),
+                 client_setup.agent_identity_telemetry.clone(),
+-                pending_retry,
++                auth_recovery.pending_retry,
+             );
+             let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
+                 session_telemetry,
+@@ -1812,11 +1818,11 @@ impl ModelClientSession {
+                         response_debug_context.request_id.as_deref(),
+                         /*output_items*/ &[],
+                     );
+-                    pending_retry = PendingUnauthorizedRetry::from_recovery(
++                    auth_recovery.pending_retry = PendingUnauthorizedRetry::from_recovery(
+                         handle_unauthorized(
+                             unauthorized_transport,
+-                            &mut auth_recovery,
+-                            &mut provider_auth_recovery_attempted,
++                            &mut auth_recovery.manager,
++                            &mut auth_recovery.provider_attempted,
+                             session_telemetry,
+                             &self.client.state.provider,
+                             self.client.event_sender.as_ref(),
+@@ -1868,16 +1874,10 @@ impl ModelClientSession {
+         warmup: bool,
+         request_trace: Option<W3cTraceContext>,
+         inference_trace: &InferenceTraceContext,
++        auth_recovery: &mut RequestAuthRecovery,
+     ) -> Result<WebsocketStreamOutcome> {
+         let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
+         let provider = Arc::clone(&self.client.state.provider);
+-        let auth_manager = provider.auth_manager();
+-
+-        let mut auth_recovery = auth_manager
+-            .as_ref()
+-            .map(AuthManager::unauthorized_recovery);
+-        let mut provider_auth_recovery_attempted = false;
+-        let mut pending_retry = PendingUnauthorizedRetry::default();
+         loop {
+             let client_setup = self
+                 .client
+@@ -1896,7 +1896,7 @@ impl ModelClientSession {
+                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                 client_setup.api_auth.as_ref(),
+                 client_setup.agent_identity_telemetry.clone(),
+-                pending_retry,
++                auth_recovery.pending_retry,
+             );
+             let mut request = self.client.build_responses_request(
+                 prompt,
+@@ -1951,18 +1951,28 @@ impl ModelClientSession {
+                 Err(ApiError::Transport(unauthorized_transport))
+                     if provider.is_recoverable_auth_error(&unauthorized_transport) =>
+                 {
+-                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+-                        handle_unauthorized(
+-                            unauthorized_transport,
+-                            &mut auth_recovery,
+-                            &mut provider_auth_recovery_attempted,
+-                            session_telemetry,
+-                            &provider,
+-                            self.client.event_sender.as_ref(),
+-                            responses_metadata.turn_id.as_deref(),
+-                        )
+-                        .await?,
+-                    );
++                    match handle_unauthorized(
++                        unauthorized_transport,
++                        &mut auth_recovery.manager,
++                        &mut auth_recovery.provider_attempted,
++                        session_telemetry,
++                        &provider,
++                        self.client.event_sender.as_ref(),
++                        responses_metadata.turn_id.as_deref(),
++                    )
++                    .await
++                    {
++                        Ok(recovery) => {
++                            auth_recovery.pending_retry =
++                                PendingUnauthorizedRetry::from_recovery(recovery);
++                        }
++                        // No prompt was sent: negotiate HTTP after auth recovery is exhausted.
++                        Err(error) if matches!(error.details(), CodexErrorDetails::UnexpectedStatus(response) if response.status == StatusCode::UNAUTHORIZED) =>
++                        {
++                            return Ok(WebsocketStreamOutcome::FallbackToHttp);
++                        }
++                        Err(error) => return Err(error),
++                    }
+                     continue;
+                 }
+                 Err(err) => return Err(provider.map_api_error(err)),
+@@ -2200,6 +2210,7 @@ impl ModelClientSession {
+         }
+ 
+         let disabled_trace = InferenceTraceContext::disabled();
++        let mut auth_recovery = RequestAuthRecovery::new(&self.client.state.provider);
+         match self
+             .stream_responses_websocket(
+                 prompt,
+@@ -2212,6 +2223,7 @@ impl ModelClientSession {
+                 /*warmup*/ true,
+                 current_span_w3c_trace_context(),
+                 &disabled_trace,
++                &mut auth_recovery,
+             )
+             .await
+         {
+@@ -2257,6 +2269,7 @@ impl ModelClientSession {
+         let wire_api = self.client.state.provider.info().wire_api;
+         match wire_api {
+             WireApi::Responses => {
++                let mut auth_recovery = RequestAuthRecovery::new(&self.client.state.provider);
+                 if self.client.responses_websocket_enabled() {
+                     let request_trace = current_span_w3c_trace_context();
+                     match self
+@@ -2271,6 +2284,7 @@ impl ModelClientSession {
+                             /*warmup*/ false,
+                             request_trace,
+                             inference_trace,
++                            &mut auth_recovery,
+                         )
+                         .await?
+                     {
+@@ -2290,6 +2304,7 @@ impl ModelClientSession {
+                     service_tier,
+                     responses_metadata,
+                     inference_trace,
++                    &mut auth_recovery,
+                 )
+                 .await
+             }
+@@ -2593,6 +2608,27 @@ impl PendingUnauthorizedRetry {
+     }
+ }
+ 
++/// Recovery belongs to one model request, including its transport negotiation.
++/// Preconnect, warmup and later requests create independent recovery budgets.
++struct RequestAuthRecovery {
++    manager: Option<UnauthorizedRecovery>,
++    provider_attempted: bool,
++    pending_retry: PendingUnauthorizedRetry,
++}
++
++impl RequestAuthRecovery {
++    fn new(provider: &SharedModelProvider) -> Self {
++        Self {
++            manager: provider
++                .auth_manager()
++                .as_ref()
++                .map(AuthManager::unauthorized_recovery),
++            provider_attempted: false,
++            pending_retry: PendingUnauthorizedRetry::default(),
++        }
++    }
++}
++
+ #[derive(Clone, Debug, Default)]
+ struct AuthRequestTelemetryContext {
+     auth_mode: Option<&'static str>,
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 05ea1c6119e5ae199d747d664f13b72e9c784c46..5ade27a2f44a06c773e8b2ecdc5d2b1648bc2eb7 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -1837,6 +1837,8 @@ struct TestRecoveryProvider {
+     inner: SharedModelProvider,
+     should_fail: bool,
+     attempts: Arc<AtomicUsize>,
++    recovery_gate: Option<(Arc<Notify>, Arc<Notify>)>,
++    rotate_keys: bool,
+ }
+ 
+ impl ModelProvider for TestRecoveryProvider {
+@@ -1849,6 +1851,13 @@ impl ModelProvider for TestRecoveryProvider {
+     }
+ 
+     fn auth(&self) -> ModelProviderFuture<'_, Option<CodexAuth>> {
++        if self.rotate_keys {
++            let key = format!(
++                "synthetic-rotation-{}",
++                self.attempts.load(Ordering::Relaxed)
++            );
++            return Box::pin(async move { Some(CodexAuth::from_api_key(&key)) });
++        }
+         self.inner.auth()
+     }
+ 
+@@ -1868,6 +1877,10 @@ impl ModelProvider for TestRecoveryProvider {
+     ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ProviderUnauthorizedRecovery>> {
+         self.attempts.fetch_add(1, Ordering::Relaxed);
+         Box::pin(async move {
++            if let Some((started, release)) = &self.recovery_gate {
++                started.notify_one();
++                release.notified().await;
++            }
+             if self.should_fail {
+                 Err(CodexErr::Io(std::io::Error::other(
+                     "provider recovery failed",
+@@ -1895,6 +1908,8 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
+             inner: test_model_provider(),
+             should_fail,
+             attempts: Arc::clone(&attempts),
++            recovery_gate: None,
++            rotate_keys: false,
+         });
+         assert!(provider.auth_manager().is_none());
+ 
+@@ -2371,3 +2386,374 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
+         );
+     }
+ }
++
++/// Rejected handshakes negotiate HTTP without spending the sampling retry budget.
++/// Exercise both startup preconnect and ordinary generation connection owners.
++#[tokio::test]
++async fn rejected_websocket_auth_falls_back_and_preserves_final_http_failure() -> anyhow::Result<()>
++{
++    for preconnect in [false, true] {
++        for final_status in [401, 403] {
++            let server = MockServer::start().await;
++            Mock::given(method("GET"))
++                .and(path("/v1/responses"))
++                .respond_with(ResponseTemplate::new(401))
++                .expect(1)
++                .mount(&server)
++                .await;
++            let final_body = r#"{"error":{"message":"final HTTP rejection","code":"final_http_rejection","type":"invalid_request_error"}}"#;
++            Mock::given(method("POST"))
++                .and(path("/v1/responses"))
++                .respond_with(
++                    ResponseTemplate::new(final_status)
++                        .insert_header("content-type", "application/json")
++                        .insert_header("x-request-id", "final-http-request")
++                        .set_body_string(final_body),
++                )
++                .expect(1)
++                .mount(&server)
++                .await;
++            let mut provider =
++                ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
++            provider.requires_openai_auth = false;
++            provider.supports_websockets = true;
++            provider.request_max_retries = Some(0);
++            let mut client = test_model_client(SessionSource::Cli);
++            Arc::get_mut(&mut client.state)
++                .expect("test client should own unique state")
++                .provider = create_model_provider(provider, /*auth_manager*/ None);
++            let metadata = test_responses_metadata_for_client(
++                &client,
++                None,
++                format!("{}:0", client.state.thread_id),
++                None,
++                TestCodexResponsesRequestKind::Turn,
++            );
++            let mut session = client.new_session();
++            if preconnect {
++                session
++                    .preconnect_websocket(
++                        &test_model_info(),
++                        None,
++                        &test_session_telemetry(),
++                        &metadata,
++                    )
++                    .await?;
++                assert!(!client.responses_websocket_enabled());
++            }
++            let error = session
++                .stream(
++                    &Prompt::default(),
++                    &test_model_info(),
++                    &test_session_telemetry(),
++                    None,
++                    codex_protocol::config_types::ReasoningSummary::None,
++                    None,
++                    &metadata,
++                    &InferenceTraceContext::disabled(),
++                )
++                .await
++                .err()
++                .expect("the final HTTP request must fail");
++            let codex_protocol::error::CodexErrorDetails::UnexpectedStatus(details) =
++                error.details()
++            else {
++                panic!("final HTTP failure must remain structured");
++            };
++            assert_eq!(details.status.as_u16(), final_status);
++            assert_eq!(details.body, final_body);
++            assert_eq!(details.request_id.as_deref(), Some("final-http-request"));
++            assert!(!client.responses_websocket_enabled());
++            assert_eq!(server.received_requests().await.unwrap().len(), 2);
++        }
++    }
++    Ok(())
++}
++
++/// Cancellation drops the actual provider-recovery future before it can dispatch
++/// another authenticated request or switch a rejected WebSocket handshake to HTTP.
++#[tokio::test]
++async fn cancellation_during_auth_recovery_stops_provider_dispatch() -> anyhow::Result<()> {
++    use codex_async_utils::OrCancelExt;
++    use tokio_util::sync::CancellationToken;
++
++    for websockets in [false, true] {
++        let server = MockServer::start().await;
++        Mock::given(method(if websockets { "GET" } else { "POST" }))
++            .and(path("/v1/responses"))
++            .respond_with(ResponseTemplate::new(401))
++            .expect(1)
++            .mount(&server)
++            .await;
++        let started = Arc::new(Notify::new());
++        let release = Arc::new(Notify::new());
++        let attempts = Arc::new(AtomicUsize::new(0));
++        let mut info =
++            ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
++        info.requires_openai_auth = false;
++        info.supports_websockets = websockets;
++        info.request_max_retries = Some(0);
++        let provider: SharedModelProvider = Arc::new(TestRecoveryProvider {
++            inner: create_model_provider(info, /*auth_manager*/ None),
++            should_fail: false,
++            attempts: Arc::clone(&attempts),
++            recovery_gate: Some((Arc::clone(&started), Arc::clone(&release))),
++            rotate_keys: false,
++        });
++        let mut client = test_model_client(SessionSource::Cli);
++        Arc::get_mut(&mut client.state)
++            .expect("unique test client state")
++            .provider = provider;
++        let metadata = test_responses_metadata_for_client(
++            &client,
++            None,
++            format!("{}:0", client.state.thread_id),
++            None,
++            TestCodexResponsesRequestKind::Turn,
++        );
++        let mut session = client.new_session();
++        let prompt = Prompt::default();
++        let model_info = test_model_info();
++        let telemetry = test_session_telemetry();
++        let trace = InferenceTraceContext::disabled();
++        let cancellation = CancellationToken::new();
++        let outcome = {
++            let pending = session
++                .stream(
++                    &prompt,
++                    &model_info,
++                    &telemetry,
++                    None,
++                    codex_protocol::config_types::ReasoningSummary::None,
++                    None,
++                    &metadata,
++                    &trace,
++                )
++                .or_cancel(&cancellation);
++            tokio::pin!(pending);
++            tokio::select! {
++                _ = started.notified() => {}
++                _ = &mut pending => panic!("recovery must remain pending at its gate"),
++            }
++            assert_eq!(attempts.load(Ordering::Relaxed), 1);
++            cancellation.cancel();
++            pending.await
++        };
++        assert!(outcome.is_err(), "sampling cancellation must drop recovery");
++        release.notify_one();
++        tokio::task::yield_now().await;
++        assert_eq!(attempts.load(Ordering::Relaxed), 1);
++        assert_eq!(server.received_requests().await.unwrap().len(), 1);
++        assert_eq!(client.responses_websocket_enabled(), websockets);
++    }
++    Ok(())
++}
++
++fn auth_recovery_model_client(
++    base_url: String,
++    websockets: bool,
++    rotate_keys: bool,
++) -> (ModelClient, Arc<AtomicUsize>) {
++    let mut info = ModelProviderInfo::create_openai_provider(Some(base_url));
++    info.requires_openai_auth = rotate_keys;
++    info.supports_websockets = websockets;
++    info.request_max_retries = Some(0);
++    let attempts = Arc::new(AtomicUsize::new(0));
++    let provider: SharedModelProvider = Arc::new(TestRecoveryProvider {
++        inner: create_model_provider(info, /*auth_manager*/ None),
++        should_fail: false,
++        attempts: Arc::clone(&attempts),
++        recovery_gate: None,
++        rotate_keys,
++    });
++    let mut client = test_model_client(SessionSource::Cli);
++    Arc::get_mut(&mut client.state).unwrap().provider = provider;
++    (client, attempts)
++}
++
++async fn auth_recovery_stream(
++    session: &mut super::ModelClientSession,
++) -> codex_protocol::error::Result<crate::client_common::ResponseStream> {
++    let metadata = test_responses_metadata_for_client(
++        &session.client,
++        None,
++        format!("{}:0", session.client.state.thread_id),
++        None,
++        TestCodexResponsesRequestKind::Turn,
++    );
++    session
++        .stream(
++            &Prompt::default(),
++            &test_model_info(),
++            &test_session_telemetry(),
++            None,
++            codex_protocol::config_types::ReasoningSummary::None,
++            None,
++            &metadata,
++            &InferenceTraceContext::disabled(),
++        )
++        .await
++}
++
++/// Only the request that attempted the rejected upgrade owns its spent recovery.
++#[tokio::test]
++async fn authentication_recovery_spans_fallback_but_not_preconnect_or_later_requests()
++-> anyhow::Result<()> {
++    for preconnect in [false, true] {
++        for status in [401, 403] {
++            let server = MockServer::start().await;
++            Mock::given(method("GET"))
++                .respond_with(ResponseTemplate::new(401))
++                .expect(2)
++                .mount(&server)
++                .await;
++            let http_attempts = if preconnect && status == 401 { 2 } else { 1 };
++            Mock::given(method("POST"))
++                .respond_with(
++                    ResponseTemplate::new(status)
++                        .insert_header("x-request-id", "final-http-request")
++                        .set_body_string("final HTTP rejection"),
++                )
++                .expect(http_attempts as u64)
++                .mount(&server)
++                .await;
++            let (client, attempts) =
++                auth_recovery_model_client(format!("{}/v1", server.uri()), true, true);
++            let metadata = test_responses_metadata_for_client(
++                &client,
++                None,
++                format!("{}:0", client.state.thread_id),
++                None,
++                TestCodexResponsesRequestKind::Turn,
++            );
++            let mut session = client.new_session();
++            if preconnect {
++                session
++                    .preconnect_websocket(
++                        &test_model_info(),
++                        None,
++                        &test_session_telemetry(),
++                        &metadata,
++                    )
++                    .await?;
++            }
++            let error = auth_recovery_stream(&mut session).await.err().unwrap();
++            let CodexErrorDetails::UnexpectedStatus(details) = error.details() else {
++                panic!("the final HTTP failure must remain structured");
++            };
++            assert_eq!(details.status.as_u16(), status);
++            assert_eq!(details.request_id.as_deref(), Some("final-http-request"));
++            assert!(error.retry_delay(1).is_none());
++            assert_eq!(
++                attempts.load(Ordering::Relaxed),
++                if preconnect && status == 401 { 2 } else { 1 }
++            );
++            assert_eq!(
++                server.received_requests().await.unwrap().len(),
++                2 + http_attempts
++            );
++        }
++    }
++
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .respond_with(ResponseTemplate::new(401))
++        .expect(2)
++        .mount(&server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(401))
++        .expect(3)
++        .mount(&server)
++        .await;
++    let (client, attempts) = auth_recovery_model_client(format!("{}/v1", server.uri()), true, true);
++    let mut session = client.new_session();
++    assert!(auth_recovery_stream(&mut session).await.is_err());
++    assert_eq!(attempts.load(Ordering::Relaxed), 1);
++    assert_eq!(server.received_requests().await.unwrap().len(), 3);
++    assert!(auth_recovery_stream(&mut session).await.is_err());
++    assert_eq!(attempts.load(Ordering::Relaxed), 2);
++    assert_eq!(server.received_requests().await.unwrap().len(), 5);
++    Ok(())
++}
++
++/// A fresh bearer can succeed after ordinary HTTP recovery.
++#[tokio::test]
++async fn authentication_recovery_rotates_http_credentials() -> anyhow::Result<()> {
++    let server = MockServer::start().await;
++    Mock::given(method("POST"))
++        .and(wiremock::matchers::header(
++            "authorization",
++            "Bearer synthetic-rotation-0",
++        ))
++        .respond_with(ResponseTemplate::new(401))
++        .expect(1)
++        .mount(&server)
++        .await;
++    Mock::given(method("POST"))
++        .and(wiremock::matchers::header("authorization", "Bearer synthetic-rotation-1"))
++        .respond_with(ResponseTemplate::new(200)
++            .insert_header("content-type", "text/event-stream")
++            .set_body_string(concat!(
++                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"recovered\"}}\n\n",
++                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"recovered\"}}\n\n",
++            )))
++        .expect(1).mount(&server).await;
++    let (client, attempts) =
++        auth_recovery_model_client(format!("{}/v1", server.uri()), false, true);
++    let mut session = client.new_session();
++    let mut stream = auth_recovery_stream(&mut session).await?;
++    let mut completed = false;
++    while let Some(event) = stream.next().await {
++        completed |= matches!(event?, ResponseEvent::Completed { .. });
++    }
++    assert!(completed);
++    assert_eq!(attempts.load(Ordering::Relaxed), 1);
++    assert_eq!(server.received_requests().await.unwrap().len(), 2);
++    Ok(())
++}
++
++/// Rotated WebSocket credentials remain usable for one HTTP fallback prompt.
++#[tokio::test]
++async fn authentication_recovery_rotates_websocket_credentials() -> anyhow::Result<()> {
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(wiremock::matchers::header(
++            "authorization",
++            "Bearer synthetic-rotation-0",
++        ))
++        .respond_with(ResponseTemplate::new(401))
++        .expect(1)
++        .mount(&server)
++        .await;
++    Mock::given(method("GET"))
++        .and(wiremock::matchers::header(
++            "authorization",
++            "Bearer synthetic-rotation-1",
++        ))
++        .respond_with(ResponseTemplate::new(426))
++        .expect(1)
++        .mount(&server)
++        .await;
++    Mock::given(method("POST"))
++        .and(wiremock::matchers::header("authorization", "Bearer synthetic-rotation-1"))
++        .respond_with(ResponseTemplate::new(200)
++            .insert_header("content-type", "text/event-stream")
++            .set_body_string(concat!(
++                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"recovered\"}}\n\n",
++                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"recovered\"}}\n\n",
++            )))
++        .expect(1).mount(&server).await;
++    let (client, attempts) = auth_recovery_model_client(format!("{}/v1", server.uri()), true, true);
++    let mut session = client.new_session();
++    let mut stream = auth_recovery_stream(&mut session).await?;
++    let mut completed = false;
++    while let Some(event) = stream.next().await {
++        completed |= matches!(event?, ResponseEvent::Completed { .. });
++    }
++    assert!(completed);
++    assert_eq!(attempts.load(Ordering::Relaxed), 1);
++    assert!(!client.responses_websocket_enabled());
++    assert_eq!(server.received_requests().await.unwrap().len(), 3);
++    Ok(())
++}
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 79a14d031e52aac1907fa9223ede50a0a2ac2e7b..0c6aa49aaee09aff0dcdb469b3b532ae20fc2161 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -313,6 +313,15 @@ async fn run_compact_task_inner_impl(
+                 return Err(e);
+             }
+             Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
++                if matches!(compaction_metadata.trigger(), CompactionTrigger::Auto)
++                    && sess
++                        .services
++                        .model_client
++                        .auth_manager()
++                        .is_some_and(|manager| manager.terminal_auto_compaction_limit_errors())
++                {
++                    return Err(e);
++                }
+                 if turn_input_len > 1 {
+                     // Trim from the beginning to preserve cache (prefix-based) and keep recent messages intact.
+                     error!(
+diff --git a/codex-rs/core/src/responses_retry_tests.rs b/codex-rs/core/src/responses_retry_tests.rs
+index 65aa29397c5f5524116b0b9f932ab3719e1ed488..7046d163858432e7e7baa4b69da4edb72676b383 100644
+--- a/codex-rs/core/src/responses_retry_tests.rs
++++ b/codex-rs/core/src/responses_retry_tests.rs
+@@ -98,3 +98,46 @@ async fn stream_retry_preserves_deadline_across_delayed_notification() {
+         "retry resumed at {resumed_at:?}, expected {advice:?}"
+     );
+ }
++
++/// Once client authentication recovery has failed, the sampling owner returns
++/// the structured failure immediately instead of beginning another request attempt.
++#[tokio::test]
++async fn terminal_unauthorized_does_not_restart_sampling_or_discard_metadata() {
++    let (session, turn_context) = make_session_and_context().await;
++    let step_context = StepContext::for_test(Arc::new(turn_context));
++    let mut client_session = session.services.model_client.new_session();
++    let mut retry_state = ResponsesStreamRetryState::default();
++    let original = CodexErr::UnexpectedStatus(codex_protocol::error::UnexpectedResponseError {
++        status: http::StatusCode::UNAUTHORIZED,
++        body: r#"{"error":{"code":"invalid_api_key","message":"synthetic rejection"}}"#.to_owned(),
++        user_message: Some("synthetic rejection".to_owned()),
++        url: None,
++        cf_ray: None,
++        request_id: Some("synthetic-auth-request".to_owned()),
++        identity_authorization_error: None,
++        identity_error_code: None,
++    })
++    .with_retry_after(RetryAfter::from_delay(Duration::ZERO).expect("retry deadline"));
++    let returned = handle_response_stream_error(
++        &mut retry_state,
++        /*max_retries*/ 5,
++        original,
++        &mut client_session,
++        &session,
++        &step_context,
++        ResponsesStreamRequest::Sampling,
++    )
++    .await
++    .expect_err("terminal authentication must not retry sampling");
++    assert_eq!(retry_state.retries, 0);
++    let codex_protocol::error::CodexErrorDetails::UnexpectedStatus(details) = returned.details()
++    else {
++        panic!("original authentication details must remain available");
++    };
++    assert_eq!(details.status, http::StatusCode::UNAUTHORIZED);
++    assert_eq!(
++        details.request_id.as_deref(),
++        Some("synthetic-auth-request")
++    );
++    assert!(details.body.contains("invalid_api_key"));
++}
+diff --git a/codex-rs/login/src/auth/auth_tests.rs b/codex-rs/login/src/auth/auth_tests.rs
+index ab15a338718561251a4673c1e53e77b5e68485a8..338edabad181fb17aad4ab768a107ce219c8db1b 100644
+--- a/codex-rs/login/src/auth/auth_tests.rs
++++ b/codex-rs/login/src/auth/auth_tests.rs
+@@ -81,6 +81,7 @@ async fn refresh_without_id_token() {
+         /*id_token*/ None,
+         Some("new-access-token".to_string()),
+         Some("new-refresh-token".to_string()),
++        /*saved_login*/ None,
+     )
+     .expect("update_tokens should succeed");
+ 
+@@ -90,6 +91,158 @@ async fn refresh_without_id_token() {
+     assert_eq!(tokens.refresh_token, "new-refresh-token");
+ }
+ 
++#[test]
++fn saved_chatgpt_refresh_persists_only_for_the_current_owner() -> anyhow::Result<()> {
++    let home = tempdir()?;
++    write_auth_file(
++        AuthFileParams {
++            openai_api_key: None,
++            chatgpt_plan_type: Some("pro".to_string()),
++            chatgpt_account_id: Some(WORKSPACE_ID_ALLOWED.to_string()),
++        },
++        home.path(),
++    )?;
++    let storage = create_auth_storage(
++        home.path().to_path_buf(),
++        AuthCredentialsStoreMode::File,
++        AuthKeyringBackendKind::default(),
++    );
++    let mut saved = storage.load()?.expect("saved login");
++    saved.tokens.as_mut().expect("login tokens").account_id =
++        Some(WORKSPACE_ID_ALLOWED.to_string());
++    storage.save(&saved)?;
++
++    let other_workspace = fake_jwt_for_auth_file_params(&AuthFileParams {
++        openai_api_key: None,
++        chatgpt_plan_type: Some("pro".to_string()),
++        chatgpt_account_id: Some(WORKSPACE_ID_DISALLOWED.to_string()),
++    })?;
++    assert!(persist_tokens(&storage, Some(other_workspace), None, None, Some(&saved)).is_err());
++    assert_eq!(storage.load()?.as_ref(), Some(&saved));
++
++    let renewed = persist_tokens(
++        &storage,
++        None,
++        Some("renewed-access-token".to_string()),
++        Some("renewed-refresh-token".to_string()),
++        Some(&saved),
++    )?;
++    assert!(persist_tokens(&storage, None, None, None, Some(&saved)).is_err());
++    assert_eq!(storage.load()?.as_ref(), Some(&renewed));
++    Ok(())
++}
++
++#[tokio::test]
++async fn saved_chatgpt_refresh_adopts_a_concurrent_same_owner_update() -> anyhow::Result<()> {
++    for (other_workspace, authority_rejected) in [(false, true), (false, false), (true, true)] {
++        let home = tempdir()?;
++        write_auth_file(
++            AuthFileParams {
++                openai_api_key: None,
++                chatgpt_plan_type: Some("pro".to_string()),
++                chatgpt_account_id: None,
++            },
++            home.path(),
++        )?;
++        let manager = AuthManager::shared_saved_chatgpt(
++            home.path().to_path_buf(),
++            crate::test_support::transport_default_auth_route_config(),
++        )?;
++        let Some(CodexAuth::Chatgpt(auth)) = manager.auth_cached() else {
++            anyhow::bail!("expected saved ChatGPT auth");
++        };
++        let attempted = auth.current_auth_json().expect("saved login");
++        let mut replacement = attempted.clone();
++        let tokens = replacement.tokens.as_mut().expect("login tokens");
++        tokens.access_token = "other-process-access-token".to_string();
++        tokens.refresh_token = "other-process-refresh-token".to_string();
++        if other_workspace {
++            let workspace = Some(WORKSPACE_ID_DISALLOWED.to_string());
++            let jwt = fake_jwt_for_auth_file_params(&AuthFileParams {
++                openai_api_key: None,
++                chatgpt_plan_type: Some("pro".to_string()),
++                chatgpt_account_id: workspace.clone(),
++            })?;
++            tokens.id_token = parse_chatgpt_jwt_claims(&jwt)?;
++            tokens.account_id = workspace;
++        }
++        auth.storage().save(&replacement)?;
++
++        let response = if authority_rejected {
++            Err(RefreshTokenFailedError::new(
++                RefreshTokenFailedReason::Exhausted,
++                "Refresh token already used.".to_string(),
++            )
++            .into())
++        } else {
++            Ok(RefreshResponse {
++                id_token: None,
++                access_token: Some("stale-response-access-token".to_string()),
++                refresh_token: Some("stale-response-refresh-token".to_string()),
++            })
++        };
++        let result = manager
++            .finish_chatgpt_refresh(&auth, Some(&attempted), response)
++            .await;
++        let expected_token = if other_workspace {
++            assert!(matches!(result, Err(RefreshTokenError::Permanent(_))));
++            "test-access-token"
++        } else {
++            result?;
++            "other-process-access-token"
++        };
++        assert_eq!(
++            manager.auth_cached().expect("cached login").get_token()?,
++            expected_token
++        );
++        assert_eq!(auth.storage().load()?.as_ref(), Some(&replacement));
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn saved_chatgpt_refresh_reloads_personal_login_on_unauthorized() -> anyhow::Result<()> {
++    let home = tempdir()?;
++    write_auth_file(
++        AuthFileParams {
++            openai_api_key: None,
++            chatgpt_plan_type: Some("pro".to_string()),
++            chatgpt_account_id: None,
++        },
++        home.path(),
++    )?;
++    let manager = AuthManager::shared_saved_chatgpt(
++        home.path().to_path_buf(),
++        crate::test_support::transport_default_auth_route_config(),
++    )?;
++    let mut recovery = manager.unauthorized_recovery();
++    assert_eq!(recovery.next().await?.auth_state_changed(), Some(false));
++    assert_eq!(recovery.step_name(), "refresh_token");
++
++    let Some(CodexAuth::Chatgpt(auth)) = manager.auth_cached() else {
++        anyhow::bail!("expected saved ChatGPT auth");
++    };
++    let mut replacement = auth.current_auth_json().expect("saved login");
++    let tokens = replacement.tokens.as_mut().expect("login tokens");
++    tokens.access_token = "rotated-personal-access-token".to_string();
++    tokens.refresh_token = "rotated-personal-refresh-token".to_string();
++    auth.storage().save(&replacement)?;
++    let mut recovery = manager.unauthorized_recovery();
++    assert_eq!(recovery.next().await?.auth_state_changed(), Some(true));
++    assert_eq!(
++        manager.auth_cached().expect("cached login").get_token()?,
++        "rotated-personal-access-token"
++    );
++
++    std::fs::remove_file(get_auth_file(home.path()))?;
++    let mut recovery = manager.unauthorized_recovery();
++    assert!(matches!(
++        recovery.next().await,
++        Err(RefreshTokenError::Permanent(_))
++    ));
++    Ok(())
++}
++
+ #[test]
+ fn login_with_api_key_overwrites_existing_auth_json() {
+     let dir = tempdir().unwrap();
+diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
+index cdc9c8d3560359aca41ebf28b1b313e1a1793304..918a3b04023d5fa172d2c8952e6707c14e251964 100644
+--- a/codex-rs/login/src/auth/manager.rs
++++ b/codex-rs/login/src/auth/manager.rs
+@@ -1596,16 +1596,73 @@ async fn load_auth(
+     Ok(Some(auth))
+ }
+ 
++// The SDK opts into the exact file-backed Codex OAuth login. Unlike the
++// regular loader, this path never looks at environment or in-memory auth.
++type SavedChatgptOwner = (Option<String>, String);
++
++fn saved_chatgpt_owner(auth: &AuthDotJson) -> Option<SavedChatgptOwner> {
++    let tokens = auth.tokens.as_ref()?;
++    let account_id = tokens.account_id.as_ref();
++    let user_id = tokens.id_token.chatgpt_user_id.as_ref()?;
++    if auth.resolved_mode() != AuthMode::Chatgpt
++        || auth.last_refresh.is_none()
++        || account_id.is_some_and(|account| account.trim().is_empty())
++        || tokens.id_token.chatgpt_account_id.as_ref() != account_id
++        || tokens.id_token.is_fedramp_account()
++        || user_id.trim().is_empty()
++        || tokens.access_token.trim().is_empty()
++        || tokens.refresh_token.trim().is_empty()
++    {
++        return None;
++    }
++    Some((account_id.cloned(), user_id.clone()))
++}
++
++fn load_saved_chatgpt(
++    codex_home: &Path,
++    auth_route_config: &AuthRouteConfig,
++    expected_owner: Option<&SavedChatgptOwner>,
++) -> std::io::Result<Option<(CodexAuth, SavedChatgptOwner)>> {
++    let storage = create_auth_storage(
++        codex_home.to_path_buf(),
++        AuthCredentialsStoreMode::File,
++        AuthKeyringBackendKind::default(),
++    );
++    let Some(auth) = storage.load()? else {
++        return Ok(None);
++    };
++    let Some(owner) = saved_chatgpt_owner(&auth) else {
++        return Ok(None);
++    };
++    if expected_owner.is_some_and(|expected| *expected != owner) {
++        return Ok(None);
++    }
++    let state = ChatgptAuthState {
++        auth_dot_json: Arc::new(Mutex::new(Some(auth))),
++        client: create_default_auth_client(REFRESH_TOKEN_URL, auth_route_config)?,
++    };
++    Ok(Some((
++        CodexAuth::Chatgpt(ChatgptAuth { state, storage }),
++        owner,
++    )))
++}
++
+ // Persist refreshed tokens into auth storage and update last_refresh.
+ fn persist_tokens(
+     storage: &Arc<dyn AuthStorageBackend>,
+     id_token: Option<String>,
+     access_token: Option<String>,
+     refresh_token: Option<String>,
++    saved_login: Option<&AuthDotJson>,
+ ) -> std::io::Result<AuthDotJson> {
+     let mut auth_dot_json = storage
+         .load()?
+         .ok_or(std::io::Error::other("Token data is not available."))?;
++    if saved_login.is_some_and(|saved| *saved != auth_dot_json) {
++        return Err(std::io::Error::other(
++            "Saved Codex login changed during refresh.",
++        ));
++    }
+ 
+     let tokens = auth_dot_json.tokens.get_or_insert_with(TokenData::default);
+     if let Some(id_token) = id_token {
+@@ -1618,6 +1675,13 @@ fn persist_tokens(
+         tokens.refresh_token = refresh_token;
+     }
+     auth_dot_json.last_refresh = Some(Utc::now());
++    if let Some(saved) = saved_login
++        && saved_chatgpt_owner(saved) != saved_chatgpt_owner(&auth_dot_json)
++    {
++        return Err(std::io::Error::other(
++            "Refreshed Codex login changed its owner.",
++        ));
++    }
+     storage.save(&auth_dot_json)?;
+     Ok(auth_dot_json)
+ }
+@@ -1627,9 +1691,13 @@ fn persist_tokens(
+ async fn request_chatgpt_token_refresh(
+     refresh_token: String,
+     client: &HttpClient,
++    saved_login_only: bool,
+ ) -> Result<RefreshResponse, RefreshTokenError> {
+-    let client_id = oauth_client_id();
+-    let endpoint = refresh_token_endpoint();
++    let (client_id, endpoint) = if saved_login_only {
++        (CLIENT_ID.to_string(), REFRESH_TOKEN_URL.to_string())
++    } else {
++        (oauth_client_id(), refresh_token_endpoint())
++    };
+     let oauth = OAuthClient::new(
+         client,
+         TokenEndpoint {
+@@ -2059,6 +2127,7 @@ pub struct AuthManager {
+     agent_identity_bootstrap_cooldown: Mutex<AgentIdentityBootstrapCooldown>,
+     external_auth: RwLock<Option<Arc<dyn ExternalAuth>>>,
+     workload_identity_selected: bool,
++    saved_chatgpt_owner: Option<SavedChatgptOwner>,
+     auth_route_config: AuthRouteConfig,
+ }
+ 
+@@ -2181,6 +2250,14 @@ impl AuthManager {
+             .await
+             .ok()
+             .flatten();
++        Self::from_initial_auth(auth_config, enable_codex_api_key_env, managed_auth)
++    }
++
++    fn from_initial_auth(
++        auth_config: AuthConfig,
++        enable_codex_api_key_env: bool,
++        managed_auth: Option<CodexAuth>,
++    ) -> Self {
+         let AuthConfig {
+             codex_home,
+             auth_credentials_store_mode,
+@@ -2216,10 +2293,37 @@ impl AuthManager {
+             agent_identity_bootstrap_cooldown: Mutex::default(),
+             external_auth: RwLock::new(None),
+             workload_identity_selected: false,
++            saved_chatgpt_owner: None,
+             auth_route_config,
+         }
+     }
+ 
++    /// Load an existing file-backed Codex OAuth login and constrain reloads to its owner.
++    pub fn shared_saved_chatgpt(
++        codex_home: PathBuf,
++        auth_route_config: AuthRouteConfig,
++    ) -> std::io::Result<Arc<Self>> {
++        let (auth, owner) = load_saved_chatgpt(&codex_home, &auth_route_config, None)?
++            .ok_or_else(|| std::io::Error::other("No saved Codex OAuth login."))?;
++        let mut manager = Self::from_initial_auth(
++            AuthConfig {
++                codex_home,
++                auth_credentials_store_mode: AuthCredentialsStoreMode::File,
++                keyring_backend_kind: AuthKeyringBackendKind::default(),
++                forced_login_method: Some(ForcedLoginMethod::Chatgpt),
++                chatgpt_base_url: None,
++                forced_chatgpt_workspace_id: None,
++                managed_auth_policy: ManagedAuthPolicy::default(),
++                auth_route_config,
++            },
++            /*enable_codex_api_key_env*/ false,
++            Some(auth),
++        );
++        manager.saved_chatgpt_owner = Some(owner);
++        manager.agent_identity_authapi_base_url = None;
++        Ok(Arc::new(manager))
++    }
++
+     /// Create an AuthManager with a specific CodexAuth, for testing only.
+     pub fn from_auth_for_testing(auth: CodexAuth) -> Arc<Self> {
+         Self::from_optional_auth_for_testing(Some(auth))
+@@ -2252,6 +2356,7 @@ impl AuthManager {
+             agent_identity_bootstrap_cooldown: Mutex::default(),
+             external_auth: RwLock::new(None),
+             workload_identity_selected: false,
++            saved_chatgpt_owner: None,
+             auth_route_config: crate::test_support::transport_default_auth_route_config(),
+         })
+     }
+@@ -2282,6 +2387,7 @@ impl AuthManager {
+             agent_identity_bootstrap_cooldown: Mutex::default(),
+             external_auth: RwLock::new(None),
+             workload_identity_selected: false,
++            saved_chatgpt_owner: None,
+             auth_route_config: crate::test_support::transport_default_auth_route_config(),
+         })
+     }
+@@ -2320,6 +2426,7 @@ impl AuthManager {
+             agent_identity_bootstrap_cooldown: Mutex::default(),
+             external_auth: RwLock::new(None),
+             workload_identity_selected: false,
++            saved_chatgpt_owner: None,
+             auth_route_config: crate::test_support::transport_default_auth_route_config(),
+         })
+     }
+@@ -2348,6 +2455,7 @@ impl AuthManager {
+             agent_identity_bootstrap_cooldown: Mutex::default(),
+             external_auth: RwLock::new(Some(Arc::new(BearerTokenRefresher::new(config)))),
+             workload_identity_selected: false,
++            saved_chatgpt_owner: None,
+             // External bearer auth refreshes by running the provider's command and never makes
+             // auth-owned HTTP requests, so this route is intentionally inert.
+             auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
+@@ -2417,6 +2525,9 @@ impl AuthManager {
+         policy: AgentIdentityAuthPolicy,
+         session_source: SessionSource,
+     ) -> std::io::Result<Option<AgentIdentityAuth>> {
++        if self.saved_chatgpt_owner.is_some() {
++            return Ok(None);
++        }
+         let Some(auth) = self.auth().await else {
+             return Ok(None);
+         };
+@@ -2486,26 +2597,26 @@ impl AuthManager {
+         &self,
+         expected_account_id: Option<&str>,
+     ) -> ReloadOutcome {
+-        let expected_account_id = match expected_account_id {
+-            Some(account_id) => account_id,
+-            None => {
+-                tracing::info!("Skipping auth reload because no account id is available.");
+-                return ReloadOutcome::Skipped;
+-            }
+-        };
++        // Personal saved logins can have no workspace ID. The saved loader
++        // still verifies the original owner before returning auth.
++        if expected_account_id.is_none() && self.saved_chatgpt_owner.is_none() {
++            tracing::info!("Skipping auth reload because no account id is available.");
++            return ReloadOutcome::Skipped;
++        }
+ 
+         let new_auth = self.load_auth().await;
+         let new_account_id = new_auth.as_ref().and_then(CodexAuth::get_account_id);
++        let expected_label = expected_account_id.unwrap_or("personal");
+ 
+-        if new_account_id.as_deref() != Some(expected_account_id) {
++        if new_auth.is_none() || new_account_id.as_deref() != expected_account_id {
+             let found_account_id = new_account_id.as_deref().unwrap_or("unknown");
+             tracing::info!(
+-                "Skipping auth reload due to account id mismatch (expected: {expected_account_id}, found: {found_account_id})"
++                "Skipping auth reload due to account id mismatch (expected: {expected_label}, found: {found_account_id})"
+             );
+             return ReloadOutcome::Skipped;
+         }
+ 
+-        tracing::info!("Reloading auth for account {expected_account_id}");
++        tracing::info!("Reloading auth for account {expected_label}");
+         let cached_before_reload = self.auth_cached();
+         let auth_changed =
+             !Self::auths_equal_for_refresh(cached_before_reload.as_ref(), new_auth.as_ref());
+@@ -2572,6 +2683,12 @@ impl AuthManager {
+     }
+ 
+     async fn load_auth(&self) -> Option<CodexAuth> {
++        if let Some(owner) = &self.saved_chatgpt_owner {
++            return load_saved_chatgpt(&self.codex_home, &self.auth_route_config, Some(owner))
++                .ok()
++                .flatten()
++                .map(|(auth, _)| auth);
++        }
+         if let Some(external_auth) = self.external_auth_provider() {
+             let cached_auth = self.auth_cached();
+             if cached_auth
+@@ -2661,6 +2778,11 @@ impl AuthManager {
+         &self,
+         external_auth: Arc<dyn ExternalAuth>,
+     ) -> Result<(), RefreshTokenError> {
++        if self.saved_chatgpt_owner.is_some() {
++            return Err(permanent_external_auth_error(
++                "the saved Codex login cannot be replaced at runtime",
++            ));
++        }
+         if self.workload_identity_selected {
+             return Err(permanent_external_auth_error(
+                 "workload identity auth cannot be replaced at runtime",
+@@ -2843,7 +2965,15 @@ impl AuthManager {
+     /// we can assume that the source already refreshed it. Otherwise, ask the
+     /// token authority to refresh.
+     pub async fn refresh_token(&self) -> Result<(), RefreshTokenError> {
+-        let _refresh_guard = self.refresh_lock.acquire().await.map_err(|_| {
++        // Separate SDK engines can open the same file. Reload after another
++        // in-process engine finishes so both don't spend the same refresh token.
++        static SAVED_CHATGPT_REFRESH_LOCK: Semaphore = Semaphore::const_new(1);
++        let refresh_lock = if self.saved_chatgpt_owner.is_some() {
++            &SAVED_CHATGPT_REFRESH_LOCK
++        } else {
++            &self.refresh_lock
++        };
++        let _refresh_guard = refresh_lock.acquire().await.map_err(|_| {
+             RefreshTokenError::Permanent(RefreshTokenFailedError::new(
+                 RefreshTokenFailedReason::Other,
+                 REFRESH_TOKEN_UNKNOWN_MESSAGE.to_string(),
+@@ -2882,6 +3012,9 @@ impl AuthManager {
+     /// it and update the shared cache. If the token refresh fails, returns the
+     /// error to the caller.
+     pub async fn refresh_token_from_authority(&self) -> Result<(), RefreshTokenError> {
++        if self.saved_chatgpt_owner.is_some() {
++            return self.refresh_token().await;
++        }
+         let _refresh_guard = self.refresh_lock.acquire().await.map_err(|_| {
+             RefreshTokenError::Permanent(RefreshTokenFailedError::new(
+                 RefreshTokenFailedReason::Other,
+@@ -2974,6 +3107,12 @@ impl AuthManager {
+     }
+ 
+     fn ensure_logout_allowed(&self) -> std::io::Result<()> {
++        if self.saved_chatgpt_owner.is_some() {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::PermissionDenied,
++                "Manage the saved Codex login with the Codex CLI",
++            ));
++        }
+         if self.workload_identity_selected {
+             return Err(std::io::Error::new(
+                 std::io::ErrorKind::PermissionDenied,
+@@ -3091,17 +3230,52 @@ impl AuthManager {
+         auth: &ChatgptAuth,
+         refresh_token: String,
+     ) -> Result<(), RefreshTokenError> {
+-        let refresh_response = request_chatgpt_token_refresh(refresh_token, auth.client()).await?;
++        let saved_login = if self.saved_chatgpt_owner.is_some() {
++            Some(
++                auth.current_auth_json()
++                    .ok_or_else(|| std::io::Error::other("Saved Codex login is unavailable."))?,
++            )
++        } else {
++            None
++        };
++        let response =
++            request_chatgpt_token_refresh(refresh_token, auth.client(), saved_login.is_some())
++                .await;
++        self.finish_chatgpt_refresh(auth, saved_login.as_ref(), response)
++            .await
++    }
+ 
+-        persist_tokens(
+-            auth.storage(),
+-            refresh_response.id_token,
+-            refresh_response.access_token,
+-            refresh_response.refresh_token,
+-        )
+-        .map_err(RefreshTokenError::from)?;
++    async fn finish_chatgpt_refresh(
++        &self,
++        auth: &ChatgptAuth,
++        saved_login: Option<&AuthDotJson>,
++        response: Result<RefreshResponse, RefreshTokenError>,
++    ) -> Result<(), RefreshTokenError> {
++        let result = response.and_then(|response| {
++            persist_tokens(
++                auth.storage(),
++                response.id_token,
++                response.access_token,
++                response.refresh_token,
++                saved_login,
++            )
++            .map_err(RefreshTokenError::from)
++        });
++        if let Err(error) = result {
++            // A separate Codex process may have saved a replacement during the
++            // request. The saved loader checks the owner before we adopt it.
++            if let Some(attempted) = saved_login.and_then(|saved| saved.tokens.as_ref())
++                && !matches!(&error, RefreshTokenError::Policy(_))
++                && let Some(replacement) = self.load_auth().await
++                && let Ok(token) = replacement.get_token()
++                && token != attempted.access_token
++            {
++                self.set_cached_auth(Some(replacement));
++                return Ok(());
++            }
++            return Err(error);
++        }
+         self.reload().await;
+-
+         Ok(())
+     }
+ }
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+index a077d7efabeae9529e11a9ffc9c7e128f8b61c1d..60cca6fe0aa4a30cdefd93a7a0190a783f5bfd9b 100644
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -444,6 +444,16 @@ impl CodexErr {
+             CodexErrorDetails::ServerOverloaded | CodexErrorDetails::RetryLimit(_) => {
+                 self.server_retry_delay()
+             }
++            // The client owns its single authentication-recovery opportunity.
++            // A terminal rejection must not restart sampling with the same key.
++            CodexErrorDetails::UnexpectedStatus(error)
++                if matches!(
++                    error.status,
++                    http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN
++                ) =>
++            {
++                None
++            }
+             CodexErrorDetails::Stream(..)
+             | CodexErrorDetails::ContentFilter
+             | CodexErrorDetails::RateLimitExceeded(_)
+diff --git a/codex-rs/protocol/src/error_tests.rs b/codex-rs/protocol/src/error_tests.rs
+index a01036f32ea8eca1241d9c9797c391e73b1d7bdc..7c8e5a165520b82ddc1ddd3182cba93f12331035 100644
+--- a/codex-rs/protocol/src/error_tests.rs
++++ b/codex-rs/protocol/src/error_tests.rs
+@@ -854,3 +854,47 @@ fn response_integrity_reason_has_only_the_four_safe_wire_values() {
+         .is_err()
+     );
+ }
++
++/// Terminal authentication keeps its details and cannot gain eligibility from advice.
++#[test]
++fn terminal_unauthorized_preserves_details_without_retry() {
++    for (status, expected_retry) in [
++        (StatusCode::UNAUTHORIZED, false),
++        (StatusCode::FORBIDDEN, false),
++        (StatusCode::TOO_MANY_REQUESTS, true),
++        (StatusCode::INTERNAL_SERVER_ERROR, true),
++        (StatusCode::SERVICE_UNAVAILABLE, true),
++    ] {
++        for advised in [false, true] {
++            let mut error = CodexErr::UnexpectedStatus(UnexpectedResponseError {
++                status,
++                body: r#"{"error":{"code":"invalid_api_key","message":"synthetic rejection"}}"#
++                    .to_owned(),
++                user_message: Some("synthetic rejection".to_owned()),
++                url: None,
++                cf_ray: None,
++                request_id: Some("synthetic-auth-request".to_owned()),
++                identity_authorization_error: None,
++                identity_error_code: None,
++            });
++            if advised {
++                error = error.with_retry_after(
++                    RetryAfter::from_delay(Duration::ZERO).expect("retry deadline"),
++                );
++            }
++            for attempt in [1, 5] {
++                assert_eq!(error.retry_delay(attempt).is_some(), expected_retry);
++            }
++
++            let CodexErrorDetails::UnexpectedStatus(details) = error.details() else {
++                panic!("authentication error details must remain structured");
++            };
++            assert_eq!(details.status, status);
++            assert_eq!(
++                details.request_id.as_deref(),
++                Some("synthetic-auth-request")
++            );
++            assert!(details.body.contains("invalid_api_key"));
++        }
++    }
++}
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 2eb1a223d10146b674319ae4037cd1f85a5250e4..83007345f5c834bc3a330fd1fd2550793ca28901 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -6287,6 +6287,7 @@ mod tests {
+     fn turn_context_item_serializes_network_when_present() -> Result<()> {
+         let item = TurnContextItem {
+             turn_id: None,
++            sdk_receipt: None,
+             root_turn_id: None,
+             disabled_plugin_ids: None,
+             cwd: test_path_buf("/tmp").abs(),

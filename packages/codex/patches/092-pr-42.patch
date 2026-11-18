@@ -1,0 +1,1229 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index c73e30ab001a40056783bc7e444d8db055dba3fd..b8d6d9b37b706b0b71583b816d823ab5b2e2ad6d 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -3613,6 +3613,14 @@ impl ModelClientSession {
+         }
+     }
+ 
++    /// A guarded candidate never owns a continuation, even if a successor's
++    /// newly authored input happens to equal the rejected provider text.
++    pub(crate) fn discard_unaccepted_response(&mut self) {
++        self.pending_http_response = None;
++        self.websocket_session.last_response_rx = None;
++        self.websocket_session.last_request = None;
++    }
++
+     pub(crate) fn has_acknowledged_response_candidate(&self) -> bool {
+         self.pending_http_response.is_some()
+     }
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index e114f68a0d688b49be01398c06bbaf4920de4ef4..c1ed46ea8ae32e23a1184b1950b62ee4dbe7aa95 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1241,7 +1241,20 @@ impl CodexThread {
+         items: Vec<String>,
+     ) -> CodexResult<String> {
+         self.session
+-            .sdk_replace_history(expected_revision, keep, items)
++            .sdk_replace_history_with_context_policy(expected_revision, keep, items, false)
++            .await
++    }
++
++    /// Replace an original suffix, allowing an explicit rebuild of compacted model context.
++    #[doc(hidden)]
++    pub async fn sdk_replace_history_allow_rebuild(
++        &self,
++        expected_revision: &str,
++        keep: usize,
++        items: Vec<String>,
++    ) -> CodexResult<String> {
++        self.session
++            .sdk_replace_history_with_context_policy(expected_revision, keep, items, true)
+             .await
+     }
+ 
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index b782b3f8353f2076e6507a3b68f75b6d8bce01a3..44f6e48c41c9bc8d9f9ad2abbf6a3cb65769ee04 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1155,7 +1155,43 @@ pub(crate) fn is_provider_compaction_boundary(envelope: &ResponseItemEnvelope) -
+         }
+ }
+ 
+-/// Configuration updates require harness provenance; raw system messages are never retained.
++/// SDK application receipts are validated at admission before they can be hidden.
++/// Collaboration-mode tags are caller-controlled in serialized history.
++pub(crate) fn is_sdk_model_only_instruction(
++    item: &ResponseItem,
++    metadata: Option<&CodexHarnessMetadata>,
++) -> bool {
++    let ResponseItem::Message {
++        role,
++        content,
++        internal_chat_message_metadata_passthrough: Some(message_metadata),
++        ..
++    } = item
++    else {
++        return false;
++    };
++    role == "developer"
++        && !metadata.is_some_and(|metadata| metadata.client_authored)
++        && message_metadata.content_item_kinds.as_ref().is_some_and(|kinds| {
++            !kinds.is_empty()
++                && kinds.len() == content.len()
++                && kinds.iter().all(|kind| {
++                    matches!(
++                        kind.0.as_str(),
++                        "sdk_application.accepted" | "sdk_application.instructions"
++                    )
++                })
++        })
++}
++
++/// Unknown, mixed, or caller-authored developer content remains visible in originals.
++pub(crate) fn is_sdk_original_item(
++    item: &ResponseItem,
++    metadata: Option<&CodexHarnessMetadata>,
++) -> bool {
++    !is_sdk_model_only_instruction(item, metadata) && is_api_message(item, metadata)
++}
++
+ pub(crate) fn is_api_message(
+     message: &ResponseItem,
+     metadata: Option<&CodexHarnessMetadata>,
+@@ -1702,3 +1738,75 @@ mod sdk_retention_tests {
+         assert!(Arc::ptr_eq(&history.items, &projected.items));
+     }
+ }
++
++#[cfg(test)]
++mod sdk_original_eligibility_tests {
++    use super::*;
++    use serde_json::json;
++
++    fn message(role: &str, kind: Option<&str>) -> ResponseItem {
++        let mut value = json!({
++            "type": "message", "role": role,
++            "content": [{"type":"input_text", "text":"developer data"}],
++        });
++        if let Some(kind) = kind {
++            value["internal_chat_message_metadata_passthrough"] =
++                json!({"content_item_kinds":[kind]});
++        }
++        serde_json::from_value(value).unwrap()
++    }
++
++    #[test]
++    fn native_configuration_remains_in_model_context_but_not_sdk_originals() {
++        for kind in [
++            "sdk_application.instructions",
++            "sdk_application.accepted",
++        ] {
++            let item = message("developer", Some(kind));
++            assert!(is_api_message(&item, None));
++            assert!(!is_sdk_original_item(&item, None));
++        }
++    }
++
++    #[test]
++    fn caller_developer_and_ordinary_messages_remain_originals() {
++        let caller = CodexHarnessMetadata {
++            client_authored: true,
++            ..Default::default()
++        };
++        assert!(is_sdk_original_item(&message("developer", None), None));
++        assert!(is_sdk_original_item(
++            &message("developer", Some("unknown")),
++            None
++        ));
++        assert!(is_sdk_original_item(
++            &message("developer", Some("unrecognized.application.instructions")),
++            None
++        ));
++        let mut mixed = serde_json::to_value(message(
++            "developer",
++            Some("sdk_application.instructions"),
++        ))
++        .unwrap();
++        mixed["content"]
++            .as_array_mut()
++            .unwrap()
++            .push(json!({"type":"input_text","text":"untrusted text"}));
++        mixed["internal_chat_message_metadata_passthrough"]["content_item_kinds"] =
++            json!(["sdk_application.instructions", "unrecognized.application.instructions"]);
++        assert!(is_sdk_original_item(
++            &serde_json::from_value(mixed).unwrap(),
++            None
++        ));
++        assert!(is_sdk_original_item(
++            &message("developer", Some("sdk_application.accepted")),
++            Some(&caller)
++        ));
++        assert!(is_sdk_original_item(
++            &message("user", Some("additional_content.user")),
++            None
++        ));
++        assert!(is_sdk_original_item(&message("assistant", None), None));
++        assert!(!is_sdk_original_item(&message("system", None), None));
++    }
++}
+diff --git a/codex-rs/core/src/context_manager/mod.rs b/codex-rs/core/src/context_manager/mod.rs
+index 3106756ab3f445ddadef5a4254dd172e6d3b20ff..d6a844ecdcbbad37684eb8a7cb94de9a3d726d6c 100644
+--- a/codex-rs/core/src/context_manager/mod.rs
++++ b/codex-rs/core/src/context_manager/mod.rs
+@@ -11,6 +11,8 @@ pub(crate) use history::is_provider_compaction_boundary;
+ pub(crate) use history::is_user_turn_boundary;
+ 
+ pub(crate) use history::is_api_message;
++pub(crate) use history::is_sdk_model_only_instruction;
++pub(crate) use history::is_sdk_original_item;
+ 
+ pub(crate) use history::rollback_context_update;
+ pub(crate) use history::rollback_retained_item;
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 45760953a1f97f0fae83f41576ead5081a696f34..e14e62ca5ab8c2000f44bed5dafb10d6a5f97766 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -287,7 +287,11 @@ impl Session {
+ mod tests;
+ 
+ enum SdkHistoryEdit {
+-    Replace { keep: usize, appended: Vec<String> },
++    Replace {
++        keep: usize,
++        appended: Vec<String>,
++        allow_rebuild: bool,
++    },
+     Pop { allow_rebuild: bool },
+ }
+ 
+@@ -385,6 +389,7 @@ impl Session {
+     pub(crate) async fn sdk_load_original_history(
+         &self,
+     ) -> codex_protocol::error::Result<codex_history::sdk_originals::SdkOriginalHistory> {
++        use codex_history::sdk_originals::SdkOriginalHistory;
+         use codex_protocol::error::CodexErr;
+         let unavailable =
+             || CodexErr::InvalidRequest("Canonical original history is unavailable".into());
+@@ -411,7 +416,7 @@ impl Session {
+             .load_original_history(false)
+             .await
+             .map_err(|_| unavailable())?;
+-        let originals = codex_history::sdk_originals::SdkOriginalHistory::replay(
++        let originals = SdkOriginalHistory::replay_with_original_filter(
+             &persisted.items,
+             |row| {
+                 let mut projected = crate::context_manager::ContextManager::new();
+@@ -434,6 +439,7 @@ impl Session {
+                     .replay_annotated_item(normalized.as_ref().unwrap_or(row), fallback_policy);
+                 projected.annotated_items().last().cloned()
+             },
++            |row| crate::context_manager::is_sdk_original_item(&row.item, row.metadata.as_ref()),
+             |items, turns| {
+                 let mut history = crate::context_manager::ContextManager::new();
+                 history.replace_annotated(items.to_vec());
+@@ -475,17 +481,33 @@ impl Session {
+             .collect())
+     }
+ 
+-    /// The SDK owns exclusive native ingress and the mutation permit throughout.
++    #[cfg(test)]
+     pub(crate) async fn sdk_replace_history(
+         &self,
+         expected_revision: &str,
+         keep: usize,
+         appended: Vec<String>,
++    ) -> codex_protocol::error::Result<String> {
++        self.sdk_replace_history_with_context_policy(expected_revision, keep, appended, false)
++            .await
++    }
++
++    /// The SDK owns exclusive native ingress and the mutation permit throughout.
++    pub(crate) async fn sdk_replace_history_with_context_policy(
++        &self,
++        expected_revision: &str,
++        keep: usize,
++        appended: Vec<String>,
++        allow_rebuild: bool,
+     ) -> codex_protocol::error::Result<String> {
+         let (revision, _, _) = self
+             .sdk_edit_history(
+                 expected_revision,
+-                SdkHistoryEdit::Replace { keep, appended },
++                SdkHistoryEdit::Replace {
++                    keep,
++                    appended,
++                    allow_rebuild,
++                },
+             )
+             .await?;
+         Ok(revision)
+@@ -533,8 +555,15 @@ impl Session {
+         if state.sdk_originals.revision() != Some(expected_revision) {
+             return Err(invalid("canonical history revision conflict"));
+         }
++        let model_only = |row: &ResponseItemEnvelope| {
++            crate::context_manager::is_sdk_model_only_instruction(&row.item, row.metadata.as_ref())
++        };
+         let (originals, envelopes, popped, rebuilt_context) = match edit {
+-            SdkHistoryEdit::Replace { keep, appended } => {
++            SdkHistoryEdit::Replace {
++                keep,
++                appended,
++                allow_rebuild,
++            } => {
+                 if keep > current.items.len() {
+                     return Err(invalid("history keep exceeds snapshot length"));
+                 }
+@@ -574,9 +603,33 @@ impl Session {
+                         projection,
+                     });
+                 }
+-                let mut envelopes = current
+-                    .retained_projection(state.history.annotated_items(), keep)
+-                    .map_err(invalid)?;
++                let mut envelopes = match current.retained_projection_preserving(
++                    state.history.annotated_items(),
++                    keep,
++                    model_only,
++                ) {
++                    Ok(envelopes) => envelopes,
++                    Err(_) if allow_rebuild => {
++                        let retained: Vec<_> = originals.items[..keep]
++                            .iter()
++                            .filter_map(|item| item.projection.clone())
++                            .collect();
++                        if retained
++                            .iter()
++                            .any(|row| matches!(
++                                &row.item,
++                                ResponseItem::Compaction { .. }
++                                    | ResponseItem::ContextCompaction { .. }
++                            ))
++                        {
++                            return Err(invalid(
++                                "cannot rebuild a retained provider compaction boundary",
++                            ));
++                        }
++                        retained
++                    }
++                    Err(error) => return Err(invalid(error)),
++                };
+                 envelopes.extend(
+                     originals.items[keep..]
+                         .iter()
+@@ -586,7 +639,7 @@ impl Session {
+             }
+             SdkHistoryEdit::Pop { allow_rebuild } => {
+                 let Some(pop) = current
+-                    .prepare_pop(state.history.annotated_items(), allow_rebuild)
++                    .prepare_pop_preserving(state.history.annotated_items(), allow_rebuild, model_only)
+                     .map_err(|error| {
+                         invalid(&format!(
+                             "{error}; raw pop can explicitly rebuild model context"
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index a2f9eda294aab6694fa194a52668e4a27f8ad909..86f3f5031c40f6fc5429467a31793354eaf46514 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2029,7 +2029,12 @@ impl Session {
+             state.sdk_originals =
+                 codex_history::sdk_originals::SdkOriginalHistoryCache::replay_metadata(
+                     rollout_items,
+-                    |row| crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()),
++                    |row| {
++                        crate::context_manager::is_sdk_original_item(
++                            &row.item,
++                            row.metadata.as_ref(),
++                        )
++                    },
+                 );
+             state.replace_annotated_history(
+                 history,
+diff --git a/codex-rs/core/src/session/original_history_read.rs b/codex-rs/core/src/session/original_history_read.rs
+index 0934fcb3a0c14f17d04eb9fb63f4148f50325f3d..007084d87f48660a16ee70f0f189ff1fce460ddc 100644
+--- a/codex-rs/core/src/session/original_history_read.rs
++++ b/codex-rs/core/src/session/original_history_read.rs
+@@ -15,7 +15,7 @@ use codex_thread_store::{
+ use codex_utils_output_truncation::TruncationPolicy;
+ 
+ use crate::context_manager::{
+-    ContextManager, is_api_message, is_user_turn_boundary, rollback_context_update,
++    ContextManager, is_sdk_original_item, is_user_turn_boundary, rollback_context_update,
+     rollback_retained_item,
+ };
+ 
+@@ -148,6 +148,9 @@ impl SnapshotReader {
+     }
+ 
+     fn native_projection(&self, row: &ResponseItemEnvelope) -> Option<ResponseItemEnvelope> {
++        if !is_sdk_original_item(&row.item, row.metadata.as_ref()) {
++            return None;
++        }
+         let mut projected = ContextManager::new();
+         let normalized = if matches!(&row.item, ResponseItem::Message { .. }) {
+             let mut normalized = row.clone();
+@@ -523,7 +526,10 @@ impl OriginalSource for MemorySource<'_> {
+                             };
+                             Entry {
+                                 original: position,
+-                                projection: if is_api_message(&row.item, row.metadata.as_ref()) {
++                                projection: if is_sdk_original_item(
++                                    &row.item,
++                                    row.metadata.as_ref(),
++                                ) {
+                                     position
+                                 } else {
+                                     Position::default()
+@@ -546,7 +552,7 @@ impl OriginalSource for MemorySource<'_> {
+             match record {
+                 RolloutItem::ResponseItem(row) if scan == Scan::Entries => {
+                     self.record += 1;
+-                    if is_api_message(&row.item, row.metadata.as_ref()) {
++                    if is_sdk_original_item(&row.item, row.metadata.as_ref()) {
+                         return Ok(Some(Action::Append(Entry {
+                             original: base,
+                             projection: base,
+diff --git a/codex-rs/core/src/session/original_history_stream.rs b/codex-rs/core/src/session/original_history_stream.rs
+index 5a8c9e1554f23d5a74d6cacfe685879283ad547c..4b71eedd29c19a5338183324dbc7f4d7395defe1 100644
+--- a/codex-rs/core/src/session/original_history_stream.rs
++++ b/codex-rs/core/src/session/original_history_stream.rs
+@@ -1,5 +1,6 @@
+ //! Selective local JSONL source. Replacement catalogs never become a whole line or Vec.
+ use super::{Action, Entry, FoldWriter, OriginalSource, Position, Scan, SnapshotReader, invalid};
++use crate::context_manager::is_sdk_original_item;
+ use codex_history::ResponseItemEnvelope;
+ use codex_history::sdk_originals::SdkOriginalSnapshotFold;
+ use codex_thread_store::OriginalHistorySegment;
+@@ -302,7 +303,7 @@ impl OriginalSource for LocalSource<'_> {
+                         item: item.start,
+                     };
+                     let row = self.envelope(position, reader)?.ok_or_else(invalid)?;
+-                    if !crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()) {
++                    if !is_sdk_original_item(&row.item, row.metadata.as_ref()) {
+                         continue;
+                     }
+                     return Ok(Some(Action::Append(Entry {
+@@ -375,7 +376,7 @@ impl OriginalSource for LocalSource<'_> {
+                         item: position,
+                     };
+                     let row = self.native(position, reader)?;
+-                    if crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()) {
++                    if is_sdk_original_item(&row.item, row.metadata.as_ref()) {
+                         return Ok(Some(Action::Append(Entry {
+                             original: position,
+                             projection: position,
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index b2bad116e37903b00054f6458e6039c26e42a635..5499c81dd6126e675e45812fe5549cdc956dc58b 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -14377,7 +14377,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+         cancellation_token: CancellationToken::new(),
+     };
+ 
+-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, None)
++    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, None, /*held_response*/ None)
+         .await
+         .expect("tool call should be handled");
+ 
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 4d3578b96ecaf13f5f740ed7f81cdaa085fcf476..4a99d696d08488a772e23cb2c3a7561cb23d9670 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -45,11 +45,13 @@ use crate::skills::emit_explicit_skill_invocations;
+ use crate::stream_events_utils::HandleOutputCtx;
+ use crate::stream_events_utils::InFlightFuture;
+ use crate::stream_events_utils::TurnItemContributorPolicy;
++use crate::stream_events_utils::HeldResponseItem;
+ use crate::stream_events_utils::finalize_non_tool_response_item;
+ use crate::stream_events_utils::handle_non_tool_response_item;
+ use crate::stream_events_utils::handle_output_item_done;
+ use crate::stream_events_utils::last_assistant_message_from_item;
+ use crate::stream_events_utils::mark_thread_memory_mode_polluted_if_external_context;
++use crate::stream_events_utils::publish_held_response_items;
+ use crate::stream_events_utils::raw_assistant_output_text_from_item;
+ use crate::stream_events_utils::record_completed_response_item_with_finalized_facts;
+ use crate::tasks::CompactionPromptRecording;
+@@ -845,6 +847,7 @@ pub(crate) async fn run_turn(
+                     accepted_handoff,
+                     needs_follow_up: model_needs_follow_up,
+                     last_agent_message: sampling_request_last_agent_message,
++                    held_response,
+                     settled_tools,
+                 } = sampling_request_output;
+                 record_tool_choice_use(
+@@ -866,7 +869,7 @@ pub(crate) async fn run_turn(
+                 drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ false).await;
+                 // Tool receipts and async hooks have settled. Policy sees only these
+                 // direct calls, never nested calls or historical observation text.
+-                if try_complete_tool_turn(
++                let tool_completion = try_complete_tool_turn(
+                     &sess,
+                     &step_context,
+                     &settled_tools,
+@@ -877,16 +880,19 @@ pub(crate) async fn run_turn(
+                     &mut client_session,
+                     &world_state,
+                 )
+-                .await?
+-                {
++                .await;
++                if !matches!(tool_completion, Ok(false)) {
++                    publish_held_response_items(&sess, &step_context, held_response).await?;
++                    tool_completion?;
+                     return Ok(None);
+                 }
+ 
+                 let has_pending_input = sess.input_queue.has_pending_input(&sess.active_turn).await;
+                 let mut needs_follow_up = model_needs_follow_up || has_pending_input;
++                let mut held_response = held_response;
+                 if !needs_follow_up {
+                     for contributor in sess.services.extensions.turn_lifecycle_contributors() {
+-                        let feedback = contributor
++                        let decision = contributor
+                             .before_turn_complete(codex_extension_api::TurnCompletionInput {
+                                 step_store: Some(&step_context.extension_data),
+                                 turn_id: &turn_context.sub_id,
+@@ -898,41 +904,68 @@ pub(crate) async fn run_turn(
+                                 turn_store: turn_context.extension_data.as_ref(),
+                             })
+                             .or_cancel(&cancellation_token)
+-                            .await?
+-                            .map_err(CodexErr::InvalidRequest)?;
++                            .await;
++                        let feedback = match decision {
++                            Ok(Ok(codex_extension_api::TurnCompletionDecision::Accept)) => continue,
++                            Ok(Ok(codex_extension_api::TurnCompletionDecision::Continue(feedback))) => feedback,
++                            Ok(Ok(codex_extension_api::TurnCompletionDecision::Withhold)) => {
++                                client_session.discard_unaccepted_response();
++                                sess.state.lock().await.acknowledged_provider_window = None;
++                                return Err(CodexErr::InvalidRequest(
++                                    "Assistant output withheld by an output guardrail".to_owned(),
++                                ));
++                            }
++                            Ok(Err(error)) => {
++                                publish_held_response_items(
++                                    &sess, &step_context, held_response,
++                                )
++                                .await?;
++                                return Err(CodexErr::InvalidRequest(error));
++                            }
++                            Err(_) => {
++                                publish_held_response_items(
++                                    &sess, &step_context, held_response,
++                                )
++                                .await?;
++                                return Err(CodexErr::TurnAborted);
++                            }
++                        };
++                        publish_held_response_items(
++                            &sess, &step_context, std::mem::take(&mut held_response),
++                        )
++                        .await?;
+                         if cancellation_token.is_cancelled() {
+                             return Err(CodexErr::TurnAborted);
+                         }
+-                        if let Some(feedback) = feedback {
+-                            let item = build_hook_prompt_message(&[
+-                                codex_protocol::items::HookPromptFragment::from_single_hook(
+-                                    feedback,
+-                                    uuid::Uuid::new_v4().to_string(),
+-                                ),
+-                            ])
+-                            .ok_or_else(|| {
+-                                CodexErr::InvalidRequest(
+-                                    "Completion feedback must not be empty".to_owned(),
+-                                )
+-                            })?;
+-                            sess.record_response_item_and_emit_turn_item(
+-                                &turn_context,
+-                                &step_context.settings.model_info,
+-                                item,
++                        let item = build_hook_prompt_message(&[
++                            codex_protocol::items::HookPromptFragment::from_single_hook(
++                                feedback,
++                                uuid::Uuid::new_v4().to_string(),
++                            ),
++                        ])
++                        .ok_or_else(|| {
++                            CodexErr::InvalidRequest(
++                                "Completion feedback must not be empty".to_owned(),
++                            )
++                        })?;
++                        sess.record_response_item_and_emit_turn_item(
++                            &turn_context,
++                            &step_context.settings.model_info,
++                            item,
++                        )
++                        .await;
++                        sess.input_queue
++                            .accept_mailbox_delivery_for_current_turn(
++                                &sess.active_turn,
++                                &turn_context.sub_id,
+                             )
+                             .await;
+-                            sess.input_queue
+-                                .accept_mailbox_delivery_for_current_turn(
+-                                    &sess.active_turn,
+-                                    &turn_context.sub_id,
+-                                )
+-                                .await;
+-                            completion_continuations += 1;
+-                            needs_follow_up = true;
+-                            break;
+-                        }
++                        completion_continuations += 1;
++                        needs_follow_up = true;
++                        break;
+                     }
+                 }
++                publish_held_response_items(&sess, &step_context, held_response).await?;
+                 let token_status = super::context_window::context_window_token_status(
+                     sess.as_ref(),
+                     turn_context.as_ref(),
+@@ -3032,6 +3065,7 @@ async fn run_sampling_request(
+                         settled_tools: SettledDirectTools::default(),
+                         needs_follow_up: true,
+                         last_agent_message: None,
++                        held_response: Vec::new(),
+                     },
+                     std::mem::take(original_input),
+                 ));
+@@ -3338,6 +3372,7 @@ struct SamplingRequestResult {
+     settled_tools: SettledDirectTools,
+     needs_follow_up: bool,
+     last_agent_message: Option<String>,
++    held_response: Vec<HeldResponseItem>,
+ }
+ 
+ /// Live authority created only by Core after validation and exact-turn reservation.
+@@ -4636,6 +4671,10 @@ async fn drain_in_flight(
+     Ok(())
+ }
+ 
++fn assistant_response_item(item: &ResponseItem) -> bool {
++    matches!(item, ResponseItem::Message { role, .. } if role == "assistant")
++}
++
+ fn assign_missing_streamed_response_item_id(
+     item: &mut ResponseItem,
+     active_item: Option<&TurnItem>,
+@@ -5084,6 +5123,15 @@ async fn try_run_sampling_request(
+     let mut needs_follow_up = false;
+     let mut last_agent_message: Option<String> = None;
+     let mut active_item: Option<TurnItem> = None;
++    let mut held_response = Vec::new();
++    let hold_assistant_completion = !client_session.has_provider_history()
++        && turn_context.mode() != ModeKind::Plan
++        && sess.services.extensions.turn_lifecycle_contributors().iter().any(|contributor| {
++            contributor.hold_assistant_completion(
++                &sess.services.thread_extension_data,
++                &step_context.extension_data,
++            )
++        });
+     let mut active_tool_argument_diff_consumer: Option<(
+         String,
+         Box<dyn ToolArgumentDiffConsumer>,
+@@ -5234,6 +5282,7 @@ async fn try_run_sampling_request(
+                         settled_tools: SettledDirectTools::default(),
+                         needs_follow_up: true,
+                         last_agent_message,
++                        held_response: std::mem::take(&mut held_response),
+                     });
+                 }
+                 Err(_) => break Err(CodexErr::TurnAborted),
+@@ -5456,7 +5505,15 @@ async fn try_run_sampling_request(
+ 
+                     let direct_call = item.clone();
+                     let output_result =
+-                        match handle_output_item_done(&mut ctx, item, previously_streamed_item, provider_agent_metadata)
++                        match handle_output_item_done(
++                            &mut ctx,
++                            item,
++                            previously_streamed_item,
++                            provider_agent_metadata,
++                            (hold_assistant_completion
++                                && (assistant_response_item(&direct_call) || !held_response.is_empty()))
++                            .then_some(&mut held_response),
++                        )
+                             .instrument(handle_responses)
+                             .await
+                         {
+@@ -5493,6 +5550,7 @@ async fn try_run_sampling_request(
+                             settled_tools: SettledDirectTools::default(),
+                             needs_follow_up: true,
+                             last_agent_message,
++                            held_response: std::mem::take(&mut held_response),
+                         });
+                     }
+                 }
+@@ -5524,7 +5582,9 @@ async fn try_run_sampling_request(
+                     .await
+                     {
+                         let mut turn_item = turn_item;
+-                        let stream_item_to_client = !defer_streamed_turn_items_for_contributors;
++                        let stream_item_to_client = !defer_streamed_turn_items_for_contributors
++                            && !(hold_assistant_completion
++                                && (assistant_response_item(&item) || !held_response.is_empty()));
+                         let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;
+                         let mut seeded_item_id: Option<String> = None;
+                         if stream_item_to_client
+@@ -5793,6 +5853,7 @@ async fn try_run_sampling_request(
+                         settled_tools: SettledDirectTools::default(),
+                         needs_follow_up,
+                         last_agent_message,
++                        held_response: std::mem::take(&mut held_response),
+                     });
+                 }
+                 ResponseEvent::OutputTextDelta(delta) => {
+diff --git a/codex-rs/core/src/state/session.rs b/codex-rs/core/src/state/session.rs
+index d2f64f3551c6dfd87dc28d12a092d7a3122942cb..e5cf1060dee48e3f85202c0e104b2d637fcad88a 100644
+--- a/codex-rs/core/src/state/session.rs
++++ b/codex-rs/core/src/state/session.rs
+@@ -162,7 +162,10 @@ impl SessionState {
+         for envelope in items {
+             self.history
+                 .record_annotated_items(std::slice::from_mut(envelope), policy);
+-            if crate::context_manager::is_api_message(&envelope.item, envelope.metadata.as_ref()) {
++            if crate::context_manager::is_sdk_original_item(
++                &envelope.item,
++                envelope.metadata.as_ref(),
++            ) {
+                 self.sdk_originals.append(
+                     serde_json::to_string(&envelope.item).expect("response items serialize"),
+                 );
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 5fd3271f733fa5d8a08adedb6c697d39b0ab0cb8..b6565e8002e141dc4b9fcc302ca21de2b7ed2125 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -275,12 +275,13 @@ pub(crate) enum TurnItemContributorPolicy<'a> {
+     Run(&'a ExtensionData),
+ }
+ 
++#[derive(Debug)]
+ pub(crate) struct FinalizedTurnItem {
+     pub(crate) turn_item: TurnItem,
+     pub(crate) facts: FinalizedTurnItemFacts,
+ }
+ 
+-#[derive(Clone, Default)]
++#[derive(Clone, Debug, Default)]
+ pub(crate) struct FinalizedTurnItemFacts {
+     pub(crate) memory_citation: Option<MemoryCitation>,
+     pub(crate) last_agent_message: Option<String>,
+@@ -381,15 +382,62 @@ fn observe_hosted_shell_pair(store: &ExtensionData, item: &ResponseItem, passive
+     })
+ }
+ 
++#[derive(Debug)]
++pub(crate) struct HeldResponseItem {
++    item: ResponseItem,
++    finalized: Option<FinalizedTurnItem>,
++}
++
++async fn publish_passive_response_item(
++    sess: &Session,
++    step: &StepContext,
++    item: &ResponseItem,
++    finalized: Option<FinalizedTurnItem>,
++    started: bool,
++) {
++    let facts = finalized.as_ref().map(|item| item.facts.clone());
++    if let Some(finalized) = finalized {
++        if !started {
++            sess.emit_turn_item_started(&step.turn, &finalized.turn_item)
++                .await;
++        }
++        sess.emit_turn_item_completed(&step.turn, finalized.turn_item)
++            .await;
++    }
++    record_completed_response_item_with_finalized_facts(
++        sess, step, item, facts.as_ref(), /*metadata*/ None,
++    )
++    .await;
++}
++
++pub(crate) async fn publish_held_response_items(
++    sess: &Session,
++    step: &StepContext,
++    held: Vec<HeldResponseItem>,
++) -> Result<()> {
++    if held.is_empty() {
++        return Ok(());
++    }
++    for HeldResponseItem { item, mut finalized } in held {
++        // The stream already deferred mailbox input when it observed the message.
++        // Repeating the operation after a follow-up has admitted mail would move it again.
++        if let Some(finalized) = finalized.as_mut() {
++            finalized.facts.defers_mailbox_delivery_to_next_turn = false;
++        }
++        publish_passive_response_item(sess, step, &item, finalized, /*started*/ false).await;
++    }
++    sess.ensure_rollout_durable().await
++}
++
+ #[instrument(level = "trace", skip_all)]
+ pub(crate) async fn handle_output_item_done(
+     ctx: &mut HandleOutputCtx,
+     item: ResponseItem,
+     previously_active_item: Option<TurnItem>,
+     provider_agent_metadata: Option<serde_json::Value>,
++    mut held_response: Option<&mut Vec<HeldResponseItem>>,
+ ) -> Result<OutputItemResult> {
+     let mut output = OutputItemResult::default();
+-    let plan_mode = ctx.step_context.turn.mode() == ModeKind::Plan;
+     ctx.tool_runtime.observe_requested_item(&item);
+ 
+     if matches!(item, ResponseItem::McpApprovalResponse { .. }) {
+@@ -429,6 +477,13 @@ pub(crate) async fn handle_output_item_done(
+     if routed.is_err() && hosted_receipt {
+         routed = Ok(None);
+     }
++    // Application calls and their model-facing errors require a continuation.
++    // Settle the preceding passive items before recording or dispatching the call.
++    if matches!(routed, Ok(Some(_)) | Err(FunctionCallError::RespondToModel(_)))
++        && let Some(held) = held_response.as_mut()
++    {
++        publish_held_response_items(&ctx.sess, &ctx.step_context, std::mem::take(*held)).await?;
++    }
+     match routed {
+         // The model emitted a tool call; log it, persist the item immediately, and queue the tool execution.
+         Ok(Some(call)) => {
+@@ -500,40 +555,38 @@ pub(crate) async fn handle_output_item_done(
+                 .services
+                 .executed_tool_calls
+                 .observe_non_dispatched_call(&item);
+-            let finalized_turn_item = finalize_non_tool_response_item(
+-                ctx.sess.as_ref(),
+-                TurnItemContributorPolicy::Run(ctx.turn_store.as_ref()),
++            let finalized = finalize_non_tool_response_item(
++                &ctx.sess,
++                TurnItemContributorPolicy::Run(&ctx.turn_store),
+                 &item,
+-                plan_mode,
++                ctx.step_context.turn.mode() == ModeKind::Plan,
+             )
+             .await;
+-            let finalized_facts = finalized_turn_item
++            output.last_agent_message = finalized
+                 .as_ref()
+-                .map(|finalized| finalized.facts.clone());
+-            if let Some(finalized_turn_item) = finalized_turn_item {
+-                if previously_active_item.is_none() {
++                .and_then(|item| item.facts.last_agent_message.clone());
++            if let Some(held) = held_response {
++                if finalized.as_ref().is_some_and(|item| {
++                    item.facts.defers_mailbox_delivery_to_next_turn
++                }) {
+                     ctx.sess
+-                        .emit_turn_item_started(
+-                            &ctx.step_context.turn,
+-                            &finalized_turn_item.turn_item,
++                        .input_queue
++                        .defer_mailbox_delivery_to_next_turn(
++                            &ctx.sess.active_turn, &ctx.step_context.turn.sub_id,
+                         )
+                         .await;
+                 }
+-
+-                ctx.sess
+-                    .emit_turn_item_completed(&ctx.step_context.turn, finalized_turn_item.turn_item)
+-                    .await;
++                held.push(HeldResponseItem { item, finalized });
++            } else {
++                publish_passive_response_item(
++                    &ctx.sess,
++                    &ctx.step_context,
++                    &item,
++                    finalized,
++                    previously_active_item.is_some(),
++                )
++                .await;
+             }
+-            record_completed_response_item_with_finalized_facts(
+-                ctx.sess.as_ref(),
+-                ctx.step_context.as_ref(),
+-                &item,
+-                finalized_facts.as_ref(),
+-                /*metadata*/ None,
+-            )
+-            .await;
+-
+-            output.last_agent_message = finalized_facts.and_then(|facts| facts.last_agent_message);
+         }
+         // The tool request should be answered directly (or was denied); push that response into the transcript.
+         Err(FunctionCallError::RespondToModel(message)) => {
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+index bc29ba4ed833d0d43f322e7302cf2951f621e0e3..41adb27633980da83d51d0e10f757bf2e4da07da 100644
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -323,7 +323,7 @@ async fn handle_output_item_done_returns_contributed_last_agent_message() {
+     let mut ctx = output_context(Arc::new(session), Arc::new(turn_context));
+     let item = assistant_output_text("original assistant text");
+ 
+-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, None)
++    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, None, /*held_response*/ None)
+         .await
+         .expect("assistant message should complete");
+ 
+@@ -356,7 +356,7 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+             "arguments": arguments.to_string(),
+         }))
+         .expect("direct input");
+-        let result = handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, None)
++        let result = handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, None, /*held_response*/ None)
+             .await
+             .expect("direct call should be handled");
+         assert!(result.needs_follow_up);
+@@ -415,7 +415,7 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+         }))
+         .expect("direct input");
+         pending.push(
+-            handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, None)
++            handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, None, /*held_response*/ None)
+                 .await
+                 .expect("direct call should be handled")
+                 .tool_future
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index fa72a79ab7a2bb8b66eaad342223017c1771a7b8..2f029bae1dbd6aba18472dcb51a7aaa420fbec60 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -85,6 +85,7 @@ pub use turn_lifecycle::ToolBatchCompletionResult;
+ pub use turn_lifecycle::ToolCompletionDecision;
+ pub use turn_lifecycle::ToolCompletionInput;
+ pub use turn_lifecycle::TurnAbortInput;
++pub use turn_lifecycle::TurnCompletionDecision;
+ pub use turn_lifecycle::TurnCompletionInput;
+ pub use turn_lifecycle::TurnErrorInput;
+ pub use turn_lifecycle::TurnStartInput;
+@@ -279,13 +280,22 @@ pub trait TurnLifecycleContributor: Send + Sync {
+         Box::pin(std::future::ready(Ok(None)))
+     }
+ 
+-    /// Accept natural completion, or return feedback to continue the same turn.
++    /// Hold a candidate assistant response until the captured completion callback settles.
++    fn hold_assistant_completion(
++        &self,
++        _thread_store: &ExtensionData,
++        _step_store: &ExtensionData,
++    ) -> bool {
++        false
++    }
++
++    /// Accept or withhold natural completion, or supply feedback to continue the turn.
+     /// Errors fail the turn; callback results never authorize tools or permissions.
+     fn before_turn_complete<'a>(
+         &'a self,
+         _input: TurnCompletionInput<'a>,
+-    ) -> ExtensionFuture<'a, Result<Option<String>, String>> {
+-        Box::pin(std::future::ready(Ok(None)))
++    ) -> ExtensionFuture<'a, Result<TurnCompletionDecision, String>> {
++        Box::pin(std::future::ready(Ok(TurnCompletionDecision::Accept)))
+     }
+ 
+     /// Selects the start phase using the current thread policy. Disabled callbacks
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index ed153b3b6bccb9309068cbe7dff2cc797bb7e0b5..23cfe80a08a519c70dfe5c4dfa886ce37ab1597c 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -89,6 +89,13 @@ pub struct TurnCompletionInput<'a> {
+     pub turn_store: &'a ExtensionData,
+ }
+ 
++/// Resolve the assistant message retained by the natural completion boundary.
++pub enum TurnCompletionDecision {
++    Accept,
++    Continue(String),
++    Withhold,
++}
++
+ /// Input supplied when the host completes a turn.
+ pub struct TurnStopInput<'a> {
+     /// Store scoped to the host session runtime.
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index d0a9f1a82bce762f420d09b12eb627ca6e948bb2..89bc10e1f473d4c2fd149232bcbfff8352234cf6 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -121,6 +121,7 @@ pub use contributors::ToolStartInput;
+ pub use contributors::ToolTimingBoundary;
+ pub use contributors::ToolTimingInput;
+ pub use contributors::TurnAbortInput;
++pub use contributors::TurnCompletionDecision;
+ pub use contributors::TurnCompletionInput;
+ pub use contributors::TurnContextContributionInput;
+ pub use contributors::TurnErrorInput;
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index 160649831f88f0c22d48fbdf6269b5bafa27138d..b4cb836e2f464cdfcb8b46631fedd8c639fb99d9 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -674,6 +674,15 @@ impl SdkOriginalHistory {
+         &self,
+         current: &[ResponseItemEnvelope],
+         allow_rebuild: bool,
++    ) -> Result<Option<SdkOriginalHistoryPop>, &'static str> {
++        self.prepare_pop_preserving(current, allow_rebuild, |_| false)
++    }
++
++    pub fn prepare_pop_preserving(
++        &self,
++        current: &[ResponseItemEnvelope],
++        allow_rebuild: bool,
++        model_only: impl Fn(&ResponseItemEnvelope) -> bool,
+     ) -> Result<Option<SdkOriginalHistoryPop>, &'static str> {
+         let Some(last) = self.items.last() else {
+             return Ok(None);
+@@ -687,8 +696,10 @@ impl SdkOriginalHistory {
+         }
+         let (projection, rebuilt_context) = if last.projection.is_none() {
+             (current.to_vec(), false)
++        } else if keep == 0 {
++            (current.iter().filter(|row| model_only(row)).cloned().collect(), false)
+         } else {
+-            match self.retained_projection_excluding(current, keep, partner) {
++            match self.retained_projection_excluding(current, keep, partner, model_only) {
+                 Ok(projection) => (projection, false),
+                 Err(error) => {
+                     if let Some(projection) =
+@@ -835,7 +846,16 @@ impl SdkOriginalHistory {
+         current: &[ResponseItemEnvelope],
+         keep: usize,
+     ) -> Result<Vec<ResponseItemEnvelope>, &'static str> {
+-        self.retained_projection_excluding(current, keep, None)
++        self.retained_projection_preserving(current, keep, |_| false)
++    }
++
++    pub fn retained_projection_preserving(
++        &self,
++        current: &[ResponseItemEnvelope],
++        keep: usize,
++        model_only: impl Fn(&ResponseItemEnvelope) -> bool,
++    ) -> Result<Vec<ResponseItemEnvelope>, &'static str> {
++        self.retained_projection_excluding(current, keep, None, model_only)
+     }
+ 
+     fn retained_projection_excluding(
+@@ -843,6 +863,7 @@ impl SdkOriginalHistory {
+         current: &[ResponseItemEnvelope],
+         keep: usize,
+         exclude: Option<usize>,
++        model_only: impl Fn(&ResponseItemEnvelope) -> bool,
+     ) -> Result<Vec<ResponseItemEnvelope>, &'static str> {
+         if keep > self.items.len() {
+             return Err("history keep exceeds snapshot length");
+@@ -872,27 +893,36 @@ impl SdkOriginalHistory {
+             stored_metadata == current_metadata
+         };
+         let unavailable = "cannot shorten original history across model compaction; use keep=0 to replace it explicitly";
++        let model_only: Vec<_> = current.iter().map(model_only).collect();
+         let mut earliest = Vec::with_capacity(current.len());
+         let mut originals = self.items.iter().enumerate();
+-        for row in current {
+-            let Some((index, _)) = originals.find(|(_, item)| matches(item, row)) else {
+-                return Err(unavailable);
+-            };
+-            earliest.push(index);
++        for (row, model_only) in current.iter().zip(&model_only) {
++            if *model_only {
++                earliest.push(None);
++            } else {
++                let (index, _) = originals.find(|(_, item)| matches(item, row)).ok_or(unavailable)?;
++                earliest.push(Some(index));
++            }
+         }
+         // The reverse match detects repeated equal items whose position relative to
+         // keep is ambiguous after model truncation. Neither pass reconstructs content.
+         let mut originals = self.items.iter().enumerate().rev();
+         let mut latest = Vec::with_capacity(current.len());
+-        for row in current.iter().rev() {
+-            let Some((index, _)) = originals.find(|(_, item)| matches(item, row)) else {
+-                return Err(unavailable);
+-            };
+-            latest.push(index);
++        for (row, model_only) in current.iter().zip(&model_only).rev() {
++            if *model_only {
++                latest.push(None);
++            } else {
++                let (index, _) = originals.find(|(_, item)| matches(item, row)).ok_or(unavailable)?;
++                latest.push(Some(index));
++            }
+         }
+         latest.reverse();
+         let mut retained = Vec::new();
+         for ((row, first), last) in current.iter().zip(earliest).zip(latest) {
++            let (Some(first), Some(last)) = (first, last) else {
++                retained.push(row.clone());
++                continue;
++            };
+             let ambiguous_exclusion = exclude.is_some_and(|index| {
+                 first != last && (first..=last).contains(&index) && matches(&self.items[index], row)
+             });
+@@ -913,6 +943,15 @@ impl SdkOriginalHistory {
+         records: &[crate::RolloutItem],
+         project: impl Fn(&ResponseItemEnvelope) -> Option<ResponseItemEnvelope>,
+         rewind: impl Fn(&[ResponseItemEnvelope], u32) -> Vec<ResponseItemEnvelope>,
++    ) -> Self {
++        Self::replay_with_original_filter(records, project, |_| true, rewind)
++    }
++
++    pub fn replay_with_original_filter(
++        records: &[crate::RolloutItem],
++        project: impl Fn(&ResponseItemEnvelope) -> Option<ResponseItemEnvelope>,
++        is_original: impl Fn(&ResponseItemEnvelope) -> bool,
++        rewind: impl Fn(&[ResponseItemEnvelope], u32) -> Vec<ResponseItemEnvelope>,
+     ) -> Self {
+         let mut history = Self::default();
+         let mut previous_window: Option<Vec<ResponseItemEnvelope>> = None;
+@@ -923,11 +962,13 @@ impl SdkOriginalHistory {
+                         if let Some(window) = &mut previous_window {
+                             window.push(projection.clone());
+                         }
+-                        history.append(SdkOriginalItem {
+-                            original: serde_json::to_string(&envelope.item)
+-                                .expect("response items serialize"),
+-                            projection: Some(projection),
+-                        });
++                        if is_original(envelope) {
++                            history.append(SdkOriginalItem {
++                                original: serde_json::to_string(&envelope.item)
++                                    .expect("response items serialize"),
++                                projection: Some(projection),
++                            });
++                        }
+                     }
+                     if envelope
+                         .metadata
+@@ -961,7 +1002,9 @@ impl SdkOriginalHistory {
+                         // Never resurrect values removed by an older canonical transaction.
+                         history = Self::default();
+                         for envelope in items {
+-                            if let Some(projection) = project(envelope) {
++                            if is_original(envelope)
++                                && let Some(projection) = project(envelope)
++                            {
+                                 history.append(SdkOriginalItem {
+                                     original: serde_json::to_string(&envelope.item)
+                                         .expect("response items serialize"),
+@@ -1932,4 +1975,123 @@ mod historical_mcp_presentation_tests {
+         );
+         assert!(input_projection(&decision(true).to_string()).is_err());
+     }
++
++    #[test]
++    fn raw_edits_keep_model_only_rows_without_admitting_them_as_originals() {
++        let row = |id: &str, role: &str| {
++            ResponseItemEnvelope::new(
++                serde_json::from_value(json!({
++                    "type":"message", "id":id, "role":role,
++                    "content":[{"type":"input_text", "text":id}]
++                }))
++                .unwrap(),
++            )
++        };
++        let configuration = row("config", "developer");
++        let user = row("user", "user");
++        let assistant = row("assistant", "assistant");
++        let model_only = |row: &ResponseItemEnvelope| row == &configuration;
++        let mut history = SdkOriginalHistory::default();
++        for item in [&user, &assistant] {
++            history.append(SdkOriginalItem::from_native(item.clone()));
++        }
++        let current = vec![configuration.clone(), user.clone(), assistant];
++        let pop = history.prepare_pop_preserving(&current, false, model_only).unwrap().unwrap();
++        assert_eq!(pop.projection, vec![configuration.clone(), user]);
++        assert!(!pop.rebuilt_context);
++        let final_pop = pop.originals.prepare_pop_preserving(&pop.projection, false, model_only)
++            .unwrap().unwrap();
++        assert_eq!(final_pop.projection, vec![configuration]);
++        assert!(!final_pop.rebuilt_context);
++    }
++
++    #[test]
++    fn filtered_publications_keep_the_cold_pop_window_proof() {
++        let envelope = |id: &str, role: &str| {
++            ResponseItemEnvelope::new(
++                serde_json::from_value(json!({
++                    "type":"message", "id":id, "role":role,
++                    "content":[{"type":"input_text", "text":id}]
++                }))
++                .unwrap(),
++            )
++        };
++        let summary = envelope("summary", "user");
++        let before_config = envelope("before-configuration", "developer");
++        let after_config = envelope("after-configuration", "developer");
++        let late_user = envelope("late-user", "user");
++        let answer = envelope("late-answer", "assistant");
++        let replay = |records: &[crate::RolloutItem]| {
++            SdkOriginalHistory::replay_with_original_filter(
++                records,
++                |row| Some(row.clone()),
++                |row| !matches!(&row.item, ResponseItem::Message { role, .. } if role == "developer"),
++                |items, _| items.to_vec(),
++            )
++        };
++        for legacy in [false, true] {
++            let mut checkpoint: crate::RolloutItem = serde_json::from_value(json!({
++                "type":"compacted", "payload":{"message":"summary"}
++            }))
++            .unwrap();
++            let crate::RolloutItem::Compacted(payload) = &mut checkpoint else {
++                panic!("checkpoint")
++            };
++            if !legacy {
++                payload.sdk_originals =
++                    Some(SdkOriginalHistoryCheckpoint::Preserve { preserve: true });
++            }
++            payload.replacement_history = Some(vec![summary.clone(), before_config.clone()]);
++            let mut records = vec![
++                crate::RolloutItem::ResponseItem(envelope("covered-user", "user")),
++                checkpoint.clone(),
++                crate::RolloutItem::ResponseItem(after_config.clone()),
++                crate::RolloutItem::ResponseItem(late_user.clone()),
++                crate::RolloutItem::ResponseItem(answer.clone()),
++            ];
++            let history = replay(&records);
++            assert_eq!(history.items.len(), 3);
++            assert!(
++                history
++                    .items
++                    .iter()
++                    .all(|row| { !row.original.contains("configuration") })
++            );
++            let current = vec![
++                summary.clone(),
++                before_config.clone(),
++                after_config.clone(),
++                late_user.clone(),
++                answer.clone(),
++            ];
++            let first = history.prepare_pop(&current, false).unwrap().unwrap();
++            let crate::RolloutItem::Compacted(payload) = &mut checkpoint else {
++                panic!("checkpoint")
++            };
++            payload.sdk_originals = Some(first.originals.into());
++            payload.replacement_history = Some(first.projection.clone());
++            records.push(checkpoint.clone());
++            let cold = replay(
++                &serde_json::from_slice::<Vec<crate::RolloutItem>>(
++                    &serde_json::to_vec(&records).unwrap(),
++                )
++                .unwrap(),
++            );
++            assert_eq!(cold.post_checkpoint_start, Some(1));
++            let second = cold.prepare_pop(&first.projection, false).unwrap().unwrap();
++            assert!(!second.rebuilt_context);
++            assert_eq!(
++                second.projection,
++                vec![summary.clone(), before_config.clone(), after_config.clone()]
++            );
++            records.push(crate::RolloutItem::EventMsg(
++                codex_protocol::protocol::EventMsg::ThreadRolledBack(
++                    codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 0 },
++                ),
++            ));
++            let rolled_back = replay(&records);
++            assert_eq!(rolled_back.post_checkpoint_start, None);
++            assert!(rolled_back.prepare_pop(&first.projection, false).is_err());
++        }
++    }
+ }
