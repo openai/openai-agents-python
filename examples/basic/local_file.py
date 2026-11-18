@@ -1,33 +1,37 @@
 import asyncio
 import base64
-import os
+from pathlib import Path
 
 from agents import Agent, Runner
 
-FILEPATH = os.path.join(os.path.dirname(__file__), "media/partial_o3-and-o4-mini-system-card.pdf")
+FILEPATH = Path(__file__).parent / "media/partial_o3-and-o4-mini-system-card.pdf"
+
+try:
+    from examples.basic import _media
+except ModuleNotFoundError as exc:  # Direct execution outside the repo root.
+    if exc.name != "examples":
+        raise
+    import _media
 
 
-def file_to_base64(file_path: str) -> str:
-    with open(file_path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
-
-
-async def main():
+async def main(*, codex: bool = False):
     agent = Agent(
         name="Assistant",
         instructions="You are a helpful assistant.",
     )
 
-    b64_file = file_to_base64(FILEPATH)
+    pdf = FILEPATH.read_bytes()
     result = await Runner.run(
         agent,
         [
             {
                 "role": "user",
                 "content": [
-                    {
+                    {"type": "input_text", "text": _media.pdf_text(pdf)}
+                    if codex
+                    else {
                         "type": "input_file",
-                        "file_data": f"data:application/pdf;base64,{b64_file}",
+                        "file_data": f"data:application/pdf;base64,{base64.b64encode(pdf).decode('ascii')}",
                         "filename": "partial_o3-and-o4-mini-system-card.pdf",
                     }
                 ],
@@ -37,9 +41,11 @@ async def main():
                 "content": "What is the first sentence of the introduction?",
             },
         ],
+        run_config=_media.codex_config() if codex else None,
     )
     print(result.final_output)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    args = _media.arguments()
+    asyncio.run(main(codex=args.codex))
