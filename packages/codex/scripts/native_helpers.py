@@ -1,5 +1,6 @@
 """Select the native executables required by the target platform."""
 
+import shutil
 from pathlib import Path
 
 
@@ -23,3 +24,10 @@ def remove_obsolete_helpers(directory: Path, platform: str) -> None:
         filename = name + suffix
         if filename not in required:
             (directory / filename).unlink(missing_ok=True)
+
+
+def stage_helpers(binaries: Path, destination: Path, platform: str) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    remove_obsolete_helpers(destination, platform)
+    for name, source in native_helpers(platform).items():
+        shutil.copy2(binaries / source, destination / name)
