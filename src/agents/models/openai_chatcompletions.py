@@ -43,6 +43,7 @@ from ._trace import model_config_for_trace, populate_generation_span, record_gen
 from .chatcmpl_converter import Converter
 from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
+from .default_models import _omit_model_defaults
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
 from .openai_responses import Converter as OpenAIResponsesConverter
@@ -79,6 +80,26 @@ class OpenAIChatCompletionsModel(Model):
 
     def _supports_default_prompt_cache_key(self) -> bool:
         return ChatCmplHelpers.is_openai(self._get_client())
+
+    def _tools_require_non_reasoning_mode(self, has_tools: bool) -> bool:
+        return has_tools and self.model in {"gpt-6-sol", "gpt-6-luna"}
+
+    def _get_request_settings(
+        self,
+        settings: ModelSettings,
+        *,
+        prompt: ResponsePromptParam | None,
+        has_tools: bool,
+        implicit_fields: set[str],
+    ) -> ModelSettings:
+        extra_args = settings.extra_args or {}
+        return _omit_model_defaults(
+            settings,
+            implicit_fields,
+            reasoning=self._tools_require_non_reasoning_mode(has_tools)
+            or "reasoning_effort" in extra_args,
+            verbosity="verbosity" in extra_args,
+        )
 
     def _handle_unsupported_prompt(self, prompt: ResponsePromptParam | None) -> None:
         if prompt is None:
@@ -685,8 +706,7 @@ class OpenAIChatCompletionsModel(Model):
         # Keep Responses defaults and caller-provided effort overrides unchanged.
         if (
             reasoning_effort is None
-            and self.model in {"gpt-6-sol", "gpt-6-luna"}
-            and converted_tools
+            and self._tools_require_non_reasoning_mode(bool(converted_tools))
             and "reasoning_effort" not in (model_settings.extra_args or {})
         ):
             reasoning_effort = "none"

@@ -1,6 +1,6 @@
 [project]
 name = "openai-agents"
-version = "0.24.0"
+version = "0.25.0"
 description = "OpenAI Agents SDK"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ dependencies = [
     "griffelib>=2, <3",
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
-    "websockets>=15.0, <17",
+    "websockets>=15.0, <18",
     # GHSA-rwrf-2pqf-9j8j: retain patched MCP 1.x and 2.x releases.
     "mcp>=1.30.0, <3, !=2.0.*, !=2.1.*; python_version >= '3.10'",
     # Security floors for transitive runtime dependencies.
@@ -43,14 +43,14 @@ Repository = "https://github.com/openai/openai-agents-python"
 
 [project.optional-dependencies]
 # Protobuf exclusions retain patched 5.x and 6.x releases (GHSA-7gcm-g887-7qv7).
-voice = ["numpy>=2.2.0, <3; python_version>='3.10'", "websockets>=15.0, <17"]
+voice = ["numpy>=2.2.0, <3; python_version>='3.10'", "websockets>=15.0, <18"]
 viz = ["graphviz>=0.17"]
 litellm = ["litellm>=1.83.0", "aiohttp>=3.14.3,<4", "filelock>=3.20.3"]
 any-llm = [
     "any-llm-sdk>=1.11.0, <2; python_version >= '3.11'",
     "pygments>=2.20.0; python_version >= '3.11'",
 ]
-realtime = ["websockets>=15.0, <17"]
+realtime = ["websockets>=15.0, <18"]
 sqlalchemy = ["SQLAlchemy[asyncio]>=2.0", "asyncpg>=0.29.0"]
 encrypt = ["cryptography>=45.0,<51"]
 redis = ["redis>=7"]
@@ -64,7 +64,7 @@ mongodb = ["pymongo>=4.18.3"]
 docker = ["docker>=6.1"]
 blaxel = ["blaxel>=0.2.50", "aiohttp>=3.14.3,<4"]
 daytona = [
-    "daytona>=0.226.1",
+    "daytona>=0.226.1,<1",
     "aiohttp>=3.14.3,<4",
     "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
 ]
@@ -101,7 +101,7 @@ dev = [
   "pytest-asyncio",
   "pytest-mock>=3.14.0",
   "pytest-xdist",
-  "rich>=13.1.0, <15",
+  "rich>=13.1.0,<16",
   "mkdocs>=1.6.0",
   "mkdocs-material>=9.7.7",
   "pymdown-extensions>=11.0.1",

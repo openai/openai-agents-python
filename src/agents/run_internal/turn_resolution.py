@@ -359,6 +359,7 @@ async def run_final_output_hooks(
         context=context_wrapper.context,
         usage=context_wrapper.usage,
         turn_input=context_wrapper.turn_input,
+        tool_input=context_wrapper.tool_input,
     )
     context_wrapper._share_tool_state_with(agent_hook_context)
 

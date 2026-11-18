@@ -103,6 +103,7 @@ from ._retry_runtime import (
     should_disable_provider_managed_retries,
     should_disable_websocket_pre_event_retries,
 )
+from .default_models import _omit_model_defaults
 from .fake_id import is_local_response_item_id
 from .interface import Model, ModelTracing
 from .openai_client_utils import is_official_openai_base_url, is_official_openai_client
@@ -536,6 +537,26 @@ class OpenAIResponsesModel(Model):
     def _supports_default_prompt_cache_key(self) -> bool:
         return is_official_openai_client(self._get_client())
 
+    def _prompt_owns_model(self, prompt: ResponsePromptParam | None) -> bool:
+        return prompt is not None and not self._model_is_explicit
+
+    def _get_request_settings(
+        self,
+        settings: ModelSettings,
+        *,
+        prompt: ResponsePromptParam | None,
+        has_tools: bool,
+        implicit_fields: set[str],
+    ) -> ModelSettings:
+        extra_args = settings.extra_args or {}
+        prompt_owns_model = self._prompt_owns_model(prompt)
+        return _omit_model_defaults(
+            settings,
+            implicit_fields,
+            reasoning=prompt_owns_model or "reasoning" in extra_args,
+            verbosity=prompt_owns_model or "text" in extra_args,
+        )
+
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
 
@@ -653,6 +674,8 @@ class OpenAIResponsesModel(Model):
                 )
                 raise
             except Exception as e:
+                if isinstance(e, ModelBehaviorError) and e._terminal_usage is not None:
+                    span_response.span_data.usage = model_usage_to_span_usage(e._terminal_usage)
                 span_response.set_error(
                     SpanError(
                         message="Error getting response",
@@ -755,6 +778,10 @@ class OpenAIResponsesModel(Model):
                                 if isinstance(terminal_response, Response)
                                 else None,
                             )
+                            if terminal_failure_error._terminal_usage is not None:
+                                span_response.span_data.usage = model_usage_to_span_usage(
+                                    terminal_failure_error._terminal_usage
+                                )
                         elif chunk_type in {"error", "response.error"}:
                             terminal_failure_error = response_error_event_failure_error(
                                 cast(str, chunk_type),
@@ -938,7 +965,7 @@ class OpenAIResponsesModel(Model):
         list_input = _to_dump_compatible(list_input)
         list_input = self._remove_openai_responses_api_incompatible_fields(list_input)
 
-        should_omit_model = prompt is not None and not self._model_is_explicit
+        should_omit_model = self._prompt_owns_model(prompt)
         effective_request_model: str | ChatModel | None = None if should_omit_model else self.model
         effective_computer_tool_model = Converter.resolve_computer_tool_model(
             request_model=effective_request_model,

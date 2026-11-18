@@ -157,6 +157,7 @@ from .model_retry import (
     _StreamAttemptSkipped,
     apply_retry_attempt_usage,
     get_response_with_retry,
+    record_failed_attempt_usage_on_error,
     stream_response_with_retry,
 )
 from .oai_conversation import OpenAIServerConversationTracker
@@ -405,7 +406,7 @@ def _publish_resumed_stream_turn(
     streamed_result.input = turn_result.original_input
     streamed_result._original_input = copy_input_items(turn_result.original_input)
     streamed_result.new_items = session_items
-    streamed_result._model_input_items = generated_items
+    streamed_result._model_input_items = list(generated_items)
     if turn_result.nested_history_owned_items is not None:
         owned_refs = reconcile_nested_history_owned_session_item_refs(
             streamed_result.new_items,
@@ -2480,6 +2481,7 @@ async def run_single_turn_streamed(
                 context=context_wrapper.context,
                 usage=context_wrapper.usage,
                 turn_input=turn_input,
+                tool_input=context_wrapper.tool_input,
             )
             context_wrapper._share_tool_state_with(agent_hook_context)
             await gather_with_cancel(
@@ -2523,7 +2525,12 @@ async def run_single_turn_streamed(
         server_conversation_tracker.validate_model(model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
-        public_agent, run_config, model, prepared_overrides=bindings.model_settings_overrides
+        public_agent,
+        run_config,
+        model,
+        prepared_overrides=bindings.model_settings_overrides,
+        prompt=prompt_config,
+        has_tools=bool(all_tools or handoffs),
     )
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
@@ -2688,10 +2695,13 @@ async def run_single_turn_streamed(
             elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
                 event_type = cast(str, event.type)
                 maybe_response = getattr(event, "response", None)
-                raise response_terminal_failure_error(
+                terminal_error = response_terminal_failure_error(
                     event_type,
                     maybe_response if isinstance(maybe_response, Response) else None,
                 )
+                if terminal_error._terminal_usage is not None:
+                    context_wrapper.usage.add(terminal_error._terminal_usage)
+                raise terminal_error
             elif getattr(event, "type", None) in {"error", "response.error"}:
                 raise response_error_event_failure_error(cast(str, event.type), event)
 
@@ -2862,6 +2872,7 @@ async def run_single_turn(
                 context=context_wrapper.context,
                 usage=context_wrapper.usage,
                 turn_input=turn_input,
+                tool_input=context_wrapper.tool_input,
             )
             context_wrapper._share_tool_state_with(agent_hook_context)
             await gather_with_cancel(
@@ -3000,7 +3011,12 @@ async def get_new_response(
         server_conversation_tracker.validate_model(model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
-        public_agent, run_config, model, prepared_overrides=bindings.model_settings_overrides
+        public_agent,
+        run_config,
+        model,
+        prepared_overrides=bindings.model_settings_overrides,
+        prompt=prompt_config,
+        has_tools=bool(all_tools or handoffs),
     )
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
@@ -3065,7 +3081,10 @@ async def get_new_response(
     compaction_input_digests = prepare_compaction_model_input(
         session, context_wrapper, filtered.input
     )
-    with model_run_context(tool_use_tracker):
+    with (
+        model_run_context(tool_use_tracker),
+        record_failed_attempt_usage_on_error(context_wrapper.usage) as reported_usage,
+    ):
         new_response = await get_response_with_retry(
             get_response=lambda: model.get_response(
                 system_instructions=filtered.instructions,
@@ -3083,6 +3102,7 @@ async def get_new_response(
             ),
             rewind=rewind_model_request,
             retry_settings=model_settings.retry,
+            reported_usage=reported_usage,
             get_retry_advice=model.get_retry_advice,
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,

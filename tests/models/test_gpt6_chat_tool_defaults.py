@@ -8,7 +8,7 @@ import pytest
 from openai import AsyncOpenAI
 from openai.types.shared import Reasoning
 
-from agents import Agent, ModelSettings, OpenAIChatCompletionsModel, RunConfig, Runner
+from agents import Agent, Model, ModelSettings, OpenAIChatCompletionsModel, RunConfig, Runner
 from agents.decorators import tool
 from agents.models.openai_provider import OpenAIProvider
 
@@ -17,6 +17,25 @@ from agents.models.openai_provider import OpenAIProvider
 def weather(city: str) -> str:
     """Get weather for a city."""
     return "sunny"
+
+
+def _chat_completion(model: str) -> httpx2.Response:
+    return httpx2.Response(
+        200,
+        json={
+            "id": "chatcmpl_test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "sunny"},
+                }
+            ],
+        },
+    )
 
 
 @pytest.mark.allow_call_model_methods
@@ -120,22 +139,7 @@ async def test_gpt6_tool_request_defaults(
                 text="".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
                 + "data: [DONE]\n\n",
             )
-        return httpx2.Response(
-            200,
-            json={
-                "id": "chatcmpl_test",
-                "object": "chat.completion",
-                "created": 0,
-                "model": name,
-                "choices": [
-                    {
-                        "index": 0,
-                        "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": "sunny"},
-                    }
-                ],
-            },
-        )
+        return _chat_completion(name)
 
     async with AsyncOpenAI(
         api_key="test-key",
@@ -176,3 +180,56 @@ async def test_gpt6_tool_request_defaults(
         assert body["reasoning_effort"] == expected
     assert bool(body.get("tools")) == (tools != "none")
     assert settings.to_json_dict() == before
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("with_tool", "override", "expected_effort", "expected_verbosity"),
+    [
+        pytest.param(True, None, "none", "low", id="tool-default"),
+        pytest.param(False, None, "low", "low", id="no-tools"),
+        pytest.param(
+            True, ModelSettings(reasoning=Reasoning(effort="low")), "low", "low", id="explicit-low"
+        ),
+        pytest.param(
+            True,
+            ModelSettings(extra_args={"reasoning_effort": "high", "verbosity": "medium"}),
+            "high",
+            "medium",
+            id="extra-args",
+        ),
+    ],
+)
+async def test_routed_chat_tool_defaults(
+    with_tool: bool, override: ModelSettings | None, expected_effort: str, expected_verbosity: str
+) -> None:
+    class RoutedProvider(OpenAIProvider):
+        def get_model(self, model_name: str | None) -> Model:
+            assert model_name == "gpt-6-astra"
+            return super().get_model("gpt-6-sol")
+
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/v1/chat/completions"
+        bodies.append(json.loads(request.content))
+        return _chat_completion("gpt-6-sol")
+
+    agent = Agent(name="Weather", model="gpt-6-astra", tools=[weather] if with_tool else [])
+    async with AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://example.invalid/v1",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+    ) as client:
+        provider = RoutedProvider(openai_client=client, use_responses=False)
+        config = RunConfig(model_provider=provider, model_settings=override, tracing_disabled=True)
+        await Runner.run(agent, "Weather?", run_config=config)
+
+    (body,) = bodies
+    assert body["model"] == "gpt-6-sol"
+    assert [t["function"]["name"] for t in body.get("tools", [])] == (
+        ["weather"] if with_tool else []
+    )
+    assert body["reasoning_effort"] == expected_effort
+    assert body["verbosity"] == expected_verbosity

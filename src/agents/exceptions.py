@@ -26,6 +26,7 @@ if TYPE_CHECKING:
         ToolOutputGuardrail,
         ToolOutputGuardrailResult,
     )
+    from .usage import Usage
 
 from .util._pretty_print import pretty_print_run_error_details
 
@@ -367,6 +368,7 @@ class ModelBehaviorError(AgentsException):
     """
 
     message: str
+    _terminal_usage: Usage | None = None
 
     def __init__(self, message: str):
         self.message = message

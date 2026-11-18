@@ -4559,7 +4559,11 @@ async def test_external_clear_resets_stale_branch_before_default_reads(
                 "input_tokens": 50,
                 "output_tokens": 30,
                 "total_tokens": 80,
-                "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 10},
+                "input_tokens_details": {
+                    "cache_write_tokens_details": None,
+                    "cache_write_tokens": 0,
+                    "cached_tokens": 10,
+                },
                 "output_tokens_details": {"reasoning_tokens": 5},
             }
         else:

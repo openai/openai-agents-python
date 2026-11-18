@@ -7,12 +7,12 @@ from typing import Any, cast
 
 import httpx2
 import pytest
-from openai import APIConnectionError, APIStatusError, BadRequestError
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI, BadRequestError
 from openai.types.responses import ResponseFunctionCallArgumentsDeltaEvent, ResponseTextDeltaEvent
 from pydantic import ValidationError
 
 from agents import Agent, RunConfig, Runner
-from agents.exceptions import ModelTimeoutError
+from agents.exceptions import ModelBehaviorError, ModelTimeoutError
 from agents.items import ModelResponse, TResponseStreamEvent
 from agents.model_settings import ModelSettings
 from agents.models._openai_retry import get_openai_retry_advice
@@ -20,7 +20,7 @@ from agents.models._retry_runtime import (
     should_disable_provider_managed_retries,
     should_disable_websocket_pre_event_retries,
 )
-from agents.models.openai_responses import OpenAIResponsesWSModel
+from agents.models.openai_responses import OpenAIResponsesModel, OpenAIResponsesWSModel
 from agents.retry import (
     ModelRetryAdvice,
     ModelRetryAdviceRequest,
@@ -36,6 +36,7 @@ from agents.retry import (
 from agents.run_internal.model_retry import get_response_with_retry, stream_response_with_retry
 from agents.testing import ModelCall, ModelStep, ScriptedModel
 from agents.usage import Usage
+from tests.model_test_helpers import get_response_obj
 from tests.test_responses import get_text_message
 
 
@@ -579,6 +580,52 @@ class _CloseTrackingStream:
 
     async def close(self) -> None:
         self.close_calls += 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize("retry_completes", [True, False], ids=["completed", "incomplete"])
+async def test_runner_counts_usage_from_retried_incomplete_response(retry_completes: bool) -> None:
+    # A mock transport exercises Responses terminal decoding on each physical attempt.
+    first = get_response_obj([], usage=Usage(input_tokens=12, output_tokens=16, total_tokens=28))
+    first.status = "incomplete"
+    second = get_response_obj(
+        [get_text_message("ok")] if retry_completes else [],
+        usage=Usage(input_tokens=5, output_tokens=2, total_tokens=7),
+    )
+    second.status = "completed" if retry_completes else "incomplete"
+    responses = iter([first, second])
+
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=next(responses).model_dump(mode="json"))
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handle)) as http_client:
+        client = AsyncOpenAI(api_key="test", http_client=http_client)
+        agent = Agent(
+            name="test",
+            model=OpenAIResponsesModel("test-model", openai_client=client),
+            model_settings=ModelSettings(
+                retry=ModelRetrySettings(
+                    max_retries=1,
+                    policy=lambda _: True,
+                    backoff=ModelRetryBackoffSettings(initial_delay=0),
+                )
+            ),
+        )
+        if retry_completes:
+            result = await Runner.run(agent, "hi")
+            assert result.final_output == "ok"
+            usage = result.context_wrapper.usage
+            assert result.raw_responses[0].usage.requests == 2
+        else:
+            with pytest.raises(ModelBehaviorError, match="response.incomplete") as caught:
+                await Runner.run(agent, "hi")
+            assert caught.value.run_data is not None
+            usage = caught.value.run_data.context_wrapper.usage
+
+    assert usage.requests == 2
+    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (17, 18, 35)
+    assert [entry.total_tokens for entry in usage.request_usage_entries] == [28, 7]
 
 
 @pytest.mark.asyncio

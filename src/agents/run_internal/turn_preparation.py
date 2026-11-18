@@ -3,6 +3,8 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+from openai.types.responses.response_prompt_param import ResponsePromptParam
+
 from ..agent import Agent
 from ..agent_output import AgentOutputSchema, AgentOutputSchemaBase
 from ..exceptions import UserError
@@ -167,9 +169,22 @@ def get_model_settings(
     model: Model,
     *,
     prepared_overrides: ModelSettings | None = None,
+    prompt: ResponsePromptParam | None = None,
+    has_tools: bool = False,
 ) -> ModelSettings:
     """Resolve model settings, keeping implicit defaults aligned with the resolved model name."""
-    model_settings = agent.model_settings
+    settings = agent.model_settings
     if agent._uses_implicit_model_settings():
-        model_settings = _model_settings_for_resolved_name(agent, run_config, model)
-    return model_settings.resolve(prepared_overrides).resolve(run_config.model_settings)
+        settings = _model_settings_for_resolved_name(agent, run_config, model)
+
+    implicit_fields = agent._implicit_request_fields()
+    for override in (prepared_overrides, run_config.model_settings):
+        if override is not None:
+            settings = settings.resolve(override)
+            implicit_fields = {name for name in implicit_fields if getattr(override, name) is None}
+    implicit_fields = {name for name in implicit_fields if getattr(settings, name) is not None}
+    if not implicit_fields:
+        return settings
+    return model._get_request_settings(
+        settings, prompt=prompt, has_tools=has_tools, implicit_fields=implicit_fields
+    )

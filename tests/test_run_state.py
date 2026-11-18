@@ -4022,7 +4022,7 @@ class TestSerializationRoundTrip:
 
         assert serialized["$schemaVersion"] == CURRENT_SCHEMA_VERSION
         assert serialized["context"]["usage"]["input_tokens_details"] == [
-            {"cached_tokens": 3, "cache_write_tokens": 7}
+            {"cached_tokens": 3, "cache_write_tokens": 7, "cache_write_tokens_details": None}
         ]
         assert new_state._context is not None
         assert new_state._context.usage.requests == 5

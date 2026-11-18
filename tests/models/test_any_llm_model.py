@@ -392,6 +392,31 @@ async def test_any_llm_runner_normalizes_nullable_usage(
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_routed_any_llm_chat_preserves_explicit_reasoning_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    any_llm = pytest.importorskip("any_llm")
+    # Record the arguments delivered by the real adapter to the provider's Chat Completions API.
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=_chat_completion("Hello"))
+    monkeypatch.setattr(any_llm.AnyLLM, "create", lambda *args, **kwargs: provider)
+
+    result = await Runner.run(
+        Agent(name="test", model="any-llm/openai/gpt-6-astra"),
+        "hi",
+        run_config=RunConfig(
+            model_settings=ModelSettings(extra_args={"reasoning_effort": "high"}),
+            tracing_disabled=True,
+        ),
+    )
+
+    assert result.final_output == "Hello"
+    (call,) = provider.chat_calls
+    assert call["model"] == "gpt-6-astra"
+    assert call["reasoning_effort"] == "high"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 @pytest.mark.parametrize("override_ua", [None, "test_user_agent"])
 async def test_user_agent_header_any_llm_chat(override_ua: str | None, monkeypatch) -> None:
     provider = FakeAnyLLMProvider(supports_responses=False, chat_response=_chat_completion("Hello"))
@@ -2282,6 +2307,7 @@ async def test_any_llm_chat_stream_preserves_trace_data_at_completed(
                         "output_tokens": 5 if with_usage else 0,
                         "total_tokens": 12 if with_usage else 0,
                         "input_tokens_details": {
+                            "cache_write_tokens_details": None,
                             "cached_tokens": 2 if with_usage else 0,
                             "cache_write_tokens": 0,
                         },
@@ -2320,7 +2346,11 @@ async def test_any_llm_chat_stream_populates_span_before_yielding_completed(monk
                     "input_tokens": 11,
                     "output_tokens": 13,
                     "total_tokens": 24,
-                    "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                    "input_tokens_details": {
+                        "cache_write_tokens_details": None,
+                        "cached_tokens": 0,
+                        "cache_write_tokens": 0,
+                    },
                     "output_tokens_details": {"reasoning_tokens": 0},
                 }
                 break

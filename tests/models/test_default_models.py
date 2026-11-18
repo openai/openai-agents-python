@@ -151,6 +151,31 @@ def test_get_default_model_settings_returns_empty_settings_for_non_gpt_5_models(
     assert get_default_model_settings("gpt-4.1") == ModelSettings()
 
 
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gpt-6-astra", ModelSettings(reasoning=Reasoning(effort="low"), verbosity="low")),
+        ("gpt-6-astra-2026-01-01", ModelSettings(verbosity="low")),
+        ("gpt-6-sol", ModelSettings(verbosity="low")),
+        ("gpt-10.1", ModelSettings(verbosity="low")),
+        ("gpt-5custom", ModelSettings()),
+    ],
+)
+def test_agent_uses_reasoning_model_family_defaults(model: str, expected: ModelSettings) -> None:
+    assert Agent(name="test", model=model).model_settings == expected
+
+
+def test_gpt_6_default_model_is_recognized_without_changing_gpt_5_predicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "GPT-6-ASTRA")
+    assert Agent(name="test").model_settings == ModelSettings(
+        reasoning=Reasoning(effort="low"), verbosity="low"
+    )
+    assert not is_gpt_5_default()
+    assert not gpt_5_reasoning_settings_required("gpt-6-astra")
+
+
 @patch.dict(os.environ, {"OPENAI_DEFAULT_MODEL": "gpt-5"})
 def test_agent_uses_gpt_5_default_model_settings():
     """Agent should inherit GPT-5 default model settings."""

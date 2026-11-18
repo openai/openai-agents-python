@@ -5,7 +5,7 @@ import pytest
 from litellm.types.utils import Choices, Message, ModelResponse, Usage
 from openai.types.shared import Reasoning
 
-from agents import function_tool
+from agents import Agent, RunConfig, Runner, function_tool
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
 from agents.models.interface import ModelTracing
@@ -20,6 +20,36 @@ def test_falsy_reasoning_effort_is_preserved() -> None:
     settings = ModelSettings(reasoning=FalsyReasoning(effort="low"))
 
     assert model._get_reasoning_effort(settings) == "low"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "settings",
+    [
+        pytest.param(ModelSettings(extra_args={"reasoning_effort": "high"}), id="extra_args"),
+        pytest.param(ModelSettings(extra_body={"reasoning_effort": "high"}), id="extra_body"),
+    ],
+)
+async def test_runner_raw_effort_overrides_litellm_model_default(
+    monkeypatch: pytest.MonkeyPatch, settings: ModelSettings
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        choice = Choices(index=0, message=Message(role="assistant", content="ok"))
+        return ModelResponse(choices=[choice], usage=Usage(0, 0, 0))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    await Runner.run(
+        Agent(name="test", model="litellm/openai/gpt-6-astra"),
+        "Hello",
+        run_config=RunConfig(model_settings=settings, tracing_disabled=True),
+    )
+
+    assert captured["model"] == "openai/gpt-6-astra"
+    assert captured["reasoning_effort"] == "high"
 
 
 @pytest.mark.allow_call_model_methods
