@@ -38,7 +38,7 @@ async def main():
     agent = Agent(
         name="Assistant",
         instructions="You only respond in haikus.",
-        # We prefix with litellm/ to tell the Runner to use the LitellmModel
+        # This prefix has been routing through MultiProvider; CodexProvider has no LiteLLM adapter.
         model="litellm/openrouter/openai/gpt-5.4-mini",
         tools=[get_weather],
         model_settings=ModelSettings(tool_choice="required"),

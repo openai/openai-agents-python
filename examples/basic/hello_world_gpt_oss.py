@@ -9,6 +9,7 @@ set_tracing_disabled(True)
 # import logging
 # logging.basicConfig(level=logging.DEBUG)
 
+# Passing this model object has been bypassing the default provider, including CodexProvider.
 # This is an example of how to use gpt-oss with Ollama.
 # Refer to https://cookbook.openai.com/articles/gpt-oss/run-locally-ollama for more details.
 # If you prefer using LM Studio, refer to https://cookbook.openai.com/articles/gpt-oss/run-locally-lmstudio

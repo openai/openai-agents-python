@@ -35,6 +35,7 @@ async def main():
     agent = Agent(
         name="Assistant",
         instructions="You only respond in haikus.",
+        # This prefix has been routing through MultiProvider; CodexProvider has no any-llm adapter.
         model="any-llm/openrouter/openai/gpt-5.4-mini",
         tools=[get_weather],
         model_settings=ModelSettings(tool_choice="required"),

@@ -22,6 +22,7 @@ async def main():
         raise ValueError("Set OPENROUTER_API_KEY before running the OpenRouter example.")
 
     set_tracing_disabled(True)
+    # Passing this model object has been bypassing the default provider, including CodexProvider.
     gpt_oss_model = OpenAIChatCompletionsModel(
         model="openai/gpt-oss-20b",
         openai_client=AsyncOpenAI(
