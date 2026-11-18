@@ -542,7 +542,7 @@ async def test_second_revision_combines_previously_read_revenue_and_new_risk_fin
             source_url=url,
             supporting_extract=excerpt,
             supported=True,
-            analysis="This observation may matter for the requested dimension.",
+            analysis="",
             explanation="Confirmed against the opened primary report.",
         )
 
@@ -584,9 +584,9 @@ async def test_second_revision_combines_previously_read_revenue_and_new_risk_fin
     assert verification.verified
     assert "### Revenue drivers" in report.markdown_report
     assert "### Key risks" in report.markdown_report
-    assert all(
-        finding.supporting_extract in report.markdown_report for finding in [*revenue, *risks]
-    )
+    assert any(finding.supporting_extract in report.markdown_report for finding in revenue)
+    assert any(finding.supporting_extract in report.markdown_report for finding in risks)
+    assert report.markdown_report.count("### ") == 3
     assert verify.await_count == 3
 
 
@@ -641,6 +641,13 @@ async def test_second_revision_prioritizes_current_findings_and_removes_supersed
     monkeypatch.setattr(manager, "_write_report", AsyncMock(return_value=draft))
     verify = AsyncMock(side_effect=[first, second, VerificationResult(verified=True, issues=[])])
     monkeypatch.setattr(manager, "_verify_report", verify)
+    from examples.financial_research_agent.agents.primary_source_auditor import PrimarySourceAudit
+
+    monkeypatch.setattr(
+        manager,
+        "_read_primary_source_claims",
+        AsyncMock(return_value=(PrimarySourceAudit(checks=[]), set())),
+    )
 
     report, verification = await manager._produce_verified_report(
         "Analyze revenue drivers and key risks", []
@@ -708,3 +715,74 @@ async def test_insufficient_first_repair_allows_next_bounded_audit_to_find_compl
     assert revenue.supporting_extract in report.markdown_report
     assert risk.supporting_extract in report.markdown_report
     assert verify.await_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("supported", "read_completed"), [(True, True), (False, True), (True, False)]
+)
+async def test_last_repair_keeps_only_independently_rechecked_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+    supported: bool,
+    read_completed: bool,
+) -> None:
+    from examples.financial_research_agent.agents.primary_source_auditor import (
+        AuditedVerificationResult,
+        PrimarySourceAudit,
+        PrimarySourceCheck,
+    )
+
+    url = "https://issuer.example/annual-report"
+    analysis = "Advertising demand may support Services revenue if that demand persists."
+    driver = PrimarySourceCheck(
+        dimension="Revenue drivers",
+        claim="Services driver",
+        source_url=url,
+        supporting_extract="Services sales increased due to advertising.",
+        supported=True,
+        analysis=analysis,
+        explanation="Primary passage was read.",
+    )
+    risk = driver.model_copy(
+        update={
+            "dimension": "Key risks",
+            "analysis": "",
+            "supporting_extract": "The company faces aggressive price competition.",
+        }
+    )
+    exact_claim = f"Analysis (inference): {analysis}"
+    fresh = driver.model_copy(
+        update={
+            "claim": exact_claim,
+            "supported": supported,
+            "supporting_extract": (
+                "Services net sales increased during fiscal 2026 due to advertising."
+            ),
+        }
+    )
+    verdict = AuditedVerificationResult(
+        verified=False,
+        issues=[],
+        primary_source_checks=[],
+        primary_source_findings=[driver, risk],
+        opened_source_urls=[url],
+    )
+    manager = FinancialResearchManager()
+    manager.printer = Mock()
+    reader = AsyncMock(
+        return_value=(PrimarySourceAudit(checks=[fresh]), {url} if read_completed else set())
+    )
+    monkeypatch.setattr(manager, "_read_primary_source_claims", reader)
+    draft = FinancialReportData(
+        short_summary="Draft", markdown_report="Draft", follow_up_questions=[]
+    )
+
+    report = await manager._revise_report(
+        "Analyze drivers and risks", draft, [], verdict, validate_analysis=True
+    )
+
+    reader.assert_awaited_once_with(url, [exact_claim])
+    assert (analysis in report.markdown_report) is (supported and read_completed)
+    if supported and read_completed:
+        assert fresh.supporting_extract in report.markdown_report
+    assert risk.supporting_extract in report.markdown_report

@@ -226,7 +226,9 @@ async def test_financial_report_revises_once_after_failed_verification(
     assert report == revised_report
     assert verification == accepted
     write_report.assert_awaited_once_with("query", [])
-    revise_report.assert_awaited_once_with("query", original_report, [], rejected)
+    revise_report.assert_awaited_once_with(
+        "query", original_report, [], rejected, validate_analysis=False
+    )
     assert verify_report.await_count == 2
 
 
