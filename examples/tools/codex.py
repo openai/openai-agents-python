@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime
 
-from agents import Agent, Runner, gen_trace_id, trace
+from agents import Agent, ModelSettings, Runner, gen_trace_id, trace
 
 # This tool is still in experimental phase and the details could be changed until being GAed.
 from agents.extensions.experimental.codex import (
@@ -104,10 +104,20 @@ def log(message: str) -> None:
 
 
 async def main() -> None:
+    completed_codex_turns = 0
+
+    async def observe_codex_stream(payload: CodexToolStreamEvent) -> None:
+        nonlocal completed_codex_turns
+        if isinstance(payload.event, TurnCompletedEvent):
+            completed_codex_turns += 1
+        await on_codex_stream(payload)
+
     agent = Agent(
         name="Codex Agent",
+        model_settings=ModelSettings(tool_choice="required"),
         instructions=(
-            "Use the codex tool to inspect the workspace in read-only mode and answer the question. "
+            "Delegate every question to the codex SDK function tool in read-only mode. "
+            "Do not use your own native shell or workspace tools instead. "
             "When skill names, which usually starts with `$`, are mentioned, "
             "you must rely on the codex tool to use the skill and answer the question.\n\n"
             "When you send the final answer, you must include the following info at the end:\n\n"
@@ -130,7 +140,7 @@ async def main() -> None:
                     # Abort Codex CLI if no events arrive within this many seconds.
                     idle_timeout_seconds=60,
                 ),
-                on_stream=on_codex_stream,
+                on_stream=observe_codex_stream,
             )
         ],
     )
@@ -139,26 +149,34 @@ async def main() -> None:
 
     with trace("Codex tool example", trace_id=trace_id):
         log("Using the Codex tool to inspect pyproject.toml and summarize Python requirements...")
+        before_turn = completed_codex_turns
         result = await Runner.run(
             agent,
             (
-                "Inspect pyproject.toml in this repository and summarize the supported Python "
+                "Call the codex SDK function tool to inspect pyproject.toml in this repository "
+                "and summarize the supported Python "
                 "version plus the main local test command. Do not modify any files."
             ),
         )
+        if completed_codex_turns <= before_turn:
+            raise RuntimeError("The question did not complete a Codex tool turn.")
         log(result.final_output)
 
         # Use local inspection in read-only mode.
         log(
             "Using the Codex tool to inspect AGENTS.md and summarize the local verification workflow..."
         )
+        before_turn = completed_codex_turns
         result = await Runner.run(
             agent,
             (
-                "Inspect AGENTS.md and summarize the mandatory local verification commands for this "
+                "Call the codex SDK function tool to inspect AGENTS.md and summarize "
+                "the mandatory local verification commands for this "
                 "repository. Do not modify any files or suggest code changes."
             ),
         )
+        if completed_codex_turns <= before_turn:
+            raise RuntimeError("The question did not complete a Codex tool turn.")
         log(result.final_output)
         # (A read-only summary of the local verification workflow will be displayed.)
 
