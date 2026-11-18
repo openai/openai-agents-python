@@ -352,8 +352,6 @@ def test_build_rejects_mutation_by_build_tools(monkeypatch, source, mutating_too
     monkeypatch.setattr(build, "cargo_build_options", lambda *_: ([], None))
     copied = []
     monkeypatch.setattr(build.shutil, "copy2", lambda src, dst: copied.append(Path(dst)))
-    monkeypatch.setattr(build, "native_helpers", lambda _: {"helper": "helper"})
-    monkeypatch.setattr(build, "remove_obsolete_helpers", lambda *_: None)
     invoked = []
 
     def run(command, **kwargs):
@@ -366,7 +364,7 @@ def test_build_rejects_mutation_by_build_tools(monkeypatch, source, mutating_too
     with pytest.raises(SystemExit, match="not pristine"):
         build.main()
     assert invoked == (["cargo"] if mutating_tool == "cargo" else ["cargo", "maturin"])
-    assert any(path.name == "helper" for path in copied) == (mutating_tool == "maturin")
+    assert any(path.stem == "codex-sdk-runtime" for path in copied) == (mutating_tool == "maturin")
 
 
 def reviewed_series(source, changes):
