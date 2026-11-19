@@ -378,12 +378,14 @@ async def test_native_provider_retrieval_reports_error_and_rejects_closed_owner(
                         "type": "error",
                         "error": {
                             "type": "invalid_request_error",
-                            "code": "synthetic_retrieval_rejected",
-                            "message": "Synthetic provider retrieval rejection",
+                            "code": "session_closed",
+                            "message": "Synthetic provider session closed during retrieval",
                         },
                     }
                 )
-                with pytest.raises(RuntimeError):
+                with pytest.raises(
+                    RuntimeError, match="Provider error terminated the voice connection"
+                ):
                     await retrieving
             finally:
                 if not retrieving.done():
@@ -2120,16 +2122,20 @@ async def test_native_create_ack_conflicting_text_rejects_edit_until_terminal_pr
             )
             assert not peer.disconnected.is_set()
             assert peer.socket is not None
+            terminal_error = "Synthetic terminal provider error after conflicting receipt"
             await peer.socket.send_json(
                 {
                     "type": "error",
                     "error": {
                         "type": "invalid_request_error",
-                        "code": "synthetic_conflicting_create_ack",
-                        "message": "Synthetic terminal provider error after conflicting receipt",
+                        "code": "session_closed",
+                        "message": terminal_error,
                     },
                 }
             )
+            with pytest.raises(RuntimeError, match=terminal_error):
+                async for _ in events:
+                    pass
             await peer.disconnected.wait()
             assert not any(
                 frame["type"] == "conversation.item.create" for frame in peer.frames[cursor:]
