@@ -1163,7 +1163,9 @@ async def test_failed_batch_accounts_for_later_completions(rejected_child):
     overflow = {**roots[0], "trace_id": "f" * 32, "name": "overflow-root"}
     rejected = {**overflow, "parent_span_id": "c" * 16} if rejected_child else overflow
     with collector() as (endpoint, received):
-        exporter = telemetry.OpenAITraceExporter(api_key="synthetic", endpoint=endpoint)
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="synthetic", endpoint=endpoint, timeout_ms=5000
+        )
         await exporter.on_trace_events(roots)
         with pytest.raises(RuntimeError):
             await exporter.on_trace_events([rejected, {**roots[0], "lifecycle": "end"}, overflow])

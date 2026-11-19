@@ -913,29 +913,26 @@ async def test_idle_close_wakes_lifetime_reader_and_closed_replay_ends(
 async def test_native_reader_exit_ends_observation_after_submission_cleanup(
     responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch, active: bool
 ) -> None:
-    release = asyncio.Event()
+    from agents import _native
+
+    native_events: asyncio.Queue[str] = asyncio.Queue()
+
+    async def next_event(_: object) -> str:
+        return await native_events.get()
+
+    monkeypatch.setattr(_native.NativeThread, "_next_session_event", next_event)
     async with (
         timeout(30),
         Agent(instructions="Answer briefly.", provider=provider(responses)).session() as session,
     ):
-        thread = session._native
-
-        class EndReader:
-            def __getattr__(self, name: str) -> Any:
-                return getattr(thread, name)
-
-            async def _next_session_event(self) -> str:
-                await release.wait()
-                return "null"
-
-        monkeypatch.setattr(session, "_native", EndReader())
         stream = session.events()
         handle = None
         if active:
             responses.respond(assistant_output("native response"))
             handle = await session.submit("active input")
-        release.set()
+        native_events.put_nowait("null")
         await session._reader
+        assert native_events.empty()
         if handle is not None:
             with pytest.raises(NativeError, match="before settlement"):
                 await (handle).get_result()
