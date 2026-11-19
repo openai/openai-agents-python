@@ -1021,34 +1021,10 @@ index 0000000000000000000000000000000000000000..de632304f37ef9aa021b6111ea9015fd
 +    assert_eq!(bundled_models_response().unwrap(), original);
 +}
 diff --git a/codex-rs/models-manager/src/lib.rs b/codex-rs/models-manager/src/lib.rs
-index cd7b59a0530b6ead4c3852d0a3217aa7115a4d81..079579e6e4f07215e69648c7e09af448bea2050a 100644
+index cd7b59a0530b6ead4c3852d0a3217aa7115a4d81..6069cb88e4b5945498fe381d5ad43896650963bc 100644
 --- a/codex-rs/models-manager/src/lib.rs
 +++ b/codex-rs/models-manager/src/lib.rs
-@@ -1,3 +1,5 @@
-+use std::sync::OnceLock;
-+
- pub mod cache;
- pub mod collaboration_mode_presets;
- pub(crate) mod config;
-@@ -9,10 +11,16 @@ pub mod test_support;
- pub use codex_protocol::auth::AuthMode;
- pub use config::ModelsManagerConfig;
- 
-+static BUNDLED_MODELS: OnceLock<codex_protocol::openai_models::ModelsResponse> = OnceLock::new();
-+
- /// Load the bundled model catalog shipped with `codex-models-manager`.
- pub fn bundled_models_response()
- -> std::result::Result<codex_protocol::openai_models::ModelsResponse, serde_json::Error> {
--    serde_json::from_str(include_str!("../models.json"))
-+    if let Some(parsed) = BUNDLED_MODELS.get() {
-+        return Ok(parsed.clone());
-+    }
-+    let parsed = serde_json::from_str(include_str!("../models.json"))?;
-+    Ok(BUNDLED_MODELS.get_or_init(move || parsed).clone())
- }
- 
- /// Convert the client version string to a whole version string (e.g. "1.2.3-alpha.4" -> "1.2.3").
-@@ -24,3 +32,7 @@ pub fn client_version_to_whole() -> String {
+@@ -24,3 +24,7 @@
          env!("CARGO_PKG_VERSION_PATCH")
      )
  }
