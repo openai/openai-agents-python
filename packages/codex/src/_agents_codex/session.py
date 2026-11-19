@@ -2961,7 +2961,6 @@ def _native_session_config(
     return {
         "include_permissions_instructions": executor is not None,
         "include_environment_context": executor is not None,
-        "include_collaboration_mode_instructions": False,
         **provider_config,
         "agents.enabled": False,
         "features.goals": goals,
