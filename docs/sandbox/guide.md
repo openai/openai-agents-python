@@ -233,6 +233,10 @@ Use manifest entries for the material the agent needs before work begins:
 
 `GitRepo` requires the `git` executable on `PATH` inside the sandbox where the repository is materialized. For `UnixLocalSandboxClient`, install Git on the local machine. For Docker or hosted sandbox clients, include Git in the sandbox image or environment before applying the manifest. Installing the Python SDK does not install Git.
 
+Use `File` to embed small files in the manifest. For example, `File(content=Path("sample.db").read_bytes())` embeds the bytes of a SQLite database. Use `LocalFile` to copy a file from the host without storing its contents in the manifest.
+
+**Sharing saved sessions with older SDKs:** UTF-8 files still serialize as JSON strings. Files that contain other bytes use a tagged object, such as `{"type": "base64", "data": "/w=="}` for the byte `0xff`. Older Python SDKs cannot read this object. Upgrade all readers before saving a session with inline binary files, or use `LocalFile` instead.
+
 `Dir` creates a directory inside the sandbox workspace from synthetic children or as an output location; it does not read from the host filesystem. Use `LocalDir` when an existing host directory should be copied into the sandbox workspace.
 
 `LocalFile.src` and `LocalDir.src` are resolved against the SDK process working directory by default. The source must stay under that base directory unless it is covered by `extra_path_grants`. This keeps local source materialization inside the same host-path trust boundary as the rest of the sandbox manifest.
