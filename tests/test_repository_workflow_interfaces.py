@@ -185,15 +185,13 @@ def test_release_build_validates_before_executing_candidate_code(job_name: str) 
     assert build.count("persist-credentials: false") == 2
     assert "fetch-depth: 0" in build
     validation = build.index("python -I control/.github/scripts/verify_release.py")
-    candidate_command = (
-        'UV_PYTHON="$python_version" make sync tests' if job_name == "checks" else "run: uv build"
-    )
+    candidate_command = "make sync tests" if job_name == "checks" else "run: uv build"
     assert validation < build.index(candidate_command)
     assert ' --tag "$RELEASE_TAG" --expected-sha "$RELEASE_SHA"' in build
     assert "enable-cache: false" in build
 
 
-@pytest.mark.parametrize("failed_check", [None, "3.12:sync tests", ":typecheck"])
+@pytest.mark.parametrize("failed_check", [None, "3.14:sync tests", "3.14:typecheck"])
 def test_release_checks_fail_closed(tmp_path: Path, failed_check: str | None) -> None:
     bash = shutil.which("bash")
     if bash is None:
@@ -205,6 +203,7 @@ def test_release_checks_fail_closed(tmp_path: Path, failed_check: str | None) ->
     steps = checks["steps"]
     check_index = next(i for i, step in enumerate(steps) if step["name"] == "Check release source")
     check = steps[check_index]
+    setup_uv = next(step for step in steps[:check_index] if step.get("name") == "Setup uv")
     package = next(step for step in build["steps"] if step.get("run") == "uv build")
     assert check["working-directory"] == package["working-directory"] == "release-source"
     assert build["needs"] == "checks"
@@ -242,13 +241,14 @@ def test_release_checks_fail_closed(tmp_path: Path, failed_check: str | None) ->
             "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
             "CHECK_LOG": str(log),
             "FAILED_CHECK": failed_check or "",
+            "UV_PYTHON": setup_uv["with"]["python-version"],
             **check["env"],
         },
         capture_output=True,
         text=True,
         timeout=5,
     )
-    expected = [f"3.{minor}:sync tests" for minor in range(10, 15)] + [":typecheck"]
+    expected = ["3.14:sync tests", "3.14:typecheck"]
     if failed_check is None:
         assert result.returncode == 0, result.stderr
         assert log.read_text(encoding="utf-8").splitlines() == expected

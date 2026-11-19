@@ -17,7 +17,7 @@ docker pull python:3.14-slim
 /tmp/agents-provider-demo/bin/python -m example_docker_provider.demo
 ```
 
-On Windows, use the environment's `Scripts/python.exe` in place of `bin/python`. This example is not published on PyPI; install it from this directory. The package declares the SDK range `>=0.24.0,<0.25.0`; widen that range only after compatibility testing. To validate against your SDK checkout instead of a published SDK, install both local projects in the same command:
+On Windows, use the environment's `Scripts/python.exe` in place of `bin/python`. This example is not published on PyPI; install it from this directory. The package declares the SDK range `>=0.24.0,<0.26.0`; widen that range only after compatibility testing. To validate against your SDK checkout instead of a published SDK, install both local projects in the same command:
 
 ```sh
 uv pip install --python /tmp/agents-provider-demo/bin/python . ./examples/sandbox/external_provider
