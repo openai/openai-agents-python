@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import os
 import shlex
 import shutil
@@ -67,14 +68,22 @@ def _commit(repo: Path, *paths: str) -> str:
     return _git(repo, "rev-parse", "HEAD")
 
 
-@pytest.fixture
-def change_repo(tmp_path: Path) -> tuple[Path, str]:
-    repo = tmp_path / "source"
+@pytest.fixture(scope="session")
+def change_repo_seed(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str]:
+    repo = tmp_path_factory.mktemp("change-repo") / "source"
     repo.mkdir()
     _git(repo, "init", "--initial-branch=main")
     _git(repo, "config", "user.name", "Change detection test")
     _git(repo, "config", "user.email", "change-test@example.invalid")
     return repo, _commit(repo)
+
+
+@pytest.fixture
+def change_repo(tmp_path: Path, change_repo_seed: tuple[Path, str]) -> tuple[Path, str]:
+    seed, head = change_repo_seed
+    repo = tmp_path / "source"
+    shutil.copytree(seed, repo, symlinks=True)
+    return repo, head
 
 
 def _detect(
@@ -1074,6 +1083,23 @@ def test_native_selection_routes_stack_sources_and_pr_provenance(
         assert eval(expression, {"__builtins__": {}}, {}) == expected
 
 
+@functools.cache
+def _native_source_selection_script(workflow_text: str) -> str:
+    workflow = yaml.load(workflow_text, Loader=yaml.BaseLoader)
+    assert "workflow_dispatch" in workflow["on"]
+    changes = workflow["jobs"]["changes"]
+    selection = next(step for step in changes["steps"] if step.get("id") == "native-source")
+    assert selection["env"]["REQUIRE_WINDOWS"] == "${{ steps.release-windows.outputs.run }}"
+    for name in ("produce-linux", "produce-windows", "produce-macos"):
+        assert workflow["jobs"][name]["with"]["native_source_run"] == (
+            "${{ needs.changes.outputs.native_source_run }}"
+        )
+    assert changes["outputs"]["native_source_run"] == "${{ steps.native-source.outputs.run_id }}"
+    assert changes["outputs"]["native_key"] == selection["env"]["NATIVE_INPUT_IDENTITY"]
+    run: str = selection["run"]
+    return run.split("\n", 1)[1].removesuffix("PYTHON\n")
+
+
 @pytest.mark.parametrize(
     "scenario",
     [
@@ -1345,17 +1371,7 @@ def test_native_build_selection(
             path.write_text(f"before {path.name}\n")
     native_workflow_path = ".github/workflows/codex-python.yml"
     native_workflow_text = (ROOT / native_workflow_path).read_text()
-    workflow = yaml.load(workflow_text, Loader=yaml.BaseLoader)
-    assert "workflow_dispatch" in workflow["on"]
-    changes = workflow["jobs"]["changes"]
-    selection = next(step for step in changes["steps"] if step.get("id") == "native-source")
-    assert selection["env"]["REQUIRE_WINDOWS"] == "${{ steps.release-windows.outputs.run }}"
-    for name in ("produce-linux", "produce-windows", "produce-macos"):
-        assert workflow["jobs"][name]["with"]["native_source_run"] == (
-            "${{ needs.changes.outputs.native_source_run }}"
-        )
-    assert changes["outputs"]["native_source_run"] == "${{ steps.native-source.outputs.run_id }}"
-    assert changes["outputs"]["native_key"] == selection["env"]["NATIVE_INPUT_IDENTITY"]
+    script = _native_source_selection_script(workflow_text)
     for path, contents in (
         (workflow_path, workflow_text),
         (native_workflow_path, native_workflow_text),
@@ -2381,7 +2397,6 @@ def test_native_build_selection(
         monkeypatch.setenv(key, value)
     if scenario == "pr_missing_number":
         monkeypatch.setenv("CURRENT_PR", "")
-    script = selection["run"].split("\n", 1)[1].removesuffix("PYTHON\n")
     if scenario.startswith("incomplete_"):
         with pytest.raises(SystemExit, match="Incomplete source metadata"):
             exec(compile(script, workflow_path, "exec"), {})

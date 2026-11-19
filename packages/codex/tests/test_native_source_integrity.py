@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 
 
-@pytest.fixture
-def source(monkeypatch, tmp_path):
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+@pytest.fixture(scope="session")
+def source_seed(tmp_path_factory):
+    tmp_path = tmp_path_factory.mktemp("integrity-source")
     root = tmp_path / "project/packages/codex"
     root.mkdir(parents=True)
     repository = tmp_path / "upstream"
@@ -110,7 +110,14 @@ def source(monkeypatch, tmp_path):
             }
         )
     )
-    return root, repository
+    return tmp_path
+
+
+@pytest.fixture
+def source(monkeypatch, tmp_path, source_seed):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    shutil.copytree(source_seed, tmp_path, symlinks=True, dirs_exist_ok=True)
+    return tmp_path / "project/packages/codex", tmp_path / "upstream"
 
 
 def prepare(monkeypatch, source):
