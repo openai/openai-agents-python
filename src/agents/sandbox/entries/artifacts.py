@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import errno
 import hashlib
 import io
@@ -11,7 +12,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import Field, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from ..errors import (
     GitCloneError,
@@ -89,9 +90,35 @@ class Dir(BaseEntry):
         )
 
 
+class _Base64FileContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["base64"]
+    data: str
+
+
 class File(BaseEntry):
     type: Literal["file"] = "file"
     content: bytes
+
+    @field_validator("content", mode="before", json_schema_input_type=bytes | _Base64FileContent)
+    @classmethod
+    def _parse_content(cls, value: object) -> object:
+        if isinstance(value, dict):
+            encoded = _Base64FileContent.model_validate(value)
+            try:
+                return base64.b64decode(encoded.data, validate=True)
+            except ValueError as exc:
+                raise ValueError("File content must contain valid base64 data") from exc
+        return value
+
+    @field_serializer("content", when_used="json")
+    def _serialize_content(self, content: bytes) -> str | _Base64FileContent:
+        try:
+            # Preserve existing text manifests and their snapshot fingerprints.
+            return content.decode("utf-8")
+        except UnicodeDecodeError:
+            return _Base64FileContent(type="base64", data=base64.b64encode(content).decode("ascii"))
 
     async def apply(
         self,
