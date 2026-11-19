@@ -481,6 +481,8 @@ pub async fn load(
     } else {
         built?
     };
+    // SDK sessions use the application instructions, not the CLI collaboration mode prompt.
+    config.include_collaboration_mode_instructions = false;
     if let Some(environment) = &options.environment {
         environment.restrict_network_approval(&mut config)?;
     }
