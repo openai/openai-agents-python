@@ -362,75 +362,7 @@ See the [OpenAI Multi-agent guide](https://developers.openai.com/api/docs/guides
 
 ## Codex provider
 
-`CodexProvider` has been running agent model calls through the stock Codex App Server. The Agents SDK has been managing the agent loop, handoffs, tool approvals, output validation, and sessions in both modes. Codex has been managing its own model connection and native workspace tools.
-
-### Install and switch providers
-
-From this branch, these commands have been installing the Python SDK and the stock CLI used by the provider.
-
-```sh
-uv sync
-npm install --global @openai/codex@0.166.0
-codex --version
-codex login
-```
-
-Codex has been reading its configuration and saved login from `CODEX_HOME`. The application has been needing write access to that directory. On a managed host, Codex has been using the host's authentication policy. On a host that allows API-key login, `CodexProvider(api_key=...)` has been signing in for the lifetime of the child process. The provider has been leaving any saved CLI login in place.
-
-The following script has been switching one agent between providers with a command-line flag. With the default provider, the script has been reading the application's OpenAI credentials. With `--codex`, it has been using the stock `codex` on `PATH`. For a specific executable, pass its path in `CodexProvider(codex_executable=...)`.
-
-```python
-import argparse
-
-from agents import Agent, RunConfig, Runner
-from agents.models.codex import CodexProvider
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--codex", action="store_true")
-args = parser.parse_args()
-
-agent = Agent(name="Guide", instructions="Answer in one sentence.")
-config = RunConfig(model_provider=CodexProvider()) if args.codex else RunConfig()
-result = Runner.run_sync(agent, "Why does bread rise?", run_config=config)
-print(result.final_output)
-```
-
-The [wildlife example](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/model_providers/codex_provider.py) has been sending a local photograph, handing off to a specialist, calling an SDK function, and streaming a structured report. It has been checking that the specialist actually called the function and returned the expected catalog ID. From the repository root, the same two commands have been running the workflow in each mode.
-
-```sh
-uv run python -m examples.model_providers.codex_provider
-uv run python -m examples.model_providers.codex_provider --codex
-```
-
-### Tools, streaming, and history
-
-Each model call has been starting a fresh Codex thread. The Runner has been passing the agent's instructions, supported history, tool schemas, and output schema into the thread. When Codex has been requesting an SDK tool or handoff, the Runner has been checking the agent's current permissions and executing the callback. SDK-managed MCP tools have been using the same path. On streamed runs the application has been receiving text deltas during generation. When the model has been supplying a requested reasoning summary, the application has also been receiving `response.reasoning_summary_text.delta` events.
-
-Streamed SDK function calls have been supplying their complete JSON arguments in a single update. For strict structured output, Codex has been enforcing the schema during generation. With `strict_json_schema=False`, the provider has been including the schema in the final-answer instructions and the Runner has been validating the returned JSON with the selected output type.
-
-A local image has been using a base64 data URL. An inline audio input has been requiring a model whose Codex catalog entry declares audio input. Checking the catalog has been preventing stock Codex from replacing unsupported audio with a text placeholder. Tool search has been discovering deferred SDK functions before execution. Local shell and patch tools have been using the application's executor or editor and its approval policy.
-
-For each follow-up, an SDK session or `result.to_input_list()` has been supplying prior messages and tool results. `OpenAIResponsesCompactionSession` has been using the OpenAI compact endpoint with the full input history. The compactor has been needing its own OpenAI client or API key. The SDK has been replaying the returned encrypted item on the next Codex turn. With sandbox memory, omitted memory-model settings have been following the sandbox agent's selected provider.
-
-### Permissions and provider-specific features
-
-For an ordinary agent, `cwd` has been selecting the Codex workspace. Native Codex commands have been using the CLI's sandbox and approval settings. Linux workspace writes have been requiring a host that permits the native sandbox to start. SDK sandbox agents have been using the SDK's filesystem and tool policies. Runs with isolated SDK execution tools have been requiring enabled Codex MCP servers to be disabled in the Codex configuration.
-
-Input guardrails with `run_in_parallel=False` have been finishing before model execution. A native command may already have been writing to the workspace when a cancellation or an output guardrail has been stopping a run. Applications have been checking the workspace before repeating a failed operation. [SDK guardrails](../guardrails.md)
-
-With `ModelSettings(tool_choice="required")`, the Codex provider has been checking that an SDK tool or handoff actually ran. It hasn't been forcing a specific function by name. For deferred tool discovery, select a model whose stock Codex catalog advertises tool search. With `CODEX_MODEL` set to that model, `uv run -m examples.tools.tool_search --codex` has been checking both which tools loaded and what their callbacks returned. For local conversation history, images, or PDF text, the repository's `examples/basic/README.md` has been listing commands that need no extra account.
-
-Several features have been depending on a specific service or transport.
-
-| Feature | Provider requirement |
-| --- | --- |
-| Stored response and conversation IDs, saved prompt IDs, explicit cache keys and breakpoints | The OpenAI Responses provider has been supplying these features. Codex turn IDs have been identifying local turns. |
-| Hosted web search | With a web-search-capable provider, stock 0.166.0 has been returning hosted search calls on `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.5`. The two 5.4 models have been searching text. The 5.5 model has been allowing text and image results. On cache-only hosts, searches have been using cached results even when the application has been allowing live access. Setting `external_web_access=False` has been limiting searches to cached results. |
-| Remote image URLs, uploaded file IDs, and hosted file search or code interpreter | The Responses provider has been resolving remote or server-owned resources. Codex image input has been accepting inline image bytes. |
-| Model sampling, output-token limits, a specific tool selected by name, programmatic tool callers | These controls have been requiring a provider that exposes them. |
-| Realtime, voice, Decisions, explicit OpenAI model objects | These APIs have been selecting their own model or transport. Setting the Runner's model provider has been affecting ordinary agent model calls. |
-
-The [Codex tool guide](../tools.md) has been covering a different integration. Registering Codex as a function tool has been letting an agent delegate a task to Codex while retaining its ordinary model provider.
+The experimental [Codex provider](codex.md) runs ordinary agent model calls through the stock Codex CLI. The SDK continues to manage tools, handoffs, approvals, output validation, and sessions. The guide covers branch setup, running one agent with either provider, and the features that still require the default provider.
 
 ## Non-OpenAI models
 
@@ -550,7 +482,7 @@ When you are using the OpenAI Responses API, several request fields already have
   with `"24h"`.
 - `prompt_cache_options`: Select implicit or explicit prompt caching and, for GPT-5.6, configure a `"30m"` cache TTL.
 - `response_include`: Request richer response payloads such as `web_search_call.action.sources`, `file_search_call.results`, or `reasoning.encrypted_content`.
-- `top_logprobs`: Request the most likely alternatives for each output token. For example, `ModelSettings(top_logprobs=5)` has been returning up to five alternatives per token with `gpt-4.1`. The SDK adds `message.output_text.logprobs` automatically.
+- `top_logprobs`: Request the most likely alternatives for each output token. For example, `ModelSettings(top_logprobs=5)` returns up to five alternatives per token with `gpt-4.1`. The SDK adds `message.output_text.logprobs` automatically.
 - `retry`: Opt in to runner-managed retry settings for model calls. See [Runner-managed retries](#runner-managed-retries).
 
 ```python

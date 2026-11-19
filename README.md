@@ -47,6 +47,8 @@ uv add openai-agents
 
 For voice support, install with the optional `voice` group: `uv add 'openai-agents[voice]'`. For Redis session support, install with the optional `redis` group: `uv add 'openai-agents[redis]'`.
 
+The experimental `feat/simple-codex` branch also includes a [Codex provider guide](docs/models/codex.md) for running the same agent through the stock Codex CLI. The guide describes checkout setup and limitations.
+
 ## Run your first agents
 
 The SDK supports four primary ways to run agents. Set the `OPENAI_API_KEY` environment variable before running any of these examples.

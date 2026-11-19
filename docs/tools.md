@@ -924,6 +924,8 @@ See [context management](context.md#use-local-context-for-capability-visibility)
 
 ## Experimental: Codex tool
 
+To run all agent model calls through Codex, use the [Codex provider](models/codex.md). The function tool below delegates individual tasks while the main agent keeps its configured model.
+
 The `codex_tool` wraps the Codex CLI so an agent can run workspace-scoped tasks (shell, file edits, MCP tools) during a tool call. This surface is experimental and may change.
 
 Use it when you want the main agent to delegate a bounded workspace task to Codex without leaving the current run. By default, the tool name is `codex`. If you set a custom name, it must be `codex` or start with `codex_`. When an agent includes multiple Codex tools, each must use a unique name.

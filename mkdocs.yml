@@ -68,7 +68,9 @@ plugins:
                     - Quickstart: voice/quickstart.md
                     - Pipeline: voice/pipeline.md
                     - Tracing: voice/tracing.md
-                - Models: models/index.md
+                - Models:
+                    - Overview: models/index.md
+                    - Codex provider: models/codex.md
                 - Tools: tools.md
                 - Guardrails: guardrails.md
                 - Running agents: running_agents.md
@@ -146,6 +148,7 @@ plugins:
                     - OpenAI Chat Completions model: ref/models/openai_chatcompletions.md
                     - OpenAI Responses model: ref/models/openai_responses.md
                     - OpenAI provider: ref/models/openai_provider.md
+                    - Codex provider: ref/models/codex.md
                     - Multi provider: ref/models/multi_provider.md
                     - MCP servers: ref/mcp/server.md
                     - MCP util: ref/mcp/util.md

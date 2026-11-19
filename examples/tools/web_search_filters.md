@@ -1,14 +1,14 @@
 # Search within official documentation domains
 
-The original example has been comparing two models through the default Responses provider, checking both service-returned sources and citation annotations. The explicit Codex variant has been opening a fixed official function-tools documentation page and explaining that page. Both modes have been restricting web access to `developers.openai.com`.
+The default example compares two models through the Responses provider. It checks the service's retrieved sources and citation annotations. With `--codex`, the example opens a fixed official function-tools page and explains that page. Both modes restrict web access to `developers.openai.com`.
 
-From the repository root, after the normal SDK and stock Codex setup:
+Complete the [Codex provider setup](../../docs/models/codex.md), then run from the repository root:
 
-```bash
+```sh
 uv run python -m examples.tools.web_search_filters
 uv run python -m examples.tools.web_search_filters --codex
 ```
 
-Codex mode has been using `CODEX_MODEL` when set and the normal stock CLI authentication and configuration. It has not been passing Responses-only `response_include` settings or forcing the hosted web tool with `tool_choice`. Instead, it has been requiring a completed web `open_page` receipt for the requested official URL and matching every final Markdown citation against completed page opens. A generated URL alone has not been satisfying that check. Any opened or cited URL outside the allowed documentation domain has been failing verification.
+Codex mode uses `CODEX_MODEL` when set and the CLI's authentication and configuration. It requires a completed web `open_page` result for the requested official URL. Each Markdown citation in the answer must match a completed page open. A generated URL alone does not pass that check. An opened or cited URL outside the allowed domain fails verification.
 
-Stock Codex has not been exposing the same retrieved-sources list or citation annotations as the Responses API. The explicit variant has been proving domain-restricted page retrieval and matching citations; it has not been claiming those missing API fields. The original default task and checks have been remaining available without `--codex`.
+Codex does not expose the same retrieved-source list or citation annotations as the Responses API. The Codex example verifies domain-restricted retrieval and matching citations; it does not reproduce those API fields. Omit `--codex` to run the original comparison with Responses source checks.
