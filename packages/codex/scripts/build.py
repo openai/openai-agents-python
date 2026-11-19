@@ -196,19 +196,19 @@ def main():
         wheel_environment["UV_FROZEN"] = "true"
         wheel_environment["UV_NO_DEFAULT_GROUPS"] = "true"
         cargo_options = [*cargo_options, "--target", host, "--pgo"]
-    manylinux = environment.get("OPENAI_AGENTS_NATIVE_MANYLINUX")
-    if mode == "build" and manylinux:
-        # Qualify the same Linux glibc baseline even if Maturin detects an older one.
-        output.extend(["--compatibility", manylinux])
-    if (
+    elif (
         mode == "build"
         and args.release
         and "CARGO_PROFILE_RELEASE_CODEGEN_UNITS" not in environment
     ):
-        # Parallelize the binding's optimized compile independently of the helper binaries.
+        # Parallelize the ordinary binding build independently of the helper binaries.
         cargo_options.extend(
             ["--config", "profile.release.package.codex-agents-python.codegen-units=8"]
         )
+    manylinux = environment.get("OPENAI_AGENTS_NATIVE_MANYLINUX")
+    if mode == "build" and manylinux:
+        # Qualify the same Linux glibc baseline even if Maturin detects an older one.
+        output.extend(["--compatibility", manylinux])
     command = ["maturin", mode, "--locked", *cargo_options, *flags, *output]
     if pgo:
         build_pgo_with_helpers(command, project, wheel_environment, build_helpers, binaries)
