@@ -1219,7 +1219,7 @@ index f26fe72ba7adec5330842b9c745c0006434e09bc..05fe37f35ce68b7f21830f412411da60
  
  #[derive(Debug, Clone, Serialize)]
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
-index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6cc681038 100644
+index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..418a84785ae35734f733784d28501236cd67cb5e 100644
 --- a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
 @@ -1,10 +1,13 @@
@@ -1236,7 +1236,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
  use std::collections::VecDeque;
  use std::sync::Arc;
  use std::sync::Mutex;
-@@ -27,15 +30,168 @@ pub trait RealtimeNativeSource: Send + Sync {
+@@ -27,15 +30,162 @@ pub trait RealtimeNativeSource: Send + Sync {
      fn as_any(&self) -> &dyn std::any::Any;
  }
  
@@ -1249,31 +1249,43 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
 -    contract: Value,
 +    contract: Arc<Value>,
 +    caller_managed_functions: Option<Arc<BTreeSet<String>>>,
-+    response_tool_scope: Option<Vec<bool>>,
++    response_scoped: bool,
 +    response_tools_explicit: bool,
 +    response_parent_contract: Option<Arc<Value>>,
 +    response_contract_bytes: usize,
 +    detached_functions: Option<Arc<BTreeSet<String>>>,
++}
++
++fn matches_tool_choice(tool: &Value, choice: Option<&Value>) -> bool {
++    choice.is_none_or(|choice| {
++        choice != "none"
++            && (!choice.is_object()
++                || (tool["type"] == choice["type"]
++                    && if choice["type"] == "mcp" {
++                        tool["server_label"] == choice["server_label"]
++                    } else {
++                        tool["name"] == choice["name"]
++                    }))
++    })
  }
  
  impl RealtimeAcceptedConfiguration {
 +    fn tools(&self) -> impl Iterator<Item = &Value> {
++        let choice = if self.response_scoped {
++            self.contract.get("tool_choice")
++        } else {
++            None
++        };
 +        self.contract
 +            .get("tools")
 +            .and_then(Value::as_array)
 +            .into_iter()
 +            .flatten()
-+            .enumerate()
-+            .filter_map(|(index, tool)| {
-+                self.response_tool_scope
-+                    .as_ref()
-+                    .is_none_or(|scope| scope[index])
-+                    .then_some(tool)
-+            })
++            .filter(move |tool| matches_tool_choice(tool, choice))
 +    }
 +
 +    pub fn allows_response_function(&self, name: &str) -> bool {
-+        (self.response_tool_scope.is_none() && self.caller_managed_functions.is_none())
++        (!self.response_scoped && self.caller_managed_functions.is_none())
 +            || self
 +                .tools()
 +                .any(|tool| tool["type"] == "function" && tool["name"].as_str() == Some(name))
@@ -1323,32 +1335,14 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
 +            });
 +        }
 +        let choice = contract.get("tool_choice");
-+        let response_tool_scope: Vec<bool> = contract["tools"]
-+            .as_array()
-+            .into_iter()
-+            .flatten()
-+            .map(|tool| {
-+                choice.is_none_or(|choice| {
-+                    choice != "none"
-+                        && (!choice.is_object()
-+                            || (tool["type"] == choice["type"]
-+                                && if choice["type"] == "mcp" {
-+                                    tool["server_label"] == choice["server_label"]
-+                                } else {
-+                                    tool["name"] == choice["name"]
-+                                }))
-+                })
-+            })
-+            .collect();
 +        let detached_functions = out_of_band.then(|| {
 +            Arc::new(
 +                contract["tools"]
 +                    .as_array()
 +                    .into_iter()
 +                    .flatten()
-+                    .zip(&response_tool_scope)
-+                    .filter_map(|(tool, enabled)| {
-+                        (*enabled && tool["type"] == "function")
++                    .filter_map(|tool| {
++                        (matches_tool_choice(tool, choice) && tool["type"] == "function")
 +                            .then(|| tool["name"].as_str().map(str::to_owned))
 +                            .flatten()
 +                    })
@@ -1370,7 +1364,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
 +                    .unwrap_or(&self.contract)
 +                    .clone(),
 +            ),
-+            response_tool_scope: Some(response_tool_scope),
++            response_scoped: true,
 +            response_tools_explicit: out_of_band || tools.is_some(),
 +            detached_functions,
 +            ..self.clone()
@@ -1406,7 +1400,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
      pub fn interrupts_on_speech_started(&self) -> bool {
          match self.contract.pointer("/audio/input/turn_detection") {
              Some(Value::Null) => false,
-@@ -47,10 +203,7 @@ impl RealtimeAcceptedConfiguration {
+@@ -47,10 +197,7 @@ impl RealtimeAcceptedConfiguration {
      }
  
      pub(super) fn hosted_declaration(&self, label: &str) -> Option<&Value> {
@@ -1418,7 +1412,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              .find(|tool| tool["type"] == "mcp" && tool["server_label"].as_str() == Some(label))
      }
      pub fn hosted_mcp_authority_ready(&self) -> bool {
-@@ -60,11 +213,7 @@ impl RealtimeAcceptedConfiguration {
+@@ -60,11 +207,7 @@ impl RealtimeAcceptedConfiguration {
      pub fn hosted_mcp_tools(
          &self,
      ) -> Vec<codex_protocol::realtime_settings::RealtimeHostedMcpTool> {
@@ -1431,7 +1425,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              .filter(|tool| tool["type"].as_str() == Some("mcp"))
              .filter_map(|tool| {
                  let mut tool = tool.clone();
-@@ -74,11 +223,7 @@ impl RealtimeAcceptedConfiguration {
+@@ -74,11 +217,7 @@ impl RealtimeAcceptedConfiguration {
              .collect()
      }
      pub fn function_tools(&self) -> Vec<codex_protocol::realtime_settings::RealtimeFunctionTool> {
@@ -1444,7 +1438,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              .filter_map(|tool| {
                  let name = tool.get("name")?.as_str()?;
                  if matches!(name, "background_agent" | "remain_silent") {
-@@ -128,6 +273,7 @@ enum ReceiptState {
+@@ -128,6 +267,7 @@ enum ReceiptState {
  struct PendingConfiguration {
      hosted_owned: bool,
      native_source: Option<Arc<dyn RealtimeNativeSource>>,
@@ -1452,7 +1446,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
      id: Option<String>,
      contract: Value,
      phase: PendingPhase,
-@@ -165,6 +311,7 @@ impl RealtimeConfigurationReceipt {
+@@ -165,6 +305,7 @@ impl RealtimeConfigurationReceipt {
  pub(super) struct ActiveResponse {
      pub(super) id: Arc<str>,
      pub(super) configuration: Arc<RealtimeAcceptedConfiguration>,
@@ -1460,7 +1454,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
      // Runtime-only lineage: automatic replies inherit, explicit user work replaces.
      request_owner: Arc<()>,
      pub(super) output_guard: RealtimeOutputGuard,
-@@ -172,15 +319,23 @@ pub(super) struct ActiveResponse {
+@@ -172,15 +313,23 @@ pub(super) struct ActiveResponse {
  
  pub(super) struct FrameObservation {
      pub hosted_mcp_events: Vec<codex_protocol::protocol::RealtimeEvent>,
@@ -1484,7 +1478,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
          }
      }
  }
-@@ -188,8 +343,12 @@ impl FrameObservation {
+@@ -188,8 +337,12 @@ impl FrameObservation {
      fn response(response: &ActiveResponse) -> Self {
          Self {
              hosted_mcp_events: Vec::new(),
@@ -1497,7 +1491,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
          }
      }
      fn suppressed() -> Self {
-@@ -199,13 +358,12 @@ impl FrameObservation {
+@@ -199,13 +352,12 @@ impl FrameObservation {
      }
  }
  struct ReceivedAudio {
@@ -1512,7 +1506,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
  }
  
  #[derive(Debug)]
-@@ -231,15 +389,20 @@ struct ConfigurationState {
+@@ -231,15 +383,20 @@ struct ConfigurationState {
      accepted: Option<Arc<RealtimeAcceptedConfiguration>>,
      pending: Option<PendingConfiguration>,
      active_response: Option<Arc<ActiveResponse>>,
@@ -1533,7 +1527,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
      received_audio: VecDeque<ReceivedAudio>,
      audio_input_sources: VecDeque<(String, AudioInputSource)>,
      failure: Option<ReadyState>,
-@@ -296,6 +459,19 @@ fn invalid(message: &str) -> ApiError {
+@@ -296,6 +453,19 @@ fn invalid(message: &str) -> ApiError {
  }
  
  impl RealtimeConfiguration {
@@ -1553,7 +1547,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
      fn settled(state: &ConfigurationState) -> Result<Arc<RealtimeAcceptedConfiguration>, ApiError> {
          if state.failure.is_some() {
              return Err(invalid("Realtime configuration is retired"));
-@@ -324,11 +500,96 @@ impl RealtimeConfiguration {
+@@ -324,11 +494,96 @@ impl RealtimeConfiguration {
          Self::settled(&self.inner.state.lock().unwrap())
      }
  
@@ -1651,7 +1645,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
      }
  
      pub fn reserve_update_with_source(
-@@ -336,19 +597,28 @@ impl RealtimeConfiguration {
+@@ -336,19 +591,28 @@ impl RealtimeConfiguration {
          update: &RealtimeSessionUpdate,
          source: Arc<dyn RealtimeNativeSource>,
      ) -> Result<RealtimeConfigurationReservation, ApiError> {
@@ -1682,7 +1676,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              let functions = update
                  .function_tools
                  .clone()
-@@ -358,19 +628,31 @@ impl RealtimeConfiguration {
+@@ -358,19 +622,31 @@ impl RealtimeConfiguration {
                  .hosted_mcp_tools
                  .clone()
                  .unwrap_or_else(|| accepted.hosted_mcp_tools());
@@ -1719,7 +1713,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              id: Some(id.clone()),
              contract,
              phase: PendingPhase::Reserved,
-@@ -385,33 +667,34 @@ impl RealtimeConfiguration {
+@@ -385,33 +661,34 @@ impl RealtimeConfiguration {
          })
      }
  
@@ -1778,7 +1772,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              || frame.sample_rate != format.sample_rate()
              || frame.num_channels != 1
          {
-@@ -419,8 +702,20 @@ impl RealtimeConfiguration {
+@@ -419,8 +696,20 @@ impl RealtimeConfiguration {
                  "Audio frame does not match the accepted input format",
              ));
          }
@@ -1800,7 +1794,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              .map_err(|_| invalid("Audio frame must contain valid base64"))?;
          if format == RealtimeAudioFormat::Pcm24k && bytes.len() % 2 != 0 {
              return Err(invalid("PCM audio requires complete two-byte samples"));
-@@ -440,6 +735,13 @@ impl RealtimeConfiguration {
+@@ -440,6 +729,13 @@ impl RealtimeConfiguration {
              completion.send_replace(ReceiptState::Failed(state.failure.clone().unwrap()));
          }
          state.output_owner.retire_owner();
@@ -1814,7 +1808,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
          state.active_response = None;
          state.response_contexts.clear();
          state.hosted_mcp = Default::default();
-@@ -463,7 +765,7 @@ impl RealtimeConfiguration {
+@@ -463,7 +759,7 @@ impl RealtimeConfiguration {
              .received_audio
              .iter()
              .find(|record| {
@@ -1823,7 +1817,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                      && record.item_id == position.item_id
                      && record.content_index == position.content_index
              })
-@@ -471,6 +773,7 @@ impl RealtimeConfiguration {
+@@ -471,6 +767,7 @@ impl RealtimeConfiguration {
                  invalid("Playback item is unknown or outside the retained media window")
              })?;
          let rate = record
@@ -1831,7 +1825,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              .configuration
              .output_format
              .ok_or_else(|| invalid("Playback format is unknown"))?
-@@ -489,6 +792,67 @@ impl RealtimeConfiguration {
+@@ -489,6 +786,67 @@ impl RealtimeConfiguration {
          Self::validate_playback_in(&self.inner.state.lock().unwrap(), position)
      }
  
@@ -1899,7 +1893,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
      pub(super) fn response_create_for(&self, response_id: &str) -> bool {
          let mut state = self.inner.state.lock().unwrap();
          let request_owner = state
-@@ -571,7 +935,13 @@ impl RealtimeConfiguration {
+@@ -571,7 +929,13 @@ impl RealtimeConfiguration {
              .map(|r| Arc::clone(&r.request_owner));
          let source_matches = state.accepted.as_ref().is_some_and(|current| {
              if let Some(expected) = expected {
@@ -1914,7 +1908,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              }
              state
                  .response_contexts
-@@ -609,6 +979,7 @@ impl RealtimeConfiguration {
+@@ -609,6 +973,7 @@ impl RealtimeConfiguration {
                      .hosted_mcp
                      .native_continuation_available(response_id, call)
              })
@@ -1922,7 +1916,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              && ((native_call.is_some() && !state.hosted_mcp.has_hosted(response_id))
                  || !state.hosted_mcp.pending_for(response_id));
          if ready {
-@@ -620,9 +991,66 @@ impl RealtimeConfiguration {
+@@ -620,9 +985,66 @@ impl RealtimeConfiguration {
              state.response_create_pending = true;
              state.pending_create_owner = request_owner;
              state.pending_create_guard = Some(state.output_owner.new_response());
@@ -1941,7 +1935,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
 +        if let Some(configuration) = state
 +            .pending_response_configuration
 +            .as_ref()
-+            .filter(|configuration| configuration.response_tool_scope.is_some())
++            .filter(|configuration| configuration.response_scoped)
 +        {
 +            event["response"] = json!({"tools": configuration.contract["tools"]});
 +            if let Some(choice) = configuration.contract.get("tool_choice") {
@@ -1989,7 +1983,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
      pub(super) fn decide_hosted_mcp(
          &self,
          token: &str,
-@@ -640,17 +1068,91 @@ impl RealtimeConfiguration {
+@@ -640,17 +1062,91 @@ impl RealtimeConfiguration {
      pub(super) fn observe_user_input(&self) {
          self.inner.state.lock().unwrap().request_owner = Arc::new(());
      }
@@ -2069,7 +2063,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
 +            || state
 +                .pending_response_configuration
 +                .as_ref()
-+                .is_some_and(|configuration| configuration.response_tool_scope.is_some());
++                .is_some_and(|configuration| configuration.response_scoped);
 +        state.pending_response_metadata = if state.out_of_band_response_pending {
 +            None
 +        } else if let Some(metadata) = supplied_metadata {
@@ -2087,7 +2081,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
      }
  
      pub(super) fn prepare_interrupt(
-@@ -691,7 +1193,7 @@ impl RealtimeConfiguration {
+@@ -691,7 +1187,7 @@ impl RealtimeConfiguration {
              let ids = state
                  .response_contexts
                  .iter()
@@ -2096,7 +2090,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                  .map(|response| response.id.to_string())
                  .collect();
              state.output_owner.retire_owner();
-@@ -703,10 +1205,9 @@ impl RealtimeConfiguration {
+@@ -703,10 +1199,9 @@ impl RealtimeConfiguration {
              .as_ref()
              .map(|active| active.id.to_string());
          let target = match response_id {
@@ -2110,7 +2104,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              None => active_response_id.clone(),
          };
          let mut payloads = Vec::new();
-@@ -714,36 +1215,49 @@ impl RealtimeConfiguration {
+@@ -714,36 +1209,49 @@ impl RealtimeConfiguration {
              target.filter(|id| state.cancelled_response_id.as_deref() != Some(id.as_str()));
          if let Some(id) = &cancelled_response_id {
              payloads.push(serde_json::json!({"type": "response.cancel", "response_id": id}));
@@ -2168,7 +2162,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                              && Arc::ptr_eq(&response.request_owner, &state.request_owner)
                      })
                      && state.feedback_response_id.as_deref() != Some(id)
-@@ -781,7 +1295,12 @@ fn retained_metadata_bytes(state: &ConfigurationState) -> usize {
+@@ -781,7 +1289,12 @@ fn retained_metadata_bytes(state: &ConfigurationState) -> usize {
      state
          .response_contexts
          .iter()
@@ -2182,7 +2176,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
          .chain(
              state
                  .received_audio
-@@ -790,6 +1309,12 @@ fn retained_metadata_bytes(state: &ConfigurationState) -> usize {
+@@ -790,6 +1303,12 @@ fn retained_metadata_bytes(state: &ConfigurationState) -> usize {
          )
          .chain(state.audio_input_sources.iter().map(|(id, _)| id.len()))
          .sum::<usize>()
@@ -2195,7 +2189,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
          .saturating_add(state.hosted_mcp.bytes())
  }
  
-@@ -890,6 +1415,7 @@ fn evict_completed_context(state: &mut ConfigurationState, protected: Option<&st
+@@ -890,6 +1409,7 @@ fn evict_completed_context(state: &mut ConfigurationState, protected: Option<&st
      let Some(index) = state.response_contexts.iter().position(|r| {
          Some(r.id.as_ref()) != active
              && Some(r.id.as_ref()) != protected
@@ -2203,7 +2197,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              && !state.hosted_mcp.pins(&r.id)
      }) else {
          return false;
-@@ -897,7 +1423,7 @@ fn evict_completed_context(state: &mut ConfigurationState, protected: Option<&st
+@@ -897,7 +1417,7 @@ fn evict_completed_context(state: &mut ConfigurationState, protected: Option<&st
      let expired = state.response_contexts.remove(index).unwrap();
      state
          .received_audio
@@ -2212,7 +2206,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
      state.hosted_mcp.remove_response(&expired.id);
      true
  }
-@@ -1003,6 +1529,7 @@ impl SessionReadiness {
+@@ -1003,6 +1523,7 @@ impl SessionReadiness {
                          pending: Some(PendingConfiguration {
                              hosted_owned: wait_for_update,
                              native_source,
@@ -2220,7 +2214,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                              id: None,
                              contract,
                              phase: if wait_for_update {
-@@ -1013,15 +1540,20 @@ impl SessionReadiness {
+@@ -1013,15 +1534,20 @@ impl SessionReadiness {
                              completion: None,
                          }),
                          active_response: None,
@@ -2241,7 +2235,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                          received_audio: VecDeque::new(),
                          audio_input_sources: VecDeque::new(),
                          failure: None,
-@@ -1071,6 +1603,24 @@ impl SessionReadiness {
+@@ -1071,6 +1597,24 @@ impl SessionReadiness {
          let Ok(event) = serde_json::from_str::<Value>(text) else {
              return observation;
          };
@@ -2266,7 +2260,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
          loop {
              let base_bytes =
                  retained_metadata_bytes(&state).saturating_sub(state.hosted_mcp.bytes());
-@@ -1139,6 +1689,54 @@ impl SessionReadiness {
+@@ -1139,6 +1683,54 @@ impl SessionReadiness {
                  self.configuration.inner.signal.send_replace(failure);
                  return FrameObservation::default();
              }
@@ -2321,7 +2315,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              Some("conversation.item.truncated") => {
                  if let (Some(item), Some(index), Some(end_ms)) = (
                      event["item_id"].as_str(),
-@@ -1148,7 +1746,7 @@ impl SessionReadiness {
+@@ -1148,7 +1740,7 @@ impl SessionReadiness {
                      for record in state.received_audio.iter_mut().filter(|record| {
                          record.item_id == item && u64::from(record.content_index) == index
                      }) {
@@ -2330,7 +2324,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                              record.samples = record
                                  .samples
                                  .min(end_ms.saturating_mul(u64::from(format.sample_rate())) / 1000);
-@@ -1188,9 +1786,15 @@ impl SessionReadiness {
+@@ -1188,9 +1780,15 @@ impl SessionReadiness {
                          let accepted = Arc::new(RealtimeAcceptedConfiguration {
                              hosted_owned: pending.hosted_owned,
                              native_source: pending.native_source,
@@ -2339,7 +2333,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                              output_format: accepted_format(accepted, "output"),
 -                            contract: pending.contract,
 +                            contract: Arc::new(pending.contract),
-+                            response_tool_scope: None,
++                            response_scoped: false,
 +                            response_tools_explicit: false,
 +                            response_parent_contract: None,
 +                            response_contract_bytes: 0,
@@ -2347,7 +2341,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                          });
                          state.accepted = Some(Arc::clone(&accepted));
                          if let Some(completion) = pending.completion {
-@@ -1235,7 +1839,10 @@ impl SessionReadiness {
+@@ -1235,7 +1833,10 @@ impl SessionReadiness {
          let response_id = event
              .get("response_id")
              .and_then(Value::as_str)
@@ -2359,7 +2353,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
          match kind {
              // Interrupting speech and committed audio start a new user request.
              // Provider echoes of our owned outgoing items do not change ownership.
-@@ -1276,36 +1883,124 @@ impl SessionReadiness {
+@@ -1276,38 +1877,126 @@ impl SessionReadiness {
              Some("input_audio_buffer.committed") => return FrameObservation::default(),
              Some("response.created") => {
                  if let Some(id) = response_id {
@@ -2406,6 +2400,8 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
 +                            None
                          }
 -                    }
+-                }
+-            }
 +                    };
 +                    // With concurrent work, an omitted conversation marker cannot
 +                    // identify which pending scope the provider has acknowledged.
@@ -2509,10 +2505,12 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
 +                            }
 +                        }
 +                    }
-                 }
-             }
++                }
++            }
              Some("response.output_audio.delta" | "response.audio.delta") => {
-@@ -1332,6 +2027,7 @@ impl SessionReadiness {
+                 if response_id.is_none() {
+                     state.failure = Some(ReadyState::Mismatch);
+@@ -1332,6 +2021,7 @@ impl SessionReadiness {
                      .active_response
                      .as_ref()
                      .is_none_or(|active| !Arc::ptr_eq(active, &response))
@@ -2520,7 +2518,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                  {
                      return FrameObservation::suppressed();
                  }
-@@ -1355,7 +2051,7 @@ impl SessionReadiness {
+@@ -1355,7 +2045,7 @@ impl SessionReadiness {
                          };
                          if bytes.len() % sample_bytes == 0 {
                              if let Some(record) = state.received_audio.iter_mut().find(|record| {
@@ -2529,7 +2527,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                                      && record.item_id == item_id
                                      && record.content_index == content
                              }) {
-@@ -1368,13 +2064,12 @@ impl SessionReadiness {
+@@ -1368,13 +2058,12 @@ impl SessionReadiness {
                                  }
                              } else if retain_metadata_room(&mut state, item_id.len(), false) {
                                  state.received_audio.push_back(ReceivedAudio {
@@ -2544,7 +2542,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                                  });
                              } else {
                                  state.failure = Some(ReadyState::Mismatch);
-@@ -1387,6 +2082,22 @@ impl SessionReadiness {
+@@ -1387,6 +2076,22 @@ impl SessionReadiness {
                  }
              }
              Some("response.done" | "response.cancelled") => {
@@ -2567,7 +2565,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                  if state
                      .active_response
                      .as_ref()
-@@ -1405,15 +2116,48 @@ impl SessionReadiness {
+@@ -1405,15 +2110,48 @@ impl SessionReadiness {
                          .map(|active| FrameObservation::response(&active))
                          .unwrap_or_default();
                  }
@@ -2617,7 +2615,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                          Some(
                              "response.output_audio_transcript.delta"
                              | "response.output_audio_transcript.done"
-@@ -1818,6 +2562,38 @@ mod tests {
+@@ -1818,6 +2556,38 @@ mod tests {
          assert!(configuration.validate_audio(&frame).is_err());
      }
  
@@ -2656,7 +2654,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
      #[test]
      fn active_response_keeps_accepted_codec_across_update_and_matching_terminal() {
          let observer = accepted_observer();
-@@ -2100,7 +2876,7 @@ mod tests {
+@@ -2100,7 +2870,7 @@ mod tests {
              done(&observer, "a");
              match boundary {
                  "user" => configuration.observe_user_input(),
@@ -2665,7 +2663,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                  "speech" => {
                      observer.observe_frame(
                          r#"{"type":"input_audio_buffer.speech_started","item_id":"new-vad-input"}"#,
-@@ -2144,7 +2920,7 @@ mod tests {
+@@ -2144,7 +2914,7 @@ mod tests {
              );
              match boundary {
                  "user" => configuration.observe_user_input(),
@@ -2674,7 +2672,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                  "speech" => {
                      observer.observe_frame(
                          r#"{"type":"input_audio_buffer.speech_started","item_id":"new-vad-input"}"#,
-@@ -2176,7 +2952,7 @@ mod tests {
+@@ -2176,7 +2946,7 @@ mod tests {
              .unwrap();
          assert!(repeated.payloads.is_empty());
          done(&observer, "a");
@@ -2683,7 +2681,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
          assert!(!configuration.response_create_for("a"));
          assert!(
              !configuration
-@@ -2412,7 +3188,7 @@ mod tests {
+@@ -2412,7 +3182,7 @@ mod tests {
      fn pending_response_create_guard_is_retired_before_its_id_is_observed() {
          let observer = accepted_observer();
          let configuration = observer.configuration();
@@ -2692,7 +2690,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
          configuration
              .prepare_interrupt(None, None, None, false)
              .unwrap();
-@@ -2617,6 +3393,631 @@ mod tests {
+@@ -2617,6 +3387,631 @@ mod tests {
          acknowledge(&observer, contract);
          observer
      }
@@ -3324,7 +3322,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
      fn hosted_event(
          observer: &SessionReadiness,
          kind: &str,
-@@ -2649,6 +4050,81 @@ mod tests {
+@@ -2649,6 +4044,81 @@ mod tests {
          };
          request
      }
@@ -3406,7 +3404,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
      #[test]
      fn hosted_receipt_uses_actual_membership_survives_done_and_is_single_use() {
          let observer = accepted_hosted_observer();
-@@ -3118,7 +4594,22 @@ mod tests {
+@@ -3118,7 +4588,22 @@ mod tests {
              let observer = accepted_hosted_observer();
              let request = issue_hosted(&observer);
              done(&observer, "r");
@@ -3429,7 +3427,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              let events = hosted_event(
                  &observer,
                  "conversation.item.done",
-@@ -3244,7 +4735,7 @@ mod tests {
+@@ -3244,7 +4729,7 @@ mod tests {
              match boundary {
                  "user" => config.observe_user_input(),
                  "manual" => {
@@ -3438,7 +3436,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
                  }
                  "speech" => {
                      observer.observe_frame(
-@@ -3269,7 +4760,7 @@ mod tests {
+@@ -3269,7 +4754,7 @@ mod tests {
          assert!(config.function_response_create("a", "one"));
          config.observe_user_input();
          assert!(
@@ -3447,7 +3445,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
              "do not overwrite outstanding automatic create"
          );
          created(&observer, "b");
-@@ -3283,7 +4774,7 @@ mod tests {
+@@ -3283,7 +4768,7 @@ mod tests {
              !config.function_response_create("b", "b-call"),
              "late automatic B must not gain newer user owner"
          );
@@ -3456,7 +3454,7 @@ index 8210a45e9fd7a0a9b6fcb3b1aa4326682de9619b..0943d27d044690a5cc27afb46ec470d6
          created(&observer, "new-user");
          done(&observer, "new-user");
          assert!(!observer.mismatched());
-@@ -3293,7 +4784,7 @@ mod tests {
+@@ -3293,7 +4778,7 @@ mod tests {
          let observer = accepted_hosted_observer();
          let config = observer.configuration();
          config.observe_user_input();
