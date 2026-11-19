@@ -145,8 +145,8 @@ def test_macos_shards_preserve_qualification_serial_scope_and_required_check() -
         "jobs"
     ]
     source, gate = jobs["native-macos-sandbox-shards"], jobs["native-macos-sandbox"]
-    assert source["needs"] == ["changes", "native-macos"]
-    assert source["if"] == "${{ !inputs.native_only }}"
+    assert source["needs"] == jobs["native-macos"]["needs"]
+    assert source["if"] == "!inputs.native_only && " + jobs["native-macos"]["if"]
     assert source["strategy"] == {
         "fail-fast": "false",
         "matrix": {"shard": "${{ fromJSON(needs.changes.outputs.sdk_tests).macos_indices }}"},

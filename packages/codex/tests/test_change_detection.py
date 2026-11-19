@@ -665,6 +665,28 @@ def test_single_sdk_producer_checks_installed_wheel_before_upload() -> None:
     assert steps[upload]["with"]["if-no-files-found"] == "error"
     assert all("continue-on-error" not in steps[index] for index in (build, verify, upload))
 
+    late_checks = [
+        names.index("Prepare qualified Python 3.11 archive and documentation checks"),
+        names.index("Verify the qualified wheel archive"),
+        names.index("Verify copied documentation and public tools against the qualified wheel"),
+    ]
+    assert verify < min(late_checks) <= max(late_checks) < upload
+    assert jobs["native-linux"]["with"]["sdk_checks"] == "${{ !inputs.native_only }}"
+    assert all(
+        "sdk_checks" not in job.get("with", {})
+        for name, job in jobs.items()
+        if name != "native-linux"
+    )
+    assert all(
+        steps[index]["if"] == "inputs.sdk_checks && inputs.runner == 'ubuntu-24.04'"
+        for index in late_checks
+    )
+    assert not any("continue-on-error" in steps[index] for index in late_checks)
+    early_commands = "\n".join(step.get("run", "") for step in jobs["tests"]["steps"])
+    for command in ("test_distribution.py", "check_docs.py", "test_docs_code.py"):
+        assert command not in early_commands
+        assert any(command in steps[index]["run"] for index in late_checks)
+
 
 @pytest.mark.parametrize(
     "scenario",
@@ -824,8 +846,13 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
         "needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true'"
     )
     suites = jobs["tests-windows-shards"]
-    assert suites["needs"] == ["changes", "native-windows"]
-    assert suites["if"] == "${{ !inputs.native_only }}"
+    assert suites["needs"] == jobs["native-windows"]["needs"]
+    assert set(suites["if"].removeprefix("${{ ").removesuffix(" }}").split(" && ")) == {
+        "!inputs.native_only",
+        "!cancelled()",
+        "success()",
+        "needs.changes.outputs.windows == 'true'",
+    }
     assert suites["strategy"] == {
         "fail-fast": "false",
         "matrix": {
@@ -1328,6 +1355,7 @@ def test_native_build_selection(
             "${{ needs.changes.outputs.native_source_run }}"
         )
     assert changes["outputs"]["native_source_run"] == "${{ steps.native-source.outputs.run_id }}"
+    assert changes["outputs"]["native_key"] == selection["env"]["NATIVE_INPUT_IDENTITY"]
     for path, contents in (
         (workflow_path, workflow_text),
         (native_workflow_path, native_workflow_text),
@@ -2328,6 +2356,7 @@ def test_native_build_selection(
             if scenario.startswith("feature_push") or harness_pr or harness_push
             else "main"
         ),
+        "NATIVE_INPUT_IDENTITY": native_identity,
         "GITHUB_EVENT_NAME": (
             "pull_request"
             if current_pr
