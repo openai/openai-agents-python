@@ -37015,15 +37015,15 @@ index 7c8e5a165520b82ddc1ddd3182cba93f12331035..d56deb8156ca8a8defea65d85d97055b
              error: Some(event),
 diff --git a/codex-rs/protocol/src/input_file.rs b/codex-rs/protocol/src/input_file.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6dd626ac1ed3bf462726979e7bad3e10acc0337c
+index 0000000000000000000000000000000000000000..bb6dfe71724b57530bb12701855cd0b56598aef9
 --- /dev/null
 +++ b/codex-rs/protocol/src/input_file.rs
-@@ -0,0 +1,423 @@
+@@ -0,0 +1,417 @@
 +//! Provider-owned file references shared by user input and tool output.
 +//! Validation performs no host file access, network access, upload, or content estimation.
 +
-+use base64::Engine;
 +use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
++use base64::read::DecoderReader;
 +use schemars::JsonSchema;
 +use serde::Deserialize;
 +use serde::Serialize;
@@ -37146,20 +37146,14 @@ index 0000000000000000000000000000000000000000..6dd626ac1ed3bf462726979e7bad3e10
 +                if payload.is_empty() {
 +                    return Err("file_data must contain base64 data".into());
 +                }
-+                // Validate aligned chunks with fixed scratch space, without allocating decoded files.
-+                const CHUNK_SIZE: usize = 32 * 1024;
-+                let mut decoded = [0_u8; CHUNK_SIZE / 4 * 3];
-+                let mut chunks = payload.as_bytes().chunks(CHUNK_SIZE).peekable();
-+                while let Some(chunk) = chunks.next() {
-+                    if (chunks.peek().is_some() && chunk.contains(&b'='))
-+                        || STANDARD
-+                            .decode_slice(chunk, &mut decoded)
-+                            .or_else(|_| STANDARD_NO_PAD.decode_slice(chunk, &mut decoded))
-+                            .is_err()
-+                    {
-+                        return Err("file_data must contain base64 data".into());
-+                    }
-+                }
++                let engine = if payload.ends_with('=') {
++                    &STANDARD
++                } else {
++                    &STANDARD_NO_PAD
++                };
++                let mut reader = DecoderReader::new(payload.as_bytes(), engine);
++                std::io::copy(&mut reader, &mut std::io::sink())
++                    .map_err(|_| "file_data must contain base64 data")?;
 +                file_data
 +            }
 +            InputFileSource::Url { file_url } => {
