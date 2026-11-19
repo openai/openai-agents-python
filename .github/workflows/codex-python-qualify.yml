@@ -235,6 +235,9 @@ jobs:
           assert Path(agents._native.__file__).resolve().is_relative_to(prefix)
           print("Installed native revision:", agents._native.CODEX_REVISION)
           PYTHON
+          TOKIO_WORKER_THREADS=1 "$python" -I -B -m pytest -q -p no:cacheprovider \
+            -o pythonpath=packages/codex -o asyncio_mode=auto \
+            packages/codex/tests/qualification/prepared_request_admission.py
           if [[ "$RUNNER_OS/$RUNNER_ARCH" == Linux/ARM64 ]]; then
             python314="$RUNNER_TEMP/sdk-3.14/bin/python"
             "$python314" -m pip install --only-binary=:all: --constraint "$stage/constraints.txt" aiohttp pytest pytest-asyncio
@@ -369,6 +372,12 @@ jobs:
               SYSTEMDRIVE SYSTEMROOT TEMP TMP USERDOMAIN USERNAME USERPROFILE WINDIR
           """.split())
           env = {key: value for key, value in os.environ.items() if key.upper() in keep}
+          subprocess.run(
+              [stage / "venv/Scripts/python.exe", "-I", "-B", "-m", "pytest", "-q", "-p", "no:cacheprovider",
+               "-o", "asyncio_mode=auto", "-o", "pythonpath=packages/codex",
+               "packages/codex/tests/qualification/prepared_request_admission.py"],
+              cwd=stage, env={**env, "TOKIO_WORKER_THREADS": "1"}, check=True, timeout=90,
+          )
           subprocess.run(
               [stage / "venv/Scripts/python.exe", "-I", "-B", "-u", "-c",
                "import os, sys; import pytest; "
