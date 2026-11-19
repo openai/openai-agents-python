@@ -150,6 +150,7 @@ Switching providers changes the model backend. It does not make every Responses 
 | CLI not found | Run `codex --version` in the application's environment, or pass `codex_executable`. |
 | Login or configuration-directory failure | Run the CLI under the same user and `CODEX_HOME`; check its login and directory access. An SDK OpenAI key alone does not configure a saved Codex login. |
 | Native shell cannot start | Check the host's native sandbox support and the configured sandbox mode. SDK tools and native commands use different executors. |
+| A paused sandbox run cannot resume | The SDK needs a writable snapshot directory in either mode. On Linux, if your home directory is read-only, set `XDG_STATE_HOME` to an absolute, writable directory before you run the app. Keep that directory available when you resume. Changing `CODEX_HOME` does not move SDK snapshots. |
 | Tools never load | Select a model whose Codex catalog declares tool search. The search examples fail if no tools load. |
 | `CodexProvider does not support ModelSettings...` | Remove the named setting only if your workflow does not need it. Otherwise use a provider that implements it. |
 | A third-party adapter no longer runs | Register Codex alongside that adapter with [`MultiProvider`](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/model_providers/README.md). Codex does not wrap LiteLLM or any-llm model clients. |
