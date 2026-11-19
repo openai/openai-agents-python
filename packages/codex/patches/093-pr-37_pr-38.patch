@@ -2003,10 +2003,10 @@ index 2f029bae1dbd6aba18472dcb51a7aaa420fbec60..ea734d21fd1d79f618af0241578cd483
      fn before_step_agent_activation<'a>(
          &'a self,
 diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
-index 8b8d866311d6fb1aee42d3f8e689663077d53ae2..1e66a00403c72da4e0fad5a0510c194983780e93 100644
+index 8b8d866311d6fb1aee42d3f8e689663077d53ae2..b7431d7748a8692ac1b17399fdafb33acaeb6fe6 100644
 --- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
 +++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
-@@ -304,6 +304,40 @@ impl std::fmt::Debug for AgentProfile {
+@@ -304,6 +304,43 @@ impl std::fmt::Debug for AgentProfile {
      }
  }
  
@@ -2034,20 +2034,23 @@ index 8b8d866311d6fb1aee42d3f8e689663077d53ae2..1e66a00403c72da4e0fad5a0510c1949
 +}
 +
 +impl AgentProfileExecutorTools {
-+    pub fn permits(&self, tool: &codex_tools::ToolName) -> bool {
-+        !tool.is_default_namespace()
-+            || !matches!(
++    pub fn is_executor_tool(tool: &codex_tools::ToolName) -> bool {
++        tool.is_default_namespace()
++            && matches!(
 +                tool.name.as_str(),
 +                "exec_command" | "write_stdin" | "apply_patch" | "project_glob" | "project_grep"
 +            )
-+            || self.allowed.contains(tool.name.as_str())
++    }
++
++    pub fn permits(&self, tool: &codex_tools::ToolName) -> bool {
++        !Self::is_executor_tool(tool) || self.allowed.contains(tool.name.as_str())
 +    }
 +}
 +
  /// One committed native profile, shared by current and future step captures.
  #[derive(Clone, Debug)]
  pub struct CapturedAgentProfile {
-@@ -317,6 +351,19 @@ pub struct AgentProfileActivation {
+@@ -317,6 +354,19 @@ pub struct AgentProfileActivation {
      pub target: std::sync::Arc<AgentProfile>,
  }
  
@@ -2099,3 +2102,27 @@ index 1e2eac23ebe75e0ca7b0f08ff29b6e86769c31b8..07ff249511fb41d31e6b555056bff2f0
  
      /// Native Agent profile/model receipt accompanying an accepted instruction envelope.
      #[serde(default, skip_serializing_if = "Option::is_none")]
+diff --git a/codex-rs/core/src/tools/builtin_result_policy.rs b/codex-rs/core/src/tools/builtin_result_policy.rs
+index 6ae520b30f62131ac5e63cf1dfb58b1cffd1cb95..f39fa89a060c0b245f6e5341174853e663bb0f5f 100644
+--- a/codex-rs/core/src/tools/builtin_result_policy.rs
++++ b/codex-rs/core/src/tools/builtin_result_policy.rs
+@@ -1,4 +1,4 @@
+-//! Whole-result policy for the three native Environment tools only.
++//! Whole-result policy for audited native Environment tools only.
+ use crate::function_tool::FunctionCallError;
+ use crate::tools::context::ToolInvocation;
+ use crate::unified_exec::PendingLocalExec;
+@@ -37,12 +37,7 @@ pub(crate) fn controlled(store: &ExtensionData, call_id: &str) -> bool {
+ }
+ 
+ pub(crate) fn capture(invocation: &ToolInvocation) -> Option<Arc<dyn ToolLifecycleContributor>> {
+-    if !invocation.tool_name.is_default_namespace()
+-        || !matches!(
+-            invocation.tool_name.name.as_str(),
+-            "exec_command" | "write_stdin" | "apply_patch"
+-        )
+-    {
++    if !codex_extension_api::AgentProfileExecutorTools::is_executor_tool(&invocation.tool_name) {
+         return None;
+     }
+     let owner = invocation
