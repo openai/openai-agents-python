@@ -10665,7 +10665,7 @@ index 0000000000000000000000000000000000000000..e8675b9996ed836c82df69e89cbf3755
 +    .await?
 +}
 diff --git a/codex-rs/rmcp-client/src/rmcp_client.rs b/codex-rs/rmcp-client/src/rmcp_client.rs
-index 39dc2cdda454504eb9117030dde2814d407ea251..b4aa24d0f71a3886cc839a7daa72089b32ffd8e2 100644
+index 39dc2cdda454504eb9117030dde2814d407ea251..3cb81d6efe79753be79c1f93111823e764fe29d5 100644
 --- a/codex-rs/rmcp-client/src/rmcp_client.rs
 +++ b/codex-rs/rmcp-client/src/rmcp_client.rs
 @@ -7,6 +7,8 @@ use std::sync::Arc;
@@ -11379,7 +11379,7 @@ index 39dc2cdda454504eb9117030dde2814d407ea251..b4aa24d0f71a3886cc839a7daa72089b
              };
          }
  
-@@ -706,7 +1043,17 @@ impl RmcpClient {
+@@ -706,8 +1043,18 @@ impl RmcpClient {
          let result = self
              .run_service_operation("tools/list", timeout, move |service| {
                  let params = params.clone();
@@ -11394,10 +11394,11 @@ index 39dc2cdda454504eb9117030dde2814d407ea251..b4aa24d0f71a3886cc839a7daa72089b
 +                    }
 +                    service.list_tools(params).await
 +                }
-+                .boxed()
              })
++            .boxed()
              .await?;
          self.persist_oauth_tokens().await;
+         Ok(result)
 @@ -752,6 +1099,69 @@ impl RmcpClient {
              .map(str::to_string)
      }

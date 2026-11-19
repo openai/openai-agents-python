@@ -1003,11 +1003,7 @@ impl Control {
 
     fn controls_environment_builtin(&self, name: &ToolName) -> bool {
         self.root
-            && name.is_default_namespace()
-            && matches!(
-                name.name.as_str(),
-                "exec_command" | "write_stdin" | "apply_patch" | "project_glob" | "project_grep"
-            )
+            && codex_extension_api::AgentProfileExecutorTools::is_executor_tool(name)
             && self
                 .channel
                 .state
@@ -1057,12 +1053,7 @@ impl Control {
         })))
     }
     fn controls_builtin_result(&self, name: &ToolName) -> bool {
-        if !name.is_default_namespace()
-            || !matches!(
-                name.name.as_str(),
-                "exec_command" | "write_stdin" | "apply_patch" | "project_glob" | "project_grep"
-            )
-        {
+        if !codex_extension_api::AgentProfileExecutorTools::is_executor_tool(name) {
             return false;
         }
         self.channel
