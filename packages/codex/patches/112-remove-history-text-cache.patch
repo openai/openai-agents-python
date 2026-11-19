@@ -1,0 +1,691 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index a1d6a49155a50469a03edd70a993a00f50d120ae..a0731024bb1ae565a4fb83aecabb3ed8a195f843 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -827,29 +827,10 @@ impl ModelClient {
+         }
+         self.provider_history
+             .as_ref()
+-            .map(|cursor| {
+-                provider_history::canonical_input_projection(
+-                    input,
+-                    Vec::new(),
+-                    0,
+-                    Some(&cursor.text_receipt),
+-                )
+-            })
++            .map(|_| provider_history::canonical_input_projection(input, Vec::new(), 0))
+             .transpose()
+     }
+ 
+-    pub(crate) fn observe_provider_history_envelope(
+-        &self,
+-        budget: &mut provider_history::HistoryBudget,
+-        envelope: &codex_history::ResponseItemEnvelope,
+-    ) -> Result<()> {
+-        if let Some(cursor) = &self.provider_history {
+-            cursor.text_receipt.observe_envelope(budget, envelope)
+-        } else {
+-            budget.observe(envelope)
+-        }
+-    }
+-
+     pub(crate) fn provider_history_selection(
+         &self,
+     ) -> Option<codex_protocol::provider_history::ProviderHistorySelection> {
+@@ -1469,7 +1450,6 @@ impl ModelClient {
+         let staged_sources = prompt.tool_admission.as_ref()
+             .and_then(|admission| admission.step_store())
+             .and_then(|store| store.get::<crate::session::staged_input_terminal::SampledSources>());
+-        let text_receipt = self.provider_history.as_deref().map(|cursor| &cursor.text_receipt);
+         let canonical_history_input = wire_input_indices
+             .map(|indices| {
+                 if let Some(source) = &staged_sources {
+@@ -1477,11 +1457,11 @@ impl ModelClient {
+                         .map_err(CodexErr::InvalidRequest)?;
+                     let mut projection = provider_history::sampling_input_projection_from_origins(
+                         &canonical, &prompt.input, &origins, indices, prefix.len(),
+-                        source.0.base_input().len(), text_receipt,
++                        source.0.base_input().len(),
+                     )?;
+                     if let Some(captured) = &prompt.canonical_history_input {
+                         let base = provider_history::canonical_input_projection(
+-                            source.0.base_input(), Vec::new(), 0, text_receipt,
++                            source.0.base_input(), Vec::new(), 0,
+                         )?;
+                         projection.retained_item_count = captured.retained_item_count
+                             .checked_add(projection.retained_item_count - base.retained_item_count)
+@@ -1497,7 +1477,6 @@ impl ModelClient {
+                     &prompt.input,
+                     indices,
+                     prefix.len(),
+-                    text_receipt,
+                 )
+             })
+             .transpose()?;
+diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
+index 747bbd735a6a6f96cc1b1b0286efa2947b2fd430..2535933ed9af849e9d3aa57256c5a51299363278 100644
+--- a/codex-rs/core/src/client/provider_history.rs
++++ b/codex-rs/core/src/client/provider_history.rs
+@@ -121,187 +121,17 @@ impl HistoryBudget {
+     }
+ }
+ 
+-// One bounded body per live Cursor; these values never enter persisted history.
+-#[derive(Default)]
+-pub(super) struct TextReceiptCache(OnceLock<TextReceipt>);
+-
+-struct TextReceipt {
+-    text: Box<str>,
+-    json_text_delta: usize,
+-    id: Option<codex_protocol::ResponseItemId>,
+-    phase: Option<codex_protocol::models::MessagePhase>,
+-    digest: OnceLock<[u8; 32]>,
+-}
+-
+-impl std::fmt::Debug for TextReceiptCache {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+-        f.debug_struct("TextReceiptCache").finish_non_exhaustive()
+-    }
+-}
+-
+-// Keep all current fields and their stock serialization, replacing only text.
+-#[derive(serde::Serialize)]
+-struct TextShell<'a> {
+-    #[serde(rename = "type")]
+-    kind: &'static str,
+-    #[serde(skip_serializing_if = "Option::is_none")]
+-    id: Option<&'a codex_protocol::ResponseItemId>,
+-    role: &'a str,
+-    content: [codex_protocol::models::ContentItem; 1],
+-    #[serde(skip_serializing_if = "Option::is_none")]
+-    phase: Option<&'a codex_protocol::models::MessagePhase>,
+-    #[serde(skip_serializing_if = "Option::is_none")]
+-    internal_chat_message_metadata_passthrough:
+-        Option<&'a codex_protocol::models::InternalChatMessageMetadataPassthrough>,
+-}
+-
+-#[derive(serde::Serialize)]
+-struct EnvelopeShell<'a> {
+-    item: TextShell<'a>,
+-    metadata: &'a Option<codex_history::CodexHarnessMetadata>,
+-}
+-
+-fn text_shell(item: &ResponseItem) -> Option<(&str, TextShell<'_>)> {
+-    use codex_protocol::models::ContentItem;
+-    let ResponseItem::Message {
+-        id,
+-        role,
+-        content,
+-        phase,
+-        internal_chat_message_metadata_passthrough,
+-    } = item
+-    else {
+-        return None;
+-    };
+-    let [ContentItem::InputText { text }] = content.as_slice() else {
+-        return None;
+-    };
+-    if role != "user"
+-        || !(64 * 1024..=1024 * 1024).contains(&text.len())
+-        || internal_chat_message_metadata_passthrough
+-            .as_ref()
+-            .and_then(|metadata| metadata.executed_tool_calls.as_ref())
+-            .is_some_and(|calls| !calls.is_empty())
+-    {
+-        return None;
+-    }
+-    Some((
+-        text,
+-        TextShell {
+-            kind: "message",
+-            id: id.as_ref(),
+-            role,
+-            content: [ContentItem::InputText {
+-                text: String::new(),
+-            }],
+-            phase: phase.as_ref(),
+-            internal_chat_message_metadata_passthrough: internal_chat_message_metadata_passthrough
+-                .as_ref(),
+-        },
+-    ))
+-}
+-
+-impl TextReceiptCache {
+-    fn observe<T: serde::Serialize>(
+-        &self,
+-        budget: &mut HistoryBudget,
+-        key: &TextShell<'_>,
+-        original: &T,
+-        shell: &impl serde::Serialize,
+-        text: &str,
+-    ) -> Result<()> {
+-        if let Some(receipt) = self.0.get().filter(|receipt| receipt.text.as_ref() == text) {
+-            budget.observe(shell)?;
+-            budget.bytes_left = budget
+-                .bytes_left
+-                .checked_sub(receipt.json_text_delta)
+-                .ok_or_else(history_limit)?;
+-            return Ok(());
+-        }
+-        let before = budget.bytes_left;
+-        budget.observe(original)?;
+-        // Publish only after this exact value fits the caller's remaining budget.
+-        if self.0.get().is_none() {
+-            let mut shell_budget = HistoryBudget::default();
+-            if shell_budget.observe(shell).is_ok()
+-                && let Some(delta) = (before - budget.bytes_left)
+-                    .checked_sub(MAX_HISTORY_BYTES - shell_budget.bytes_left)
+-            {
+-                let _ = self.0.set(TextReceipt {
+-                    text: text.into(),
+-                    json_text_delta: delta,
+-                    id: key.id.cloned(),
+-                    phase: key.phase.cloned(),
+-                    digest: OnceLock::new(),
+-                });
+-            }
+-        }
+-        Ok(())
+-    }
+-
+-    fn observe_item(&self, budget: &mut HistoryBudget, item: &ResponseItem) -> Result<()> {
+-        let Some((text, shell)) = text_shell(item) else {
+-            return budget.observe(item);
+-        };
+-        self.observe(budget, &shell, item, &shell, text)
+-    }
+-
+-    pub(super) fn observe_envelope(
+-        &self,
+-        budget: &mut HistoryBudget,
+-        envelope: &codex_history::ResponseItemEnvelope,
+-    ) -> Result<()> {
+-        let Some((text, item)) = text_shell(&envelope.item) else {
+-            return budget.observe(envelope);
+-        };
+-        let shell = EnvelopeShell {
+-            item,
+-            metadata: &envelope.metadata,
+-        };
+-        self.observe(budget, &shell.item, envelope, &shell, text)
+-    }
+-
+-    fn matching(&self, item: &ResponseItem) -> Option<&TextReceipt> {
+-        let (text, shell) = text_shell(item)?;
+-        self.0.get().filter(|receipt| {
+-            receipt.text.as_ref() == text
+-                && receipt.id.as_ref() == shell.id
+-                && receipt.phase.as_ref() == shell.phase
+-        })
+-    }
+-}
+-
+ fn check_items<'a>(
+     items: impl ExactSizeIterator<Item = &'a ResponseItem>,
+-    receipt: Option<&TextReceiptCache>,
+ ) -> Result<HistoryBudget> {
+     HistoryBudget::check_count(items.len())?;
+     let mut budget = HistoryBudget::default();
+     for item in items {
+-        if let Some(receipt) = receipt {
+-            receipt.observe_item(&mut budget, item)?;
+-        } else {
+-            budget.observe(item)?;
+-        }
++        budget.observe(item)?;
+     }
+     Ok(budget)
+ }
+ 
+-fn item_digest_with_receipt(
+-    item: &ResponseItem,
+-    receipt: Option<&TextReceiptCache>,
+-) -> Result<[u8; 32]> {
+-    let cached = receipt.and_then(|receipt| receipt.matching(item));
+-    if let Some(digest) = cached.and_then(|cached| cached.digest.get()) {
+-        return Ok(*digest);
+-    }
+-    let digest = item_digest_after_budget_check(item)?;
+-    if let Some(cached) = cached {
+-        let _ = cached.digest.set(digest);
+-    }
+-    Ok(digest)
+-}
+-
+ #[derive(Debug)]
+ struct Pending {
+     canonical_input: ProviderHistoryInputBoundary,
+@@ -331,7 +161,6 @@ pub(crate) struct McpRewriteAdmission(pub(crate) std::sync::Arc<Cursor>);
+ 
+ #[derive(Debug)]
+ pub(crate) struct Cursor {
+-    pub(super) text_receipt: TextReceiptCache,
+     state: StdMutex<State>,
+     session: OnceLock<Weak<crate::session::session::Session>>,
+ }
+@@ -465,14 +294,13 @@ struct InputDigests {
+ fn input_digests_after_budget_check<'a>(
+     items: impl IntoIterator<Item = &'a ResponseItem>,
+     prefix_len: Option<usize>,
+-    receipt: Option<&TextReceiptCache>,
+ ) -> Result<InputDigests> {
+     let mut digest = Sha256::new();
+     digest.update(b"sdk-provider-history-input-v1\0");
+     let mut prefix = (prefix_len == Some(0)).then(|| hex(digest.clone().finalize()));
+     let mut tail = Vec::new();
+     for (index, item) in items.into_iter().enumerate() {
+-        let item_hash = item_digest_with_receipt(item, receipt)?;
++        let item_hash = item_digest_after_budget_check(item)?;
+         digest.update(item_hash);
+         if prefix_len == Some(index + 1) {
+             prefix = Some(hex(digest.clone().finalize()));
+@@ -512,13 +340,12 @@ pub(super) fn canonical_input_projection(
+     items: &[ResponseItem],
+     wire_input_indices: Vec<usize>,
+     prefix_len: usize,
+-    receipt: Option<&TextReceiptCache>,
+ ) -> Result<codex_api::ProviderHistoryInputProjection> {
+-    let budget = check_items(items.iter(), receipt)?;
++    let budget = check_items(items.iter())?;
+     let (retained_item_count, retained_json_bytes) = budget.retained();
+     let hashes = items
+         .iter()
+-        .map(|item| item_digest_with_receipt(item, receipt))
++        .map(item_digest_after_budget_check)
+         .collect::<Result<Vec<_>>>()?;
+     Ok(codex_api::ProviderHistoryInputProjection {
+         retained_item_count,
+@@ -545,16 +372,15 @@ pub(super) fn sampling_input_projection(
+     items: &[ResponseItem],
+     wire_input_indices: Vec<usize>,
+     prefix_len: usize,
+-    receipt: Option<&TextReceiptCache>,
+ ) -> Result<codex_api::ProviderHistoryInputProjection> {
+     let Some(captured) = captured else {
+-        return canonical_input_projection(items, wire_input_indices, prefix_len, receipt);
++        return canonical_input_projection(items, wire_input_indices, prefix_len);
+     };
+-    check_items(items.iter(), receipt)?;
++    check_items(items.iter())?;
+     let mut projection = captured.clone();
+     projection.sampling_item_sha256 = items
+         .iter()
+-        .map(|item| item_digest_with_receipt(item, receipt))
++        .map(item_digest_after_budget_check)
+         .collect::<Result<Vec<_>>>()?;
+     projection.wire_input_indices = wire_input_indices;
+     projection.prefix_len = prefix_len;
+@@ -642,16 +468,15 @@ pub(super) fn sampling_input_projection_from_origins(
+     wire_input_indices: Vec<usize>,
+     prefix_len: usize,
+     staged_start: usize,
+-    receipt: Option<&TextReceiptCache>,
+ ) -> Result<codex_api::ProviderHistoryInputProjection> {
+-    check_items(items.iter(), receipt)?;
++    check_items(items.iter())?;
+     if origins.len() != items.len() {
+         return Err(invalid("Sampling origins do not cover the current input"));
+     }
+     let mut projection = canonical_input_projection(
+-        canonical_items, wire_input_indices, prefix_len, receipt,
++        canonical_items, wire_input_indices, prefix_len,
+     )?;
+-    projection.sampling_item_sha256 = items.iter().map(|item| item_digest_with_receipt(item, receipt))
++    projection.sampling_item_sha256 = items.iter().map(item_digest_after_budget_check)
+         .collect::<Result<Vec<_>>>()?;
+     projection.sampling_canonical_indices = origins.to_vec();
+     let mut delivered = std::collections::HashSet::new();
+@@ -841,7 +666,6 @@ pub(crate) fn definitive_pre_stream_rejection(error: &codex_api::ApiError) -> bo
+ impl Cursor {
+     pub(crate) fn new(start: Start) -> Self {
+         Self {
+-            text_receipt: TextReceiptCache::default(),
+             state: StdMutex::new(State {
+                 reference: start.reference.unwrap_or(ProviderHistoryReference {
+                     selection: start.selection,
+@@ -924,7 +748,7 @@ impl Cursor {
+         attempt: Option<std::sync::Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
+         history_transport: HistoryTransport<'_>,
+     ) -> Result<Option<codex_api::CacheAnnotatedInput<Vec<ResponseItem>>>> {
+-        check_items(request.input.iter(), Some(&self.text_receipt))?;
++        check_items(request.input.iter())?;
+         let mut canonical_input = request
+             .request_controls
+             .canonical_history_input
+@@ -1000,7 +824,6 @@ impl Cursor {
+         let wire_digests = input_digests_after_budget_check(
+             request.input.as_ref(),
+             saved.window.as_ref().map(|window| window.input_len),
+-            Some(&self.text_receipt),
+         )?;
+         let mut full_digest = wire_digests.full;
+         let unsent = if let Some(window) = &saved.window {
+@@ -1146,14 +969,13 @@ impl Cursor {
+                     .map(|id| ResponseItem::ItemReference { id: id.clone() }),
+             );
+             items.extend(request.input.iter().cloned());
+-            let budget = check_items(items.iter(), Some(&self.text_receipt))?;
++            let budget = check_items(items.iter())?;
+             request.input = request.input.with_items(items);
+             canonical_input.prefix_len += imported_items.len();
+             full_len = request.input.len();
+             full_digest = input_digests_after_budget_check(
+                 request.input.as_ref(),
+                 None,
+-                Some(&self.text_receipt),
+             )?
+             .full;
+             Some(budget)
+@@ -1202,7 +1024,7 @@ impl Cursor {
+         current: &[&ResponseItem],
+         items: &[&ResponseItem],
+     ) -> Result<()> {
+-        check_items(items.iter().copied(), None)?;
++        check_items(items.iter().copied())?;
+         let state = self.state.lock().unwrap();
+         let refused = || invalid("Cannot replace acknowledged provider history input or output");
+         if state.reference.pending {
+@@ -1463,10 +1285,9 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn text_receipt_matches_stock_message_envelope_and_digest_with_current_metadata() {
++    fn history_counts_envelope_bytes_and_hashes_with_current_metadata() {
+         for unit in ["a", "é\"\\\n\t\0\u{2028}", "\0\r\n\u{8}\u{c}"] {
+             let text = unit.repeat((64 * 1024_usize).div_ceil(unit.len()));
+-            let cache = TextReceiptCache::default();
+             let original = receipt_message(&text);
+             let mut stamped = original.clone();
+             stamped.set_turn_id_if_missing("turn_receipt");
+@@ -1486,121 +1307,39 @@ mod tests {
+                     item: item.clone(),
+                     metadata: Some(codex_history::CodexHarnessMetadata::default()),
+                 };
+-                let mut stock = HistoryBudget::default();
+-                let mut observed = HistoryBudget::default();
+-                stock.observe(&envelope).unwrap();
+-                cache.observe_envelope(&mut observed, &envelope).unwrap();
+-                assert_eq!(observed.retained(), stock.retained());
+-                let mut stock = HistoryBudget::default();
+-                let mut observed = HistoryBudget::default();
+-                stock.observe(item).unwrap();
+-                cache.observe_item(&mut observed, item).unwrap();
+-                assert_eq!(observed.retained(), stock.retained());
+-                let (_, shell) = text_shell(item).unwrap();
+-                let mut empty = item.clone();
+-                if let ResponseItem::Message { content, .. } = &mut empty {
+-                    let [codex_protocol::models::ContentItem::InputText { text }] =
+-                        content.as_mut_slice()
+-                    else {
+-                        panic!("fixture text")
+-                    };
+-                    text.clear();
+-                }
+-                assert_eq!(
+-                    serde_json::to_vec(&shell).unwrap(),
+-                    serde_json::to_vec(&empty).unwrap()
+-                );
+-                let empty_envelope = codex_history::ResponseItemEnvelope {
+-                    item: empty,
+-                    metadata: envelope.metadata.clone(),
+-                };
+-                assert_eq!(
+-                    serde_json::to_vec(&EnvelopeShell {
+-                        item: shell,
+-                        metadata: &envelope.metadata
+-                    })
+-                    .unwrap(),
+-                    serde_json::to_vec(&empty_envelope).unwrap(),
+-                );
+-                assert_eq!(
+-                    item_digest_with_receipt(item, Some(&cache)).unwrap(),
+-                    expected_digest
+-                );
+-                assert_eq!(
+-                    item_digest_with_receipt(item, Some(&cache)).unwrap(),
+-                    item_digest_after_budget_check(item).unwrap()
+-                );
++                let mut envelope_budget = HistoryBudget::default();
++                envelope_budget.observe(&envelope).unwrap();
++                assert_eq!(envelope_budget.retained(), (1, serde_json::to_vec(&envelope).unwrap().len()));
++                let budget = check_items([item].into_iter()).unwrap();
++                assert_eq!(budget.retained(), (1, serde_json::to_vec(item).unwrap().len()));
++                assert_eq!(item_digest(item).unwrap(), expected_digest);
+             }
+         }
+     }
+ 
+     #[test]
+-    fn text_receipt_keeps_exact_limits_and_never_publishes_failed_admission() {
++    fn history_enforces_exact_limits_with_changed_metadata() {
+         let item = receipt_message(&"a".repeat(64 * 1024));
+-        let cache = TextReceiptCache::default();
+-        let size = serde_json::to_vec(&item).unwrap().len();
+-        for (items, remaining) in [(MAX_HISTORY_ITEMS, MAX_HISTORY_BYTES), (0, size - 1)] {
+-            let mut stock = HistoryBudget {
+-                items,
+-                bytes_left: remaining,
+-            };
+-            let mut observed = stock.clone();
+-            assert_eq!(
+-                cache
+-                    .observe_item(&mut observed, &item)
+-                    .unwrap_err()
+-                    .to_string(),
+-                stock.observe(&item).unwrap_err().to_string()
+-            );
+-            assert!(cache.0.get().is_none());
+-        }
+-        let mut exact = HistoryBudget {
+-            items: 0,
+-            bytes_left: size,
+-        };
+-        cache.observe_item(&mut exact, &item).unwrap();
+-        assert_eq!(exact.bytes_left, 0);
+         let mut changed = item.clone();
+         changed.set_turn_id_if_missing(&"escaped\"turn".repeat(100));
+-        let size = serde_json::to_vec(&changed).unwrap().len();
+-        for remaining in [size - 1, size] {
+-            let mut stock = HistoryBudget {
+-                items: 0,
+-                bytes_left: remaining,
+-            };
+-            let mut observed = stock.clone();
+-            match stock.observe(&changed) {
+-                Ok(()) => {
+-                    cache.observe_item(&mut observed, &changed).unwrap();
+-                    assert_eq!(observed.retained(), stock.retained());
+-                }
+-                Err(error) => assert_eq!(
+-                    cache
+-                        .observe_item(&mut observed, &changed)
+-                        .unwrap_err()
+-                        .to_string(),
+-                    error.to_string()
+-                ),
++        for item in [&item, &changed] {
++            let size = serde_json::to_vec(item).unwrap().len();
++            for (items, remaining) in [(MAX_HISTORY_ITEMS, MAX_HISTORY_BYTES), (0, size - 1)] {
++                let mut budget = HistoryBudget { items, bytes_left: remaining };
++                assert_eq!(budget.observe(item).unwrap_err().to_string(), history_limit().to_string());
+             }
++            let mut exact = HistoryBudget { items: 0, bytes_left: size };
++            exact.observe(item).unwrap();
++            assert_eq!(exact.bytes_left, 0);
+         }
+         let oversized = receipt_message(&"x".repeat(MAX_HISTORY_BYTES));
+-        let empty = TextReceiptCache::default();
+-        assert!(
+-            empty
+-                .observe_item(&mut HistoryBudget::default(), &oversized)
+-                .is_err()
+-        );
+-        assert!(empty.0.get().is_none());
++        assert!(check_items([&oversized].into_iter()).is_err());
+     }
+ 
+     #[test]
+-    fn text_receipt_falls_back_for_changed_identity_content_and_executed_calls() {
++    fn history_hashes_reflect_the_current_item_and_executed_calls() {
+         let item = receipt_message(&"a".repeat(64 * 1024));
+-        let cache = TextReceiptCache::default();
+-        cache
+-            .observe_item(&mut HistoryBudget::default(), &item)
+-            .unwrap();
+-        let digest = item_digest_with_receipt(&item, Some(&cache)).unwrap();
++        let digest = item_digest(&item).unwrap();
+         let mut changed_id = item.clone();
+         changed_id.set_id(Some(codex_protocol::ResponseItemId::from_server(
+             "other".into(),
+@@ -1622,21 +1361,13 @@ mod tests {
+                 serde_json::json!({"arg": "value"}),
+             )]);
+         }
+-        assert!(text_shell(&executed).is_none());
+         for changed in [&changed_id, &changed_phase, &changed_text, &executed] {
+-            let mut stock = HistoryBudget::default();
+-            let mut observed = HistoryBudget::default();
+-            stock.observe(changed).unwrap();
+-            cache.observe_item(&mut observed, changed).unwrap();
+-            assert_eq!(observed.retained(), stock.retained());
+-            assert_eq!(
+-                item_digest_with_receipt(changed, Some(&cache)).unwrap(),
+-                item_digest_after_budget_check(changed).unwrap()
+-            );
++            let projection = canonical_input_projection(std::slice::from_ref(changed), vec![0], 0)
++                .unwrap();
++            assert_eq!(projection.item_sha256, vec![item_digest(changed).unwrap()]);
++            assert_eq!(projection.retained_json_bytes, serde_json::to_vec(changed).unwrap().len());
+         }
+-        assert_eq!(cache.0.get().unwrap().text.as_ref(), "a".repeat(64 * 1024));
+-        assert_eq!(*cache.0.get().unwrap().digest.get().unwrap(), digest);
+-        assert!(TextReceiptCache::default().0.get().is_none());
++        assert_eq!(digest, item_digest(&item).unwrap());
+     }
+ 
+     fn call(kind: &str, input: &str) -> ResponseItem {
+@@ -1717,8 +1448,8 @@ mod tests {
+                 Some(items.len()),
+                 Some(items.len() + 1),
+             ] {
+-                check_items(items.iter(), None).unwrap();
+-                let actual = input_digests_after_budget_check(&items, prefix_len, None).unwrap();
++                check_items(items.iter()).unwrap();
++                let actual = input_digests_after_budget_check(&items, prefix_len).unwrap();
+                 assert_eq!(actual.full, separate_input_digest(&items).unwrap());
+                 let expected_prefix = prefix_len
+                     .and_then(|len| items.get(..len))
+@@ -1743,8 +1474,8 @@ mod tests {
+         let item = input_message("msg_budget", &"é".repeat(MAX_HISTORY_BYTES / 2));
+         let expected = separate_input_digest([&item]).unwrap_err().to_string();
+         let items = [item];
+-        let actual = check_items(items.iter(), None)
+-            .and_then(|_| input_digests_after_budget_check(&items, Some(2), None));
++        let actual = check_items(items.iter())
++            .and_then(|_| input_digests_after_budget_check(&items, Some(2)));
+         assert_eq!(actual.err().unwrap().to_string(), expected);
+         let small = input_message("msg_count", "small");
+         let expected = separate_input_digest(std::iter::repeat_n(&small, MAX_HISTORY_ITEMS + 1))
+@@ -1762,42 +1493,36 @@ mod tests {
+     fn explicit_origins_keep_equal_text_occurrences_distinct_when_reordered() {
+         let mut first = input_message("msg_a", "same");
+         first.set_id(None);
+-        let cache = TextReceiptCache::default();
+         let original = vec![first.clone(), first.clone()];
+         let projection = sampling_input_projection_from_origins(
+             &original, &[first.clone(), first.clone()],
+             &[Some(1), Some(0)], vec![0, 1], 0, original.len(),
+-            Some(&cache),
+         ).unwrap();
+         assert_eq!(projection.delivered_input_indices, vec![0, 1]);
+         assert!(sampling_input_projection_from_origins(
+             &original, &[first.clone(), first],
+             &[Some(0), Some(0)], vec![0, 1], 0, original.len(),
+-            Some(&cache),
+         ).is_err());
+     }
+ 
+     #[test]
+     fn explicit_origins_refuse_changed_missing_and_out_of_range_user_sources() {
+         let original = vec![input_message("msg_a", "original")];
+-        let cache = TextReceiptCache::default();
+         for origins in [vec![], vec![None], vec![Some(1)]] {
+             assert!(sampling_input_projection_from_origins(
+                 &original, &original, &origins, vec![0], 0, original.len(),
+-                Some(&cache),
+             ).is_err());
+         }
+         assert!(sampling_input_projection_from_origins(
+             &original, &[input_message("msg_a", "changed")],
+             &[Some(0)], vec![0], 0, original.len(),
+-            Some(&cache),
+         ).is_err());
+     }
+ 
+     #[test]
+     fn sampling_append_and_same_identity_replacement_keep_canonical_boundary() {
+         let original = vec![input_message("msg_original", "original")];
+-        let captured = canonical_input_projection(&original, vec![], 0, None).unwrap();
++        let captured = canonical_input_projection(&original, vec![], 0).unwrap();
+         for sample in [
+             vec![
+                 original[0].clone(),
+@@ -1810,7 +1535,6 @@ mod tests {
+                 &sample,
+                 (0..sample.len()).collect(),
+                 0,
+-                None,
+             )
+             .unwrap();
+             let (boundary, tail) = delivered_boundary(&projected).unwrap();
+@@ -1827,10 +1551,10 @@ mod tests {
+             input_message("msg_b", "b"),
+             input_message("msg_c", "c"),
+         ];
+-        let captured = canonical_input_projection(&original, vec![], 0, None).unwrap();
++        let captured = canonical_input_projection(&original, vec![], 0).unwrap();
+         let sample = vec![original[0].clone(), original[2].clone()];
+         let projected =
+-            sampling_input_projection(Some(&captured), &sample, vec![0, 1], 0, None).unwrap();
++            sampling_input_projection(Some(&captured), &sample, vec![0, 1], 0).unwrap();
+         let (boundary, mut tail) = delivered_boundary(&projected).unwrap();
+         assert_eq!(boundary.input_len, 1);
+         let output = input_message("msg_output", "output");
+@@ -1896,7 +1620,7 @@ mod tests {
+         .unwrap();
+         let other = input_message("msg_other", "other");
+         let original = vec![same.clone(), other.clone(), same.clone()];
+-        let captured = canonical_input_projection(&original, vec![], 0, None).unwrap();
++        let captured = canonical_input_projection(&original, vec![], 0).unwrap();
+         let sample = vec![
+             input_message("msg_new", "new"),
+             same.clone(),
+@@ -1904,10 +1628,10 @@ mod tests {
+             other.clone(),
+         ];
+         let projected =
+-            sampling_input_projection(Some(&captured), &sample, vec![0, 1, 2, 3], 0, None).unwrap();
++            sampling_input_projection(Some(&captured), &sample, vec![0, 1, 2, 3], 0).unwrap();
+         assert_eq!(projected.delivered_input_indices, vec![0, 1, 2]);
+         assert!(
+-            sampling_input_projection(Some(&captured), &[same, other], vec![0, 1], 0, None)
++            sampling_input_projection(Some(&captured), &[same, other], vec![0, 1], 0)
+                 .is_err()
+         );
+     }
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index acb9ddb93f3fd1edf965e130c50fa85745c18f30..045194beed6aef8a134f283e5f02e417d7840c2e 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1370,9 +1370,7 @@ async fn check_provider_history_budget<T: serde::Serialize>(
+         let history = sess.clone_history().await;
+         HistoryBudget::check_count(history.raw_items().len().saturating_add(input.len()))?;
+         for item in history.annotated_items() {
+-            sess.services
+-                .model_client
+-                .observe_provider_history_envelope(&mut budget, item)?;
++            budget.observe(item)?;
+         }
+         for item in input {
+             budget.observe(item)?;

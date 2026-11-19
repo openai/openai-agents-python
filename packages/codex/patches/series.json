@@ -443,7 +443,11 @@
     {
       "path": "111-pr-05.patch",
       "sha256": "efec31871140fbcbf99c9f8649beac2214f017b2b029b131dbae2328e7c52281"
+    },
+    {
+      "path": "112-remove-history-text-cache.patch",
+      "sha256": "a4b9f08081402d5ac71dbf8d146060f0b6dc34476425e72f4750e923eea1bc47"
     }
   ],
-  "result_tree": "bf05fbb7950e287c622716a68332ae7c5ea3115c"
+  "result_tree": "52a4fa08a054d47a1fe1577a5f79a88e5336ecd8"
 }
