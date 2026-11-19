@@ -330,8 +330,8 @@ async def test_initialized_notification_transport_exception_hides_url_credential
     caplog,
     redacted: bool,
 ):
-    url = "https://user:s3cr3t_pw@example.test/mcp?api_key=SECRET_QS_KEY#SECRET_FRAGMENT"
-    secrets = ("user", "s3cr3t_pw", "SECRET_QS_KEY", "SECRET_FRAGMENT")
+    url = "https://mcp_test_login:s3cr3t_pw@example.test/mcp?api_key=SECRET_QS_KEY#SECRET_FRAGMENT"
+    secrets = ("mcp_test_login", "s3cr3t_pw", "SECRET_QS_KEY", "SECRET_FRAGMENT")
 
     async def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("boom", request=request)

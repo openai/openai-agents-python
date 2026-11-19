@@ -31,9 +31,9 @@ else:
 
 
 _CREDENTIALED_URL = (
-    "https://user:s3cr3t_pw@mcp.example.com/sse?api_key=SECRET_QS_KEY#SECRET_FRAGMENT"
+    "https://mcp_test_login:s3cr3t_pw@mcp.example.com/sse?api_key=SECRET_QS_KEY#SECRET_FRAGMENT"
 )
-_URL_SECRETS = ("user", "s3cr3t_pw", "SECRET_QS_KEY", "SECRET_FRAGMENT")
+_URL_SECRETS = ("mcp_test_login", "s3cr3t_pw", "SECRET_QS_KEY", "SECRET_FRAGMENT")
 _SAFE_URL = "https://mcp.example.com/sse"
 _PROMPT_RESOURCE_OPERATIONS = [
     ("list_prompts", (), "list prompts"),
