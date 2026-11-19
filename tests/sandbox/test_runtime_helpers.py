@@ -288,3 +288,54 @@ def test_resolve_workspace_path_helper_allows_nested_read_only_extra_grant_on_re
     assert result.returncode == 0
     assert result.stdout == f"{target.resolve(strict=False)}\n"
     assert result.stderr == ""
+
+
+@requires_posix_shell
+def test_runtime_helper_install_ignores_readonly_temp_from_reused_process_id(
+    tmp_path: Path,
+) -> None:
+    install_path = tmp_path / "helper"
+    helper = RuntimeHelperScript(
+        name="test-helper",
+        content="#!/bin/sh\nprintf 'expected\\n'",
+        install_path=install_path,
+    )
+    command = helper.install_command()
+    # An interrupted installer can leave a mode-0555 sibling behind. Container PID
+    # reuse must not make the next installer open or remove that old file.
+    setup = 'stale="$1.tmp.$$"; printf stale > "$stale"; chmod 0555 "$stale"\n'
+    result = subprocess.run(
+        (*command[:2], setup + command[2], *command[3:]),
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert install_path.read_text().rstrip("\n") == helper.content
+    leftovers = list(tmp_path.glob("helper.tmp.*"))
+    assert len(leftovers) == 1
+    assert leftovers[0].read_text() == "stale"
+    assert install_path.stat().st_mode & 0o777 == 0o555
+
+
+@requires_posix_shell
+def test_runtime_helper_install_replaces_directory_symlink_without_changing_target(
+    tmp_path: Path,
+) -> None:
+    install_path = tmp_path / "helper"
+    untouched = tmp_path / "target"
+    untouched.mkdir()
+    (untouched / "keep.txt").write_text("untouched")
+    install_path.symlink_to(untouched, target_is_directory=True)
+    helper = RuntimeHelperScript(
+        name="test-helper",
+        content="#!/bin/sh\nprintf 'expected\\n'",
+        install_path=install_path,
+    )
+
+    subprocess.run(helper.install_command(), check=True, capture_output=True)
+
+    assert not install_path.is_symlink()
+    assert install_path.read_text().rstrip("\n") == helper.content
+    assert (untouched / "keep.txt").read_text() == "untouched"
+    assert list(tmp_path.glob("helper.tmp.*")) == []

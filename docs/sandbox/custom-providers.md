@@ -58,6 +58,8 @@ Underscored base-class hooks are implementation coupling: pin and test the SDK v
 
 State the capabilities your backend supports. Reject unsupported PTY sessions, users, exposed ports, mounts, or manifest entries explicitly instead of executing them on the host as a fallback. Translate provider failures into the SDK's sandbox error types while preserving useful error codes and retryability without exposing credentials or raw sensitive responses.
 
+If your backend uses the SDK's Unix shell helpers, include `mktemp` in the sandbox image. The SDK uses it to give each installer its own temporary file, so two processes can install the same helper without overwriting each other's work.
+
 ## Registration happens when types are imported
 
 Client selection and serialized-type registration are separate operations:

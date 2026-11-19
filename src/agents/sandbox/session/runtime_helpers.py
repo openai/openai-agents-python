@@ -299,7 +299,6 @@ class RuntimeHelperScript:
         return cls(name=name, content=content, install_path=install_path)
 
     def install_command(self) -> tuple[str, ...]:
-        tmp_template = f"{self.install_path}.tmp.$$"
         heredoc = f"OPENAI_AGENTS_HELPER_{self.install_path.name.upper().replace('-', '_')}"
         return (
             "sh",
@@ -309,9 +308,8 @@ class RuntimeHelperScript:
 set -eu
 
 dest="$1"
-tmp="{tmp_template}"
-
 mkdir -p -- "$(dirname -- "$dest")"
+tmp=$(mktemp "$dest.tmp.XXXXXXXXXX")
 
 cleanup() {{
     rm -f -- "$tmp"
@@ -330,7 +328,6 @@ if [ -x "$dest" ] && command -v cmp >/dev/null 2>&1 && cmp -s "$dest" "$tmp"; th
     trap - EXIT INT TERM
     exit 0
 fi
-rm -f -- "$dest"
 mv -f -- "$tmp" "$dest"
 trap - EXIT INT TERM
 """.strip(),
