@@ -10,6 +10,16 @@ on:
   schedule:
     - cron: '23 6 * * 2'
 
+concurrency:
+  # Keep explicit retries and non-PR scans independent.
+  group: >-
+    ${{ github.event_name == 'pull_request' && github.run_attempt == '1' &&
+    github.base_ref == 'feat/codex-harness' &&
+    github.event.pull_request.head.repo.full_name == github.repository &&
+    format('agents-python-codeql-harness-pr-{0}', github.event.pull_request.number) ||
+    format('agents-python-codeql-run-{0}', github.run_id) }}
+  cancel-in-progress: true
+
 permissions: {}
 
 jobs:
