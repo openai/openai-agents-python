@@ -9,6 +9,10 @@ on:
       runner:
         type: string
         required: true
+      admission_in_qualification:
+        description: Run the admission regression in the caller's installed-wheel qualification.
+        type: boolean
+        default: false
       native_source_run:
         type: string
         required: false
@@ -303,7 +307,7 @@ jobs:
           mkdir -p "$(dirname "$OPENAI_AGENTS_BUILD_SOURCE/$fixture")"
           cp "$fixture" "$OPENAI_AGENTS_BUILD_SOURCE/$fixture"
       - name: Run the native binding admission regression
-        if: inputs.native_source_run == '' && env.WINDOWS_REGRESSIONS_IN_SIBLING != 'true'
+        if: inputs.native_source_run == '' && !inputs.admission_in_qualification && env.WINDOWS_REGRESSIONS_IN_SIBLING != 'true'
         run: &native_admission_test |
           python -I -S - <<'PYTHON'
           import os
@@ -570,6 +574,7 @@ jobs:
         run: *windows_filename_command
       - *copy_test_executor_source
       - name: Run the native binding admission regression
+        if: ${{ !inputs.admission_in_qualification }}
         run: *native_admission_test
       - name: Verify the prepared native source after testing
         run: *verify_filename_source

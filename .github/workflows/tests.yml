@@ -532,6 +532,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     uses: ./.github/workflows/codex-python.yml
     with:
+      admission_in_qualification: true
       runner: ubuntu-24.04
       native_source_run: ${{ needs.changes.outputs.native_source_run }}
       native_artifacts: ${{ needs.changes.outputs.native_artifacts }}
@@ -542,6 +543,7 @@ jobs:
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true'
     uses: ./.github/workflows/codex-python.yml
     with:
+      admission_in_qualification: true
       runner: windows-latest
       native_source_run: ${{ needs.changes.outputs.native_source_run }}
       native_artifacts: ${{ needs.changes.outputs.native_artifacts }}
@@ -552,6 +554,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     uses: ./.github/workflows/codex-python.yml
     with:
+      admission_in_qualification: true
       runner: macos-latest
       native_source_run: ${{ needs.changes.outputs.native_source_run }}
       native_artifacts: ${{ needs.changes.outputs.native_artifacts }}
@@ -566,6 +569,7 @@ jobs:
       (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness'))
     uses: ./.github/workflows/codex-python.yml
     with:
+      admission_in_qualification: true
       runner: ubuntu-24.04-arm
       native_source_run: >-
         ${{ needs.changes.outputs.native_artifacts != '' &&

@@ -510,6 +510,7 @@ def test_native_publication_is_a_global_barrier() -> None:
             assert producers <= ancestors(name), name
     for name in producers:
         assert jobs[name]["needs"] == "changes"
+        assert jobs[name]["with"]["admission_in_qualification"] == "true"
     steps = _steps()
     assert not any("qualification/" in step.get("run", "") for step in steps)
     assert not any("import agents" in step.get("run", "") for step in steps)
@@ -607,6 +608,7 @@ def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
     assert producer["needs"] == "changes"
     assert producer["with"] == {
         "runner": "ubuntu-24.04-arm",
+        "admission_in_qualification": "true",
         "native_source_run": (
             "${{ needs.changes.outputs.native_artifacts != '' && "
             "fromJSON(needs.changes.outputs.native_artifacts)['Linux-ARM64'] && "
@@ -1243,7 +1245,10 @@ def test_manual_native_entrypoint_uses_the_existing_qualified_package_pipeline(
         ("push", "feat/codex-harness", "same", "123", False),
     ],
 )
-def test_windows_regression_sibling_preserves_inline_fallbacks(event, ref, repo, source, parallel):
+@pytest.mark.parametrize("installed", [False, True])
+def test_windows_regression_sibling_preserves_inline_fallbacks(
+    event, ref, repo, source, parallel, installed
+):
     values = {
         "github.repository": "openai/openai-agents-python" if repo == "same" else "fork/repo",
         "github.event_name": event,
@@ -1254,6 +1259,7 @@ def test_windows_regression_sibling_preserves_inline_fallbacks(event, ref, repo,
     workflow = yaml.load(
         (ROOT / ".github/workflows/codex-python.yml").read_text(), Loader=yaml.BaseLoader
     )
+    values["inputs.admission_in_qualification"] = installed
     sibling = workflow["jobs"]["windows-filename"]
     assert _condition(sibling["if"], values) is parallel
     assert sibling["if"] == workflow["jobs"]["build"]["env"]["WINDOWS_REGRESSIONS_IN_SIBLING"]
@@ -1264,10 +1270,13 @@ def test_windows_regression_sibling_preserves_inline_fallbacks(event, ref, repo,
         "Test Windows project-search filename handling",
         "Run the native binding admission regression",
     ):
+        in_qualification = installed and name == "Run the native binding admission regression"
         assert _condition(steps[name]["if"].replace("runner.os", "'Windows'"), values) is (
-            not source and not parallel
+            not source and not parallel and not in_qualification
         )
         assert sibling_steps[name]["run"] == steps[name]["run"]
+        if name == "Run the native binding admission regression":
+            assert _condition(sibling_steps[name]["if"], values) is (not installed)
     copy_fixture = "Copy the shared test executor source"
     assert sibling_steps[copy_fixture]["run"] == steps[copy_fixture]["run"]
     assert _condition(steps["Build the shared test executor"]["if"], values) is (not source)
