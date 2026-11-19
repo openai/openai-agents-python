@@ -887,7 +887,7 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         run: |
           uv run --with mcp==2.0.0 --with mcp-types==2.0.0 --with uvicorn --with starlette python -c 'from agents.experimental.mcp_tasks import MCPTasksProvider'
-          uv run --with mcp==2.0.0 --with mcp-types==2.0.0 --with uvicorn --with starlette python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_deferred_mcp_response_budget.py packages/codex/tests/test_deferred_mcp_tasks.py packages/codex/tests/test_deferred_mcp_tasks_import.py packages/codex/tests/test_deferred_mcp_wire_primitives.py packages/codex/tests/test_deferred_mcp_worker_context.py
+          uv run --with mcp==2.0.0 --with mcp-types==2.0.0 --with uvicorn --with starlette python packages/codex/scripts/test_native.py --sdk -m pytest -q -n 4 --dist worksteal packages/codex/tests/test_deferred_mcp_response_budget.py packages/codex/tests/test_deferred_mcp_tasks.py packages/codex/tests/test_deferred_mcp_tasks_import.py packages/codex/tests/test_deferred_mcp_wire_primitives.py packages/codex/tests/test_deferred_mcp_worker_context.py
       - name: Skip tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."
