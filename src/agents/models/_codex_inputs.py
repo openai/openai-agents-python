@@ -6,7 +6,8 @@ import mimetypes
 import re
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import TypeAdapter
@@ -26,7 +27,7 @@ def _image_content(part: dict[str, Any]) -> dict[str, Any]:
     if isinstance(image, str) and not image.startswith("data:"):
         parsed = urlparse(image)
         if parsed.scheme == "file" and parsed.netloc in ("", "localhost"):
-            path = Path(unquote(parsed.path))
+            path = Path(url2pathname(parsed.path))
         elif not parsed.scheme and Path(image).is_absolute():
             path = Path(image)
         else:

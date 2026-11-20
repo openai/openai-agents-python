@@ -101,12 +101,9 @@ async def test_initialization_retries_only_child_exit_and_reaps_failed_attempt(
 
     monkeypatch.setattr("agents.models._codex_app_server._INITIALIZE_RETRY_DELAYS", (0, 0, 0))
 
-    script = tmp_path / "codex-app-server"
+    script = tmp_path / "codex-app-server.py"
     script.write_text(
-        "#!"
-        + sys.executable
-        + "\n"
-        + r"""
+        r"""
 import json, os, pathlib, sys
 attempt_file = pathlib.Path(os.environ["ATTEMPT_FILE"])
 try:
@@ -126,7 +123,15 @@ for line in sys.stdin:
         print(json.dumps({"id": message["id"], "result": {"ok": True}}), flush=True)
 """
     )
-    script.chmod(0o700)
+    create_subprocess_exec = asyncio.create_subprocess_exec
+
+    async def launch_script(*args, **kwargs):
+        # Run the same real protocol child through Python on every host.
+        if args[0] == str(script):
+            args = (sys.executable, "-u", *args)
+        return await create_subprocess_exec(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch_script)
     opened = []
     original = CodexAppServer.open
 

@@ -65,8 +65,10 @@ def test_tool_result_continuation_uses_history_without_fabricated_user_input():
     assert turn == []
 
 
-def test_data_and_local_images_preserve_content_in_turn_and_tool_output(tmp_path):
-    image = tmp_path / "image.png"
+@pytest.mark.parametrize("name", ["image.png", "image %23 #%.png"])
+@pytest.mark.parametrize("authority", ["", "localhost"])
+def test_data_and_local_images_preserve_content_in_turn_and_tool_output(tmp_path, name, authority):
+    image = tmp_path / name
     image.write_bytes(b"image bytes")
     data = "data:image/png;base64,aW1hZ2UgYnl0ZXM="
     history, turn = prepare_codex_history(
@@ -77,7 +79,14 @@ def test_data_and_local_images_preserve_content_in_turn_and_tool_output(tmp_path
                 {
                     "type": "function_call_output",
                     "call_id": "c",
-                    "output": [{"type": "input_image", "image_url": image.as_uri()}],
+                    "output": [
+                        {
+                            "type": "input_image",
+                            "image_url": image.as_uri().replace(
+                                "file://", f"file://{authority}", 1
+                            ),
+                        }
+                    ],
                 },
                 {
                     "role": "user",
@@ -105,6 +114,14 @@ def test_data_and_local_images_preserve_content_in_turn_and_tool_output(tmp_path
         [{"role": "user", "content": [{"type": "input_file", "file_id": "file_1"}]}],
         [{"type": "function_call", "name": "f", "call_id": "c", "arguments": "{}"}],
         [{"type": "function_call_output", "call_id": "c", "output": "orphan"}],
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": "file://remote.example/image.png"}
+                ],
+            }
+        ],
     ],
 )
 def test_unsupported_history_is_rejected(items: Any):
