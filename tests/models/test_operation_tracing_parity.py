@@ -272,9 +272,12 @@ trace_exporter = "none"
         mcp_server.write_text(
             "import sys\n"
             "from pathlib import Path\n"
-            "from mcp.server.fastmcp import FastMCP\n"
+            "try:\n"
+            "    from mcp.server.mcpserver import MCPServer\n"
+            "except ImportError:\n"
+            "    from mcp.server.fastmcp import FastMCP as MCPServer\n"
             "from mcp.types import ToolAnnotations\n"
-            'server = FastMCP("parity")\n'
+            'server = MCPServer("parity")\n'
             "@server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))\n"
             "def read_file() -> str:\n"
             '    """Read the synthetic fixture file."""\n'
@@ -313,7 +316,7 @@ trace_exporter = "none"
 
 def _ns(timestamp: str | None) -> int:
     assert timestamp is not None
-    return int(datetime.fromisoformat(timestamp).timestamp() * 1_000_000_000)
+    return int(datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp() * 1_000_000_000)
 
 
 def _model_provider(name: str, tmp_path: Path, server: _ResponsesFixture) -> ModelProvider:

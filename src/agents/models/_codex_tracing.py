@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 from openai.types.responses import Response
@@ -20,7 +19,7 @@ from ..tracing._model import acquire_model_span, finish_model_span, record_model
 from ..tracing.config import get_operation_detail
 from ..tracing.provider import _is_noop_span, _is_noop_trace
 from ..tracing.span_data import FunctionSpanData, GenerationSpanData, ResponseSpanData
-from ..tracing.util import time_iso
+from ..tracing.util import _parse_iso_timestamp, time_iso
 from .interface import ModelTracing
 
 
@@ -165,9 +164,7 @@ class CodexOperationTracing:
     def _timestamp(value: Any) -> str:
         if not isinstance(value, str):
             raise ValueError("Missing source timestamp.")
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            raise ValueError("Source timestamp must include timezone.")
+        _parse_iso_timestamp(value)
         return value
 
     def _metadata(self, operation: _Operation, event: dict[str, Any]) -> None:
