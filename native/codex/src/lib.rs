@@ -1,5 +1,6 @@
 //! Private, asynchronous Core bindings for the opt-in Codex model provider.
 mod config;
+mod tool_hooks;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -388,6 +389,11 @@ impl Thread {
     #[getter]
     fn model(&self) -> String {
         self.lease.model.clone()
+    }
+
+    fn tool_hook_orders(&self, server: &str) -> PyResult<Vec<(&'static str, i64)>> {
+        self.lease.ensure_open().map_err(py_error)?;
+        Ok(tool_hooks::registered(&self.lease.thread, server))
     }
 
     fn inject_items<'py>(

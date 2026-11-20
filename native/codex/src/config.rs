@@ -826,6 +826,10 @@ pub async fn prepare_config(services: &CoreServices, attempt: &Value) -> Result<
             override_value(&mut overrides, config, value.clone())?;
         }
     }
+    let sdk_hooks = attempt.get("sdk_tool_hooks");
+    if let Some(hooks) = sdk_hooks {
+        crate::tool_hooks::add_overrides(&mut overrides, hooks, &services.helpers.executable)?;
+    }
     let mut typed = services.helpers.overrides(&services.cwd);
     typed.model = attempt
         .get("model")
@@ -880,6 +884,22 @@ pub async fn prepare_config(services: &CoreServices, attempt: &Value) -> Result<
     };
     bind_policy(&mut config, &services.network);
     validate_manager_config(services, &config)?;
+    if let Some(hooks) = sdk_hooks {
+        if !config.features.enabled(Feature::CodexHooks) {
+            return Err("Codex native tool hooks are disabled in the active configuration.".into());
+        }
+        if !hooks["server"]
+            .as_str()
+            .and_then(|name| config.mcp_servers.get().get(name))
+            .is_some_and(|server| server.enabled && server.is_local_environment())
+        {
+            return Err("Codex configuration did not allow the local SDK tool hook relay.".into());
+        }
+        crate::tool_hooks::validate_collaboration_names(
+            hooks,
+            config.multi_agent_v2.tool_namespace.as_deref(),
+        )?;
+    }
     configure_tools(
         &mut config,
         sdk_sandbox,

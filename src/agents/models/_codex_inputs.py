@@ -365,10 +365,8 @@ def prepare_dynamic_tools(
                 "SDK callback tools",
             )
             continue
-        if (
-            not isinstance(tool, FunctionTool)
-            or tool.output_json_schema is not None
-            or any(caller != "direct" for caller in tool.allowed_callers or [])
+        if not isinstance(tool, FunctionTool) or any(
+            caller != "direct" for caller in tool.allowed_callers or []
         ):
             raise UserError("CodexProvider supports direct SDK function tools and handoffs.")
         add(
