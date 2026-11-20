@@ -34,7 +34,7 @@ By default, the SDK traces the following:
 -   Each runner invocation is wrapped in a `task_span()`.
 -   Each model turn is wrapped in a `turn_span()`.
 -   Each time an agent runs, it is wrapped in `agent_span()`
--   LLM generations are wrapped in `generation_span()`
+-   Responses and Codex model calls have been using `response_span()` by default, or `generation_span()` with explicit operation detail.
 -   Function tool calls are each wrapped in `function_span()`
 -   Guardrails are wrapped in `guardrail_span()`
 -   Handoffs are wrapped in `handoff_span()`
@@ -144,7 +144,7 @@ Certain spans may capture potentially sensitive data.
 
 The `generation_span()` stores the inputs/outputs of the LLM generation, and `function_span()` stores the inputs/outputs of function calls. These may contain sensitive data, so you can disable capturing that data via [`RunConfig.trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data].
 
-For an approval-gated function tool, a span that pauses for approval does not store the SDK's internal result wrapper as tool output. If the application rejects the call with a custom rejection message, the function span stores that message as output and error text only when `trace_include_sensitive_data` is `True`. When the setting is `False`, the span omits the output and uses the generic error text `Tool execution rejected`.
+With `operation_detail` omitted, a function span that pauses for approval does not store the SDK's internal result wrapper as tool output. If the application rejects the call with a custom rejection message, the function span stores that message as output and error text only when `trace_include_sensitive_data` is `True`. When the setting is `False`, the span omits the output and uses the generic error text `Tool execution rejected`. For detailed tracing, see [Payload capture](#payload-capture).
 
 Similarly, Audio spans include base64-encoded PCM data for input and output audio by default. You can disable capturing this audio data by configuring [`VoicePipelineConfig.trace_include_sensitive_audio_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_audio_data].
 
@@ -174,6 +174,111 @@ The [trace redaction example](https://github.com/openai/openai-agents-python/blo
 
 The redactor and destination are trusted application code. They must not independently log or send the original data. The batch processor can invoke the exporter during background export, explicit flush, or shutdown, so callbacks must be safe to use from those execution contexts. A failed batch is dropped; subsequent batches can still be exported. Replacement affects future processor callbacks and does not erase data already buffered by a previously registered processor. Configure the replacement before creating traces or running agents.
 
+## OpenTelemetry
+
+Use [`OpenTelemetryTracingProcessor`](ref/extensions/tracing/opentelemetry.md) with the default Responses provider or the [Codex provider](models/codex.md#operation-tracing). Install the `opentelemetry` extra for the integration and the OpenTelemetry SDK for the console example. Use OpenTelemetry 1.45 or later for structured message attributes.
+
+```sh
+pip install "openai-agents[opentelemetry]" opentelemetry-sdk
+```
+
+### One setup for both providers
+
+Save the following script as `otel_agent.py`. Register the processor once, before starting a run. Configure `OPENAI_API_KEY` for the default provider. For Codex, follow the [CLI and authentication setup](models/codex.md#set-up-the-checkout-and-cli).
+
+```python
+import argparse
+
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+
+from agents import Agent, ModelSettings, RunConfig, Runner, set_trace_processors
+from agents.decorators import tool
+from agents.extensions.tracing import OpenTelemetryTracingProcessor
+from agents.models.codex import CodexProvider
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--codex", action="store_true")
+parser.add_argument("--codex-executable")
+parser.add_argument("--model")
+parser.add_argument("--content", action="store_true")
+args = parser.parse_args()
+
+provider = TracerProvider()
+provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+tracer = provider.get_tracer("example")
+set_trace_processors([OpenTelemetryTracingProcessor(tracer_provider=provider)])
+
+
+@tool
+def square(value: int) -> int:
+    """Return the square of an integer."""
+    with tracer.start_as_current_span("square.calculate"):
+        return value * value
+
+
+agent = Agent(
+    name="Calculator",
+    instructions="Use square once, then reply with the result.",
+    tools=[square],
+    model_settings=ModelSettings(tool_choice="required"),
+)
+config = RunConfig(
+    model=args.model,
+    tracing={"operation_detail": "content" if args.content else "metadata"},
+    trace_include_sensitive_data=args.content,
+)
+if args.codex:
+    config.model_provider = CodexProvider(codex_executable=args.codex_executable)
+
+try:
+    with tracer.start_as_current_span("calculator.request"):
+        result = Runner.run_sync(agent, "What is the square of 12?", run_config=config)
+    print(result.final_output)
+finally:
+    provider.shutdown()
+```
+
+```sh
+python otel_agent.py
+python otel_agent.py --codex --codex-executable /absolute/path/to/patched/codex
+```
+
+Use `set_trace_processors()` to replace the default SDK processors, as above. Use `add_trace_processor()` to keep them alongside OTel. Configure sampling and export on your application's tracer provider. Flush and shut down that provider in your application.
+
+Check for an answer of `144` in either mode. In the console trace, look for `square.calculate` beneath `execute_tool square`.
+
+```text
+calculator.request
+  invoke_runner Agent workflow
+    invoke_agent Calculator
+      openai.agents.turn
+        chat <model>
+        execute_tool square
+          square.calculate
+      openai.agents.turn
+        chat <model>
+```
+
+Group runs, agents, model calls, and tools by `gen_ai.operation.name` using `invoke_runner`, `invoke_agent`, `chat`, and `execute_tool`. Use `openai.agents.turn` for SDK turns and `openai.agents.tool_approval` for approval records. Read tool durations from the start of execution after approval. For stock Codex coverage, see the [provider table](models/codex.md#operation-tracing).
+
+### Payload capture
+
+Select capture per run with `RunConfig.tracing["operation_detail"]`. Set `trace_include_sensitive_data=False` to suppress input and output even with `"content"` selected.
+
+| `operation_detail` | `trace_include_sensitive_data` | SDK model and tool payload fields | OTel payload attributes |
+| --- | --- | --- | --- |
+| Omitted | `True`, the default | Existing SDK input and output fields | None |
+| Omitted | `False` | None | None |
+| `"metadata"` | Either value | None | None |
+| `"content"` | `True` | Bounded model and tool content | Bounded permitted content |
+| `"content"` | `False` | None | None |
+
+In either detailed mode, count one model span for an inference, including retries of that inference and time spent waiting between attempts. With detail omitted, count each retry by the Runner as a separate SDK attempt. Count retries inside a provider as part of the same call in all modes. For an approval pause or rejection, look for a dedicated `tool_approval` SDK span in detailed mode.
+
+Pass `--content` to the example to inspect the submitted messages, instructions, and visible output. Look for `gen_ai.input.messages`, `gen_ai.system_instructions`, `gen_ai.output.messages`, `gen_ai.tool.call.arguments`, and `gen_ai.tool.call.result`. For a continuation, look for the submitted messages and `openai.response.previous_response_id`. For response ID handling, see [Sensitive data](#sensitive-data).
+
+Expect a 32 KiB UTF-8 JSON budget for the input and another 32 KiB for the output of each operation. Check for markers for truncation, binary media, hidden reasoning, and known credential fields. Treat ordinary text, including file contents and tool results, as potentially private. Configure separate policies for application logs and custom processors.
 
 ## Tracing with non-OpenAI models
 

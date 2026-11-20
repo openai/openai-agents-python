@@ -90,7 +90,7 @@ uv run python -m examples.model_providers.codex_provider --codex
 | Option | Purpose |
 | --- | --- |
 | `cwd` | Codex's workspace. Defaults to the application's current directory. |
-| `codex_executable` | Path to the stock CLI. Otherwise the provider finds `codex` on `PATH`. |
+| `codex_executable` | Path to the CLI executable. Defaults to `codex` on `PATH`. |
 | `config_overrides` | Sequence of Codex configuration overrides, such as `sandbox_mode="read-only"`. |
 | `env` | Complete environment for the child process. When supplied, it replaces the inherited environment. Include any required `PATH`, authentication, and configuration variables. |
 | `api_key` | API key for the child process, when the host allows that login method. |
@@ -113,7 +113,7 @@ Input guardrails with `run_in_parallel=False` finish before model execution. Can
 
 ## Streaming, history, and cancellation
 
-Each model call starts an ephemeral Codex thread. The SDK supplies the instructions, supported messages and tool results, tool schemas, and output schema for that call. Keep conversation history in an [SDK session](../sessions/index.md) or pass `result.to_input_list()` to the next run.
+For each request from the Runner, the provider starts an ephemeral Codex thread. One request can include several model calls and native tool executions. The SDK supplies the instructions, supported messages and tool results, tool schemas, and output schema for the request. Keep conversation history in an [SDK session](../sessions/index.md) or pass `result.to_input_list()` to the next run.
 
 Use `Runner.run_streamed()` and consume `result.stream_events()` as with the default provider. Text deltas arrive during generation. When the model supplies a requested reasoning summary, the stream also includes `response.reasoning_summary_text.delta` events. SDK function calls supply their complete JSON arguments in one update, rather than an argument-by-argument stream.
 
@@ -122,6 +122,40 @@ Call `result.cancel()` to stop a streaming run immediately, or `result.cancel(mo
 Strict structured output uses Codex's output schema. With `strict_json_schema=False`, the provider puts the schema in the instructions and the SDK validates the final JSON. The latter does not constrain generation on the server.
 
 `OpenAIResponsesCompactionSession` can compact full input history and replay the encrypted result into Codex. It calls the separate OpenAI compact endpoint and needs an OpenAI client or credentials. `compaction_mode="previous_response_id"` cannot use Codex's local turn IDs as stored Responses IDs. See [session compaction](../sessions/index.md).
+
+## Operation tracing
+
+Use the existing SDK trace processors for Codex observations. Follow the [English tracing guide's OpenTelemetry section](https://openai.github.io/openai-agents-python/tracing/#opentelemetry) for one example across both providers, capture settings, and expected parent relationships.
+
+To trace individual model calls and native tools, build a CLI with the experimental protocol. Follow `patches/codex/README.md` in the SDK checkout. Pass the absolute path to the resulting executable.
+
+```python
+from agents import RunConfig
+from agents.models.codex import CodexProvider
+
+config = RunConfig(
+    model_provider=CodexProvider(
+        codex_executable="/absolute/path/to/patched/codex",
+    ),
+    tracing={"operation_detail": "metadata"},
+    trace_include_sensitive_data=False,
+)
+```
+
+| Observation | Executable with operation tracing | Stock 0.166.0 |
+| --- | --- | --- |
+| Runner, agent, SDK turns, and SDK function execution | SDK spans | SDK spans |
+| Individual model invocations and automatic retries | One span per logical inference | Zero model spans |
+| Native Codex tools, including nested execution | Source observations with explicit parents | Not observed |
+| Per-inference timing, model identity, and token counts | Source values when available | Not available |
+
+Look for an SDK span named `codex.tracing.coverage` when observations are incomplete. Inspect its `reason` field. With the stock CLI, expect `reason="unsupported"` and `coverage="partial"` while the agent continues the run. In OTel, filter on `openai.agents.operation.coverage="partial"`.
+
+With the patched CLI, use each span's timestamps to measure the operation inside Codex. After a child process exits unexpectedly or a stream closes early, look for `outcome="interrupted"` and `estimated_end=True` on unfinished operations. For a Python tool requested by Codex, count one execution span from the Runner.
+
+With `operation_detail` omitted and sensitive data enabled, find the input supplied by the Runner on the first model span and the response returned to the Runner on the last. Expect metadata on intermediate calls and native tools. To inspect what Codex sent on each call, select `"content"` and allow sensitive data for that run.
+
+Configure OTel export in Python. Set `tracing_disabled=True` to disable SDK capture and operation notifications for the run. For the settings shared by both providers, see the [English tracing guide's Payload capture section](https://openai.github.io/openai-agents-python/tracing/#payload-capture).
 
 ## Supported features and limits
 
