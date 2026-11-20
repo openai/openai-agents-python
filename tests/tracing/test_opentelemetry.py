@@ -444,3 +444,59 @@ def test_trace_cleanup_continues_after_otel_end_failure(otel) -> None:
     assert all(
         span.attributes["openai.agents.operation.outcome"] == "interrupted" for span in spans
     )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_chat_completions_native_payloads_reach_otel(otel, monkeypatch, streamed) -> None:
+    from unittest.mock import AsyncMock
+
+    from openai import AsyncOpenAI
+    from openai.types.chat import ChatCompletionChunk
+
+    from agents import ModelSettings, ModelTracing, OpenAIChatCompletionsModel
+    from agents.tracing.config import operation_tracing_scope
+    from tests.models.test_openai_chatcompletions import _minimal_chat_completion
+
+    _, exporter = otel
+    completion = _minimal_chat_completion("answer")
+    call = {
+        "id": "call-lookup",
+        "type": "function",
+        "function": {"name": "lookup", "arguments": '{"key":"value"}'},
+    }
+    completion.choices[0].message = type(completion.choices[0].message).model_validate(
+        {**completion.choices[0].message.model_dump(), "tool_calls": [call]}
+    )
+
+    async def chunks():
+        payload = completion.model_dump()
+        delta = {**payload["choices"][0]["message"], "tool_calls": [{**call, "index": 0}]}
+        payload.update(
+            object="chat.completion.chunk",
+            choices=[{"index": 0, "delta": delta, "finish_reason": "tool_calls"}],
+        )
+        yield ChatCompletionChunk.model_validate(payload)
+
+    async with AsyncOpenAI(api_key="test-placeholder") as client:
+        monkeypatch.setattr(
+            client.chat.completions,
+            "create",
+            AsyncMock(return_value=chunks() if streamed else completion),
+        )
+        model = OpenAIChatCompletionsModel("fixture", client)
+        with trace("group"), operation_tracing_scope({"operation_detail": "content"}, True):
+            args = (None, "prompt", ModelSettings(), [], None, [], ModelTracing.ENABLED)
+            if streamed:
+                async for _ in model.stream_response(*args):
+                    pass
+            else:
+                await model.get_response(*args)
+    span = next(s for s in exporter.get_finished_spans() if s.name == "chat fixture")
+    messages = json.loads(json.dumps(span.attributes["gen_ai.output.messages"]))
+    assert messages[0]["role"] == "assistant"
+    assert messages[0]["parts"] == [
+        {"type": "text", "content": "answer"},
+        {"type": "tool_call", "id": "call-lookup", "name": "lookup", "arguments": {"key": "value"}},
+    ]

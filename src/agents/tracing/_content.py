@@ -54,6 +54,7 @@ _OMIT_TYPES = {
 }
 _OMIT_FIELDS = {key.replace("_", "") for key in _OMIT_FIELDS}
 _DATA_URI = re.compile(r"data:[^\s;,]+(?:;[^\s,]*)?,[^\s\"'<>]+", re.IGNORECASE)
+_JSON_PREFIX = re.compile(r"\s*[\[{]")
 
 
 def _json(value: Any) -> str:
@@ -81,7 +82,9 @@ def _project(value: Any, budget: int, depth: int) -> Any:
     if depth > 32:
         return _TRUNCATED
     if isinstance(value, str):
-        if value.lstrip().startswith(("{", "[")):
+        if _JSON_PREFIX.match(value):
+            if len(value) > budget or len(value.encode("utf-8")) > budget:
+                return _json({"omitted": True, "truncated": True, "reason": "capture_budget"})
             try:
                 embedded = json.loads(value)
             except ValueError:
@@ -96,7 +99,7 @@ def _project(value: Any, budget: int, depth: int) -> Any:
                     # slicing encoded JSON into an invalid tool result.
                     encoded = _json(_project(embedded, (budget - 2) // 2, depth + 1))
                 return encoded
-        value = _DATA_URI.sub("[omitted: media]", value)
+        value = _DATA_URI.sub("[omitted: media]", _text(value, budget))
         return _text(value, budget)
     if value is None or isinstance(value, (bool, float, int)):
         return value if _size(value) <= budget else _TRUNCATED
