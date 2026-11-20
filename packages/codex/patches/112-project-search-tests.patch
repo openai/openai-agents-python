@@ -1356,15 +1356,11 @@ index 0000000000000000000000000000000000000000..650f729aa1cd9f7e0ec1e61f82dbc893
 +] }
 diff --git a/codex-rs/exec-server/tests/project-search/lib.rs b/codex-rs/exec-server/tests/project-search/lib.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..2b35b1d42e150501b317cb79726173765aa67503
+index 0000000000000000000000000000000000000000..0d36c33d201ec3d56932077a1123f996f4293e58
 --- /dev/null
 +++ b/codex-rs/exec-server/tests/project-search/lib.rs
 @@ -0,0 +1,17 @@
 +#![cfg(test)]
-+
-+use codex_utils_path_uri::PathUri;
-+
-+include!("../../../file-system/src/walk_types.rs");
 +
 +#[allow(dead_code)]
 +#[path = "../../src/no_follow/mod.rs"]
@@ -1373,15 +1369,33 @@ index 0000000000000000000000000000000000000000..2b35b1d42e150501b317cb7972617376
 +mod project_search_invalid_filename_tests;
 +#[path = "../../src/walk.rs"]
 +mod walk;
++#[path = "../../../file-system/src/walk_types.rs"]
++mod walk_types;
 +#[cfg(windows)]
 +#[allow(dead_code)]
 +#[path = "../../src/windows_file_type.rs"]
 +mod windows_file_type;
++
++pub use walk_types::*;
 diff --git a/codex-rs/file-system/src/lib.rs b/codex-rs/file-system/src/lib.rs
-index 4e304fa073af24fea5ddb96eb6423d84e1fe9ce1..193f843a6820866cf15e0b39268b2565bd7fa6ed 100644
+index 4e304fa073af24fea5ddb96eb6423d84e1fe9ce1..08d7fa1c5e5216ecc2c9d2841da478b3754662f7 100644
 --- a/codex-rs/file-system/src/lib.rs
 +++ b/codex-rs/file-system/src/lib.rs
-@@ -41,16 +41,7 @@ use std::task::Poll;
+@@ -1,6 +1,7 @@
+ mod environment_accessor;
+ mod exec_permission_profile_serde;
+ mod find_up;
++mod walk_types;
+ 
+ use bytes::Bytes;
+ use codex_protocol::config_types::WindowsSandboxLevel;
+@@ -36,21 +37,12 @@ use std::path::Path;
+ use std::pin::Pin;
+ use std::task::Context;
+ use std::task::Poll;
++pub use walk_types::*;
+ 
+ /// Maximum chunk size returned by [`ExecutorFileSystem::read_file_stream`].
  pub const FILE_READ_CHUNK_SIZE: usize = 1024 * 1024;
  /// Maximum decoded chunk size accepted by a streamed filesystem write.
  pub const FILE_WRITE_CHUNK_SIZE: usize = 1024 * 1024;
@@ -1395,11 +1409,10 @@ index 4e304fa073af24fea5ddb96eb6423d84e1fe9ce1..193f843a6820866cf15e0b39268b2565
 -pub const MAX_WALK_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 -/// Per-entry or per-error overhead charged to the walk response budget.
 -pub const WALK_RESPONSE_ITEM_OVERHEAD_BYTES: usize = 64;
-+include!("walk_types.rs");
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
  pub struct ReadFileOptions {
-@@ -112,17 +103,6 @@ pub struct CopyOptions {
+@@ -112,17 +104,6 @@ pub struct CopyOptions {
      pub recursive: bool,
  }
  
@@ -1417,7 +1430,7 @@ index 4e304fa073af24fea5ddb96eb6423d84e1fe9ce1..193f843a6820866cf15e0b39268b2565
  #[derive(Clone, Debug, Eq, PartialEq)]
  pub struct ReadDirectoryEntry {
      pub file_name: String,
-@@ -130,59 +110,6 @@ pub struct ReadDirectoryEntry {
+@@ -130,59 +111,6 @@ pub struct ReadDirectoryEntry {
      pub is_file: bool,
  }
  
@@ -1479,10 +1492,12 @@ index 4e304fa073af24fea5ddb96eb6423d84e1fe9ce1..193f843a6820866cf15e0b39268b2565
  pub enum ExecFileSystemPath {
 diff --git a/codex-rs/file-system/src/walk_types.rs b/codex-rs/file-system/src/walk_types.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..295ee2df14cf3bbdca323b3f54824b6b69067997
+index 0000000000000000000000000000000000000000..5d6266e3962ce935bc5c60760e3292c737b7dc6a
 --- /dev/null
 +++ b/codex-rs/file-system/src/walk_types.rs
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,76 @@
++use codex_utils_path_uri::PathUri;
++
 +/// Maximum accepted directory depth for a filesystem walk.
 +pub const MAX_WALK_DEPTH: usize = 64;
 +/// Maximum accepted directory count, including the walk root.
