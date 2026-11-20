@@ -1278,3 +1278,737 @@ async def test_required_preserves_incomplete_turn_runtime_error(tmp_path, server
         else:
             await Runner.run(agent, "Use a tool.", run_config=config(tmp_path))
     assert server.closed
+
+
+class OperationServer(FakeServer):
+    # This double preserves the negotiated wire and source timing at the real Runner boundary.
+    def __init__(self, *, capture="metadata", malformed=False, active=False):
+        super().__init__()
+        self.capture = capture
+        self.malformed = malformed
+        self.active = active
+
+    async def request(self, method, params):
+        result = await super().request(method, params)
+        if method == "turn/start":
+            result["operationTracing"] = self.capture
+        return result
+
+    async def events(self):
+        common = {"threadId": "thread_1", "turnId": "turn_1"}
+        for index, kind in enumerate(["model", "tool", "model"], 1):
+            operation = {
+                **common,
+                "operationId": f"operation_{index}",
+                "kind": kind,
+                "requestedModel": "requested-model",
+                "startedAt": f"2026-11-20T00:00:0{index}.000Z",
+            }
+            if kind == "tool":
+                operation.update(toolName="read_file", callId="native_call")
+            if self.capture == "content":
+                operation["input"] = {
+                    "value": {"input": [{"role": "user", "content": "native_input_secret"}]}
+                    if kind == "model"
+                    else {"path": "native_arg_secret"},
+                    "truncated": False,
+                    "omitted": False,
+                }
+            yield {"method": "turn/operation/started", "params": operation}
+            if self.active:
+                async for event in super().events():
+                    yield event
+                return
+            terminal = {
+                **operation,
+                "completedAt": f"2026-11-20T00:00:0{index}.250Z",
+                "durationMs": 250,
+                "outcome": "success",
+            }
+            if kind == "model":
+                terminal.update(
+                    responseId=f"resp_source_{index}",
+                    responseIdTrusted=False,
+                    observedModel="observed-model",
+                    usage={"input_tokens": index * 10, "output_tokens": index * 5},
+                )
+            if self.capture == "content":
+                terminal["output"] = {
+                    "value": [{"role": "assistant", "content": "native_result_secret"}]
+                    if kind == "model"
+                    else "native_result_secret",
+                    "truncated": False,
+                    "omitted": False,
+                }
+            yield {"method": "turn/operation/completed", "params": terminal}
+            if self.malformed:
+                yield {"method": "turn/operation/completed", "params": terminal}
+                yield {
+                    "method": "turn/operation/started",
+                    "params": {**operation, "threadId": "another_thread"},
+                }
+        async for event in super().events():
+            yield event
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("truncated", [False, True])
+async def test_codex_interrupted_visible_text_reaches_otel(tmp_path, servers, streamed, truncated):
+    import json
+
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from agents.extensions.tracing import OpenTelemetryTracingProcessor
+    from agents.tracing import set_trace_processors
+    from tests.testing_processor import SPAN_PROCESSOR_TESTING, fetch_ordered_spans
+
+    # This wire double preserves the visible partial item produced before OutputItemDone.
+    partial = {
+        "type": "output_text",
+        "text": "visible partial answer",
+        "partial": True,
+        "truncated": truncated,
+    }
+
+    class InterruptedServer(OperationServer):
+        async def events(self):
+            operation = {
+                "threadId": "thread_1",
+                "turnId": "turn_1",
+                "operationId": "model-1",
+                "kind": "model",
+                "requestedModel": "fixture",
+                "startedAt": "2026-11-20T00:00:00Z",
+            }
+            yield {"method": "turn/operation/started", "params": operation}
+            yield {
+                "method": "turn/operation/completed",
+                "params": {
+                    **operation,
+                    "completedAt": "2026-11-20T00:00:01Z",
+                    "outcome": "interrupted",
+                    "output": {"value": [partial], "truncated": False, "omitted": False},
+                },
+            }
+            raise RuntimeError("synthetic interrupted turn")
+
+    queue, _ = servers
+    server = InterruptedServer(capture="content")
+    queue.append(server)
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    set_trace_processors(
+        [SPAN_PROCESSOR_TESTING, OpenTelemetryTracingProcessor(tracer_provider=provider)]
+    )
+    try:
+        config = RunConfig(
+            model_provider=CodexProvider(cwd=tmp_path),
+            tracing={"operation_detail": "content"},
+        )
+        with pytest.raises(RuntimeError, match="synthetic interrupted turn"):
+            if streamed:
+                run = Runner.run_streamed(Agent(name="worker"), "hello", run_config=config)
+                async for _ in run.stream_events():
+                    pass
+            else:
+                await Runner.run(Agent(name="worker"), "hello", run_config=config)
+        native = next(span for span in fetch_ordered_spans() if span.span_data.type == "generation")
+        otel = next(
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes is not None
+            and span.attributes.get("gen_ai.operation.name") == "chat"
+        )
+        assert native.span_data.output == [partial]
+        assert otel.attributes is not None
+        output = json.loads(json.dumps(otel.attributes["gen_ai.output.messages"]))
+        assert output[0]["role"] == "assistant"
+        assert output[0]["parts"][0] == {
+            "type": "text",
+            "content": partial["text"],
+            "partial": True,
+            "truncated": truncated,
+        }
+        assert native.span_data.operation.outcome == "interrupted"
+        assert otel.attributes["openai.agents.operation.outcome"] == "interrupted"
+        assert server.closed
+    finally:
+        set_trace_processors([SPAN_PROCESSOR_TESTING])
+        provider.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("detail", [None, "metadata", "content"])
+@pytest.mark.parametrize("sensitive", [False, True])
+async def test_codex_operations_preserve_source_spans_and_capture_policy(
+    tmp_path, servers, detail, sensitive
+):
+    import json
+
+    from tests.testing_processor import fetch_ordered_spans
+
+    queue, _ = servers
+    effective = "content" if detail == "content" and sensitive else "metadata"
+    server = OperationServer(capture=effective)
+    queue.append(server)
+    result = await Runner.run(
+        Agent(name="worker"),
+        "sdk_input_secret",
+        run_config=RunConfig(
+            model_provider=CodexProvider(cwd=tmp_path),
+            trace_include_sensitive_data=sensitive,
+            tracing={} if detail is None else {"operation_detail": detail},
+        ),
+    )
+    assert result.final_output == "A Codex response"
+    assert dict(server.requests)["turn/start"]["operationTracing"] == effective
+    operations = [span for span in fetch_ordered_spans() if hasattr(span.span_data, "operation")]
+    models = [span for span in operations if span.span_data.type in {"response", "generation"}]
+    tools = [span for span in operations if span.span_data.type == "function"]
+    assert len(models) == 2 and len(tools) == 1
+    assert {span.parent_id for span in operations} == {models[0].parent_id}
+    assert models[0].started_at == "2026-11-20T00:00:01.000Z"
+    assert models[0].ended_at == "2026-11-20T00:00:01.250Z"
+    assert models[-1].ended_at == "2026-11-20T00:00:03.250Z"
+    assert models[0].span_data.usage == {"input_tokens": 10, "output_tokens": 5}
+    assert models[-1].span_data.usage == {"input_tokens": 30, "output_tokens": 15}
+    assert models[-1].span_data.operation.response_model == "observed-model"
+    assert models[-1].span_data.operation.outcome == "completed"
+    if detail is None:
+        assert all(span.span_data.type == "response" for span in models)
+        assert models[0].span_data.input == (
+            [{"role": "user", "content": "sdk_input_secret"}] if sensitive else None
+        )
+        assert models[-1].span_data.input is None
+        assert (models[-1].span_data.response is not None) == sensitive
+        if sensitive:
+            assert models[-1].span_data.response.id == "turn_1"
+            assert models[-1].span_data.response.usage.input_tokens == 10
+        assert tools[0].span_data.input is None and tools[0].span_data.output is None
+    else:
+        assert all(span.span_data.type == "generation" for span in models)
+        assert (models[0].span_data.input is not None) == (effective == "content")
+        assert (tools[0].span_data.input is not None) == (effective == "content")
+    exported = json.dumps([span.export() for span in operations])
+    assert ("native_result_secret" in exported) == (effective == "content")
+    if not sensitive:
+        assert all(span.span_data.operation.response_id is None for span in models)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("detail", [None, "metadata", "content"])
+async def test_stock_codex_has_one_partial_coverage_marker_without_synthetic_model_span(
+    tmp_path, servers, detail
+):
+    from tests.testing_processor import fetch_ordered_spans
+
+    queue, _ = servers
+    queue.append(FakeServer())
+    result = await Runner.run(
+        Agent(name="worker"),
+        "Hello",
+        run_config=RunConfig(
+            model_provider=CodexProvider(cwd=tmp_path),
+            tracing={} if detail is None else {"operation_detail": detail},
+        ),
+    )
+    assert result.final_output == "A Codex response"
+    spans = fetch_ordered_spans()
+    markers = [
+        span for span in spans if getattr(span.span_data, "name", None) == "codex.tracing.coverage"
+    ]
+    assert len(markers) == 1
+    assert markers[0].span_data.data["coverage"] == "partial"
+    assert not any(span.span_data.type in {"response", "generation"} for span in spans)
+
+
+@pytest.mark.asyncio
+async def test_codex_duplicate_and_foreign_telemetry_preserve_model_result(tmp_path, servers):
+    from tests.testing_processor import fetch_ordered_spans
+
+    queue, _ = servers
+    server = OperationServer(malformed=True)
+    queue.append(server)
+    run = Runner.run_streamed(
+        Agent(name="worker"),
+        "Hello",
+        run_config=RunConfig(model_provider=CodexProvider(cwd=tmp_path)),
+    )
+    async for _ in run.stream_events():
+        pass
+    assert run.final_output == "A Codex response"
+    spans = fetch_ordered_spans()
+    assert (
+        sum(getattr(span.span_data, "name", None) == "codex.tracing.coverage" for span in spans)
+        == 1
+    )
+    assert sum(span.span_data.type == "response" for span in spans) == 2
+
+
+@pytest.mark.asyncio
+async def test_codex_early_stream_close_finishes_observed_operation(tmp_path, servers):
+    from agents import ModelSettings
+    from agents.models.interface import ModelTracing
+    from agents.tracing import trace
+    from tests.testing_processor import fetch_ordered_spans
+
+    queue, _ = servers
+    server = OperationServer(active=True)
+    queue.append(server)
+    model = CodexProvider(cwd=tmp_path).get_model("test-model")
+    with trace("test"):
+        stream = model.stream_response(
+            None,
+            "Hello",
+            ModelSettings(),
+            [],
+            None,
+            [],
+            ModelTracing.ENABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+        assert (await anext(stream)).type == "response.created"
+        assert (await anext(stream)).type == "response.output_item.added"
+        await stream.aclose()
+    assert server.closed
+    models = [span for span in fetch_ordered_spans() if span.span_data.type == "response"]
+    assert len(models) == 1
+    assert models[0].ended_at is not None
+    assert models[0].span_data.operation.outcome == "interrupted"
+    assert models[0].span_data.operation.estimated_end
+
+
+@pytest.mark.asyncio
+async def test_codex_nested_and_overlapping_tools_keep_explicit_parents(tmp_path, servers):
+    from tests.testing_processor import fetch_ordered_spans
+
+    class NestedServer(OperationServer):
+        async def events(self):
+            common = {"threadId": "thread_1", "turnId": "turn_1"}
+            model = {
+                **common,
+                "operationId": "model",
+                "kind": "model",
+                "requestedModel": "test-model",
+                "startedAt": "2026-11-20T00:00:01Z",
+            }
+            yield {"method": "turn/operation/started", "params": model}
+            yield {
+                "method": "turn/operation/completed",
+                "params": {**model, "completedAt": "2026-11-20T00:00:02Z", "outcome": "success"},
+            }
+            calls = []
+            for name, parent in [("outer", None), ("nested", "outer"), ("parallel", None)]:
+                event = {
+                    **common,
+                    "operationId": name,
+                    "kind": "tool",
+                    "toolName": name,
+                    "startedAt": "2026-11-20T00:00:02Z",
+                }
+                if parent:
+                    event["parentOperationId"] = parent
+                calls.append(event)
+                yield {"method": "turn/operation/started", "params": event}
+            for event in reversed(calls):
+                yield {
+                    "method": "turn/operation/completed",
+                    "params": {
+                        **event,
+                        "completedAt": "2026-11-20T00:00:03Z",
+                        "outcome": "success",
+                    },
+                }
+            async for event in FakeServer.events(self):
+                yield event
+
+    queue, _ = servers
+    queue.append(NestedServer())
+    result = await Runner.run(
+        Agent(name="worker"),
+        "Hello",
+        run_config=RunConfig(model_provider=CodexProvider(cwd=tmp_path)),
+    )
+    assert result.final_output == "A Codex response"
+    tools = {
+        span.span_data.name: span
+        for span in fetch_ordered_spans()
+        if span.span_data.type == "function"
+    }
+    assert tools["nested"].parent_id == tools["outer"].span_id
+    assert tools["parallel"].parent_id == tools["outer"].parent_id
+    assert tools["parallel"].started_at == tools["outer"].started_at
+    assert tools["parallel"].ended_at == tools["outer"].ended_at
+
+
+@pytest.mark.asyncio
+async def test_disabled_codex_tracing_omits_negotiation_and_operations(tmp_path, servers):
+    from tests.testing_processor import fetch_ordered_spans
+
+    queue, _ = servers
+    server = OperationServer(capture="content")
+    queue.append(server)
+    result = await Runner.run(Agent(name="worker"), "Hello", run_config=config(tmp_path))
+    assert result.final_output == "A Codex response"
+    assert "operationTracing" not in dict(server.requests)["turn/start"]
+    assert fetch_ordered_spans() == []
+
+
+@pytest.mark.asyncio
+async def test_codex_default_end_callback_receives_final_sdk_response_and_source_time(
+    tmp_path, servers, monkeypatch
+):
+    from tests.testing_processor import SPAN_PROCESSOR_TESTING
+
+    snapshots = []
+    original = SPAN_PROCESSOR_TESTING.on_span_end
+
+    def observe_end(span):
+        if span.span_data.type == "response":
+            snapshots.append((span.span_data.response, span.ended_at, span.span_data.usage))
+        original(span)
+
+    monkeypatch.setattr(SPAN_PROCESSOR_TESTING, "on_span_end", observe_end)
+    queue, _ = servers
+    queue.append(OperationServer())
+    result = await Runner.run(
+        Agent(name="worker"),
+        "Hello",
+        run_config=RunConfig(model_provider=CodexProvider(cwd=tmp_path)),
+    )
+    assert result.final_output == "A Codex response"
+    assert len(snapshots) == 2
+    assert snapshots[0][0] is None
+    response, ended_at, usage = snapshots[-1]
+    assert response.id == "turn_1"
+    assert response.output[0].content[0].text == "A Codex response"
+    assert ended_at == "2026-11-20T00:00:03.250Z"
+    assert usage == {"input_tokens": 30, "output_tokens": 15}
+
+
+@pytest.mark.asyncio
+async def test_codex_content_retains_wire_omission_and_truncation_markers(tmp_path, servers):
+    import json
+
+    from tests.testing_processor import fetch_ordered_spans
+
+    class BoundedServer(OperationServer):
+        async def events(self):
+            async for event in super().events():
+                params = event.get("params", {})
+                if event["method"] == "turn/operation/started" and params["kind"] == "model":
+                    params["input"]["truncated"] = True
+                    params["input"]["reason"] = "capture_budget"
+                if event["method"] == "turn/operation/completed" and params["kind"] == "tool":
+                    params["output"] = {
+                        "value": None,
+                        "omitted": True,
+                        "truncated": False,
+                        "reason": "unsupported_content",
+                    }
+                yield event
+
+    queue, _ = servers
+    queue.append(BoundedServer(capture="content"))
+    result = await Runner.run(
+        Agent(name="worker"),
+        "Hello",
+        run_config=RunConfig(
+            model_provider=CodexProvider(cwd=tmp_path),
+            tracing={"operation_detail": "content"},
+        ),
+    )
+    assert result.final_output == "A Codex response"
+    models = [span for span in fetch_ordered_spans() if span.span_data.type == "generation"]
+    assert all(any(item.get("truncated") for item in span.span_data.input) for span in models)
+    native = next(span for span in fetch_ordered_spans() if span.span_data.type == "function")
+    assert json.loads(native.span_data.output) == {"omitted": True, "reason": "unsupported_content"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disabled_parent", [False, True])
+async def test_codex_suppresses_capture_when_trace_provider_or_parent_is_disabled(
+    tmp_path, servers, disabled_parent
+):
+    from contextlib import nullcontext
+
+    from agents.tracing import set_tracing_disabled, trace
+    from tests.testing_processor import fetch_ordered_spans
+
+    queue, _ = servers
+    server = OperationServer(capture="content")
+    queue.append(server)
+    parent = trace("disabled", disabled=True) if disabled_parent else nullcontext()
+    if not disabled_parent:
+        set_tracing_disabled(True)
+    try:
+        with parent:
+            result = await Runner.run(
+                Agent(name="worker"),
+                "Hello",
+                run_config=RunConfig(
+                    model_provider=CodexProvider(cwd=tmp_path),
+                    tracing={"operation_detail": "content"},
+                ),
+            )
+    finally:
+        if not disabled_parent:
+            set_tracing_disabled(False)
+    assert result.final_output == "A Codex response"
+    assert "operationTracing" not in dict(server.requests)["turn/start"]
+    assert fetch_ordered_spans() == []
+
+
+@pytest.mark.asyncio
+async def test_codex_capture_downgrade_marks_partial_coverage(tmp_path, servers):
+    from tests.testing_processor import fetch_ordered_spans
+
+    queue, _ = servers
+    server = OperationServer(capture="metadata")
+    queue.append(server)
+    result = await Runner.run(
+        Agent(name="worker"),
+        "Hello",
+        run_config=RunConfig(
+            model_provider=CodexProvider(cwd=tmp_path),
+            tracing={"operation_detail": "content"},
+        ),
+    )
+    assert result.final_output == "A Codex response"
+    assert dict(server.requests)["turn/start"]["operationTracing"] == "content"
+    markers = [
+        span
+        for span in fetch_ordered_spans()
+        if getattr(span.span_data, "name", None) == "codex.tracing.coverage"
+    ]
+    assert len(markers) == 1
+    assert markers[0].span_data.data["reason"] == "capture_downgraded"
+    models = [span for span in fetch_ordered_spans() if span.span_data.type == "generation"]
+    assert len(models) == 2
+    assert all(span.span_data.input is None and span.span_data.output is None for span in models)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_codex_teardown_failure_finishes_pending_source_span(tmp_path, servers, cancel):
+    import asyncio
+
+    from tests.testing_processor import fetch_ordered_spans
+
+    closing = asyncio.Event()
+
+    class TeardownServer(OperationServer):
+        async def close(self):
+            self.closed = True
+            closing.set()
+            if cancel:
+                await asyncio.Event().wait()
+            raise RuntimeError("teardown failed")
+
+    queue, _ = servers
+    queue.append(TeardownServer())
+    task = asyncio.create_task(
+        Runner.run(
+            Agent(name="worker"),
+            "Hello",
+            run_config=RunConfig(model_provider=CodexProvider(cwd=tmp_path)),
+        )
+    )
+    await closing.wait()
+    if cancel:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError if cancel else RuntimeError):
+        await task
+    models = [span for span in fetch_ordered_spans() if span.span_data.type == "response"]
+    assert len(models) == 2
+    assert models[-1].ended_at == "2026-11-20T00:00:03.250Z"
+
+
+@pytest.mark.asyncio
+async def test_codex_releases_completed_tool_content_and_preserves_late_child_parent(
+    tmp_path, servers, monkeypatch
+):
+    import gc
+    import weakref
+
+    from tests.testing_processor import SPAN_PROCESSOR_TESTING
+
+    completed_tools = {}
+    tool_edges = {}
+    original = SPAN_PROCESSOR_TESTING.on_span_end
+
+    def release_completed(span):
+        if span.span_data.type == "function":
+            completed_tools[span.span_data.name] = weakref.ref(span)
+            tool_edges[span.span_data.name] = (span.span_id, span.parent_id)
+        else:
+            original(span)
+
+    monkeypatch.setattr(SPAN_PROCESSOR_TESTING, "on_span_end", release_completed)
+
+    class LateChildServer(OperationServer):
+        async def events(self):
+            common = {"threadId": "thread_1", "turnId": "turn_1"}
+            for name, parent in [("outer", None), ("late_child", "outer")]:
+                if parent is not None:
+                    gc.collect()
+                    assert completed_tools["outer"]() is None
+                params = {
+                    **common,
+                    "operationId": name,
+                    "kind": "tool",
+                    "toolName": name,
+                    "startedAt": "2026-11-20T00:00:01Z",
+                    "input": {"value": "synthetic_content" * 1000},
+                }
+                if parent is not None:
+                    params["parentOperationId"] = parent
+                yield {"method": "turn/operation/started", "params": params}
+                yield {
+                    "method": "turn/operation/completed",
+                    "params": {
+                        **params,
+                        "completedAt": "2026-11-20T00:00:02Z",
+                        "outcome": "success",
+                    },
+                }
+            async for event in FakeServer.events(self):
+                yield event
+
+    queue, _ = servers
+    queue.append(LateChildServer(capture="content"))
+    result = await Runner.run(
+        Agent(name="worker"),
+        "Hello",
+        run_config=RunConfig(
+            model_provider=CodexProvider(cwd=tmp_path),
+            tracing={"operation_detail": "content"},
+        ),
+    )
+    assert result.final_output == "A Codex response"
+    assert tool_edges["late_child"][1] == tool_edges["outer"][0]
+
+
+@pytest.mark.asyncio
+async def test_codex_default_span_retains_exact_sdk_visible_response(tmp_path, servers):
+    from agents import ModelSettings
+    from agents.models.interface import ModelTracing
+    from agents.tracing import trace
+    from tests.testing_processor import fetch_ordered_spans
+
+    queue, _ = servers
+    queue.append(OperationServer())
+    with trace("test"):
+        events = [
+            event
+            async for event in CodexProvider(cwd=tmp_path)
+            .get_model(None)
+            .stream_response(
+                None,
+                "Hello",
+                ModelSettings(),
+                [],
+                None,
+                [],
+                ModelTracing.ENABLED,
+                previous_response_id=None,
+                conversation_id=None,
+                prompt=None,
+            )
+        ]
+    final = events[-1].response
+    models = [span for span in fetch_ordered_spans() if span.span_data.type == "response"]
+    assert models[-1].span_data.response is final
+    assert final.id == "turn_1"
+    assert final.usage is not None
+    assert final.usage.input_tokens == 10
+    assert models[-1].span_data.usage["input_tokens"] == 30
+    assert models[-1].span_data.operation.response_id == "resp_source_3"
+
+
+@pytest.mark.asyncio
+async def test_codex_direct_model_sensitive_veto_downgrades_child_capture(tmp_path, servers):
+    from agents import ModelSettings
+    from agents.models.interface import ModelTracing
+    from agents.tracing import trace
+    from agents.tracing.config import operation_tracing_scope
+    from tests.testing_processor import fetch_ordered_spans
+
+    queue, _ = servers
+    server = OperationServer(capture="metadata")
+    queue.append(server)
+    with trace("test"), operation_tracing_scope({"operation_detail": "content"}, True):
+        async for _ in (
+            CodexProvider(cwd=tmp_path)
+            .get_model(None)
+            .stream_response(
+                None,
+                "Hello",
+                ModelSettings(),
+                [],
+                None,
+                [],
+                ModelTracing.ENABLED_WITHOUT_DATA,
+                previous_response_id=None,
+                conversation_id=None,
+                prompt=None,
+            )
+        ):
+            pass
+    assert dict(server.requests)["turn/start"]["operationTracing"] == "metadata"
+    models = [span for span in fetch_ordered_spans() if span.span_data.type == "generation"]
+    assert len(models) == 2
+    assert all(span.span_data.operation.detail == "metadata" for span in models)
+    assert all(span.span_data.input is None and span.span_data.output is None for span in models)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_codex_llm_hook_global_disable_prevents_child_capture(tmp_path, servers, streamed):
+    from agents import RunHooks
+    from agents.tracing import get_current_span, get_current_trace, set_tracing_disabled
+    from tests.testing_processor import fetch_ordered_spans
+
+    class DisableCapture(RunHooks):
+        async def on_llm_start(self, context, agent, system_prompt, input_items):
+            active_trace, active_span = get_current_trace(), get_current_span()
+            assert active_trace is not None and active_trace.trace_id != "no-op"
+            assert active_span is not None and active_span.span_id != "no-op"
+            set_tracing_disabled(True)
+
+    queue, _ = servers
+    server = OperationServer(capture="content")
+    queue.append(server)
+    run_config = RunConfig(
+        model_provider=CodexProvider(cwd=tmp_path), tracing={"operation_detail": "content"}
+    )
+    try:
+        if streamed:
+            result = Runner.run_streamed(
+                Agent(name="worker"),
+                "Hello",
+                hooks=DisableCapture(),
+                run_config=run_config,
+            )
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(
+                Agent(name="worker"),
+                "Hello",
+                hooks=DisableCapture(),
+                run_config=run_config,
+            )
+    finally:
+        set_tracing_disabled(False)
+    assert result.final_output == "A Codex response"
+    assert "operationTracing" not in dict(server.requests)["turn/start"]
+    assert not any(
+        span.span_data.type in {"generation", "response"} for span in fetch_ordered_spans()
+    )

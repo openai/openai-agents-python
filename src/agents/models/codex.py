@@ -41,6 +41,7 @@ from ..tool import ApplyPatchTool, ShellTool, Tool, WebSearchTool
 from ..usage import Usage, _make_input_tokens_details, _response_usage_to_usage
 from ._codex_app_server import CodexAppServer, resolve_codex_executable
 from ._codex_inputs import prepare_codex_history, prepare_dynamic_tools, sdk_tool_call
+from ._codex_tracing import CodexOperationTracing
 from .interface import Model, ModelProvider, ModelTracing
 
 
@@ -311,6 +312,7 @@ class _CodexModel(Model):
             overrides,
             provider._env,
         )
+        observations = CodexOperationTracing(tracing, input, self._name)
         output: dict[str, Any] = {}
         streamed: set[str] = set()
         indices: dict[str, int] = {}
@@ -322,6 +324,7 @@ class _CodexModel(Model):
         raw_usage = None
         reasoning_summaries: list[str] = []
         usage = None
+        sdk_done_event = None
         try:
             if provider._api_key is not None:
                 await server.request(
@@ -516,7 +519,12 @@ class _CodexModel(Model):
                 turn_params["outputSchema"] = output_schema.json_schema()
             if sdk_sandbox:
                 turn_params["environments"] = []
-            turn_id = _id(await server.request("turn/start", turn_params), "turn")
+            operation_mode = observations.request_mode()
+            if operation_mode is not None:
+                turn_params["operationTracing"] = operation_mode
+            turn_result = await server.request("turn/start", turn_params)
+            turn_id = _id(turn_result, "turn")
+            observations.bind(thread_id, turn_id, turn_result.get("operationTracing"))
             response = Response(
                 id=turn_id,
                 created_at=time.time(),
@@ -534,6 +542,12 @@ class _CodexModel(Model):
             sequence += 1
             async for event in server.events():
                 params = event.get("params") or {}
+                if event.get("method") in (
+                    "turn/operation/started",
+                    "turn/operation/completed",
+                ):
+                    observations.observe(event["method"], params)
+                    continue
                 if "id" in event:
                     if (
                         event["method"] != "item/tool/call"
@@ -774,34 +788,39 @@ class _CodexModel(Model):
                         type="response.output_item.done",
                     )
                     sequence += 1
+            if not completed:
+                raise RuntimeError("Codex finished without a completed response.")
+            if require_sdk_call and sdk_call is None:
+                raise UserError(
+                    "CodexProvider tool_choice='required' did not return "
+                    "an SDK tool or handoff call."
+                )
+            if sdk_call is None and not output:
+                raise RuntimeError("Codex finished without a completed response.")
+            items = list(output.values()) + ([sdk_call] if sdk_call is not None else [])
+            if reasoning_summaries:
+                items[-1].codex_reasoning_summary = reasoning_summaries
+            if sdk_call is not None:
+                assert isinstance(sdk_call.id, str)
+                sdk_done_event = ResponseOutputItemDoneEvent(
+                    item=sdk_call,
+                    output_index=indices[sdk_call.id],
+                    sequence_number=sequence,
+                    type="response.output_item.done",
+                )
+                sequence += 1
+            items.sort(key=lambda item: indices[item.id])
+            response = response.model_copy(
+                update={"output": items, "status": "completed", "usage": usage}
+            )
+            if raw_usage is not None:
+                response.__dict__["codex_raw_usage"] = raw_usage
+            observations.finish_response(response)
         finally:
+            observations.close(interrupted=True)
             await server.close()
-        if not completed:
-            raise RuntimeError("Codex finished without a completed response.")
-        if require_sdk_call and sdk_call is None:
-            raise UserError(
-                "CodexProvider tool_choice='required' did not return an SDK tool or handoff call."
-            )
-        if sdk_call is None and not output:
-            raise RuntimeError("Codex finished without a completed response.")
-        items = list(output.values()) + ([sdk_call] if sdk_call is not None else [])
-        if reasoning_summaries:
-            items[-1].codex_reasoning_summary = reasoning_summaries
-        if sdk_call is not None:
-            assert isinstance(sdk_call.id, str)
-            yield ResponseOutputItemDoneEvent(
-                item=sdk_call,
-                output_index=indices[sdk_call.id],
-                sequence_number=sequence,
-                type="response.output_item.done",
-            )
-            sequence += 1
-        items.sort(key=lambda item: indices[item.id])
-        response = response.model_copy(
-            update={"output": items, "status": "completed", "usage": usage}
-        )
-        if raw_usage is not None:
-            response.__dict__["codex_raw_usage"] = raw_usage
+        if sdk_done_event is not None:
+            yield sdk_done_event
         yield ResponseCompletedEvent(
             response=response, sequence_number=sequence, type="response.completed"
         )

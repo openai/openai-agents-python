@@ -1,0 +1,3964 @@
+diff --git a/codex-rs/analytics/src/client_tests.rs b/codex-rs/analytics/src/client_tests.rs
+index d7d8ff6..4d04a6a 100644
+--- a/codex-rs/analytics/src/client_tests.rs
++++ b/codex-rs/analytics/src/client_tests.rs
+@@ -746,6 +746,7 @@ fn sample_thread_fork_response() -> ClientResponsePayload {
+
+ fn sample_turn_start_response() -> ClientResponsePayload {
+     ClientResponsePayload::TurnStart(TurnStartResponse {
++        operation_tracing: None,
+         turn: Turn {
+             id: "turn-1".to_string(),
+             root_turn_id: None,
+diff --git a/codex-rs/analytics/src/tests/support.rs b/codex-rs/analytics/src/tests/support.rs
+index c47593d..060571c 100644
+--- a/codex-rs/analytics/src/tests/support.rs
++++ b/codex-rs/analytics/src/tests/support.rs
+@@ -263,6 +263,7 @@ pub(super) fn sample_turn_start_request(thread_id: &str, request_id: i64) -> Cli
+
+ pub(super) fn sample_turn_start_response(turn_id: &str) -> ClientResponsePayload {
+     ClientResponsePayload::TurnStart(codex_app_server_protocol::TurnStartResponse {
++        operation_tracing: None,
+         turn: Turn {
+             id: turn_id.to_string(),
+             root_turn_id: None,
+diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
+index 2936c01..fe3b0ad 100644
+--- a/codex-rs/app-server-protocol/src/protocol/common.rs
++++ b/codex-rs/app-server-protocol/src/protocol/common.rs
+@@ -2029,6 +2029,10 @@ server_notification_definitions! {
+     ThreadSettingsUpdated => "thread/settings/updated" (v2::ThreadSettingsUpdatedNotification),
+     ThreadTokenUsageUpdated => "thread/tokenUsage/updated" (v2::ThreadTokenUsageUpdatedNotification),
+     TurnStarted => "turn/started" (v2::TurnStartedNotification),
++    #[experimental("turn/operation/started")]
++    TurnOperationStarted => "turn/operation/started" (v2::OperationTracingNotification),
++    #[experimental("turn/operation/completed")]
++    TurnOperationCompleted => "turn/operation/completed" (v2::OperationTracingNotification),
+     HookStarted => "hook/started" (v2::HookStartedNotification),
+     TurnCompleted => "turn/completed" (v2::TurnCompletedNotification),
+     HookCompleted => "hook/completed" (v2::HookCompletedNotification),
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/mod.rs b/codex-rs/app-server-protocol/src/protocol/v2/mod.rs
+index 0ecd549..e329b5d 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/mod.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/mod.rs
+@@ -24,6 +24,7 @@ mod memory;
+ mod model;
+ mod model_provider_error;
+ mod notification;
++mod operation_tracing;
+ mod permissions;
+ mod plugin;
+ mod plugin_search;
+@@ -67,6 +68,7 @@ pub use memory::*;
+ pub use model::*;
+ pub use model_provider_error::*;
+ pub use notification::*;
++pub use operation_tracing::*;
+ pub use permissions::*;
+ pub use plugin::*;
+ pub use plugin_search::*;
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/operation_tracing.rs b/codex-rs/app-server-protocol/src/protocol/v2/operation_tracing.rs
+new file mode 100644
+index 0000000..f9d1b44
+--- /dev/null
++++ b/codex-rs/app-server-protocol/src/protocol/v2/operation_tracing.rs
+@@ -0,0 +1,136 @@
++use crate::JsonSchema;
++use crate::TS;
++use serde::Deserialize;
++use serde::Serialize;
++use serde_json::Value;
++
++/// Per-turn operation observation, delivered only to its initiating connection.
++#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(export_to = "v2/")]
++pub enum OperationTracingMode {
++    Metadata,
++    Content,
++}
++
++#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(export_to = "v2/")]
++pub enum OperationTracingKind {
++    Model,
++    Tool,
++}
++
++#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(export_to = "v2/")]
++pub enum OperationTracingOutcome {
++    Success,
++    Error,
++    Interrupted,
++}
++
++/// Content projected before delivery, with explicit capture completeness.
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(export_to = "v2/")]
++pub struct OperationTracingContent {
++    pub value: Value,
++    pub truncated: bool,
++    pub omitted: bool,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub reason: Option<String>,
++}
++
++/// Source operation facts. Times are UTC RFC 3339, duration uses a monotonic clock.
++/// Input and output are absent in metadata mode and must never enter logs or history.
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(export_to = "v2/")]
++pub struct OperationTracingNotification {
++    pub operation_id: String,
++    pub thread_id: String,
++    pub turn_id: String,
++    pub kind: OperationTracingKind,
++    pub started_at: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub completed_at: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub duration_ms: Option<f64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub outcome: Option<OperationTracingOutcome>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub parent_operation_id: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub requested_model: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub observed_model: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub response_id: Option<String>,
++    #[serde(default)]
++    pub response_id_trusted: bool,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub usage: Option<Value>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub tool_name: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub call_id: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub input: Option<OperationTracingContent>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub output: Option<OperationTracingContent>,
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::TurnStartParams;
++    use crate::experimental_api::ExperimentalApi;
++    use serde_json::json;
++
++    #[test]
++    fn opt_in_requires_experimental_capability() {
++        let request: TurnStartParams = serde_json::from_value(json!({
++            "threadId": "thread", "input": [], "operationTracing": "metadata"
++        }))
++        .unwrap();
++        assert_eq!(
++            request.operation_tracing,
++            Some(OperationTracingMode::Metadata)
++        );
++        assert_eq!(
++            request.experimental_reason(),
++            Some("turn/start.operationTracing")
++        );
++        let request: TurnStartParams =
++            serde_json::from_value(json!({"threadId": "thread", "input": []})).unwrap();
++        assert!(request.operation_tracing.is_none());
++    }
++
++    #[test]
++    fn metadata_notification_roundtrip_preserves_source_identity() {
++        let value = json!({
++            "operationId": "op", "threadId": "thread", "turnId": "turn",
++            "kind": "model", "startedAt": "2026-11-20T00:00:00.000Z",
++            "requestedModel": "test-model", "responseIdTrusted": false
++        });
++        let notification: OperationTracingNotification =
++            serde_json::from_value(value.clone()).unwrap();
++        assert!(notification.input.is_none());
++        assert!(notification.output.is_none());
++        assert_eq!(serde_json::to_value(notification).unwrap(), value);
++    }
++}
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
+index 4580410..4ed8a48 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
+@@ -5108,6 +5108,7 @@ fn turn_start_params_preserve_explicit_null_service_tier() {
+     );
+
+     let without_override = TurnStartParams {
++        operation_tracing: None,
+         disabled_plugin_ids: None,
+         thread_id: "thread_123".to_string(),
+         client_user_message_id: None,
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/turn.rs b/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
+index bf24445..ec7f2b6 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
+@@ -172,6 +172,11 @@ pub struct TurnToolOutput {
+ #[ts(export_to = "v2/")]
+ pub struct TurnStartParams {
+     pub thread_id: String,
++    /// Observe operations for this new turn on the initiating connection only.
++    #[experimental("turn/start.operationTracing")]
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub operation_tracing: Option<super::OperationTracingMode>,
+     /// Replace this thread's disabled plugin IDs.
+     /// Omitted/null preserves the list; [] clears it.
+     #[ts(optional = nullable)]
+@@ -305,11 +310,16 @@ pub struct TurnStartParams {
+     pub cyber_access_program: Option<CyberAccessProgram>,
+ }
+
+-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
+ #[serde(rename_all = "camelCase")]
+ #[ts(export_to = "v2/")]
+ pub struct TurnStartResponse {
+     pub turn: Turn,
++    /// Effective observation mode. Absent when unrequested or steering an existing turn.
++    #[experimental("turn/start.operationTracing")]
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub operation_tracing: Option<super::OperationTracingMode>,
+ }
+
+ #[derive(
+diff --git a/codex-rs/app-server/src/message_processor_tracing_tests.rs b/codex-rs/app-server/src/message_processor_tracing_tests.rs
+index aeff494..286fee6 100644
+--- a/codex-rs/app-server/src/message_processor_tracing_tests.rs
++++ b/codex-rs/app-server/src/message_processor_tracing_tests.rs
+@@ -678,6 +678,7 @@ async fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
+             ClientRequest::TurnStart {
+                 request_id: RequestId::Integer(3),
+                 params: TurnStartParams {
++                    operation_tracing: None,
+                     disabled_plugin_ids: None,
+                     environments: None,
+                     thread_id,
+diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
+index 99e4d1e..2ce64ea 100644
+--- a/codex-rs/app-server/src/notification_media.rs
++++ b/codex-rs/app-server/src/notification_media.rs
+@@ -138,6 +138,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
+         | ServerNotification::WindowsWorldWritableWarning(_)
+         | ServerNotification::WindowsSandboxSetupCompleted(_)
+         | ServerNotification::AccountLoginCompleted(_)
++        | ServerNotification::TurnOperationStarted(_)
++        | ServerNotification::TurnOperationCompleted(_)
+         | ServerNotification::GatewayOAuthChanged(_) => notification,
+     }
+ }
+diff --git a/codex-rs/app-server/src/operation_observation.rs b/codex-rs/app-server/src/operation_observation.rs
+new file mode 100644
+index 0000000..7e36f8a
+--- /dev/null
++++ b/codex-rs/app-server/src/operation_observation.rs
+@@ -0,0 +1,361 @@
++//! Private operation delivery. Payloads bypass telemetry, history, and broadcasts.
++
++use super::ConnectionId;
++use super::OutgoingEnvelope;
++use super::OutgoingMessageSender;
++use super::timestamped_server_notification;
++use codex_app_server_protocol::OperationTracingContent;
++use codex_app_server_protocol::OperationTracingKind;
++use codex_app_server_protocol::OperationTracingNotification;
++use codex_app_server_protocol::OperationTracingOutcome;
++use codex_app_server_protocol::ServerNotification;
++use codex_core::operation_observation::OperationContent;
++use codex_core::operation_observation::OperationEvent;
++use codex_core::operation_observation::OperationKind;
++use codex_core::operation_observation::OperationMetadata;
++use codex_core::operation_observation::OperationObserver;
++use codex_core::operation_observation::OperationOutcome;
++use codex_core::operation_observation::OperationPhase;
++use std::future::Future;
++use std::pin::Pin;
++use std::sync::Arc;
++use std::sync::Mutex;
++use tokio::sync::mpsc;
++use tokio::sync::watch;
++
++struct PrivateOperationObserver {
++    thread_id: String,
++    turn_id: Mutex<Option<String>>,
++    sender: Mutex<Option<mpsc::UnboundedSender<ServerNotification>>>,
++    drained: watch::Receiver<bool>,
++}
++
++impl PrivateOperationObserver {
++    fn owns_turn(&self, thread_id: &str, turn_id: &str) -> bool {
++        if thread_id != self.thread_id {
++            return false;
++        }
++        let mut bound = self
++            .turn_id
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if bound.as_ref().is_some_and(|id| id != turn_id) {
++            return false;
++        }
++        bound.get_or_insert_with(|| turn_id.to_owned());
++        true
++    }
++}
++
++impl OperationObserver for PrivateOperationObserver {
++    fn emit(&self, event: OperationEvent) {
++        if !self.owns_turn(&event.thread_id, &event.turn_id) {
++            return;
++        }
++        let phase = event.phase;
++        let payload = operation_notification(event);
++        let notification = match phase {
++            OperationPhase::Started => ServerNotification::TurnOperationStarted(payload),
++            OperationPhase::Completed => ServerNotification::TurnOperationCompleted(payload),
++        };
++        let sender = self
++            .sender
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if let Some(sender) = sender.as_ref() {
++            let _ = sender.send(notification);
++        }
++    }
++
++    fn turn_finished<'a>(
++        &'a self,
++        thread_id: &'a str,
++        turn_id: &'a str,
++    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
++        let owns_turn = self.owns_turn(thread_id, turn_id);
++        Box::pin(async move {
++            if !owns_turn {
++                return;
++            }
++            // Closing admission also fences empty turns and late finalizers.
++            drop(
++                self.sender
++                    .lock()
++                    .unwrap_or_else(std::sync::PoisonError::into_inner)
++                    .take(),
++            );
++            // Shared completion survives cancellation of an earlier terminal waiter.
++            let mut drained = self.drained.clone();
++            let _ = drained.wait_for(|complete| *complete).await;
++        })
++    }
++}
++
++impl OutgoingMessageSender {
++    pub(crate) fn operation_observer(
++        self: &Arc<Self>,
++        connection_id: ConnectionId,
++        thread_id: String,
++    ) -> Arc<dyn OperationObserver> {
++        let (sender, mut receiver) = mpsc::unbounded_channel();
++        let (completed, drained) = watch::channel(false);
++        let outgoing = Arc::downgrade(self);
++        tokio::spawn(async move {
++            while let Some(notification) = receiver.recv().await {
++                let Some(outgoing) = outgoing.upgrade() else {
++                    break;
++                };
++                // Explicit owner delivery, without notification logging or analytics.
++                if outgoing
++                    .sender
++                    .send(OutgoingEnvelope::ToConnection {
++                        connection_id,
++                        message: timestamped_server_notification(notification),
++                        write_complete_tx: None,
++                    })
++                    .await
++                    .is_err()
++                {
++                    break;
++                }
++            }
++            let _ = completed.send(true);
++        });
++        Arc::new(PrivateOperationObserver {
++            thread_id,
++            turn_id: Mutex::new(None),
++            sender: Mutex::new(Some(sender)),
++            drained,
++        })
++    }
++}
++
++fn operation_notification(event: OperationEvent) -> OperationTracingNotification {
++    let OperationEvent {
++        phase: _,
++        operation_id,
++        thread_id,
++        turn_id,
++        kind,
++        started_at,
++        completed_at,
++        duration_ms,
++        outcome,
++        metadata,
++        input,
++        output,
++    } = event;
++    let OperationMetadata {
++        parent_operation_id,
++        requested_model,
++        observed_model,
++        response_id,
++        response_id_trusted,
++        usage,
++        tool_name,
++        call_id,
++    } = metadata;
++    OperationTracingNotification {
++        operation_id,
++        thread_id,
++        turn_id,
++        started_at,
++        completed_at,
++        duration_ms,
++        kind: match kind {
++            OperationKind::Model => OperationTracingKind::Model,
++            OperationKind::Tool => OperationTracingKind::Tool,
++        },
++        outcome: outcome.map(|outcome| match outcome {
++            OperationOutcome::Success => OperationTracingOutcome::Success,
++            OperationOutcome::Error => OperationTracingOutcome::Error,
++            OperationOutcome::Interrupted => OperationTracingOutcome::Interrupted,
++        }),
++        parent_operation_id,
++        requested_model,
++        observed_model,
++        response_id,
++        response_id_trusted,
++        usage,
++        tool_name,
++        call_id,
++        input: input.map(operation_content),
++        output: output.map(operation_content),
++    }
++}
++
++fn operation_content(content: OperationContent) -> OperationTracingContent {
++    let OperationContent {
++        value,
++        truncated,
++        omitted,
++        reason,
++    } = content;
++    OperationTracingContent {
++        value,
++        truncated,
++        omitted,
++        reason,
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use codex_core::operation_observation::OperationCaptureMode;
++    use codex_core::operation_observation::OperationObservation;
++
++    #[tokio::test]
++    async fn owner_only_delivery_and_source_terminal_fence() {
++        let (sender, mut receiver) = mpsc::channel(8);
++        let outgoing = Arc::new(OutgoingMessageSender::new(
++            sender,
++            codex_analytics::AnalyticsEventsClient::disabled(),
++        ));
++        let observer = outgoing.operation_observer(ConnectionId(7), "thread".into());
++        let observation =
++            OperationObservation::new(OperationCaptureMode::Metadata, observer.clone());
++        let operation = observation.start(
++            "thread".into(),
++            "turn".into(),
++            OperationKind::Model,
++            OperationMetadata::default(),
++        );
++        operation.capture_input(&serde_json::json!({"value": "metadata-canary"}));
++        drop(operation);
++        observer.turn_finished("thread", "turn").await;
++        let mut phases = Vec::new();
++        while let Ok(envelope) = receiver.try_recv() {
++            let OutgoingEnvelope::ToConnection {
++                connection_id,
++                message,
++                ..
++            } = envelope
++            else {
++                panic!("operation observations must never broadcast");
++            };
++            assert_eq!(connection_id, ConnectionId(7));
++            let value = serde_json::to_value(message).unwrap();
++            assert!(!value.to_string().contains("metadata-canary"));
++            phases.push(value["method"].as_str().unwrap().to_owned());
++        }
++        assert_eq!(
++            phases,
++            ["turn/operation/started", "turn/operation/completed"]
++        );
++        drop(observation.start(
++            "thread".into(),
++            "turn".into(),
++            OperationKind::Model,
++            OperationMetadata::default(),
++        ));
++        tokio::task::yield_now().await;
++        assert!(receiver.try_recv().is_err());
++    }
++
++    #[tokio::test]
++    async fn private_content_preserves_capture_fields() {
++        let (sender, mut receiver) = mpsc::channel(8);
++        let outgoing = Arc::new(OutgoingMessageSender::new(
++            sender,
++            codex_analytics::AnalyticsEventsClient::disabled(),
++        ));
++        let observer = outgoing.operation_observer(ConnectionId(9), "thread".into());
++        let observation =
++            OperationObservation::new(OperationCaptureMode::Content, observer.clone());
++        let operation = observation.start(
++            "thread".into(),
++            "turn".into(),
++            OperationKind::Tool,
++            OperationMetadata::default(),
++        );
++        operation.capture_input(&serde_json::json!({"value": "private-canary"}));
++        operation.finish_with_output(
++            OperationOutcome::Success,
++            &serde_json::json!({"value": "private-output"}),
++        );
++        observer.turn_finished("thread", "turn").await;
++        for phase in ["turn/operation/started", "turn/operation/completed"] {
++            let OutgoingEnvelope::ToConnection {
++                connection_id,
++                message,
++                ..
++            } = receiver.recv().await.unwrap()
++            else {
++                panic!("expected private delivery");
++            };
++            assert_eq!(connection_id, ConnectionId(9));
++            let value = serde_json::to_value(message).unwrap();
++            assert_eq!(value["method"], phase);
++            if phase.ends_with("completed") {
++                assert_eq!(value["params"]["input"]["value"]["value"], "private-canary");
++                assert_eq!(
++                    value["params"]["output"]["value"]["value"],
++                    "private-output"
++                );
++            }
++        }
++    }
++
++    #[tokio::test]
++    async fn empty_source_terminal_excludes_all_late_observations() {
++        let (sender, mut receiver) = mpsc::channel(8);
++        let outgoing = Arc::new(OutgoingMessageSender::new(
++            sender,
++            codex_analytics::AnalyticsEventsClient::disabled(),
++        ));
++        let observer = outgoing.operation_observer(ConnectionId(7), "thread".into());
++        let observation =
++            OperationObservation::new(OperationCaptureMode::Metadata, observer.clone());
++        observer.turn_finished("thread", "empty-turn").await;
++        for (thread_id, turn_id) in [
++            ("thread", "empty-turn"),
++            ("thread", "later-turn"),
++            ("child", "empty-turn"),
++        ] {
++            drop(observation.start(
++                thread_id.into(),
++                turn_id.into(),
++                OperationKind::Model,
++                OperationMetadata::default(),
++            ));
++        }
++        tokio::task::yield_now().await;
++        assert!(receiver.try_recv().is_err());
++    }
++    #[tokio::test]
++    async fn cancelled_terminal_waiter_does_not_release_a_later_terminal_early() {
++        let (sender, mut receiver) = mpsc::channel(1);
++        let outgoing = Arc::new(OutgoingMessageSender::new(
++            sender,
++            codex_analytics::AnalyticsEventsClient::disabled(),
++        ));
++        let observer = outgoing.operation_observer(ConnectionId(7), "thread".into());
++        let observation =
++            OperationObservation::new(OperationCaptureMode::Metadata, observer.clone());
++        drop(observation.start(
++            "thread".into(),
++            "turn".into(),
++            OperationKind::Model,
++            OperationMetadata::default(),
++        ));
++        let mut first_waiter = observer.turn_finished("thread", "turn");
++        assert!(futures::poll!(&mut first_waiter).is_pending());
++        drop(first_waiter);
++        let second_waiter = observer.turn_finished("thread", "turn");
++        let receive_operations = async {
++            for expected in ["turn/operation/started", "turn/operation/completed"] {
++                let OutgoingEnvelope::ToConnection { message, .. } = receiver.recv().await.unwrap()
++                else {
++                    panic!("expected owner delivery");
++                };
++                assert_eq!(serde_json::to_value(message).unwrap()["method"], expected);
++            }
++        };
++        tokio::time::timeout(std::time::Duration::from_secs(1), async {
++            tokio::join!(second_waiter, receive_operations);
++        })
++        .await
++        .unwrap();
++    }
++}
+diff --git a/codex-rs/app-server/src/outgoing_message.rs b/codex-rs/app-server/src/outgoing_message.rs
+index 35f5027..73a4662 100644
+--- a/codex-rs/app-server/src/outgoing_message.rs
++++ b/codex-rs/app-server/src/outgoing_message.rs
+@@ -1706,3 +1706,6 @@ mod tests {
+         );
+     }
+ }
++
++#[path = "operation_observation.rs"]
++mod operation_observation;
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index f310c4a..a9f727f 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -2,6 +2,10 @@ use super::thread_input::ensure_direct_input_allowed;
+ use super::*;
+ use codex_app_server_protocol::ImageReference as V2ImageReference;
+ use codex_app_server_protocol::ThreadItem;
++use codex_core::WithTurnExtensionData;
++use codex_core::operation_observation::OperationCaptureMode;
++use codex_core::operation_observation::OperationObservation;
++use codex_extension_api::ExtensionDataInit;
+ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::FunctionCallOutputBody;
+@@ -636,8 +640,27 @@ impl TurnRequestProcessor {
+             )
+             .await?;
+
++        // Always replace inherited turn data, including when this request opts out.
++        // Core applies this attachment only when the request starts a new turn.
++        let requested_operation_tracing = params.operation_tracing;
++        let mut turn_extension_init = ExtensionDataInit::new();
++        if let Some(mode) = requested_operation_tracing {
++            let capture_mode = match mode {
++                codex_app_server_protocol::OperationTracingMode::Metadata => {
++                    OperationCaptureMode::Metadata
++                }
++                codex_app_server_protocol::OperationTracingMode::Content => {
++                    OperationCaptureMode::Content
++                }
++            };
++            turn_extension_init.insert(OperationObservation::new(
++                capture_mode,
++                self.outgoing
++                    .operation_observer(request_id.connection_id, thread_id.to_string()),
++            ));
++        }
+         let submission = thread
+-            .start_or_steer_turn(
++            .start_or_steer_turn(WithTurnExtensionData::new_turn_only(
+                 TurnInputRequest::new(input)
+                     .with_thread_settings(thread_settings)
+                     .on_start(TurnStartOptions {
+@@ -653,7 +676,8 @@ impl TurnRequestProcessor {
+                     .with_responses_metadata(params.responsesapi_client_metadata)
+                     .with_responses_metadata_patch(params.responsesapi_client_metadata_patch)
+                     .with_trace(self.request_trace_context(&request_id).await),
+-            )
++                turn_extension_init,
++            ))
+             .await
+             .map_err(|err| {
+                 let error = match err.details() {
+@@ -713,7 +737,10 @@ impl TurnRequestProcessor {
+             duration_ms: None,
+         };
+
+-        Ok(TurnStartResponse { turn })
++        Ok(TurnStartResponse {
++            turn,
++            operation_tracing: requested_operation_tracing.filter(|_| started),
++        })
+     }
+
+     async fn build_environment_override(
+diff --git a/codex-rs/app-server/tests/common/test_app_server.rs b/codex-rs/app-server/tests/common/test_app_server.rs
+index bec5909..1e7ebc1 100644
+--- a/codex-rs/app-server/tests/common/test_app_server.rs
++++ b/codex-rs/app-server/tests/common/test_app_server.rs
+@@ -1091,7 +1091,7 @@ impl TestAppServer {
+         let response = self
+             .read_stream_until_response_message(RequestId::Integer(request_id))
+             .await?;
+-        let TurnStartResponse { turn } = crate::to_response(response)?;
++        let TurnStartResponse { turn, .. } = crate::to_response(response)?;
+         let notification = self
+             .read_stream_until_matching_notification(
+                 "turn/completed for started turn",
+diff --git a/codex-rs/app-server/tests/suite/logging.rs b/codex-rs/app-server/tests/suite/logging.rs
+index 348d6a8..c707b46 100644
+--- a/codex-rs/app-server/tests/suite/logging.rs
++++ b/codex-rs/app-server/tests/suite/logging.rs
+@@ -772,7 +772,7 @@ async fn app_server_emits_structured_tool_call_timing_event() -> Result<()> {
+         .await?
+         .thread;
+
+-    let TurnStartResponse { turn } = app_server
++    let TurnStartResponse { turn, .. } = app_server
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+diff --git a/codex-rs/app-server/tests/suite/v2/analytics.rs b/codex-rs/app-server/tests/suite/v2/analytics.rs
+index 9a280c9..1e2c179 100644
+--- a/codex-rs/app-server/tests/suite/v2/analytics.rs
++++ b/codex-rs/app-server/tests/suite/v2/analytics.rs
+@@ -220,7 +220,7 @@ async fn guardian_review_turns_and_tools_reach_analytics() -> Result<()> {
+             ..Default::default()
+         })
+         .await?;
+-    let TurnStartResponse { turn } =
++    let TurnStartResponse { turn, .. } =
+         timeout(READ_TIMEOUT, app_server.read_response(request_id)).await??;
+     let reviews = timeout(READ_TIMEOUT, async {
+         loop {
+diff --git a/codex-rs/app-server/tests/suite/v2/client_metadata.rs b/codex-rs/app-server/tests/suite/v2/client_metadata.rs
+index 76fe254..1292c6f 100644
+--- a/codex-rs/app-server/tests/suite/v2/client_metadata.rs
++++ b/codex-rs/app-server/tests/suite/v2/client_metadata.rs
+@@ -98,7 +98,7 @@ async fn turn_start_forwards_client_metadata_to_responses_request_v2() -> Result
+             ..Default::default()
+         })
+         .await?;
+-    let TurnStartResponse { turn } =
++    let TurnStartResponse { turn, .. } =
+         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_req)).await??;
+
+     timeout(
+@@ -197,7 +197,7 @@ async fn turn_start_sends_fork_lineage_in_turn_metadata_for_thread_fork_v2() ->
+             ..Default::default()
+         })
+         .await?;
+-    let TurnStartResponse { turn } =
++    let TurnStartResponse { turn, .. } =
+         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_req)).await??;
+
+     timeout(
+@@ -391,7 +391,7 @@ async fn turn_start_sends_nested_subagent_lineage_after_cold_thread_resume_v2()
+             ..Default::default()
+         })
+         .await?;
+-    let TurnStartResponse { turn } =
++    let TurnStartResponse { turn, .. } =
+         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_req)).await??;
+
+     timeout(
+@@ -517,7 +517,7 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2(
+             ..Default::default()
+         })
+         .await?;
+-    let TurnStartResponse { turn } =
++    let TurnStartResponse { turn, .. } =
+         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_req)).await??;
+     let turn_id = turn.id.clone();
+
+@@ -672,7 +672,7 @@ async fn turn_start_forwards_client_metadata_to_responses_websocket_request_body
+             ..Default::default()
+         })
+         .await?;
+-    let TurnStartResponse { turn } =
++    let TurnStartResponse { turn, .. } =
+         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_req)).await??;
+
+     timeout(
+diff --git a/codex-rs/app-server/tests/suite/v2/compaction.rs b/codex-rs/app-server/tests/suite/v2/compaction.rs
+index 784e6f9..49c4cbd 100644
+--- a/codex-rs/app-server/tests/suite/v2/compaction.rs
++++ b/codex-rs/app-server/tests/suite/v2/compaction.rs
+@@ -698,7 +698,7 @@ async fn send_turn_and_wait(
+             ..Default::default()
+         })
+         .await?;
+-    let TurnStartResponse { turn } =
++    let TurnStartResponse { turn, .. } =
+         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_id)).await??;
+     wait_for_turn_completed(mcp, &turn.id).await?;
+     Ok(turn.id)
+diff --git a/codex-rs/app-server/tests/suite/v2/connection_handling_websocket_unix.rs b/codex-rs/app-server/tests/suite/v2/connection_handling_websocket_unix.rs
+index cb01a3b..e372272 100644
+--- a/codex-rs/app-server/tests/suite/v2/connection_handling_websocket_unix.rs
++++ b/codex-rs/app-server/tests/suite/v2/connection_handling_websocket_unix.rs
+@@ -264,7 +264,8 @@ async fn websocket_transport_allows_turn_interrupt_during_drain() -> Result<()>
+         to_response(read_response_for_id(&mut ws, /*id*/ 2).await?)?;
+     let thread_id = thread.id;
+     send_turn_start_request(&mut ws, /*id*/ 3, &thread_id).await?;
+-    let TurnStartResponse { turn } = to_response(read_response_for_id(&mut ws, /*id*/ 3).await?)?;
++    let TurnStartResponse { turn, .. } =
++        to_response(read_response_for_id(&mut ws, /*id*/ 3).await?)?;
+     let turn_id = turn.id;
+     timeout(
+         DEFAULT_READ_TIMEOUT,
+@@ -427,7 +428,7 @@ async fn start_ctrl_c_restart_fixture(turn_delay: Duration) -> Result<GracefulCt
+
+     send_turn_start_request(&mut ws, /*id*/ 3, &thread.id).await?;
+     let turn_start_response = read_response_for_id(&mut ws, /*id*/ 3).await?;
+-    let TurnStartResponse { turn } = to_response(turn_start_response)?;
++    let TurnStartResponse { turn, .. } = to_response(turn_start_response)?;
+
+     wait_for_responses_post(&server, Duration::from_secs(5)).await?;
+
+diff --git a/codex-rs/app-server/tests/suite/v2/dynamic_tools.rs b/codex-rs/app-server/tests/suite/v2/dynamic_tools.rs
+index 0875bed..e59fe6d 100644
+--- a/codex-rs/app-server/tests/suite/v2/dynamic_tools.rs
++++ b/codex-rs/app-server/tests/suite/v2/dynamic_tools.rs
+@@ -442,7 +442,7 @@ async fn dynamic_tool_call_round_trip_sends_text_content_items_to_model() -> Res
+         mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+     )
+     .await??;
+-    let TurnStartResponse { turn } = to_response::<TurnStartResponse>(turn_resp)?;
++    let TurnStartResponse { turn, .. } = to_response::<TurnStartResponse>(turn_resp)?;
+     let turn_id = turn.id.clone();
+
+     let started = wait_for_dynamic_tool_started(&mut mcp, call_id).await?;
+@@ -654,7 +654,7 @@ async fn start_function_dynamic_tool_call(call_id: &str) -> Result<PendingDynami
+         mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+     )
+     .await??;
+-    let TurnStartResponse { turn } = to_response::<TurnStartResponse>(turn_resp)?;
++    let TurnStartResponse { turn, .. } = to_response::<TurnStartResponse>(turn_resp)?;
+     let turn_id = turn.id.clone();
+
+     let started = wait_for_dynamic_tool_started(&mut mcp, call_id).await?;
+diff --git a/codex-rs/app-server/tests/suite/v2/imagegen_extension.rs b/codex-rs/app-server/tests/suite/v2/imagegen_extension.rs
+index 0084570..876eb49 100644
+--- a/codex-rs/app-server/tests/suite/v2/imagegen_extension.rs
++++ b/codex-rs/app-server/tests/suite/v2/imagegen_extension.rs
+@@ -1240,7 +1240,7 @@ async fn start_turn(
+             ..turn_start_params
+         })
+         .await?;
+-    let TurnStartResponse { turn } =
++    let TurnStartResponse { turn, .. } =
+         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_req)).await??;
+
+     Ok(turn.id)
+diff --git a/codex-rs/app-server/tests/suite/v2/mcp_server_elicitation.rs b/codex-rs/app-server/tests/suite/v2/mcp_server_elicitation.rs
+index cda1f49..b59b762 100644
+--- a/codex-rs/app-server/tests/suite/v2/mcp_server_elicitation.rs
++++ b/codex-rs/app-server/tests/suite/v2/mcp_server_elicitation.rs
+@@ -438,7 +438,7 @@ async fn openai_form_capability_follows_the_turn_starting_connection() -> Result
+         })?),
+     )
+     .await?;
+-    let TurnStartResponse { turn } =
++    let TurnStartResponse { turn, .. } =
+         to_response(read_response_for_id(&mut supported_client, /*id*/ 6).await?)?;
+
+     let (request_id, params) = loop {
+@@ -789,7 +789,7 @@ impl ElicitationRoundTripFixture {
+             mcp.read_stream_until_response_message(RequestId::Integer(turn_start_id)),
+         )
+         .await??;
+-        let TurnStartResponse { turn } = to_response(turn_start_resp)?;
++        let TurnStartResponse { turn, .. } = to_response(turn_start_resp)?;
+
+         Ok(Self {
+             mcp,
+diff --git a/codex-rs/app-server/tests/suite/v2/misalignment_policy.rs b/codex-rs/app-server/tests/suite/v2/misalignment_policy.rs
+index 7c52208..16fae33 100644
+--- a/codex-rs/app-server/tests/suite/v2/misalignment_policy.rs
++++ b/codex-rs/app-server/tests/suite/v2/misalignment_policy.rs
+@@ -196,7 +196,7 @@ async fn assert_policy_violation_completes_turn_with_typed_terminal_error(
+             ..Default::default()
+         })
+         .await?;
+-    let TurnStartResponse { turn } = app_server
++    let TurnStartResponse { turn, .. } = app_server
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+diff --git a/codex-rs/app-server/tests/suite/v2/request_permissions.rs b/codex-rs/app-server/tests/suite/v2/request_permissions.rs
+index 3a061e9..374ed33 100644
+--- a/codex-rs/app-server/tests/suite/v2/request_permissions.rs
++++ b/codex-rs/app-server/tests/suite/v2/request_permissions.rs
+@@ -107,7 +107,7 @@ text(await tools.exec_command({{cmd: "{command}"}}));"#,
+     }
+     events.push(create_final_assistant_message_sse_response("done")?);
+     let mock = responses::mount_sse_sequence(&server, events).await;
+-    let TurnStartResponse { turn } = app
++    let TurnStartResponse { turn, .. } = app
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -342,7 +342,7 @@ text(await tools.apply_patch("*** Begin Patch\n*** Add File: next.txt\n+next tur
+             ],
+         };
+         let mock = responses::mount_sse_sequence(&server, events).await;
+-        let TurnStartResponse { turn } = app
++        let TurnStartResponse { turn, .. } = app
+             .request(|request_id| ClientRequest::TurnStart {
+                 request_id,
+                 params: TurnStartParams {
+@@ -555,7 +555,9 @@ await tools.request_permissions({{permissions: {{file_system: {{write: ["."]}}}}
+         ],
+     )
+     .await;
+-    let TurnStartResponse { turn: first_turn } = app
++    let TurnStartResponse {
++        turn: first_turn, ..
++    } = app
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -625,7 +627,7 @@ await tools.request_permissions({{permissions: {{file_system: {{write: ["."]}}}}
+         "next turn done",
+     )?);
+     let mock = responses::mount_sse_sequence(&server, events).await;
+-    let TurnStartResponse { turn } = app
++    let TurnStartResponse { turn, .. } = app
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+diff --git a/codex-rs/app-server/tests/suite/v2/selected_capability_stack.rs b/codex-rs/app-server/tests/suite/v2/selected_capability_stack.rs
+index 13c983a..5976891 100644
+--- a/codex-rs/app-server/tests/suite/v2/selected_capability_stack.rs
++++ b/codex-rs/app-server/tests/suite/v2/selected_capability_stack.rs
+@@ -154,7 +154,7 @@ async fn selected_plugin_mcp_startup_respects_explicit_mentions(
+         app_server.read_stream_until_response_message(RequestId::Integer(request_id)),
+     )
+     .await??;
+-    let TurnStartResponse { turn } = to_response(response)?;
++    let TurnStartResponse { turn, .. } = to_response(response)?;
+     wait_for_pid_file(&fixture.pid_file).await?;
+     if explicitly_mentioned {
+         // An explicit mention must outwait the optional one-second grace.
+diff --git a/codex-rs/app-server/tests/suite/v2/sleep.rs b/codex-rs/app-server/tests/suite/v2/sleep.rs
+index b515dbc..46e467f 100644
+--- a/codex-rs/app-server/tests/suite/v2/sleep.rs
++++ b/codex-rs/app-server/tests/suite/v2/sleep.rs
+@@ -85,7 +85,7 @@ async fn clock_tools_emit_control_tool_analytics() -> Result<()> {
+         .start_thread(ThreadStartParams::default())
+         .await?
+         .thread;
+-    let TurnStartResponse { turn } = app_server
++    let TurnStartResponse { turn, .. } = app_server
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_fork.rs b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
+index 6c902ce..613222b 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_fork.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
+@@ -478,7 +478,7 @@ async fn assert_thread_fork_preserves_persisted_approvals_reviewer(
+             mcp.read_stream_until_response_message(RequestId::Integer(turn_id)),
+         )
+         .await??;
+-        let TurnStartResponse { turn } = to_response(turn_resp)?;
++        let TurnStartResponse { turn, .. } = to_response(turn_resp)?;
+         timeout(
+             DEFAULT_READ_TIMEOUT,
+             mcp.read_stream_until_notification_message("turn/completed"),
+@@ -651,7 +651,7 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
+                 ..Default::default()
+             })
+             .await?;
+-        let TurnStartResponse { turn } =
++        let TurnStartResponse { turn, .. } =
+             timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_request_id)).await??;
+         turn_ids.push(turn.id);
+         timeout(
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_inject_items.rs b/codex-rs/app-server/tests/suite/v2/thread_inject_items.rs
+index 931c45e..ab9ec94 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_inject_items.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_inject_items.rs
+@@ -314,7 +314,7 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history(
+             ..Default::default()
+         })
+         .await?;
+-    let TurnStartResponse { turn } =
++    let TurnStartResponse { turn, .. } =
+         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(delegated_req)).await??;
+     let turn_started: TurnStartedNotification =
+         timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("turn/started")).await??;
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
+index 8badd11..3b2a97d 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
+@@ -5282,8 +5282,9 @@ async fn thread_resume_rejects_history_when_thread_is_running() -> Result<()> {
+         primary.read_stream_until_response_message(RequestId::Integer(running_turn_request_id)),
+     )
+     .await??;
+-    let TurnStartResponse { turn: running_turn } =
+-        to_response::<TurnStartResponse>(running_turn_resp)?;
++    let TurnStartResponse {
++        turn: running_turn, ..
++    } = to_response::<TurnStartResponse>(running_turn_resp)?;
+     assert_eq!(running_turn.items_view, TurnItemsView::NotLoaded);
+     timeout(
+         DEFAULT_READ_TIMEOUT,
+@@ -5401,8 +5402,9 @@ async fn thread_resume_rejects_mismatched_path_for_running_thread_id() -> Result
+         primary.read_stream_until_response_message(RequestId::Integer(running_turn_request_id)),
+     )
+     .await??;
+-    let TurnStartResponse { turn: running_turn } =
+-        to_response::<TurnStartResponse>(running_turn_resp)?;
++    let TurnStartResponse {
++        turn: running_turn, ..
++    } = to_response::<TurnStartResponse>(running_turn_resp)?;
+     timeout(
+         DEFAULT_READ_TIMEOUT,
+         primary.read_stream_until_notification_message("turn/started"),
+@@ -5556,8 +5558,9 @@ async fn thread_resume_rejoins_running_paginated_thread_with_initial_page() -> R
+             ..Default::default()
+         })
+         .await?;
+-    let TurnStartResponse { turn: seed_turn } =
+-        timeout(DEFAULT_READ_TIMEOUT, primary.read_response(seed_turn_id)).await??;
++    let TurnStartResponse {
++        turn: seed_turn, ..
++    } = timeout(DEFAULT_READ_TIMEOUT, primary.read_response(seed_turn_id)).await??;
+     timeout(
+         DEFAULT_READ_TIMEOUT,
+         primary.read_stream_until_notification_message("turn/completed"),
+@@ -5581,8 +5584,9 @@ async fn thread_resume_rejoins_running_paginated_thread_with_initial_page() -> R
+         primary.read_stream_until_response_message(RequestId::Integer(running_turn_id)),
+     )
+     .await??;
+-    let TurnStartResponse { turn: running_turn } =
+-        to_response::<TurnStartResponse>(running_turn_resp)?;
++    let TurnStartResponse {
++        turn: running_turn, ..
++    } = to_response::<TurnStartResponse>(running_turn_resp)?;
+     timeout(
+         DEFAULT_READ_TIMEOUT,
+         primary.read_stream_until_notification_message("turn/started"),
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_revert.rs b/codex-rs/app-server/tests/suite/v2/thread_revert.rs
+index ffbdbde..d762735 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_revert.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_revert.rs
+@@ -641,7 +641,9 @@ async fn thread_revert_interrupts_active_turn_and_keeps_thread_loaded() -> Resul
+         })
+         .await?;
+
+-    let TurnStartResponse { turn: active_turn } = mcp
++    let TurnStartResponse {
++        turn: active_turn, ..
++    } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_settings_update.rs b/codex-rs/app-server/tests/suite/v2/thread_settings_update.rs
+index ab688b1..49b8eec 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_settings_update.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_settings_update.rs
+@@ -612,7 +612,7 @@ async fn turn_start_settings_override_emits_thread_settings_updated() -> Result<
+             ..Default::default()
+         })
+         .await?;
+-    let TurnStartResponse { turn } =
++    let TurnStartResponse { turn, .. } =
+         timeout(DEFAULT_TIMEOUT, mcp.read_response(turn_request_id)).await??;
+     assert!(!turn.id.is_empty());
+
+@@ -653,7 +653,7 @@ async fn start_text_turn(mcp: &mut TestAppServer, thread_id: String) -> Result<(
+             ..Default::default()
+         })
+         .await?;
+-    let TurnStartResponse { turn } =
++    let TurnStartResponse { turn, .. } =
+         timeout(DEFAULT_TIMEOUT, mcp.read_response(turn_request_id)).await??;
+     assert!(!turn.id.is_empty());
+     Ok(())
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_shell_command.rs b/codex-rs/app-server/tests/suite/v2/thread_shell_command.rs
+index 561b890..639c279 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_shell_command.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_shell_command.rs
+@@ -260,7 +260,7 @@ async fn check_thread_shell_command_in_active_turn(timeout_ms: Option<i64>) -> R
+         current_shell_output_command("active turn bang")?
+     };
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+diff --git a/codex-rs/app-server/tests/suite/v2/turn_cost_otel.rs b/codex-rs/app-server/tests/suite/v2/turn_cost_otel.rs
+index f9a06f2..016e364 100644
+--- a/codex-rs/app-server/tests/suite/v2/turn_cost_otel.rs
++++ b/codex-rs/app-server/tests/suite/v2/turn_cost_otel.rs
+@@ -201,7 +201,7 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{}/metrics", protocol = "json"
+         })
+         .await?
+         .expect("turn/start");
+-    let TurnStartResponse { turn } = serde_json::from_value(response)?;
++    let TurnStartResponse { turn, .. } = serde_json::from_value(response)?;
+     timeout(Duration::from_secs(/*secs*/ 30), async {
+         while let Some(event) = client.next_event().await {
+             if let InProcessServerEvent::ServerNotification(event) = event
+diff --git a/codex-rs/app-server/tests/suite/v2/turn_interrupt.rs b/codex-rs/app-server/tests/suite/v2/turn_interrupt.rs
+index bdc1740..e5df44b 100644
+--- a/codex-rs/app-server/tests/suite/v2/turn_interrupt.rs
++++ b/codex-rs/app-server/tests/suite/v2/turn_interrupt.rs
+@@ -84,7 +84,7 @@ async fn turn_interrupt_aborts_running_turn() -> Result<()> {
+         .await?;
+
+     // Start a turn that triggers a long-running command.
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -176,7 +176,7 @@ async fn turn_interrupt_rejects_completed_turn() -> Result<()> {
+         })
+         .await?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -269,7 +269,7 @@ async fn turn_interrupt_resolves_pending_command_approval_request() -> Result<()
+         })
+         .await?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+diff --git a/codex-rs/app-server/tests/suite/v2/turn_start.rs b/codex-rs/app-server/tests/suite/v2/turn_start.rs
+index 7053107..99a34f8 100644
+--- a/codex-rs/app-server/tests/suite/v2/turn_start.rs
++++ b/codex-rs/app-server/tests/suite/v2/turn_start.rs
+@@ -171,7 +171,7 @@ async fn run_local_image_turn(detail: Option<ImageDetail>) -> Result<Vec<Value>>
+     let image_path = codex_home.path().join("image.png");
+     std::fs::write(&image_path, TINY_PNG_BYTES)?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -571,7 +571,7 @@ async fn turn_start_with_empty_input_runs_model_request() -> Result<()> {
+         })
+         .await?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -698,7 +698,9 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
+             ..Default::default()
+         })
+         .await?;
+-    let TurnStartResponse { turn: active_turn } = mcp
++    let TurnStartResponse {
++        turn: active_turn, ..
++    } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -742,7 +744,9 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
+         (thread.id.clone(), Some(false))
+     );
+
+-    let TurnStartResponse { turn: steered_turn } = mcp
++    let TurnStartResponse {
++        turn: steered_turn, ..
++    } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -1361,7 +1365,7 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
+         })
+         .await?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -1540,7 +1544,7 @@ async fn turn_start_tracks_thread_originator_in_analytics() -> Result<()> {
+         })
+         .await?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -1796,7 +1800,9 @@ async fn turn_profile_tracks_blocking_tool_and_follow_up_sampling() -> Result<()
+         })
+         .await?;
+
+-    let TurnStartResponse { turn: first_turn } = mcp
++    let TurnStartResponse {
++        turn: first_turn, ..
++    } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -1974,7 +1980,7 @@ async fn turn_start_accepts_text_at_limit_with_mention_item() -> Result<()> {
+         })
+         .await?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -2211,7 +2217,7 @@ allow_local_binding = false
+         active_permission_profile.context("expected active permission profile")?;
+     assert_eq!(active_permission_profile.id, "managed-network");
+
+-    let TurnStartResponse { turn } = app_server
++    let TurnStartResponse { turn, .. } = app_server
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -2547,7 +2553,7 @@ async fn turn_start_emits_notifications_and_accepts_model_override() -> Result<(
+         .await?;
+
+     // Start a turn with only input and thread_id set (no overrides).
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -2585,7 +2591,7 @@ async fn turn_start_emits_notifications_and_accepts_model_override() -> Result<(
+     assert_eq!(completed.turn.status, TurnStatus::Completed);
+
+     // Send a second turn that exercises the overrides path: change the model.
+-    let TurnStartResponse { turn: turn2 } = mcp
++    let TurnStartResponse { turn: turn2, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -3335,7 +3341,7 @@ async fn run_turn_start_exec_approval_rejection_v2(
+         })
+         .await?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -3510,6 +3516,7 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
++                operation_tracing: None,
+                 disabled_plugin_ids: None,
+                 environments: None,
+                 thread_id: thread.id.clone(),
+@@ -3562,6 +3569,7 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
++                operation_tracing: None,
+                 disabled_plugin_ids: None,
+                 environments: Some(vec![TurnEnvironmentParams {
+                     environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+@@ -3872,7 +3880,7 @@ async fn run_environment_selection_case(
+     let ThreadStartResponse { thread, .. } =
+         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(thread_req)).await??;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -3969,7 +3977,7 @@ async fn turn_start_file_change_approval_v2() -> Result<()> {
+         })
+         .await?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -4300,7 +4308,7 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
+         })
+         .await?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -5222,7 +5230,7 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
+         .await?;
+
+     // First turn: expect FileChangeRequestApproval, respond with AcceptForSession, and verify the file exists.
+-    let TurnStartResponse { turn: turn_1 } = mcp
++    let TurnStartResponse { turn: turn_1, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -5314,7 +5322,7 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
+     assert_eq!(std::fs::read_to_string(&readme_path)?, "new line\n");
+
+     // Second turn: apply a patch to the same file. Approval should be skipped due to AcceptForSession.
+-    let TurnStartResponse { turn: turn_2 } = mcp
++    let TurnStartResponse { turn: turn_2, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -5450,7 +5458,7 @@ async fn run_turn_start_file_change_approval_rejection_v2(
+         })
+         .await?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -5600,7 +5608,7 @@ async fn command_execution_notifications_include_process_id(
+         })
+         .await?;
+
+-    let TurnStartResponse { turn: _turn } = mcp
++    let TurnStartResponse { turn: _turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+diff --git a/codex-rs/app-server/tests/suite/v2/turn_steer.rs b/codex-rs/app-server/tests/suite/v2/turn_steer.rs
+index 38f5cac..6565241 100644
+--- a/codex-rs/app-server/tests/suite/v2/turn_steer.rs
++++ b/codex-rs/app-server/tests/suite/v2/turn_steer.rs
+@@ -190,7 +190,7 @@ async fn turn_steer_rejects_oversized_text_input() -> Result<()> {
+         })
+         .await?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -311,7 +311,7 @@ async fn turn_steer_returns_active_turn_id(tool_outputs: bool) -> Result<()> {
+         })
+         .await?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+@@ -491,7 +491,7 @@ async fn turn_steer_rejects_context_only_input_without_merging_context() -> Resu
+         })
+         .await?;
+
+-    let TurnStartResponse { turn } = mcp
++    let TurnStartResponse { turn, .. } = mcp
+         .request(|request_id| ClientRequest::TurnStart {
+             request_id,
+             params: TurnStartParams {
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index 2510f35..0a4af6c 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -89,6 +89,8 @@ pub enum ResponseEvent {
+     /// Emitted when the server includes `OpenAI-Model` on the stream response.
+     /// This can differ from the requested model when backend safety routing applies.
+     ServerModel(String),
++    /// The response body's model name, for observation only, without routing authority.
++    ModelObservation(String),
+     /// Emitted when the server recommends additional account verification.
+     ModelVerifications(Vec<ModelVerification>),
+     /// Emitted when the server includes moderation metadata for first-party turn presentation.
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index f43e285..d330da5 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -907,6 +907,11 @@ async fn run_websocket_response_stream(
+                     }
+                     continue;
+                 }
++                if let Some(model) = event.observation_model() {
++                    let _ = tx_event
++                        .send(Ok(ResponseEvent::ModelObservation(model)))
++                        .await;
++                }
+                 let model = event.response_model();
+                 // Preserve terminal usage before any accompanying notification can block.
+                 let event = match process_responses_event(event) {
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index 67f627e..1e6c9cd 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -190,6 +190,16 @@ impl ResponsesStreamEvent {
+         &self.kind
+     }
+
++    /// Returns the body's model name for observation, without routing authority.
++    pub fn observation_model(&self) -> Option<String> {
++        self.response
++            .as_ref()?
++            .get("model")?
++            .as_str()
++            .filter(|model| !model.is_empty())
++            .map(str::to_owned)
++    }
++
+     /// Returns the effective model reported by the server, if present.
+     ///
+     /// Precedence:
+@@ -637,6 +647,15 @@ async fn process_sse_with_treatment(
+         let safety_buffering = event.safety_buffering(&safety_buffering_treatment);
+         let metadata_events = event.metadata_events(safety_buffering);
+
++        if let Some(model) = event.observation_model() {
++            if tx_event
++                .send(Ok(ResponseEvent::ModelObservation(model)))
++                .await
++                .is_err()
++            {
++                return;
++            }
++        }
+         if let Some(model) = event.response_model()
+             && last_server_model.as_deref() != Some(model.as_str())
+         {
+@@ -1613,7 +1632,7 @@ mod tests {
+     }
+
+     #[tokio::test]
+-    async fn process_sse_ignores_response_model_field_in_payload() {
++    async fn process_sse_reports_body_model_without_routing_authority() {
+         let events = run_sse(vec![
+             json!({
+                 "type": "response.created",
+@@ -1632,10 +1651,17 @@ mod tests {
+         ])
+         .await;
+
+-        assert_eq!(events.len(), 2);
+-        assert_matches!(&events[0], ResponseEvent::Created { .. });
++        assert_eq!(events.len(), 4);
++        assert_matches!(&events[0], ResponseEvent::ModelObservation(model) if model == CYBER_RESTRICTED_MODEL_FOR_TESTS);
++        assert_matches!(&events[1], ResponseEvent::Created { .. });
++        assert_matches!(&events[2], ResponseEvent::ModelObservation(model) if model == CYBER_RESTRICTED_MODEL_FOR_TESTS);
++        assert!(
++            !events
++                .iter()
++                .any(|event| matches!(event, ResponseEvent::ServerModel(_)))
++        );
+         assert_matches!(
+-            &events[1],
++            &events[3],
+             ResponseEvent::Completed {
+                 response_id,
+                 token_usage: None,
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 2ac9b93..3f93332 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -2033,6 +2033,11 @@ impl ResponsesHttpExecutor<'_> {
+                 request.input = input;
+             }
+             inference_trace_attempt.record_started(&request);
++            crate::operation_observation::observe_model_request(
++                &request,
++                &request,
++                &client_setup.api_provider.base_url,
++            );
+             let client = ApiResponsesClient::new(
+                 transport,
+                 client_setup.api_provider,
+@@ -2185,6 +2190,7 @@ impl ModelClientSession {
+             } else {
+                 session_telemetry_for_request(session_telemetry, &request)
+             };
++            let operation_endpoint = client_setup.api_provider.base_url.clone();
+             match self
+                 .websocket_connection(WebsocketConnectParams {
+                     session_telemetry,
+@@ -2341,6 +2347,13 @@ impl ModelClientSession {
+                 inference_trace_attempt.record_started(&ws_request);
+             }
+
++            if !warmup {
++                crate::operation_observation::observe_model_request(
++                    &ws_request,
++                    &request,
++                    &operation_endpoint,
++                );
++            }
+             let websocket_connection =
+                 self.websocket_session.connection.as_ref().ok_or_else(|| {
+                     self.client.state.provider.map_api_error(ApiError::Stream(
+@@ -2686,6 +2699,8 @@ where
+         mpsc::channel::<Result<ResponseEvent>>(RESPONSE_STREAM_CHANNEL_CAPACITY);
+     let consumer_dropped = CancellationToken::new();
+     let consumer_dropped_for_stream = consumer_dropped.clone();
++    let operation_observation = crate::operation_observation::current_model_operation()
++        .map(crate::operation_observation::ModelOperation::for_stream);
+
+     tokio::spawn(async move {
+         let mut logged_error = false;
+@@ -2702,6 +2717,7 @@ where
+         loop {
+             let event = tokio::select! {
+                 _ = consumer_dropped.cancelled() => {
++                    if let Some(operation) = &operation_observation { operation.source_ended(); }
+                     inference_trace_attempt.record_cancelled(
+                         STREAM_DROPPED_REASON,
+                         upstream_request_id,
+@@ -2712,8 +2728,21 @@ where
+                 event = api_stream.next() => event,
+             };
+             let Some(event) = event else {
++                if let Some(operation) = &operation_observation {
++                    operation.source_ended();
++                }
+                 break;
+             };
++            if let (Some(operation), Err(error)) = (&operation_observation, &event) {
++                operation.source_error(error);
++            }
++            if let (Some(operation), Ok(event)) = (&operation_observation, &event) {
++                operation.event(event);
++            }
++            // Body model names are observation facts, never session-routing updates.
++            if matches!(&event, Ok(ResponseEvent::ModelObservation(_))) {
++                continue;
++            }
+             match event {
+                 Ok(ResponseEvent::OutputItemDone(mut item)) => {
+                     // Assign IDs after interceptors, which may replace provider items.
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 61400a1..dcd01e4 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -10,6 +10,7 @@ mod apps;
+ mod client;
+ mod client_common;
+ mod model_request;
++pub mod operation_observation;
+ mod realtime_context;
+ mod realtime_conversation;
+ mod realtime_history;
+diff --git a/codex-rs/core/src/mcp_tool_call.rs b/codex-rs/core/src/mcp_tool_call.rs
+index 8c4ce1f..c6efa68 100644
+--- a/codex-rs/core/src/mcp_tool_call.rs
++++ b/codex-rs/core/src/mcp_tool_call.rs
+@@ -559,6 +559,9 @@ async fn handle_approved_mcp_tool_call(
+                         request_meta,
+                     )
+                     .await?;
++                    crate::tools::operation_observation::start_current_execution_with_input(
++                        &tool_input,
++                    );
+                     let mcp_call_trace = sess
+                         .services
+                         .rollout_thread_trace
+diff --git a/codex-rs/core/src/mcp_tool_call_tests.rs b/codex-rs/core/src/mcp_tool_call_tests.rs
+index 9f4ef92..34a88e0 100644
+--- a/codex-rs/core/src/mcp_tool_call_tests.rs
++++ b/codex-rs/core/src/mcp_tool_call_tests.rs
+@@ -1847,6 +1847,7 @@ async fn codex_apps_auth_elicitation_enabled_by_default_requests_elicitation(
+ #[test]
+ fn mcp_tool_call_ids_are_added_to_request_meta() {
+     let origin = crate::tools::context::ToolCallOrigin {
++        operation_id: None,
+         item_id: Some(ResponseItemId::from_server("fc-live".to_string())),
+         window_id: "thread-live:2".to_string(),
+     };
+diff --git a/codex-rs/core/src/operation_observation.rs b/codex-rs/core/src/operation_observation.rs
+new file mode 100644
+index 0000000..1344548
+--- /dev/null
++++ b/codex-rs/core/src/operation_observation.rs
+@@ -0,0 +1,1348 @@
++//! Opt-in, in-memory operation facts for the host that owns a turn.
++//!
++//! These observations never enter the rollout or the telemetry logger. The host
++//! owns delivery and tracing policy; core owns operation boundaries and content.
++
++use chrono::SecondsFormat;
++use chrono::Utc;
++use futures::FutureExt;
++use serde::Serialize;
++use serde_json::Value;
++use std::future::Future;
++use std::pin::Pin;
++use std::sync::Arc;
++use std::sync::Mutex;
++use std::time::Instant;
++
++pub const CONTENT_LIMIT_BYTES: usize = 32 * 1024;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub enum OperationCaptureMode {
++    Metadata,
++    Content,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub enum OperationKind {
++    Model,
++    Tool,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub enum OperationOutcome {
++    Success,
++    Error,
++    Interrupted,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum OperationPhase {
++    Started,
++    Completed,
++}
++
++#[derive(Clone, Debug, Default, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct OperationMetadata {
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub parent_operation_id: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub requested_model: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub observed_model: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub response_id: Option<String>,
++    pub response_id_trusted: bool,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub usage: Option<Value>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub tool_name: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub call_id: Option<String>,
++}
++
++#[derive(Clone, Debug, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct OperationContent {
++    pub value: Value,
++    pub truncated: bool,
++    pub omitted: bool,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub reason: Option<String>,
++}
++
++#[derive(Clone, Debug, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct OperationEvent {
++    #[serde(skip)]
++    pub phase: OperationPhase,
++    pub operation_id: String,
++    pub thread_id: String,
++    pub turn_id: String,
++    pub kind: OperationKind,
++    pub started_at: String,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub completed_at: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub duration_ms: Option<f64>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub outcome: Option<OperationOutcome>,
++    #[serde(flatten)]
++    pub metadata: OperationMetadata,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub input: Option<OperationContent>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub output: Option<OperationContent>,
++}
++
++pub trait OperationObserver: Send + Sync {
++    /// Must return promptly. Delivery failures must not affect execution.
++    fn emit(&self, event: OperationEvent);
++
++    /// Closes admission for this source turn before its terminal event.
++    fn turn_finished<'a>(
++        &'a self,
++        _thread_id: &'a str,
++        _turn_id: &'a str,
++    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
++        Box::pin(async {})
++    }
++}
++
++#[derive(Clone)]
++pub struct OperationObservation {
++    mode: OperationCaptureMode,
++    sink: Arc<dyn OperationObserver>,
++}
++
++impl std::fmt::Debug for OperationObservation {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("OperationObservation")
++            .field("mode", &self.mode)
++            .finish_non_exhaustive()
++    }
++}
++
++impl OperationObservation {
++    pub fn new(mode: OperationCaptureMode, sink: Arc<dyn OperationObserver>) -> Self {
++        Self { mode, sink }
++    }
++
++    pub fn captures_content(&self) -> bool {
++        self.mode == OperationCaptureMode::Content
++    }
++
++    pub fn start(
++        &self,
++        thread_id: String,
++        turn_id: String,
++        kind: OperationKind,
++        metadata: OperationMetadata,
++    ) -> OperationGuard {
++        let started = Instant::now();
++        let event = OperationEvent {
++            phase: OperationPhase::Started,
++            operation_id: uuid::Uuid::new_v4().to_string(),
++            thread_id,
++            turn_id,
++            kind,
++            started_at: timestamp(),
++            completed_at: None,
++            duration_ms: None,
++            outcome: None,
++            metadata,
++            input: None,
++            output: None,
++        };
++        self.emit(event.clone());
++        OperationGuard {
++            operation_id: event.operation_id.clone(),
++            observation: self.clone(),
++            started,
++            state: Mutex::new(event),
++        }
++    }
++
++    pub async fn turn_finished(&self, thread_id: &str, turn_id: &str) {
++        let future = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            self.sink.turn_finished(thread_id, turn_id)
++        }));
++        if let Ok(future) = future {
++            let _ = std::panic::AssertUnwindSafe(future).catch_unwind().await;
++        }
++    }
++
++    fn emit(&self, event: OperationEvent) {
++        // An optional host observer must never unwind an agent operation.
++        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.sink.emit(event)));
++    }
++}
++
++tokio::task_local! {
++    static CURRENT_MODEL_OPERATION: ModelOperation;
++}
++
++pub struct OperationGuard {
++    operation_id: String,
++    observation: OperationObservation,
++    started: Instant,
++    state: Mutex<OperationEvent>,
++}
++
++impl OperationGuard {
++    pub fn operation_id(&self) -> &str {
++        &self.operation_id
++    }
++
++    pub fn capture_input<T: Serialize + ?Sized>(&self, value: &T) {
++        if self.observation.mode == OperationCaptureMode::Content {
++            self.update(|event| event.input = Some(project_content(value)));
++        }
++    }
++
++    pub fn capture_output<T: Serialize + ?Sized>(&self, value: &T) {
++        if self.observation.mode == OperationCaptureMode::Content {
++            self.update(|event| event.output = Some(project_content(value)));
++        }
++    }
++
++    fn update(&self, update: impl FnOnce(&mut OperationEvent)) {
++        let mut event = self
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if event.phase == OperationPhase::Started {
++            update(&mut event);
++        }
++    }
++
++    pub fn finish_with_output_fn<T: Serialize>(
++        &self,
++        outcome: OperationOutcome,
++        output: impl FnOnce() -> T,
++    ) {
++        let completed_at = timestamp();
++        let duration_ms = self.started.elapsed().as_secs_f64() * 1000.0;
++        if self.observation.captures_content() {
++            self.capture_output(&output());
++        }
++        self.finish_at(outcome, completed_at, duration_ms);
++    }
++
++    pub fn finish_with_output<T: Serialize + ?Sized>(&self, outcome: OperationOutcome, output: &T) {
++        let completed_at = timestamp();
++        let duration_ms = self.started.elapsed().as_secs_f64() * 1000.0;
++        self.capture_output(output);
++        self.finish_at(outcome, completed_at, duration_ms);
++    }
++
++    pub fn finish(&self, outcome: OperationOutcome) {
++        self.finish_at(
++            outcome,
++            timestamp(),
++            self.started.elapsed().as_secs_f64() * 1000.0,
++        );
++    }
++
++    fn finish_at(&self, outcome: OperationOutcome, completed_at: String, duration_ms: f64) {
++        let terminal = {
++            let mut event = self
++                .state
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            if event.phase == OperationPhase::Completed {
++                return;
++            }
++            event.phase = OperationPhase::Completed;
++            event.completed_at = Some(completed_at);
++            event.duration_ms = Some(duration_ms);
++            event.outcome = Some(outcome);
++            event.clone()
++        };
++        self.observation.emit(terminal);
++    }
++}
++
++impl Drop for OperationGuard {
++    fn drop(&mut self) {
++        self.finish(OperationOutcome::Interrupted);
++    }
++}
++
++fn timestamp() -> String {
++    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
++}
++
++/// Projects JSON in memory, omitting binary/hidden reasoning and transport secrets.
++/// Inline markers survive consumers that extract values from the wire envelope.
++pub fn project_content<T: Serialize + ?Sized>(value: &T) -> OperationContent {
++    let value = match serde_json::to_value(value) {
++        Ok(value) => value,
++        Err(_) => return omitted_content("serialization_failed"),
++    };
++    let mut projection = ContentProjection {
++        truncated: false,
++        omitted: false,
++    };
++    let value = projection.project(value, CONTENT_LIMIT_BYTES - 256, 0);
++    let content = OperationContent {
++        value,
++        truncated: projection.truncated,
++        omitted: projection.omitted,
++        reason: if projection.truncated {
++            Some("capture_budget".into())
++        } else if projection.omitted {
++            Some("unsupported_content".into())
++        } else {
++            None
++        },
++    };
++    if json_size(&content) <= CONTENT_LIMIT_BYTES {
++        content
++    } else {
++        omitted_content("capture_budget")
++    }
++}
++
++fn omitted_content(reason: &str) -> OperationContent {
++    OperationContent {
++        value: serde_json::json!({"omitted":true,"reason":reason}),
++        truncated: reason == "capture_budget",
++        omitted: true,
++        reason: Some(reason.into()),
++    }
++}
++
++fn json_size(value: &(impl Serialize + ?Sized)) -> usize {
++    serde_json::to_vec(value).map_or(usize::MAX, |value| value.len())
++}
++
++struct ContentProjection {
++    truncated: bool,
++    omitted: bool,
++}
++
++impl ContentProjection {
++    fn project(&mut self, value: Value, budget: usize, depth: usize) -> Value {
++        if depth > 32 {
++            self.truncated = true;
++            return Value::String("[truncated]".into());
++        }
++        match value {
++            Value::String(text) => self.text(text, budget, depth),
++            Value::Array(items) => {
++                let mut result = Vec::new();
++                let mut used: usize = 2;
++                for item in items {
++                    let available = budget.saturating_sub(used + 34);
++                    if available < 84 {
++                        self.truncated = true;
++                        result.push(serde_json::json!({"truncated":true}));
++                        break;
++                    }
++                    let item = self.project(item, available, depth + 1);
++                    used += json_size(&item) + 2;
++                    result.push(item);
++                }
++                Value::Array(result)
++            }
++            Value::Object(items) => {
++                self.truncated |= items.get("truncated") == Some(&Value::Bool(true));
++                self.omitted |= items.get("omitted") == Some(&Value::Bool(true));
++                let kind = items.get("type").and_then(Value::as_str);
++                let binary_resource = kind == Some("resource")
++                    && items
++                        .get("resource")
++                        .and_then(|value| value.get("blob"))
++                        .is_some();
++                if binary_resource
++                    || kind.is_some_and(|kind| {
++                        matches!(
++                            kind,
++                            "reasoning"
++                                | "reasoning_text"
++                                | "thinking"
++                                | "redacted_thinking"
++                                | "compaction"
++                                | "encrypted_content"
++                                | "image"
++                                | "input_image"
++                                | "output_image"
++                                | "image_url"
++                                | "computer_screenshot"
++                                | "image_generation_call"
++                                | "audio"
++                                | "input_audio"
++                                | "output_audio"
++                                | "file"
++                                | "input_file"
++                                | "video"
++                                | "input_video"
++                        )
++                    })
++                {
++                    self.omitted = true;
++                    return serde_json::json!({"type":kind,"omitted":true,"reason":"unsupported_content"});
++                }
++                let mut result = serde_json::Map::new();
++                let mut used: usize = 2;
++                let mut items: Vec<_> = items.into_iter().collect();
++                items.sort_by_key(|(key, _)| {
++                    !matches!(key.as_str(), "type" | "role" | "id" | "call_id" | "name")
++                });
++                for (key, value) in items {
++                    let available = budget.saturating_sub(used + json_size(&key) + 36);
++                    if available < 84 {
++                        self.truncated = true;
++                        result.insert("truncated".into(), Value::Bool(true));
++                        break;
++                    }
++                    let normalized = key.to_ascii_lowercase().replace(['-', '_'], "");
++                    let value = if matches!(
++                        normalized.as_str(),
++                        "apikey"
++                            | "xapikey"
++                            | "authorization"
++                            | "accesstoken"
++                            | "refreshtoken"
++                            | "password"
++                            | "headers"
++                            | "clientmetadata"
++                            | "encryptedcontent"
++                            | "reasoning"
++                            | "reasoningcontent"
++                            | "reasoningdetails"
++                            | "thinking"
++                            | "imageurl"
++                            | "filedata"
++                            | "imagedata"
++                            | "audiodata"
++                            | "b64json"
++                    ) {
++                        self.omitted = true;
++                        Value::String("[omitted]".into())
++                    } else {
++                        self.project(value, available, depth + 1)
++                    };
++                    used += json_size(&key) + json_size(&value) + 4;
++                    result.insert(key, value);
++                }
++                Value::Object(result)
++            }
++            value => value,
++        }
++    }
++
++    fn text(&mut self, text: String, budget: usize, depth: usize) -> Value {
++        static DATA_URI: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
++            regex_lite::Regex::new(r#"(?i)data:[^\s;,]+(?:;[^\s,]*)?,[^\s\"'<>]+"#)
++                .expect("valid data URI pattern")
++        });
++        self.truncated |= text.ends_with("[truncated]");
++        self.omitted |= text.contains("[omitted]") || text.contains("[omitted: media]");
++        if text.trim_start().starts_with(['{', '[']) {
++            if let Ok(embedded) = serde_json::from_str::<Value>(&text) {
++                let safe = self.project(embedded.clone(), budget, depth + 1);
++                if safe == embedded && json_size(&text) <= budget {
++                    return Value::String(text);
++                }
++                let mut encoded = safe.to_string();
++                if json_size(&encoded) > budget {
++                    // Rebudget the value so escaped JSON remains valid.
++                    encoded = self
++                        .project(embedded, budget.saturating_sub(2) / 2, depth + 1)
++                        .to_string();
++                }
++                return Value::String(encoded);
++            }
++        }
++        let projected = DATA_URI.replace_all(&text, "[omitted: media]");
++        self.omitted |= projected != text;
++        let text = projected.into_owned();
++        if json_size(&text) <= budget {
++            return Value::String(text);
++        }
++        self.truncated = true;
++        let mut low = 0;
++        let mut high = text.len().min(budget);
++        while low < high {
++            let middle = low + (high - low + 1) / 2;
++            let mut end = middle;
++            while !text.is_char_boundary(end) {
++                end -= 1;
++            }
++            if json_size(&format!("{}[truncated]", &text[..end])) <= budget {
++                low = middle;
++            } else {
++                high = middle - 1;
++            }
++        }
++        while !text.is_char_boundary(low) {
++            low -= 1;
++        }
++        Value::String(format!("{}[truncated]", &text[..low]))
++    }
++}
++
++#[derive(Clone)]
++pub(crate) struct ModelOperation {
++    observation: Arc<OperationObservation>,
++    thread_id: String,
++    turn_id: String,
++    requested_model: String,
++    stream_generation: Option<u64>,
++    state: Arc<Mutex<ModelOperationState>>,
++}
++
++#[derive(Default)]
++struct ModelOperationState {
++    guard: Option<OperationGuard>,
++    output: Vec<Value>,
++    output_bytes: usize,
++    partial_text: String,
++    partial_truncated: bool,
++    fingerprint: Option<u64>,
++    generation: u64,
++    source_end: Option<(String, f64)>,
++    retry_waiting: bool,
++    authoritative_model: bool,
++}
++
++impl ModelOperation {
++    pub(crate) fn new(
++        observation: Arc<OperationObservation>,
++        thread_id: String,
++        turn_id: String,
++        requested_model: String,
++    ) -> Self {
++        Self {
++            observation,
++            thread_id,
++            turn_id,
++            requested_model,
++            stream_generation: None,
++            state: Arc::new(Mutex::new(ModelOperationState::default())),
++        }
++    }
++
++    pub(crate) async fn scope<F: Future>(&self, future: F) -> F::Output {
++        CURRENT_MODEL_OPERATION.scope(self.clone(), future).await
++    }
++
++    pub(crate) fn finish(&self, outcome: OperationOutcome) {
++        // Only the source response.completed event establishes inference success.
++        // An outer successful turn handoff can still have preempted this stream.
++        let outcome = if outcome == OperationOutcome::Success {
++            OperationOutcome::Interrupted
++        } else {
++            outcome
++        };
++        let state = self
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if let Some(guard) = &state.guard {
++            if let Some((completed_at, duration_ms)) = &state.source_end
++                && (outcome != OperationOutcome::Interrupted || !state.retry_waiting)
++            {
++                if self.observation.captures_content() {
++                    guard.capture_output(&model_output(&state));
++                }
++                guard.finish_at(outcome, completed_at.clone(), *duration_ms);
++            } else {
++                guard.finish_with_output_fn(outcome, || model_output(&state));
++            }
++        }
++    }
++
++    pub(crate) fn interruption_guard(&self) -> ModelInterruptionGuard {
++        ModelInterruptionGuard(self.clone())
++    }
++
++    pub(crate) fn retry_waiting(&self, waiting: bool) {
++        self.state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .retry_waiting = waiting;
++    }
++
++    pub(crate) fn source_ended(&self) {
++        let mut state = self
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if self
++            .stream_generation
++            .is_some_and(|generation| generation != state.generation)
++        {
++            return;
++        }
++        if state.source_end.is_none() {
++            let source_end = state
++                .guard
++                .as_ref()
++                .map(|guard| (timestamp(), guard.started.elapsed().as_secs_f64() * 1000.0));
++            if source_end.is_some() {
++                state.source_end = source_end;
++            }
++        }
++    }
++
++    pub(crate) fn source_error(&self, error: &codex_api::ApiError) {
++        self.source_ended();
++        let state = self
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if self
++            .stream_generation
++            .is_some_and(|generation| generation != state.generation)
++        {
++            return;
++        }
++        if let codex_api::ApiError::ResponseIncomplete(incomplete) = error
++            && let Some(guard) = &state.guard
++        {
++            guard.update(|event| {
++                event.metadata.response_id = incomplete.response_id.clone();
++                event.metadata.usage = incomplete
++                    .token_usage
++                    .as_ref()
++                    .and_then(|usage| serde_json::to_value(usage).ok());
++            });
++        }
++    }
++
++    fn request<T: Serialize + ?Sized>(
++        &self,
++        request: &T,
++        identity: &impl Serialize,
++        endpoint: &str,
++    ) {
++        let mut state = self
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        state.generation = state.generation.wrapping_add(1);
++        let previous_source_end = state.source_end.take();
++        state.retry_waiting = false;
++        state.authoritative_model = false;
++        // Exclude routing metadata and changing transport fields from retry identity.
++        let fingerprint = request_fingerprint(identity);
++        if state.guard.is_some() && state.fingerprint == Some(fingerprint) {
++            if let Some(guard) = &state.guard {
++                guard.update(|event| {
++                    event.metadata.response_id = None;
++                    event.metadata.observed_model = None;
++                    event.metadata.usage = None;
++                    event.metadata.response_id_trusted = trusted_response_endpoint(endpoint);
++                });
++                if self.observation.captures_content() {
++                    guard.capture_input(&model_request_content(request));
++                }
++            }
++            // A retried stream replaces any partial output from the failed attempt.
++            state.output.clear();
++            state.output_bytes = 0;
++            state.partial_text.clear();
++            state.partial_truncated = false;
++            return;
++        }
++        if let Some(previous) = state.guard.take() {
++            if self.observation.captures_content() {
++                previous.capture_output(&model_output(&state));
++            }
++            if let Some((completed_at, duration_ms)) = previous_source_end {
++                previous.finish_at(OperationOutcome::Error, completed_at, duration_ms);
++            } else {
++                previous.finish(OperationOutcome::Error);
++            }
++        }
++        state.output.clear();
++        state.output_bytes = 0;
++        state.partial_text.clear();
++        state.partial_truncated = false;
++        state.fingerprint = Some(fingerprint);
++        let guard = self.observation.start(
++            self.thread_id.clone(),
++            self.turn_id.clone(),
++            OperationKind::Model,
++            OperationMetadata {
++                requested_model: Some(self.requested_model.clone()),
++                response_id_trusted: trusted_response_endpoint(endpoint),
++                ..Default::default()
++            },
++        );
++        // Capture the assembled wire body, rather than the caller's input.
++        if self.observation.captures_content() {
++            guard.capture_input(&model_request_content(request));
++        }
++        state.guard = Some(guard);
++    }
++
++    pub(crate) fn for_stream(mut self) -> Self {
++        self.stream_generation = Some(
++            self.state
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .generation,
++        );
++        self
++    }
++
++    pub(crate) fn event(&self, event: &codex_api::ResponseEvent) {
++        let mut state = self
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if self
++            .stream_generation
++            .is_some_and(|generation| generation != state.generation)
++            || state.source_end.is_some()
++        {
++            return;
++        }
++        match event {
++            codex_api::ResponseEvent::OutputTextDelta(text)
++                if self.observation.captures_content() =>
++            {
++                let mut end = text
++                    .len()
++                    .min(CONTENT_LIMIT_BYTES.saturating_sub(state.partial_text.len()));
++                while !text.is_char_boundary(end) {
++                    end -= 1;
++                }
++                state.partial_text.push_str(&text[..end]);
++                state.partial_truncated |= end < text.len();
++            }
++            codex_api::ResponseEvent::OutputItemDone(item)
++                if self.observation.mode == OperationCaptureMode::Content =>
++            {
++                if matches!(item, codex_protocol::models::ResponseItem::Message { .. }) {
++                    state.partial_text.clear();
++                    state.partial_truncated = false;
++                }
++                if state.output_bytes < CONTENT_LIMIT_BYTES {
++                    let content = project_content(item);
++                    state.output_bytes += serde_json::to_vec(&content.value)
++                        .map_or(CONTENT_LIMIT_BYTES, |value| value.len());
++                    state.output.push(content.value);
++                    if content.truncated || content.omitted {
++                        state.output.push(serde_json::json!({"omitted":content.omitted,"truncated":content.truncated,"reason":content.reason}));
++                    }
++                } else if state
++                    .output
++                    .last()
++                    .and_then(|item| item.get("reason"))
++                    .and_then(Value::as_str)
++                    != Some("capture_budget")
++                {
++                    state
++                        .output
++                        .push(serde_json::json!({"truncated":true,"reason":"capture_budget"}));
++                }
++            }
++            codex_api::ResponseEvent::ModelObservation(model) => {
++                if !state.authoritative_model
++                    && let Some(guard) = &state.guard
++                {
++                    guard.update(|event| event.metadata.observed_model = Some(model.clone()));
++                }
++            }
++            codex_api::ResponseEvent::ServerModel(model) => {
++                state.authoritative_model = true;
++                if let Some(guard) = &state.guard {
++                    guard.update(|event| event.metadata.observed_model = Some(model.clone()));
++                }
++            }
++            codex_api::ResponseEvent::Created { response_id } => {
++                if let Some(guard) = &state.guard {
++                    guard.update(|event| event.metadata.response_id = response_id.clone());
++                }
++            }
++            codex_api::ResponseEvent::Completed {
++                response_id,
++                token_usage,
++                ..
++            } => {
++                if let Some(guard) = &state.guard {
++                    guard.update(|event| {
++                        event.metadata.response_id = Some(response_id.clone());
++                        event.metadata.usage = token_usage
++                            .as_ref()
++                            .and_then(|usage| serde_json::to_value(usage).ok());
++                    });
++                    guard.finish_with_output_fn(OperationOutcome::Success, || model_output(&state));
++                }
++            }
++            _ => {}
++        }
++    }
++}
++
++fn model_output(state: &ModelOperationState) -> Vec<Value> {
++    let mut output = state.output.clone();
++    if !state.partial_text.is_empty() {
++        output.push(serde_json::json!({"type":"output_text","text":state.partial_text,"partial":true,"truncated":state.partial_truncated}));
++    }
++    output
++}
++
++pub(crate) fn current_model_operation() -> Option<ModelOperation> {
++    CURRENT_MODEL_OPERATION.try_with(Clone::clone).ok()
++}
++
++pub(crate) fn observe_model_request<T: Serialize + ?Sized>(
++    request: &T,
++    identity: &impl Serialize,
++    endpoint: &str,
++) {
++    if let Some(operation) = current_model_operation() {
++        operation.request(request, identity, endpoint);
++    }
++}
++
++pub(crate) struct ModelInterruptionGuard(ModelOperation);
++
++impl Drop for ModelInterruptionGuard {
++    fn drop(&mut self) {
++        self.0.finish(OperationOutcome::Interrupted);
++    }
++}
++
++fn model_request_content(request: &(impl Serialize + ?Sized)) -> Value {
++    let mut value = model_request_identity(request);
++    if let Value::Object(body) = &mut value {
++        // The per-direction content budget belongs to messages and instructions.
++        // Tool definitions affect request identity but must not consume that budget.
++        body.retain(|key, _| {
++            matches!(
++                key.as_str(),
++                "instructions" | "input" | "previous_response_id"
++            )
++        });
++    }
++    value
++}
++
++fn model_request_identity(request: &(impl Serialize + ?Sized)) -> Value {
++    let Ok(Value::Object(mut body)) = serde_json::to_value(request) else {
++        return Value::Null;
++    };
++    // Preserve semantic request changes when grouping same-input transport retries.
++    body.retain(|key, _| {
++        matches!(
++            key.as_str(),
++            "model"
++                | "instructions"
++                | "input"
++                | "previous_response_id"
++                | "tools"
++                | "tool_choice"
++                | "text"
++        )
++    });
++    Value::Object(body)
++}
++
++fn request_fingerprint(request: &impl Serialize) -> u64 {
++    use std::hash::Hash;
++    use std::hash::Hasher;
++    let value = model_request_identity(request);
++    let mut hasher = std::collections::hash_map::DefaultHasher::new();
++    // The digest only lives with this operation; request content is not retained in metadata mode.
++    value.to_string().hash(&mut hasher);
++    hasher.finish()
++}
++
++fn trusted_response_endpoint(endpoint: &str) -> bool {
++    url::Url::parse(endpoint)
++        .is_ok_and(|url| url.scheme() == "https" && url.host_str() == Some("api.openai.com"))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use pretty_assertions::assert_eq;
++
++    #[derive(Default)]
++    struct RecordingObserver(Mutex<Vec<OperationEvent>>);
++    impl OperationObserver for RecordingObserver {
++        fn emit(&self, event: OperationEvent) {
++            self.0.lock().unwrap().push(event);
++        }
++    }
++
++    fn observation(mode: OperationCaptureMode) -> (OperationObservation, Arc<RecordingObserver>) {
++        let sink = Arc::new(RecordingObserver::default());
++        (OperationObservation::new(mode, sink.clone()), sink)
++    }
++
++    #[test]
++    fn metadata_never_captures_payload_and_finalizes_once() {
++        let (observation, sink) = observation(OperationCaptureMode::Metadata);
++        {
++            let operation = observation.start(
++                "thread".into(),
++                "turn".into(),
++                OperationKind::Tool,
++                OperationMetadata::default(),
++            );
++            operation.capture_input(&serde_json::json!({"text":"INPUT_CANARY"}));
++            operation.finish_with_output(OperationOutcome::Success, &"OUTPUT_CANARY");
++            operation.finish(OperationOutcome::Error);
++        }
++        let events = sink.0.lock().unwrap();
++        assert_eq!(events.len(), 2);
++        assert_eq!(events[0].phase, OperationPhase::Started);
++        assert_eq!(events[1].outcome, Some(OperationOutcome::Success));
++        assert_eq!(events[0].operation_id, events[1].operation_id);
++        assert_eq!(events[1].input, None);
++        assert_eq!(events[1].output, None);
++        assert!(!serde_json::to_string(&*events).unwrap().contains("CANARY"));
++    }
++
++    #[test]
++    fn dropped_operation_reports_interruption() {
++        let (observation, sink) = observation(OperationCaptureMode::Content);
++        drop(observation.start(
++            "thread".into(),
++            "turn".into(),
++            OperationKind::Tool,
++            OperationMetadata::default(),
++        ));
++        let events = sink.0.lock().unwrap();
++        assert_eq!(events.len(), 2);
++        assert_eq!(events[1].outcome, Some(OperationOutcome::Interrupted));
++        assert!(events[1].duration_ms.unwrap() >= 0.0);
++        assert!(chrono::DateTime::parse_from_rfc3339(&events[1].started_at).is_ok());
++        assert!(
++            chrono::DateTime::parse_from_rfc3339(events[1].completed_at.as_ref().unwrap()).is_ok()
++        );
++    }
++
++    #[test]
++    fn projection_bounds_utf8_and_excludes_hidden_or_binary_parts() {
++        let content = project_content(&serde_json::json!({
++            "input":[{"role":"user","content":[{"type":"input_text","text":"hello"},{"type":"input_image","image_url":"BINARY_CANARY"}]},{"type":"reasoning","summary":[{"text":"REASONING_CANARY"}]}],
++            "authorization":"SECRET_CANARY",
++            "output":"é🙂".repeat(CONTENT_LIMIT_BYTES)
++        }));
++        let serialized = serde_json::to_string(&content).unwrap();
++        assert!(serialized.len() <= CONTENT_LIMIT_BYTES);
++        assert!(content.truncated);
++        assert!(content.omitted);
++        assert!(!serialized.contains("CANARY"));
++        assert_eq!(content.value["input"][0]["role"], "user");
++        assert_eq!(content.value["input"][0]["content"][0]["text"], "hello");
++    }
++
++    #[test]
++    fn mcp_binary_content_is_omitted_but_text_resources_remain_visible() {
++        let content = project_content(&serde_json::json!([
++            {"type":"image","data":"IMAGE_CANARY","mimeType":"image/png"},
++            {"type":"resource","resource":{"uri":"file:///image","blob":"BLOB_CANARY"}},
++            {"type":"audio","data":"AUDIO_CANARY","mimeType":"audio/wav"},
++            {"type":"resource","resource":{"uri":"file:///text","text":"visible text"}},
++            {"type":"text","text":"visible output"}
++        ]));
++        let serialized = serde_json::to_string(&content).unwrap();
++        assert!(content.omitted);
++        assert!(!serialized.contains("CANARY"));
++        assert_eq!(content.value[3]["resource"]["text"], "visible text");
++        assert_eq!(content.value[4]["text"], "visible output");
++    }
++
++    #[test]
++    fn oversized_text_keeps_a_useful_utf8_prefix_and_inline_marker() {
++        let content = project_content(&format!(
++            "file prefix: {}",
++            "é🙂".repeat(CONTENT_LIMIT_BYTES)
++        ));
++        assert!(content.value.as_str().unwrap().starts_with("file prefix: "));
++        assert!(content.value.as_str().unwrap().ends_with("[truncated]"));
++        assert!(content.truncated);
++        assert!(json_size(&content) <= CONTENT_LIMIT_BYTES);
++    }
++
++    #[test]
++    fn native_tool_catalog_does_not_truncate_intact_model_input() {
++        let input = serde_json::json!([
++            {"role":"user","content":[{"type":"input_text","text":"x".repeat(27_000)}]},
++        ]);
++        let request = serde_json::json!({
++            "model":"fixture-model",
++            "instructions":"worker instructions",
++            "input": input,
++            "tools":[{"type":"function","name":"native_tool","description":"catalog".repeat(20_000)}],
++            "text":{"format":{"type":"json_schema","schema":{"description":"schema".repeat(10_000)}}},
++            "tool_choice":"auto",
++        });
++        let content = project_content(&model_request_content(&request));
++        assert!(!content.truncated);
++        assert!(!content.omitted);
++        assert_eq!(content.value["input"], input);
++        assert_eq!(content.value["instructions"], "worker instructions");
++        assert!(content.value.get("tools").is_none());
++        assert!(content.value.get("text").is_none());
++        let mut changed = request.clone();
++        changed["tools"][0]["name"] = Value::String("different_tool".into());
++        assert_ne!(request_fingerprint(&request), request_fingerprint(&changed));
++        assert_eq!(
++            model_request_content(&request),
++            model_request_content(&changed)
++        );
++    }
++
++    #[test]
++    fn embedded_json_that_fits_the_budget_remains_intact() {
++        let raw = serde_json::json!({"text":"x".repeat(27_000)}).to_string();
++        let content = project_content(&raw);
++        assert_eq!(content.value, Value::String(raw));
++        assert!(!content.truncated);
++    }
++
++    #[test]
++    fn oversized_messages_preserve_roles_and_part_identity() {
++        let content = project_content(&serde_json::json!([
++            {"content":[{"text":format!("prefix {}", "x".repeat(80_000)),"type":"input_text"}],"role":"user"},
++        ]));
++        assert_eq!(content.value[0]["role"], "user");
++        assert_eq!(content.value[0]["content"][0]["type"], "input_text");
++        assert!(
++            content.value[0]["content"][0]["text"]
++                .as_str()
++                .unwrap()
++                .starts_with("prefix ")
++        );
++        assert!(
++            content.value[0]["content"][0]["text"]
++                .as_str()
++                .unwrap()
++                .ends_with("[truncated]")
++        );
++        assert!(json_size(&content) <= CONTENT_LIMIT_BYTES);
++    }
++
++    #[test]
++    fn embedded_json_redacts_and_truncates_without_breaking_its_structure() {
++        let input = serde_json::json!({
++            "accessToken":"TOKEN_CANARY",
++            "result":format!("prefix {}", "🙂".repeat(CONTENT_LIMIT_BYTES)),
++        })
++        .to_string();
++        let content = project_content(&input);
++        let embedded: Value = serde_json::from_str(content.value.as_str().unwrap()).unwrap();
++        assert_eq!(embedded["accessToken"], "[omitted]");
++        assert!(embedded["result"].as_str().unwrap().starts_with("prefix "));
++        assert!(
++            embedded["result"]
++                .as_str()
++                .unwrap()
++                .ends_with("[truncated]")
++        );
++        assert!(content.truncated);
++        assert!(content.omitted);
++        assert!(json_size(&content) <= CONTENT_LIMIT_BYTES);
++        assert!(!content.value.to_string().contains("CANARY"));
++    }
++
++    #[test]
++    fn embedded_media_and_container_budget_have_visible_markers() {
++        let content = project_content(&serde_json::json!({
++            "message":"before data:image/png;base64,BINARY_CANARY after",
++            "nested": [{"Authorization":"AUTH_CANARY","visible":"hello"}],
++            "nested_encoded": serde_json::json!({"request":serde_json::json!({"apiKey":"NESTED_CANARY","uri":"data:image/png;base64,MEDIA_CANARY","text":"visible nested"}).to_string()}).to_string(),
++            "results": vec![serde_json::json!({"text":"x".repeat(180)}); 3000],
++        }));
++        let serialized = serde_json::to_string(&content).unwrap();
++        assert!(!serialized.contains("CANARY"));
++        assert!(
++            content.value["message"]
++                .as_str()
++                .unwrap()
++                .contains("[omitted: media]")
++        );
++        assert_eq!(content.value["nested"][0]["visible"], "hello");
++        assert!(
++            content.value["nested_encoded"]
++                .as_str()
++                .unwrap()
++                .contains("visible nested")
++        );
++        assert!(content.value["results"].to_string().contains("truncated"));
++        assert!(serialized.len() <= CONTENT_LIMIT_BYTES);
++    }
++
++    #[tokio::test]
++    async fn same_input_retry_has_one_live_start_and_changed_input_splits() {
++        let (observation, sink) = observation(OperationCaptureMode::Content);
++        let model = ModelOperation::new(
++            Arc::new(observation),
++            "thread".into(),
++            "turn".into(),
++            "model".into(),
++        );
++        model.scope(async {
++            let request = serde_json::json!({"model":"model","input":[{"role":"user","content":"first"}],"client_metadata":{"secret":"META_CANARY"}});
++            observe_model_request(&request, &request, "http://localhost:8080");
++            assert_eq!(sink.0.lock().unwrap().len(), 1);
++            observe_model_request(&request, &request, "http://localhost:8080");
++            assert_eq!(sink.0.lock().unwrap().len(), 1);
++            let changed = serde_json::json!({"model":"model","input":[{"role":"user","content":"second"}]});
++            observe_model_request(&changed, &changed, "http://localhost:8080");
++            model.event(&codex_api::ResponseEvent::Completed { response_id:"response".into(),token_usage:None,usage_metadata:None,end_turn:Some(true) });
++        }).await;
++        model.finish(OperationOutcome::Error);
++        let events = sink.0.lock().unwrap();
++        assert_eq!(events.len(), 4);
++        assert_eq!(events[1].outcome, Some(OperationOutcome::Error));
++        assert_eq!(events[3].outcome, Some(OperationOutcome::Success));
++        assert_eq!(events[3].metadata.response_id.as_deref(), Some("response"));
++        assert!(!events[3].metadata.response_id_trusted);
++        assert!(
++            !serde_json::to_string(&*events)
++                .unwrap()
++                .contains("META_CANARY")
++        );
++    }
++
++    #[test]
++    fn body_model_fallback_never_overrides_authoritative_header_model() {
++        let (observation, sink) = observation(OperationCaptureMode::Metadata);
++        let model = ModelOperation::new(
++            Arc::new(observation),
++            "thread".into(),
++            "turn".into(),
++            "requested".into(),
++        );
++        let request = serde_json::json!({"model":"requested","input":[]});
++        model.request(&request, &request, "http://localhost");
++        model.event(&codex_api::ResponseEvent::ModelObservation(
++            "body-first".into(),
++        ));
++        assert_eq!(
++            model
++                .state
++                .lock()
++                .unwrap()
++                .guard
++                .as_ref()
++                .unwrap()
++                .state
++                .lock()
++                .unwrap()
++                .metadata
++                .observed_model
++                .as_deref(),
++            Some("body-first")
++        );
++        model.event(&codex_api::ResponseEvent::ServerModel("header".into()));
++        model.event(&codex_api::ResponseEvent::ModelObservation(
++            "body-last".into(),
++        ));
++        model.event(&codex_api::ResponseEvent::Completed {
++            response_id: "response".into(),
++            token_usage: None,
++            usage_metadata: None,
++            end_turn: Some(true),
++        });
++        let events = sink.0.lock().unwrap();
++        assert_eq!(events[1].metadata.observed_model.as_deref(), Some("header"));
++    }
++
++    #[test]
++    fn stale_stream_cannot_finish_a_new_attempt() {
++        let (observation, sink) = observation(OperationCaptureMode::Metadata);
++        let model = ModelOperation::new(
++            Arc::new(observation),
++            "thread".into(),
++            "turn".into(),
++            "model".into(),
++        );
++        let request = serde_json::json!({"model":"model","input":[]});
++        model.request(&request, &request, "http://localhost");
++        let old = model.clone().for_stream();
++        old.source_ended();
++        model.request(&request, &request, "http://localhost");
++        old.event(&codex_api::ResponseEvent::Completed {
++            response_id: "old".into(),
++            token_usage: None,
++            usage_metadata: None,
++            end_turn: Some(true),
++        });
++        old.source_ended();
++        assert_eq!(sink.0.lock().unwrap().len(), 1);
++        model.event(&codex_api::ResponseEvent::Completed {
++            response_id: "new".into(),
++            token_usage: None,
++            usage_metadata: None,
++            end_turn: Some(true),
++        });
++        let events = sink.0.lock().unwrap();
++        assert_eq!(events.len(), 2);
++        assert_eq!(events[1].metadata.response_id.as_deref(), Some("new"));
++    }
++
++    #[test]
++    fn final_error_uses_stream_end_before_later_cleanup() {
++        let (observation, sink) = observation(OperationCaptureMode::Metadata);
++        let model = ModelOperation::new(
++            Arc::new(observation),
++            "thread".into(),
++            "turn".into(),
++            "model".into(),
++        );
++        let request = serde_json::json!({"model":"model","input":[]});
++        model.request(&request, &request, "http://localhost");
++        model.source_ended();
++        let expected = model.state.lock().unwrap().source_end.clone().unwrap();
++        // A later EOF/drop must not move the source error boundary to tool cleanup.
++        model.source_ended();
++        model.finish(OperationOutcome::Error);
++        let events = sink.0.lock().unwrap();
++        assert_eq!(events[1].completed_at.as_ref(), Some(&expected.0));
++        assert_eq!(events[1].duration_ms, Some(expected.1));
++    }
++
++    #[test]
++    fn successful_handoff_without_response_completion_marks_inference_interrupted() {
++        let (observation, sink) = observation(OperationCaptureMode::Metadata);
++        let model = ModelOperation::new(
++            Arc::new(observation),
++            "thread".into(),
++            "turn".into(),
++            "model".into(),
++        );
++        let request = serde_json::json!({"model":"model","input":[]});
++        model.request(&request, &request, "http://localhost");
++        model.finish(OperationOutcome::Success);
++        let events = sink.0.lock().unwrap();
++        assert_eq!(events.len(), 2);
++        assert_eq!(events[1].outcome, Some(OperationOutcome::Interrupted));
++    }
++
++    #[test]
++    fn interruption_during_retry_wait_includes_backoff() {
++        let (observation, sink) = observation(OperationCaptureMode::Metadata);
++        let model = ModelOperation::new(
++            Arc::new(observation),
++            "thread".into(),
++            "turn".into(),
++            "model".into(),
++        );
++        let request = serde_json::json!({"model":"model","input":[]});
++        model.request(&request, &request, "http://localhost");
++        model.source_ended();
++        model.state.lock().unwrap().source_end = Some(("2000-01-01T00:00:00.000Z".into(), 0.0));
++        model.retry_waiting(true);
++        model.finish(OperationOutcome::Interrupted);
++        let events = sink.0.lock().unwrap();
++        assert_ne!(
++            events[1].completed_at.as_deref(),
++            Some("2000-01-01T00:00:00.000Z")
++        );
++        assert!(events[1].duration_ms.unwrap() > 0.0);
++    }
++
++    #[test]
++    fn changed_input_closes_previous_inference_at_saved_source_end() {
++        let (observation, sink) = observation(OperationCaptureMode::Metadata);
++        let model = ModelOperation::new(
++            Arc::new(observation),
++            "thread".into(),
++            "turn".into(),
++            "model".into(),
++        );
++        let request = serde_json::json!({"model":"model","input":[]});
++        model.request(&request, &request, "http://localhost");
++        model.source_ended();
++        let expected = model.state.lock().unwrap().source_end.clone().unwrap();
++        let changed = serde_json::json!({"model":"model","input":["changed"]});
++        model.request(&changed, &changed, "http://localhost");
++        let events = sink.0.lock().unwrap();
++        assert_eq!(events.len(), 3);
++        assert_eq!(events[1].completed_at.as_ref(), Some(&expected.0));
++        assert_eq!(events[1].duration_ms, Some(expected.1));
++    }
++
++    #[test]
++    fn incomplete_response_preserves_usage_without_error_payload() {
++        let (observation, sink) = observation(OperationCaptureMode::Metadata);
++        let model = ModelOperation::new(
++            Arc::new(observation),
++            "thread".into(),
++            "turn".into(),
++            "model".into(),
++        );
++        let request = serde_json::json!({"model":"model","input":[]});
++        model.request(&request, &request, "http://localhost");
++        let error = codex_api::ApiError::ResponseIncomplete(Box::new(
++            codex_protocol::error::ResponseIncompleteError {
++                reason: "ERROR_PAYLOAD_CANARY".into(),
++                response_id: Some("partial-response".into()),
++                token_usage: Some(codex_protocol::protocol::TokenUsage {
++                    input_tokens: 7,
++                    output_tokens: 3,
++                    total_tokens: 10,
++                    ..Default::default()
++                }),
++            },
++        ));
++        model.source_error(&error);
++        model.finish(OperationOutcome::Error);
++        let events = sink.0.lock().unwrap();
++        assert_eq!(
++            events[1].metadata.response_id.as_deref(),
++            Some("partial-response")
++        );
++        assert_eq!(
++            events[1].metadata.usage.as_ref().unwrap()["input_tokens"],
++            7
++        );
++        assert_eq!(events[1].outcome, Some(OperationOutcome::Error));
++        assert!(!serde_json::to_string(&*events).unwrap().contains("CANARY"));
++    }
++
++    #[test]
++    fn model_interruption_preserves_bounded_visible_partial_output() {
++        let (observation, sink) = observation(OperationCaptureMode::Content);
++        let model = ModelOperation::new(
++            Arc::new(observation),
++            "thread".into(),
++            "turn".into(),
++            "model".into(),
++        );
++        let interrupted = model.interruption_guard();
++        let request = serde_json::json!({"model":"model","input":[]});
++        model.request(&request, &request, "http://localhost:8080");
++        model.event(&codex_api::ResponseEvent::OutputTextDelta(
++            "partial answer".into(),
++        ));
++        drop(interrupted);
++        let events = sink.0.lock().unwrap();
++        assert_eq!(events.len(), 2);
++        assert_eq!(events[1].outcome, Some(OperationOutcome::Interrupted));
++        assert_eq!(
++            events[1].output.as_ref().unwrap().value[0]["text"],
++            "partial answer"
++        );
++        assert_eq!(events[1].output.as_ref().unwrap().value[0]["partial"], true);
++    }
++
++    #[test]
++    fn response_id_trust_requires_exact_official_https_host() {
++        assert!(trusted_response_endpoint("https://api.openai.com/v1"));
++        assert!(!trusted_response_endpoint(
++            "https://chatgpt.com/backend-api/codex"
++        ));
++        assert!(!trusted_response_endpoint(
++            "https://api.openai.com.example.test/v1"
++        ));
++        assert!(!trusted_response_endpoint("http://api.openai.com/v1"));
++        assert!(!trusted_response_endpoint("http://127.0.0.1:9000/v1"));
++    }
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index cc418ca..66476ae 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2526,6 +2526,15 @@ impl Session {
+
+     /// Persist the event to rollout and send it to clients.
+     pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
++        if matches!(&msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_))
++            && let Some(observation) = turn_context
++                .extension_data
++                .get::<crate::operation_observation::OperationObservation>()
++        {
++            observation
++                .turn_finished(&self.thread_id.to_string(), &turn_context.sub_id)
++                .await;
++        }
+         if let Some((item_id, started_at_ms)) = msg.command_approval_start() {
+             // The client can see the command before execution. Keep its first start
+             // for the canonical lifecycle events that will be saved in history.
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index e4a092e..871cdc9 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1745,6 +1745,53 @@ async fn run_sampling_request(
+     client_session: &mut ModelClientSession,
+     input: Vec<ResponseItem>,
+     cancellation_token: CancellationToken,
++) -> CodexResult<(SamplingRequestResult, Vec<String>)> {
++    let observation = step_context
++        .turn
++        .extension_data
++        .get::<crate::operation_observation::OperationObservation>();
++    let operation = observation.map(|observation| {
++        crate::operation_observation::ModelOperation::new(
++            observation,
++            sess.thread_id.to_string(),
++            step_context.turn.sub_id.clone(),
++            step_context.settings.model_info.slug.clone(),
++        )
++    });
++    let future = run_sampling_request_observed(
++        sess,
++        step_context,
++        turn_store,
++        turn_diff_tracker,
++        client_session,
++        input,
++        cancellation_token,
++    );
++    if let Some(operation) = operation {
++        let _interrupted = operation.interruption_guard();
++        let result = operation.scope(future).await;
++        operation.finish(match &result {
++            Ok(_) => crate::operation_observation::OperationOutcome::Success,
++            Err(error) if matches!(error.details(), CodexErrorDetails::TurnAborted) => {
++                crate::operation_observation::OperationOutcome::Interrupted
++            }
++            Err(_) => crate::operation_observation::OperationOutcome::Error,
++        });
++        result
++    } else {
++        future.await
++    }
++}
++
++#[allow(clippy::too_many_arguments)]
++async fn run_sampling_request_observed(
++    sess: Arc<Session>,
++    step_context: Arc<StepContext>,
++    turn_store: Arc<codex_extension_api::ExtensionData>,
++    turn_diff_tracker: SharedTurnDiffTracker,
++    client_session: &mut ModelClientSession,
++    input: Vec<ResponseItem>,
++    cancellation_token: CancellationToken,
+ ) -> CodexResult<(SamplingRequestResult, Vec<String>)> {
+     let turn_context = Arc::clone(&step_context.turn);
+     let preempt = step_context.preempt.clone().unwrap_or_default();
+@@ -1854,6 +1901,9 @@ async fn run_sampling_request(
+             },
+         };
+
++        if let Some(operation) = crate::operation_observation::current_model_operation() {
++            operation.retry_waiting(true);
++        }
+         let retry = handle_response_stream_error(
+             &mut retry_state,
+             max_retries,
+@@ -1866,6 +1916,9 @@ async fn run_sampling_request(
+         .or_cancel(&preempt)
+         .or_cancel(&cancellation_token)
+         .await?;
++        if let Some(operation) = crate::operation_observation::current_model_operation() {
++            operation.retry_waiting(false);
++        }
+         if cancellation_token.is_cancelled() {
+             return Err(CodexErr::TurnAborted);
+         }
+@@ -3170,6 +3223,8 @@ async fn try_run_sampling_request(
+                     active_item_is_streaming_to_client = stream_item_to_client;
+                 }
+             }
++            // Consumed by the client observer before session events are forwarded.
++            ResponseEvent::ModelObservation(_) => {}
+             ResponseEvent::ServerModel(server_model) => {
+                 if !turn_context
+                     .server_model_warning_emitted
+diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
+index 4fa1c9d..28f4a00 100644
+--- a/codex-rs/core/src/session/turn_input.rs
++++ b/codex-rs/core/src/session/turn_input.rs
+@@ -98,6 +98,7 @@ impl TurnStartKind {
+ struct PreparedTurnInputSettings {
+     thread_settings_update: Option<SessionSettingsUpdate>,
+     start_options: TurnStartOptions,
++    new_turn_only_attachment: bool,
+ }
+
+ impl PreparedTurnInputSettings {
+@@ -108,7 +109,15 @@ impl PreparedTurnInputSettings {
+         thread_settings: impl Into<WithTurnExtensionData<ThreadSettingsOverrides>>,
+         start_options: TurnStartOptions,
+     ) -> CodexResult<Self> {
+-        let thread_settings = thread_settings.into();
++        let mut thread_settings = thread_settings.into();
++        let new_turn_only = thread_settings
++            .turn_extension_init
++            .as_ref()
++            .and_then(|init| init.get::<crate::turn_extension_data::NewTurnOnlyData>());
++        let new_turn_only_attachment = new_turn_only.is_some();
++        if let Some(init) = new_turn_only {
++            thread_settings.turn_extension_init = Some(init.0.clone());
++        }
+         let thread_settings_update = if thread_settings.request
+             == ThreadSettingsOverrides::default()
+             && thread_settings.turn_extension_init.is_none()
+@@ -128,6 +137,7 @@ impl PreparedTurnInputSettings {
+         Ok(Self {
+             thread_settings_update,
+             start_options,
++            new_turn_only_attachment,
+         })
+     }
+
+@@ -215,9 +225,12 @@ impl PreparedTurnInputSettings {
+     /// Applies only persistent settings after steering succeeds. The active
+     /// turn keeps its existing context; subsequent turns see the update.
+     async fn apply_steered(self, session: &Session, submission_id: String) -> CodexResult<()> {
+-        let Some(thread_settings_update) = self.thread_settings_update else {
++        let Some(mut thread_settings_update) = self.thread_settings_update else {
+             return Ok(());
+         };
++        if self.new_turn_only_attachment {
++            thread_settings_update.turn_extension_init = None;
++        }
+         thread_settings::apply_update(session, submission_id, thread_settings_update)
+             .await
+             .map_err(|error| CodexErr::InvalidRequest(error.to_string()))
+diff --git a/codex-rs/core/src/session/turn_input_tests.rs b/codex-rs/core/src/session/turn_input_tests.rs
+index c8df7c1..5ccf2d4 100644
+--- a/codex-rs/core/src/session/turn_input_tests.rs
++++ b/codex-rs/core/src/session/turn_input_tests.rs
+@@ -1238,3 +1238,128 @@ async fn scored_prompt_keeps_its_submission_item_id() {
+     assert_eq!(ui_ids.len(), 3);
+     session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+ }
++
++#[derive(Debug)]
++struct AttachmentOwner(&'static str);
++
++#[test_case(false, false; "legacy_start_or_steer")]
++#[test_case(false, true; "legacy_steer_only")]
++#[test_case(true, false; "start_only_start_or_steer")]
++#[test_case(true, true; "start_only_steer_only")]
++#[tokio::test]
++async fn steering_respects_new_turn_only_attachment_policy(start_only: bool, steer_only: bool) {
++    let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
++    session
++        .state
++        .lock()
++        .await
++        .session_configuration
++        .turn_extension_init
++        .insert(AttachmentOwner("original"));
++    turn_context
++        .extension_data
++        .insert(AttachmentOwner("original"));
++    session
++        .spawn_task(
++            Arc::clone(&turn_context),
++            vec![TurnInput::UserInput {
++                metadata: Default::default(),
++                content: vec![UserInput::Text {
++                    text: "initial".into(),
++                    text_elements: Vec::new(),
++                }],
++                client_id: None,
++            }],
++            NeverEndingTask {
++                kind: TaskKind::Regular,
++                listen_to_cancellation_token: true,
++            },
++        )
++        .await;
++    let mut init = codex_extension_api::ExtensionDataInit::new();
++    init.insert(AttachmentOwner("steering"));
++    let request = TurnInputRequest::user_input(vec![UserInput::Text {
++        text: "steer".into(),
++        text_elements: Vec::new(),
++    }]);
++    let request = if start_only {
++        WithTurnExtensionData::new_turn_only(request, init)
++    } else {
++        WithTurnExtensionData::new(request, init)
++    };
++    let mode = if steer_only {
++        TurnInputMode::Steer {
++            expected_turn_id: turn_context.sub_id.clone(),
++        }
++    } else {
++        TurnInputMode::StartOrSteer
++    };
++    let result = handle(&session, request, mode, "steering-owner".into())
++        .await
++        .unwrap();
++    assert!(matches!(result, TurnInputSubmission::Steered { .. }));
++    assert_eq!(
++        turn_context
++            .extension_data
++            .get::<AttachmentOwner>()
++            .unwrap()
++            .0,
++        "original"
++    );
++    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
++    // Automatic/recovery contexts read this same saved configuration. An
++    // unacknowledged steering owner must not acquire those later turns.
++    let later = session
++        .new_turn_with_default_settings("later".into(), Default::default())
++        .await;
++    assert_eq!(
++        later.extension_data.get::<AttachmentOwner>().unwrap().0,
++        if start_only { "original" } else { "steering" }
++    );
++    assert!(
++        later
++            .extension_data
++            .get::<crate::turn_extension_data::NewTurnOnlyData>()
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn started_turn_unwraps_new_turn_only_attachment_before_persistence() {
++    let (session, _, _rx) = make_session_and_context_with_rx().await;
++    let mut init = codex_extension_api::ExtensionDataInit::new();
++    init.insert(AttachmentOwner("started"));
++    let wrapped =
++        WithTurnExtensionData::new_turn_only(TurnInputRequest::user_input(Vec::new()), init);
++    let settings = PreparedTurnInputSettings::prepare(
++        &session,
++        WithTurnExtensionData {
++            request: ThreadSettingsOverrides::default(),
++            turn_extension_init: wrapped.turn_extension_init,
++        },
++        TurnStartOptions::default(),
++    )
++    .await
++    .unwrap();
++    let turn = settings
++        .apply_started(&session, "started-owner".into(), TurnStartKind::User)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(
++        turn.extension_data.get::<AttachmentOwner>().unwrap().0,
++        "started"
++    );
++    assert!(
++        turn.extension_data
++            .get::<crate::turn_extension_data::NewTurnOnlyData>()
++            .is_none()
++    );
++    let later = session
++        .new_turn_with_default_settings("later".into(), Default::default())
++        .await;
++    assert_eq!(
++        later.extension_data.get::<AttachmentOwner>().unwrap().0,
++        "started"
++    );
++}
+diff --git a/codex-rs/core/src/tools/code_mode/execute_handler.rs b/codex-rs/core/src/tools/code_mode/execute_handler.rs
+index 317e029..4354977 100644
+--- a/codex-rs/core/src/tools/code_mode/execute_handler.rs
++++ b/codex-rs/core/src/tools/code_mode/execute_handler.rs
+@@ -208,7 +208,10 @@ impl CodeModeExecuteHandler {
+         invocation: ToolInvocation,
+     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
+         let handler_span = tracing::Span::current();
+-        let originating_call = invocation.originating_call().await;
++        let mut originating_call = invocation.originating_call().await;
++        if let Some(origin) = originating_call.as_mut() {
++            origin.operation_id = crate::tools::operation_observation::current_tool_operation_id();
++        }
+         let ToolInvocation {
+             session,
+             turn,
+diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
+index fe7de2c..60aa2b8 100644
+--- a/codex-rs/core/src/tools/context.rs
++++ b/codex-rs/core/src/tools/context.rs
+@@ -125,6 +125,8 @@ pub struct ToolInvocation {
+ /// Identity of the model call that started a tool invocation, retained across code-mode waits.
+ #[derive(Clone)]
+ pub(crate) struct ToolCallOrigin {
++    /// Execution observation retained across code-mode yields and detached callbacks.
++    pub(crate) operation_id: Option<String>,
+     /// Best-effort lookup: invocations without a matching history item still
+     /// retain their known window ID.
+     pub(crate) item_id: Option<ResponseItemId>,
+@@ -158,6 +160,7 @@ impl ToolInvocation {
+                 _ => None,
+             });
+         Some(ToolCallOrigin {
++            operation_id: super::operation_observation::current_tool_operation_id(),
+             item_id,
+             window_id: self.session.current_window_id().await,
+         })
+diff --git a/codex-rs/core/src/tools/handlers/apply_patch.rs b/codex-rs/core/src/tools/handlers/apply_patch.rs
+index 64d6cc1..0c1c08a 100644
+--- a/codex-rs/core/src/tools/handlers/apply_patch.rs
++++ b/codex-rs/core/src/tools/handlers/apply_patch.rs
+@@ -338,6 +338,10 @@ impl ApplyPatchHandler {
+ }
+
+ impl CoreToolRuntime for ApplyPatchHandler {
++    fn approves_inside_handler(&self) -> bool {
++        true
++    }
++
+     fn environments_for_input(
+         &self,
+         invocation: &ToolInvocation,
+diff --git a/codex-rs/core/src/tools/handlers/dynamic.rs b/codex-rs/core/src/tools/handlers/dynamic.rs
+index 0eac846..59c158c 100644
+--- a/codex-rs/core/src/tools/handlers/dynamic.rs
++++ b/codex-rs/core/src/tools/handlers/dynamic.rs
+@@ -174,6 +174,10 @@ impl DynamicToolHandler {
+ }
+
+ impl CoreToolRuntime for DynamicToolHandler {
++    fn is_client_tool_handoff(&self) -> bool {
++        true
++    }
++
+     fn finishes_on_cancellation(&self) -> bool {
+         true
+     }
+diff --git a/codex-rs/core/src/tools/handlers/mcp.rs b/codex-rs/core/src/tools/handlers/mcp.rs
+index 8ac6845..a040228 100644
+--- a/codex-rs/core/src/tools/handlers/mcp.rs
++++ b/codex-rs/core/src/tools/handlers/mcp.rs
+@@ -307,6 +307,10 @@ impl McpHandler {
+ }
+
+ impl CoreToolRuntime for McpHandler {
++    fn approves_inside_handler(&self) -> bool {
++        true
++    }
++
+     fn environments_for_input(
+         &self,
+         invocation: &ToolInvocation,
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+index 6a81b62..00af650 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+@@ -309,6 +309,10 @@ fn one_shot_exec_command_spec(spec: ToolSpec) -> ToolSpec {
+ }
+
+ impl CoreToolRuntime for ExecCommandHandler {
++    fn approves_inside_handler(&self) -> bool {
++        true
++    }
++
+     fn telemetry_tags(&self, invocation: &ToolInvocation) -> ToolTelemetryTags {
+         // Record the configured mode so fallback calls remain in their rollout cohort.
+         // This does not indicate whether the command actually used a snapshot.
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+index 3344ed8..ea173f5 100644
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -14,6 +14,7 @@ mod multi_agent_tool;
+ mod native_tool_review;
+ pub(crate) use native_tool_review::review as review_native_tool_call;
+ pub(crate) mod network_approval;
++pub(crate) mod operation_observation;
+ pub(crate) mod orchestrator;
+ pub(crate) mod parallel;
+ pub(crate) mod registry;
+diff --git a/codex-rs/core/src/tools/operation_observation.rs b/codex-rs/core/src/tools/operation_observation.rs
+new file mode 100644
+index 0000000..d07036a
+--- /dev/null
++++ b/codex-rs/core/src/tools/operation_observation.rs
+@@ -0,0 +1,174 @@
++//! Execution observations, separate from admission, approval, and result hooks.
++
++use std::sync::Arc;
++use std::sync::Mutex;
++
++use serde::Serialize;
++use serde_json::Value;
++
++use crate::function_tool::FunctionCallError;
++use crate::operation_observation::OperationGuard;
++use crate::operation_observation::OperationKind;
++use crate::operation_observation::OperationMetadata;
++use crate::operation_observation::OperationObservation;
++use crate::operation_observation::OperationOutcome;
++use crate::tools::context::ToolCallSource;
++use crate::tools::context::ToolInvocation;
++use crate::tools::context::ToolOutput;
++use crate::tools::context::ToolPayload;
++use crate::tools::registry::CoreToolRuntime;
++
++tokio::task_local! {
++    static CURRENT_EXECUTION: Arc<ExecutionObservation>;
++}
++
++struct ExecutionObservation {
++    observation: Arc<OperationObservation>,
++    thread_id: String,
++    turn_id: String,
++    metadata: OperationMetadata,
++    input: Option<Value>,
++    guard: Mutex<Option<OperationGuard>>,
++}
++
++impl ExecutionObservation {
++    fn start(&self, input: Option<&Value>) {
++        let mut guard = self
++            .guard
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        // Sandbox retries still belong to the same native tool execution.
++        if guard.is_some() {
++            return;
++        }
++        let started = self.observation.start(
++            self.thread_id.clone(),
++            self.turn_id.clone(),
++            OperationKind::Tool,
++            self.metadata.clone(),
++        );
++        if let Some(input) = input.or(self.input.as_ref()) {
++            started.capture_input(input);
++        }
++        *guard = Some(started);
++    }
++
++    fn operation_id(&self) -> Option<String> {
++        self.guard
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .as_ref()
++            .map(|guard| guard.operation_id().to_string())
++    }
++
++    fn finish(
++        &self,
++        invocation: &ToolInvocation,
++        result: &Result<Box<dyn ToolOutput>, FunctionCallError>,
++    ) {
++        let guard = self
++            .guard
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        let Some(guard) = guard.as_ref() else {
++            // A rejected approval has not executed a tool.
++            return;
++        };
++        let outcome = if invocation.cancellation_token.is_cancelled() {
++            OperationOutcome::Interrupted
++        } else if result
++            .as_ref()
++            .is_ok_and(|output| output.success_for_logging())
++        {
++            OperationOutcome::Success
++        } else {
++            OperationOutcome::Error
++        };
++        guard.finish_with_output_fn(outcome, || match result {
++            Ok(output) => output.code_mode_result(&invocation.payload),
++            Err(error) => serde_json::json!({"error": error.to_string()}),
++        });
++    }
++}
++
++/// Called immediately before an approved sandbox or MCP execution starts.
++pub(crate) fn start_current_execution() {
++    let _ = CURRENT_EXECUTION.try_with(|execution| execution.start(None));
++}
++
++/// MCP preparation can rewrite arguments before sending them to the server.
++pub(crate) fn start_current_execution_with_input(input: &impl Serialize) {
++    let _ = CURRENT_EXECUTION.try_with(|execution| {
++        let input = execution
++            .observation
++            .captures_content()
++            .then(|| serde_json::to_value(input).ok())
++            .flatten();
++        execution.start(input.as_ref());
++    });
++}
++
++pub(crate) fn current_tool_operation_id() -> Option<String> {
++    CURRENT_EXECUTION
++        .try_with(|execution| execution.operation_id())
++        .ok()
++        .flatten()
++}
++
++pub(crate) async fn observe_execution(
++    tool: &dyn CoreToolRuntime,
++    invocation: &ToolInvocation,
++) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
++    let Some(observation) = invocation.turn.extension_data.get::<OperationObservation>() else {
++        return tool.handle(invocation.clone()).await;
++    };
++    if tool.is_client_tool_handoff() {
++        return tool.handle(invocation.clone()).await;
++    }
++
++    let parent_operation_id = match &invocation.source {
++        ToolCallSource::CodeMode { cell_id, .. } => invocation
++            .session
++            .services
++            .code_mode_service
++            .cell_originating_call(&codex_code_mode::CellId::new(cell_id.clone()))
++            .and_then(|origin| origin.operation_id),
++        _ => current_tool_operation_id(),
++    };
++    let input = observation
++        .captures_content()
++        .then(|| match &invocation.payload {
++            ToolPayload::Function { arguments } => {
++                serde_json::from_str(arguments).unwrap_or_else(|_| Value::String(arguments.clone()))
++            }
++            ToolPayload::Custom { input } => Value::String(input.clone()),
++            ToolPayload::ToolSearch { arguments } => {
++                serde_json::to_value(arguments).unwrap_or(Value::Null)
++            }
++        });
++    let execution = Arc::new(ExecutionObservation {
++        observation,
++        thread_id: invocation.session.thread_id.to_string(),
++        turn_id: invocation.turn.sub_id.clone(),
++        metadata: OperationMetadata {
++            tool_name: Some(crate::tools::flat_tool_name(&invocation.tool_name).into_owned()),
++            call_id: Some(invocation.call_id.clone()),
++            parent_operation_id,
++            ..Default::default()
++        },
++        input,
++        guard: Mutex::new(None),
++    });
++    if !tool.approves_inside_handler() {
++        execution.start(None);
++    }
++    let result = CURRENT_EXECUTION
++        .scope(Arc::clone(&execution), tool.handle(invocation.clone()))
++        .await;
++    execution.finish(invocation, &result);
++    result
++}
++
++#[cfg(test)]
++#[path = "operation_observation_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/tools/operation_observation_tests.rs b/codex-rs/core/src/tools/operation_observation_tests.rs
+new file mode 100644
+index 0000000..7fda319
+--- /dev/null
++++ b/codex-rs/core/src/tools/operation_observation_tests.rs
+@@ -0,0 +1,291 @@
++use super::*;
++use crate::operation_observation::OperationCaptureMode;
++use crate::operation_observation::OperationEvent;
++use crate::operation_observation::OperationObserver;
++use crate::operation_observation::OperationPhase;
++use crate::session::step_context::StepContext;
++use crate::session::tests::make_session_and_context;
++use crate::tools::context::FunctionToolOutput;
++use crate::tools::context::ToolCallOrigin;
++use crate::tools::registry::ToolExecutor;
++use crate::turn_diff_tracker::TurnDiffTracker;
++use pretty_assertions::assert_eq;
++use tokio::sync::Notify;
++use tokio_util::sync::CancellationToken;
++
++#[derive(Default)]
++struct Events(Mutex<Vec<OperationEvent>>);
++
++impl OperationObserver for Events {
++    fn emit(&self, event: OperationEvent) {
++        self.0.lock().unwrap().push(event);
++    }
++}
++
++struct Handler {
++    approved: Option<Arc<Notify>>,
++    entered: Option<Arc<Notify>>,
++    complete: Option<Arc<Notify>>,
++    denied: bool,
++    handoff: bool,
++    success: bool,
++}
++
++impl Default for Handler {
++    fn default() -> Self {
++        Self {
++            approved: None,
++            entered: None,
++            complete: None,
++            denied: false,
++            handoff: false,
++            success: true,
++        }
++    }
++}
++
++impl ToolExecutor<ToolInvocation> for Handler {
++    fn tool_name(&self) -> codex_tools::ToolName {
++        codex_tools::ToolName::plain("test_tool")
++    }
++
++    fn spec(&self) -> codex_tools::ToolSpec {
++        codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++            name: "test_tool".to_string(),
++            description: "Observation fixture.".to_string(),
++            strict: false,
++            defer_loading: None,
++            parameters: codex_tools::JsonSchema::default(),
++            output_schema: None,
++        })
++    }
++
++    fn handle<'a>(&'a self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
++    where
++        ToolInvocation: 'a,
++    {
++        Box::pin(async move {
++            if let Some(approved) = &self.approved {
++                approved.notified().await;
++            }
++            if self.denied {
++                return Err(FunctionCallError::RespondToModel(
++                    "Denied fixture.".to_string(),
++                ));
++            }
++            if self.approved.is_some() {
++                start_current_execution();
++            }
++            if let Some(entered) = &self.entered {
++                entered.notify_one();
++            }
++            if let Some(complete) = &self.complete {
++                complete.notified().await;
++            }
++            Ok(Box::new(FunctionToolOutput::from_text(
++                "private-tool-result".to_string(),
++                Some(self.success),
++            )) as Box<dyn ToolOutput>)
++        })
++    }
++}
++
++impl CoreToolRuntime for Handler {
++    fn approves_inside_handler(&self) -> bool {
++        self.approved.is_some() || self.denied
++    }
++
++    fn is_client_tool_handoff(&self) -> bool {
++        self.handoff
++    }
++}
++
++async fn fixture(mode: OperationCaptureMode) -> (ToolInvocation, Arc<Events>) {
++    let (session, turn) = make_session_and_context().await;
++    let events = Arc::new(Events::default());
++    turn.extension_data
++        .insert(OperationObservation::new(mode, events.clone()));
++    let turn = Arc::new(turn);
++    let invocation = ToolInvocation {
++        session: Arc::new(session),
++        step_context: StepContext::for_test(Arc::clone(&turn)),
++        turn,
++        cancellation_token: CancellationToken::new(),
++        tracker: Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
++        call_id: "call-1".to_string(),
++        tool_name: codex_tools::ToolName::plain("test_tool"),
++        source: ToolCallSource::Direct,
++        payload: ToolPayload::Function {
++            arguments: r#"{"query":"private-tool-argument"}"#.to_string(),
++        },
++        environments: Default::default(),
++    };
++    (invocation, events)
++}
++
++#[tokio::test]
++async fn approval_precedes_live_execution_start() {
++    let (invocation, events) = fixture(OperationCaptureMode::Content).await;
++    let approved = Arc::new(Notify::new());
++    let entered = Arc::new(Notify::new());
++    let complete = Arc::new(Notify::new());
++    let handler = Handler {
++        approved: Some(Arc::clone(&approved)),
++        entered: Some(Arc::clone(&entered)),
++        complete: Some(Arc::clone(&complete)),
++        ..Default::default()
++    };
++    let task = tokio::spawn(async move { observe_execution(&handler, &invocation).await });
++    tokio::task::yield_now().await;
++    assert!(events.0.lock().unwrap().is_empty());
++    approved.notify_one();
++    entered.notified().await;
++    {
++        let events = events.0.lock().unwrap();
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].phase, OperationPhase::Started);
++        assert_eq!(events[0].metadata.call_id.as_deref(), Some("call-1"));
++    }
++    complete.notify_one();
++    assert!(task.await.unwrap().is_ok());
++    let events = events.0.lock().unwrap();
++    assert_eq!(events.len(), 2);
++    assert_eq!(events[0].operation_id, events[1].operation_id);
++    assert_eq!(events[1].outcome, Some(OperationOutcome::Success));
++    let content = serde_json::to_string(&events[1]).unwrap();
++    assert!(content.contains("private-tool-argument"));
++    assert!(content.contains("private-tool-result"));
++}
++
++#[tokio::test]
++async fn denied_execution_and_client_handoff_emit_no_native_operation() {
++    let (invocation, events) = fixture(OperationCaptureMode::Content).await;
++    assert!(
++        observe_execution(
++            &Handler {
++                denied: true,
++                ..Default::default()
++            },
++            &invocation
++        )
++        .await
++        .is_err()
++    );
++    assert!(
++        observe_execution(
++            &Handler {
++                handoff: true,
++                ..Default::default()
++            },
++            &invocation
++        )
++        .await
++        .is_ok()
++    );
++    assert!(events.0.lock().unwrap().is_empty());
++}
++
++#[tokio::test]
++async fn metadata_omits_payloads_and_retains_failed_execution() {
++    let (invocation, events) = fixture(OperationCaptureMode::Metadata).await;
++    let registry = crate::tools::registry::ToolRegistry::with_handler_for_test(Arc::new(Handler {
++        success: false,
++        ..Default::default()
++    }));
++    assert!(
++        registry
++            .dispatch_any_with_state(invocation, None)
++            .await
++            .is_ok()
++    );
++    let events = events.0.lock().unwrap();
++    assert_eq!(events.len(), 2);
++    assert_eq!(events[1].outcome, Some(OperationOutcome::Error));
++    assert!(events[1].input.is_none());
++    assert!(events[1].output.is_none());
++    let serialized = serde_json::to_string(&*events).unwrap();
++    assert!(!serialized.contains("private-tool-argument"));
++    assert!(!serialized.contains("private-tool-result"));
++}
++
++#[tokio::test]
++async fn abort_emits_one_interrupted_terminal() {
++    let (invocation, events) = fixture(OperationCaptureMode::Metadata).await;
++    let entered = Arc::new(Notify::new());
++    let handler = Handler {
++        entered: Some(Arc::clone(&entered)),
++        complete: Some(Arc::new(Notify::new())),
++        ..Default::default()
++    };
++    let task = tokio::spawn(async move { observe_execution(&handler, &invocation).await });
++    entered.notified().await;
++    task.abort();
++    assert!(task.await.err().unwrap().is_cancelled());
++    let events = events.0.lock().unwrap();
++    assert_eq!(events.len(), 2);
++    assert_eq!(events[0].operation_id, events[1].operation_id);
++    assert_eq!(events[1].outcome, Some(OperationOutcome::Interrupted));
++}
++
++#[tokio::test]
++async fn detached_parallel_code_cell_tools_retain_the_issuing_operation() {
++    let (mut first, events) = fixture(OperationCaptureMode::Metadata).await;
++    let cell_id = codex_code_mode::CellId::new("cell-1".to_string());
++    first
++        .session
++        .services
++        .code_mode_service
++        .mark_cell_ready_for_dispatch(
++            &cell_id,
++            Some(ToolCallOrigin {
++                operation_id: Some("issuing-exec-operation".to_string()),
++                item_id: None,
++                window_id: "window-1".to_string(),
++            }),
++        );
++    first.source = ToolCallSource::CodeMode {
++        cell_id: "cell-1".to_string(),
++        runtime_tool_call_id: "nested-1".to_string(),
++    };
++    let mut second = first.clone();
++    second.call_id = "call-2".to_string();
++    second.source = ToolCallSource::CodeMode {
++        cell_id: "cell-1".to_string(),
++        runtime_tool_call_id: "nested-2".to_string(),
++    };
++    let first_entered = Arc::new(Notify::new());
++    let second_entered = Arc::new(Notify::new());
++    let complete = Arc::new(Notify::new());
++    let first_handler = Handler {
++        entered: Some(Arc::clone(&first_entered)),
++        complete: Some(Arc::clone(&complete)),
++        ..Default::default()
++    };
++    let second_handler = Handler {
++        entered: Some(Arc::clone(&second_entered)),
++        complete: Some(Arc::clone(&complete)),
++        ..Default::default()
++    };
++    let first_task = tokio::spawn(async move { observe_execution(&first_handler, &first).await });
++    let second_task =
++        tokio::spawn(async move { observe_execution(&second_handler, &second).await });
++    first_entered.notified().await;
++    second_entered.notified().await;
++    assert_eq!(events.0.lock().unwrap().len(), 2);
++    complete.notify_waiters();
++    assert!(first_task.await.unwrap().is_ok());
++    assert!(second_task.await.unwrap().is_ok());
++    let events = events.0.lock().unwrap();
++    let starts: Vec<_> = events
++        .iter()
++        .filter(|event| event.phase == OperationPhase::Started)
++        .collect();
++    assert_eq!(starts.len(), 2);
++    assert_ne!(starts[0].operation_id, starts[1].operation_id);
++    for event in starts {
++        assert_eq!(
++            event.metadata.parent_operation_id.as_deref(),
++            Some("issuing-exec-operation")
++        );
++    }
++}
+diff --git a/codex-rs/core/src/tools/orchestrator.rs b/codex-rs/core/src/tools/orchestrator.rs
+index a1a88e4..d9afeb6 100644
+--- a/codex-rs/core/src/tools/orchestrator.rs
++++ b/codex-rs/core/src/tools/orchestrator.rs
+@@ -102,6 +102,7 @@ impl ToolOrchestrator {
+                 .as_ref()
+                 .map(ActiveNetworkApproval::execution_proxy),
+         };
++        super::operation_observation::start_current_execution();
+         let run_result = tool
+             .run(req, &attempt_with_network_approval, &attempt_tool_ctx)
+             .await;
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 3dccc2e..bbbf568 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -62,6 +62,16 @@ pub use codex_tools::ToolExposure;
+ /// Implementers provide the shared `ToolExecutor` behavior plus optional
+ /// core-owned metadata for hooks, telemetry, tool search, and argument diffs.
+ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
++    /// Client callbacks execute outside this process and are observed by their owner.
++    fn is_client_tool_handoff(&self) -> bool {
++        false
++    }
++
++    /// Defers the execution observation until the handler's approval has completed.
++    fn approves_inside_handler(&self) -> bool {
++        false
++    }
++
+     /// Opts this invocation into synchronous native-call review before the handler runs.
+     fn requires_guardian_review(&self, _invocation: &ToolInvocation) -> bool {
+         false
+@@ -1050,7 +1060,7 @@ async fn handle_any_tool(
+ ) -> Result<AnyToolResult, FunctionCallError> {
+     let call_id = invocation.call_id.clone();
+     let payload = invocation.payload.clone();
+-    let output = tool.handle(invocation.clone()).await?;
++    let output = super::operation_observation::observe_execution(tool, &invocation).await?;
+     let post_tool_use_payload =
+         CoreToolRuntime::post_tool_use_payload(tool, &invocation, output.as_ref());
+     let result = AnyToolResult {
+diff --git a/codex-rs/core/src/turn_extension_data.rs b/codex-rs/core/src/turn_extension_data.rs
+index 89f1127..e8990d2 100644
+--- a/codex-rs/core/src/turn_extension_data.rs
++++ b/codex-rs/core/src/turn_extension_data.rs
+@@ -31,3 +31,21 @@ impl<T> From<T> for WithTurnExtensionData<T> {
+         }
+     }
+ }
++
++/// Carries start-only attachment policy through the existing submission envelope.
++/// PreparedTurnInputSettings unwraps this before storing the original initializer.
++#[derive(Debug)]
++pub(crate) struct NewTurnOnlyData(pub(crate) ExtensionDataInit);
++
++impl WithTurnExtensionData<codex_protocol::turn_input::TurnInputRequest> {
++    /// Replaces saved host data only when this request starts a new turn.
++    /// Steering preserves the previously saved initializer.
++    pub fn new_turn_only(
++        request: codex_protocol::turn_input::TurnInputRequest,
++        turn_extension_init: ExtensionDataInit,
++    ) -> Self {
++        let mut init = ExtensionDataInit::new();
++        init.insert(NewTurnOnlyData(turn_extension_init));
++        Self::new(request, init)
++    }
++}
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index de45b74..9dd25e6 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -492,6 +492,7 @@ fn response_event_records_turn_ttft(event: &ResponseEvent) -> bool {
+         | ResponseEvent::ReasoningContentDelta { .. } => true,
+         ResponseEvent::Created { .. }
+         | ResponseEvent::ServerModel(_)
++        | ResponseEvent::ModelObservation(_)
+         | ResponseEvent::ModelVerifications(_)
+         | ResponseEvent::TurnModerationMetadata(_)
+         | ResponseEvent::GuardianAssessment(_)
+diff --git a/codex-rs/exec/src/lib.rs b/codex-rs/exec/src/lib.rs
+index 43cf70b..d692465 100644
+--- a/codex-rs/exec/src/lib.rs
++++ b/codex-rs/exec/src/lib.rs
+@@ -1238,6 +1238,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
+                 ClientRequest::TurnStart {
+                     request_id: request_ids.next(),
+                     params: TurnStartParams {
++                        operation_tracing: None,
+                         disabled_plugin_ids: None,
+                         thread_id: primary_thread_id_for_span.clone(),
+                         turn_trigger: Some("exec".to_string()),
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index ced543a..193452e 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -1406,7 +1406,9 @@ impl SessionTelemetry {
+             ResponseEvent::ReasoningSummaryPartAdded { .. } => {
+                 "reasoning_summary_part_added".into()
+             }
+-            ResponseEvent::ServerModel(_) => "server_model".into(),
++            ResponseEvent::ServerModel(_) | ResponseEvent::ModelObservation(_) => {
++                "server_model".into()
++            }
+             ResponseEvent::ModelVerifications(_) => "model_verifications".into(),
+             ResponseEvent::TurnModerationMetadata(_) => "turn_moderation_metadata".into(),
+             ResponseEvent::GuardianAssessment(_) => "guardian_assessment".into(),
+diff --git a/codex-rs/tui/src/app/app_server_event_targets.rs b/codex-rs/tui/src/app/app_server_event_targets.rs
+index 13d30c2..ca841f5 100644
+--- a/codex-rs/tui/src/app/app_server_event_targets.rs
++++ b/codex-rs/tui/src/app/app_server_event_targets.rs
+@@ -137,6 +137,10 @@ pub(super) fn server_notification_thread_target(
+         ServerNotification::ReasoningTextDelta(notification) => {
+             Some(notification.thread_id.as_str())
+         }
++        ServerNotification::TurnOperationStarted(notification)
++        | ServerNotification::TurnOperationCompleted(notification) => {
++            Some(notification.thread_id.as_str())
++        }
+         ServerNotification::ContextCompacted(notification) => Some(notification.thread_id.as_str()),
+         ServerNotification::ModelRerouted(notification) => Some(notification.thread_id.as_str()),
+         ServerNotification::ModelVerification(notification) => {
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+index be7da50..40e6c3f 100644
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -388,6 +388,8 @@ impl ChatWidget {
+             | ServerNotification::ThreadAttachmentUpdated(_)
+             | ServerNotification::RawResponseItemCompleted(_)
+             | ServerNotification::RawResponseCompleted(_)
++            | ServerNotification::TurnOperationStarted(_)
++            | ServerNotification::TurnOperationCompleted(_)
+             | ServerNotification::CommandExecOutputDelta(_)
+             | ServerNotification::ProcessOutputDelta(_)
+             | ServerNotification::ProcessExited(_)
