@@ -10,7 +10,6 @@ from pydantic import ValidationError
 
 from agents.sandbox import Manifest
 from agents.sandbox.entries import Dir, File
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
 
 def test_inline_binary_file_round_trips_through_nested_manifest_json() -> None:
@@ -76,6 +75,8 @@ def test_inline_file_json_schemas_declare_the_encoded_object() -> None:
 async def test_inline_binary_file_survives_real_session_serialization_and_resume(
     tmp_path: Path,
 ) -> None:
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
     client = UnixLocalSandboxClient(inherit_host_environment=False)
     content = b"SQLite format 3\x00\x80\xff\x00"
     manifest = Manifest(

@@ -7,7 +7,14 @@ for command in cmake pkg-config perl unzip; do
   command -v "$command" >/dev/null
 done
 if ! perl -MIPC::Cmd -e 1 >/dev/null 2>&1; then
-  dnf install --assumeyes perl-core
+  # Public mirrors can expose repodata before its referenced files are synchronized.
+  # Use AlmaLinux's packaged HTTPS baseurls and keep their signature checks.
+  dnf --refresh --assumeyes --disablerepo='*' --enablerepo=baseos,appstream \
+    --setopt=baseos.mirrorlist= \
+    --setopt='baseos.baseurl=https://repo.almalinux.org/almalinux/$releasever/BaseOS/$basearch/os/' \
+    --setopt=appstream.mirrorlist= \
+    --setopt='appstream.baseurl=https://repo.almalinux.org/almalinux/$releasever/AppStream/$basearch/os/' \
+    install perl-core
 fi
 openssl_version=3.6.3
 openssl_checksum=243a86649cf6f23eeb6a2ff2456e09e5d77dd9018a54d3d96b0c6bdd6ba6c7f1

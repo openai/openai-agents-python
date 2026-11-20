@@ -100,7 +100,6 @@ jobs:
         shell: bash
     env:
       CARGO_INCREMENTAL: '0'
-      CARGO_BUILD_JOBS: '3'
       RUSTUP_TOOLCHAIN: '1.95.0'
       MACOSX_DEPLOYMENT_TARGET: '11.0'
       WHEEL_TARGET: ${{ matrix.target }}
@@ -119,12 +118,14 @@ jobs:
           enable-cache: false
       - name: Select isolated build directories
         run: |
+          # Short roots keep Cargo's Codex checkout within the Windows path limit.
           {
-            printf 'CARGO_HOME=%s/codex-cargo\n' "$RUNNER_TEMP"
-            printf 'CARGO_TARGET_DIR=%s/codex-target\n' "$RUNNER_TEMP"
+            printf 'CARGO_HOME=%s/c\n' "$RUNNER_TEMP"
+            printf 'CARGO_TARGET_DIR=%s/t\n' "$RUNNER_TEMP"
             printf 'UV_CACHE_DIR=%s/codex-uv\n' "$RUNNER_TEMP"
           } >> "$GITHUB_ENV"
           if [[ "$RUNNER_OS" == Linux ]]; then
+            printf 'CARGO_BUILD_JOBS=%s\n' "$(nproc)" >> "$GITHUB_ENV"
             printf '%s\n' /opt/python/cp312-cp312/bin >> "$GITHUB_PATH"
             printf 'PYO3_PYTHON=%s\n' /opt/python/cp312-cp312/bin/python >> "$GITHUB_ENV"
             test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.28'
