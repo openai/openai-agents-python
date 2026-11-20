@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from typing import Any
 
 from agents import Agent, ModelSettings, RunConfig, Runner, ToolCallHookContext, ToolExecutionConfig
 from agents.decorators import tool
@@ -15,18 +16,22 @@ def echo(text: str) -> str:
     return text
 
 
-async def lowercase_input(call: ToolCallHookContext[None]) -> dict[str, str]:
+async def lowercase_input(call: ToolCallHookContext[None]) -> dict[str, Any]:
+    if call.tool.name != echo.name:
+        return call.arguments
     return {"text": call.arguments["text"].lower()}
 
 
-async def quote_output(_call: ToolCallHookContext[None], result: str) -> str:
-    return f"Echoed {result!r}"
+async def quote_output(call: ToolCallHookContext[None], result: Any) -> Any:
+    return f"Echoed {result!r}" if call.tool.name == echo.name else result
 
 
 async def main(use_codex: bool) -> None:
     config = RunConfig(
         tool_execution=ToolExecutionConfig(
-            prepare_tool_input=lowercase_input, prepare_tool_output=quote_output
+            # Hosted Responses tools execute outside both callbacks.
+            prepare_tool_input=lowercase_input,
+            prepare_tool_output=quote_output,
         ),
         trace_include_sensitive_data=False,
     )

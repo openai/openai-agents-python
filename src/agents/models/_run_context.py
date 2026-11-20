@@ -3,27 +3,34 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import aclosing, contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, TypeVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
+    from ..agent import Agent
+    from ..lifecycle import RunHooks
     from ..run_config import ToolExecutionConfig
+    from ..run_context import RunContextWrapper
 
-_MODEL_RUN_CONTEXT: ContextVar[tuple[object | None, bool]] = ContextVar(
-    "model_run_context", default=(None, False)
+
+@dataclass(frozen=True)
+class ModelToolHooks:
+    agent: Agent[Any]
+    context: RunContextWrapper[Any]
+    lifecycle: RunHooks[Any]
+    settings: ToolExecutionConfig | None
+
+
+_MODEL_RUN_CONTEXT: ContextVar[tuple[object | None, ModelToolHooks | None]] = ContextVar(
+    "model_run_context", default=(None, None)
 )
 
 T = TypeVar("T")
 
 
 @contextmanager
-def model_run_context(
-    owner: object, tool_execution: ToolExecutionConfig | None = None
-) -> Iterator[None]:
-    has_hooks = tool_execution is not None and (
-        tool_execution.prepare_tool_input is not None
-        or tool_execution.prepare_tool_output is not None
-    )
-    token = _MODEL_RUN_CONTEXT.set((owner, has_hooks))
+def model_run_context(owner: object, hooks: ModelToolHooks | None = None) -> Iterator[None]:
+    token = _MODEL_RUN_CONTEXT.set((owner, hooks))
     try:
         yield
     finally:
@@ -35,20 +42,18 @@ def get_model_run_owner() -> object | None:
     return owner
 
 
-def uses_local_tool_hooks() -> bool:
-    """Whether this model request requires SDK-owned workspace and MCP tool execution."""
-    _, has_hooks = _MODEL_RUN_CONTEXT.get()
-    return has_hooks
+def get_model_tool_hooks() -> ModelToolHooks | None:
+    return _MODEL_RUN_CONTEXT.get()[1]
 
 
 async def model_run_context_stream(
     stream: AsyncGenerator[T, None],
     owner: object,
-    tool_execution: ToolExecutionConfig | None = None,
+    hooks: ModelToolHooks | None = None,
 ) -> AsyncGenerator[T, None]:
     # `aclosing` forwards an early `aclose()` on this generator to the delegate, so the
     # delegate's cleanup runs deterministically instead of waiting for garbage collection.
-    with model_run_context(owner, tool_execution):
+    with model_run_context(owner, hooks):
         async with aclosing(stream):
             async for item in stream:
                 yield item

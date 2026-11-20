@@ -1663,6 +1663,13 @@ class ProgrammaticToolCallingTool:
         return "programmatic_tool_calling"
 
 
+@dataclass(frozen=True)
+class NativeTool:
+    """A tool executed by the provider, identified by the name in its hook event."""
+
+    name: str
+
+
 Tool = (
     FunctionTool
     | FileSearchTool

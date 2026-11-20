@@ -5,6 +5,7 @@ import json
 import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Sequence
+from contextlib import AsyncExitStack
 from dataclasses import fields
 from importlib import import_module
 from importlib.resources import files
@@ -49,7 +50,8 @@ from ..usage import (
     _response_usage_to_usage,
 )
 from ._codex_inputs import prepare_codex_history, prepare_dynamic_tools, sdk_tool_call
-from ._run_context import uses_local_tool_hooks
+from ._codex_tool_hooks import CodexToolHooks
+from ._run_context import get_model_tool_hooks
 from .interface import Model, ModelProvider, ModelTracing
 
 
@@ -268,10 +270,21 @@ class _CodexModel(Model):
                 )
             )
         provider = self._provider
-        sdk_sandbox = uses_local_tool_hooks() or any(
+        bindings = get_model_tool_hooks()
+        tool_execution = bindings.settings if bindings is not None else None
+        classic_preparation = (
+            tool_execution is not None
+            and tool_execution.sdk_only_tool_hooks
+            and (
+                tool_execution.prepare_tool_input is not None
+                or tool_execution.prepare_tool_output is not None
+            )
+        )
+        sdk_sandbox = classic_preparation or any(
             getattr(tool, "_sdk_sandbox", False) or isinstance(tool, (ShellTool, ApplyPatchTool))
             for tool in tools
         )
+        native_hooks = None if sdk_sandbox else CodexToolHooks.for_run(bindings, identities)
         if sdk_sandbox:
             system_instructions = "\n\n".join(
                 filter(
@@ -339,9 +352,7 @@ class _CodexModel(Model):
             and output_schema.is_strict_json_schema()
             else None
         )
-        thread = await provider._native_manager().start_thread(
-            json.dumps(dynamic_tools), system_instructions, json.dumps(settings)
-        )
+        resources = AsyncExitStack()
         output: dict[str, Any] = {}
         streamed: set[str] = set()
         indices: dict[str, int] = {}
@@ -363,6 +374,14 @@ class _CodexModel(Model):
                 interrupt_requested = True
 
         try:
+            if native_hooks is not None:
+                settings["sdk_tool_hooks"] = await native_hooks.configure(resources)
+            thread = await provider._native_manager().start_thread(
+                json.dumps(dynamic_tools), system_instructions, json.dumps(settings)
+            )
+            resources.push_async_callback(thread.close)
+            if native_hooks is not None:
+                native_hooks.verify(thread)
             if history:
                 await thread.inject_items(json.dumps(history))
             turn_id = await thread.start_turn(json.dumps(turn_input), json.dumps(schema))
@@ -388,6 +407,9 @@ class _CodexModel(Model):
                 event = json.loads(encoded)
                 message = event["msg"]
                 kind = message["type"]
+                if kind == "hook_completed" and native_hooks is not None:
+                    native_hooks.check_completion(message["run"])
+                    continue
                 if event.get("id") not in ("", turn_id):
                     continue
                 if kind == "dynamic_tool_call_request":
@@ -596,7 +618,7 @@ class _CodexModel(Model):
             raise
         finally:
             try:
-                await _join_close(thread.close())
+                await _join_close(resources.aclose())
             except Exception:
                 # Keep the attempt failure primary when joined cleanup also fails.
                 if failure is None:

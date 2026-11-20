@@ -73,7 +73,7 @@ from ..models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
 )
-from ..models._run_context import model_run_context, model_run_context_stream
+from ..models._run_context import ModelToolHooks, model_run_context, model_run_context_stream
 from ..result import RunResultStreaming
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
@@ -2684,7 +2684,11 @@ async def run_single_turn_streamed(
     # Raising out of this loop leaves the model stream suspended at its yield, so close it
     # explicitly instead of waiting for garbage collection to finalize the generator chain.
     async with aclosing(
-        model_run_context_stream(retry_stream, tool_use_tracker, run_config.tool_execution)
+        model_run_context_stream(
+            retry_stream,
+            tool_use_tracker,
+            ModelToolHooks(public_agent, context_wrapper, hooks, run_config.tool_execution),
+        )
     ) as model_events:
         async for event in model_events:
             stream_event_count += 1
@@ -3106,7 +3110,10 @@ async def get_new_response(
         session, context_wrapper, filtered.input
     )
     with (
-        model_run_context(tool_use_tracker, run_config.tool_execution),
+        model_run_context(
+            tool_use_tracker,
+            ModelToolHooks(public_agent, context_wrapper, hooks, run_config.tool_execution),
+        ),
         record_failed_attempt_usage_on_error(context_wrapper.usage) as reported_usage,
     ):
         new_response = await get_response_with_retry(
