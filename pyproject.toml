@@ -42,6 +42,7 @@ Homepage = "https://openai.github.io/openai-agents-python/"
 Repository = "https://github.com/openai/openai-agents-python"
 
 [project.optional-dependencies]
+opentelemetry = ["opentelemetry-api>=1.45.0,<2"]
 # Protobuf exclusions retain patched 5.x and 6.x releases (GHSA-7gcm-g887-7qv7).
 voice = ["numpy>=2.2.0, <3; python_version>='3.10'", "websockets>=15.0, <18"]
 viz = ["graphviz>=0.17"]
@@ -95,6 +96,7 @@ temporal = [
 
 [dependency-groups]
 dev = [
+  "opentelemetry-sdk>=1.45.0,<2",
   "mypy",
   "ruff==0.17.1",
   "pytest>=9.0.3",

@@ -12,8 +12,9 @@ import functools
 import inspect
 import json
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_input_item_param import (
@@ -98,13 +99,12 @@ from ..tool_guardrails import (
     ToolOutputGuardrailData,
     ToolOutputGuardrailResult,
 )
-from ..tracing import Span, SpanError, function_span, get_current_trace
+from ..tracing import FunctionSpanData, Span, SpanError, custom_span, function_span
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_function_tool_approval
 from ..util._asyncio_tasks import _consume_future_exception, gather_with_cancel
 from ..util._custom_data import maybe_extract_custom_data, merge_custom_data
 from ..util._tool_errors import get_trace_tool_error
-from ..util._types import MaybeAwaitable
 from ._asyncio_progress import get_function_tool_task_progress_deadline
 from .agent_bindings import AgentBindings, bind_public_agent
 from .approvals import append_approval_error_output
@@ -151,7 +151,7 @@ __all__ = [
     "normalize_shell_output_entries",
     "format_shell_error",
     "get_trace_tool_error",
-    "with_tool_function_span",
+    "pending_tool_span",
     "build_litellm_json_tool_call",
     "collect_manual_mcp_approvals",
     "index_approval_items_by_call_id",
@@ -169,7 +169,6 @@ __all__ = [
     "execute_approved_tools",
 ]
 
-TToolSpanResult = TypeVar("TToolSpanResult")
 _FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS = 0.25
 _FUNCTION_TOOL_CANCELLED_IMMEDIATE_STEP_LIMIT = 64
 _FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS = 0.1
@@ -1123,26 +1122,48 @@ def log_tool_action_error(
     )
 
 
-async def with_tool_function_span(
-    *,
-    config: RunConfig,
-    tool_name: str,
-    fn: Callable[[Span[Any] | None], MaybeAwaitable[TToolSpanResult]],
-) -> TToolSpanResult:
-    """Execute a tool callback in a function span when tracing is active."""
-    if config.tracing_disabled or get_current_trace() is None:
-        result = fn(None)
-        if inspect.isawaitable(result):
-            return await result
-        direct_result: object = result
-        return cast(TToolSpanResult, direct_result)
-
-    with function_span(tool_name) as span:
-        result = fn(span)
-        if inspect.isawaitable(result):
-            return await result
-        span_result: object = result
-        return cast(TToolSpanResult, span_result)
+@contextmanager
+def pending_tool_span(
+    config: RunConfig, tool_name: str, call_id: str | None
+) -> Iterator[Span[FunctionSpanData]]:
+    """Prepare a span that the executor starts after approval and input guardrails."""
+    span = function_span(tool_name, disabled=config.tracing_disabled)
+    operation = span.span_data.operation
+    operation.tool_call_id = call_id
+    try:
+        yield span
+    except asyncio.CancelledError:
+        operation.outcome = "interrupted"
+        raise
+    except Exception:
+        operation.outcome = "failed"
+        if span.error is None:
+            span.set_error(SpanError(message="Error running tool", data=None))
+        raise
+    finally:
+        if span.started_at is not None:
+            if operation.outcome is None:
+                operation.outcome = "failed" if span.error else "completed"
+            span.finish(reset_current=True)
+        elif span.trace_id == "no-op":
+            span.finish(reset_current=True)
+        else:
+            # An early return is a decision about a tool, before execution begins.
+            operation.outcome = operation.outcome or "rejected"
+            if operation.detail is None:
+                # Existing processors read approval inputs and results from function spans.
+                span.start()
+                span.finish()
+            else:
+                with custom_span(
+                    "tool_approval",
+                    data={
+                        "tool_name": tool_name,
+                        "tool_call_id": call_id,
+                        "outcome": operation.outcome,
+                    },
+                ):
+                    pass
 
 
 def build_litellm_json_tool_call(output: ResponseFunctionToolCall) -> FunctionTool:
@@ -1809,7 +1830,7 @@ class _FunctionToolBatchExecutor:
             or get_function_tool_trace_name(func_tool)
             or func_tool.name
         )
-        with function_span(trace_tool_name) as span_fn:
+        with pending_tool_span(self.config, trace_tool_name, tool_call.call_id) as span_fn:
             tool_context_namespace = get_tool_call_namespace(raw_tool_call)
             if tool_context_namespace is None:
                 tool_context_namespace = get_tool_call_namespace(tool_call)
@@ -1836,8 +1857,11 @@ class _FunctionToolBatchExecutor:
                 )
                 if approval_result is not None:
                     result = approval_result
+                    if isinstance(result.run_item, ToolApprovalItem):
+                        span_fn.span_data.operation.outcome = "paused"
                 else:
                     result = await self._execute_single_tool_body(
+                        span=span_fn,
                         outer_task=outer_task,
                         task_state=task_state,
                         func_tool=func_tool,
@@ -1850,7 +1874,7 @@ class _FunctionToolBatchExecutor:
                     trace_include_sensitive_data=self.config.trace_include_sensitive_data,
                     error_message=str(e),
                 )
-                _error_tracing.attach_error_to_current_span(
+                span_fn.set_error(
                     SpanError(
                         message="Error running tool",
                         data={"tool_name": func_tool.name, "error": trace_error},
@@ -2021,6 +2045,7 @@ class _FunctionToolBatchExecutor:
     async def _execute_single_tool_body(
         self,
         *,
+        span: Span[FunctionSpanData],
         outer_task: asyncio.Task[Any] | None,
         task_state: _FunctionToolTaskState,
         func_tool: FunctionTool,
@@ -2048,6 +2073,8 @@ class _FunctionToolBatchExecutor:
                 self.schema_bypassed_tool_runs.add(id(task_state.tool_run))
                 return rejected_message
 
+        span.start(mark_as_current=True)
+        if not is_nested_continuation:
             await gather_with_cancel(
                 self.hooks.on_tool_start(tool_context, self.public_agent, func_tool),
                 (

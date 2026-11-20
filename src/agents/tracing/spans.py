@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import abc
 import contextvars
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, Generic, TypeVar
 
 from typing_extensions import TypedDict
@@ -10,7 +12,7 @@ from ..logger import logger
 from . import util
 from .processor_interface import TracingProcessor
 from .scope import Scope
-from .span_data import SpanData
+from .span_data import OperationMetadata, SpanData
 
 TSpanData = TypeVar("TSpanData", bound=SpanData)
 _SPAN_METADATA_ROUTING_KEYS = ("agent_harness_id",)
@@ -45,6 +47,9 @@ def _finish_on_generator_exit(span: Span[Any]) -> None:
     ``finish`` still surfaces rather than being mistaken for a foreign token.
     """
     span.finish(reset_current=False)
+
+    if isinstance(span, SpanImpl):
+        span._exit_processor_scope()
 
     token: contextvars.Token[Span[Any] | None] | None = span._prev_span_token  # type: ignore[attr-defined]
     if token is None:
@@ -144,6 +149,53 @@ class Span(abc.ABC, Generic[TSpanData]):
             reset_current: If true, the span will be reset as the current span.
         """
         pass
+
+    def start_at(self, started_at: str) -> None:
+        """Start an external operation at its source ISO 8601 timestamp."""
+        self.start()
+
+    def finish_at(self, ended_at: str) -> None:
+        """Finish an external operation at its source ISO 8601 timestamp."""
+        self.finish()
+
+    def clear_error(self) -> None:
+        """Clear a transient error when retrying the same operation."""
+
+    @contextmanager
+    def as_current(self) -> Iterator[Span[TSpanData]]:
+        """Activate an already-started span without changing its lifetime.
+
+        Use this scope when one source-timed or retried operation spans several execution
+        intervals. Start and finish remain the caller's responsibility.
+        """
+        token = Scope.set_current_span(self)
+        processor = getattr(self, "_processor", None)
+        callback = getattr(processor, "on_span_scope_enter", None)
+        scope_token: object | None = None
+        if callback is not None:
+            try:
+                scope_token = callback(self)
+            except Exception:
+                logger.warning("Error in trace processor during scope entry")
+        generator_exit = False
+        try:
+            yield self
+        except GeneratorExit:
+            generator_exit = True
+            raise
+        finally:
+            callback = getattr(processor, "on_span_scope_exit", None)
+            if callback is not None and scope_token is not None:
+                try:
+                    callback(self, scope_token)
+                except Exception:
+                    logger.warning("Error in trace processor during scope exit")
+            try:
+                Scope.reset_current_span(token)
+            except ValueError:
+                if not generator_exit:
+                    raise
+                logger.debug("Skipping span context reset, token belongs to another context")
 
     @abc.abstractmethod
     def __enter__(self) -> Span[TSpanData]:
@@ -299,6 +351,7 @@ class SpanImpl(Span[TSpanData]):
         "_span_data",
         "_tracing_api_key",
         "_trace_metadata",
+        "_processor_scope_token",
     )
 
     def __init__(
@@ -322,6 +375,7 @@ class SpanImpl(Span[TSpanData]):
         self._span_data = span_data
         self._tracing_api_key = tracing_api_key
         self._trace_metadata = trace_metadata
+        self._processor_scope_token: object | None = None
 
     @property
     def trace_id(self) -> str:
@@ -340,25 +394,55 @@ class SpanImpl(Span[TSpanData]):
         return self._parent_id
 
     def start(self, mark_as_current: bool = False):
+        self._start(util.time_iso(), mark_as_current)
+
+    def start_at(self, started_at: str) -> None:
+        self._start(started_at, mark_as_current=False)
+
+    def _start(self, started_at: str, mark_as_current: bool) -> None:
         if self.started_at is not None:
             logger.warning("Span already started")
             return
 
-        self._started_at = util.time_iso()
+        self._started_at = started_at
         self._processor.on_span_start(self)
         if mark_as_current:
             self._prev_span_token = Scope.set_current_span(self)
+            callback = getattr(self._processor, "on_span_scope_enter", None)
+            if callback is not None:
+                try:
+                    self._processor_scope_token = callback(self)
+                except Exception:
+                    logger.warning("Error in trace processor during scope entry")
 
     def finish(self, reset_current: bool = False) -> None:
+        self._finish(util.time_iso(), reset_current)
+
+    def finish_at(self, ended_at: str) -> None:
+        self._finish(ended_at, reset_current=False)
+
+    def _finish(self, ended_at: str, reset_current: bool) -> None:
         if self.ended_at is not None:
             logger.warning("Span already finished")
             return
 
-        self._ended_at = util.time_iso()
+        self._ended_at = ended_at
         self._processor.on_span_end(self)
         if reset_current and self._prev_span_token is not None:
+            self._exit_processor_scope()
             Scope.reset_current_span(self._prev_span_token)
             self._prev_span_token = None
+
+    def _exit_processor_scope(self) -> None:
+        token = self._processor_scope_token
+        self._processor_scope_token = None
+        if token is not None:
+            callback = getattr(self._processor, "on_span_scope_exit", None)
+            if callback is not None:
+                try:
+                    callback(self, token)
+                except Exception:
+                    logger.warning("Error in trace processor during scope exit")
 
     def __enter__(self) -> Span[TSpanData]:
         self.start(mark_as_current=True)
@@ -372,6 +456,9 @@ class SpanImpl(Span[TSpanData]):
 
     def set_error(self, error: SpanError) -> None:
         self._error = error
+
+    def clear_error(self) -> None:
+        self._error = None
 
     @property
     def error(self) -> SpanError | None:
@@ -418,6 +505,9 @@ class SpanImpl(Span[TSpanData]):
             metadata.update(
                 {key: value for key, value in span_data_metadata.items() if key not in metadata}
             )
+        operation = getattr(self.span_data, "operation", None)
+        if isinstance(operation, OperationMetadata) and operation.detail is not None:
+            metadata["operation"] = operation.export()
         if metadata:
             payload["metadata"] = metadata
         return payload

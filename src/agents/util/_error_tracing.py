@@ -7,6 +7,7 @@ from .. import _debug
 from ..exceptions import ModelTimeoutError
 from ..logger import log_model_action_warning, logger
 from ..tracing import Span, SpanError, get_current_span
+from ..tracing.config import get_operation_detail
 
 REDACTED_TRACE_ERROR_MESSAGE = "Error details are redacted."
 _MODEL_TIMEOUT_ERROR_ATTR = "_openai_agents_model_timeout_error"
@@ -43,6 +44,12 @@ def record_current_task_model_timeout_on_span(
     return True
 
 
+def include_error_text(include_sensitive: bool) -> bool:
+    # Detailed content covers submitted messages and results. An exception can
+    # contain transport headers reflected by the endpoint.
+    return include_sensitive and get_operation_detail() is None
+
+
 def get_trace_error(
     *,
     trace_include_sensitive_data: bool,
@@ -50,7 +57,7 @@ def get_trace_error(
     redacted_message: str = REDACTED_TRACE_ERROR_MESSAGE,
 ) -> str:
     """Return a trace-safe error string based on the sensitive-data setting."""
-    return error_message if trace_include_sensitive_data else redacted_message
+    return error_message if include_error_text(trace_include_sensitive_data) else redacted_message
 
 
 def attach_error_to_span(span: Span[Any], error: SpanError) -> None:
@@ -74,7 +81,7 @@ def _model_error_text(error: Exception, *, trace_include_sensitive_data: bool) -
     provider exception with a side-effecting `__str__` is not invoked just to have
     its output thrown away by redaction.
     """
-    if not trace_include_sensitive_data:
+    if not include_error_text(trace_include_sensitive_data):
         return REDACTED_TRACE_ERROR_MESSAGE
     try:
         return str(error)

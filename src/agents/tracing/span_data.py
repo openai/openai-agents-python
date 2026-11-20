@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+from ._content import bound_content
+from .config import OperationDetail, get_operation_detail
 
 if TYPE_CHECKING:
     from openai.types.responses import Response, ResponseInputItemParam
@@ -132,13 +136,45 @@ class TurnSpanData(SpanData):
         }
 
 
+@dataclass(slots=True)
+class OperationMetadata:
+    """Capture permission and source facts for one model call or tool execution."""
+
+    detail: OperationDetail | None = field(default_factory=get_operation_detail)
+    api_type: str | None = None
+    model: str | None = None
+    response_model: str | None = None
+    response_id: str | None = None
+    previous_response_id: str | None = None
+    tool_call_id: str | None = None
+    operation_id: str | None = None
+    outcome: str | None = None
+    estimated_end: bool = False
+
+    def export(self) -> dict[str, Any]:
+        """Supply detailed operation facts alongside the existing hosted span schema."""
+        values = {
+            "detail": self.detail,
+            "api_type": self.api_type,
+            "model": self.model,
+            "response_model": self.response_model,
+            "response_id": self.response_id,
+            "previous_response_id": self.previous_response_id,
+            "tool_call_id": self.tool_call_id,
+            "operation_id": self.operation_id,
+            "outcome": self.outcome,
+            "estimated_end": True if self.estimated_end else None,
+        }
+        return {key: value for key, value in values.items() if value is not None}
+
+
 class FunctionSpanData(SpanData):
     """
     Represents a Function Span in the trace.
     Includes input, output and MCP data (if applicable).
     """
 
-    __slots__ = ("name", "input", "output", "mcp_data")
+    __slots__ = ("name", "_input", "_output", "mcp_data", "operation")
 
     def __init__(
         self,
@@ -148,9 +184,33 @@ class FunctionSpanData(SpanData):
         mcp_data: dict[str, Any] | None = None,
     ):
         self.name = name
+        self.operation = OperationMetadata()
         self.input = input
         self.output = output
         self.mcp_data = mcp_data
+
+    def _capture(self, value: Any) -> Any:
+        if self.operation.detail == "metadata":
+            return None
+        if self.operation.detail == "content" and value is not None:
+            return bound_content(value)
+        return value
+
+    @property
+    def input(self) -> str | None:
+        return self._input
+
+    @input.setter
+    def input(self, value: str | None) -> None:
+        self._input: str | None = self._capture(value)
+
+    @property
+    def output(self) -> Any:
+        return self._output
+
+    @output.setter
+    def output(self, value: Any) -> None:
+        self._output = self._capture(value)
 
     @property
     def type(self) -> str:
@@ -179,6 +239,7 @@ class GenerationSpanData(SpanData):
         "model_config",
         "usage",
         "tools",
+        "operation",
     )
 
     def __init__(
@@ -194,6 +255,7 @@ class GenerationSpanData(SpanData):
         self.output = output
         self.model = model
         self.model_config = model_config
+        self.operation = OperationMetadata(model=model)
         self.usage = usage
         self.tools = tools
 
@@ -219,7 +281,7 @@ class ResponseSpanData(SpanData):
     Includes response and input.
     """
 
-    __slots__ = ("response", "input", "usage", "_response_id")
+    __slots__ = ("response", "input", "usage", "_response_id", "operation")
 
     def __init__(
         self,
@@ -233,15 +295,19 @@ class ResponseSpanData(SpanData):
         self.input = input
         self.usage = usage
         self._response_id: str | None = None
+        self.operation = OperationMetadata()
 
     @property
     def type(self) -> str:
         return "response"
 
     def export(self) -> dict[str, Any]:
+        response_id = self.response.id if self.response is not None else self._response_id
+        if self.operation.operation_id is not None:
+            response_id = self.operation.response_id
         return {
             "type": self.type,
-            "response_id": (self.response.id if self.response is not None else self._response_id),
+            "response_id": response_id,
             "usage": self.usage,
         }
 

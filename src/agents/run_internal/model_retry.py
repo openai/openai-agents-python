@@ -35,6 +35,7 @@ from ..retry import (
     _coerce_backoff_settings,
     retry_policy_retries_safe_transport_errors,
 )
+from ..tracing._model import ModelRetrySpans, model_retry_scope
 from ..usage import RequestUsage, Usage
 from ..util._error_tracing import mark_model_timeout_task
 
@@ -619,91 +620,96 @@ async def get_response_with_retry(
         conversation_id=conversation_id,
     )
 
-    while True:
-        try:
-            # Keep provider retries on the initial attempt, but disable them on explicit
-            # no-retry settings and on any replay attempt that the runner manages itself.
-            with (
-                provider_managed_retries_disabled(
-                    _should_disable_provider_managed_retries(
-                        retry_settings,
-                        attempt=request_attempt,
-                        stateful_request=stateful_request,
-                        replay_unsafe_request=replay_unsafe_request,
-                    )
-                ),
-                websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
-            ):
-                response = await _await_model_attempt(get_response(), timeout)
-            response.usage = apply_retry_attempt_usage(
-                response.usage, request_attempt - 1, reported_usage
-            )
-            return response
-        except Exception as error:
-            if isinstance(error, ModelBehaviorError) and error._terminal_usage is not None:
-                reported_usage[request_attempt] = error._terminal_usage
-            if (
-                not replay_unsafe_request
-                and _is_conversation_locked_error(error)
-                and _should_preserve_conversation_locked_compatibility(retry_settings)
-            ):
-                # Preserve the historical conversation_locked retry path for backward
-                # compatibility, including when callers enable retry policies for unrelated
-                # failures. Callers can explicitly opt out of this compatibility behavior with
-                # max_retries=0.
-                if compatibility_retries_taken < COMPATIBILITY_CONVERSATION_LOCKED_RETRIES:
-                    compatibility_retries_taken += 1
-                    delay = 1.0 * (2 ** (compatibility_retries_taken - 1))
-                    logger.debug(
-                        "Conversation locked, retrying in %ss (attempt %s/%s).",
-                        delay,
-                        compatibility_retries_taken,
-                        COMPATIBILITY_CONVERSATION_LOCKED_RETRIES,
-                    )
-                    await rewind()
-                    await _sleep_for_retry(delay)
-                    request_attempt += 1
-                    continue
+    model_spans = ModelRetrySpans()
+    try:
+        while True:
+            try:
+                # Keep provider retries on the initial attempt, but disable them on explicit
+                # no-retry settings and on any replay attempt that the runner manages itself.
+                with (
+                    provider_managed_retries_disabled(
+                        _should_disable_provider_managed_retries(
+                            retry_settings,
+                            attempt=request_attempt,
+                            stateful_request=stateful_request,
+                            replay_unsafe_request=replay_unsafe_request,
+                        )
+                    ),
+                    websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
+                    model_retry_scope(model_spans, request_attempt),
+                ):
+                    response = await _await_model_attempt(get_response(), timeout)
+                response.usage = apply_retry_attempt_usage(
+                    response.usage, request_attempt - 1, reported_usage
+                )
+                return response
+            except Exception as error:
+                if isinstance(error, ModelBehaviorError) and error._terminal_usage is not None:
+                    reported_usage[request_attempt] = error._terminal_usage
+                if (
+                    not replay_unsafe_request
+                    and _is_conversation_locked_error(error)
+                    and _should_preserve_conversation_locked_compatibility(retry_settings)
+                ):
+                    # Preserve the historical conversation_locked retry path for backward
+                    # compatibility, including when callers enable retry policies for unrelated
+                    # failures. Callers can explicitly opt out of this compatibility behavior with
+                    # max_retries=0.
+                    if compatibility_retries_taken < COMPATIBILITY_CONVERSATION_LOCKED_RETRIES:
+                        compatibility_retries_taken += 1
+                        delay = 1.0 * (2 ** (compatibility_retries_taken - 1))
+                        logger.debug(
+                            "Conversation locked, retrying in %ss (attempt %s/%s).",
+                            delay,
+                            compatibility_retries_taken,
+                            COMPATIBILITY_CONVERSATION_LOCKED_RETRIES,
+                        )
+                        await rewind()
+                        await _sleep_for_retry(delay)
+                        request_attempt += 1
+                        continue
 
-            provider_advice = get_retry_advice(
-                ModelRetryAdviceRequest(
+                provider_advice = get_retry_advice(
+                    ModelRetryAdviceRequest(
+                        error=error,
+                        attempt=policy_attempt,
+                        stream=False,
+                        previous_response_id=previous_response_id,
+                        conversation_id=conversation_id,
+                    )
+                )
+                decision = await _evaluate_retry(
                     error=error,
                     attempt=policy_attempt,
+                    max_retries=(
+                        max(retry_settings.max_retries or 0, 0) if retry_settings is not None else 0
+                    ),
+                    retry_policy=retry_settings.policy if retry_settings is not None else None,
+                    retry_backoff=retry_settings.backoff if retry_settings is not None else None,
                     stream=False,
+                    replay_unsafe_request=replay_unsafe_request,
+                    emitted_retry_unsafe_event=False,
+                    provider_advice=provider_advice,
                     previous_response_id=previous_response_id,
                     conversation_id=conversation_id,
                 )
-            )
-            decision = await _evaluate_retry(
-                error=error,
-                attempt=policy_attempt,
-                max_retries=(
-                    max(retry_settings.max_retries or 0, 0) if retry_settings is not None else 0
-                ),
-                retry_policy=retry_settings.policy if retry_settings is not None else None,
-                retry_backoff=retry_settings.backoff if retry_settings is not None else None,
-                stream=False,
-                replay_unsafe_request=replay_unsafe_request,
-                emitted_retry_unsafe_event=False,
-                provider_advice=provider_advice,
-                previous_response_id=previous_response_id,
-                conversation_id=conversation_id,
-            )
-            if not decision.retry:
-                raise
+                if not decision.retry:
+                    raise
 
-            logger.debug(
-                "Retrying failed model request in %ss (attempt %s/%s).",
-                decision.delay,
-                policy_attempt,
-                retry_settings.max_retries
-                if retry_settings is not None and retry_settings.max_retries is not None
-                else 0,
-            )
-            await rewind()
-            await _sleep_for_retry(decision.delay or 0.0)
-            request_attempt += 1
-            policy_attempt += 1
+                logger.debug(
+                    "Retrying failed model request in %ss (attempt %s/%s).",
+                    decision.delay,
+                    policy_attempt,
+                    retry_settings.max_retries
+                    if retry_settings is not None and retry_settings.max_retries is not None
+                    else 0,
+                )
+                await rewind()
+                await _sleep_for_retry(decision.delay or 0.0)
+                request_attempt += 1
+                policy_attempt += 1
+    finally:
+        model_spans.finish()
 
 
 async def stream_response_with_retry(
@@ -730,192 +736,205 @@ async def stream_response_with_retry(
         conversation_id=conversation_id,
     )
 
-    while True:
-        emitted_retry_unsafe_event = False
-        event: TResponseStreamEvent | None = None
-        stream: AsyncIterator[TResponseStreamEvent] | None = None
-        stream_owner: asyncio.Task[None] | None = None
-        deadline = asyncio.get_running_loop().time() + timeout if timeout is not None else None
-        try:
-            disable_provider_managed_retries = _should_disable_provider_managed_retries(
-                retry_settings,
-                attempt=request_attempt,
-                stateful_request=stateful_request,
-                replay_unsafe_request=replay_unsafe_request,
-            )
-            stream_requests: asyncio.Queue[None] | None = None
-            stream_results: (
-                asyncio.Queue[tuple[str, TResponseStreamEvent | BaseException | None]] | None
-            ) = None
-            if timeout is None:
-                # Pull stream events under the retry-disable context, but yield them outside it
-                # so unrelated model calls made by the consumer do not inherit this setting.
-                with (
-                    provider_managed_retries_disabled(disable_provider_managed_retries),
-                    websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
-                ):
-                    stream = get_stream()
-            else:
-                stream_requests = asyncio.Queue()
-                stream_results = asyncio.Queue()
-                with (
-                    provider_managed_retries_disabled(disable_provider_managed_retries),
-                    websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
-                ):
-                    stream_owner = asyncio.create_task(
-                        _run_stream_attempt_in_one_task(
-                            get_stream,
-                            stream_requests,
-                            stream_results,
-                        )
-                    )
+    model_spans = ModelRetrySpans()
+    try:
+        while True:
+            emitted_retry_unsafe_event = False
+            event: TResponseStreamEvent | None = None
+            stream: AsyncIterator[TResponseStreamEvent] | None = None
+            stream_owner: asyncio.Task[None] | None = None
+            deadline = asyncio.get_running_loop().time() + timeout if timeout is not None else None
             try:
-                while True:
-                    try:
-                        if timeout is None:
-                            assert stream is not None
-                            with (
-                                provider_managed_retries_disabled(disable_provider_managed_retries),
-                                websocket_pre_event_retries_disabled(
-                                    disable_websocket_pre_event_retry
-                                ),
-                            ):
-                                event = await stream.__anext__()
-                        else:
-                            assert stream_owner is not None
-                            assert stream_requests is not None
-                            assert stream_results is not None
-                            assert deadline is not None
-                            stream_requests.put_nowait(None)
-                            remaining = max(deadline - asyncio.get_running_loop().time(), 0.0)
-                            try:
-                                result_kind, result_value = await _await_model_attempt(
-                                    stream_results.get(),
-                                    remaining,
-                                    timeout_error_seconds=timeout,
-                                )
-                            except ModelTimeoutError as error:
-                                await _cancel_and_drain_model_attempt_task(
-                                    stream_owner,
-                                    error,
-                                    cancel_cleanup=True,
-                                )
-                                raise
-                            except asyncio.CancelledError:
-                                await _cancel_and_drain_model_attempt_task(stream_owner)
-                                raise
-                            if result_kind == "done":
+                disable_provider_managed_retries = _should_disable_provider_managed_retries(
+                    retry_settings,
+                    attempt=request_attempt,
+                    stateful_request=stateful_request,
+                    replay_unsafe_request=replay_unsafe_request,
+                )
+                stream_requests: asyncio.Queue[None] | None = None
+                stream_results: (
+                    asyncio.Queue[tuple[str, TResponseStreamEvent | BaseException | None]] | None
+                ) = None
+                if timeout is None:
+                    # Pull stream events under the retry-disable context, but yield them outside it
+                    # so unrelated model calls made by the consumer do not inherit this setting.
+                    with (
+                        provider_managed_retries_disabled(disable_provider_managed_retries),
+                        websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
+                        model_retry_scope(model_spans, request_attempt),
+                    ):
+                        stream = get_stream()
+                else:
+                    stream_requests = asyncio.Queue()
+                    stream_results = asyncio.Queue()
+                    with (
+                        provider_managed_retries_disabled(disable_provider_managed_retries),
+                        websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
+                        model_retry_scope(model_spans, request_attempt),
+                    ):
+                        stream_owner = asyncio.create_task(
+                            _run_stream_attempt_in_one_task(
+                                get_stream,
+                                stream_requests,
+                                stream_results,
+                            )
+                        )
+                try:
+                    while True:
+                        try:
+                            if timeout is None:
+                                assert stream is not None
+                                with (
+                                    provider_managed_retries_disabled(
+                                        disable_provider_managed_retries
+                                    ),
+                                    websocket_pre_event_retries_disabled(
+                                        disable_websocket_pre_event_retry
+                                    ),
+                                    model_retry_scope(model_spans, request_attempt),
+                                ):
+                                    event = await stream.__anext__()
+                            else:
+                                assert stream_owner is not None
+                                assert stream_requests is not None
+                                assert stream_results is not None
+                                assert deadline is not None
+                                stream_requests.put_nowait(None)
                                 remaining = max(deadline - asyncio.get_running_loop().time(), 0.0)
-                                await _await_model_attempt(
-                                    stream_owner,
-                                    remaining,
-                                    timeout_error_seconds=timeout,
-                                )
-                                return
-                            if result_kind == "error":
-                                remaining = max(deadline - asyncio.get_running_loop().time(), 0.0)
-                                await _await_model_attempt(
-                                    stream_owner,
-                                    remaining,
-                                    timeout_error_seconds=timeout,
-                                )
-                                assert isinstance(result_value, BaseException)
-                                raise result_value
-                            assert result_kind == "event"
-                            assert result_value is not None
-                            assert not isinstance(result_value, BaseException)
-                            event = result_value
-                    except StopAsyncIteration:
-                        if stream_owner is None:
-                            await _close_async_iterator_quietly(stream)
-                        return
-                    if _stream_event_blocks_retry(event):
-                        emitted_retry_unsafe_event = True
-                    if failed_retry_attempts_out is not None:
-                        failed_retry_attempts_out[:] = [
-                            failed_policy_attempts + compatibility_retries_taken
-                        ]
-                    yield event
-            finally:
-                if stream_owner is not None and not stream_owner.done():
-                    await _cancel_and_drain_model_attempt_task(stream_owner)
-            return
-        except _StreamAttemptSkipped as skipped:
-            raise skipped.reason from None
-        except BaseException as error:
-            if isinstance(error, ModelTimeoutError):
-                # The timed owner has already been cancelled and drained. Do not retain its
-                # task, result queues, or previous event in the public timeout traceback frame.
-                stream = None
-                stream_owner = None
-                stream_requests = None
-                stream_results = None
-                event = None
-                result_value = None
-            if stream_owner is None:
-                await _close_async_iterator_quietly(stream)
-            if isinstance(error, asyncio.CancelledError | GeneratorExit):
-                raise
-            if not isinstance(error, Exception):
-                raise
-            if (
-                not replay_unsafe_request
-                and _is_conversation_locked_error(error)
-                and _should_preserve_conversation_locked_compatibility(retry_settings)
-            ):
-                if compatibility_retries_taken < COMPATIBILITY_CONVERSATION_LOCKED_RETRIES:
-                    compatibility_retries_taken += 1
-                    delay = 1.0 * (2 ** (compatibility_retries_taken - 1))
-                    logger.debug(
-                        (
-                            "Conversation locked during streamed request, retrying in %ss "
-                            "(attempt %s/%s)."
-                        ),
-                        delay,
-                        compatibility_retries_taken,
-                        COMPATIBILITY_CONVERSATION_LOCKED_RETRIES,
+                                try:
+                                    result_kind, result_value = await _await_model_attempt(
+                                        stream_results.get(),
+                                        remaining,
+                                        timeout_error_seconds=timeout,
+                                    )
+                                except ModelTimeoutError as error:
+                                    await _cancel_and_drain_model_attempt_task(
+                                        stream_owner,
+                                        error,
+                                        cancel_cleanup=True,
+                                    )
+                                    raise
+                                except asyncio.CancelledError:
+                                    await _cancel_and_drain_model_attempt_task(stream_owner)
+                                    raise
+                                if result_kind == "done":
+                                    remaining = max(
+                                        deadline - asyncio.get_running_loop().time(), 0.0
+                                    )
+                                    await _await_model_attempt(
+                                        stream_owner,
+                                        remaining,
+                                        timeout_error_seconds=timeout,
+                                    )
+                                    return
+                                if result_kind == "error":
+                                    remaining = max(
+                                        deadline - asyncio.get_running_loop().time(), 0.0
+                                    )
+                                    await _await_model_attempt(
+                                        stream_owner,
+                                        remaining,
+                                        timeout_error_seconds=timeout,
+                                    )
+                                    assert isinstance(result_value, BaseException)
+                                    raise result_value
+                                assert result_kind == "event"
+                                assert result_value is not None
+                                assert not isinstance(result_value, BaseException)
+                                event = result_value
+                        except StopAsyncIteration:
+                            if stream_owner is None:
+                                await _close_async_iterator_quietly(stream)
+                            return
+                        if _stream_event_blocks_retry(event):
+                            emitted_retry_unsafe_event = True
+                        if failed_retry_attempts_out is not None:
+                            failed_retry_attempts_out[:] = [
+                                failed_policy_attempts + compatibility_retries_taken
+                            ]
+                        yield event
+                finally:
+                    if stream_owner is not None and not stream_owner.done():
+                        await _cancel_and_drain_model_attempt_task(stream_owner)
+                return
+            except _StreamAttemptSkipped as skipped:
+                raise skipped.reason from None
+            except BaseException as error:
+                if isinstance(error, ModelTimeoutError):
+                    # The timed owner has already been cancelled and drained. Do not retain its
+                    # task, result queues, or previous event in the public timeout traceback frame.
+                    stream = None
+                    stream_owner = None
+                    stream_requests = None
+                    stream_results = None
+                    event = None
+                    result_value = None
+                if stream_owner is None:
+                    await _close_async_iterator_quietly(stream)
+                if isinstance(error, asyncio.CancelledError | GeneratorExit):
+                    raise
+                if not isinstance(error, Exception):
+                    raise
+                if (
+                    not replay_unsafe_request
+                    and _is_conversation_locked_error(error)
+                    and _should_preserve_conversation_locked_compatibility(retry_settings)
+                ):
+                    if compatibility_retries_taken < COMPATIBILITY_CONVERSATION_LOCKED_RETRIES:
+                        compatibility_retries_taken += 1
+                        delay = 1.0 * (2 ** (compatibility_retries_taken - 1))
+                        logger.debug(
+                            (
+                                "Conversation locked during streamed request, retrying in %ss "
+                                "(attempt %s/%s)."
+                            ),
+                            delay,
+                            compatibility_retries_taken,
+                            COMPATIBILITY_CONVERSATION_LOCKED_RETRIES,
+                        )
+                        await rewind()
+                        await _sleep_for_retry(delay)
+                        request_attempt += 1
+                        continue
+                provider_advice = get_retry_advice(
+                    ModelRetryAdviceRequest(
+                        error=error,
+                        attempt=policy_attempt,
+                        stream=True,
+                        previous_response_id=previous_response_id,
+                        conversation_id=conversation_id,
                     )
-                    await rewind()
-                    await _sleep_for_retry(delay)
-                    request_attempt += 1
-                    continue
-            provider_advice = get_retry_advice(
-                ModelRetryAdviceRequest(
+                )
+                decision = await _evaluate_retry(
                     error=error,
                     attempt=policy_attempt,
+                    max_retries=(
+                        max(retry_settings.max_retries or 0, 0) if retry_settings is not None else 0
+                    ),
+                    retry_policy=retry_settings.policy if retry_settings is not None else None,
+                    retry_backoff=retry_settings.backoff if retry_settings is not None else None,
                     stream=True,
+                    replay_unsafe_request=replay_unsafe_request,
+                    emitted_retry_unsafe_event=emitted_retry_unsafe_event,
+                    provider_advice=provider_advice,
                     previous_response_id=previous_response_id,
                     conversation_id=conversation_id,
                 )
-            )
-            decision = await _evaluate_retry(
-                error=error,
-                attempt=policy_attempt,
-                max_retries=(
-                    max(retry_settings.max_retries or 0, 0) if retry_settings is not None else 0
-                ),
-                retry_policy=retry_settings.policy if retry_settings is not None else None,
-                retry_backoff=retry_settings.backoff if retry_settings is not None else None,
-                stream=True,
-                replay_unsafe_request=replay_unsafe_request,
-                emitted_retry_unsafe_event=emitted_retry_unsafe_event,
-                provider_advice=provider_advice,
-                previous_response_id=previous_response_id,
-                conversation_id=conversation_id,
-            )
-            if not decision.retry:
-                raise
+                if not decision.retry:
+                    raise
 
-            logger.debug(
-                "Retrying failed streamed model request in %ss (attempt %s/%s).",
-                decision.delay,
-                policy_attempt,
-                retry_settings.max_retries
-                if retry_settings is not None and retry_settings.max_retries is not None
-                else 0,
-            )
-            await rewind()
-            await _sleep_for_retry(decision.delay or 0.0)
-            request_attempt += 1
-            policy_attempt += 1
-            failed_policy_attempts += 1
+                logger.debug(
+                    "Retrying failed streamed model request in %ss (attempt %s/%s).",
+                    decision.delay,
+                    policy_attempt,
+                    retry_settings.max_retries
+                    if retry_settings is not None and retry_settings.max_retries is not None
+                    else 0,
+                )
+                await rewind()
+                await _sleep_for_retry(decision.delay or 0.0)
+                request_attempt += 1
+                policy_attempt += 1
+                failed_policy_attempts += 1
+    finally:
+        model_spans.finish()

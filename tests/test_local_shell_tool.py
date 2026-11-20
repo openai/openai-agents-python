@@ -32,6 +32,7 @@ from agents.testing import ScriptedModel
 from tests.model_test_helpers import get_response_obj
 
 from .test_responses import get_text_message
+from .testing_processor import fetch_ordered_spans
 
 
 class RecordingLocalShellExecutor:
@@ -186,6 +187,10 @@ async def test_runner_executes_local_shell_calls() -> None:
 
     result = await Runner.run(agent, input="please run shell")
 
+    (span,) = [s for s in fetch_ordered_spans() if s.span_data.type == "function"]
+    assert span.span_data.name == tool.name
+    assert span.span_data.operation.tool_call_id == "call_local_shell"
+    assert span.span_data.operation.outcome == "completed"
     assert len(executor.calls) == 1
     request = executor.calls[0]
     assert isinstance(request, LocalShellCommandRequest)

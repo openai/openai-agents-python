@@ -174,6 +174,28 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
                     diagnostic_extra=partial(_processor_diagnostic_extra, processor),
                 )
 
+    def on_span_scope_enter(self, span: Span[Any]) -> object:
+        entered: list[tuple[TracingProcessor, object]] = []
+        for processor in self._processors:
+            callback = getattr(processor, "on_span_scope_enter", None)
+            if callback is None:
+                continue
+            try:
+                token = callback(span)
+                if token is not None:
+                    entered.append((processor, token))
+            except Exception:
+                logger.warning("Error in trace processor during scope entry")
+        return entered
+
+    def on_span_scope_exit(self, span: Span[Any], token: object) -> None:
+        # Restore the processors that entered, even if registration changed meanwhile.
+        for processor, scope_token in reversed(cast(list[tuple[TracingProcessor, object]], token)):
+            try:
+                processor.on_span_scope_exit(span, scope_token)
+            except Exception:
+                logger.warning("Error in trace processor during scope exit")
+
     def shutdown(self, timeout: float | None = None) -> None:
         """
         Called when the application stops.

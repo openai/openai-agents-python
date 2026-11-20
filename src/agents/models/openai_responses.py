@@ -74,7 +74,11 @@ from ..tool import (
     validate_responses_programmatic_tool_calling_configuration,
     validate_responses_tool_search_configuration,
 )
-from ..tracing import SpanError, response_span
+from ..tracing._content import bound_content
+from ..tracing._model import ModelSpan, finish_model_span, model_span, record_model_input
+from ..tracing.scope import Scope
+from ..tracing.span_data import GenerationSpanData, ResponseSpanData
+from ..tracing.util import time_iso
 from ..usage import (
     Usage,
     _attach_raw_usage_snapshot,
@@ -182,6 +186,68 @@ def _materialize_responses_tool_params(
     for tool in materialized:
         typed_tools.append(_require_responses_tool_param(tool))
     return typed_tools
+
+
+def _record_response_id(span: ModelSpan, response_id: str) -> None:
+    span.span_data.operation.response_id = response_id
+    if isinstance(span.span_data, ResponseSpanData):
+        span.span_data._response_id = response_id
+
+
+def _record_response_operation(
+    span: ModelSpan,
+    response: Response,
+    input: str | list[TResponseInputItem],
+    tracing: ModelTracing,
+    *,
+    outcome: Literal["completed", "failed"] = "completed",
+) -> None:
+    data = span.span_data
+    data.operation.response_model = getattr(response, "model", None)
+    data.operation.outcome = outcome
+    if tracing.include_data():
+        data.operation.response_id = response.id
+    if isinstance(data, ResponseSpanData):
+        if tracing.include_data() and outcome == "completed":
+            data.response = response
+            data.input = input
+    elif data.operation.detail == "content":
+        data.output = bound_content([item.model_dump(mode="json") for item in response.output])
+
+
+def _record_prepared_request(request: Mapping[str, Any]) -> None:
+    span = Scope.get_current_span()
+    if span is None or not isinstance(span.span_data, (GenerationSpanData, ResponseSpanData)):
+        return
+    data = span.span_data
+    model = request.get("model")
+    data.operation.model = model if isinstance(model, str) else None
+    if isinstance(data, GenerationSpanData):
+        data.model = data.operation.model
+    if not isinstance(data, GenerationSpanData) or data.operation.detail != "content":
+        return
+    record_model_input(data, dict(request))
+
+
+def _record_failed_response(response: Response, *, response_id_trusted: bool) -> None:
+    span = Scope.get_current_span()
+    if span is None or not isinstance(span.span_data, (GenerationSpanData, ResponseSpanData)):
+        return
+    data = span.span_data
+    if isinstance(data, GenerationSpanData):
+        _record_response_operation(
+            span,
+            response,
+            [],
+            ModelTracing.ENABLED
+            if data.operation.detail == "content"
+            else ModelTracing.ENABLED_WITHOUT_DATA,
+            outcome="failed",
+        )
+        if response_id_trusted:
+            data.operation.response_id = response.id
+    else:
+        data.operation.response_model = getattr(response, "model", None)
 
 
 async def _refresh_openai_client_api_key_if_supported(client: Any) -> None:
@@ -622,7 +688,7 @@ class OpenAIResponsesModel(Model):
         conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
-        with response_span(disabled=tracing.is_disabled()) as span_response:
+        with model_span(tracing, self.model) as span_response:
             try:
                 redacted_response_id_endpoint_is_trusted = (
                     not tracing.include_data()
@@ -658,14 +724,12 @@ class OpenAIResponsesModel(Model):
                 if response.usage is not None or usage.requests:
                     span_response.span_data.usage = model_usage_to_span_usage(usage)
 
-                if tracing.include_data():
-                    span_response.span_data.response = response
-                    span_response.span_data.input = input
-                elif (
+                _record_response_operation(span_response, response, input, tracing)
+                if (
                     redacted_response_id_endpoint_is_trusted
                     and self._uses_official_openai_endpoint()
                 ):
-                    span_response.span_data._response_id = response.id
+                    _record_response_id(span_response, response.id)
             except asyncio.CancelledError:
                 record_current_task_model_timeout_on_span(
                     span_response,
@@ -676,15 +740,11 @@ class OpenAIResponsesModel(Model):
             except Exception as e:
                 if isinstance(e, ModelBehaviorError) and e._terminal_usage is not None:
                     span_response.span_data.usage = model_usage_to_span_usage(e._terminal_usage)
-                span_response.set_error(
-                    SpanError(
-                        message="Error getting response",
-                        data={
-                            "error": str(e)
-                            if tracing.include_data()
-                            else "Error details are redacted.",
-                        },
-                    )
+                record_model_error_on_span(
+                    span_response,
+                    message="Error getting response",
+                    error=e,
+                    trace_include_sensitive_data=tracing.include_data(),
                 )
                 message = "Error getting response"
                 if not _debug.DONT_LOG_MODEL_DATA:
@@ -720,7 +780,8 @@ class OpenAIResponsesModel(Model):
         """
         Yields a partial message as it is generated, as well as the usage information.
         """
-        with response_span(disabled=tracing.is_disabled()) as span_response:
+        with model_span(tracing, self.model) as span_response:
+            terminal_ended_at: str | None = None
             try:
                 redacted_response_id_endpoint_is_trusted = (
                     not tracing.include_data()
@@ -748,12 +809,13 @@ class OpenAIResponsesModel(Model):
                     async for chunk in stream:
                         chunk_type = getattr(chunk, "type", None)
                         if isinstance(chunk, ResponseCompletedEvent):
+                            terminal_ended_at = time_iso()
                             final_response = chunk.response
                             if (
                                 redacted_response_id_endpoint_is_trusted
                                 and self._uses_official_openai_endpoint()
                             ):
-                                span_response.span_data._response_id = chunk.response.id
+                                _record_response_id(span_response, chunk.response.id)
                             if model_settings.preserve_raw_usage is True:
                                 _attach_raw_usage_snapshot(chunk.response, chunk.response.usage)
                             usage = _usage_from_response(chunk.response)
@@ -761,17 +823,30 @@ class OpenAIResponsesModel(Model):
                                 # Record before yielding the terminal event because consumers may
                                 # close the generator immediately after receiving it.
                                 span_response.span_data.usage = model_usage_to_span_usage(usage)
-                            if tracing.include_data():
-                                # Same reason as usage: a consumer that stops at the terminal
-                                # event closes the generator and never reaches the post-loop
-                                # assignment, so record the model I/O before yielding.
-                                span_response.span_data.response = chunk.response
-                                span_response.span_data.input = input
+                            _record_response_operation(
+                                span_response, chunk.response, input, tracing
+                            )
                         elif chunk_type in {
                             "response.failed",
                             "response.incomplete",
                         }:
+                            terminal_ended_at = time_iso()
                             terminal_response = getattr(chunk, "response", None)
+                            if isinstance(terminal_response, Response):
+                                _record_response_operation(
+                                    span_response,
+                                    terminal_response,
+                                    input,
+                                    tracing,
+                                    outcome="failed",
+                                )
+                                if (
+                                    redacted_response_id_endpoint_is_trusted
+                                    and self._uses_official_openai_endpoint()
+                                ):
+                                    span_response.span_data.operation.response_id = (
+                                        terminal_response.id
+                                    )
                             terminal_failure_error = response_terminal_failure_error(
                                 cast(str, chunk_type),
                                 terminal_response
@@ -783,6 +858,7 @@ class OpenAIResponsesModel(Model):
                                     terminal_failure_error._terminal_usage
                                 )
                         elif chunk_type in {"error", "response.error"}:
+                            terminal_ended_at = time_iso()
                             terminal_failure_error = response_error_event_failure_error(
                                 cast(str, chunk_type),
                                 chunk,
@@ -796,6 +872,7 @@ class OpenAIResponsesModel(Model):
                         }:
                             yielded_terminal_event = True
                             if terminal_failure_error is not None:
+                                span_response.span_data.operation.outcome = "failed"
                                 # A consumer that stops at this event closes the
                                 # generator, which raises GeneratorExit at the yield
                                 # below and skips the raise after the loop, so the
@@ -831,9 +908,8 @@ class OpenAIResponsesModel(Model):
                 if terminal_failure_error is not None:
                     raise terminal_failure_error
 
-                if final_response is not None and tracing.include_data():
-                    span_response.span_data.response = final_response
-                    span_response.span_data.input = input
+                if final_response is not None:
+                    _record_response_operation(span_response, final_response, input, tracing)
             except asyncio.CancelledError:
                 record_current_task_model_timeout_on_span(
                     span_response,
@@ -842,18 +918,17 @@ class OpenAIResponsesModel(Model):
                 )
                 raise
             except Exception as e:
-                span_response.set_error(
-                    SpanError(
-                        message="Error streaming response",
-                        data={
-                            "error": str(e)
-                            if tracing.include_data()
-                            else "Error details are redacted.",
-                        },
-                    )
+                record_model_error_on_span(
+                    span_response,
+                    message="Error streaming response",
+                    error=e,
+                    trace_include_sensitive_data=tracing.include_data(),
                 )
                 log_model_action_error(logger, "Error streaming response", e)
                 raise
+            finally:
+                if terminal_ended_at is not None:
+                    finish_model_span(span_response, ended_at=terminal_ended_at)
 
     @overload
     async def _fetch_response(
@@ -910,11 +985,23 @@ class OpenAIResponsesModel(Model):
             stream=stream,
             prompt=prompt,
         )
+        prepared_request = dict(create_kwargs)
+        extra_body = prepared_request.get("extra_body")
+        if isinstance(extra_body, Mapping):
+            prepared_request.update(extra_body)
+        _record_prepared_request(prepared_request)
         client = self._get_client()
 
         if not stream:
+            response_id_trusted = self._uses_official_openai_endpoint()
             response = await client.responses.create(**create_kwargs)
             if getattr(response, "status", None) in {"failed", "incomplete"}:
+                _record_failed_response(
+                    response,
+                    response_id_trusted=(
+                        response_id_trusted and self._uses_official_openai_endpoint()
+                    ),
+                )
                 raise response_terminal_failure_error(f"response.{response.status}", response)
             _mark_transport_request_without_usage(response)
             return cast(Response, response)
@@ -1344,6 +1431,7 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
 
         final_response: Response | None = None
         terminal_event_type: str | None = None
+        response_id_trusted = self._uses_official_openai_endpoint()
         async for event in self._iter_websocket_response_events(create_kwargs):
             event_type = getattr(event, "type", None)
             if isinstance(event, ResponseCompletedEvent):
@@ -1352,6 +1440,13 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
             elif event_type in {"response.incomplete", "response.failed"}:
                 terminal_event_type = cast(str, event_type)
                 terminal_response = getattr(event, "response", None)
+                if isinstance(terminal_response, Response):
+                    _record_failed_response(
+                        terminal_response,
+                        response_id_trusted=(
+                            response_id_trusted and self._uses_official_openai_endpoint()
+                        ),
+                    )
                 raise response_terminal_failure_error(
                     terminal_event_type,
                     terminal_response if isinstance(terminal_response, Response) else None,
@@ -1390,6 +1485,7 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
             request_frame, ws_url, request_headers = await self._prepare_websocket_request(
                 create_kwargs
             )
+            _record_prepared_request(request_frame)
             retry_pre_event_disconnect = _should_retry_pre_event_websocket_disconnect()
             while True:
                 connection: Any = None
