@@ -489,10 +489,10 @@ async def _exercise(
         assert otel_index[database.parent.span_id] in executions
         python_execution = otel_index[database.parent.span_id]
         callback_started, callback_ended = callback_intervals[0]
-        assert python_execution.start_time <= callback_started
-        assert python_execution.end_time >= callback_ended
-        assert python_execution.start_time <= database.start_time <= database.end_time
-        assert database.end_time <= python_execution.end_time
+        # The SDK records the tool interval with datetime's microsecond precision.
+        assert python_execution.start_time // 1_000 <= callback_started // 1_000
+        assert callback_started <= database.start_time <= database.end_time <= callback_ended
+        assert callback_ended // 1_000 <= python_execution.end_time // 1_000
         if models:
             assert _ns(models[0].ended_at) <= callback_started + 1_000_000
         for span in otel:
