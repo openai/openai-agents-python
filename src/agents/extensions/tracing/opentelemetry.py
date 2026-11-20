@@ -82,7 +82,7 @@ def _messages(value: Any, *, output: bool = False) -> list[dict[str, Any]]:
                 if isinstance(item.get(flag), bool):
                     part[flag] = item[flag]
             parts.append(part)
-        elif item.get("truncated") is True:
+        elif item.get("truncated") is True and "content" not in item and "tool_calls" not in item:
             parts.append({"type": "openai.omitted", "reason": "truncated"})
         elif kind in ("function_call", "custom_tool_call"):
             role = "assistant"
@@ -105,7 +105,11 @@ def _messages(value: Any, *, output: bool = False) -> list[dict[str, Any]]:
             )
         elif kind == "message":
             content = item.get("content")
-            if isinstance(content, str):
+            if role == "tool" and "tool_call_id" in item:
+                parts.append(
+                    {"type": "tool_call_response", "id": item["tool_call_id"], "response": content}
+                )
+            elif isinstance(content, str):
                 parts.append({"type": "text", "content": content})
             elif isinstance(content, Sequence):
                 for part in content:
@@ -116,6 +120,18 @@ def _messages(value: Any, *, output: bool = False) -> list[dict[str, Any]]:
                     else:
                         # Preserve part order without exporting media or hidden reasoning.
                         parts.append({"type": "openai.omitted", "reason": "unsupported_content"})
+            for call in item.get("tool_calls") or ():
+                if not isinstance(call, Mapping) or call.get("type") != "function":
+                    continue
+                function = call.get("function")
+                if isinstance(function, Mapping):
+                    canonical = {
+                        "type": "function_call",
+                        "call_id": call.get("id"),
+                        "name": function.get("name", ""),
+                        "arguments": function.get("arguments"),
+                    }
+                    parts.extend(_messages([canonical], output=True)[0]["parts"])
         else:
             parts.append({"type": "openai.omitted", "reason": "unsupported_content"})
         if output and messages:
@@ -372,6 +388,9 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
                     else None
                 )
             )
+            if isinstance(data, ResponseSpanData):
+                inputs = bound_content(inputs) if inputs is not None else None
+                output = bound_content(output) if output is not None else None
             request: dict[str, Any] = {}
             if inputs is not None:
                 request["messages"] = _messages(inputs)
