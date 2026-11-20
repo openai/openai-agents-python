@@ -19,7 +19,7 @@ use codex_core_api::{
 use codex_features::Feature;
 use codex_http_client::{DestinationPolicy, NetworkPolicyController};
 use codex_login::{CodexAuth, ExternalAuth, ExternalAuthFuture, ExternalAuthRefreshContext};
-use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::config_types::{ShellEnvironmentPolicyInherit, WebSearchMode};
 use codex_protocol::models::{PermissionProfile, SandboxEnforcement};
 use codex_protocol::openai_models::{InputModality, ModelInfo, WebSearchToolType};
 use codex_protocol::permissions::{
@@ -236,12 +236,26 @@ fn bind_policy(config: &mut Config, controller: &NetworkPolicyController) {
     config.application_network_policy = controller.policy();
 }
 
+fn apply_shell_environment_defaults(config: &mut Config) {
+    let configured = config.config_layer_stack.layers_high_to_low().any(|layer| {
+        layer
+            .config
+            .get("shell_environment_policy")
+            .and_then(|value| value.get("inherit"))
+            .is_some()
+    });
+    if !configured {
+        config.permissions.shell_environment_policy.inherit = ShellEnvironmentPolicyInherit::Core;
+    }
+}
+
 async fn read_config(builder: ConfigBuilder) -> Result<Config> {
-    let config = builder.build().await.map_err(|error| error.to_string())?;
+    let mut config = builder.build().await.map_err(|error| error.to_string())?;
     config
         .config_layer_stack
         .ensure_config_server_applied()
         .map_err(|error| error.to_string())?;
+    apply_shell_environment_defaults(&mut config);
     Ok(config)
 }
 
@@ -384,18 +398,14 @@ pub async fn build_services(
         auth_config.auth_route_config.http_client_factory().clone(),
         bootstrap.config_layer_stack.requirements_toml(),
     );
-    let mut config = ConfigBuilder::default()
-        .codex_home(home.clone())
-        .cli_overrides(overrides.clone())
-        .harness_overrides(helpers.overrides(&cwd))
-        .cloud_config_bundle(cloud.clone())
-        .build()
-        .await
-        .map_err(|e| e.to_string())?;
-    config
-        .config_layer_stack
-        .ensure_config_server_applied()
-        .map_err(|e| e.to_string())?;
+    let mut config = read_config(
+        ConfigBuilder::default()
+            .codex_home(home.clone())
+            .cli_overrides(overrides.clone())
+            .harness_overrides(helpers.overrides(&cwd))
+            .cloud_config_bundle(cloud.clone()),
+    )
+    .await?;
     bind_policy(&mut config, &network);
     let auth = AuthManager::shared_from_config(&config, true)
         .await
@@ -949,6 +959,48 @@ mod tests {
             .await
             .unwrap();
         (root, config)
+    }
+
+    #[tokio::test]
+    async fn shell_environment_defaults_limit_inheritance_without_replacing_explicit_policy() {
+        let (root, _) = fixture_config("", &[]).await;
+        let environment = |config: &Config| {
+            let values = codex_protocol::shell_environment::create_env_from_vars(
+                [
+                    ("PATH".to_owned(), "/usr/bin".to_owned()),
+                    ("SDK_PARENT_SENTINEL".to_owned(), "parent".to_owned()),
+                ],
+                &config.permissions.shell_environment_policy,
+                None,
+            );
+            ["PATH", "SDK_PARENT_SENTINEL", "SDK_COMMAND_ALLOWED"]
+                .map(|name| values.get(name).cloned())
+        };
+        let config = read_config(fixture_builder(root.path(), &[]))
+            .await
+            .unwrap();
+        assert_eq!(environment(&config), [Some("/usr/bin".into()), None, None]);
+
+        std::fs::write(root.path().join("config.toml"), "[shell_environment_policy]\ninherit = \"none\"\n[shell_environment_policy.set]\nSDK_COMMAND_ALLOWED = \"scoped\"\n").unwrap();
+        let config = read_config(fixture_builder(root.path(), &[]))
+            .await
+            .unwrap();
+        assert_eq!(environment(&config), [None, None, Some("scoped".into())]);
+
+        let config = read_config(fixture_builder(
+            root.path(),
+            &["shell_environment_policy.inherit=\"all\""],
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            environment(&config),
+            [
+                Some("/usr/bin".into()),
+                Some("parent".into()),
+                Some("scoped".into())
+            ]
+        );
     }
 
     #[tokio::test]

@@ -118,6 +118,16 @@ uv run --no-sync python -m examples.model_providers.codex_provider --codex
 
 Ordinary agents can use native Codex commands. Codex can start a separate helper process to execute a command in its configured sandbox. The host must allow that sandbox to start. An outer container or filesystem policy can limit workspace writes.
 
+Native commands inherit Codex's `core` set of environment variables by default. This includes `PATH` and the variables for your platform's temporary directories. An explicit `shell_environment_policy.inherit` in your Codex configuration takes precedence. To supply an extra variable for commands from one provider, use `config_overrides`.
+
+```python
+provider = CodexProvider(
+    config_overrides=('shell_environment_policy.set.BUILD_PROFILE="preview"',),
+)
+```
+
+Set `shell_environment_policy.inherit="none"` to start with an empty set of inherited variables. Then supply any variables the command and its sandbox need, such as `PATH`. This policy controls the environment Codex passes to commands. Core runs inside Python, and configured hooks can access the application's environment. To limit the variables available to the entire runtime, set the environment before starting Python.
+
 The provider disables shell snapshots by default so Codex can start each model call without launching a login shell. To capture your shell environment for native commands, pass `config_overrides=("features.shell_snapshot=true",)`.
 
 The workspace sandbox protects the directory that contains the installed helpers. For example, if you install the wheel in `.venv` at the workspace root, native commands can edit project files but cannot write to or rename `.venv`. Use a separate virtual environment for dependencies that native commands need to install.

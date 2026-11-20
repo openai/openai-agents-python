@@ -222,6 +222,8 @@ async def native_route(folder):
                     if text == "blocked":
                         assert blocked_delta.wait(10), "The blocked run did not stream."
                         assert release_blocked.wait(10), "Cancellation cleanup did not finish."
+                        # The caller cancelled this stream after its first delta.
+                        return
                     item["content"][0]["text"] = text
                 self.send_event({"type": "response.output_item.done", "item": item})
                 if number == 1:
@@ -247,9 +249,6 @@ async def native_route(folder):
                     "output_tokens_details": {"reasoning_tokens": 1},
                 }
                 self.send_event({"type": "response.completed", "response": response})
-            except (BrokenPipeError, ConnectionResetError):
-                if not release_blocked.is_set():
-                    errors.append("Unexpected provider disconnect.")
             except Exception as error:
                 errors.append(f"{type(error).__name__} {error}")
 
