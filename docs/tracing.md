@@ -264,7 +264,7 @@ Group runs, agents, model calls, and tools by `gen_ai.operation.name` using `inv
 
 ### Payload capture
 
-Select capture per run with `RunConfig.tracing["operation_detail"]`. Set `trace_include_sensitive_data=False` to suppress input and output even with `"content"` selected.
+For the Responses and Codex providers, select capture per run with `RunConfig.tracing["operation_detail"]`. Set `trace_include_sensitive_data=False` to suppress input and output even with `"content"` selected.
 
 | `operation_detail` | `trace_include_sensitive_data` | SDK model and tool payload fields | OTel payload attributes |
 | --- | --- | --- | --- |
@@ -278,7 +278,7 @@ In either detailed mode, count one model span for an inference, including retrie
 
 Pass `--content` to the example to inspect the submitted messages, instructions, and visible output. Look for `gen_ai.input.messages`, `gen_ai.system_instructions`, `gen_ai.output.messages`, `gen_ai.tool.call.arguments`, and `gen_ai.tool.call.result`. For a continuation, look for the submitted messages and `openai.response.previous_response_id`. For response ID handling, see [Sensitive data](#sensitive-data).
 
-Expect a 32 KiB UTF-8 JSON budget for the input and another 32 KiB for the output of each operation. Check for markers for truncation, binary media, hidden reasoning, and known credential fields. Treat ordinary text, including file contents and tool results, as potentially private. Configure separate policies for application logs and custom processors.
+Each operation has a 32 KiB budget for its input and another 32 KiB for its output, measured as UTF-8 JSON. Tracing checks the remaining budget before parsing a string that looks like a JSON object or array. If the string exceeds that budget, the trace records an omission with the reason `capture_budget`. Check for markers for truncated text, binary media, hidden reasoning, and known credential fields. Treat ordinary text, including file contents and tool results, as potentially private. Configure separate policies for application logs and custom processors.
 
 ## Tracing with non-OpenAI models
 
