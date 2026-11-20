@@ -722,6 +722,10 @@ class RunResultStreaming(RunResultBase):
         default_factory=asyncio.Event, init=False, repr=False
     )
 
+    _resumable_checkpoint: Callable[[RunResultStreaming], Awaitable[None]] | None = field(
+        default=None, init=False, repr=False
+    )
+
     _current_turn_persisted_item_count: int = 0
     """Number of items from new_items already persisted to session for the
     current turn."""
@@ -1297,6 +1301,8 @@ class RunResultStreaming(RunResultBase):
                     pass
             ```
         """
+        if self._resumable_checkpoint is not None:
+            raise AgentsException("The resumable session checkpoint has not been acknowledged")
         # Create a RunState from the current result
         # Use _original_input (updated on handoffs/resume when input history changes).
         # This avoids serializing a mutated view of input history.

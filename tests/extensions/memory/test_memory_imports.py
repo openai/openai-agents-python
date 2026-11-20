@@ -16,6 +16,13 @@ _PACKAGE_EXPORTS: tuple[tuple[str, str, str, str, str], ...] = (
     ),
     ("RedisSession", "agents.extensions.memory.redis_session", "redis.asyncio", "redis", "redis"),
     (
+        "RedisSessionStore",
+        "agents.extensions.memory.redis_session_store",
+        "redis.asyncio",
+        "redis",
+        "redis",
+    ),
+    (
         "SQLAlchemySession",
         "agents.extensions.memory.sqlalchemy_session",
         "agents.extensions.memory.sqlalchemy_session",
@@ -48,6 +55,7 @@ _PACKAGE_EXPORTS: tuple[tuple[str, str, str, str, str], ...] = (
 
 _DIRECT_MODULE_IMPORTS: tuple[tuple[str, str, str, str], ...] = (
     ("agents.extensions.memory.redis_session", "redis.asyncio", "redis", "redis"),
+    ("agents.extensions.memory.redis_session_store", "redis.asyncio", "redis", "redis"),
     ("agents.extensions.memory.dapr_session", "dapr.aio.clients", "dapr", "dapr"),
     (
         "agents.extensions.memory.mongodb_session",

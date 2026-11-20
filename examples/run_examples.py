@@ -372,7 +372,7 @@ def prepare_redis_for_example(
     relpath: str,
     env: dict[str, str],
 ) -> tuple[TemporaryRedisServer | None, list[str]]:
-    if relpath != REDIS_SESSION_EXAMPLE:
+    if relpath not in (REDIS_SESSION_EXAMPLE, "examples/memory/resumable_redis_session.py"):
         return None, []
 
     configured_url = env.get("REDIS_URL")
