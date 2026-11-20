@@ -1302,7 +1302,7 @@ class OperationServer(FakeServer):
                 "operationId": f"operation_{index}",
                 "kind": kind,
                 "requestedModel": "requested-model",
-                "startedAt": f"2026-11-20T00:00:0{index}.000Z",
+                "startedAt": f"2026-11-20T00:00:0{index}.000000000Z",
             }
             if kind == "tool":
                 operation.update(toolName="read_file", callId="native_call")
@@ -1471,7 +1471,7 @@ async def test_codex_operations_preserve_source_spans_and_capture_policy(
     tools = [span for span in operations if span.span_data.type == "function"]
     assert len(models) == 2 and len(tools) == 1
     assert {span.parent_id for span in operations} == {models[0].parent_id}
-    assert models[0].started_at == "2026-11-20T00:00:01.000Z"
+    assert models[0].started_at == "2026-11-20T00:00:01.000000000Z"
     assert models[0].ended_at == "2026-11-20T00:00:01.250Z"
     assert models[-1].ended_at == "2026-11-20T00:00:03.250Z"
     assert models[0].span_data.usage == {"input_tokens": 10, "output_tokens": 5}

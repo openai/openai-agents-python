@@ -101,12 +101,10 @@ async def test_initialization_retries_only_child_exit_and_reaps_failed_attempt(
 
     monkeypatch.setattr("agents.models._codex_app_server._INITIALIZE_RETRY_DELAYS", (0, 0, 0))
 
-    script = tmp_path / "codex-app-server"
+    # The real launcher supplies this filename as Python's script argument.
+    script = tmp_path / "app-server"
     script.write_text(
-        "#!"
-        + sys.executable
-        + "\n"
-        + r"""
+        r"""
 import json, os, pathlib, sys
 attempt_file = pathlib.Path(os.environ["ATTEMPT_FILE"])
 try:
@@ -126,7 +124,6 @@ for line in sys.stdin:
         print(json.dumps({"id": message["id"], "result": {"ok": True}}), flush=True)
 """
     )
-    script.chmod(0o700)
     opened = []
     original = CodexAppServer.open
 
@@ -142,7 +139,9 @@ for line in sys.stdin:
         "FAILURE_MODE": failure,
     }
     if failure == "once":
-        server = await CodexAppServer.open_initialized(str(script), str(tmp_path), [], environment)
+        server = await CodexAppServer.open_initialized(
+            sys.executable, str(tmp_path), [], environment
+        )
         assert len(opened) == 2
         assert opened[0]._process.returncode is not None
         assert await server.request("thread/start", {}) == {"ok": True}
@@ -150,7 +149,7 @@ for line in sys.stdin:
     else:
         error = _CodexProcessExitedError if failure == "always" else RuntimeError
         with pytest.raises(error):
-            await CodexAppServer.open_initialized(str(script), str(tmp_path), [], environment)
+            await CodexAppServer.open_initialized(sys.executable, str(tmp_path), [], environment)
         assert len(opened) == (4 if failure == "always" else 1)
     assert all(server._process.returncode is not None for server in opened)
 
