@@ -157,6 +157,13 @@
       "fixture": "features/v1_21_duplicate_agent_hook_identity.json",
       "provenance": "historical_writer",
       "version": "1.21"
+    },
+    {
+      "commit": "448ae7a3d9c5ddbfa0656a04a021ffb3f3c16530",
+      "feature": "codex_compaction_response_storage",
+      "fixture": "features/v1_22_codex_compaction_response_storage.json",
+      "provenance": "historical_writer",
+      "version": "1.22"
     }
   ],
   "resume": {
@@ -247,6 +254,10 @@
     "1.21": {
       "commit": "17d994bd3045dae71acda676a4ef4762ed8ecd94",
       "fixture": "minimal/v1_21.json"
+    },
+    "1.22": {
+      "commit": "0a74177ed23ffb0c2dba24eda3fb12fb58e3e09d",
+      "fixture": "minimal/v1_22.json"
     },
     "1.3": {
       "commit": "6814a54711f591712c893f0a8be1cf56c512ae63",

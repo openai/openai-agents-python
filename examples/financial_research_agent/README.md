@@ -2,7 +2,7 @@
 
 Run this example to see how an agent plans research, consults financial and risk analysts, and checks a draft before showing it to the reader. You can switch the agents to stock Codex without changing the search or the evidence rules.
 
-From the repository root, set `OPENAI_API_KEY` in your environment. **Both modes use hosted web search for research and for the final audit. These calls incur search and model charges.** For Codex mode, also install the stock `codex` CLI and make sure it's on your `PATH`.
+From the repository root, set `OPENAI_API_KEY` in your environment. **Both modes use hosted web search for research and for the final audit. These calls incur search and model charges.** For Codex mode, install the prerelease wheel using the [Codex provider setup](../../docs/models/codex.md) and set `UV_NO_SYNC=1`.
 
 ```bash
 # Default provider

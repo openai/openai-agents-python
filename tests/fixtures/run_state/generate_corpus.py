@@ -44,6 +44,8 @@ state = RunState(
 RELEASED_1_18_WRITER = "ce8ae9f368e7e3e2f495fc80a0c44137e88b78c4"
 HELD_WRITE_1_19_WRITER = "9303a8f8b8a528f572582ba09743b37b9fd0735c"
 RELEASED_1_21_WRITER = "17d994bd3045dae71acda676a4ef4762ed8ecd94"
+RELEASED_1_22_WRITER = "0a74177ed23ffb0c2dba24eda3fb12fb58e3e09d"
+CODEX_1_22_WRITER = "448ae7a3d9c5ddbfa0656a04a021ffb3f3c16530"
 GUARDRAIL_1_20_WRITER = "125efa029b4bfd84238bd2c4fd69c3406f802663"
 
 LEGACY_CANONICAL_COMPATIBILITY_NOTE = (
@@ -567,6 +569,27 @@ agent.handoffs = [handoff(duplicate)]
 state._current_agent = duplicate
 """,
     ),
+    Scenario(
+        "1.22",
+        CODEX_1_22_WRITER,
+        "codex_compaction_response_storage",
+        """
+from agents.run_internal.run_steps import NextStepRunAgain
+
+state._current_step = NextStepRunAgain()
+state._pending_session_write = {
+    "session_id": "session-compaction",
+    "items": [{"role": "user", "content": "historical input"}],
+    "before": None,
+    "persisted_count": 0,
+    "compaction_model_exchange": {
+        "item_digests": [],
+        "reasoning_item_id_policy": "preserve",
+        "supports_stored_response_id": False,
+    },
+}
+""",
+    ),
 )
 
 
@@ -613,6 +636,7 @@ MINIMAL_SCENARIOS = (
     ),
     Scenario("1.20", GUARDRAIL_1_20_WRITER, "minimal", ""),
     Scenario("1.21", RELEASED_1_21_WRITER, "minimal", ""),
+    Scenario("1.22", RELEASED_1_22_WRITER, "minimal", ""),
 )
 
 
