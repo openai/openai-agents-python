@@ -11,11 +11,9 @@ The GenAI mapping follows semantic-conventions-genai commit
 from __future__ import annotations
 
 import json
-import re
 import threading
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
-from datetime import datetime
 from typing import Any
 
 from opentelemetry import context as otel_context, trace as otel_trace
@@ -37,6 +35,7 @@ from ...tracing.span_data import (
 )
 from ...tracing.spans import Span
 from ...tracing.traces import Trace
+from ...tracing.util import _parse_iso_timestamp
 from ...version import __version__
 
 _scope_owner: ContextVar[object | None] = ContextVar("agents_otel_scope_owner", default=None)
@@ -45,10 +44,8 @@ _scope_owner: ContextVar[object | None] = ContextVar("agents_otel_scope_owner", 
 def _timestamp(value: str | None) -> int | None:
     if value is None:
         return None
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    seconds = int(parsed.replace(microsecond=0).timestamp())
-    fraction = re.search(r"T\d{2}:\d{2}:\d{2}\.(\d+)", value)
-    nanos = int(fraction.group(1).ljust(9, "0")[:9]) if fraction else 0
+    parsed, nanos = _parse_iso_timestamp(value)
+    seconds = int(parsed.timestamp())
     return seconds * 1_000_000_000 + nanos
 
 
