@@ -201,3 +201,52 @@ async def test_resume_preserves_provider_metadata_without_union_coercion() -> No
     assert not resumed.is_paused
     assert resumed._get_history() == history
     assert json.loads(store.records[session.session_id])["history"] == history
+
+
+def _sdk_traceback_locals(error: BaseException) -> str:
+    frames = []
+    tb = error.__traceback__
+    while tb is not None:
+        if "/src/agents/" in tb.tb_frame.f_code.co_filename.replace("\\", "/"):
+            frames.append(repr(tb.tb_frame.f_locals))
+        tb = tb.tb_next
+    return "\n".join(frames)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "resume", "load_state"])
+async def test_public_checkpoint_errors_drop_sensitive_sdk_traceback_locals(operation: str) -> None:
+    from agents import Agent
+    from agents.run_state import CURRENT_SCHEMA_VERSION
+
+    marker = "synthetic-checkpoint-private-value"
+
+    class SensitiveStore(MemoryStore):
+        def __repr__(self) -> str:
+            return marker
+
+    store = SensitiveStore()
+    with pytest.raises(ResumableSessionError) as error:
+        if operation == "create":
+            store.fail_save = "before"
+            await ResumableSession.create(store)
+        elif operation == "resume":
+            store.records["sensitive"] = marker
+            await ResumableSession.resume(store, "sensitive")
+        else:
+            store.records["sensitive"] = json.dumps(
+                {
+                    "version": 1,
+                    "revision": "test",
+                    "status": "paused",
+                    "history": [{"role": "user", "content": marker}],
+                    "run_state": json.dumps({"$schemaVersion": CURRENT_SCHEMA_VERSION}),
+                }
+            )
+            session = await ResumableSession.resume(store, "sensitive")
+            await session.load_state(
+                Agent(name="test", instructions=marker), context_override={"private": marker}
+            )
+    assert marker not in _sdk_traceback_locals(error.value)
+    assert error.value.__context__ is None
+    assert error.value.__cause__ is None

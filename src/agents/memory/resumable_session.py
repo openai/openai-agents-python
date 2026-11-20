@@ -17,7 +17,11 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-from ..exceptions import UserError, _mark_error_data_redacted
+from ..exceptions import (
+    UserError,
+    _data_redacted_error_boundary,
+    _mark_error_data_redacted,
+)
 from ..items import TResponseInputItem
 from .session import await_session_mutation
 
@@ -186,6 +190,7 @@ class ResumableSession:
         return self._checkpoint.status == "paused"
 
     @classmethod
+    @_data_redacted_error_boundary
     async def create(cls, store: ResumableSessionStore) -> ResumableSession:
         """Create and confirm a new empty session with an SDK-generated ID."""
         checkpoint = _Checkpoint(
@@ -196,6 +201,7 @@ class ResumableSession:
         return session
 
     @classmethod
+    @_data_redacted_error_boundary
     async def resume(cls, store: ResumableSessionStore, session_id: str) -> ResumableSession:
         """Load an existing checkpoint, rejecting missing, invalid, or active state."""
         value = await cls._load(store, session_id)
@@ -220,6 +226,7 @@ class ResumableSession:
             raise ResumableSessionError(reason)
         return value
 
+    @_data_redacted_error_boundary
     async def load_state(
         self,
         agent: Agent[Any],

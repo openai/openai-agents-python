@@ -80,3 +80,61 @@ async def test_redis_handle_requires_existing_valid_state() -> None:
         assert malformed.value.__context__ is None
     finally:
         await redis.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["load", "save"])
+async def test_redis_checkpoint_errors_drop_sensitive_sdk_traceback_locals(operation: str) -> None:
+    marker = "synthetic-redis-checkpoint-private-value"
+    redis = fakeredis.FakeRedis()
+    try:
+        store = RedisSessionStore(cast(Redis, redis))
+        await redis.set("agents:resumable:sensitive", marker.encode() + b"\xff")
+        with pytest.raises(ResumableSessionError) as error:
+            if operation == "load":
+                await store.load("sensitive")
+            else:
+                await store.save("sensitive", marker, expected=marker)
+        tb = error.value.__traceback__
+        while tb is not None:
+            if "/src/agents/" in tb.tb_frame.f_code.co_filename.replace("\\", "/"):
+                assert marker not in repr(tb.tb_frame.f_locals)
+            tb = tb.tb_next
+        assert error.value.__context__ is None
+        assert error.value.__cause__ is None
+    finally:
+        await redis.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["load", "save"])
+async def test_redis_backend_error_does_not_expose_checkpoint_data(
+    operation: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from redis.exceptions import ResponseError
+
+    marker = "synthetic-redis-server-private-value"
+    redis = fakeredis.FakeRedis()
+
+    async def fail(*args: object, **kwargs: object) -> None:
+        raise ResponseError(marker)
+
+    try:
+        store = RedisSessionStore(cast(Redis, redis))
+        monkeypatch.setattr(redis, "get" if operation == "load" else "set", fail)
+        with pytest.raises(ResumableSessionError) as error:
+            if operation == "load":
+                await store.load("sensitive")
+            else:
+                await store.save("sensitive", marker, expected=None)
+        assert error.value.reason == "unavailable"
+        assert marker not in str(error.value)
+        tb = error.value.__traceback__
+        while tb is not None:
+            if "/src/agents/" in tb.tb_frame.f_code.co_filename.replace("\\", "/"):
+                assert marker not in repr(tb.tb_frame.f_locals)
+            tb = tb.tb_next
+        assert error.value.__context__ is None
+        assert error.value.__cause__ is None
+    finally:
+        await redis.aclose()

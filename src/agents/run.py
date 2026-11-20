@@ -21,6 +21,7 @@ from .exceptions import (
     UserError,
     _await_data_redacted_error_boundary,
     _clear_data_redacted_error_traceback,
+    _data_redacted_error_boundary,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
     _is_tool_local_cancellation,
@@ -574,13 +575,14 @@ class AgentRunner:
     It should not be used directly or subclassed.
     """
 
+    @_data_redacted_error_boundary
     async def run(
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
-        session = prepare_run_session(kwargs.get("session"), input)
+        session = prepare_run_session(kwargs.get("session"))
         kwargs["session"] = session
         run_config, owns_model_provider = _normalize_run_config_for_runner(kwargs.get("run_config"))
         cast(dict[str, Any], kwargs)["run_config"] = run_config
@@ -625,13 +627,7 @@ class AgentRunner:
                 if owns_model_provider:
                     await _close_runner_owned_model_provider(run_config.model_provider)
 
-        self = cast(Any, None)
-        starting_agent = cast(Any, None)
-        input = cast(Any, None)
-        run_config = cast(Any, None)
-        cast(dict[str, Any], kwargs).clear()
         assert redacted_error is not None
-        _detach_data_redacted_error_traceback(redacted_error)
         _raise_data_redacted_error(redacted_error)
 
     async def _run_impl(
@@ -2651,7 +2647,7 @@ class AgentRunner:
         previous_response_id = kwargs.get("previous_response_id")
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
-        session = prepare_run_session(kwargs.get("session"), input)
+        session = prepare_run_session(kwargs.get("session"))
 
         run_config, owns_model_provider = _normalize_run_config_for_runner(run_config)
 

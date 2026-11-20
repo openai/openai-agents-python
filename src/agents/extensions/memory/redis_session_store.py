@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ...exceptions import _data_redacted_error_boundary
 from ...memory.resumable_session import ResumableSessionError
 from ._optional_imports import raise_optional_dependency_error
 
@@ -41,23 +42,37 @@ class RedisSessionStore:
     def _key(self, session_id: str) -> str:
         return f"{self._key_prefix}:{session_id}"
 
+    @_data_redacted_error_boundary
     async def load(self, session_id: str) -> str | None:
         """Read one complete checkpoint without silently creating the session."""
-        return _decode(await self._redis.get(self._key(session_id)))
+        try:
+            return _decode(await self._redis.get(self._key(session_id)))
+        except ResumableSessionError:
+            raise
+        except Exception:
+            pass
+        raise ResumableSessionError("unavailable")
 
+    @_data_redacted_error_boundary
     async def save(self, session_id: str, value: str, *, expected: str | None) -> bool:
         """Create or atomically replace the exact previously loaded checkpoint."""
-        key = self._key(session_id)
-        if expected is None:
-            return bool(await self._redis.set(key, value, nx=True))
-        async with self._redis.pipeline(transaction=True) as pipe:
-            await pipe.watch(key)
-            if _decode(await pipe.get(key)) != expected:
-                return False
-            pipe.multi()
-            pipe.set(key, value, keepttl=True)
-            try:
-                await pipe.execute()
-            except WatchError:
-                return False
-        return True
+        try:
+            key = self._key(session_id)
+            if expected is None:
+                return bool(await self._redis.set(key, value, nx=True))
+            async with self._redis.pipeline(transaction=True) as pipe:
+                await pipe.watch(key)
+                if _decode(await pipe.get(key)) != expected:
+                    return False
+                pipe.multi()
+                pipe.set(key, value, keepttl=True)
+                try:
+                    await pipe.execute()
+                except WatchError:
+                    return False
+            return True
+        except ResumableSessionError:
+            raise
+        except Exception:
+            pass
+        raise ResumableSessionError("unavailable")

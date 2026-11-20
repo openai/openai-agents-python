@@ -13,7 +13,9 @@ from agents.decorators import tool
 from agents.exceptions import AgentsException
 from agents.memory.resumable_session import ResumableSession, ResumableSessionError
 from agents.result import RunResult, RunResultStreaming
+from agents.run import AgentRunner
 from agents.testing import ScriptedModel, UnexpectedModelCall
+from tests.test_error_logging_redaction import _assert_secret_absent_from_agents_traceback
 from tests.test_responses import get_function_tool_call, get_text_message
 
 
@@ -205,6 +207,28 @@ async def test_failed_final_save_retains_prior_checkpoint_and_unknown_attempt() 
     assert active["history"] == prior_history
     with pytest.raises(ResumableSessionError, match="unknown outcome"):
         await ResumableSession.resume(store, session.session_id)
+    assert len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["direct-run", "streamed"])
+async def test_checkpoint_failure_and_subsequent_claim_release_run_payloads(streamed: bool) -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    store.fail_checkpoint = True
+    secret = "synthetic-checkpoint-payload"
+    model = ScriptedModel([[get_text_message(secret)]])
+    agent = Agent(name="assistant", instructions=secret, model=model)
+
+    for reason in ("unavailable", "active"):
+        with pytest.raises(ResumableSessionError) as failure:
+            if streamed:
+                await run_agent(agent, secret, session, True)
+            else:
+                await AgentRunner().run(agent, secret, session=session, run_config=CONFIG)
+        assert failure.value.reason == reason
+        assert failure.value.run_data is None
+        _assert_secret_absent_from_agents_traceback(failure.value, secret)
     assert len(model.calls) == 1
 
 

@@ -5,9 +5,10 @@ import builtins
 import sys
 import traceback
 import types
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from functools import partial, wraps
+from typing import TYPE_CHECKING, Any, NoReturn, ParamSpec, TypeVar, cast
 
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup
@@ -188,6 +189,26 @@ async def _await_data_redacted_error_boundary(
     assert redacted_error is not None
     _detach_data_redacted_error_traceback(redacted_error)
     _raise_data_redacted_error(redacted_error)
+
+
+_RedactedParams = ParamSpec("_RedactedParams")
+_RedactedResult = TypeVar("_RedactedResult")
+
+
+def _data_redacted_error_boundary(
+    method: Callable[_RedactedParams, Awaitable[_RedactedResult]],
+) -> Callable[_RedactedParams, Coroutine[Any, Any, _RedactedResult]]:
+    """Release public-call arguments before re-raising data-redacted failures."""
+
+    @wraps(method)
+    async def wrapped(
+        *args: _RedactedParams.args, **kwargs: _RedactedParams.kwargs
+    ) -> _RedactedResult:
+        boundary = _await_data_redacted_error_boundary(partial(method, *args, **kwargs))
+        del args, kwargs
+        return cast(_RedactedResult, await boundary)
+
+    return wrapped
 
 
 def _prepare_data_redacted_error(

@@ -88,9 +88,8 @@ class _CheckpointEventQueue(asyncio.Queue[StreamEvent | QueueCompleteSentinel]):
         self._pending.clear()
 
 
-def prepare_run_session(session: Session | ResumableSession | None, input: Any) -> Session | None:
+def prepare_run_session(session: Session | ResumableSession | None) -> Session | None:
     if isinstance(session, ResumableSession):
-        session._validate_run(input)
         return ResumableRun(session)
     return session
 
