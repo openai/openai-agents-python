@@ -157,4 +157,14 @@ gh release view "$RELEASE_TAG" --repo "$REPO" --json tagName,isPrerelease,assets
 
 Verify the title `Agents SDK v1.0.0-alpha.1`, tag `v1.0.0-alpha.1`, prerelease flag and five assets. The prerelease flag skips the PyPI workflow. Inspect the tag and release before retrying a failed command. Use a new alpha version for corrections.
 
-For a local development wheel with Rust 1.95 and platform build tools, run `uv run --no-project --with maturin==1.11.5 python scripts/build_codex_wheel.py --profile dev --out dist`. Publish only qualified CI wheels.
+For a local development wheel, install Rust 1.95 and the build tools for your platform. From the repository root, use the same Python build dependencies as CI. These commands create a separate environment for the build and verify each tool's checksum before installation.
+
+```sh
+uv venv --python 3.12 .venv-codex-build
+uv pip install --python .venv-codex-build --require-hashes --only-binary=:all: \
+  -r native/codex/build-requirements.txt
+UV_PROJECT_ENVIRONMENT=.venv-codex-build UV_NO_BUILD_ISOLATION=1 UV_OFFLINE=1 \
+  uv run --no-sync python scripts/build_codex_wheel.py --profile dev --out dist
+```
+
+Publish only qualified CI wheels.

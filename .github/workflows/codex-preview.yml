@@ -123,6 +123,7 @@ jobs:
             printf 'CARGO_HOME=%s/c\n' "$RUNNER_TEMP"
             printf 'CARGO_TARGET_DIR=%s/t\n' "$RUNNER_TEMP"
             printf 'UV_CACHE_DIR=%s/codex-uv\n' "$RUNNER_TEMP"
+            printf 'UV_PROJECT_ENVIRONMENT=%s/codex-build-tools\n' "$RUNNER_TEMP"
           } >> "$GITHUB_ENV"
           if [[ "$RUNNER_OS" == Linux ]]; then
             printf 'CARGO_BUILD_JOBS=%s\n' "$(nproc)" >> "$GITHUB_ENV"
@@ -147,12 +148,20 @@ jobs:
           bash .github/scripts/install-codex-preview-tools.sh
       # Codex selects Cargo.lock's checksum-pinned vendored protoc on every platform.
       - name: Select the pinned toolchain
-        run: rustup toolchain install 1.95.0 --profile minimal
+        run: rustup toolchain install 1.95.0 --profile minimal --no-self-update
+      - name: Install hash-pinned Python build tools
+        run: |
+          uv venv --python 3.12 --no-python-downloads "$UV_PROJECT_ENVIRONMENT"
+          uv pip install --python "$UV_PROJECT_ENVIRONMENT" --require-hashes --only-binary=:all: \
+            --requirements native/codex/build-requirements.txt
       - name: Build the combined native wheel
+        env:
+          UV_NO_BUILD_ISOLATION: '1'
+          UV_OFFLINE: '1'
         run: |
           options=()
           if [[ "$RUNNER_OS" == Linux ]]; then options+=(--compatibility manylinux_2_28); fi
-          uv run --no-project --with 'maturin==1.11.5' python scripts/build_codex_wheel.py \
+          uv run --no-sync python scripts/build_codex_wheel.py \
             --out "$GITHUB_WORKSPACE/dist" --target "$WHEEL_TARGET" "${options[@]}"
       - name: Test native policy and configuration
         if: matrix.platform == 'manylinux_2_28_x86_64'
