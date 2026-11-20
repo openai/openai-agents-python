@@ -87,7 +87,7 @@ def test_data_and_local_images_preserve_content_in_turn_and_tool_output(tmp_path
         )
     )
     assert history[1]["output"] == [{"type": "input_image", "image_url": data}]
-    assert turn == [{"type": "image", "url": data, "detail": "high"}]
+    assert turn == [{"type": "image", "image_url": data, "detail": "high"}]
 
 
 @pytest.mark.parametrize(
@@ -402,7 +402,7 @@ def test_inline_audio_preserves_exact_base64_in_history_and_latest_turn():
     )
     url = f"data:audio/wav;base64,{encoded}"
     assert history[0]["content"] == [{"type": "input_audio", "audio_url": url}]
-    assert turn == [{"type": "audio", "url": url}]
+    assert turn == [{"type": "audio", "audio_url": url}]
     with pytest.raises(UserError, match="bytes matching"):
         prepare_codex_history(
             cast(

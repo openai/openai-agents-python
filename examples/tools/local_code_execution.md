@@ -4,7 +4,7 @@ This example runs a local Python 3 interpreter through an SDK shell tool, stream
 
 ## Setup and run
 
-Use the repository's Python setup and install Python 3 on the execution host. The default provider uses `OPENAI_API_KEY`. For `--codex`, complete the [stock CLI setup](../../docs/models/codex.md). Optional `OPENAI_MODEL` and `CODEX_MODEL` variables select the model for each mode.
+Use the repository's Python setup and install Python 3 on the execution host. The default provider uses `OPENAI_API_KEY`. For `--codex`, complete the [Codex provider setup](../../docs/models/codex.md). Optional `OPENAI_MODEL` and `CODEX_MODEL` variables select the model for each mode.
 
 From the repository root:
 

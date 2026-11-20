@@ -85,7 +85,9 @@ def _user_content(content: Any) -> list[dict[str, Any]]:
         elif part["type"] == "input_audio":
             result.append(_audio_content(part))
         else:
-            raise UserError("CodexProvider accepts only text and local images in user content.")
+            raise UserError(
+                "CodexProvider accepts only text, local images, and inline audio in user content."
+            )
     return result
 
 
@@ -216,12 +218,12 @@ def prepare_codex_history(
             if part["type"] == "input_text":
                 turn_input.append({"type": "text", "text": part["text"], "text_elements": []})
             elif part["type"] == "input_audio":
-                turn_input.append({"type": "audio", "url": part["audio_url"]})
+                turn_input.append({"type": "audio", "audio_url": part["audio_url"]})
             else:
                 turn_input.append(
                     {
                         "type": "image",
-                        "url": part["image_url"],
+                        "image_url": part["image_url"],
                         **({"detail": part["detail"]} if "detail" in part else {}),
                     }
                 )

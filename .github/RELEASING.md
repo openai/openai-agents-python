@@ -99,3 +99,62 @@ merge, an authorized maintainer verifies the exact merged source/version before 
 an annotated version tag and GitHub Release. Stop if the tag already exists. Resume Release
 Please only after both exist, then restore the automated readiness requirement and enable
 switch. Never use the manual path as an implicit workaround for a failed automated check.
+
+## Codex provider previews on GitHub
+
+Use this procedure to publish prebuilt wheels from `feat/simple-codex` as a GitHub prerelease. You need Python 3.12+, Cargo, Git, `uv` and an authenticated `gh` with artifact access and release permission.
+
+The first preview uses `1.0.0-alpha.1`. To prepare a later preview, set `package.version` in `native/codex/Cargo.toml` to an unused alpha version. Run `cargo update --workspace --manifest-path native/codex/Cargo.toml` to update the lockfile. The build script applies the crate version to the staged Python project, so the first wheels use `1.0.0a1`. Review, commit and push the candidate to `feat/simple-codex`.
+
+Find successful **Tests** and **Codex preview wheels** runs for the candidate commit. Check that all four native builds and eight wheel installation jobs passed. Run these commands from a clean checkout of that commit. Replace the example IDs with the successful run IDs.
+
+```sh
+set -eu
+RELEASE_SHA=$(git rev-parse HEAD)
+export RELEASE_SHA REPO=openai/openai-agents-python WHEEL_VERSION=1.0.0a1 RELEASE_TAG=v1.0.0-alpha.1
+gh run list --repo "$REPO" --branch feat/simple-codex --commit "$RELEASE_SHA" --event push --workflow tests.yml
+gh run list --repo "$REPO" --branch feat/simple-codex --commit "$RELEASE_SHA" --workflow codex-preview.yml
+export TESTS_RUN_ID=123456789 WHEEL_RUN_ID=123456790
+gh run view "$TESTS_RUN_ID" --repo "$REPO" --json workflowName,headSha,headBranch,event,status,conclusion,url
+RELEASE_STAGE=$(mktemp -d)
+export RELEASE_STAGE
+gh api "repos/$REPO/actions/runs/$WHEEL_RUN_ID" > "$RELEASE_STAGE/run.json"
+export WHEEL_ATTEMPT=$(python -c 'import json,os; print(json.load(open(os.environ["RELEASE_STAGE"]+"/run.json"))["run_attempt"])')
+gh run download "$WHEEL_RUN_ID" --repo "$REPO" --name "codex-preview-$WHEEL_RUN_ID-$WHEEL_ATTEMPT" --dir "$RELEASE_STAGE/dist"
+python - <<'PY'
+import hashlib, json, os
+from pathlib import Path
+stage = Path(os.environ['RELEASE_STAGE'])
+root = stage / 'dist'
+run = json.loads((stage / 'run.json').read_text())
+build = json.loads((root / 'BUILD.json').read_text())
+assert run['status'] == 'completed' and run['conclusion'] == 'success'
+assert run['repository']['full_name'] == run['head_repository']['full_name'] == build['repository'] == os.environ['REPO']
+assert run['head_branch'] == build['source_branch'] == 'feat/simple-codex'
+assert run['path'] == '.github/workflows/codex-preview.yml' and run['event'] in ('push', 'workflow_dispatch')
+assert build['workflow'] == os.environ['REPO'] + '/.github/workflows/codex-preview.yml@refs/heads/feat/simple-codex'
+assert run['head_sha'] == build['source_commit'] == os.environ['RELEASE_SHA']
+assert run['id'] == build['run_id'] == int(os.environ['WHEEL_RUN_ID'])
+assert run['run_attempt'] == build['run_attempt'] == int(os.environ['WHEEL_ATTEMPT'])
+assert build['version'] == os.environ['WHEEL_VERSION'] and build['tag'] == os.environ['RELEASE_TAG']
+hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.glob('*.whl')}
+checksums = [line.split() for line in (root / 'SHA256SUMS').read_text().splitlines()]
+assert len(hashes) == len(checksums) == 4
+assert hashes == build['sha256'] == {name: digest for digest, name in checksums}
+PY
+```
+
+Verify that the `Tests` run succeeded for the push of this commit to `feat/simple-codex`. Retain `BUILD.json` as evidence. Confirm the tag is available and check for draft releases. Save reviewed notes in `$RELEASE_STAGE/notes.md`. The commands below publish the four wheels and their checksums.
+
+```sh
+git tag -a "$RELEASE_TAG" "$RELEASE_SHA" -m "Agents SDK $RELEASE_TAG"
+git push origin "refs/tags/$RELEASE_TAG"
+gh release create "$RELEASE_TAG" --repo "$REPO" --verify-tag --prerelease --latest=false \
+  --title "Agents SDK $RELEASE_TAG" --notes-file "$RELEASE_STAGE/notes.md" \
+  "$RELEASE_STAGE"/dist/*.whl "$RELEASE_STAGE/dist/SHA256SUMS"
+gh release view "$RELEASE_TAG" --repo "$REPO" --json tagName,isPrerelease,assets,url
+```
+
+Verify the title `Agents SDK v1.0.0-alpha.1`, tag `v1.0.0-alpha.1`, prerelease flag and five assets. The prerelease flag skips the PyPI workflow. Inspect the tag and release before retrying a failed command. Use a new alpha version for corrections.
+
+For a local development wheel with Rust 1.95 and platform build tools, run `uv run --no-project --with maturin==1.11.5 python scripts/build_codex_wheel.py --profile dev --out dist`. Publish only qualified CI wheels.

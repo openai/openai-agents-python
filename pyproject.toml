@@ -154,6 +154,11 @@ exclude = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/agents"]
 
+[tool.maturin]
+manifest-path = "native/codex/Cargo.toml"
+python-source = "src"
+module-name = "agents.models._codex_native"
+
 
 [tool.ruff]
 line-length = 100

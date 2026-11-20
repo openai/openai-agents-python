@@ -1,0 +1,278 @@
+name: Codex preview wheels
+
+on:
+  push:
+    branches: [feat/simple-codex]
+    paths: &wheel_paths
+      - 'src/**'
+      - 'native/**'
+      - 'scripts/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'README.md'
+      - 'LICENSE'
+      - '.github/workflows/codex-preview.yml'
+      - '.github/scripts/install-codex-preview-tools.sh'
+  pull_request:
+    branches: [feat/simple-codex]
+    paths: *wheel_paths
+  # The push trigger also works before this workflow reaches the default branch.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  candidate:
+    if: >-
+      github.ref == 'refs/heads/feat/simple-codex' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    outputs:
+      preview: ${{ steps.version.outputs.preview }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - name: Require an explicit alpha candidate
+        id: version
+        shell: python
+        run: |
+          import os, re, tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path('native/codex/Cargo.toml').read_text())['package']['version']
+          match = re.fullmatch(r'(\d+\.\d+\.\d+)(?:-alpha\.|a)(\d+)', version)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print(f'preview={str(match is not None).lower()}', file=output)
+              if match:
+                  print(f'version={match[1]}a{match[2]}', file=output)
+                  print(f'tag=v{match[1]}-alpha.{match[2]}', file=output)
+          if not match:
+              if os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch':
+                  raise SystemExit('Choose an unused X.Y.Z-alpha.N version in native/codex/Cargo.toml before building a preview.')
+              print('::notice::Skipping preview wheels until source metadata selects an alpha version.')
+
+  build:
+    needs: candidate
+    if: needs.candidate.outputs.preview == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: manylinux_2_28_x86_64
+            image: quay.io/pypa/manylinux_2_28_x86_64@sha256:9555ba6c479fa69a2aa80ad1dc57154a60d562b19df159361d9379a02beb1e36
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: manylinux_2_28_aarch64
+            image: quay.io/pypa/manylinux_2_28_aarch64@sha256:cb37f0d66c8a75abb93cf6085cad1f1427cd7208f0c0fc48359bb1eea9924f21
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            platform: macosx_11_0_arm64
+            image: ''
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: win_amd64
+            image: ''
+    # Reuse the harness's provisioned cold-build runners in the official repository.
+    runs-on: >-
+      ${{ fromJSON(
+        github.repository == 'openai/openai-agents-python' && matrix.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64-xl"}' ||
+        github.repository == 'openai/openai-agents-python' && matrix.runner == 'ubuntu-24.04-arm' && '{"group":"codex-runners","labels":"codex-linux-arm64"}' ||
+        github.repository == 'openai/openai-agents-python' && matrix.runner == 'windows-latest' && '{"group":"codex-runners","labels":"codex-windows-x64-xl"}' ||
+        github.repository == 'openai/openai-agents-python' && matrix.runner == 'macos-latest' && '"macos-26-xlarge"' ||
+        toJSON(matrix.runner)
+      ) }}
+    container: ${{ matrix.image || null }}
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '3'
+      RUSTUP_TOOLCHAIN: '1.95.0'
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      WHEEL_TARGET: ${{ matrix.target }}
+      WHEEL_PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        if: runner.os != 'Linux'
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e
+        with:
+          version: '0.11.14'
+          enable-cache: false
+      - name: Select isolated build directories
+        run: |
+          {
+            printf 'CARGO_HOME=%s/codex-cargo\n' "$RUNNER_TEMP"
+            printf 'CARGO_TARGET_DIR=%s/codex-target\n' "$RUNNER_TEMP"
+            printf 'UV_CACHE_DIR=%s/codex-uv\n' "$RUNNER_TEMP"
+          } >> "$GITHUB_ENV"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            printf '%s\n' /opt/python/cp312-cp312/bin >> "$GITHUB_PATH"
+            printf 'PYO3_PYTHON=%s\n' /opt/python/cp312-cp312/bin/python >> "$GITHUB_ENV"
+            test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.28'
+          fi
+      - name: Install Rust and Linux prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          case "$(uname -m)" in
+            x86_64) checksum=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c ;;
+            aarch64) checksum=e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c ;;
+          esac
+          installer="$RUNNER_TEMP/rustup-init"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 2 \
+            --output "$installer" "https://static.rust-lang.org/rustup/archive/1.28.2/$(uname -m)-unknown-linux-gnu/rustup-init"
+          printf '%s  %s\n' "$checksum" "$installer" | sha256sum --check --strict
+          chmod +x "$installer"
+          "$installer" -y --default-toolchain none --no-modify-path
+          printf '%s/bin\n' "$CARGO_HOME" >> "$GITHUB_PATH"
+          bash .github/scripts/install-codex-preview-tools.sh
+      - name: Install macOS prerequisites
+        if: runner.os == 'macOS'
+        run: brew install cmake pkgconf protobuf openssl@3
+      - name: Install Windows prerequisites
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install protoc --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          protoc.exe --version
+      - name: Select the pinned toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Build the combined native wheel
+        run: |
+          options=()
+          if [[ "$RUNNER_OS" == Linux ]]; then options+=(--compatibility manylinux_2_28); fi
+          uv run --no-project --with 'maturin==1.11.5' python scripts/build_codex_wheel.py \
+            --out "$GITHUB_WORKSPACE/dist" --target "$WHEEL_TARGET" "${options[@]}"
+      - name: Test native policy and configuration
+        if: matrix.platform == 'manylinux_2_28_x86_64'
+        run: cargo test --locked --release --lib --manifest-path native/codex/Cargo.toml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: codex-wheel-${{ matrix.platform }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 14
+
+  verify:
+    needs: [candidate, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.14']
+        platform: [manylinux_2_28_x86_64, manylinux_2_28_aarch64, macosx_11_0_arm64, win_amd64]
+    runs-on: >-
+      ${{ matrix.platform == 'manylinux_2_28_x86_64' && 'ubuntu-24.04' ||
+          matrix.platform == 'manylinux_2_28_aarch64' && 'ubuntu-24.04-arm' ||
+          matrix.platform == 'macosx_11_0_arm64' && 'macos-latest' || 'windows-latest' }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: python
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: native/codex/verify_installed.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: codex-wheel-${{ matrix.platform }}
+          path: ${{ runner.temp }}/codex-wheel
+      - name: Exercise a fresh installation outside the checkout
+        working-directory: ${{ runner.temp }}
+        env:
+          VERIFIER: ${{ github.workspace }}/native/codex/verify_installed.py
+        run: |
+          import os, shutil, subprocess, venv
+          from pathlib import Path
+          wheel, = Path('codex-wheel').glob('*.whl')
+          venv.create('codex-venv', with_pip=True)
+          python = Path('codex-venv') / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+          subprocess.run([str(python), '-I', '-m', 'pip', 'install', '--only-binary=:all:', str(wheel)], check=True)
+          shutil.copy2(os.environ['VERIFIER'], 'verify_installed.py')
+          subprocess.run([str(python), '-I', 'verify_installed.py', '--output', 'installed.json'], check=True)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: codex-installed-${{ matrix.platform }}-${{ matrix.python }}
+          path: ${{ runner.temp }}/installed.json
+          if-no-files-found: error
+          retention-days: 14
+
+  distributions:
+    needs: [candidate, build, verify]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: codex-wheel-*
+          merge-multiple: true
+          path: dist
+      - name: Validate all four wheel identities and create checksums
+        shell: python
+        env:
+          PREVIEW_VERSION: ${{ needs.candidate.outputs.version }}
+          PREVIEW_TAG: ${{ needs.candidate.outputs.tag }}
+        run: |
+          import hashlib, json, os, zipfile
+          from email.parser import BytesParser
+          from pathlib import Path
+          root = Path('dist')
+          version = os.environ['PREVIEW_VERSION']
+          platforms = ['manylinux_2_28_x86_64', 'manylinux_2_28_aarch64', 'macosx_11_0_arm64', 'win_amd64']
+          expected = {f'openai_agents-{version}-cp310-abi3-{platform}.whl': platform for platform in platforms}
+          assert {path.name for path in root.iterdir()} == set(expected), 'Expected exactly four platform wheels'
+          hashes = {}
+          for name, platform in expected.items():
+              path = root / name
+              with zipfile.ZipFile(path) as archive:
+                  metadata, = [name for name in archive.namelist() if name.endswith('.dist-info/METADATA')]
+                  package = BytesParser().parsebytes(archive.read(metadata))
+                  wheel = BytesParser().parsebytes(archive.read(metadata.removesuffix('METADATA') + 'WHEEL'))
+                  assert package['Name'] == 'openai-agents' and package['Version'] == version
+                  assert wheel.get_all('Tag') == [f'cp310-abi3-{platform}']
+                  assert wheel['Root-Is-Purelib'] == 'false'
+              hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+          (root / 'SHA256SUMS').write_text(''.join(f'{hashes[name]}  {name}\n' for name in sorted(hashes)))
+          receipt = {
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'source_commit': os.environ['GITHUB_SHA'],
+              'source_branch': os.environ['GITHUB_REF_NAME'],
+              'workflow': os.environ['GITHUB_WORKFLOW_REF'],
+              'run_id': int(os.environ['GITHUB_RUN_ID']),
+              'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'version': version,
+              'tag': os.environ['PREVIEW_TAG'],
+              'sha256': hashes,
+          }
+          (root / 'BUILD.json').write_text(json.dumps(receipt, indent=2) + '\n')
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: codex-preview-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
