@@ -1,6 +1,7 @@
 """Exercise the provider-wire conversion boundary without starting Codex."""
 
 import json
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -65,10 +66,18 @@ def test_tool_result_continuation_uses_history_without_fabricated_user_input():
     assert turn == []
 
 
-def test_data_and_local_images_preserve_content_in_turn_and_tool_output(tmp_path):
-    image = tmp_path / "image.png"
+@pytest.mark.parametrize("local_image_format", ["path", "uri", "localhost_uri"])
+def test_data_and_local_images_preserve_content_in_turn_and_tool_output(
+    tmp_path, local_image_format
+):
+    image = tmp_path / "image %20 café#.png"
     image.write_bytes(b"image bytes")
     data = "data:image/png;base64,aW1hZ2UgYnl0ZXM="
+    local_image = {
+        "path": str(image),
+        "uri": image.as_uri(),
+        "localhost_uri": image.as_uri().replace("file:///", "file://localhost/", 1),
+    }[local_image_format]
     history, turn = prepare_codex_history(
         cast(
             list[TResponseInputItem],
@@ -77,7 +86,7 @@ def test_data_and_local_images_preserve_content_in_turn_and_tool_output(tmp_path
                 {
                     "type": "function_call_output",
                     "call_id": "c",
-                    "output": [{"type": "input_image", "image_url": image.as_uri()}],
+                    "output": [{"type": "input_image", "image_url": local_image}],
                 },
                 {
                     "role": "user",
@@ -88,6 +97,27 @@ def test_data_and_local_images_preserve_content_in_turn_and_tool_output(tmp_path
     )
     assert history[1]["output"] == [{"type": "input_image", "image_url": data}]
     assert turn == [{"type": "image", "image_url": data, "detail": "high"}]
+
+
+@pytest.mark.parametrize(
+    "image_url",
+    [
+        "file://example.com/a.png",
+        "file:///%5C%5Cexample.com/share/a.png",
+        r"\\example.com\share\a.png",
+        r"\\?\C:\a.png",
+        r"\\.\C:\a.png",
+    ],
+)
+def test_remote_or_device_images_are_rejected_before_reading(image_url, monkeypatch):
+    def unexpected_read(path):
+        raise AssertionError(f"Unexpected image read: {path}")
+
+    monkeypatch.setattr(Path, "read_bytes", unexpected_read)
+    with pytest.raises(UserError):
+        prepare_codex_history(
+            [{"role": "user", "content": [{"type": "input_image", "image_url": image_url}]}]
+        )
 
 
 @pytest.mark.parametrize(

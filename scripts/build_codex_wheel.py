@@ -84,7 +84,6 @@ def main() -> None:
             ],
             cwd=ROOT,
             env=environment,
-            text=True,
         )
     )
     target_dir = Path(metadata["target_directory"])

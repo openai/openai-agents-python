@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import os
 import re
 from pathlib import Path
 from typing import Any, cast
@@ -26,17 +27,18 @@ def _image_content(part: dict[str, Any]) -> dict[str, Any]:
     if isinstance(image, str) and not image.startswith("data:"):
         parsed = urlparse(image)
         if parsed.scheme == "file" and parsed.netloc in ("", "localhost"):
-            path = Path(unquote(parsed.path))
-        elif not parsed.scheme and Path(image).is_absolute():
-            path = Path(image)
-        else:
+            image = unquote(parsed.path)
+            if os.name == "nt" and re.match(r"^/[a-zA-Z]:[/\\]", image):
+                image = image[1:]
+        path = Path(image)
+        if not path.is_absolute() or str(path).replace("\\", "/").startswith("//"):
             raise UserError("CodexProvider accepts images as local paths or image data URLs.")
         media_type = mimetypes.guess_type(path.name)[0]
         if media_type not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
             raise UserError("CodexProvider accepts PNG, JPEG, WebP, and GIF images.")
         try:
             image = f"data:{media_type};base64,{base64.b64encode(path.read_bytes()).decode()}"
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise UserError("CodexProvider cannot read the local image.") from exc
     if not isinstance(image, str) or not re.match(
         r"^data:image/(?:png|jpeg|webp|gif);base64,", image, re.IGNORECASE

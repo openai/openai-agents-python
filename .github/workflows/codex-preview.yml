@@ -145,16 +145,7 @@ jobs:
           "$installer" -y --default-toolchain none --no-modify-path
           printf '%s/bin\n' "$CARGO_HOME" >> "$GITHUB_PATH"
           bash .github/scripts/install-codex-preview-tools.sh
-      - name: Install macOS prerequisites
-        if: runner.os == 'macOS'
-        run: brew install cmake pkgconf protobuf openssl@3
-      - name: Install Windows prerequisites
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install protoc --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          protoc.exe --version
+      # Codex selects Cargo.lock's checksum-pinned vendored protoc on every platform.
       - name: Select the pinned toolchain
         run: rustup toolchain install 1.95.0 --profile minimal
       - name: Build the combined native wheel
