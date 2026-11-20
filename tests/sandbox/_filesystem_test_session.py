@@ -6,7 +6,7 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from agents.sandbox.errors import (
     ExecNonZeroError,
@@ -16,22 +16,27 @@ from agents.sandbox.errors import (
 )
 from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.manifest import Manifest
-from agents.sandbox.sandboxes.unix_local import (
-    UnixLocalSandboxClient,
-    UnixLocalSandboxSession,
-    UnixLocalSandboxSessionState,
-)
 from agents.sandbox.session import SandboxSession
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.manager import Instrumentation
+from agents.sandbox.session.sandbox_client import BaseSandboxClient
 from agents.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot, SnapshotBase, SnapshotSpec
 from agents.sandbox.types import ExecResult, Permissions, User
+
+if TYPE_CHECKING:
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxSession
+
+
+class FilesystemTestSandboxSessionState(SandboxSessionState):
+    type: Literal["filesystem_test"] = "filesystem_test"
+    workspace_root_owned: bool = False
 
 
 class FilesystemTestSandboxSession(BaseSandboxSession):
     """Host-filesystem test double with no process-execution implementation."""
 
-    def __init__(self, state: UnixLocalSandboxSessionState) -> None:
+    def __init__(self, state: SandboxSessionState) -> None:
         self.state = state
         self._running = False
 
@@ -173,8 +178,17 @@ class FilesystemTestSandboxSession(BaseSandboxSession):
         raise AssertionError("FilesystemTestSandboxSession does not support workspace hydration")
 
 
-class FilesystemTestSandboxClient(UnixLocalSandboxClient):
+class FilesystemTestSandboxClient(BaseSandboxClient[object]):
     """Client test double that creates ``FilesystemTestSandboxSession`` instances."""
+
+    backend_id = "filesystem_test"
+    supports_default_options = True
+
+    def __init__(self) -> None:
+        self._instrumentation = Instrumentation()
+
+    def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
+        return self._deserialize_session_state_payload(payload, FilesystemTestSandboxSessionState)
 
     async def create(
         self,
@@ -192,7 +206,7 @@ class FilesystemTestSandboxClient(UnixLocalSandboxClient):
                 update={"root": workspace_root},
                 deep=True,
             )
-        state = UnixLocalSandboxSessionState(
+        state = FilesystemTestSandboxSessionState(
             session_id=uuid.uuid4(),
             manifest=resolved_manifest,
             snapshot=NoopSnapshot(id=str(uuid.uuid4())),
@@ -205,14 +219,13 @@ class FilesystemTestSandboxClient(UnixLocalSandboxClient):
 
     async def delete(self, session: SandboxSession) -> SandboxSession:
         inner = cast(FilesystemTestSandboxSession, session._inner)
-        if inner.state.workspace_root_owned:
+        if cast(FilesystemTestSandboxSessionState, inner.state).workspace_root_owned:
             shutil.rmtree(inner.state.manifest.root, ignore_errors=True)
         return session
 
     async def resume(self, state: SandboxSessionState) -> SandboxSession:
-        unix_state = cast(UnixLocalSandboxSessionState, state)
         return self._wrap_session(
-            FilesystemTestSandboxSession(state=unix_state),
+            FilesystemTestSandboxSession(state=state),
             instrumentation=self._instrumentation,
         )
 
@@ -223,6 +236,11 @@ def _build_unix_local_session(
     manifest: Manifest | None = None,
     exposed_ports: tuple[int, ...] = (),
 ) -> UnixLocalSandboxSession:
+    from agents.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxSession,
+        UnixLocalSandboxSessionState,
+    )
+
     workspace = tmp_path / "workspace"
     snapshot = LocalSnapshot(id=str(uuid.uuid4()), base_path=tmp_path)
     session_manifest = (
@@ -249,7 +267,7 @@ def _build_filesystem_test_session(
         if manifest is not None
         else Manifest(root=str(workspace))
     )
-    state = UnixLocalSandboxSessionState(
+    state = FilesystemTestSandboxSessionState(
         manifest=session_manifest,
         snapshot=LocalSnapshot(id=str(uuid.uuid4()), base_path=tmp_path),
     )

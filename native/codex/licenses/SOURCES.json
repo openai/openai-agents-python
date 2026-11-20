@@ -1,0 +1,8 @@
+{
+  "CODEX_LICENSE": "https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/LICENSE",
+  "CODEX_NOTICE": "https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/NOTICE",
+  "BUBBLEWRAP_COPYING": "https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/vendor/bubblewrap/COPYING",
+  "BUBBLEWRAP_SOURCE": "https://github.com/openai/codex/tree/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/vendor/bubblewrap",
+  "RUSTY_V8_LICENSE": "https://github.com/seanh-oai/rusty_v8/blob/350c5a859a9b3c84ab8701b3ad51e3b7699b30c0/LICENSE",
+  "V8_LICENSE": "https://github.com/denoland/v8/blob/c4ca1eccb90c5464d826b7713dc27178a53b0cfe/LICENSE"
+}

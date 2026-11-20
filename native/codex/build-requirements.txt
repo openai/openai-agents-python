@@ -1,0 +1,13 @@
+# Python 3.12 build tools; Maturin hashes cover all four preview platforms.
+# Verified against https://pypi.org/pypi/maturin/1.11.5/json and downloaded wheel bytes.
+maturin==1.11.5 \
+    --hash=sha256:2a596eab137cb3e169b97e89a739515abfa7a8755e2e5f0fc91432ef446f74f4 \
+    --hash=sha256:ffe7418834ff3b4a6c987187b7abb85ba033f4733e089d77d84e2de87057b4e7 \
+    --hash=sha256:c739b243d012386902f112ea63a54a94848932b70ae3565fa5e121fd1c0200e0 \
+    --hash=sha256:70d3e5beffb9ef9dfae5f3c1a7eeb572091505eb8cb076e9434518df1c42a73b
+hatchling==1.33.0 --hash=sha256:415290b84f464d2884303fca8974d38e7b85579069fab02a15db0828fbb1446d
+packaging==25.0 --hash=sha256:29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24b0e69331a484
+pathspec==0.12.1 --hash=sha256:a0d503e138a4c123b27490a4f7beda6a01c6f288df0e4a8b79c7eb0dc7b4cc08
+pluggy==1.6.0 --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
+tomlkit==0.15.2 --hash=sha256:05562412163a3037b94497385fb7f9204c637bc605af7a48199e41cf2272f437
+trove-classifiers==2026.9.21.13 --hash=sha256:8b1ff4f9c191b1040b71c37f1e445ab99732911e3cd91de52838453a854d7a17
