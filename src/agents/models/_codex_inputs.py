@@ -6,7 +6,8 @@ import mimetypes
 import re
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import TypeAdapter
@@ -24,13 +25,13 @@ from ..tool import ApplyPatchTool, FunctionTool, ShellTool, Tool, ToolSearchTool
 def _image_content(part: dict[str, Any]) -> dict[str, Any]:
     image = part.get("image_url")
     if isinstance(image, str) and not image.startswith("data:"):
-        parsed = urlparse(image)
-        if parsed.scheme == "file" and parsed.netloc in ("", "localhost"):
-            path = Path(unquote(parsed.path))
-        elif not parsed.scheme and Path(image).is_absolute():
-            path = Path(image)
-        else:
-            raise UserError("CodexProvider accepts images as local paths or image data URLs.")
+        path = Path(image)
+        if not path.is_absolute():
+            parsed = urlparse(image)
+            if parsed.scheme == "file" and parsed.netloc in ("", "localhost"):
+                path = Path(url2pathname(parsed.path))
+            else:
+                raise UserError("CodexProvider accepts images as local paths or image data URLs.")
         media_type = mimetypes.guess_type(path.name)[0]
         if media_type not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
             raise UserError("CodexProvider accepts PNG, JPEG, WebP, and GIF images.")
