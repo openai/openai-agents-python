@@ -43,6 +43,7 @@ state = RunState(
 # from main either.
 RELEASED_1_18_WRITER = "ce8ae9f368e7e3e2f495fc80a0c44137e88b78c4"
 HELD_WRITE_1_19_WRITER = "9303a8f8b8a528f572582ba09743b37b9fd0735c"
+RELEASED_1_22_WRITER = "0a74177ed23ffb0c2dba24eda3fb12fb58e3e09d"
 RELEASED_1_21_WRITER = "17d994bd3045dae71acda676a4ef4762ed8ecd94"
 GUARDRAIL_1_20_WRITER = "125efa029b4bfd84238bd2c4fd69c3406f802663"
 
@@ -613,6 +614,7 @@ MINIMAL_SCENARIOS = (
     ),
     Scenario("1.20", GUARDRAIL_1_20_WRITER, "minimal", ""),
     Scenario("1.21", RELEASED_1_21_WRITER, "minimal", ""),
+    Scenario("1.22", RELEASED_1_22_WRITER, "minimal", ""),
 )
 
 
@@ -695,6 +697,17 @@ async def produce_pending_state():
 
 state = asyncio.run(produce_pending_state())
 """,
+)
+
+
+# The released writer records the approval occurrence within the current response.
+SCENARIOS += (
+    Scenario(
+        "1.22",
+        RELEASED_1_22_WRITER,
+        "current_response_approval_ownership",
+        PENDING_TOOL_APPROVAL.code,
+    ),
 )
 
 

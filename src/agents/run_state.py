@@ -152,6 +152,7 @@ from .util._json import _to_dump_compatible
 if TYPE_CHECKING:
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
     from .items import ModelResponse, RunItem
+    from .memory.resumable_session import _ResumableSessionBinding
     from .run_internal.run_steps import (
         NextStepInterruption,
         NextStepRunAgain,
@@ -246,7 +247,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.22"
+CURRENT_SCHEMA_VERSION = "1.23"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -309,6 +310,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Records current-response ownership for approvals propagated from nested agent tools "
         "and distinguishes provider response IDs from stored Responses IDs for compaction."
     ),
+    "1.23": "Records when a paused run must resume through its ResumableSession.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -858,6 +860,10 @@ class RunState(Generic[TContext, TAgent]):
     Changed or ambiguous history requires application repair. Independently restored snapshots must
     not be resumed concurrently against the same Session.
 
+    When using a `ResumableSession`, share its ID with the next worker. Use
+    `session.load_state(agent)` to restore the pending call. The returned state remembers
+    its session, so `Runner.run(agent, state)` can claim the call and save the result.
+
     Context serialization is intentionally conservative:
 
     - Mapping contexts round-trip directly.
@@ -958,6 +964,11 @@ class RunState(Generic[TContext, TAgent]):
     _pending_session_write: _PendingSessionWrite | None = field(default=None, repr=False)
     """Canonical Session append that must settle before another model call."""
 
+    _resumable_binding: _ResumableSessionBinding | Literal["detached"] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    """The session that must claim this run, or a marker requiring a reload by session ID."""
+
     _session_write_in_progress: bool = field(default=False, repr=False)
     """Live ownership guard; independent serialized copies require caller serialization."""
 
@@ -1009,6 +1020,7 @@ class RunState(Generic[TContext, TAgent]):
         self._sandbox = None
         self._schema_version = CURRENT_SCHEMA_VERSION
         self._pending_session_write = None
+        self._resumable_binding = None
         self._session_write_in_progress = False
         self._terminal_unrecoverable = False
         from .agent_tool_state import get_agent_tool_state_scope
@@ -2071,6 +2083,8 @@ class RunState(Generic[TContext, TAgent]):
         result["current_turn_persisted_item_count"] = self._current_turn_persisted_item_count
         if self._pending_session_write is not None:
             result["pending_session_write"] = copy.deepcopy(self._pending_session_write)
+        if self._resumable_binding is not None:
+            result["requires_resumable_session"] = True
         if self._terminal_unrecoverable:
             result["terminal_unrecoverable"] = True
         result["trace"] = self._serialize_trace_data(
@@ -4677,6 +4691,11 @@ async def _build_run_state_from_json(
     state._current_turn_persisted_item_count = state_json.get(
         "current_turn_persisted_item_count", 0
     )
+    if "requires_resumable_session" in state_json:
+        marker = state_json["requires_resumable_session"]
+        if (schema_major, schema_minor) < (1, 23) or marker is not True:
+            raise validation_error_factory("Run state session marker is invalid", UserError)
+        state._resumable_binding = "detached"
     pending_write = state_json.get("pending_session_write")
     if pending_write is not None:
         from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
@@ -5627,6 +5646,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Run state pending Session write is invalid",
         "Invalid tool output guardrail result boundary",
         "Run state tool output guardrail result boundary requires schema 1.20.",
+        "Run state session marker is invalid",
         "Run state terminal marker is invalid",
         "Run state references an agent identity that is not present in the restored graph",
         "Function approval owner is absent from the restored graph.",

@@ -62,6 +62,7 @@ from .util._pretty_print import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from .memory.resumable_session import _ResumableSessionBinding
     from .sandbox.session.base_sandbox_session import BaseSandboxSession
 
 T = TypeVar("T")
@@ -121,6 +122,7 @@ def _populate_state_from_result(
     auto_previous_response_id: bool = False,
 ) -> RunState[Any]:
     """Populate a RunState with common fields from a RunResult."""
+    state._resumable_binding = result._resumable_binding
     state._current_agent = result.last_agent
     model_input_items = getattr(result, "_model_input_items", None)
     if isinstance(model_input_items, list):
@@ -428,6 +430,10 @@ class RunResultBase(abc.ABC):
         default=None, init=False, repr=False
     )
     """Held pending Session write preserved when a non-streaming result becomes a RunState."""
+    _resumable_binding: _ResumableSessionBinding | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    """The session and confirmed revision to use when resuming this result."""
     _current_step_for_state: Any = field(default=None, init=False, repr=False)
     """Current step preserved when a non-streaming result is converted back to RunState."""
 

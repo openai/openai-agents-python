@@ -70,7 +70,7 @@ async def run(args: argparse.Namespace) -> None:
                 state.approve(pending)
             else:
                 state.reject(pending)
-            result = await Runner.run(agent, state, session=session, run_config=config)
+            result = await Runner.run(agent, state, run_config=config)
         print(result.final_output)
 
 

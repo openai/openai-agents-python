@@ -582,7 +582,7 @@ class AgentRunner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
-        session = prepare_run_session(kwargs.get("session"))
+        session = prepare_run_session(kwargs.get("session"), input)
         kwargs["session"] = session
         run_config, owns_model_provider = _normalize_run_config_for_runner(kwargs.get("run_config"))
         cast(dict[str, Any], kwargs)["run_config"] = run_config
@@ -2647,7 +2647,7 @@ class AgentRunner:
         previous_response_id = kwargs.get("previous_response_id")
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
-        session = prepare_run_session(kwargs.get("session"))
+        session = prepare_run_session(kwargs.get("session"), input)
 
         run_config, owns_model_provider = _normalize_run_config_for_runner(run_config)
 

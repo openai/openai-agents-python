@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from typing import Any
 
 import pytest
 
-from agents import Agent, RunConfig, Runner
+from agents import Agent, RunConfig, Runner, RunState, Session, SQLiteSession
 from agents.decorators import tool
 from agents.exceptions import AgentsException
 from agents.memory.resumable_session import ResumableSession, ResumableSessionError
@@ -52,11 +53,14 @@ CONFIG = RunConfig(tracing_disabled=True)
 
 
 async def run_agent(
-    agent: Agent[Any], input: Any, session: ResumableSession, streamed: bool
+    agent: Agent[Any], input: Any, session: Session | ResumableSession | None, streamed: bool
 ) -> RunResult | RunResultStreaming:
+    options: dict[str, Any] = {"run_config": CONFIG}
+    if session is not None:
+        options["session"] = session
     if not streamed:
-        return await Runner.run(agent, input, session=session, run_config=CONFIG)
-    result = Runner.run_streamed(agent, input, session=session, run_config=CONFIG)
+        return await Runner.run(agent, input, **options)
+    result = Runner.run_streamed(agent, input, **options)
     async for _ in result.stream_events():
         pass
     return result
@@ -88,7 +92,10 @@ async def test_completed_history_recovers_through_new_handle(streamed: bool) -> 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
 @pytest.mark.parametrize("approved", [False, True], ids=["reject", "approve"])
-async def test_fresh_handle_resolves_original_call_once(streamed: bool, approved: bool) -> None:
+@pytest.mark.parametrize("explicit_session", [False, True], ids=["implicit", "explicit"])
+async def test_fresh_handle_resolves_original_call_once(
+    streamed: bool, approved: bool, explicit_session: bool
+) -> None:
     store = MemoryStore()
     session = await ResumableSession.create(store)
     effects: list[str] = []
@@ -120,7 +127,7 @@ async def test_fresh_handle_resolves_original_call_once(streamed: bool, approved
         state.approve(pending)
     else:
         state.reject(pending, rejection_message="explicit denial")
-    result = await run_agent(rebuilt, state, restored, streamed)
+    result = await run_agent(rebuilt, state, restored if explicit_session else None, streamed)
     assert result.final_output == "resolved"
     assert not restored.is_paused
     assert effects == (["original"] if approved else [])
@@ -437,3 +444,180 @@ async def test_error_handler_completion_confirms_a_ready_checkpoint(streamed: bo
     assert checkpoint["status"] == "ready"
     assert "handled answer" in json.dumps(checkpoint["history"])
     assert not model.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("copy_state", [False, True], ids=["live", "deepcopy"])
+async def test_result_state_carries_the_confirmed_session_binding(
+    streamed: bool, copy_state: bool
+) -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    effects: list[str] = []
+
+    @tool(needs_approval=True)
+    def change() -> str:
+        effects.append("changed")
+        return "confirmed output"
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("change", "{}", call_id="bound-call")],
+            [get_text_message("resolved")],
+        ]
+    )
+    agent = Agent(name="assistant", model=model, tools=[change])
+    paused = await run_agent(agent, "start", session, streamed)
+    state = paused.to_state()
+    if copy_state:
+        state = copy.deepcopy(state)
+    (pending,) = state.get_interruptions()
+    state.approve(pending)
+    result = await run_agent(agent, state, None, streamed)
+    assert result.final_output == "resolved"
+    assert effects == ["changed"]
+    assert store.checkpoint(session.session_id)["status"] == "ready"
+    history = store.checkpoint(session.session_id)["history"]
+    assert sum(item.get("call_id") == "bound-call" for item in history) == 2
+    with pytest.raises(ResumableSessionError):
+        await run_agent(agent, state, None, streamed)
+    with pytest.raises(ResumableSessionError):
+        await run_agent(agent, result.to_state(), None, streamed)
+    assert effects == ["changed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("history_only", [False, True], ids=["other-durable", "history-only"])
+async def test_bound_approval_rejects_a_conflicting_session_before_dispatch(
+    streamed: bool, history_only: bool
+) -> None:
+    marker = "SYNTHETIC_BOUND_APPROVAL_PRIVATE_INPUT"
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    effects: list[str] = []
+
+    @tool(needs_approval=True)
+    def change() -> str:
+        effects.append("changed")
+        return "output"
+
+    agent = Agent(
+        name="assistant",
+        instructions=marker,
+        model=ScriptedModel([[get_function_tool_call("change", "{}", call_id="bound-call")]]),
+        tools=[change],
+    )
+    await run_agent(agent, marker, session, streamed)
+    saved = store.records[session.session_id]
+    model = ScriptedModel([[get_text_message("must not dispatch")]])
+    rebuilt = Agent(name="assistant", instructions=marker, model=model, tools=[change])
+    state = await session.load_state(rebuilt)
+    state.approve(state.get_interruptions()[0])
+    conflicting = (
+        SQLiteSession("history-only")
+        if history_only
+        else await ResumableSession.create(MemoryStore())
+    )
+    try:
+        if streamed:
+            result = Runner.run_streamed(rebuilt, state, session=conflicting, run_config=CONFIG)
+            with pytest.raises(ResumableSessionError) as error:
+                async for _ in result.stream_events():
+                    pass
+        else:
+            with pytest.raises(ResumableSessionError) as error:
+                await Runner.run(rebuilt, state, session=conflicting, run_config=CONFIG)
+        _assert_secret_absent_from_agents_traceback(error.value, marker)
+        assert error.value.reason == "invalid_state"
+        assert not effects
+        assert not model.calls
+        assert store.records[session.session_id] == saved
+        if isinstance(conflicting, SQLiteSession):
+            assert await conflicting.get_items() == []
+    finally:
+        if isinstance(conflicting, SQLiteSession):
+            conflicting.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("explicit_session", [False, True], ids=["implicit", "explicit"])
+async def test_detached_approval_requires_loading_through_the_session(
+    streamed: bool, explicit_session: bool
+) -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    effects: list[str] = []
+
+    @tool(needs_approval=True)
+    def change() -> str:
+        effects.append("changed")
+        return "output"
+
+    agent = Agent(
+        name="assistant",
+        model=ScriptedModel([[get_function_tool_call("change", "{}", call_id="bound-call")]]),
+        tools=[change],
+    )
+    paused = await run_agent(agent, "start", session, streamed)
+    model = ScriptedModel([[get_text_message("resolved")]])
+    rebuilt = Agent(name="assistant", model=model, tools=[change])
+    detached = await RunState.from_string(rebuilt, paused.to_state().to_string())
+    detached.approve(detached.get_interruptions()[0])
+    with pytest.raises(ResumableSessionError, match="session.load_state"):
+        await run_agent(rebuilt, detached, session if explicit_session else None, streamed)
+    assert not effects
+    assert not model.calls
+    assert session.is_paused
+    attached = await session.load_state(rebuilt)
+    attached.approve(attached.get_interruptions()[0])
+    await run_agent(rebuilt, attached, None, streamed)
+    assert effects == ["changed"]
+    assert store.checkpoint(session.session_id)["status"] == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+async def test_independently_loaded_approvals_claim_one_revision_once(streamed: bool) -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    effects: list[str] = []
+
+    @tool(needs_approval=True)
+    def change() -> str:
+        effects.append("changed")
+        return "output"
+
+    agent = Agent(
+        name="assistant",
+        model=ScriptedModel([[get_function_tool_call("change", "{}", call_id="bound-call")]]),
+        tools=[change],
+    )
+    await run_agent(agent, "start", session, streamed)
+    restored = [await ResumableSession.resume(store, session.session_id) for _ in range(2)]
+    agents = [
+        Agent(
+            name="assistant", model=ScriptedModel([[get_text_message("resolved")]]), tools=[change]
+        )
+        for _ in range(2)
+    ]
+    states = [
+        await owner.load_state(worker) for owner, worker in zip(restored, agents, strict=True)
+    ]
+    for state in states:
+        state.approve(state.get_interruptions()[0])
+    outcomes = await asyncio.gather(
+        *(
+            run_agent(worker, state, None, streamed)
+            for worker, state in zip(agents, states, strict=True)
+        ),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(outcome, ResumableSessionError) for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, (RunResult, RunResultStreaming)) for outcome in outcomes) == 1
+    assert effects == ["changed"]
+    assert store.checkpoint(session.session_id)["status"] == "ready"
+    history = store.checkpoint(session.session_id)["history"]
+    assert sum(item.get("call_id") == "bound-call" for item in history) == 2

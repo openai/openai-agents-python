@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import uuid4
@@ -28,6 +29,17 @@ from .session import await_session_mutation
 if TYPE_CHECKING:
     from ..agent import Agent
     from ..run_state import ContextDeserializer, ContextOverride, RunState
+
+
+@dataclass(frozen=True)
+class _ResumableSessionBinding:
+    """A live checkpoint reference; serialized state alone cannot grant this authority."""
+
+    session: ResumableSession
+    revision: str
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _ResumableSessionBinding:
+        return self
 
 
 class ResumableSessionStore(Protocol):
@@ -81,7 +93,8 @@ class ResumableSessionError(UserError):
             ),
             "paused": "The resumable session requires its saved approval state, not a new prompt.",
             "invalid_state": (
-                "The run state does not match this session's saved approval checkpoint."
+                "The run state is not attached to this session's current approval checkpoint. "
+                "Reload it through session.load_state(agent)."
             ),
         }
         super().__init__(messages[reason])
@@ -152,11 +165,14 @@ def _parse_checkpoint(value: str) -> _Checkpoint:
 
 
 class ResumableSession:
-    """An opt-in durable conversation and approval checkpoint used with ``session=``.
+    """Save a conversation and its pending tool approvals under one ID.
 
-    Use ``create(store)`` to allocate an ID and ``resume(store, session_id)`` to load it.
-    Pass the handle to ``Runner.run`` or ``Runner.run_streamed``. If ``is_paused``, use
-    ``load_state(agent)``, apply the authorized decision and pass that state to the runner.
+    Start with ``await ResumableSession.create(store)``. On another worker, use
+    ``await ResumableSession.resume(store, session_id)`` to load the session.
+    For a new message, call ``Runner.run(agent, message, session=session)``.
+    If ``session.is_paused``, load the state with ``await session.load_state(agent)``.
+    Apply the user's decision and call ``Runner.run(agent, state)``. The state
+    remembers which session to update. The same calls work with ``Runner.run_streamed``.
     Wait for the run to finish before acting on its final output or interruptions.
     Raw model stream events describe work in progress.
 
@@ -182,7 +198,6 @@ class ResumableSession:
         self._store = store
         self._checkpoint = _checkpoint
         self._serialized = _serialized
-        self._loaded_state: RunState[Any, Any] | None = None
 
     @property
     def is_paused(self) -> bool:
@@ -235,22 +250,25 @@ class ResumableSession:
         context_deserializer: ContextDeserializer | None = None,
         strict_context: bool = False,
     ) -> RunState[Any, Any]:
-        """Restore this checkpoint's pending run using trusted current agent configuration.
+        """Load the run waiting for approval, using this worker's agent and tools.
 
-        Approve or reject its interruptions with the public RunState methods, then
-        pass the same state object and this session to Runner. The store itself
-        must authenticate and authorize access to the entire saved snapshot.
+        Match the user's decision to a call in ``state.get_interruptions()``. Call
+        ``state.approve(call)`` or ``state.reject(call)``, then ``Runner.run(agent, state)``.
+        The runner saves the outcome in this session. If you also pass ``session=``,
+        pass the session that loaded the state. On another worker, resume by session
+        ID and call ``load_state`` again to restore the connection to the store.
         """
         from ..run_state import RunState
 
-        if self._checkpoint.status != "paused" or self._checkpoint.run_state is None:
+        checkpoint = self._checkpoint
+        if checkpoint.status != "paused" or checkpoint.run_state is None:
             raise ResumableSessionError("invalid_state")
         failed = False
         state = None
         try:
             state = await RunState.from_string(
                 agent,
-                self._checkpoint.run_state,
+                checkpoint.run_state,
                 context_override=context_override,
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
@@ -261,7 +279,7 @@ class ResumableSession:
             failed = True
         if failed or state is None:
             raise ResumableSessionError("invalid_state")
-        self._loaded_state = state
+        state._resumable_binding = _ResumableSessionBinding(self, checkpoint.revision)
         return state
 
     def _validate_run(self, input: Any) -> None:
@@ -275,7 +293,12 @@ class ResumableSession:
             return
         if not isinstance(input, RunState):
             raise ResumableSessionError("paused")
-        if input is not self._loaded_state:
+        binding = input._resumable_binding
+        if (
+            not isinstance(binding, _ResumableSessionBinding)
+            or binding.session is not self
+            or binding.revision != self._checkpoint.revision
+        ):
             raise ResumableSessionError("invalid_state")
 
     def _get_history(self) -> list[TResponseInputItem]:
@@ -285,11 +308,10 @@ class ResumableSession:
         self._validate_run(input)
         active = self._checkpoint.model_copy(update={"status": "active", "revision": uuid4().hex})
         await self._replace(active, expected=self._serialized)
-        self._loaded_state = None
 
     async def _save_checkpoint(
         self, history: list[TResponseInputItem], state: RunState[Any, Any] | None
-    ) -> None:
+    ) -> _ResumableSessionBinding:
         if self._checkpoint.status != "active":
             raise ResumableSessionError("conflict")
         checkpoint = None
@@ -306,6 +328,7 @@ class ResumableSession:
         if checkpoint is None:
             raise ResumableSessionError("invalid_state")
         await self._replace(checkpoint, expected=self._serialized)
+        return _ResumableSessionBinding(self, checkpoint.revision)
 
     async def _replace(self, checkpoint: _Checkpoint, *, expected: str | None) -> None:
         value = None
