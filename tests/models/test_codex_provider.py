@@ -204,6 +204,31 @@ async def test_runner_owns_function_execution_and_history(tmp_path, threads):
 
 
 @pytest.mark.asyncio
+async def test_runner_replays_typed_function_tool_result(tmp_path, threads):
+    class Counts(BaseModel):
+        total: int
+
+    @function_tool(output_type=Counts)
+    def count_items() -> dict[str, int]:
+        return {"total": 3}
+
+    queue, _ = threads
+    first = FakeThread(call={"callId": "count", "tool": "count_items", "arguments": {}})
+    second = FakeThread(text="Counted items.")
+    queue.extend([first, second])
+
+    result = await Runner.run(
+        Agent(name="test", tools=[count_items]), "Count the items.", run_config=config(tmp_path)
+    )
+
+    tool_item = next(item for item in result.new_items if item.type == "tool_call_output_item")
+    assert tool_item.output == Counts(total=3)
+    replayed = next(item for item in second.history if item["type"] == "function_call_output")
+    assert replayed["call_id"] == "count"
+    assert json.loads(replayed["output"]) == {"total": 3}
+
+
+@pytest.mark.asyncio
 async def test_unsupported_settings_fail_before_launch(tmp_path, threads):
     queue, opened = threads
     from agents import ModelSettings
