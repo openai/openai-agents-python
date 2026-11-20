@@ -294,7 +294,7 @@ jobs:
 
           options, _ = cargo_build_options(root, dict(os.environ))
           subprocess.run(
-              ["cargo", "test", "--locked", "--release", *options, "-p", "codex-exec-server",
+              ["cargo", "test", "--locked", "--release", *options, "-p", "codex-exec-server-project-search-tests",
                "--lib", "invalid_filename", "--", "--nocapture"],
               cwd=root / ".upstream/codex/codex-rs", check=True,
           )

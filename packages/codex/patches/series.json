@@ -431,7 +431,11 @@
     {
       "path": "111-pr-05.patch",
       "sha256": "efec31871140fbcbf99c9f8649beac2214f017b2b029b131dbae2328e7c52281"
+    },
+    {
+      "path": "112-project-search-tests.patch",
+      "sha256": "00650ed6f28766713e0147bfca0b13586456673241ff0a7c13bbdd05c2a85980"
     }
   ],
-  "result_tree": "fcece0c216c3c419885a29670f901cfc48174074"
+  "result_tree": "641adffcc49bbc4746213115cfa16ab8ce35a94f"
 }

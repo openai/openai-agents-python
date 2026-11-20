@@ -1,0 +1,1559 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index f7a4d4ef3059e199b1ed9cb6a0dcf4b88a1d7bfa..b6283c333445b7c94bd05d8b0b11c1580ed06f14 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -3286,6 +3286,22 @@ dependencies = [
+  "wiremock",
+ ]
+ 
++[[package]]
++name = "codex-exec-server-project-search-tests"
++version = "0.0.0"
++dependencies = [
++ "codex-utils-absolute-path",
++ "codex-utils-path-uri",
++ "libc",
++ "rustix 1.1.4",
++ "serde",
++ "tempfile",
++ "tokio",
++ "tokio-util",
++ "uuid",
++ "windows-sys 0.61.2",
++]
++
+ [[package]]
+ name = "codex-exec-server-protocol"
+ version = "0.0.0"
+diff --git a/codex-rs/Cargo.toml b/codex-rs/Cargo.toml
+index ce7ed1f34d2a11bb0e65b87265cac15b9a228fa9..8ab4abe5a999cfe22ba50eb81d656d333e5f9995 100644
+--- a/codex-rs/Cargo.toml
++++ b/codex-rs/Cargo.toml
+@@ -58,6 +58,7 @@ members = [
+     "file-system",
+     "exec-server-protocol",
+     "exec-server",
++    "exec-server/tests/project-search",
+     "exec-server/tests/support",
+     "execpolicy",
+     "ext/agent",
+diff --git a/codex-rs/exec-server/src/lib.rs b/codex-rs/exec-server/src/lib.rs
+index 4877812c4c07de5024a934d045faa4934843fbb8..a28fe9ab1c7937024bd12b1d265a02d86d2d32ce 100644
+--- a/codex-rs/exec-server/src/lib.rs
++++ b/codex-rs/exec-server/src/lib.rs
+@@ -34,6 +34,8 @@ mod noise_relay;
+ mod process;
+ mod process_sandbox;
+ mod process_telemetry;
++#[cfg(test)]
++mod project_search_invalid_filename_tests;
+ mod regular_file;
+ mod relay;
+ mod relay_proto;
+@@ -57,12 +59,20 @@ mod shell_snapshot_file;
+ mod shell_snapshot_process;
+ mod telemetry;
+ mod trace_context;
++mod walk;
+ mod websocket_pong_watchdog;
++#[cfg(windows)]
++mod windows_file_type;
+ 
+ // Shared limits for inbound executor messages across all transports.
+ mod client_inbound_request_limit;
+ 
+ use codex_exec_server_protocol as protocol;
++use codex_file_system::MAX_WALK_DEPTH;
++use codex_file_system::MAX_WALK_DIRECTORIES;
++use codex_file_system::MAX_WALK_ENTRIES;
++use codex_file_system::MAX_WALK_RESPONSE_BYTES;
++use codex_file_system::WALK_RESPONSE_ITEM_OVERHEAD_BYTES;
+ 
+ /// Process-local opt-in for tying a remote executor to its parent's stdin pipe.
+ pub const CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE_ENV_VAR: &str =
+diff --git a/codex-rs/exec-server/src/local_file_system.rs b/codex-rs/exec-server/src/local_file_system.rs
+index aeb871e18bee88fc71f1759552780229fdf8107f..02d4e40d37025448d3f4a8d6dba5a34262831d26 100644
+--- a/codex-rs/exec-server/src/local_file_system.rs
++++ b/codex-rs/exec-server/src/local_file_system.rs
+@@ -1,12 +1,5 @@
+-use codex_file_system::MAX_WALK_DEPTH;
+-use codex_file_system::MAX_WALK_DIRECTORIES;
+-use codex_file_system::MAX_WALK_ENTRIES;
+-use codex_file_system::MAX_WALK_RESPONSE_BYTES;
+-use codex_file_system::WALK_RESPONSE_ITEM_OVERHEAD_BYTES;
+ use codex_utils_absolute_path::AbsolutePathBuf;
+ use codex_utils_path_uri::PathUri;
+-use std::collections::HashSet;
+-use std::collections::VecDeque;
+ use std::path::Path;
+ use std::path::PathBuf;
+ use std::sync::Arc;
+@@ -31,9 +24,6 @@ use crate::GetMetadataOptions;
+ use crate::ReadDirectoryEntry;
+ use crate::ReadFileOptions;
+ use crate::RemoveOptions;
+-use crate::WalkEntry;
+-use crate::WalkEntryKind;
+-use crate::WalkError;
+ use crate::WalkOptions;
+ use crate::WalkOutcome;
+ use crate::WriteFileOptions;
+@@ -717,293 +707,12 @@ impl DirectFileSystem {
+         Ok(entries)
+     }
+ 
+-    fn sync_walk_no_follow(
+-        root: &PathUri,
+-        options: WalkOptions,
+-        cancelled: &CancellationToken,
+-    ) -> io::Result<WalkOutcome> {
+-        let native = root.to_abs_path()?;
+-        if !no_follow::walk_metadata_sync(native.as_path())?.is_directory {
+-            return Err(io::Error::new(
+-                io::ErrorKind::InvalidInput,
+-                "walk root is not a directory",
+-            ));
+-        }
+-        let mut outcome = WalkOutcome::default();
+-        let mut queue = VecDeque::from([(root.clone(), 0usize)]);
+-        let mut directories = 1usize;
+-        let mut examined = 0usize;
+-        let mut response_bytes = 0usize;
+-        while let Some((directory, depth)) = queue.pop_front() {
+-            check_walk_cancelled(cancelled)?;
+-            let native = directory.to_abs_path()?;
+-            let remaining = options.max_entries - examined;
+-            let names =
+-                match no_follow::read_directory_bounded(native.as_path(), remaining + 1, cancelled)
+-                {
+-                    Ok(names) => names,
+-                    Err(error) => {
+-                        check_walk_cancelled(cancelled)?;
+-                        if !push_walk_error(
+-                            &mut outcome,
+-                            &mut response_bytes,
+-                            directory,
+-                            error.to_string(),
+-                        ) {
+-                            break;
+-                        }
+-                        continue;
+-                    }
+-                };
+-            if names.len() > remaining {
+-                outcome.truncated = true;
+-            }
+-            for name in names.into_iter().take(remaining) {
+-                check_walk_cancelled(cancelled)?;
+-                examined += 1;
+-                let name = match name {
+-                    Ok(name) => name,
+-                    Err(error) => {
+-                        if !push_walk_error(
+-                            &mut outcome,
+-                            &mut response_bytes,
+-                            directory.clone(),
+-                            error.to_string(),
+-                        ) {
+-                            return Ok(outcome);
+-                        }
+-                        continue;
+-                    }
+-                };
+-                let child_native = native.as_path().join(&name);
+-                let path = match PathUri::from_host_native_path(&child_native) {
+-                    Ok(path) => path,
+-                    Err(error) => {
+-                        if !push_walk_error(
+-                            &mut outcome,
+-                            &mut response_bytes,
+-                            directory.clone(),
+-                            error.to_string(),
+-                        ) {
+-                            return Ok(outcome);
+-                        }
+-                        continue;
+-                    }
+-                };
+-                let metadata = match no_follow::walk_metadata_sync(&child_native) {
+-                    Ok(metadata) => metadata,
+-                    Err(error) => {
+-                        if !push_walk_error(
+-                            &mut outcome,
+-                            &mut response_bytes,
+-                            path,
+-                            error.to_string(),
+-                        ) {
+-                            return Ok(outcome);
+-                        }
+-                        continue;
+-                    }
+-                };
+-                let kind = if metadata.is_directory {
+-                    WalkEntryKind::Directory
+-                } else if metadata.is_file {
+-                    WalkEntryKind::File
+-                } else {
+-                    continue;
+-                };
+-                if !reserve_walk_response_bytes(
+-                    &mut outcome,
+-                    &mut response_bytes,
+-                    path.to_string().len(),
+-                ) {
+-                    return Ok(outcome);
+-                }
+-                outcome.entries.push(WalkEntry {
+-                    path: path.clone(),
+-                    kind,
+-                });
+-                if kind == WalkEntryKind::Directory {
+-                    if options.prune_hidden_directories && name.starts_with('.') {
+-                        continue;
+-                    }
+-                    if depth >= options.max_depth || directories >= options.max_directories {
+-                        outcome.truncated = true;
+-                    } else {
+-                        directories += 1;
+-                        queue.push_back((path, depth + 1));
+-                    }
+-                }
+-            }
+-            if examined == options.max_entries {
+-                if !queue.is_empty() {
+-                    outcome.truncated = true;
+-                }
+-                break;
+-            }
+-        }
+-        Ok(outcome)
+-    }
+-
+     fn sync_walk(
+         root: &PathUri,
+         options: WalkOptions,
+         cancelled: &CancellationToken,
+     ) -> io::Result<WalkOutcome> {
+-        if options.max_directories == 0 || options.max_entries == 0 {
+-            return Err(io::Error::new(
+-                io::ErrorKind::InvalidInput,
+-                "filesystem walk limits must be greater than zero",
+-            ));
+-        }
+-        if options.max_depth > MAX_WALK_DEPTH
+-            || options.max_directories > MAX_WALK_DIRECTORIES
+-            || options.max_entries > MAX_WALK_ENTRIES
+-        {
+-            return Err(io::Error::new(
+-                io::ErrorKind::InvalidInput,
+-                format!(
+-                    "filesystem walk limits exceed maximums: depth={MAX_WALK_DEPTH}, directories={MAX_WALK_DIRECTORIES}, entries={MAX_WALK_ENTRIES}"
+-                ),
+-            ));
+-        }
+-
+-        check_walk_cancelled(cancelled)?;
+-        if options.no_follow {
+-            return Self::sync_walk_no_follow(root, options, cancelled);
+-        }
+-        let (root_metadata, root_is_symlink) = walk_metadata(root)?;
+-        if !root_metadata.is_dir() || (root_is_symlink && !options.follow_directory_symlinks) {
+-            return Ok(WalkOutcome::default());
+-        }
+-
+-        let root_identity = if options.follow_directory_symlinks {
+-            check_walk_cancelled(cancelled)?;
+-            walk_canonicalize(root)?
+-        } else {
+-            root.clone()
+-        };
+-        let mut outcome = WalkOutcome::default();
+-        let mut queue = VecDeque::from([(root.clone(), 0usize)]);
+-        let mut visited_directories = HashSet::from([root_identity]);
+-        let mut directory_count = 1usize;
+-        let mut entry_count = 0usize;
+-        let mut response_bytes = 0usize;
+-
+-        while let Some((directory, depth)) = queue.pop_front() {
+-            let entries = walk_read_directory(&directory, cancelled);
+-            check_walk_cancelled(cancelled)?;
+-            let mut entries = match entries {
+-                Ok(entries) => entries,
+-                Err(error) => {
+-                    if !push_walk_error(
+-                        &mut outcome,
+-                        &mut response_bytes,
+-                        directory,
+-                        error.to_string(),
+-                    ) {
+-                        return Ok(outcome);
+-                    }
+-                    continue;
+-                }
+-            };
+-            entries.sort();
+-
+-            for file_name in entries {
+-                check_walk_cancelled(cancelled)?;
+-                if entry_count == options.max_entries {
+-                    outcome.truncated = true;
+-                    return Ok(outcome);
+-                }
+-                entry_count += 1;
+-
+-                let path = match directory.join(&file_name) {
+-                    Ok(path) => path,
+-                    Err(error) => {
+-                        if !push_walk_error(
+-                            &mut outcome,
+-                            &mut response_bytes,
+-                            directory.clone(),
+-                            error.to_string(),
+-                        ) {
+-                            return Ok(outcome);
+-                        }
+-                        continue;
+-                    }
+-                };
+-                let (metadata, is_symlink) = match walk_metadata(&path) {
+-                    Ok(metadata) => metadata,
+-                    Err(error) => {
+-                        if !push_walk_error(
+-                            &mut outcome,
+-                            &mut response_bytes,
+-                            path,
+-                            error.to_string(),
+-                        ) {
+-                            return Ok(outcome);
+-                        }
+-                        continue;
+-                    }
+-                };
+-                if is_symlink && (!options.follow_directory_symlinks || !metadata.is_dir()) {
+-                    continue;
+-                }
+-
+-                let kind = if metadata.is_dir() {
+-                    WalkEntryKind::Directory
+-                } else if metadata.is_file() {
+-                    WalkEntryKind::File
+-                } else {
+-                    continue;
+-                };
+-                if !reserve_walk_response_bytes(
+-                    &mut outcome,
+-                    &mut response_bytes,
+-                    path.to_string().len(),
+-                ) {
+-                    return Ok(outcome);
+-                }
+-                outcome.entries.push(WalkEntry {
+-                    path: path.clone(),
+-                    kind,
+-                });
+-
+-                if kind == WalkEntryKind::Directory && depth < options.max_depth {
+-                    if options.prune_hidden_directories && file_name.starts_with('.') {
+-                        continue;
+-                    }
+-                    let directory_identity = if options.follow_directory_symlinks {
+-                        check_walk_cancelled(cancelled)?;
+-                        match walk_canonicalize(&path) {
+-                            Ok(path) => path,
+-                            Err(error) => {
+-                                if !push_walk_error(
+-                                    &mut outcome,
+-                                    &mut response_bytes,
+-                                    path,
+-                                    error.to_string(),
+-                                ) {
+-                                    return Ok(outcome);
+-                                }
+-                                continue;
+-                            }
+-                        }
+-                    } else {
+-                        path.clone()
+-                    };
+-                    if !visited_directories.insert(directory_identity) {
+-                        continue;
+-                    }
+-                    if directory_count == options.max_directories {
+-                        outcome.truncated = true;
+-                    } else {
+-                        directory_count += 1;
+-                        queue.push_back((path, depth + 1));
+-                    }
+-                }
+-            }
+-        }
+-
+-        Ok(outcome)
++        crate::walk::sync_walk(root, options, cancelled)
+     }
+ 
+     async fn remove(
+@@ -1199,89 +908,6 @@ impl ExecutorFileSystem for DirectFileSystem {
+     }
+ }
+ 
+-fn check_walk_cancelled(cancelled: &CancellationToken) -> io::Result<()> {
+-    if cancelled.is_cancelled() {
+-        return Err(io::Error::new(
+-            io::ErrorKind::Interrupted,
+-            "filesystem walk cancelled",
+-        ));
+-    }
+-    Ok(())
+-}
+-
+-fn walk_metadata(path: &PathUri) -> io::Result<(std::fs::Metadata, bool)> {
+-    let path = path.to_abs_path()?;
+-    let metadata = std::fs::symlink_metadata(path.as_path())?;
+-    let is_symlink = metadata.is_symlink();
+-    let metadata = if is_symlink {
+-        std::fs::metadata(path.as_path())?
+-    } else {
+-        metadata
+-    };
+-    Ok((metadata, is_symlink))
+-}
+-
+-fn walk_canonicalize(path: &PathUri) -> io::Result<PathUri> {
+-    let path = path.to_abs_path()?;
+-    let canonicalized =
+-        AbsolutePathBuf::from_absolute_path(std::fs::canonicalize(path.as_path())?)?;
+-    Ok(PathUri::from_abs_path(&canonicalized))
+-}
+-
+-fn walk_read_directory(path: &PathUri, cancelled: &CancellationToken) -> io::Result<Vec<String>> {
+-    check_walk_cancelled(cancelled)?;
+-    let path = path.to_abs_path()?;
+-    let mut entries = Vec::new();
+-    for entry in std::fs::read_dir(path.as_path())? {
+-        check_walk_cancelled(cancelled)?;
+-        let entry = entry?;
+-        let Ok(file_type) = entry.file_type() else {
+-            continue;
+-        };
+-        // Match DirectFileSystem::read_directory: omit broken or inaccessible links.
+-        if file_type.is_symlink() {
+-            check_walk_cancelled(cancelled)?;
+-            if std::fs::metadata(entry.path()).is_err() {
+-                continue;
+-            }
+-        }
+-        entries.push(entry.file_name().to_string_lossy().into_owned());
+-    }
+-    Ok(entries)
+-}
+-
+-fn push_walk_error(
+-    outcome: &mut WalkOutcome,
+-    response_bytes: &mut usize,
+-    path: PathUri,
+-    message: String,
+-) -> bool {
+-    let item_bytes = path.to_string().len().saturating_add(message.len());
+-    if !reserve_walk_response_bytes(outcome, response_bytes, item_bytes) {
+-        return false;
+-    }
+-    outcome.errors.push(WalkError { path, message });
+-    true
+-}
+-
+-fn reserve_walk_response_bytes(
+-    outcome: &mut WalkOutcome,
+-    response_bytes: &mut usize,
+-    content_bytes: usize,
+-) -> bool {
+-    let item_bytes = content_bytes.saturating_add(WALK_RESPONSE_ITEM_OVERHEAD_BYTES);
+-    let Some(total_bytes) = response_bytes.checked_add(item_bytes) else {
+-        outcome.truncated = true;
+-        return false;
+-    };
+-    if total_bytes > MAX_WALK_RESPONSE_BYTES {
+-        outcome.truncated = true;
+-        return false;
+-    }
+-    *response_bytes = total_bytes;
+-    true
+-}
+-
+ fn reject_sandbox_context(sandbox: Option<&FileSystemSandboxContext>) -> io::Result<()> {
+     if sandbox.is_some() {
+         return Err(io::Error::new(
+@@ -1504,83 +1130,13 @@ mod walk_tests {
+         assert_eq!(wrapper_error.kind(), io::ErrorKind::InvalidInput);
+         Ok(())
+     }
+-
+-    #[test]
+-    fn sync_walk_cancellation_stops_before_io() -> io::Result<()> {
+-        let temp = tempfile::tempdir()?;
+-        let missing = PathUri::from_host_native_path(temp.path().join("missing"))?;
+-        let options = WalkOptions {
+-            no_follow: false,
+-            max_depth: 1,
+-            max_directories: 1,
+-            max_entries: 1,
+-            follow_directory_symlinks: true,
+-            prune_hidden_directories: false,
+-        };
+-        let cancelled = CancellationToken::new();
+-        let cancel_on_drop = cancelled.clone().drop_guard();
+-        drop(cancel_on_drop);
+-
+-        for result in [
+-            DirectFileSystem::sync_walk(&missing, options, &cancelled).map(|_| ()),
+-            walk_read_directory(&missing, &cancelled).map(|_| ()),
+-        ] {
+-            assert_eq!(
+-                result
+-                    .expect_err("cancelled walks must stop before I/O")
+-                    .kind(),
+-                io::ErrorKind::Interrupted,
+-            );
+-        }
+-        Ok(())
+-    }
+-
+-    #[test]
+-    fn sync_walk_response_budget_counts_entries_and_errors() -> io::Result<()> {
+-        let temp = tempfile::tempdir()?;
+-        let root = PathUri::from_host_native_path(temp.path())?;
+-        let mut outcome = WalkOutcome::default();
+-        let mut response_bytes =
+-            MAX_WALK_RESPONSE_BYTES - WALK_RESPONSE_ITEM_OVERHEAD_BYTES - root.to_string().len();
+-        assert!(push_walk_error(
+-            &mut outcome,
+-            &mut response_bytes,
+-            root.clone(),
+-            String::new()
+-        ));
+-        assert!(!reserve_walk_response_bytes(
+-            &mut outcome,
+-            &mut response_bytes,
+-            /*content_bytes*/ 0
+-        ));
+-        assert_eq!(
+-            outcome,
+-            WalkOutcome {
+-                entries: Vec::new(),
+-                errors: vec![WalkError {
+-                    path: root,
+-                    message: String::new()
+-                }],
+-                truncated: true,
+-            },
+-        );
+-        Ok(())
+-    }
+ }
+ 
+-#[cfg(test)]
++#[cfg(all(test, unix))]
+ mod project_search_walk_tests {
+     use super::*;
+-    fn options() -> WalkOptions {
+-        WalkOptions {
+-            no_follow: true,
+-            max_depth: 64,
+-            max_directories: 1000,
+-            max_entries: 10_000,
+-            follow_directory_symlinks: false,
+-            prune_hidden_directories: false,
+-        }
+-    }
++    use crate::WalkEntryKind;
++    use crate::project_search_invalid_filename_tests::options;
+     #[cfg(unix)]
+     #[tokio::test]
+     async fn control_names_preserve_identity_and_contents() -> io::Result<()> {
+@@ -1708,103 +1264,6 @@ mod project_search_walk_tests {
+         Ok(())
+     }
+ 
+-    fn invalid_filename(index: usize) -> std::ffi::OsString {
+-        let name = format!("invalid-{index}-");
+-        #[cfg(unix)]
+-        {
+-            use std::os::unix::ffi::OsStringExt;
+-            let mut bytes = name.into_bytes();
+-            bytes.push(0xff);
+-            std::ffi::OsString::from_vec(bytes)
+-        }
+-        #[cfg(windows)]
+-        {
+-            use std::os::windows::ffi::OsStringExt;
+-            let units: Vec<u16> = name.encode_utf16().chain([0xd800]).collect();
+-            std::ffi::OsString::from_wide(&units)
+-        }
+-    }
+-
+-    fn create_invalid_filename_fixture(base: &Path) -> io::Result<bool> {
+-        let mut file = match std::fs::File::create(base.join(invalid_filename(0))) {
+-            Ok(file) => file,
+-            #[cfg(unix)]
+-            Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+-                eprintln!("not applicable: filesystem rejects invalid filename bytes ({error})");
+-                return Ok(false);
+-            }
+-            Err(error) => return Err(error),
+-        };
+-        std::io::Write::write_all(&mut file, b"unrepresentable")?;
+-        Ok(true)
+-    }
+-
+-    #[test]
+-    fn invalid_filename_preserves_valid_siblings_and_descendants() -> io::Result<()> {
+-        let temp = tempfile::tempdir()?;
+-        let base = temp.path().canonicalize()?;
+-        std::fs::write(base.join("good.txt"), "needle")?;
+-        if !create_invalid_filename_fixture(&base)? {
+-            return Ok(());
+-        }
+-        std::fs::create_dir(base.join("nested"))?;
+-        std::fs::write(base.join("nested/match.txt"), "needle")?;
+-        let root = PathUri::from_host_native_path(&base)?;
+-        let result = DirectFileSystem::sync_walk(&root, options(), &CancellationToken::new())?;
+-        assert_eq!(result.entries.len(), 3);
+-        for name in ["good.txt", "nested", "nested/match.txt"] {
+-            let expected = root.join(name).unwrap();
+-            assert!(result.entries.iter().any(|entry| entry.path == expected));
+-        }
+-        assert_eq!(result.errors.len(), 1);
+-        assert_eq!(result.errors[0].path, root);
+-        assert!(
+-            !result.truncated,
+-            "the error is not an entry-limit truncation"
+-        );
+-        Ok(())
+-    }
+-
+-    #[test]
+-    fn invalid_filenames_consume_the_entry_budget() -> io::Result<()> {
+-        let temp = tempfile::tempdir()?;
+-        let base = temp.path().canonicalize()?;
+-        if !create_invalid_filename_fixture(&base)? {
+-            return Ok(());
+-        }
+-        for index in 1..8 {
+-            std::fs::write(base.join(invalid_filename(index)), "unrepresentable")?;
+-        }
+-        let root = PathUri::from_host_native_path(&base)?;
+-        let mut limits = options();
+-        limits.max_entries = 3;
+-        let result = DirectFileSystem::sync_walk(&root, limits, &CancellationToken::new())?;
+-        assert!(result.entries.is_empty());
+-        assert_eq!(result.errors.len(), 3);
+-        assert!(result.errors.iter().all(|error| error.path == root));
+-        assert!(result.truncated);
+-        let entries = no_follow::read_directory_bounded(&base, 4, &CancellationToken::new())?;
+-        assert_eq!(entries.len(), 4, "including only the bounded extra probe");
+-        Ok(())
+-    }
+-
+-    #[test]
+-    fn invalid_filename_cancellation_and_setup_failures_stay_outer() -> io::Result<()> {
+-        let temp = tempfile::tempdir()?;
+-        let base = temp.path().canonicalize()?;
+-        // These assertions also apply when the filesystem rejects invalid filenames.
+-        let _ = create_invalid_filename_fixture(&base)?;
+-        let cancelled = CancellationToken::new();
+-        cancelled.cancel();
+-        let error = no_follow::read_directory_bounded(&base, 4, &cancelled).unwrap_err();
+-        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+-        assert!(
+-            no_follow::read_directory_bounded(&base.join("missing"), 4, &CancellationToken::new(),)
+-                .is_err()
+-        );
+-        Ok(())
+-    }
+-
+     #[cfg(unix)]
+     #[test]
+     fn nofollow_walk_bounds_wide_directories_and_reports_depth() -> io::Result<()> {
+diff --git a/codex-rs/exec-server/src/no_follow/windows.rs b/codex-rs/exec-server/src/no_follow/windows.rs
+index 9cb3955cf22df366ab55edb72bb0356857cbc2d6..59c1de92ab16b406dc1a267d5751d57f0290575e 100644
+--- a/codex-rs/exec-server/src/no_follow/windows.rs
++++ b/codex-rs/exec-server/src/no_follow/windows.rs
+@@ -1,4 +1,4 @@
+-use crate::regular_file;
++use crate::windows_file_type;
+ use std::ffi::OsStr;
+ use std::ffi::c_void;
+ use std::io;
+@@ -206,7 +206,7 @@ pub(super) fn open_file_sync(path: &Path) -> io::Result<std::fs::File> {
+ }
+ 
+ fn validate_regular_file(file: &std::fs::File, path: &Path) -> io::Result<()> {
+-    if !regular_file::is_disk_file(file) || !file.metadata()?.is_file() {
++    if !windows_file_type::is_disk_file(file) || !file.metadata()?.is_file() {
+         return Err(io::Error::new(
+             io::ErrorKind::InvalidInput,
+             format!("path `{}` is not a file", path.display()),
+diff --git a/codex-rs/exec-server/src/project_search_invalid_filename_tests.rs b/codex-rs/exec-server/src/project_search_invalid_filename_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..79189efe91a1259920139e9fb88e9bb2f4ddae3d
+--- /dev/null
++++ b/codex-rs/exec-server/src/project_search_invalid_filename_tests.rs
+@@ -0,0 +1,116 @@
++use codex_utils_path_uri::PathUri;
++use std::io;
++use std::path::Path;
++use tokio_util::sync::CancellationToken;
++
++use crate::WalkOptions;
++use crate::no_follow;
++use crate::walk::sync_walk;
++
++pub(crate) fn options() -> WalkOptions {
++    WalkOptions {
++        no_follow: true,
++        max_depth: 64,
++        max_directories: 1000,
++        max_entries: 10_000,
++        follow_directory_symlinks: false,
++        prune_hidden_directories: false,
++    }
++}
++
++fn invalid_filename(index: usize) -> std::ffi::OsString {
++    let name = format!("invalid-{index}-");
++    #[cfg(unix)]
++    {
++        use std::os::unix::ffi::OsStringExt;
++        let mut bytes = name.into_bytes();
++        bytes.push(0xff);
++        std::ffi::OsString::from_vec(bytes)
++    }
++    #[cfg(windows)]
++    {
++        use std::os::windows::ffi::OsStringExt;
++        let units: Vec<u16> = name.encode_utf16().chain([0xd800]).collect();
++        std::ffi::OsString::from_wide(&units)
++    }
++}
++
++fn create_invalid_filename_fixture(base: &Path) -> io::Result<bool> {
++    let mut file = match std::fs::File::create(base.join(invalid_filename(0))) {
++        Ok(file) => file,
++        #[cfg(unix)]
++        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
++            eprintln!("not applicable: filesystem rejects invalid filename bytes ({error})");
++            return Ok(false);
++        }
++        Err(error) => return Err(error),
++    };
++    std::io::Write::write_all(&mut file, b"unrepresentable")?;
++    Ok(true)
++}
++
++#[test]
++fn invalid_filename_preserves_valid_siblings_and_descendants() -> io::Result<()> {
++    let temp = tempfile::tempdir()?;
++    let base = temp.path().canonicalize()?;
++    std::fs::write(base.join("good.txt"), "needle")?;
++    if !create_invalid_filename_fixture(&base)? {
++        return Ok(());
++    }
++    std::fs::create_dir(base.join("nested"))?;
++    std::fs::write(base.join("nested/match.txt"), "needle")?;
++    let root = PathUri::from_host_native_path(&base)?;
++    let result = sync_walk(&root, options(), &CancellationToken::new())?;
++    assert_eq!(result.entries.len(), 3);
++    for name in ["good.txt", "nested", "nested/match.txt"] {
++        let expected = root.join(name).unwrap();
++        assert!(result.entries.iter().any(|entry| entry.path == expected));
++    }
++    assert_eq!(result.errors.len(), 1);
++    assert_eq!(result.errors[0].path, root);
++    assert!(
++        !result.truncated,
++        "the error is not an entry-limit truncation"
++    );
++    Ok(())
++}
++
++#[test]
++fn invalid_filenames_consume_the_entry_budget() -> io::Result<()> {
++    let temp = tempfile::tempdir()?;
++    let base = temp.path().canonicalize()?;
++    if !create_invalid_filename_fixture(&base)? {
++        return Ok(());
++    }
++    for index in 1..8 {
++        std::fs::write(base.join(invalid_filename(index)), "unrepresentable")?;
++    }
++    let root = PathUri::from_host_native_path(&base)?;
++    let mut limits = options();
++    limits.max_entries = 3;
++    let result = sync_walk(&root, limits, &CancellationToken::new())?;
++    assert!(result.entries.is_empty());
++    assert_eq!(result.errors.len(), 3);
++    assert!(result.errors.iter().all(|error| error.path == root));
++    assert!(result.truncated);
++    let entries = no_follow::read_directory_bounded(&base, 4, &CancellationToken::new())?;
++    assert_eq!(entries.len(), 4, "including only the bounded extra probe");
++    Ok(())
++}
++
++#[test]
++fn invalid_filename_cancellation_and_setup_failures_stay_outer() -> io::Result<()> {
++    let temp = tempfile::tempdir()?;
++    let base = temp.path().canonicalize()?;
++    // These assertions also apply when the filesystem rejects invalid filenames.
++    let _ = create_invalid_filename_fixture(&base)?;
++    let cancelled = CancellationToken::new();
++    cancelled.cancel();
++    let error = no_follow::read_directory_bounded(&base, 4, &cancelled).unwrap_err();
++    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
++    assert!(
++        no_follow::read_directory_bounded(&base.join("missing"), 4, &CancellationToken::new(),)
++            .is_err()
++    );
++    Ok(())
++}
+diff --git a/codex-rs/exec-server/src/regular_file.rs b/codex-rs/exec-server/src/regular_file.rs
+index 84d38bd381eebeaa332cd6d7904395627c066917..107f32323147784d5a7fae815d7737c8c5e6fdd3 100644
+--- a/codex-rs/exec-server/src/regular_file.rs
++++ b/codex-rs/exec-server/src/regular_file.rs
+@@ -7,6 +7,8 @@ use std::path::Path;
+ use tokio::io::AsyncReadExt;
+ 
+ use crate::protocol::FsOpenMode;
++#[cfg(windows)]
++use crate::windows_file_type::is_disk_file;
+ 
+ pub(crate) async fn open(path: &Path, mode: FsOpenMode) -> io::Result<tokio::fs::File> {
+     let path = path.to_path_buf();
+@@ -83,15 +85,6 @@ fn configure_open(options: &mut std::fs::OpenOptions) {
+ #[cfg(not(any(unix, windows)))]
+ fn configure_open(_options: &mut std::fs::OpenOptions) {}
+ 
+-#[cfg(windows)]
+-pub(crate) fn is_disk_file(file: &impl std::os::windows::io::AsRawHandle) -> bool {
+-    use windows_sys::Win32::Storage::FileSystem::FILE_TYPE_DISK;
+-    use windows_sys::Win32::Storage::FileSystem::GetFileType;
+-
+-    // SAFETY: `file` owns this handle for the duration of the call.
+-    unsafe { GetFileType(file.as_raw_handle()) == FILE_TYPE_DISK }
+-}
+-
+ #[cfg(not(windows))]
+ fn is_disk_file<T>(_file: &T) -> bool {
+     true
+diff --git a/codex-rs/exec-server/src/walk.rs b/codex-rs/exec-server/src/walk.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ba3bfe65e687e3e687c2b0ab5a41656d77a43a5b
+--- /dev/null
++++ b/codex-rs/exec-server/src/walk.rs
+@@ -0,0 +1,448 @@
++use codex_utils_absolute_path::AbsolutePathBuf;
++use codex_utils_path_uri::PathUri;
++use std::collections::HashSet;
++use std::collections::VecDeque;
++use std::io;
++use tokio_util::sync::CancellationToken;
++
++use crate::MAX_WALK_DEPTH;
++use crate::MAX_WALK_DIRECTORIES;
++use crate::MAX_WALK_ENTRIES;
++use crate::MAX_WALK_RESPONSE_BYTES;
++use crate::WALK_RESPONSE_ITEM_OVERHEAD_BYTES;
++use crate::WalkEntry;
++use crate::WalkEntryKind;
++use crate::WalkError;
++use crate::WalkOptions;
++use crate::WalkOutcome;
++use crate::no_follow;
++
++fn sync_walk_no_follow(
++    root: &PathUri,
++    options: WalkOptions,
++    cancelled: &CancellationToken,
++) -> io::Result<WalkOutcome> {
++    let native = root.to_abs_path()?;
++    if !no_follow::walk_metadata_sync(native.as_path())?.is_directory {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidInput,
++            "walk root is not a directory",
++        ));
++    }
++    let mut outcome = WalkOutcome::default();
++    let mut queue = VecDeque::from([(root.clone(), 0usize)]);
++    let mut directories = 1usize;
++    let mut examined = 0usize;
++    let mut response_bytes = 0usize;
++    while let Some((directory, depth)) = queue.pop_front() {
++        check_walk_cancelled(cancelled)?;
++        let native = directory.to_abs_path()?;
++        let remaining = options.max_entries - examined;
++        let names =
++            match no_follow::read_directory_bounded(native.as_path(), remaining + 1, cancelled) {
++                Ok(names) => names,
++                Err(error) => {
++                    check_walk_cancelled(cancelled)?;
++                    if !push_walk_error(
++                        &mut outcome,
++                        &mut response_bytes,
++                        directory,
++                        error.to_string(),
++                    ) {
++                        break;
++                    }
++                    continue;
++                }
++            };
++        if names.len() > remaining {
++            outcome.truncated = true;
++        }
++        for name in names.into_iter().take(remaining) {
++            check_walk_cancelled(cancelled)?;
++            examined += 1;
++            let name = match name {
++                Ok(name) => name,
++                Err(error) => {
++                    if !push_walk_error(
++                        &mut outcome,
++                        &mut response_bytes,
++                        directory.clone(),
++                        error.to_string(),
++                    ) {
++                        return Ok(outcome);
++                    }
++                    continue;
++                }
++            };
++            let child_native = native.as_path().join(&name);
++            let path = match PathUri::from_host_native_path(&child_native) {
++                Ok(path) => path,
++                Err(error) => {
++                    if !push_walk_error(
++                        &mut outcome,
++                        &mut response_bytes,
++                        directory.clone(),
++                        error.to_string(),
++                    ) {
++                        return Ok(outcome);
++                    }
++                    continue;
++                }
++            };
++            let metadata = match no_follow::walk_metadata_sync(&child_native) {
++                Ok(metadata) => metadata,
++                Err(error) => {
++                    if !push_walk_error(&mut outcome, &mut response_bytes, path, error.to_string())
++                    {
++                        return Ok(outcome);
++                    }
++                    continue;
++                }
++            };
++            let kind = if metadata.is_directory {
++                WalkEntryKind::Directory
++            } else if metadata.is_file {
++                WalkEntryKind::File
++            } else {
++                continue;
++            };
++            if !reserve_walk_response_bytes(
++                &mut outcome,
++                &mut response_bytes,
++                path.to_string().len(),
++            ) {
++                return Ok(outcome);
++            }
++            outcome.entries.push(WalkEntry {
++                path: path.clone(),
++                kind,
++            });
++            if kind == WalkEntryKind::Directory {
++                if options.prune_hidden_directories && name.starts_with('.') {
++                    continue;
++                }
++                if depth >= options.max_depth || directories >= options.max_directories {
++                    outcome.truncated = true;
++                } else {
++                    directories += 1;
++                    queue.push_back((path, depth + 1));
++                }
++            }
++        }
++        if examined == options.max_entries {
++            if !queue.is_empty() {
++                outcome.truncated = true;
++            }
++            break;
++        }
++    }
++    Ok(outcome)
++}
++
++pub(crate) fn sync_walk(
++    root: &PathUri,
++    options: WalkOptions,
++    cancelled: &CancellationToken,
++) -> io::Result<WalkOutcome> {
++    if options.max_directories == 0 || options.max_entries == 0 {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidInput,
++            "filesystem walk limits must be greater than zero",
++        ));
++    }
++    if options.max_depth > MAX_WALK_DEPTH
++        || options.max_directories > MAX_WALK_DIRECTORIES
++        || options.max_entries > MAX_WALK_ENTRIES
++    {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidInput,
++            format!(
++                "filesystem walk limits exceed maximums: depth={MAX_WALK_DEPTH}, directories={MAX_WALK_DIRECTORIES}, entries={MAX_WALK_ENTRIES}"
++            ),
++        ));
++    }
++
++    check_walk_cancelled(cancelled)?;
++    if options.no_follow {
++        return sync_walk_no_follow(root, options, cancelled);
++    }
++    let (root_metadata, root_is_symlink) = walk_metadata(root)?;
++    if !root_metadata.is_dir() || (root_is_symlink && !options.follow_directory_symlinks) {
++        return Ok(WalkOutcome::default());
++    }
++
++    let root_identity = if options.follow_directory_symlinks {
++        check_walk_cancelled(cancelled)?;
++        walk_canonicalize(root)?
++    } else {
++        root.clone()
++    };
++    let mut outcome = WalkOutcome::default();
++    let mut queue = VecDeque::from([(root.clone(), 0usize)]);
++    let mut visited_directories = HashSet::from([root_identity]);
++    let mut directory_count = 1usize;
++    let mut entry_count = 0usize;
++    let mut response_bytes = 0usize;
++
++    while let Some((directory, depth)) = queue.pop_front() {
++        let entries = walk_read_directory(&directory, cancelled);
++        check_walk_cancelled(cancelled)?;
++        let mut entries = match entries {
++            Ok(entries) => entries,
++            Err(error) => {
++                if !push_walk_error(
++                    &mut outcome,
++                    &mut response_bytes,
++                    directory,
++                    error.to_string(),
++                ) {
++                    return Ok(outcome);
++                }
++                continue;
++            }
++        };
++        entries.sort();
++
++        for file_name in entries {
++            check_walk_cancelled(cancelled)?;
++            if entry_count == options.max_entries {
++                outcome.truncated = true;
++                return Ok(outcome);
++            }
++            entry_count += 1;
++
++            let path = match directory.join(&file_name) {
++                Ok(path) => path,
++                Err(error) => {
++                    if !push_walk_error(
++                        &mut outcome,
++                        &mut response_bytes,
++                        directory.clone(),
++                        error.to_string(),
++                    ) {
++                        return Ok(outcome);
++                    }
++                    continue;
++                }
++            };
++            let (metadata, is_symlink) = match walk_metadata(&path) {
++                Ok(metadata) => metadata,
++                Err(error) => {
++                    if !push_walk_error(&mut outcome, &mut response_bytes, path, error.to_string())
++                    {
++                        return Ok(outcome);
++                    }
++                    continue;
++                }
++            };
++            if is_symlink && (!options.follow_directory_symlinks || !metadata.is_dir()) {
++                continue;
++            }
++
++            let kind = if metadata.is_dir() {
++                WalkEntryKind::Directory
++            } else if metadata.is_file() {
++                WalkEntryKind::File
++            } else {
++                continue;
++            };
++            if !reserve_walk_response_bytes(
++                &mut outcome,
++                &mut response_bytes,
++                path.to_string().len(),
++            ) {
++                return Ok(outcome);
++            }
++            outcome.entries.push(WalkEntry {
++                path: path.clone(),
++                kind,
++            });
++
++            if kind == WalkEntryKind::Directory && depth < options.max_depth {
++                if options.prune_hidden_directories && file_name.starts_with('.') {
++                    continue;
++                }
++                let directory_identity = if options.follow_directory_symlinks {
++                    check_walk_cancelled(cancelled)?;
++                    match walk_canonicalize(&path) {
++                        Ok(path) => path,
++                        Err(error) => {
++                            if !push_walk_error(
++                                &mut outcome,
++                                &mut response_bytes,
++                                path,
++                                error.to_string(),
++                            ) {
++                                return Ok(outcome);
++                            }
++                            continue;
++                        }
++                    }
++                } else {
++                    path.clone()
++                };
++                if !visited_directories.insert(directory_identity) {
++                    continue;
++                }
++                if directory_count == options.max_directories {
++                    outcome.truncated = true;
++                } else {
++                    directory_count += 1;
++                    queue.push_back((path, depth + 1));
++                }
++            }
++        }
++    }
++
++    Ok(outcome)
++}
++
++fn check_walk_cancelled(cancelled: &CancellationToken) -> io::Result<()> {
++    if cancelled.is_cancelled() {
++        return Err(io::Error::new(
++            io::ErrorKind::Interrupted,
++            "filesystem walk cancelled",
++        ));
++    }
++    Ok(())
++}
++
++fn walk_metadata(path: &PathUri) -> io::Result<(std::fs::Metadata, bool)> {
++    let path = path.to_abs_path()?;
++    let metadata = std::fs::symlink_metadata(path.as_path())?;
++    let is_symlink = metadata.is_symlink();
++    let metadata = if is_symlink {
++        std::fs::metadata(path.as_path())?
++    } else {
++        metadata
++    };
++    Ok((metadata, is_symlink))
++}
++
++fn walk_canonicalize(path: &PathUri) -> io::Result<PathUri> {
++    let path = path.to_abs_path()?;
++    let canonicalized =
++        AbsolutePathBuf::from_absolute_path(std::fs::canonicalize(path.as_path())?)?;
++    Ok(PathUri::from_abs_path(&canonicalized))
++}
++
++fn walk_read_directory(path: &PathUri, cancelled: &CancellationToken) -> io::Result<Vec<String>> {
++    check_walk_cancelled(cancelled)?;
++    let path = path.to_abs_path()?;
++    let mut entries = Vec::new();
++    for entry in std::fs::read_dir(path.as_path())? {
++        check_walk_cancelled(cancelled)?;
++        let entry = entry?;
++        let Ok(file_type) = entry.file_type() else {
++            continue;
++        };
++        // Match DirectFileSystem::read_directory: omit broken or inaccessible links.
++        if file_type.is_symlink() {
++            check_walk_cancelled(cancelled)?;
++            if std::fs::metadata(entry.path()).is_err() {
++                continue;
++            }
++        }
++        entries.push(entry.file_name().to_string_lossy().into_owned());
++    }
++    Ok(entries)
++}
++
++fn push_walk_error(
++    outcome: &mut WalkOutcome,
++    response_bytes: &mut usize,
++    path: PathUri,
++    message: String,
++) -> bool {
++    let item_bytes = path.to_string().len().saturating_add(message.len());
++    if !reserve_walk_response_bytes(outcome, response_bytes, item_bytes) {
++        return false;
++    }
++    outcome.errors.push(WalkError { path, message });
++    true
++}
++
++fn reserve_walk_response_bytes(
++    outcome: &mut WalkOutcome,
++    response_bytes: &mut usize,
++    content_bytes: usize,
++) -> bool {
++    let item_bytes = content_bytes.saturating_add(WALK_RESPONSE_ITEM_OVERHEAD_BYTES);
++    let Some(total_bytes) = response_bytes.checked_add(item_bytes) else {
++        outcome.truncated = true;
++        return false;
++    };
++    if total_bytes > MAX_WALK_RESPONSE_BYTES {
++        outcome.truncated = true;
++        return false;
++    }
++    *response_bytes = total_bytes;
++    true
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn sync_walk_cancellation_stops_before_io() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let missing = PathUri::from_host_native_path(temp.path().join("missing"))?;
++        let options = WalkOptions {
++            no_follow: false,
++            max_depth: 1,
++            max_directories: 1,
++            max_entries: 1,
++            follow_directory_symlinks: true,
++            prune_hidden_directories: false,
++        };
++        let cancelled = CancellationToken::new();
++        let cancel_on_drop = cancelled.clone().drop_guard();
++        drop(cancel_on_drop);
++
++        for result in [
++            sync_walk(&missing, options, &cancelled).map(|_| ()),
++            walk_read_directory(&missing, &cancelled).map(|_| ()),
++        ] {
++            assert_eq!(
++                result
++                    .expect_err("cancelled walks must stop before I/O")
++                    .kind(),
++                io::ErrorKind::Interrupted,
++            );
++        }
++        Ok(())
++    }
++
++    #[test]
++    fn sync_walk_response_budget_counts_entries_and_errors() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let root = PathUri::from_host_native_path(temp.path())?;
++        let mut outcome = WalkOutcome::default();
++        let mut response_bytes =
++            MAX_WALK_RESPONSE_BYTES - WALK_RESPONSE_ITEM_OVERHEAD_BYTES - root.to_string().len();
++        assert!(push_walk_error(
++            &mut outcome,
++            &mut response_bytes,
++            root.clone(),
++            String::new()
++        ));
++        assert!(!reserve_walk_response_bytes(
++            &mut outcome,
++            &mut response_bytes,
++            /*content_bytes*/ 0
++        ));
++        assert_eq!(
++            outcome,
++            WalkOutcome {
++                entries: Vec::new(),
++                errors: vec![WalkError {
++                    path: root,
++                    message: String::new()
++                }],
++                truncated: true,
++            },
++        );
++        Ok(())
++    }
++}
+diff --git a/codex-rs/exec-server/src/windows_file_type.rs b/codex-rs/exec-server/src/windows_file_type.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bcf508c5ef6a7572e0956857a102d890f6594787
+--- /dev/null
++++ b/codex-rs/exec-server/src/windows_file_type.rs
+@@ -0,0 +1,8 @@
++#[cfg(windows)]
++pub(crate) fn is_disk_file(file: &impl std::os::windows::io::AsRawHandle) -> bool {
++    use windows_sys::Win32::Storage::FileSystem::FILE_TYPE_DISK;
++    use windows_sys::Win32::Storage::FileSystem::GetFileType;
++
++    // SAFETY: `file` owns this handle for the duration of the call.
++    unsafe { GetFileType(file.as_raw_handle()) == FILE_TYPE_DISK }
++}
+diff --git a/codex-rs/exec-server/tests/project-search/Cargo.toml b/codex-rs/exec-server/tests/project-search/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..650f729aa1cd9f7e0ec1e61f82dbc893b4bf3733
+--- /dev/null
++++ b/codex-rs/exec-server/tests/project-search/Cargo.toml
+@@ -0,0 +1,36 @@
++[package]
++name = "codex-exec-server-project-search-tests"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++publish = false
++
++[lib]
++path = "lib.rs"
++doctest = false
++
++[lints]
++workspace = true
++
++[dev-dependencies]
++codex-utils-absolute-path = { workspace = true }
++codex-utils-path-uri = { workspace = true }
++serde = { workspace = true, features = ["derive"] }
++tempfile = { workspace = true }
++tokio = { workspace = true, features = ["rt"] }
++tokio-util = { workspace = true, features = ["rt"] }
++
++[target.'cfg(unix)'.dev-dependencies]
++libc = { workspace = true }
++rustix = { workspace = true, features = ["fs", "process"] }
++
++[target.'cfg(windows)'.dev-dependencies]
++uuid = { workspace = true, features = ["v4"] }
++windows-sys = { workspace = true, features = [
++    "Win32_Foundation",
++    "Win32_Security",
++    "Win32_Storage_FileSystem",
++    "Win32_System_IO",
++    "Win32_System_Pipes",
++    "Win32_System_Threading",
++] }
+diff --git a/codex-rs/exec-server/tests/project-search/lib.rs b/codex-rs/exec-server/tests/project-search/lib.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b35b1d42e150501b317cb79726173765aa67503
+--- /dev/null
++++ b/codex-rs/exec-server/tests/project-search/lib.rs
+@@ -0,0 +1,17 @@
++#![cfg(test)]
++
++use codex_utils_path_uri::PathUri;
++
++include!("../../../file-system/src/walk_types.rs");
++
++#[allow(dead_code)]
++#[path = "../../src/no_follow/mod.rs"]
++mod no_follow;
++#[path = "../../src/project_search_invalid_filename_tests.rs"]
++mod project_search_invalid_filename_tests;
++#[path = "../../src/walk.rs"]
++mod walk;
++#[cfg(windows)]
++#[allow(dead_code)]
++#[path = "../../src/windows_file_type.rs"]
++mod windows_file_type;
+diff --git a/codex-rs/file-system/src/lib.rs b/codex-rs/file-system/src/lib.rs
+index 4e304fa073af24fea5ddb96eb6423d84e1fe9ce1..193f843a6820866cf15e0b39268b2565bd7fa6ed 100644
+--- a/codex-rs/file-system/src/lib.rs
++++ b/codex-rs/file-system/src/lib.rs
+@@ -41,16 +41,7 @@ use std::task::Poll;
+ pub const FILE_READ_CHUNK_SIZE: usize = 1024 * 1024;
+ /// Maximum decoded chunk size accepted by a streamed filesystem write.
+ pub const FILE_WRITE_CHUNK_SIZE: usize = 1024 * 1024;
+-/// Maximum accepted directory depth for a filesystem walk.
+-pub const MAX_WALK_DEPTH: usize = 64;
+-/// Maximum accepted directory count, including the walk root.
+-pub const MAX_WALK_DIRECTORIES: usize = 10_000;
+-/// Maximum accepted number of directory entries to examine.
+-pub const MAX_WALK_ENTRIES: usize = 50_000;
+-/// Maximum estimated size of a walk response.
+-pub const MAX_WALK_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+-/// Per-entry or per-error overhead charged to the walk response budget.
+-pub const WALK_RESPONSE_ITEM_OVERHEAD_BYTES: usize = 64;
++include!("walk_types.rs");
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub struct ReadFileOptions {
+@@ -112,17 +103,6 @@ pub struct CopyOptions {
+     pub recursive: bool,
+ }
+ 
+-#[derive(Clone, Debug, Eq, PartialEq)]
+-pub struct FileMetadata {
+-    pub is_directory: bool,
+-    pub is_file: bool,
+-    pub is_symlink: bool,
+-    /// Size in bytes.
+-    pub size: u64,
+-    pub created_at_ms: i64,
+-    pub modified_at_ms: i64,
+-}
+-
+ #[derive(Clone, Debug, Eq, PartialEq)]
+ pub struct ReadDirectoryEntry {
+     pub file_name: String,
+@@ -130,59 +110,6 @@ pub struct ReadDirectoryEntry {
+     pub is_file: bool,
+ }
+ 
+-/// Bounds for a recursive filesystem walk.
+-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+-#[serde(rename_all = "camelCase")]
+-pub struct WalkOptions {
+-    /// Reject symlinks in every component, including root ancestors.
+-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+-    pub no_follow: bool,
+-    /// Maximum directory depth below the root that may be traversed.
+-    pub max_depth: usize,
+-    /// Maximum number of directories that may be traversed, including the root.
+-    pub max_directories: usize,
+-    /// Maximum number of directory entries that may be examined.
+-    pub max_entries: usize,
+-    /// Whether directory symlinks should be followed.
+-    pub follow_directory_symlinks: bool,
+-    /// Whether directories whose names start with `.` should be returned but not traversed.
+-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+-    pub prune_hidden_directories: bool,
+-}
+-
+-/// Type of a filesystem entry returned by a walk.
+-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+-#[serde(rename_all = "camelCase")]
+-pub enum WalkEntryKind {
+-    Directory,
+-    File,
+-}
+-
+-/// One entry returned by a walk.
+-#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+-#[serde(rename_all = "camelCase")]
+-pub struct WalkEntry {
+-    pub path: PathUri,
+-    pub kind: WalkEntryKind,
+-}
+-
+-/// A descendant that could not be inspected during a walk.
+-#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+-#[serde(rename_all = "camelCase")]
+-pub struct WalkError {
+-    pub path: PathUri,
+-    pub message: String,
+-}
+-
+-/// Entries and recoverable errors collected by a bounded walk.
+-#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+-#[serde(rename_all = "camelCase")]
+-pub struct WalkOutcome {
+-    pub entries: Vec<WalkEntry>,
+-    pub errors: Vec<WalkError>,
+-    pub truncated: bool,
+-}
+-
+ #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+ #[serde(tag = "type", rename_all = "snake_case")]
+ pub enum ExecFileSystemPath {
+diff --git a/codex-rs/file-system/src/walk_types.rs b/codex-rs/file-system/src/walk_types.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..295ee2df14cf3bbdca323b3f54824b6b69067997
+--- /dev/null
++++ b/codex-rs/file-system/src/walk_types.rs
+@@ -0,0 +1,74 @@
++/// Maximum accepted directory depth for a filesystem walk.
++pub const MAX_WALK_DEPTH: usize = 64;
++/// Maximum accepted directory count, including the walk root.
++pub const MAX_WALK_DIRECTORIES: usize = 10_000;
++/// Maximum accepted number of directory entries to examine.
++pub const MAX_WALK_ENTRIES: usize = 50_000;
++/// Maximum estimated size of a walk response.
++pub const MAX_WALK_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
++/// Per-entry or per-error overhead charged to the walk response budget.
++pub const WALK_RESPONSE_ITEM_OVERHEAD_BYTES: usize = 64;
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct FileMetadata {
++    pub is_directory: bool,
++    pub is_file: bool,
++    pub is_symlink: bool,
++    /// Size in bytes.
++    pub size: u64,
++    pub created_at_ms: i64,
++    pub modified_at_ms: i64,
++}
++
++/// Bounds for a recursive filesystem walk.
++#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct WalkOptions {
++    /// Reject symlinks in every component, including root ancestors.
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub no_follow: bool,
++    /// Maximum directory depth below the root that may be traversed.
++    pub max_depth: usize,
++    /// Maximum number of directories that may be traversed, including the root.
++    pub max_directories: usize,
++    /// Maximum number of directory entries that may be examined.
++    pub max_entries: usize,
++    /// Whether directory symlinks should be followed.
++    pub follow_directory_symlinks: bool,
++    /// Whether directories whose names start with `.` should be returned but not traversed.
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub prune_hidden_directories: bool,
++}
++
++/// Type of a filesystem entry returned by a walk.
++#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub enum WalkEntryKind {
++    Directory,
++    File,
++}
++
++/// One entry returned by a walk.
++#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct WalkEntry {
++    pub path: PathUri,
++    pub kind: WalkEntryKind,
++}
++
++/// A descendant that could not be inspected during a walk.
++#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct WalkError {
++    pub path: PathUri,
++    pub message: String,
++}
++
++/// Entries and recoverable errors collected by a bounded walk.
++#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct WalkOutcome {
++    pub entries: Vec<WalkEntry>,
++    pub errors: Vec<WalkError>,
++    pub truncated: bool,
++}
