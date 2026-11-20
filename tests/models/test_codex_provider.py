@@ -7,7 +7,15 @@ from types import ModuleType
 import pytest
 from pydantic import BaseModel
 
-from agents import Agent, RunConfig, Runner, UserError, function_tool
+from agents import (
+    Agent,
+    RunConfig,
+    Runner,
+    ToolExecutionConfig,
+    UserError,
+    function_tool,
+    tool_namespace,
+)
 from agents.models.codex import CodexProvider
 
 
@@ -201,6 +209,114 @@ async def test_runner_owns_function_execution_and_history(tmp_path, threads):
         item.get("type") == "function_call_output" and item.get("call_id") == "call_1"
         for item in injected
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "streamed"), [("input", False), ("output", True)], ids=["input", "streamed-output"]
+)
+async def test_classic_hooks_own_codex_tools_without_a_workspace_executor(
+    tmp_path, threads, phase, streamed
+):
+    queue, _ = threads
+    actions = []
+
+    @function_tool
+    async def publish(value: str) -> str:
+        actions.append(value)
+        return "internal"
+
+    async def before(call):
+        return {"value": "reviewed"}
+
+    async def after(call, result):
+        assert result == "internal"
+        return "published"
+
+    first = FakeThread(
+        call={
+            "callId": "req",
+            "namespace": None,
+            "tool": "publish",
+            "arguments": {"value": "proposed"},
+        }
+    )
+    second = FakeThread(text="done")
+    queue.extend([first, second])
+    run_config = config(tmp_path)
+    run_config.tool_execution = ToolExecutionConfig(
+        sdk_only_tool_hooks=True,
+        prepare_tool_input=before if phase == "input" else None,
+        prepare_tool_output=after if phase == "output" else None,
+    )
+    agent = Agent(name="test", tools=[publish])
+    if streamed:
+        result = Runner.run_streamed(agent, "go", run_config=run_config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "go", run_config=run_config)
+    assert result.final_output == "done"
+    assert actions == ["reviewed" if phase == "input" else "proposed"]
+    assert first.settings["sdk_sandbox"] is True
+    replay = second.history
+    output = next(item for item in replay if item.get("type") == "function_call_output")
+    assert output["output"] == ("published" if phase == "output" else "internal")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("namespace", "name", "reserved_name"),
+    [
+        ("apply_", "patch", "apply_patch"),
+        ("spawn_", "agent", "spawn_agent"),
+        ("multi_agent_v1", "spawn_agent", "spawn_agent"),
+    ],
+)
+async def test_native_hooks_reject_sdk_tool_that_flattens_to_reserved_name(
+    tmp_path, threads, namespace, name, reserved_name
+):
+    @function_tool(name_override=name)
+    def local_tool(command: str) -> str:
+        return command
+
+    async def prepare(call):
+        return call.arguments
+
+    _, opened = threads
+    tools = tool_namespace(name=namespace, description="SDK tools.", tools=[local_tool])
+    run_config = config(tmp_path)
+    run_config.tool_execution = ToolExecutionConfig(prepare_tool_input=prepare)
+
+    with pytest.raises(UserError, match=f"Codex native hooks reserve {reserved_name}"):
+        await Runner.run(Agent(name="test", tools=tools), "Use a tool.", run_config=run_config)
+
+    assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_runner_replays_typed_function_tool_result(tmp_path, threads):
+    class Counts(BaseModel):
+        total: int
+
+    @function_tool(output_type=Counts)
+    def count_items() -> dict[str, int]:
+        return {"total": 3}
+
+    queue, _ = threads
+    first = FakeThread(call={"callId": "count", "tool": "count_items", "arguments": {}})
+    second = FakeThread(text="Counted items.")
+    queue.extend([first, second])
+
+    result = await Runner.run(
+        Agent(name="test", tools=[count_items]), "Count the items.", run_config=config(tmp_path)
+    )
+
+    tool_item = next(item for item in result.new_items if item.type == "tool_call_output_item")
+    assert tool_item.output == Counts(total=3)
+    replayed = next(item for item in second.history if item["type"] == "function_call_output")
+    assert replayed["call_id"] == "count"
+    assert json.loads(replayed["output"]) == {"total": 3}
 
 
 @pytest.mark.asyncio

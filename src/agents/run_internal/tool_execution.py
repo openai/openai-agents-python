@@ -116,10 +116,11 @@ from .items import (
     function_tool_error_output,
 )
 from .run_steps import ToolRunFunction
+from .tool_hooks import hook_payload_diagnostics, transform_tool_output
 from .tool_use_tracker import AgentToolUseTracker
 
 if TYPE_CHECKING:
-    from ..lifecycle import RunHooks
+    from ..lifecycle import AgentHooks, RunHooks
     from .run_steps import (
         ToolRunApplyPatchCall,
         ToolRunComputerAction,
@@ -753,7 +754,11 @@ def normalize_apply_patch_fallback_call(tool_call: Any) -> dict[str, Any] | None
         pseudo_call = {
             "type": "apply_patch_call",
             "call_id": call_id,
-            **parsed_operation,
+            **{
+                key: parsed_operation[key]
+                for key in ("operation", "operations")
+                if key in parsed_operation
+            },
         }
     elif call_type == "function_call":
         parsed_operation = parse_apply_patch_function_args(
@@ -2137,6 +2142,17 @@ class _FunctionToolBatchExecutor:
             return real_result
 
         task_state.in_post_invoke_phase = True
+        unfiltered_result = real_result
+        real_result = await transform_tool_output(
+            self.config,
+            tool_context,
+            self.public_agent,
+            func_tool,
+            task_state.tool_run.tool_call,
+            real_result,
+        )
+        # Only the SDK's original failure may bypass a success schema.
+        bypass_output_schema = bypass_output_schema and real_result is unfiltered_result
         output_guardrail_result = await _execute_tool_output_guardrails(
             func_tool=func_tool,
             tool_context=tool_context,
@@ -2157,12 +2173,22 @@ class _FunctionToolBatchExecutor:
             if bypass_output_schema
             else final_result
         )
-        raw_output_item = ItemHelpers.tool_call_output_item(
-            tool_call,
-            provider_result,
-            output_json_schema=None if bypass_output_schema else func_tool.output_json_schema,
-            output_type_adapter=None if bypass_output_schema else func_tool._output_type_adapter,
-        )
+        with hook_payload_diagnostics(
+            "Function tool output could not be serialized or does not match "
+            "its declared output schema.",
+            enabled=(
+                self.config.tool_execution is not None
+                and self.config.tool_execution.prepare_tool_output is not None
+            ),
+        ):
+            raw_output_item = ItemHelpers.tool_call_output_item(
+                tool_call,
+                provider_result,
+                output_json_schema=None if bypass_output_schema else func_tool.output_json_schema,
+                output_type_adapter=None
+                if bypass_output_schema
+                else func_tool._output_type_adapter,
+            )
         output_item: ToolCallOutputItem | None = None
         if not nested_interruptions:
             output_item = ToolCallOutputItem(
@@ -2188,13 +2214,8 @@ class _FunctionToolBatchExecutor:
             self.custom_data_by_tool_run[id(task_state.tool_run)] = custom_data
             if output_item is not None:
                 output_item.custom_data = custom_data
-        await gather_with_cancel(
-            self.hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result),
-            (
-                agent_hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result)
-                if agent_hooks is not None
-                else _coro.noop_coroutine()
-            ),
+        await run_tool_end_hooks(
+            self.hooks, agent_hooks, tool_context, self.public_agent, func_tool, final_result
         )
         return final_result
 
@@ -2370,14 +2391,30 @@ async def execute_function_tool_calls(
     ).execute()
 
 
-async def run_native_tool_post_invoke(
-    post_invoke: Awaitable[None],
-    sibling_category_failure: asyncio.Event | None,
+async def run_tool_end_hooks(
+    hooks: RunHooks[Any],
+    agent_hooks: AgentHooks[Any] | None,
+    context: RunContextWrapper[Any],
+    agent: Agent[Any],
+    tool: Tool,
+    result: object,
 ) -> None:
+    """Notify both observers after the runner records the tool result."""
+    await gather_with_cancel(
+        hooks.on_tool_end(context, agent, tool, result),
+        agent_hooks.on_tool_end(context, agent, tool, result)
+        if agent_hooks is not None
+        else _coro.noop_coroutine(),
+    )
+
+
+async def run_native_tool_post_invoke(
+    post_invoke: Awaitable[TToolSpanResult],
+    sibling_category_failure: asyncio.Event | None,
+) -> TToolSpanResult:
     """Settle native output finalization on sibling failure without delaying parent cancellation."""
     if sibling_category_failure is None:
-        await post_invoke
-        return
+        return await post_invoke
 
     task = asyncio.ensure_future(post_invoke)
     task.add_done_callback(_consume_future_exception)
@@ -2385,7 +2422,7 @@ async def run_native_tool_post_invoke(
         # Invocation error conversion may consume cancellation before finalization starts.
         if sibling_category_failure.is_set():
             raise asyncio.CancelledError
-        await asyncio.shield(task)
+        return await asyncio.shield(task)
     except asyncio.CancelledError:
         if sibling_category_failure.is_set():
             try:

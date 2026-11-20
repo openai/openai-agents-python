@@ -5,7 +5,7 @@ from typing_extensions import TypeVar
 from .agent import Agent, AgentBase
 from .items import ModelResponse, TResponseInputItem
 from .run_context import AgentHookContext, RunContextWrapper, TContext
-from .tool import Tool
+from .tool import NativeTool, Tool
 
 TAgent = TypeVar("TAgent", bound=AgentBase, default=AgentBase)
 
@@ -84,9 +84,11 @@ class RunHooksBase(Generic[TContext, TAgent]):
         self,
         context: RunContextWrapper[TContext],
         agent: TAgent,
-        tool: Tool,
+        tool: Tool | NativeTool,
     ) -> None:
-        """Called immediately before a local tool is invoked.
+        """Called when an SDK tool starts or Codex emits a native pre-tool event.
+
+        Use ``ToolExecutionConfig.prepare_tool_input`` to change the arguments before approval.
 
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
@@ -99,10 +101,12 @@ class RunHooksBase(Generic[TContext, TAgent]):
         self,
         context: RunContextWrapper[TContext],
         agent: TAgent,
-        tool: Tool,
+        tool: Tool | NativeTool,
         result: object,
     ) -> None:
-        """Called immediately after a local tool is invoked.
+        """Called with the prepared result of an SDK tool or a native Codex tool.
+
+        Use ``ToolExecutionConfig.prepare_tool_output`` to change the result before it is recorded.
 
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
@@ -175,9 +179,11 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         self,
         context: RunContextWrapper[TContext],
         agent: TAgent,
-        tool: Tool,
+        tool: Tool | NativeTool,
     ) -> None:
-        """Called immediately before a local tool is invoked.
+        """Called when an SDK tool starts or Codex emits a native pre-tool event.
+
+        Use ``ToolExecutionConfig.prepare_tool_input`` to change the arguments before approval.
 
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
@@ -190,10 +196,12 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         self,
         context: RunContextWrapper[TContext],
         agent: TAgent,
-        tool: Tool,
+        tool: Tool | NativeTool,
         result: object,
     ) -> None:
-        """Called immediately after a local tool is invoked.
+        """Called with the prepared result of an SDK tool or a native Codex tool.
+
+        Use ``ToolExecutionConfig.prepare_tool_output`` to change the result before it is recorded.
 
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
