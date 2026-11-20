@@ -80,10 +80,11 @@ class DelegationHandler:
                         except Exception:
                             # Do not expose exception payloads to the browser or the models.
                             output = "The order specialist failed. No order was changed."
+                    item_event_id = str(uuid4())
                     await self.send(
                         {
                             "type": "response.item.create",
-                            "event_id": str(uuid4()),
+                            "event_id": item_event_id,
                             "item": {
                                 "type": "function_call_output",
                                 "call_id": call["call_id"],
@@ -95,17 +96,22 @@ class DelegationHandler:
                         {
                             "type": "backend",
                             "status": "result_submitted",
+                            "event_id": item_event_id,
+                            "delegation_id": delegation_id,
+                            "source_response_id": response_id,
                             "call_id": call["call_id"],
                             "result": output,
                         }
                     )
-                await self.send({"type": "response.create", "event_id": str(uuid4())})
+                continuation_event_id = str(uuid4())
+                await self.send({"type": "response.create", "event_id": continuation_event_id})
                 await self.notify(
                     {
                         "type": "backend",
                         "status": "continued",
+                        "event_id": continuation_event_id,
                         "delegation_id": delegation_id,
-                        "response_id": response_id,
+                        "source_response_id": response_id,
                     }
                 )
             finally:

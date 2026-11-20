@@ -3,43 +3,86 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>GPT Live + Agents SDK</title>
-    <style>
-      :root { color-scheme: light dark; font: 16px system-ui, sans-serif; }
-      body { max-width: 1050px; margin: 40px auto; padding: 0 24px; }
-      h1 { letter-spacing: -0.04em; margin-bottom: 12px; }
-      p { line-height: 1.6; }
-      button { padding: 10px 18px; margin: 0 8px 12px 0; cursor: pointer; }
-      button:disabled { cursor: default; }
-      #status { min-height: 1.5em; font-weight: 600; }
-      .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-      section { border: 1px solid #8886; border-radius: 12px; padding: 20px; min-width: 0; }
-      pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.6; }
-      .hint { color: light-dark(#555, #bbb); font-size: 0.9rem; }
-      @media (max-width: 700px) { .panels { grid-template-columns: 1fr; } }
-    </style>
+    <meta name="theme-color" content="#111116">
+    <title>GPT-Live demo</title>
+    <link rel="stylesheet" href="/static/style.css">
   </head>
   <body>
-    <h1>GPT Live + Agents SDK</h1>
-    <p>Ask about fictional orders <strong>A0042</strong> and <strong>A0043</strong>.
-      GPT Live handles the conversation; an Agents SDK specialist looks up the order.</p>
-    <button id="start">Start conversation</button>
-    <button id="stop" disabled>End conversation</button>
-    <button id="mute" disabled>Mute microphone</button>
-    <audio id="audio" autoplay controls></audio>
-    <p id="status" role="status">Ready to connect.</p>
-    <div class="panels">
-      <section>
-        <h2>Conversation</h2>
-        <p class="hint">Transcripts are shown independently for each speaker and may overlap.</p>
-        <h3>You</h3><pre id="user"></pre>
-        <h3>Assistant</h3><pre id="assistant"></pre>
-      </section>
-      <section>
-        <h2>Specialist activity</h2>
-        <p class="hint">A submitted result does not mean it has been spoken or heard.</p>
-        <pre id="activity"></pre>
-      </section>
+    <div class="shell">
+      <header class="masthead">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>Agents SDK</span>
+        </div>
+      </header>
+
+      <main>
+        <header class="intro">
+          <h1>GPT-Live demo</h1>
+          <p class="model-label">Model: <code>gpt-live-1.1</code></p>
+        </header>
+
+        <div class="voice-console">
+          <section class="call-setup" aria-labelledby="controls-title">
+            <h2 id="controls-title">Call controls</h2>
+            <div class="actions">
+              <button type="button" class="call-button" id="call-control" data-state="idle">Connect</button>
+              <button type="button" class="mic-button" id="mute" aria-label="Mute microphone"
+                aria-pressed="false" title="Mute microphone" disabled>
+                <span class="mic-icon" aria-hidden="true"><i class="mic-slash"></i></span>
+              </button>
+              <button type="button" id="play-audio" hidden>Play assistant audio</button>
+            </div>
+            <p id="status" class="call-status" role="status"></p>
+            <p id="audio-status" class="visually-hidden" role="status"></p>
+            <div class="example-prompt">
+              <h3>Example prompts</h3>
+              <p>"What's the status of order A zero zero four two?"</p>
+              <p class="hint">After Standby, try "Actually, the last digit is three."</p>
+              <p>"Search the web for the latest OpenAI API news."</p>
+            </div>
+            <audio id="audio" autoplay></audio>
+          </section>
+
+          <section id="inference-panel" class="inference-panel" data-state="idle" aria-labelledby="inference-title">
+            <h2 id="inference-title">Inference state</h2>
+            <div class="state-track" aria-hidden="true">
+              <span class="state-option state-active">
+                <span class="signal"><i></i><i></i><i></i></span>
+                Active
+              </span>
+              <span class="state-option state-standby">
+                <span class="pause"><i></i><i></i></span>
+                Standby
+              </span>
+            </div>
+            <p id="inference" class="inference-message" role="status"></p>
+            <p class="hint">After 20 seconds of inactivity, inference pauses. The call stays connected so you can speak to resume.</p>
+          </section>
+        </div>
+
+        <section class="conversation-area" aria-labelledby="conversation-title">
+          <div class="conversation-header">
+            <h2 id="conversation-title">Conversation</h2>
+            <label class="debug-toggle">
+              <input type="checkbox" id="debug-toggle" class="visually-hidden" role="switch" aria-controls="debug-panel">
+              <span class="debug-switch" aria-hidden="true"></span>
+              Debug events
+            </label>
+          </div>
+          <div class="conversation-panes">
+            <div id="conversation-log" class="conversation-log" role="region" aria-label="Conversation timeline" tabindex="0">
+              <ol id="timeline" class="timeline" role="list"></ol>
+              <p class="timeline-empty">Connect and speak to start the timeline.</p>
+            </div>
+            <section id="debug-panel" class="debug-panel" aria-labelledby="debug-title" hidden>
+              <h3 id="debug-title">Debug events</h3>
+              <p class="hint">Browser time starts at Connect. Sideband time starts when the server attaches.</p>
+              <pre id="debug-events" class="debug-events" role="region" aria-label="Debug event log" tabindex="0">Connect to see session events.</pre>
+            </section>
+          </div>
+        </section>
+      </main>
     </div>
     <script type="module" src="/static/app.js"></script>
   </body>
