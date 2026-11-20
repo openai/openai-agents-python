@@ -1,6 +1,6 @@
-# GPT Live with an Agents SDK specialist
+# GPT-Live with an Agents SDK specialist
 
-This local browser example connects GPT Live to an ordinary Agents SDK Agent through Responses delegation. GPT Live handles speech; its managed Responses backend calls `ask_order_agent`; the Python server runs the order specialist with `Runner.run()` and returns a function result.
+This local browser example uses GPT-Live-1.1, an Agents SDK order specialist, and hosted web search to demonstrate speech-triggered standby, multilingual conversation, and Responses delegation.
 
 ## When to use this pattern
 
@@ -37,22 +37,28 @@ export OPENAI_API_KEY="your-project-api-key"
 uv run --with-requirements examples/live/app/requirements.txt python -m examples.live.app.server
 ```
 
-Open [http://localhost:8000](http://localhost:8000), select **Start conversation**, and grant microphone permission. Ask "What is the status of order A0042?" Then try "Actually, please check A0043." These are fictional records: A0042 is shipped with an expected September 15 delivery; A0043 is processing without a confirmed shipping date.
+Open [http://localhost:8000](http://localhost:8000), select **Connect**, and grant microphone permission. Try this sequence in a single call:
 
-If autoplay is blocked, select play in the audio controls. **Mute microphone** controls local capture without stopping backend work. **End conversation** cancels application-owned work, requests Live finalization, and then releases the microphone and connections.
+1. When the demo is waiting for speech, ask for the status of order A0042 and spell out the letter and each digit, including the zeros. To try a language switch, ask and request a reply in Japanese. The fictional order A0042 has shipped and is expected September 15.
+2. After the assistant finishes speaking, stay quiet until the inference status shows **Standby**. The demo pauses inference after twenty seconds without an input or output transcript. The WebRTC connection and conversation history are retained.
+3. Say "Actually, the last digit is three. Could you tell me the status in English?" The session resumes on speech. Check the specialist activity and listen for the corrected order A0043, which is processing with no confirmed shipping date.
 
-The dependency override installs a Live-capable OpenAI Python SDK for this command without changing the repository's lockfile or base SDK requirements. The example requires `openai>=3.13.0,<4`. GPT Live voice duration and both backend models can incur usage charges.
+If the browser blocks autoplay, select **Play assistant audio**. The microphone button controls local capture while backend work continues. A slash marks the muted state. **Disconnect** cancels application-owned work, requests Live finalization, and then releases the microphone and connections.
+
+To try hosted Web Search, say "Search the web for the latest OpenAI API news." When the backend cites sources, their links appear in the conversation. Turn on **Debug events** to see the logs beside the conversation on wider screens or below it on smaller screens.
+
+The dependency override installs `openai>=3.57.0,<4` for WebRTC standby without changing the repository's lockfile or base SDK requirements. Active and standby voice time have [different rates](https://developers.openai.com/api/docs/models/gpt-live-1.1). The demo shows their durations after ending the call when Live reports the breakdown. Both backend models can incur separate usage charges.
 
 ## How it works
 
 1. The browser creates a WebRTC offer and sends it over an application WebSocket.
-2. The server creates a Live session with Responses delegation and attaches a sideband before returning the SDP answer. Audio travels between the browser and OpenAI; the sideband carries server events and commands.
+2. The server creates a Live session with speech wake and Responses delegation and attaches a sideband before returning the SDP answer. Audio travels between the browser and OpenAI. The server forwards `session.paused` and `session.resumed` from the sideband so the browser can display the inference state.
 3. The managed Responses model turns the conversation into a self-contained `ask_order_agent(request)` function call.
 4. The server collects completed function items from nested `response.output_item.done` events. It does not read pending calls from the empty terminal `response.output` snapshot.
 5. A separate worker runs the specialist while the receiver continues processing Live events. The specialist uses a read-only `lookup_order` tool.
 6. The worker submits every required `function_call_output` for a completed response before sending one `response.create` continuation.
 
-The browser never executes functions. Transcript fragments are appended exactly as received, separately for each speaker; they are not authoritative completed turns. Specialist output appears in its own panel because result submission does not establish that GPT Live spoke it or that the listener heard it.
+The server executes custom functions, while the managed Responses backend runs [hosted web search](https://developers.openai.com/api/docs/guides/live-delegation#add-hosted-tools) directly. The browser's conversation timeline shows transcript fragments, specialist updates, and web citations in the order they arrive. It keeps transcript fragments verbatim and groups adjacent transcript or specialist updates from the same source. Use the Specialist entries to follow lookup progress and result submission. Listen to the call for the assistant's spoken reply.
 
 ### What the specialist knows on each call
 
@@ -80,10 +86,11 @@ When setup fails after creation, the server attempts to attach only to close the
 
 ## Offline checks
 
-From the repository root, run `uv run pytest tests/test_live_example.py` for delegation and server lifecycle tests. With Node.js 18 or later, run `node --test examples/live/app/test_ui.cjs` for the controlled browser callback test. These checks do not connect to the OpenAI API.
+From the repository root, run `uv run pytest tests/test_live_example.py` for delegation and server lifecycle tests. With Node.js 18 or later, run `node --test examples/live/app/test_ui.cjs` for browser event handling and standby display tests. These checks do not connect to the OpenAI API.
 
 ## References
 
 - [Live delegation and tools](https://developers.openai.com/api/docs/guides/live-delegation)
+- [Live standby configuration](https://developers.openai.com/api/docs/guides/live-conversations#configure-standby)
 - [Live WebRTC connections](https://developers.openai.com/api/docs/guides/voice-webrtc?api=live)
 - [Live server-side controls](https://developers.openai.com/api/docs/guides/voice-server-controls?api=live)
