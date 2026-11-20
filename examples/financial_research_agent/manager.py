@@ -250,8 +250,7 @@ class FinancialResearchManager:
     async def _search(self, item: FinancialSearchItem) -> FinancialSearchEvidence | None:
         input_data = f"Search term: {item.query}\nReason: {item.reason}"
         try:
-            # The stock Codex App Server does not expose the retrieved-source metadata.
-            # Keep this search on Responses in both modes rather than trusting generated URLs.
+            # Use Responses in both modes to get the source URLs from the search result.
             result = await Runner.run(
                 search_agent,
                 input_data,

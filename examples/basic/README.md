@@ -1,6 +1,6 @@
 # Run the basic examples with Codex
 
-These examples use the stock Codex CLI. Start with the [Codex provider setup](../../docs/models/codex.md), then run commands from the repository root. Omitting `--codex` keeps the default provider and its original service requirements.
+For `--codex`, follow the [Codex provider setup](../../docs/models/codex.md) to install the prerelease wheel in the project environment. Set `UV_NO_SYNC=1` and run the commands from the repository root. Omitting `--codex` keeps the default provider and its original service requirements.
 
 ```sh
 # Keep two questions in one local SDK session.

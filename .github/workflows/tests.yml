@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feat/simple-codex
   pull_request:
     # All PRs, including stacked PRs
   merge_group:

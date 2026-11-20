@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from agents import Agent, RunConfig, Runner, RunState, Session, SQLiteSession
+from agents import Agent, RunConfig, Runner, RunState, Session, SQLiteSession, ToolExecutionConfig
 from agents.decorators import tool
 from agents.exceptions import AgentsException
 from agents.memory.resumable_session import ResumableSession, ResumableSessionError
@@ -621,3 +621,91 @@ async def test_independently_loaded_approvals_claim_one_revision_once(streamed: 
     assert store.checkpoint(session.session_id)["status"] == "ready"
     history = store.checkpoint(session.session_id)["history"]
     assert sum(item.get("call_id") == "bound-call" for item in history) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("approved", [False, True], ids=["reject", "approve"])
+async def test_prepared_approval_survives_durable_restore(streamed: bool, approved: bool) -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    prepared: list[str] = []
+    reviewed: list[tuple[str, str]] = []
+    executed: list[str] = []
+
+    async def requires_review(context: Any, arguments: dict[str, Any], call_id: str) -> bool:
+        reviewed.append((call_id, arguments["text"]))
+        return True
+
+    @tool(needs_approval=requires_review)
+    def publish(text: str) -> str:
+        executed.append(text)
+        return "private receipt"
+
+    async def prepare_input(call: Any) -> dict[str, Any]:
+        prepared.append(call.arguments["text"])
+        return {"text": "reviewed text"}
+
+    async def prepare_output(call: Any, result: Any) -> Any:
+        return "public receipt" if result == "private receipt" else result
+
+    config = RunConfig(
+        tracing_disabled=True,
+        tool_execution=ToolExecutionConfig(
+            prepare_tool_input=prepare_input, prepare_tool_output=prepare_output
+        ),
+    )
+
+    async def run(worker: Agent[Any], input: Any, **options: Any) -> RunResult | RunResultStreaming:
+        if streamed:
+            result = Runner.run_streamed(worker, input, run_config=config, **options)
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(worker, input, run_config=config, **options)
+
+    initial = Agent(
+        name="publisher",
+        model=ScriptedModel(
+            [[get_function_tool_call("publish", '{"text":"proposal"}', call_id="prepared-call")]]
+        ),
+        tools=[publish],
+    )
+    paused = await run(initial, "publish", session=session)
+    assert not executed
+    assert json.loads(paused.interruptions[0].arguments) == {"text": "reviewed text"}
+    checkpoint = store.checkpoint(session.session_id)
+    snapshot = json.loads(checkpoint["run_state"])
+    assert snapshot["$schemaVersion"] == "1.23"
+    assert snapshot["requires_resumable_session"] is True
+
+    restored = await ResumableSession.resume(store, session.session_id)
+    rebuilt = Agent(
+        name="publisher", model=ScriptedModel([[get_text_message("finished")]]), tools=[publish]
+    )
+    state = await restored.load_state(rebuilt)
+    (pending,) = state.get_interruptions()
+    assert pending.raw_item.call_id == "prepared-call"
+    assert json.loads(pending.arguments) == {"text": "reviewed text"}
+    if approved:
+        state.approve(pending)
+    else:
+        state.reject(pending, rejection_message="Rejected reviewed text")
+    await run(rebuilt, state)
+    assert prepared == ["proposal"]
+    assert reviewed == [("prepared-call", "reviewed text")]
+    assert executed == (["reviewed text"] if approved else [])
+    assert store.checkpoint(session.session_id)["status"] == "ready"
+
+    followup_model = ScriptedModel([[get_text_message("continued")]])
+    await run(
+        Agent(name="publisher", model=followup_model, tools=[publish]), "next", session=restored
+    )
+    history = followup_model.calls[0].input
+    calls = [item for item in history if item.get("type") == "function_call"]
+    outputs = [item for item in history if item.get("type") == "function_call_output"]
+    assert len(calls) == len(outputs) == 1
+    assert calls[0]["call_id"] == outputs[0]["call_id"] == "prepared-call"
+    assert json.loads(calls[0]["arguments"]) == {"text": "reviewed text"}
+    assert outputs[0]["output"] == ("public receipt" if approved else "Rejected reviewed text")
+    assert "private receipt" not in json.dumps(history)

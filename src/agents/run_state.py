@@ -310,7 +310,10 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Records current-response ownership for approvals propagated from nested agent tools "
         "and distinguishes provider response IDs from stored Responses IDs for compaction."
     ),
-    "1.23": "Records when a paused run must resume through its ResumableSession.",
+    "1.23": (
+        "Binds prepared tool inputs to their original proposals across retries and resume, "
+        "and records required ResumableSession ownership for paused runs."
+    ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -1508,16 +1511,23 @@ class RunState(Generic[TContext, TAgent]):
         """Serialize the run-owned canonical tool invocation ledger."""
         if self._context is None:
             return {}
-        return {
-            call_id: {
+        serialized: dict[str, dict[str, Any]] = {}
+        for call_id, invocation in self._context._tool_invocations.items():
+            record: dict[str, Any] = {
                 "type": invocation.invocation_type,
                 "approval_scope": invocation.approval_scope,
                 "fingerprint": invocation.fingerprint,
                 "executed": invocation.executed,
                 "completed": invocation.completed,
             }
-            for call_id, invocation in self._context._tool_invocations.items()
-        }
+            if invocation.input_rewrite is not None:
+                fingerprint, arguments = invocation.input_rewrite
+                record["input_rewrite"] = {
+                    "proposal_fingerprint": fingerprint,
+                    "arguments": copy.deepcopy(arguments),
+                }
+            serialized[call_id] = record
+        return serialized
 
     def _serialize_hosted_mcp_approvals(self) -> list[dict[str, Any]]:
         """Serialize hosted MCP approvals with explicit typed identities."""
@@ -4336,9 +4346,21 @@ async def _build_run_state_from_json(
     context._restored_unbound_approval_call_ids = set()
     context._allow_legacy_approval_binding_reconstruction = (schema_major, schema_minor) < (1, 15)
     context._rebuild_approvals(context_data.get("approvals", {}))
+    saved_invocations = context_data.get("tool_invocations", {})
+    if (
+        (schema_major, schema_minor) < (1, 23)
+        and isinstance(saved_invocations, Mapping)
+        and any(
+            isinstance(record, Mapping) and "input_rewrite" in record
+            for record in saved_invocations.values()
+        )
+    ):
+        raise validation_error_factory(
+            "Tool input rewrites require RunState schema 1.23.", UserError
+        )
     if (schema_major, schema_minor) >= (1, 15):
         context._rebuild_tool_invocations(
-            context_data.get("tool_invocations", {}),
+            saved_invocations,
             validation_error_factory=lambda message: cast(
                 UserError,
                 validation_error_factory(message, UserError),
@@ -5682,6 +5704,8 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "RunState tool_invocations contains an invalid call ID.",
         "RunState tool invocation must be a mapping.",
         "RunState tool invocation contains invalid lifecycle data.",
+        "Tool input rewrites require RunState schema 1.23.",
+        "RunState tool input rewrite is invalid.",
         "Hosted MCP approval decisions require a non-empty request id.",
         (
             "Persistent hosted MCP approval decisions require a non-empty server_label "

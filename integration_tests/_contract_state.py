@@ -178,18 +178,6 @@ def _restore_agent(payload: dict[str, Any]) -> Any:
     if identity == f"{name}#2":
         duplicate = Agent(name=name)
         return Agent(name=name, handoffs=[handoff(duplicate)])
-    processed_response = payload.get("last_processed_response")
-    if isinstance(processed_response, dict) and any(
-        entry.get("tool", {}).get("name") == "historical_approval"
-        for entry in processed_response.get("functions", [])
-    ):
-        from agents import function_tool
-
-        @function_tool(needs_approval=True)
-        def historical_approval(account_id: str) -> str:
-            return f"approved:{account_id}"
-
-        return Agent(name=name, tools=[historical_approval])
     return Agent(name=name)
 
 

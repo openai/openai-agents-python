@@ -159,9 +159,9 @@
       "version": "1.21"
     },
     {
-      "commit": "0a74177ed23ffb0c2dba24eda3fb12fb58e3e09d",
-      "feature": "current_response_approval_ownership",
-      "fixture": "features/v1_22_current_response_approval_ownership.json",
+      "commit": "448ae7a3d9c5ddbfa0656a04a021ffb3f3c16530",
+      "feature": "codex_compaction_response_storage",
+      "fixture": "features/v1_22_codex_compaction_response_storage.json",
       "provenance": "historical_writer",
       "version": "1.22"
     }
