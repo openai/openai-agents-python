@@ -1482,22 +1482,25 @@ index 67f627e..1e6c9cd 100644
                  response_id,
                  token_usage: None,
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 2ac9b93..3f93332 100644
+index 2ac9b93..8a01fc3 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -2033,6 +2033,11 @@ impl ResponsesHttpExecutor<'_> {
+@@ -2033,6 +2033,14 @@ impl ResponsesHttpExecutor<'_> {
                  request.input = input;
              }
              inference_trace_attempt.record_started(&request);
 +            crate::operation_observation::observe_model_request(
-+                &request,
++                &crate::operation_observation::ModelRequestContent {
++                    input: &request.input,
++                    previous_response_id: None,
++                },
 +                &request,
 +                &client_setup.api_provider.base_url,
 +            );
              let client = ApiResponsesClient::new(
                  transport,
                  client_setup.api_provider,
-@@ -2185,6 +2190,7 @@ impl ModelClientSession {
+@@ -2185,6 +2193,7 @@ impl ModelClientSession {
              } else {
                  session_telemetry_for_request(session_telemetry, &request)
              };
@@ -1505,13 +1508,17 @@ index 2ac9b93..3f93332 100644
              match self
                  .websocket_connection(WebsocketConnectParams {
                      session_telemetry,
-@@ -2341,6 +2347,13 @@ impl ModelClientSession {
+@@ -2341,6 +2350,17 @@ impl ModelClientSession {
                  inference_trace_attempt.record_started(&ws_request);
              }
 
 +            if !warmup {
++                let ResponsesWsRequest::ResponseCreate(payload) = &ws_request;
 +                crate::operation_observation::observe_model_request(
-+                    &ws_request,
++                    &crate::operation_observation::ModelRequestContent {
++                        input: payload.input,
++                        previous_response_id: payload.previous_response_id.as_deref(),
++                    },
 +                    &request,
 +                    &operation_endpoint,
 +                );
@@ -1519,7 +1526,7 @@ index 2ac9b93..3f93332 100644
              let websocket_connection =
                  self.websocket_session.connection.as_ref().ok_or_else(|| {
                      self.client.state.provider.map_api_error(ApiError::Stream(
-@@ -2686,6 +2699,8 @@ where
+@@ -2686,6 +2706,8 @@ where
          mpsc::channel::<Result<ResponseEvent>>(RESPONSE_STREAM_CHANNEL_CAPACITY);
      let consumer_dropped = CancellationToken::new();
      let consumer_dropped_for_stream = consumer_dropped.clone();
@@ -1528,7 +1535,7 @@ index 2ac9b93..3f93332 100644
 
      tokio::spawn(async move {
          let mut logged_error = false;
-@@ -2702,6 +2717,7 @@ where
+@@ -2702,6 +2724,7 @@ where
          loop {
              let event = tokio::select! {
                  _ = consumer_dropped.cancelled() => {
@@ -1536,7 +1543,7 @@ index 2ac9b93..3f93332 100644
                      inference_trace_attempt.record_cancelled(
                          STREAM_DROPPED_REASON,
                          upstream_request_id,
-@@ -2712,8 +2728,21 @@ where
+@@ -2712,8 +2735,21 @@ where
                  event = api_stream.next() => event,
              };
              let Some(event) = event else {
@@ -1598,10 +1605,10 @@ index 9f4ef92..34a88e0 100644
      };
 diff --git a/codex-rs/core/src/operation_observation.rs b/codex-rs/core/src/operation_observation.rs
 new file mode 100644
-index 0000000..1344548
+index 0000000..cea2a98
 --- /dev/null
 +++ b/codex-rs/core/src/operation_observation.rs
-@@ -0,0 +1,1348 @@
+@@ -0,0 +1,1970 @@
 +//! Opt-in, in-memory operation facts for the host that owns a turn.
 +//!
 +//! These observations never enter the rollout or the telemetry logger. The host
@@ -1619,6 +1626,7 @@ index 0000000..1344548
 +use std::time::Instant;
 +
 +pub const CONTENT_LIMIT_BYTES: usize = 32 * 1024;
++pub(crate) const CONTENT_VALUE_LIMIT_BYTES: usize = CONTENT_LIMIT_BYTES - 256;
 +
 +#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 +#[serde(rename_all = "camelCase")]
@@ -1801,13 +1809,19 @@ index 0000000..1344548
 +        &self.operation_id
 +    }
 +
-+    pub fn capture_input<T: Serialize + ?Sized>(&self, value: &T) {
++    pub fn capture_input(&self, value: &Value) {
 +        if self.observation.mode == OperationCaptureMode::Content {
 +            self.update(|event| event.input = Some(project_content(value)));
 +        }
 +    }
 +
-+    pub fn capture_output<T: Serialize + ?Sized>(&self, value: &T) {
++    pub(crate) fn capture_input_content(&self, content: OperationContent) {
++        if self.observation.captures_content() {
++            self.update(|event| event.input = Some(content));
++        }
++    }
++
++    pub fn capture_output(&self, value: &Value) {
 +        if self.observation.mode == OperationCaptureMode::Content {
 +            self.update(|event| event.output = Some(project_content(value)));
 +        }
@@ -1823,11 +1837,7 @@ index 0000000..1344548
 +        }
 +    }
 +
-+    pub fn finish_with_output_fn<T: Serialize>(
-+        &self,
-+        outcome: OperationOutcome,
-+        output: impl FnOnce() -> T,
-+    ) {
++    pub fn finish_with_output_fn(&self, outcome: OperationOutcome, output: impl FnOnce() -> Value) {
 +        let completed_at = timestamp();
 +        let duration_ms = self.started.elapsed().as_secs_f64() * 1000.0;
 +        if self.observation.captures_content() {
@@ -1836,7 +1846,7 @@ index 0000000..1344548
 +        self.finish_at(outcome, completed_at, duration_ms);
 +    }
 +
-+    pub fn finish_with_output<T: Serialize + ?Sized>(&self, outcome: OperationOutcome, output: &T) {
++    pub fn finish_with_output(&self, outcome: OperationOutcome, output: &Value) {
 +        let completed_at = timestamp();
 +        let duration_ms = self.started.elapsed().as_secs_f64() * 1000.0;
 +        self.capture_output(output);
@@ -1882,16 +1892,53 @@ index 0000000..1344548
 +
 +/// Projects JSON in memory, omitting binary/hidden reasoning and transport secrets.
 +/// Inline markers survive consumers that extract values from the wire envelope.
-+pub fn project_content<T: Serialize + ?Sized>(value: &T) -> OperationContent {
-+    let value = match serde_json::to_value(value) {
-+        Ok(value) => value,
-+        Err(_) => return omitted_content("serialization_failed"),
-+    };
++pub fn project_content(value: &Value) -> OperationContent {
++    project_with(|projection| projection.project(value, CONTENT_VALUE_LIMIT_BYTES, 0))
++}
++
++pub(crate) fn project_text(text: &str) -> OperationContent {
++    project_with(|projection| projection.text(text, CONTENT_VALUE_LIMIT_BYTES, 0))
++}
++
++/// Typed adapters stop serialization before constructing an oversized owned JSON value.
++fn bounded_value(value: &(impl Serialize + ?Sized)) -> Result<Value, &'static str> {
++    struct BoundedWriter(Vec<u8>);
++    impl std::io::Write for BoundedWriter {
++        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
++            if bytes.len() > CONTENT_VALUE_LIMIT_BYTES.saturating_sub(self.0.len()) {
++                return Err(std::io::Error::other("capture_budget"));
++            }
++            self.0.extend_from_slice(bytes);
++            Ok(bytes.len())
++        }
++        fn flush(&mut self) -> std::io::Result<()> {
++            Ok(())
++        }
++    }
++    let mut writer = BoundedWriter(Vec::new());
++    serde_json::to_writer(&mut writer, value).map_err(|error| {
++        if error.is_io() {
++            "capture_budget"
++        } else {
++            "serialization_failed"
++        }
++    })?;
++    serde_json::from_slice(&writer.0).map_err(|_| "serialization_failed")
++}
++
++pub(crate) fn project_serializable_content(value: &(impl Serialize + ?Sized)) -> OperationContent {
++    match bounded_value(value) {
++        Ok(value) => project_content(&value),
++        Err(reason) => omitted_content(reason),
++    }
++}
++
++fn project_with(project: impl FnOnce(&mut ContentProjection) -> Value) -> OperationContent {
 +    let mut projection = ContentProjection {
 +        truncated: false,
 +        omitted: false,
 +    };
-+    let value = projection.project(value, CONTENT_LIMIT_BYTES - 256, 0);
++    let value = project(&mut projection);
 +    let content = OperationContent {
 +        value,
 +        truncated: projection.truncated,
@@ -1913,7 +1960,11 @@ index 0000000..1344548
 +
 +fn omitted_content(reason: &str) -> OperationContent {
 +    OperationContent {
-+        value: serde_json::json!({"omitted":true,"reason":reason}),
++        value: if reason == "capture_budget" {
++            serde_json::json!({"omitted":true,"truncated":true,"reason":reason})
++        } else {
++            serde_json::json!({"omitted":true,"reason":reason})
++        },
 +        truncated: reason == "capture_budget",
 +        omitted: true,
 +        reason: Some(reason.into()),
@@ -1921,7 +1972,18 @@ index 0000000..1344548
 +}
 +
 +fn json_size(value: &(impl Serialize + ?Sized)) -> usize {
-+    serde_json::to_vec(value).map_or(usize::MAX, |value| value.len())
++    struct Counter(usize);
++    impl std::io::Write for Counter {
++        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
++            self.0 = self.0.saturating_add(bytes.len());
++            Ok(bytes.len())
++        }
++        fn flush(&mut self) -> std::io::Result<()> {
++            Ok(())
++        }
++    }
++    let mut counter = Counter(0);
++    serde_json::to_writer(&mut counter, value).map_or(usize::MAX, |_| counter.0)
 +}
 +
 +struct ContentProjection {
@@ -1930,7 +1992,7 @@ index 0000000..1344548
 +}
 +
 +impl ContentProjection {
-+    fn project(&mut self, value: Value, budget: usize, depth: usize) -> Value {
++    fn project(&mut self, value: &Value, budget: usize, depth: usize) -> Value {
 +        if depth > 32 {
 +            self.truncated = true;
 +            return Value::String("[truncated]".into());
@@ -1993,11 +2055,14 @@ index 0000000..1344548
 +                }
 +                let mut result = serde_json::Map::new();
 +                let mut used: usize = 2;
-+                let mut items: Vec<_> = items.into_iter().collect();
-+                items.sort_by_key(|(key, _)| {
-+                    !matches!(key.as_str(), "type" | "role" | "id" | "call_id" | "name")
-+                });
-+                for (key, value) in items {
++                // Preserve structural keys without collecting an unbounded list of references.
++                let structural =
++                    |key: &str| matches!(key, "type" | "role" | "id" | "call_id" | "name");
++                let ordered = items
++                    .iter()
++                    .filter(|(key, _)| structural(key))
++                    .chain(items.iter().filter(|(key, _)| !structural(key)));
++                for (key, value) in ordered {
 +                    let available = budget.saturating_sub(used + json_size(&key) + 36);
 +                    if available < 84 {
 +                        self.truncated = true;
@@ -2032,41 +2097,230 @@ index 0000000..1344548
 +                        self.project(value, available, depth + 1)
 +                    };
 +                    used += json_size(&key) + json_size(&value) + 4;
-+                    result.insert(key, value);
++                    result.insert(key.clone(), value);
 +                }
 +                Value::Object(result)
 +            }
-+            value => value,
++            value => value.clone(),
 +        }
 +    }
 +
-+    fn text(&mut self, text: String, budget: usize, depth: usize) -> Value {
++    fn response_item(
++        &mut self,
++        item: &codex_protocol::models::ResponseItem,
++        budget: usize,
++    ) -> Value {
++        use codex_protocol::models::ContentItem;
++        use codex_protocol::models::ResponseItem;
++        match bounded_value(item) {
++            Ok(value) => return self.project(&value, budget, 0),
++            Err("capture_budget") => {}
++            Err(reason) => {
++                self.omitted = true;
++                return omitted_content(reason).value;
++            }
++        }
++        if let Some(value) = self.oversized_tool_result(item, budget) {
++            return value;
++        }
++        let ResponseItem::Message {
++            role,
++            content,
++            id,
++            status,
++            phase,
++            encrypted_content,
++            internal_chat_message_metadata_passthrough,
++            ..
++        } = item
++        else {
++            self.truncated = true;
++            self.omitted = true;
++            return omitted_content("capture_budget").value;
++        };
++        // Large messages retain borrowed visible text without cloning media or the full item.
++        let mut result = serde_json::Map::new();
++        result.insert("type".into(), Value::String("message".into()));
++        result.insert("role".into(), self.text(role, budget.min(256), 0));
++        for (key, value) in [
++            ("id", bounded_value(id)),
++            ("status", bounded_value(status)),
++            ("phase", bounded_value(phase)),
++        ] {
++            if let Ok(value) = value {
++                if !value.is_null() {
++                    result.insert(key.into(), self.project(&value, 256, 0));
++                }
++            } else {
++                self.omitted = true;
++                result.insert("omitted".into(), Value::Bool(true));
++            }
++        }
++        if encrypted_content.is_some() || internal_chat_message_metadata_passthrough.is_some() {
++            self.omitted = true;
++            result.insert("omitted".into(), Value::Bool(true));
++        }
++        let mut used = json_size(&result) + 24;
++        let mut parts = Vec::new();
++        for part in content {
++            let available = budget.saturating_sub(used + 96);
++            if available < 84 {
++                self.truncated = true;
++                parts.push(serde_json::json!({"truncated":true,"reason":"capture_budget"}));
++                break;
++            }
++            let value = match part {
++                ContentItem::InputText { text } => {
++                    serde_json::json!({"type":"input_text","text":self.text(text, available, 0)})
++                }
++                ContentItem::OutputText {
++                    text,
++                    annotations,
++                    logprobs,
++                } => {
++                    let mut value = serde_json::json!({"type":"output_text","text":self.text(text, available, 0)});
++                    if annotations.is_some() || logprobs.is_some() {
++                        self.omitted = true;
++                        value["omitted"] = Value::Bool(true);
++                    }
++                    value
++                }
++                ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
++                    self.omitted = true;
++                    serde_json::json!({"type":if matches!(part, ContentItem::InputImage { .. }) {"input_image"} else {"input_audio"},"omitted":true,"reason":"unsupported_content"})
++                }
++            };
++            used += json_size(&value) + 2;
++            parts.push(value);
++        }
++        result.insert("content".into(), Value::Array(parts));
++        Value::Object(result)
++    }
++
++    fn oversized_tool_result(
++        &mut self,
++        item: &codex_protocol::models::ResponseItem,
++        budget: usize,
++    ) -> Option<Value> {
++        use codex_protocol::models::{
++            FunctionCallOutputBody, FunctionCallOutputContentItem, ResponseItem,
++        };
++        let (kind, call_id, name, output) = match item {
++            ResponseItem::FunctionCallOutput {
++                call_id,
++                name,
++                output,
++                ..
++            } => (
++                "function_call_output",
++                call_id.as_deref(),
++                name.as_deref(),
++                output,
++            ),
++            ResponseItem::CustomToolCallOutput {
++                call_id,
++                name,
++                output,
++                ..
++            } => (
++                "custom_tool_call_output",
++                Some(call_id.as_str()),
++                name.as_deref(),
++                output,
++            ),
++            _ => return None,
++        };
++        self.omitted = true;
++        let mut result = serde_json::json!({"type":kind,"omitted":true,"reason":"capture_budget"});
++        for (key, value) in [("call_id", call_id), ("name", name)] {
++            if let Some(value) = value {
++                result[key] = self.text(value, budget.min(256), 0);
++            }
++        }
++        let mut used = json_size(&result) + 24;
++        result["output"] = match &output.body {
++            FunctionCallOutputBody::Text(text) => {
++                self.text(text, budget.saturating_sub(used + 64), 0)
++            }
++            FunctionCallOutputBody::ContentItems(items) => {
++                let mut parts = Vec::new();
++                for part in items {
++                    let available = budget.saturating_sub(used + 96);
++                    if available < 84 {
++                        self.truncated = true;
++                        parts.push(serde_json::json!({"truncated":true,"reason":"capture_budget"}));
++                        break;
++                    }
++                    let value = match part {
++                        FunctionCallOutputContentItem::InputText { text } => {
++                            serde_json::json!({"type":"input_text","text":self.text(text, available, 0)})
++                        }
++                        _ => {
++                            let kind = match part {
++                                FunctionCallOutputContentItem::InputImage { .. } => "input_image",
++                                FunctionCallOutputContentItem::InputAudio { .. } => "input_audio",
++                                FunctionCallOutputContentItem::EncryptedContent { .. } => {
++                                    "encrypted_content"
++                                }
++                                FunctionCallOutputContentItem::InputText { .. } => unreachable!(),
++                            };
++                            serde_json::json!({"type":kind,"omitted":true,"reason":"unsupported_content"})
++                        }
++                    };
++                    used += json_size(&value) + 2;
++                    parts.push(value);
++                }
++                Value::Array(parts)
++            }
++        };
++        Some(self.project(&result, budget, 0))
++    }
++
++    fn text(&mut self, text: &str, budget: usize, depth: usize) -> Value {
 +        static DATA_URI: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
 +            regex_lite::Regex::new(r#"(?i)data:[^\s;,]+(?:;[^\s,]*)?,[^\s\"'<>]+"#)
 +                .expect("valid data URI pattern")
 +        });
 +        self.truncated |= text.ends_with("[truncated]");
 +        self.omitted |= text.contains("[omitted]") || text.contains("[omitted: media]");
++        // Classification borrows the text; bound raw bytes before allocating a JSON tree.
++        let parse_limit = budget.min(CONTENT_LIMIT_BYTES);
 +        if text.trim_start().starts_with(['{', '[']) {
++            if text.len() > parse_limit {
++                self.truncated = true;
++                self.omitted = true;
++                return Value::String(
++                    serde_json::json!({"omitted":true,"truncated":true,"reason":"capture_budget"})
++                        .to_string(),
++                );
++            }
 +            if let Ok(embedded) = serde_json::from_str::<Value>(&text) {
-+                let safe = self.project(embedded.clone(), budget, depth + 1);
++                let safe = self.project(&embedded, budget, depth + 1);
 +                if safe == embedded && json_size(&text) <= budget {
-+                    return Value::String(text);
++                    return Value::String(text.to_owned());
 +                }
 +                let mut encoded = safe.to_string();
 +                if json_size(&encoded) > budget {
 +                    // Rebudget the value so escaped JSON remains valid.
 +                    encoded = self
-+                        .project(embedded, budget.saturating_sub(2) / 2, depth + 1)
++                        .project(&embedded, budget.saturating_sub(2) / 2, depth + 1)
 +                        .to_string();
 +                }
 +                return Value::String(encoded);
 +            }
 +        }
-+        let projected = DATA_URI.replace_all(&text, "[omitted: media]");
++        // Regex replacement and JSON sizing only see a bounded UTF-8 prefix.
++        let mut end = text.len().min(budget);
++        while !text.is_char_boundary(end) {
++            end -= 1;
++        }
++        let source_truncated = end < text.len();
++        self.truncated |= source_truncated;
++        let text = &text[..end];
++        let projected = DATA_URI.replace_all(text, "[omitted: media]");
 +        self.omitted |= projected != text;
 +        let text = projected.into_owned();
-+        if json_size(&text) <= budget {
++        if !source_truncated && json_size(&text) <= budget {
 +            return Value::String(text);
 +        }
 +        self.truncated = true;
@@ -2078,7 +2332,7 @@ index 0000000..1344548
 +            while !text.is_char_boundary(end) {
 +                end -= 1;
 +            }
-+            if json_size(&format!("{}[truncated]", &text[..end])) <= budget {
++            if json_size(&&text[..end]).saturating_add("[truncated]".len()) <= budget {
 +                low = middle;
 +            } else {
 +                high = middle - 1;
@@ -2223,7 +2477,7 @@ index 0000000..1344548
 +    fn request<T: Serialize + ?Sized>(
 +        &self,
 +        request: &T,
-+        identity: &impl Serialize,
++        identity: &codex_api::ResponsesApiRequest,
 +        endpoint: &str,
 +    ) {
 +        let mut state = self
@@ -2330,7 +2584,7 @@ index 0000000..1344548
 +                    state.partial_truncated = false;
 +                }
 +                if state.output_bytes < CONTENT_LIMIT_BYTES {
-+                    let content = project_content(item);
++                    let content = project_response_item(item);
 +                    state.output_bytes += serde_json::to_vec(&content.value)
 +                        .map_or(CONTENT_LIMIT_BYTES, |value| value.len());
 +                    state.output.push(content.value);
@@ -2387,21 +2641,60 @@ index 0000000..1344548
 +    }
 +}
 +
-+fn model_output(state: &ModelOperationState) -> Vec<Value> {
++fn model_output(state: &ModelOperationState) -> Value {
 +    let mut output = state.output.clone();
 +    if !state.partial_text.is_empty() {
 +        output.push(serde_json::json!({"type":"output_text","text":state.partial_text,"partial":true,"truncated":state.partial_truncated}));
 +    }
-+    output
++    Value::Array(output)
 +}
 +
 +pub(crate) fn current_model_operation() -> Option<ModelOperation> {
 +    CURRENT_MODEL_OPERATION.try_with(Clone::clone).ok()
 +}
 +
++/// Only wire messages and continuation identity consume the content budget.
++#[derive(Serialize)]
++pub(crate) struct ModelRequestContent<'a> {
++    #[serde(serialize_with = "serialize_model_inputs")]
++    pub input: &'a [codex_protocol::models::ResponseItem],
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub previous_response_id: Option<&'a str>,
++}
++
++fn serialize_model_inputs<S: serde::Serializer>(
++    input: &[codex_protocol::models::ResponseItem],
++    serializer: S,
++) -> Result<S::Ok, S::Error> {
++    use serde::ser::SerializeSeq;
++    let mut sequence = serializer.serialize_seq(None)?;
++    let mut projection = ContentProjection {
++        truncated: false,
++        omitted: false,
++    };
++    let mut used = 0;
++    for item in input {
++        let available = CONTENT_VALUE_LIMIT_BYTES.saturating_sub(used + 512);
++        if available < 84 {
++            sequence.serialize_element(
++                &serde_json::json!({"truncated":true,"reason":"capture_budget"}),
++            )?;
++            break;
++        }
++        let value = projection.response_item(item, available);
++        used += json_size(&value) + 2;
++        sequence.serialize_element(&value)?;
++    }
++    sequence.end()
++}
++
++fn project_response_item(item: &codex_protocol::models::ResponseItem) -> OperationContent {
++    project_with(|projection| projection.response_item(item, CONTENT_VALUE_LIMIT_BYTES))
++}
++
 +pub(crate) fn observe_model_request<T: Serialize + ?Sized>(
 +    request: &T,
-+    identity: &impl Serialize,
++    identity: &codex_api::ResponsesApiRequest,
 +    endpoint: &str,
 +) {
 +    if let Some(operation) = current_model_operation() {
@@ -2418,7 +2711,10 @@ index 0000000..1344548
 +}
 +
 +fn model_request_content(request: &(impl Serialize + ?Sized)) -> Value {
-+    let mut value = model_request_identity(request);
++    let mut value = match bounded_value(request) {
++        Ok(value) => value,
++        Err(reason) => return omitted_content(reason).value,
++    };
 +    if let Value::Object(body) = &mut value {
 +        // The per-direction content budget belongs to messages and instructions.
 +        // Tool definitions affect request identity but must not consume that budget.
@@ -2432,34 +2728,43 @@ index 0000000..1344548
 +    value
 +}
 +
-+fn model_request_identity(request: &(impl Serialize + ?Sized)) -> Value {
-+    let Ok(Value::Object(mut body)) = serde_json::to_value(request) else {
-+        return Value::Null;
-+    };
-+    // Preserve semantic request changes when grouping same-input transport retries.
-+    body.retain(|key, _| {
-+        matches!(
-+            key.as_str(),
-+            "model"
-+                | "instructions"
-+                | "input"
-+                | "previous_response_id"
-+                | "tools"
-+                | "tool_choice"
-+                | "text"
-+        )
-+    });
-+    Value::Object(body)
++fn model_request_identity(request: &codex_api::ResponsesApiRequest) -> impl Serialize + '_ {
++    #[derive(Serialize)]
++    struct Identity<'a> {
++        input: &'a [codex_protocol::models::ResponseItem],
++        model: &'a str,
++        #[serde(skip_serializing_if = "Option::is_none")]
++        text: Option<&'a codex_api::TextControls>,
++        tool_choice: &'a str,
++        #[serde(skip_serializing_if = "Option::is_none")]
++        tools: Option<&'a codex_api::ResponsesApiTools>,
++    }
++    Identity {
++        input: &request.input,
++        model: &request.model,
++        text: request.text.as_ref(),
++        tool_choice: &request.tool_choice,
++        tools: request.tools.as_ref(),
++    }
 +}
 +
-+fn request_fingerprint(request: &impl Serialize) -> u64 {
-+    use std::hash::Hash;
++fn request_fingerprint(request: &codex_api::ResponsesApiRequest) -> u64 {
 +    use std::hash::Hasher;
-+    let value = model_request_identity(request);
-+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-+    // The digest only lives with this operation; request content is not retained in metadata mode.
-+    value.to_string().hash(&mut hasher);
-+    hasher.finish()
++    struct Digest(std::collections::hash_map::DefaultHasher);
++    impl std::io::Write for Digest {
++        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
++            self.0.write(bytes);
++            Ok(bytes.len())
++        }
++        fn flush(&mut self) -> std::io::Result<()> {
++            Ok(())
++        }
++    }
++    let mut digest = Digest(std::collections::hash_map::DefaultHasher::new());
++    // Typed semantic fields borrow the prepared body. Transport metadata is excluded;
++    // request retries clone history and retain its map ordering and raw tool JSON.
++    let _ = serde_json::to_writer(&mut digest, &model_request_identity(request));
++    digest.0.finish()
 +}
 +
 +fn trusted_response_endpoint(endpoint: &str) -> bool {
@@ -2485,6 +2790,86 @@ index 0000000..1344548
 +        (OperationObservation::new(mode, sink.clone()), sink)
 +    }
 +
++    // Capture fixtures remain independent from the prepared transport identity.
++    fn test_request(value: &Value) -> codex_api::ResponsesApiRequest {
++        codex_api::ResponsesApiRequest {
++            model: value["model"].as_str().unwrap_or("model").to_owned(),
++            input: vec![codex_protocol::models::ResponseItem::Message {
++                role: "user".into(),
++                content: vec![codex_protocol::models::ContentItem::InputText {
++                    text: value["input"].to_string(),
++                }],
++                encrypted_content: None,
++                status: None,
++                id: None,
++                phase: None,
++                internal_chat_message_metadata_passthrough: None,
++            }],
++            tools: value.get("tools").map(|tools| {
++                Arc::<serde_json::value::RawValue>::from(
++                    serde_json::value::to_raw_value(tools).unwrap(),
++                )
++                .into()
++            }),
++            tool_choice: value["tool_choice"].as_str().unwrap_or("auto").to_owned(),
++            text: None,
++            stream: true,
++            service_tier: None,
++            parallel_tool_calls: true,
++            reasoning: None,
++            store: false,
++            stream_options: None,
++            include: vec![],
++            prompt_cache_key: None,
++            client_metadata: None,
++            access_programs: None,
++        }
++    }
++
++    #[test]
++    fn fingerprint_ignores_transport_metadata_and_tracks_semantic_fields() {
++        let old_identity = |request: &codex_api::ResponsesApiRequest| {
++            let mut value = serde_json::to_value(request).unwrap();
++            value.as_object_mut().unwrap().retain(|key, _| {
++                matches!(
++                    key.as_str(),
++                    "model" | "input" | "tools" | "tool_choice" | "text"
++                )
++            });
++            value
++        };
++        let request = test_request(&serde_json::json!({"input":["same"]}));
++        let original = request_fingerprint(&request);
++        let mut retry = request.clone();
++        retry.client_metadata = Some(std::collections::HashMap::from([
++            ("routing".into(), "new route".into()),
++            ("trace".into(), "new trace".into()),
++        ]));
++        retry.service_tier = Some("priority".into());
++        retry.prompt_cache_key = Some("new cache key".into());
++        assert_eq!(old_identity(&request), old_identity(&retry));
++        assert_eq!(original, request_fingerprint(&retry));
++        let mut changed_model = request.clone();
++        changed_model.model = "different".into();
++        let mut changed_input = request.clone();
++        changed_input.input.clear();
++        let mut changed_choice = request.clone();
++        changed_choice.tool_choice = "none".into();
++        let mut changed_text = request.clone();
++        changed_text.text = Some(codex_api::TextControls::default());
++        let changed_tools = test_request(&serde_json::json!({"input":["same"],"tools":[]}));
++        for changed in [
++            changed_model,
++            changed_input,
++            changed_choice,
++            changed_text,
++            changed_tools,
++        ] {
++            assert_ne!(old_identity(&request), old_identity(&changed));
++            assert_ne!(original, request_fingerprint(&changed));
++        }
++    }
++
 +    #[test]
 +    fn metadata_never_captures_payload_and_finalizes_once() {
 +        let (observation, sink) = observation(OperationCaptureMode::Metadata);
@@ -2496,7 +2881,10 @@ index 0000000..1344548
 +                OperationMetadata::default(),
 +            );
 +            operation.capture_input(&serde_json::json!({"text":"INPUT_CANARY"}));
-+            operation.finish_with_output(OperationOutcome::Success, &"OUTPUT_CANARY");
++            operation.finish_with_output(
++                OperationOutcome::Success,
++                &Value::String("OUTPUT_CANARY".into()),
++            );
 +            operation.finish(OperationOutcome::Error);
 +        }
 +        let events = sink.0.lock().unwrap();
@@ -2562,7 +2950,7 @@ index 0000000..1344548
 +
 +    #[test]
 +    fn oversized_text_keeps_a_useful_utf8_prefix_and_inline_marker() {
-+        let content = project_content(&format!(
++        let content = project_text(&format!(
 +            "file prefix: {}",
 +            "é🙂".repeat(CONTENT_LIMIT_BYTES)
 +        ));
@@ -2585,7 +2973,9 @@ index 0000000..1344548
 +            "text":{"format":{"type":"json_schema","schema":{"description":"schema".repeat(10_000)}}},
 +            "tool_choice":"auto",
 +        });
-+        let content = project_content(&model_request_content(&request));
++        let selected =
++            serde_json::json!({"input": request["input"], "instructions":request["instructions"]});
++        let content = project_content(&model_request_content(&selected));
 +        assert!(!content.truncated);
 +        assert!(!content.omitted);
 +        assert_eq!(content.value["input"], input);
@@ -2594,17 +2984,16 @@ index 0000000..1344548
 +        assert!(content.value.get("text").is_none());
 +        let mut changed = request.clone();
 +        changed["tools"][0]["name"] = Value::String("different_tool".into());
-+        assert_ne!(request_fingerprint(&request), request_fingerprint(&changed));
-+        assert_eq!(
-+            model_request_content(&request),
-+            model_request_content(&changed)
++        assert_ne!(
++            request_fingerprint(&test_request(&request)),
++            request_fingerprint(&test_request(&changed))
 +        );
 +    }
 +
 +    #[test]
 +    fn embedded_json_that_fits_the_budget_remains_intact() {
 +        let raw = serde_json::json!({"text":"x".repeat(27_000)}).to_string();
-+        let content = project_content(&raw);
++        let content = project_text(&raw);
 +        assert_eq!(content.value, Value::String(raw));
 +        assert!(!content.truncated);
 +    }
@@ -2632,25 +3021,55 @@ index 0000000..1344548
 +    }
 +
 +    #[test]
-+    fn embedded_json_redacts_and_truncates_without_breaking_its_structure() {
-+        let input = serde_json::json!({
-+            "accessToken":"TOKEN_CANARY",
-+            "result":format!("prefix {}", "🙂".repeat(CONTENT_LIMIT_BYTES)),
-+        })
-+        .to_string();
-+        let content = project_content(&input);
++    fn embedded_json_redacts_in_budget_sensitive_fields() {
++        let input =
++            serde_json::json!({"accessToken":"TOKEN_CANARY","result":"visible"}).to_string();
++        let content = project_text(&input);
 +        let embedded: Value = serde_json::from_str(content.value.as_str().unwrap()).unwrap();
 +        assert_eq!(embedded["accessToken"], "[omitted]");
-+        assert!(embedded["result"].as_str().unwrap().starts_with("prefix "));
-+        assert!(
-+            embedded["result"]
-+                .as_str()
-+                .unwrap()
-+                .ends_with("[truncated]")
-+        );
-+        assert!(content.truncated);
++        assert_eq!(embedded["result"], "visible");
++        assert!(!content.truncated);
 +        assert!(content.omitted);
-+        assert!(json_size(&content) <= CONTENT_LIMIT_BYTES);
++        assert!(!content.value.to_string().contains("CANARY"));
++    }
++
++    #[test]
++    fn oversized_json_text_is_omitted_before_structural_projection() {
++        let inputs = [
++            serde_json::json!({"authorization":"LARGE_JSON_CANARY","items":vec![0; CONTENT_LIMIT_BYTES * 8]}).to_string(),
++            format!("{}{}", " ".repeat(CONTENT_LIMIT_BYTES * 2), r#"{"authorization":"WHITESPACE_CANARY","result":"visible"}"#),
++        ];
++        for raw in inputs {
++            let content = project_text(&raw);
++            let marker: Value = serde_json::from_str(content.value.as_str().unwrap()).unwrap();
++            assert_eq!(
++                marker,
++                serde_json::json!({"omitted":true,"truncated":true,"reason":"capture_budget"})
++            );
++            assert!(content.omitted);
++            assert!(content.truncated);
++            assert_eq!(content.reason.as_deref(), Some("capture_budget"));
++            assert!(json_size(&content) <= CONTENT_LIMIT_BYTES);
++            assert!(!content.value.to_string().contains("CANARY"));
++        }
++    }
++
++    #[test]
++    fn embedded_json_parse_limit_follows_remaining_direction_budget() {
++        let raw =
++            serde_json::json!({"authorization":"NESTED_JSON_CANARY","text":"y".repeat(8_000)})
++                .to_string();
++        assert!(raw.len() < CONTENT_LIMIT_BYTES);
++        let content = project_content(
++            &serde_json::json!({"a":"x".repeat(CONTENT_VALUE_LIMIT_BYTES - 1_200),"z":raw}),
++        );
++        let marker: Value = serde_json::from_str(content.value["z"].as_str().unwrap()).unwrap();
++        assert_eq!(
++            marker,
++            serde_json::json!({"omitted":true,"truncated":true,"reason":"capture_budget"})
++        );
++        assert!(content.omitted);
++        assert!(content.truncated);
 +        assert!(!content.value.to_string().contains("CANARY"));
 +    }
 +
@@ -2681,6 +3100,216 @@ index 0000000..1344548
 +        assert!(serialized.len() <= CONTENT_LIMIT_BYTES);
 +    }
 +
++    #[test]
++    fn borrowed_large_plain_text_retains_prefix_and_redacts_media() {
++        let value = serde_json::json!({
++            "role":"tool",
++            "text":format!("visible data:image/png;base64,MEDIA_CANARY {}", "é🙂".repeat(CONTENT_LIMIT_BYTES * 8)),
++            "authorization":"TOKEN_CANARY",
++        });
++        let content = project_content(&value);
++        assert_eq!(content.value["role"], "tool");
++        assert!(
++            content.value["text"]
++                .as_str()
++                .unwrap()
++                .starts_with("visible [omitted: media] ")
++        );
++        assert!(
++            content.value["text"]
++                .as_str()
++                .unwrap()
++                .ends_with("[truncated]")
++        );
++        assert!(content.truncated);
++        assert!(content.omitted);
++        assert!(!content.value.to_string().contains("CANARY"));
++        assert!(json_size(&content) <= CONTENT_LIMIT_BYTES);
++    }
++
++    fn tool_result_item(
++        output: codex_protocol::models::FunctionCallOutputPayload,
++        custom: bool,
++    ) -> codex_protocol::models::ResponseItem {
++        use codex_protocol::models::ResponseItem;
++        if custom {
++            ResponseItem::CustomToolCallOutput {
++                id: None,
++                call_id: "call-file".into(),
++                name: Some("read_file".into()),
++                output,
++                internal_chat_message_metadata_passthrough: None,
++            }
++        } else {
++            ResponseItem::FunctionCallOutput {
++                id: None,
++                call_id: Some("call-file".into()),
++                name: Some("read_file".into()),
++                namespace: None,
++                output,
++                internal_chat_message_metadata_passthrough: None,
++            }
++        }
++    }
++
++    #[test]
++    fn oversized_tool_results_preserve_call_identity_and_readable_utf8_prefix() {
++        for custom in [false, true] {
++            let item = tool_result_item(
++                codex_protocol::models::FunctionCallOutputPayload::from_text(format!(
++                    "file prefix: {}",
++                    "é🙂".repeat(CONTENT_LIMIT_BYTES)
++                )),
++                custom,
++            );
++            let content = project_with(|projection| {
++                projection.response_item(&item, CONTENT_VALUE_LIMIT_BYTES)
++            });
++            assert_eq!(content.value["call_id"], "call-file");
++            assert_eq!(
++                content.value["type"],
++                if custom {
++                    "custom_tool_call_output"
++                } else {
++                    "function_call_output"
++                }
++            );
++            let output = content.value["output"].as_str().unwrap();
++            assert!(output.starts_with("file prefix: "));
++            assert!(output.ends_with("[truncated]"));
++            assert!(content.truncated);
++            assert!(json_size(&content) <= CONTENT_LIMIT_BYTES);
++        }
++    }
++
++    #[test]
++    fn oversized_multimodal_tool_result_keeps_text_and_omits_binary_parts() {
++        use codex_protocol::models::{
++            FunctionCallOutputContentItem, FunctionCallOutputPayload, ImageReference,
++        };
++        let item = tool_result_item(
++            FunctionCallOutputPayload::from_content_items(vec![
++                FunctionCallOutputContentItem::InputImage {
++                    image: ImageReference::Inline {
++                        image_url: "IMAGE_CANARY".repeat(CONTENT_LIMIT_BYTES),
++                    },
++                    detail: None,
++                },
++                FunctionCallOutputContentItem::InputAudio {
++                    audio_url: "AUDIO_CANARY".repeat(CONTENT_LIMIT_BYTES),
++                },
++                FunctionCallOutputContentItem::InputText {
++                    text: format!("file prefix: {}", "x".repeat(CONTENT_LIMIT_BYTES * 4)),
++                },
++            ]),
++            false,
++        );
++        let content =
++            project_with(|projection| projection.response_item(&item, CONTENT_VALUE_LIMIT_BYTES));
++        assert_eq!(content.value["call_id"], "call-file");
++        assert_eq!(content.value["output"][0]["omitted"], true);
++        assert_eq!(content.value["output"][1]["omitted"], true);
++        assert!(
++            content.value["output"][2]["text"]
++                .as_str()
++                .unwrap()
++                .starts_with("file prefix: ")
++        );
++        assert!(!content.value.to_string().contains("CANARY"));
++        assert!(content.omitted);
++        assert!(json_size(&content) <= CONTENT_LIMIT_BYTES);
++    }
++
++    #[test]
++    fn oversized_json_tool_result_uses_the_existing_raw_json_guard() {
++        let raw = serde_json::json!({"authorization":"TOOL_JSON_CANARY","text":"x".repeat(CONTENT_LIMIT_BYTES * 4)}).to_string();
++        let item = tool_result_item(
++            codex_protocol::models::FunctionCallOutputPayload::from_text(raw),
++            true,
++        );
++        let content =
++            project_with(|projection| projection.response_item(&item, CONTENT_VALUE_LIMIT_BYTES));
++        let marker: Value =
++            serde_json::from_str(content.value["output"].as_str().unwrap()).unwrap();
++        assert_eq!(marker["reason"], "capture_budget");
++        assert_eq!(marker["omitted"], true);
++        assert_eq!(content.value["call_id"], "call-file");
++        assert!(!content.value.to_string().contains("CANARY"));
++        assert!(content.omitted);
++        assert!(content.truncated);
++    }
++
++    #[test]
++    fn typed_oversized_items_stop_serialization_with_explicit_omission() {
++        #[derive(Serialize)]
++        struct TypedItem<'a> {
++            text: &'a str,
++        }
++        let text = "x".repeat(CONTENT_LIMIT_BYTES * 128);
++        let content = project_serializable_content(&TypedItem { text: &text });
++        assert!(content.omitted);
++        assert!(content.truncated);
++        assert_eq!(content.value["truncated"], true);
++        assert_eq!(content.reason.as_deref(), Some("capture_budget"));
++        assert!(json_size(&content) <= CONTENT_LIMIT_BYTES);
++    }
++
++    #[test]
++    fn oversized_typed_messages_keep_plain_prefix_and_omit_structured_text() {
++        for kind in ["input_text", "output_text"] {
++            for structured in [false, true] {
++                let text = if structured {
++                    serde_json::json!({"authorization":"MESSAGE_CANARY","text":"x".repeat(96 * 1024)}).to_string()
++                } else {
++                    format!("TEXT_PREFIX {}", "é".repeat(96 * 1024))
++                };
++                let item: codex_protocol::models::ResponseItem = serde_json::from_value(serde_json::json!({
++                    "type":"message","id":"msg_test","role":"user","content":[{"type":kind,"text":text}]
++                })).unwrap();
++                let output = project_response_item(&item);
++                let request = ModelRequestContent {
++                    input: std::slice::from_ref(&item),
++                    previous_response_id: Some("previous"),
++                };
++                let input = project_content(&model_request_content(&request));
++                for (content, value) in
++                    [(&output, &output.value), (&input, &input.value["input"][0])]
++                {
++                    assert_eq!(value["role"], "user");
++                    assert_eq!(value["id"], "msg_test");
++                    let text = value["content"][0]["text"].as_str().unwrap();
++                    if structured {
++                        let marker: Value = serde_json::from_str(text).unwrap();
++                        assert_eq!(marker["reason"], "capture_budget");
++                        assert!(content.omitted);
++                        assert!(!text.contains("CANARY"));
++                    } else {
++                        assert!(text.starts_with("TEXT_PREFIX "));
++                        assert!(text.ends_with("[truncated]"));
++                    }
++                    assert!(content.truncated);
++                    assert!(json_size(content) <= CONTENT_LIMIT_BYTES);
++                }
++                assert_eq!(input.value["previous_response_id"], "previous");
++            }
++        }
++    }
++
++    #[test]
++    fn oversized_media_does_not_consume_visible_message_text_budget() {
++        let item: codex_protocol::models::ResponseItem = serde_json::from_value(serde_json::json!({
++            "type":"message","role":"user","content":[
++                {"type":"input_image","image_url":format!("data:image/png;base64,{}", "x".repeat(2_000_000))},
++                {"type":"input_text","text":"VISIBLE_AFTER_MEDIA"}
++            ]
++        })).unwrap();
++        let content = project_response_item(&item);
++        assert_eq!(content.value["content"][0]["omitted"], true);
++        assert_eq!(content.value["content"][1]["text"], "VISIBLE_AFTER_MEDIA");
++        assert!(content.omitted);
++        assert!(json_size(&content) <= CONTENT_LIMIT_BYTES);
++    }
++
 +    #[tokio::test]
 +    async fn same_input_retry_has_one_live_start_and_changed_input_splits() {
 +        let (observation, sink) = observation(OperationCaptureMode::Content);
@@ -2692,12 +3321,12 @@ index 0000000..1344548
 +        );
 +        model.scope(async {
 +            let request = serde_json::json!({"model":"model","input":[{"role":"user","content":"first"}],"client_metadata":{"secret":"META_CANARY"}});
-+            observe_model_request(&request, &request, "http://localhost:8080");
++            observe_model_request(&request, &test_request(&request), "http://localhost:8080");
 +            assert_eq!(sink.0.lock().unwrap().len(), 1);
-+            observe_model_request(&request, &request, "http://localhost:8080");
++            observe_model_request(&request, &test_request(&request), "http://localhost:8080");
 +            assert_eq!(sink.0.lock().unwrap().len(), 1);
 +            let changed = serde_json::json!({"model":"model","input":[{"role":"user","content":"second"}]});
-+            observe_model_request(&changed, &changed, "http://localhost:8080");
++            observe_model_request(&changed, &test_request(&changed), "http://localhost:8080");
 +            model.event(&codex_api::ResponseEvent::Completed { response_id:"response".into(),token_usage:None,usage_metadata:None,end_turn:Some(true) });
 +        }).await;
 +        model.finish(OperationOutcome::Error);
@@ -2724,7 +3353,7 @@ index 0000000..1344548
 +            "requested".into(),
 +        );
 +        let request = serde_json::json!({"model":"requested","input":[]});
-+        model.request(&request, &request, "http://localhost");
++        model.request(&request, &test_request(&request), "http://localhost");
 +        model.event(&codex_api::ResponseEvent::ModelObservation(
 +            "body-first".into(),
 +        ));
@@ -2768,10 +3397,10 @@ index 0000000..1344548
 +            "model".into(),
 +        );
 +        let request = serde_json::json!({"model":"model","input":[]});
-+        model.request(&request, &request, "http://localhost");
++        model.request(&request, &test_request(&request), "http://localhost");
 +        let old = model.clone().for_stream();
 +        old.source_ended();
-+        model.request(&request, &request, "http://localhost");
++        model.request(&request, &test_request(&request), "http://localhost");
 +        old.event(&codex_api::ResponseEvent::Completed {
 +            response_id: "old".into(),
 +            token_usage: None,
@@ -2801,7 +3430,7 @@ index 0000000..1344548
 +            "model".into(),
 +        );
 +        let request = serde_json::json!({"model":"model","input":[]});
-+        model.request(&request, &request, "http://localhost");
++        model.request(&request, &test_request(&request), "http://localhost");
 +        model.source_ended();
 +        let expected = model.state.lock().unwrap().source_end.clone().unwrap();
 +        // A later EOF/drop must not move the source error boundary to tool cleanup.
@@ -2822,7 +3451,7 @@ index 0000000..1344548
 +            "model".into(),
 +        );
 +        let request = serde_json::json!({"model":"model","input":[]});
-+        model.request(&request, &request, "http://localhost");
++        model.request(&request, &test_request(&request), "http://localhost");
 +        model.finish(OperationOutcome::Success);
 +        let events = sink.0.lock().unwrap();
 +        assert_eq!(events.len(), 2);
@@ -2839,7 +3468,7 @@ index 0000000..1344548
 +            "model".into(),
 +        );
 +        let request = serde_json::json!({"model":"model","input":[]});
-+        model.request(&request, &request, "http://localhost");
++        model.request(&request, &test_request(&request), "http://localhost");
 +        model.source_ended();
 +        model.state.lock().unwrap().source_end = Some(("2000-01-01T00:00:00.000Z".into(), 0.0));
 +        model.retry_waiting(true);
@@ -2862,11 +3491,11 @@ index 0000000..1344548
 +            "model".into(),
 +        );
 +        let request = serde_json::json!({"model":"model","input":[]});
-+        model.request(&request, &request, "http://localhost");
++        model.request(&request, &test_request(&request), "http://localhost");
 +        model.source_ended();
 +        let expected = model.state.lock().unwrap().source_end.clone().unwrap();
 +        let changed = serde_json::json!({"model":"model","input":["changed"]});
-+        model.request(&changed, &changed, "http://localhost");
++        model.request(&changed, &test_request(&changed), "http://localhost");
 +        let events = sink.0.lock().unwrap();
 +        assert_eq!(events.len(), 3);
 +        assert_eq!(events[1].completed_at.as_ref(), Some(&expected.0));
@@ -2883,7 +3512,7 @@ index 0000000..1344548
 +            "model".into(),
 +        );
 +        let request = serde_json::json!({"model":"model","input":[]});
-+        model.request(&request, &request, "http://localhost");
++        model.request(&request, &test_request(&request), "http://localhost");
 +        let error = codex_api::ApiError::ResponseIncomplete(Box::new(
 +            codex_protocol::error::ResponseIncompleteError {
 +                reason: "ERROR_PAYLOAD_CANARY".into(),
@@ -2922,7 +3551,7 @@ index 0000000..1344548
 +        );
 +        let interrupted = model.interruption_guard();
 +        let request = serde_json::json!({"model":"model","input":[]});
-+        model.request(&request, &request, "http://localhost:8080");
++        model.request(&request, &test_request(&request), "http://localhost:8080");
 +        model.event(&codex_api::ResponseEvent::OutputTextDelta(
 +            "partial answer".into(),
 +        ));
@@ -3352,24 +3981,28 @@ index 3344ed8..ea173f5 100644
  pub(crate) mod registry;
 diff --git a/codex-rs/core/src/tools/operation_observation.rs b/codex-rs/core/src/tools/operation_observation.rs
 new file mode 100644
-index 0000000..d07036a
+index 0000000..2c84e35
 --- /dev/null
 +++ b/codex-rs/core/src/tools/operation_observation.rs
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,184 @@
 +//! Execution observations, separate from admission, approval, and result hooks.
 +
 +use std::sync::Arc;
 +use std::sync::Mutex;
 +
-+use serde::Serialize;
 +use serde_json::Value;
 +
 +use crate::function_tool::FunctionCallError;
++use crate::operation_observation::CONTENT_VALUE_LIMIT_BYTES;
++use crate::operation_observation::OperationContent;
 +use crate::operation_observation::OperationGuard;
 +use crate::operation_observation::OperationKind;
 +use crate::operation_observation::OperationMetadata;
 +use crate::operation_observation::OperationObservation;
 +use crate::operation_observation::OperationOutcome;
++use crate::operation_observation::project_content;
++use crate::operation_observation::project_serializable_content;
++use crate::operation_observation::project_text;
 +use crate::tools::context::ToolCallSource;
 +use crate::tools::context::ToolInvocation;
 +use crate::tools::context::ToolOutput;
@@ -3385,12 +4018,12 @@ index 0000000..d07036a
 +    thread_id: String,
 +    turn_id: String,
 +    metadata: OperationMetadata,
-+    input: Option<Value>,
++    input: Option<OperationContent>,
 +    guard: Mutex<Option<OperationGuard>>,
 +}
 +
 +impl ExecutionObservation {
-+    fn start(&self, input: Option<&Value>) {
++    fn start(&self, input: Option<OperationContent>) {
 +        let mut guard = self
 +            .guard
 +            .lock()
@@ -3405,8 +4038,8 @@ index 0000000..d07036a
 +            OperationKind::Tool,
 +            self.metadata.clone(),
 +        );
-+        if let Some(input) = input.or(self.input.as_ref()) {
-+            started.capture_input(input);
++        if let Some(input) = input.or_else(|| self.input.clone()) {
++            started.capture_input_content(input);
 +        }
 +        *guard = Some(started);
 +    }
@@ -3455,14 +4088,13 @@ index 0000000..d07036a
 +}
 +
 +/// MCP preparation can rewrite arguments before sending them to the server.
-+pub(crate) fn start_current_execution_with_input(input: &impl Serialize) {
++pub(crate) fn start_current_execution_with_input(input: &Value) {
 +    let _ = CURRENT_EXECUTION.try_with(|execution| {
 +        let input = execution
 +            .observation
 +            .captures_content()
-+            .then(|| serde_json::to_value(input).ok())
-+            .flatten();
-+        execution.start(input.as_ref());
++            .then(|| project_content(input));
++        execution.start(input);
 +    });
 +}
 +
@@ -3497,11 +4129,18 @@ index 0000000..d07036a
 +        .captures_content()
 +        .then(|| match &invocation.payload {
 +            ToolPayload::Function { arguments } => {
-+                serde_json::from_str(arguments).unwrap_or_else(|_| Value::String(arguments.clone()))
++                // Trace-only parsing must not allocate a JSON tree beyond the capture budget.
++                if arguments.len() > CONTENT_VALUE_LIMIT_BYTES {
++                    project_content(&serde_json::json!({"omitted":true,"truncated":true,"reason":"capture_budget"}))
++                } else if let Ok(value) = serde_json::from_str::<Value>(arguments) {
++                    project_content(&value)
++                } else {
++                    project_text(arguments)
++                }
 +            }
-+            ToolPayload::Custom { input } => Value::String(input.clone()),
++            ToolPayload::Custom { input } => project_text(input),
 +            ToolPayload::ToolSearch { arguments } => {
-+                serde_json::to_value(arguments).unwrap_or(Value::Null)
++                project_serializable_content(arguments)
 +            }
 +        });
 +    let execution = Arc::new(ExecutionObservation {
@@ -3532,10 +4171,10 @@ index 0000000..d07036a
 +mod tests;
 diff --git a/codex-rs/core/src/tools/operation_observation_tests.rs b/codex-rs/core/src/tools/operation_observation_tests.rs
 new file mode 100644
-index 0000000..7fda319
+index 0000000..b94ecd9
 --- /dev/null
 +++ b/codex-rs/core/src/tools/operation_observation_tests.rs
-@@ -0,0 +1,291 @@
+@@ -0,0 +1,348 @@
 +use super::*;
 +use crate::operation_observation::OperationCaptureMode;
 +use crate::operation_observation::OperationEvent;
@@ -3826,6 +4465,63 @@ index 0000000..7fda319
 +            Some("issuing-exec-operation")
 +        );
 +    }
++}
++
++#[tokio::test]
++async fn oversized_function_arguments_are_omitted_without_changing_execution() {
++    let (mut invocation, events) = fixture(OperationCaptureMode::Content).await;
++    invocation.payload = ToolPayload::Function {
++        arguments: serde_json::json!({"authorization":"TOOL_ARGUMENT_CANARY","items":vec![0; CONTENT_VALUE_LIMIT_BYTES * 8]}).to_string(),
++    };
++    assert!(
++        observe_execution(&Handler::default(), &invocation)
++            .await
++            .is_ok()
++    );
++    let events = events.0.lock().unwrap();
++    assert_eq!(events.len(), 2);
++    assert_eq!(events[1].outcome, Some(OperationOutcome::Success));
++    let content = events[1].input.as_ref().unwrap();
++    assert_eq!(
++        content.value,
++        serde_json::json!({"omitted":true,"truncated":true,"reason":"capture_budget"})
++    );
++    assert!(content.omitted);
++    assert!(content.truncated);
++    assert!(!serde_json::to_string(&*events).unwrap().contains("CANARY"));
++}
++
++#[tokio::test]
++async fn oversized_custom_input_keeps_prefix_without_changing_execution() {
++    let (mut invocation, events) = fixture(OperationCaptureMode::Content).await;
++    invocation.payload = ToolPayload::Custom {
++        input: format!(
++            "visible custom input {}",
++            "é🙂".repeat(CONTENT_VALUE_LIMIT_BYTES * 8)
++        ),
++    };
++    assert!(
++        observe_execution(&Handler::default(), &invocation)
++            .await
++            .is_ok()
++    );
++    let events = events.0.lock().unwrap();
++    assert_eq!(events.len(), 2);
++    assert_eq!(events[1].outcome, Some(OperationOutcome::Success));
++    let content = events[1].input.as_ref().unwrap();
++    assert!(
++        content
++            .value
++            .as_str()
++            .unwrap()
++            .starts_with("visible custom input ")
++    );
++    assert!(content.value.as_str().unwrap().ends_with("[truncated]"));
++    assert!(content.truncated);
++    assert!(
++        serde_json::to_vec(content).unwrap().len()
++            <= crate::operation_observation::CONTENT_LIMIT_BYTES
++    );
 +}
 diff --git a/codex-rs/core/src/tools/orchestrator.rs b/codex-rs/core/src/tools/orchestrator.rs
 index a1a88e4..d9afeb6 100644

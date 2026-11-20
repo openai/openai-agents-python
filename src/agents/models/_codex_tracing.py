@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,7 +13,7 @@ from ..tracing import (
     get_current_trace,
     response_span,
 )
-from ..tracing._content import bound_content
+from ..tracing._content import _json, bound_content
 from ..tracing._model import acquire_model_span, finish_model_span, record_model_input
 from ..tracing.config import get_operation_detail
 from ..tracing.provider import _is_noop_span, _is_noop_trace
@@ -208,7 +207,7 @@ class CodexOperationTracing:
             if value is None and marker:
                 value = marker
             if isinstance(data, FunctionSpanData):
-                setattr(data, direction, value if isinstance(value, str) else json.dumps(value))
+                setattr(data, direction, value if isinstance(value, str) else _json(value))
             elif isinstance(data, GenerationSpanData):
                 items = value if isinstance(value, list) else [{"content": value}]
                 if marker and marker not in items:

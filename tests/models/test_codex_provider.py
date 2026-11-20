@@ -1281,6 +1281,9 @@ async def test_required_preserves_incomplete_turn_runtime_error(tmp_path, server
 
 
 class OperationServer(FakeServer):
+    # ASCII escapes would push this UTF-8 file over the capture budget.
+    file_text = "native_result_secret" + "🙂" * 3000
+
     # This double preserves the negotiated wire and source timing at the real Runner boundary.
     def __init__(self, *, capture="metadata", malformed=False, active=False):
         super().__init__()
@@ -1336,7 +1339,7 @@ class OperationServer(FakeServer):
                 terminal["output"] = {
                     "value": [{"role": "assistant", "content": "native_result_secret"}]
                     if kind == "model"
-                    else "native_result_secret",
+                    else {"text": self.file_text},
                     "truncated": False,
                     "omitted": False,
                 }
@@ -1495,6 +1498,8 @@ async def test_codex_operations_preserve_source_spans_and_capture_policy(
         assert (tools[0].span_data.input is not None) == (effective == "content")
     exported = json.dumps([span.export() for span in operations])
     assert ("native_result_secret" in exported) == (effective == "content")
+    if effective == "content":
+        assert json.loads(tools[0].span_data.output) == {"text": OperationServer.file_text}
     if not sensitive:
         assert all(span.span_data.operation.response_id is None for span in models)
 

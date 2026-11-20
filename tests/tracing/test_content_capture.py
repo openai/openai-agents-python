@@ -21,6 +21,8 @@ from agents.tracing import (
     trace,
 )
 from agents.tracing._content import CONTENT_LIMIT, bound_content
+from agents.tracing.config import OperationDetail, operation_tracing_scope
+from agents.tracing.span_data import GenerationSpanData
 from tests.testing_processor import SPAN_PROCESSOR_TESTING, SpanProcessorForTests
 
 
@@ -104,21 +106,21 @@ def test_public_model_export_omits_hidden_reasoning_and_embedded_media(exporter)
     assert "omitted" in serialized
 
 
-def test_public_tool_export_retains_large_result_prefix_with_bounded_json(exporter) -> None:
+def test_public_tool_export_omits_oversized_structured_result_with_bounded_json(exporter) -> None:
     with trace("content"), function_span("read_file") as tool:
         tool.span_data.operation.detail = "content"
         tool.span_data.output = json.dumps({"text": "file prefix: " + "é🙂" * 40_000})
     captured = exporter.get_finished_spans()[0].attributes["gen_ai.tool.call.result"]
     assert len(json.dumps(captured, ensure_ascii=False).encode("utf-8")) <= CONTENT_LIMIT
     decoded = json.loads(captured)
-    assert decoded["text"].startswith("file prefix: ")
-    assert decoded["text"].endswith("[truncated]")
+    assert decoded == {"omitted": True, "truncated": True, "reason": "capture_budget"}
 
 
 @pytest.mark.parametrize(
     "value",
     [
         "é🙂" * 40_000,
+        " " * (CONTENT_LIMIT * 8) + "ordinary text",
         [{"text": "x" * 180}] * 3_000,
         {"input": [{"role": "user", "content": "x" * 80_000}], "instructions": "later"},
     ],
@@ -129,16 +131,35 @@ def test_projection_keeps_valid_structure_and_inline_budget_marker(value) -> Non
     assert len(serialized.encode("utf-8")) <= CONTENT_LIMIT
     assert "truncated" in serialized
     assert json.loads(serialized) == captured
+    if isinstance(value, str):
+        assert captured.endswith("[truncated]")
 
 
-def test_embedded_tool_json_remains_parseable_after_redaction_and_truncation() -> None:
-    raw = json.dumps({"accessToken": "TOKEN_CANARY", "result": "prefix " + "🙂" * 40_000})
+@pytest.mark.parametrize(
+    "raw",
+    [
+        json.dumps({"accessToken": "TOKEN_CANARY", "result": "prefix " + "🙂" * 40_000}),
+        "[" + ",".join(['{"apiKey":"TOKEN_CANARY"}'] * 60_000) + "]",
+        json.dumps({"text": "🙂" * 10_000}, ensure_ascii=False),
+        " " * (CONTENT_LIMIT * 8) + '{"apiKey":"TOKEN_CANARY"}',
+    ],
+    ids=["object", "array", "utf8-byte-limit", "whitespace-prefix"],
+)
+def test_oversized_embedded_tool_json_is_omitted_without_parsing(
+    raw: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_loads = json.loads
+    monkeypatch.setattr(
+        "agents.tracing._content.json.loads",
+        lambda _: pytest.fail("Oversized structured content must not be parsed."),
+    )
     captured = bound_content(raw)
     assert isinstance(captured, str)
-    decoded = json.loads(captured)
-    assert decoded["result"].startswith("prefix ")
-    assert decoded["result"].endswith("[truncated]")
-    assert decoded["accessToken"] == "[omitted]"
+    assert original_loads(captured) == {
+        "omitted": True,
+        "truncated": True,
+        "reason": "capture_budget",
+    }
     assert len(json.dumps(captured, ensure_ascii=False).encode("utf-8")) <= CONTENT_LIMIT
 
 
@@ -207,3 +228,68 @@ async def test_provider_error_cannot_export_a_reflected_transport_credential(
         assert "TRANSPORT_CREDENTIAL_CANARY" not in str(
             (dict(span.attributes), span.events, span.status.description)
         )
+
+
+@pytest.mark.parametrize("detail", [None, "metadata", "content"])
+@pytest.mark.parametrize("assign", [False, True], ids=["constructor", "assignment"])
+def test_generation_payload_capture_policy(detail: OperationDetail | None, assign: bool) -> None:
+    messages = [{"role": "user", "content": "visible prompt " + "é🙂" * 40_000}]
+    output = [
+        {
+            "role": "assistant",
+            "reasoning_content": "HIDDEN_CANARY",
+            "content": "visible answer " + "é🙂" * 40_000,
+        }
+    ]
+    config = {
+        "instructions": "visible instructions " + "é🙂" * 40_000,
+        "metadata": {"Authorization": "AUTH_CANARY"},
+    }
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "lookup", "description": "visible tool " + "é🙂" * 40_000},
+        }
+    ]
+    usage = {"input_tokens": 10, "output_tokens": 5}
+    policy = {"operation_detail": detail} if detail is not None else None
+    with operation_tracing_scope(policy, include_sensitive=True):
+        if assign:
+            data = GenerationSpanData(model="fixture", usage=usage)
+            data.input, data.output, data.model_config, data.tools = messages, output, config, tools
+        else:
+            data = GenerationSpanData(messages, output, "fixture", config, usage, tools)
+    captured = (data.input, data.output, data.model_config, data.tools)
+    assert all(
+        value is repeated
+        for value, repeated in zip(
+            captured, (data.input, data.output, data.model_config, data.tools), strict=True
+        )
+    )
+    originals = (messages, output, config, tools)
+    assert data.model == "fixture" and data.usage is usage
+    if detail is None:
+        assert all(value is original for value, original in zip(captured, originals, strict=True))
+    elif detail == "metadata":
+        assert captured == (None, None, None, None)
+        assert "CANARY" not in json.dumps(data.export())
+    else:
+        assert all(
+            len(json.dumps(value, ensure_ascii=False).encode()) <= CONTENT_LIMIT
+            for value in captured
+        )
+        exported = json.dumps(data.export(), ensure_ascii=False)
+        assert "CANARY" not in exported
+        assert "visible prompt" in exported and "visible answer" in exported
+        assert "visible instructions" in exported and "visible tool" in exported
+
+
+def test_generation_payload_assignments_honor_content_veto() -> None:
+    with operation_tracing_scope({"operation_detail": "content"}, include_sensitive=False):
+        data = GenerationSpanData()
+        data.input = [{"role": "user", "content": "INPUT_CANARY"}]
+        data.output = [{"role": "assistant", "content": "OUTPUT_CANARY"}]
+        data.model_config = {"instructions": "INSTRUCTIONS_CANARY"}
+        data.tools = [{"description": "TOOL_CANARY"}]
+    assert (data.input, data.output, data.model_config, data.tools) == (None, None, None, None)
+    assert "CANARY" not in json.dumps(data.export())

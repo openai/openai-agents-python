@@ -3,7 +3,7 @@ from __future__ import annotations
 import abc
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from ._content import bound_content
 from .config import OperationDetail, get_operation_detail
@@ -168,13 +168,47 @@ class OperationMetadata:
         return {key: value for key, value in values.items() if value is not None}
 
 
-class FunctionSpanData(SpanData):
+_Payload = TypeVar("_Payload")
+_Input = TypeVar("_Input")
+_Output = TypeVar("_Output")
+
+
+def _capture_payload(operation: OperationMetadata, value: _Payload) -> _Payload | None:
+    if operation.detail == "metadata":
+        return None
+    if operation.detail == "content" and value is not None:
+        return cast(_Payload, bound_content(value))
+    return value
+
+
+class _CapturedSpanData(SpanData, Generic[_Input, _Output]):
+    __slots__ = ("_input", "_output", "operation")
+    operation: OperationMetadata
+
+    @property
+    def input(self) -> _Input | None:
+        return self._input
+
+    @input.setter
+    def input(self, value: _Input | None) -> None:
+        self._input = _capture_payload(self.operation, value)
+
+    @property
+    def output(self) -> _Output | None:
+        return self._output
+
+    @output.setter
+    def output(self, value: _Output | None) -> None:
+        self._output = _capture_payload(self.operation, value)
+
+
+class FunctionSpanData(_CapturedSpanData[str, Any]):
     """
     Represents a Function Span in the trace.
     Includes input, output and MCP data (if applicable).
     """
 
-    __slots__ = ("name", "_input", "_output", "mcp_data", "operation")
+    __slots__ = ("name", "mcp_data")
 
     def __init__(
         self,
@@ -188,29 +222,6 @@ class FunctionSpanData(SpanData):
         self.input = input
         self.output = output
         self.mcp_data = mcp_data
-
-    def _capture(self, value: Any) -> Any:
-        if self.operation.detail == "metadata":
-            return None
-        if self.operation.detail == "content" and value is not None:
-            return bound_content(value)
-        return value
-
-    @property
-    def input(self) -> str | None:
-        return self._input
-
-    @input.setter
-    def input(self, value: str | None) -> None:
-        self._input: str | None = self._capture(value)
-
-    @property
-    def output(self) -> Any:
-        return self._output
-
-    @output.setter
-    def output(self, value: Any) -> None:
-        self._output = self._capture(value)
 
     @property
     def type(self) -> str:
@@ -226,20 +237,19 @@ class FunctionSpanData(SpanData):
         }
 
 
-class GenerationSpanData(SpanData):
+class GenerationSpanData(
+    _CapturedSpanData[Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]]
+):
     """
     Represents a Generation Span in the trace.
     Includes input, output, model, model configuration, usage, and optional tool definitions.
     """
 
     __slots__ = (
-        "input",
-        "output",
         "model",
-        "model_config",
+        "_model_config",
         "usage",
-        "tools",
-        "operation",
+        "_tools",
     )
 
     def __init__(
@@ -251,13 +261,29 @@ class GenerationSpanData(SpanData):
         usage: dict[str, Any] | None = None,
         tools: Sequence[Mapping[str, Any]] | None = None,
     ):
+        self.operation = OperationMetadata(model=model)
         self.input = input
         self.output = output
         self.model = model
         self.model_config = model_config
-        self.operation = OperationMetadata(model=model)
         self.usage = usage
         self.tools = tools
+
+    @property
+    def model_config(self) -> Mapping[str, Any] | None:
+        return self._model_config
+
+    @model_config.setter
+    def model_config(self, value: Mapping[str, Any] | None) -> None:
+        self._model_config = _capture_payload(self.operation, value)
+
+    @property
+    def tools(self) -> Sequence[Mapping[str, Any]] | None:
+        return self._tools
+
+    @tools.setter
+    def tools(self, value: Sequence[Mapping[str, Any]] | None) -> None:
+        self._tools = _capture_payload(self.operation, value)
 
     @property
     def type(self) -> str:
