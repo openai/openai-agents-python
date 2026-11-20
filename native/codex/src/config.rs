@@ -588,7 +588,7 @@ fn configure_tools(
             .values()
             .any(|server| server.enabled)
     {
-        return Err("CodexProvider with SandboxAgent requires Codex MCP servers to be disabled; expose tools through the SDK instead".into());
+        return Err("CodexProvider with SDK-owned tools requires Codex MCP servers to be disabled. Register servers on Agent.mcp_servers instead.".into());
     }
     if sdk_sandbox || !deferred.is_empty() {
         let direct = &mut config.code_mode.direct_only_tool_namespaces;

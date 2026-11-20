@@ -49,6 +49,7 @@ from ..usage import (
     _response_usage_to_usage,
 )
 from ._codex_inputs import prepare_codex_history, prepare_dynamic_tools, sdk_tool_call
+from ._run_context import uses_local_tool_hooks
 from .interface import Model, ModelProvider, ModelTracing
 
 
@@ -267,7 +268,7 @@ class _CodexModel(Model):
                 )
             )
         provider = self._provider
-        sdk_sandbox = any(
+        sdk_sandbox = uses_local_tool_hooks() or any(
             getattr(tool, "_sdk_sandbox", False) or isinstance(tool, (ShellTool, ApplyPatchTool))
             for tool in tools
         )

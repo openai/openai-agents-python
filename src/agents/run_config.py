@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Generic, Literal
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from .sandbox.session.sandbox_client import BaseSandboxClient
     from .sandbox.session.sandbox_session_state import SandboxSessionState
     from .sandbox.snapshot import SnapshotBase, SnapshotSpec
+    from .tool import Tool
 
 
 DEFAULT_MAX_TURNS = 10
@@ -140,8 +141,34 @@ OutputGuardrailBlockedMessageFormatter = Callable[
 
 
 @dataclass
+class ToolCallHookContext(Generic[TContext]):
+    """One SDK-executed tool call, available to input and output hooks in the host process."""
+
+    run_context: RunContextWrapper[TContext]
+    agent: Agent[TContext]
+    tool: Tool
+    call_id: str
+    tool_namespace: str | None
+    arguments: dict[str, Any]
+    """Function arguments or the local tool's input fields (for example, `{"action": ...}`).
+
+    If a function tool recovers from malformed JSON, its output hook receives an empty dictionary.
+    The original text is available in the function's `ToolContext.tool_arguments`.
+    """
+
+
+@dataclass
 class ToolExecutionConfig:
-    """Grouped SDK-side execution settings for local tool calls."""
+    """Configure SDK-side execution of local tool calls.
+
+    Preparation callbacks run in the host process for SDK-executed tools, including local MCP.
+
+    With either callback set, `CodexProvider` disables its native workspace tools. Supply a local
+    `ShellTool`, `ApplyPatchTool`, or `Agent.mcp_servers` to expose those tools through the SDK.
+    Hosted API tools execute outside these callbacks.
+
+    Supply the same callbacks when resuming a run in another process.
+    """
 
     max_function_tool_concurrency: int | None = None
     """Maximum number of local function tool calls to execute concurrently.
@@ -154,6 +181,29 @@ class ToolExecutionConfig:
     """Run function tool input guardrails before emitting a pending approval interruption.
 
     The same guardrails still run again immediately before tool execution after approval.
+    """
+
+    prepare_tool_input: Callable[[ToolCallHookContext[Any]], Awaitable[dict[str, Any]]] | None = (
+        None
+    )
+    """Return the arguments to approve and execute. Return `call.arguments` to pass them through.
+
+    The runner awaits this callback for a new call so the approver sees what the tool will execute.
+    Resuming an approved call reuses those arguments. `on_tool_start` runs after approval.
+
+    Raw provider stream events and provider-managed history may contain the original proposal.
+    """
+
+    prepare_tool_output: Callable[[ToolCallHookContext[Any], Any], Awaitable[Any]] | None = None
+    """Return the tool result to use after the tool has executed.
+
+    The runner awaits this callback before function-tool output guardrails and before building the
+    tool-output item used for history and later model turns. `on_tool_end` observes the accepted
+    result after that item is built, and the runner ignores its return value.
+
+    Return the received result to pass it through. Return a copyable value to isolate concurrent
+    calls. Function tools use their normal output validation and serialization. Shell tools accept
+    text or `ShellResult`. Editors and custom tools use text. Computer tools use base64 screenshots.
     """
 
     def __post_init__(self) -> None:
@@ -649,6 +699,7 @@ __all__ = [
     "SandboxConcurrencyLimits",
     "SandboxRunConfig",
     "ToolExecutionConfig",
+    "ToolCallHookContext",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "_default_trace_include_sensitive_data",

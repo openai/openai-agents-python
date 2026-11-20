@@ -204,6 +204,60 @@ async def test_runner_owns_function_execution_and_history(tmp_path, threads):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "streamed"), [("input", False), ("output", True)], ids=["input", "streamed-output"]
+)
+async def test_mutable_hooks_own_codex_tools_without_a_workspace_executor(
+    tmp_path, threads, phase, streamed
+):
+    from agents import ToolExecutionConfig
+
+    queue, _ = threads
+    actions = []
+
+    @function_tool
+    async def publish(value: str) -> str:
+        actions.append(value)
+        return "internal"
+
+    async def before(call):
+        return {"value": "reviewed"}
+
+    async def after(call, result):
+        assert result == "internal"
+        return "published"
+
+    first = FakeThread(
+        call={
+            "callId": "req",
+            "namespace": None,
+            "tool": "publish",
+            "arguments": {"value": "proposed"},
+        }
+    )
+    second = FakeThread(text="done")
+    queue.extend([first, second])
+    run_config = config(tmp_path)
+    run_config.tool_execution = ToolExecutionConfig(
+        prepare_tool_input=before if phase == "input" else None,
+        prepare_tool_output=after if phase == "output" else None,
+    )
+    agent = Agent(name="test", tools=[publish])
+    if streamed:
+        result = Runner.run_streamed(agent, "go", run_config=run_config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "go", run_config=run_config)
+    assert result.final_output == "done"
+    assert actions == ["reviewed" if phase == "input" else "proposed"]
+    assert first.settings["sdk_sandbox"] is True
+    replay = second.history
+    output = next(item for item in replay if item.get("type") == "function_call_output")
+    assert output["output"] == ("published" if phase == "output" else "internal")
+
+
+@pytest.mark.asyncio
 async def test_unsupported_settings_fail_before_launch(tmp_path, threads):
     queue, opened = threads
     from agents import ModelSettings

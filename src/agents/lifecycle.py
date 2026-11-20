@@ -88,6 +88,8 @@ class RunHooksBase(Generic[TContext, TAgent]):
     ) -> None:
         """Called immediately before a local tool is invoked.
 
+        Use ``ToolExecutionConfig.prepare_tool_input`` to change the arguments before approval.
+
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
         and ``tool_arguments``. Other local tool families may provide a plain
@@ -102,7 +104,9 @@ class RunHooksBase(Generic[TContext, TAgent]):
         tool: Tool,
         result: object,
     ) -> None:
-        """Called immediately after a local tool is invoked.
+        """Called after the SDK accepts a local tool result.
+
+        Use ``ToolExecutionConfig.prepare_tool_output`` to change the result before it is recorded.
 
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
@@ -179,6 +183,8 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     ) -> None:
         """Called immediately before a local tool is invoked.
 
+        Use ``ToolExecutionConfig.prepare_tool_input`` to change the arguments before approval.
+
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
         and ``tool_arguments``. Other local tool families may provide a plain
@@ -193,7 +199,9 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         tool: Tool,
         result: object,
     ) -> None:
-        """Called immediately after a local tool is invoked.
+        """Called after the SDK accepts a local tool result.
+
+        Use ``ToolExecutionConfig.prepare_tool_output`` to change the result before it is recorded.
 
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
