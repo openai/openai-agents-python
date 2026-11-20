@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.26.0](https://github.com/openai/openai-agents-python/compare/v0.25.0...v0.26.0) (2026-11-20)
+
+
+### Features
+
+* Upgrade the GPT-Live demo to 1.1 ([6c4e4a2](https://github.com/openai/openai-agents-python/commit/6c4e4a29cd08eef454db6980d74da6afc8939d24))
+
+
+### Bug Fixes
+
+* allow SDK 0.25 in the external provider example ([#6068](https://github.com/openai/openai-agents-python/issues/6068)) ([9b17858](https://github.com/openai/openai-agents-python/commit/9b17858afb5b45f48bbf695cc7c8f34778425156))
+* sandbox memory selection across UTC offsets ([#6066](https://github.com/openai/openai-agents-python/issues/6066)) ([e7ce15a](https://github.com/openai/openai-agents-python/commit/e7ce15a25b336bb3d0840ad16dee597f69a6e6d3))
+* support opt-in JSON validation for Codex tool parameters ([#6067](https://github.com/openai/openai-agents-python/issues/6067)) ([54492d1](https://github.com/openai/openai-agents-python/commit/54492d112b5c3366cc30f35abd60c46fa92140c2))
+
 ## [0.25.0](https://github.com/openai/openai-agents-python/compare/v0.24.0...v0.25.0) (2026-11-17)
 
 
