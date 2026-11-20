@@ -12,8 +12,10 @@ from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseCustomToolCall,
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
@@ -41,6 +43,7 @@ from ..tool import ApplyPatchTool, ShellTool, Tool, WebSearchTool
 from ..usage import Usage, _make_input_tokens_details, _response_usage_to_usage
 from ._codex_app_server import CodexAppServer, resolve_codex_executable
 from ._codex_inputs import prepare_codex_history, prepare_dynamic_tools, sdk_tool_call
+from ._codex_items import CodexCustomToolCallOutput, CodexFunctionToolCallOutput
 from .interface import Model, ModelProvider, ModelTracing
 
 
@@ -317,6 +320,8 @@ class _CodexModel(Model):
         started: set[str] = set()
         finished: set[str] = set()
         sdk_call = None
+        native_pending: dict[str, tuple[str, str]] = {}
+        native_completed: set[str] = set()
         completed = False
         sequence = 0
         raw_usage = None
@@ -544,6 +549,13 @@ class _CodexModel(Model):
                             "Codex requested an unsupported approval or client action."
                         )
                     call = sdk_tool_call(params, identities, tools)
+                    call_id = params["callId"]
+                    if call_id in native_completed:
+                        raise RuntimeError("Codex reused a completed native tool call ID.")
+                    pending = native_pending.pop(call_id, None)
+                    if pending is not None:
+                        output.pop(pending[0], None)
+                        indices[call_id] = indices.pop(pending[0])
                     if sdk_call is None:
                         sdk_call = call.model_copy(update={"id": params["callId"]})
                         call_id = params["callId"]
@@ -614,6 +626,14 @@ class _CodexModel(Model):
                     if model_settings.preserve_raw_usage:
                         raw_usage = token_usage
                     continue
+                if (
+                    method in ("item/started", "item/completed")
+                    and (params.get("item") or {}).get("type") == "contextCompaction"
+                ):
+                    raise UserError(
+                        "Codex native context compaction cannot be replayed by this provider. "
+                        "Use SDK-managed input compaction before starting another model call."
+                    )
                 if params.get("turnId") != turn_id:
                     continue
                 if summary is not None and method in (
@@ -669,7 +689,68 @@ class _CodexModel(Model):
                     continue
                 if method == "rawResponseItem/completed":
                     raw = params.get("item") or {}
-                    if raw.get("type") == "reasoning":
+                    kind = raw.get("type")
+                    if kind in ("function_call", "custom_tool_call"):
+                        call_id, item_id = raw.get("call_id"), raw.get("id")
+                        if sdk_call is not None and call_id == getattr(sdk_call, "call_id", None):
+                            continue
+                        if (
+                            not isinstance(call_id, str)
+                            or not isinstance(item_id, str)
+                            or call_id in native_pending
+                            or call_id in native_completed
+                        ):
+                            raise RuntimeError("Codex returned an invalid native tool call.")
+                        call_type = (
+                            ResponseFunctionToolCall
+                            if kind == "function_call"
+                            else ResponseCustomToolCall
+                        )
+                        # Keep model-visible call data, without warehouse or runtime metadata.
+                        call_keys = (
+                            "type",
+                            "id",
+                            "call_id",
+                            "name",
+                            "namespace",
+                            "arguments",
+                            "input",
+                            "status",
+                            "encrypted_content",
+                        )
+                        output[item_id] = call_type.model_validate(
+                            {key: raw[key] for key in call_keys if key in raw}
+                        )
+                        native_pending[call_id] = (item_id, kind)
+                    elif kind in ("function_call_output", "custom_tool_call_output"):
+                        call_id, item_id = raw.get("call_id"), raw.get("id")
+                        # Interrupting the dynamic SDK call can produce a Codex cancellation result.
+                        # The Runner owns the real result, including after an approval pause.
+                        if sdk_call is not None and call_id == getattr(sdk_call, "call_id", None):
+                            continue
+                        if not isinstance(call_id, str):
+                            raise RuntimeError("Codex returned an unmatched native tool output.")
+                        pending = native_pending.pop(call_id, None)
+                        if (
+                            pending is None
+                            or kind != pending[1] + "_output"
+                            or not isinstance(item_id, str)
+                        ):
+                            raise RuntimeError("Codex returned an unmatched native tool output.")
+                        output_type = (
+                            CodexFunctionToolCallOutput
+                            if kind == "function_call_output"
+                            else CodexCustomToolCallOutput
+                        )
+                        output_keys = ("type", "id", "call_id", "output", "name", "namespace")
+                        output[item_id] = output_type.model_validate(
+                            {
+                                "status": "completed",
+                                **{key: raw[key] for key in output_keys if key in raw},
+                            }
+                        )
+                        native_completed.add(call_id)
+                    elif kind == "reasoning":
                         output[raw["id"]] = ResponseReasoningItem.model_validate(raw)
                     elif raw.get("type") == "web_search_call":
                         output[raw["id"]] = ResponseFunctionWebSearch.model_validate(raw)
@@ -776,6 +857,8 @@ class _CodexModel(Model):
                     sequence += 1
         finally:
             await server.close()
+        if native_pending:
+            raise RuntimeError("Codex finished with an incomplete native tool call.")
         if not completed:
             raise RuntimeError("Codex finished without a completed response.")
         if require_sdk_call and sdk_call is None:
@@ -787,6 +870,21 @@ class _CodexModel(Model):
         items = list(output.values()) + ([sdk_call] if sdk_call is not None else [])
         if reasoning_summaries:
             items[-1].codex_reasoning_summary = reasoning_summaries
+        for native_item in output.values():
+            if native_item.type not in (
+                "function_call",
+                "custom_tool_call",
+                "function_call_output",
+                "custom_tool_call_output",
+            ):
+                continue
+            yield ResponseOutputItemDoneEvent(
+                item=native_item,
+                output_index=indices[native_item.id],
+                sequence_number=sequence,
+                type="response.output_item.done",
+            )
+            sequence += 1
         if sdk_call is not None:
             assert isinstance(sdk_call.id, str)
             yield ResponseOutputItemDoneEvent(

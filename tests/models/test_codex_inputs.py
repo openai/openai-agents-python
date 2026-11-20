@@ -435,3 +435,42 @@ def test_web_search_uses_native_declaration_and_preserves_search_replay():
     history, turn = prepare_codex_history(cast(list[TResponseInputItem], [item]))
     assert history == [item]
     assert turn == []
+
+
+@pytest.mark.parametrize("output", ["", [{"type": "input_text", "text": "patch result"}]])
+def test_custom_native_pair_replay_preserves_input_and_output(output):
+    call = {
+        "type": "custom_tool_call",
+        "id": "custom_item",
+        "call_id": "custom_call",
+        "name": "apply_patch",
+        "input": "*** Begin Patch\n*** End Patch",
+        "namespace": "functions",
+    }
+    history, turn = prepare_codex_history(
+        [
+            call,
+            {"type": "custom_tool_call_output", "call_id": "custom_call", "output": output},
+            {"role": "user", "content": "Continue"},
+        ]
+    )
+    assert history == [
+        {key: value for key, value in call.items() if key != "id"},
+        {"type": "custom_tool_call_output", "call_id": "custom_call", "output": output},
+    ]
+    assert turn[0]["text"] == "Continue"
+
+
+def test_native_replay_rejects_mismatched_call_output_forms():
+    with pytest.raises(UserError, match="match a tool call"):
+        prepare_codex_history(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call",
+                    "name": "exec_command",
+                    "arguments": "{}",
+                },
+                {"type": "custom_tool_call_output", "call_id": "call", "output": "result"},
+            ]
+        )

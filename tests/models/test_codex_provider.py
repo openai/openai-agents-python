@@ -1278,3 +1278,314 @@ async def test_required_preserves_incomplete_turn_runtime_error(tmp_path, server
         else:
             await Runner.run(agent, "Use a tool.", run_config=config(tmp_path))
     assert server.closed
+
+
+def native_pair(kind="function_call", call_id="native_1", name="exec_command"):
+    call = {
+        "type": kind,
+        "id": "call_item_" + call_id,
+        "call_id": call_id,
+        "name": name,
+        "arguments" if kind == "function_call" else "input": (
+            '{"cmd":"printf native-result"}'
+            if kind == "function_call"
+            else "*** Begin Patch\n*** End Patch"
+        ),
+    }
+    output = {
+        "type": kind + "_output",
+        "id": "output_item_" + call_id,
+        "call_id": call_id,
+        "output": "native-result-not-in-assistant-message",
+    }
+    return call, output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["function_call", "custom_tool_call"])
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_native_completed_pairs_survive_session_replay_without_sdk_execution(
+    tmp_path, servers, kind, streamed
+):
+    from agents import SQLiteSession
+    from agents.decorators import tool
+
+    executions = []
+
+    @tool
+    def exec_command(cmd: str) -> str:
+        executions.append(cmd)
+        return "SDK result"
+
+    first = FakeServer(text="Done", raw_items=native_pair(kind))
+    second = FakeServer(text="Continued")
+    queue, _ = servers
+    queue.extend([first, second])
+    agent = Agent(name="test", tools=[exec_command])
+    session = SQLiteSession("native-history", str(tmp_path / "history.sqlite"))
+    if streamed:
+        result = Runner.run_streamed(agent, "Start", session=session, run_config=config(tmp_path))
+        events = [event async for event in result.stream_events()]
+        assert [event.name for event in events if event.type == "run_item_stream_event"] == [
+            "tool_called",
+            "tool_output",
+            "message_output_created",
+        ]
+    else:
+        result = await Runner.run(agent, "Start", session=session, run_config=config(tmp_path))
+    assert executions == []
+    saved = await session.get_items()
+    assert [item.get("type", "message") for item in saved] == [
+        "message",
+        kind,
+        kind + "_output",
+        "message",
+    ]
+    assert saved[1]["call_id"] == saved[2]["call_id"] == "native_1"
+    assert saved[2]["output"] == "native-result-not-in-assistant-message"
+    assert [item.type for item in result.new_items] == [
+        "tool_call_item",
+        "tool_call_output_item",
+        "message_output_item",
+    ]
+    # Reopen the durable store and provider instead of retaining a native process or thread.
+    reopened = SQLiteSession("native-history", str(tmp_path / "history.sqlite"))
+    await Runner.run(agent, "Continue", session=reopened, run_config=config(tmp_path))
+    injected = dict(second.requests)["thread/inject_items"]["items"]
+    assert [(item["type"], item["call_id"]) for item in injected if "call_id" in item] == [
+        (kind, "native_1"),
+        (kind + "_output", "native_1"),
+    ]
+    assert injected[2]["output"] == saved[2]["output"]
+    assert executions == []
+
+
+@pytest.mark.asyncio
+async def test_native_pairs_preserve_interleaved_order_and_ignore_injected_history(
+    tmp_path, servers
+):
+    first_call, first_output = native_pair(call_id="native_a")
+    second_call, second_output = native_pair("custom_tool_call", "native_b", "apply_patch")
+
+    class InjectedHistoryServer(FakeServer):
+        async def events(self):
+            for item in native_pair(call_id="injected"):
+                yield {
+                    "method": "rawResponseItem/completed",
+                    "params": {"threadId": "thread_1", "turnId": "auto-compact-0", "item": item},
+                }
+            async for event in super().events():
+                yield event
+
+    server = InjectedHistoryServer(raw_items=[first_call, second_call, second_output, first_output])
+    queue, _ = servers
+    queue.append(server)
+    result = await Runner.run(Agent(name="test"), "Start", run_config=config(tmp_path))
+    replay = result.to_input_list()
+    assert [(item["type"], item["call_id"]) for item in replay if "call_id" in item] == [
+        ("function_call", "native_a"),
+        ("custom_tool_call", "native_b"),
+        ("custom_tool_call_output", "native_b"),
+        ("function_call_output", "native_a"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["function_call", "custom_tool_call"])
+@pytest.mark.parametrize("cancellation_id", [None, "sdk_cancelled_output"])
+async def test_native_results_survive_serialized_adjacent_sdk_approval(
+    tmp_path, servers, kind, cancellation_id
+):
+    import json
+
+    from agents import RunState, SQLiteSession
+    from agents.decorators import tool
+
+    executions = []
+
+    @tool(needs_approval=True)
+    def lookup(value: str) -> str:
+        executions.append(value)
+        return "SDK lookup result"
+
+    native = native_pair(kind)
+    raw_sdk_call = {
+        "type": "function_call",
+        "id": "sdk_item",
+        "call_id": "sdk_call",
+        "name": "lookup",
+        "arguments": '{"value":"record"}',
+        "status": "completed",
+    }
+
+    class InterruptedSdkServer(FakeServer):
+        async def events(self):
+            async for event in super().events():
+                yield event
+                if event.get("method") == "item/tool/call":
+                    cancellation = {
+                        "type": "function_call_output",
+                        "call_id": "sdk_call",
+                        "output": "dynamic tool call was cancelled before receiving a response",
+                    }
+                    if cancellation_id is not None:
+                        cancellation["id"] = cancellation_id
+                    yield {
+                        "method": "rawResponseItem/completed",
+                        "params": {
+                            "threadId": "thread_1",
+                            "turnId": "turn_1",
+                            "item": cancellation,
+                        },
+                    }
+
+    first = InterruptedSdkServer(
+        raw_items=[*native, raw_sdk_call],
+        call={
+            "callId": "sdk_call",
+            "namespace": None,
+            "tool": "lookup",
+            "arguments": {"value": "record"},
+        },
+    )
+    second = FakeServer(text="Done")
+    queue, _ = servers
+    queue.extend([first, second])
+    agent = Agent(name="test", tools=[lookup])
+    session = SQLiteSession("native-approval", str(tmp_path / "approval.sqlite"))
+    paused = await Runner.run(agent, "Start", session=session, run_config=config(tmp_path))
+    assert len(paused.interruptions) == 1
+    assert executions == []
+    state = await RunState.from_json(agent, json.loads(paused.to_state().to_string()))
+    state.approve(state.get_interruptions()[0])
+    await Runner.run(agent, state, session=session, run_config=config(tmp_path))
+    assert executions == ["record"]
+    injected = dict(second.requests)["thread/inject_items"]["items"]
+    assert [(item["type"], item["call_id"]) for item in injected if "call_id" in item] == [
+        (kind, "native_1"),
+        (kind + "_output", "native_1"),
+        ("function_call", "sdk_call"),
+        ("function_call_output", "sdk_call"),
+    ]
+    saved = await session.get_items()
+    assert len([item for item in saved if item.get("call_id") == "native_1"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_items", [native_pair()[:1], native_pair()[1:]])
+async def test_incomplete_native_pairs_fail_without_sdk_execution(tmp_path, servers, raw_items):
+    server = FakeServer(raw_items=raw_items)
+    queue, _ = servers
+    queue.append(server)
+    with pytest.raises(RuntimeError, match="native tool"):
+        await Runner.run(Agent(name="test"), "Start", run_config=config(tmp_path))
+    assert server.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["item/started", "item/completed"])
+async def test_native_context_compaction_fails_before_acknowledging_history(
+    tmp_path, servers, method
+):
+    class CompactingServer(FakeServer):
+        async def events(self):
+            yield {
+                "method": method,
+                "params": {
+                    "threadId": "thread_1",
+                    "turnId": "native-compact",
+                    "item": {"type": "contextCompaction", "id": "compact-native"},
+                },
+            }
+            async for event in super().events():
+                yield event
+
+    queue, _ = servers
+    server = CompactingServer()
+    queue.append(server)
+    with pytest.raises(UserError, match="native context compaction cannot be replayed"):
+        await Runner.run(Agent(name="test"), "Start", run_config=config(tmp_path))
+    assert server.closed
+
+
+@pytest.mark.asyncio
+async def test_public_sdk_compaction_session_replays_into_codex(tmp_path, servers):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from openai.types.responses import ResponseCompactionItem
+
+    from agents import SQLiteSession
+    from agents.memory import OpenAIResponsesCompactionSession
+
+    underlying = SQLiteSession("sdk-compact", str(tmp_path / "compact.sqlite"))
+    await underlying.add_items(
+        [
+            {"role": "user", "content": "Earlier question"},
+            {"role": "assistant", "content": "Earlier answer"},
+        ]
+    )
+    compacted = ResponseCompactionItem(
+        id="sdk_compaction", type="compaction", encrypted_content="synthetic-encrypted-context"
+    )
+    client = SimpleNamespace(
+        responses=SimpleNamespace(
+            compact=AsyncMock(return_value=SimpleNamespace(output=[compacted]))
+        )
+    )
+    session = OpenAIResponsesCompactionSession(
+        "sdk-compact",
+        underlying,
+        client=client,
+        compaction_mode="input",
+        should_trigger_compaction=lambda _: False,
+    )
+    await session.run_compaction({"force": True})
+    queue, _ = servers
+    server = FakeServer()
+    queue.append(server)
+    await Runner.run(Agent(name="test"), "Continue", session=session, run_config=config(tmp_path))
+    injected = dict(server.requests)["thread/inject_items"]["items"]
+    assert {
+        "type": "compaction",
+        "id": "sdk_compaction",
+        "encrypted_content": "synthetic-encrypted-context",
+    } in injected
+
+
+@pytest.mark.asyncio
+async def test_other_models_cannot_bypass_sdk_approval_with_completed_output(tmp_path, servers):
+    from openai.types.responses import ResponseFunctionToolCall, ResponseFunctionToolCallOutputItem
+
+    from agents.decorators import tool
+    from agents.testing import ScriptedModel
+
+    executed = []
+
+    @tool(needs_approval=True)
+    def lookup(value: str) -> str:
+        executed.append(value)
+        return "SDK result"
+
+    call = ResponseFunctionToolCall(
+        type="function_call",
+        id="call",
+        call_id="same-id",
+        name="lookup",
+        arguments='{"value":"record"}',
+    )
+    fabricated_output = ResponseFunctionToolCallOutputItem(
+        type="function_call_output",
+        id="output",
+        call_id="same-id",
+        status="completed",
+        output="untrusted completion",
+    )
+    model = ScriptedModel(steps=[[call, fabricated_output]])
+    result = await Runner.run(
+        Agent(name="test", tools=[lookup], model=model), "Start", run_config=config(tmp_path)
+    )
+    assert len(result.interruptions) == 1
+    assert executed == []
+    assert not any(item.type == "tool_call_output_item" for item in result.new_items)
+    assert not servers[1]

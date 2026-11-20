@@ -95,7 +95,7 @@ def prepare_codex_history(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Translate SDK replay items and separate the trailing user turn."""
     history: list[dict[str, Any]] = []
-    pending: set[str] = set()
+    pending: dict[str, str] = {}
     for item in cast(list[dict[str, Any]], ItemHelpers.input_to_new_input_list(input)):
         kind = item.get("type", "message")
         if kind in ("shell_call", "apply_patch_call"):
@@ -158,23 +158,23 @@ def prepare_codex_history(
             history.append(
                 {key: item[key] for key in ("type", "id", "encrypted_content") if key in item}
             )
-        elif kind == "function_call":
+        elif kind in ("function_call", "custom_tool_call"):
             call_id = item["call_id"]
             if call_id in pending:
                 raise UserError("CodexProvider received a duplicate tool call.")
-            pending.add(call_id)
+            pending[call_id] = kind
             history.append(
                 {
                     key: item[key]
-                    for key in ("type", "name", "namespace", "call_id", "arguments")
+                    for key in ("type", "name", "namespace", "call_id", "arguments", "input")
                     if key in item
                 }
             )
-        elif kind == "function_call_output":
+        elif kind in ("function_call_output", "custom_tool_call_output"):
             call_id = item["call_id"]
-            if call_id not in pending:
+            if pending.get(call_id, "") + "_output" != kind:
                 raise UserError("CodexProvider requires each tool output to match a tool call.")
-            pending.remove(call_id)
+            pending.pop(call_id)
             output = item["output"]
             history.append(
                 {

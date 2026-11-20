@@ -101,6 +101,7 @@ from ..items import (
 )
 from ..lifecycle import RunHooks
 from ..logger import log_tool_action_error, logger
+from ..models._codex_items import CodexCustomToolCallOutput, CodexFunctionToolCallOutput
 from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
@@ -3171,6 +3172,21 @@ def process_model_response(
 ) -> ProcessedResponse:
     items: list[RunItem] = []
 
+    # Only the Codex adapter creates these types, after validating native call/output pairing.
+    provider_completed = {
+        output.call_id: "function_call"
+        if isinstance(output, CodexFunctionToolCallOutput)
+        else "custom_tool_call"
+        for output in response.output
+        if isinstance(output, (CodexFunctionToolCallOutput, CodexCustomToolCallOutput))
+    }
+    provider_tool_names = {
+        output.call_id: output.name
+        for output in response.output
+        if isinstance(output, (ResponseFunctionToolCall, ResponseCustomToolCall))
+        and output.call_id in provider_completed
+    }
+
     # A provider may have already executed client discovery before returning its response.
     client_search_items: dict[str, list[Any]] = {}
     for output in response.output:
@@ -3260,6 +3276,25 @@ def process_model_response(
         )
         caller = get_mapping_or_attr(output, "caller")
         is_program_owned = get_mapping_or_attr(caller, "type") == "program"
+        if (
+            not is_program_owned
+            and isinstance(output, (ResponseFunctionToolCall, ResponseCustomToolCall))
+            and provider_completed.get(output.call_id) == output_type
+        ):
+            items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))
+            tools_used.append(output.name)
+            continue
+        if isinstance(output, (CodexFunctionToolCallOutput, CodexCustomToolCallOutput)):
+            assert output.call_id is not None
+            tools_used.append(provider_tool_names[output.call_id])
+            items.append(
+                ToolCallOutputItem(
+                    raw_item=cast(Any, output.model_dump(exclude_unset=True)),
+                    output=output.output,
+                    agent=agent,
+                )
+            )
+            continue
         if (
             output_type in ("program", "program_output") or is_program_owned
         ) and programmatic_tool is None:
