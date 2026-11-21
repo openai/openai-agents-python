@@ -1,4 +1,77 @@
-# Decisions API recipes
+# Decisions in the Python Agents SDK
+
+## Let the primary model request a specialist
+
+Use `agents.decisions.decision_handoff` when the primary model should decide **when** to transfer. Decisions chooses **which** specialist from the labels your application currently allows. If the primary model answers directly, there is no Decisions request.
+
+[Run the offline comparison](compare_handoffs.py) from the repository root without credentials.
+
+```bash
+uv run python examples/decisions/compare_handoffs.py
+```
+
+The example compares direct and Decisions handoffs on the same three labeled inputs. Both paths use the same scripted specialists and settings. Route accuracy measures the fraction routed correctly. Task completion measures the fraction with the expected final answer. Each row also reports total elapsed time inside Runner and request counts. Estimated cost is unknown (`null`). The predictions include deliberate mistakes. These fixtures check the workflow and scoring. They provide no evidence of live accuracy, latency or cost.
+
+For live requests, pass a caller-owned `AsyncOpenAI` client and a supported Decisions model. This function makes paid calls when invoked.
+
+```python
+from openai import AsyncOpenAI
+
+from agents import Agent, Runner
+from agents.decisions import OpenAIDecisions, decision_handoff
+
+
+async def answer(client: AsyncOpenAI, decisions_model: str, text: str):
+    source = Agent(name="Triage", instructions="Transfer requests that need a specialist.")
+    targets = {
+        "billing": Agent(name="Billing", instructions="Help with invoices."),
+        "account": Agent(name="Account", instructions="Help with account settings."),
+    }
+    source.handoffs.append(
+        decision_handoff(
+            source,
+            provider=OpenAIDecisions(client, model=decisions_model),
+            question="Which team can help?",
+            targets=targets,
+            timeout=10,
+        )
+    )
+    return await Runner.run(source, text)
+```
+
+- **Evidence.** The model supplies one nonblank `input` string of up to 8,192 UTF-8 bytes. The provider receives that string, the question and the allowed choices. The model can copy sensitive text into the string. The specialist receives the usual handoff history. Set the handoff's `input_filter` when the specialist needs less context.
+- **Authority.** The handoff belongs to the source agent. Create a new handoff for a clone. Labels bind to the original agent objects and names. Removing, replacing or renaming a target makes it unavailable. Use a synchronous, side-effect-free `is_available(ctx, label)` to check application permissions. The handoff checks the selected route again before transfer. Runner keeps the run context, call IDs, tool restrictions and approvals.
+- **Failures.** Refusals and invalid answers raise `DecisionError`. Revoked routes raise `ValueError`. The provider deadline defaults to 30 seconds. On timeout or cancellation, the SDK waits for provider cleanup and discards late answers. Timeout raises `asyncio.TimeoutError`. If the provider cancels its own request, the SDK raises `RuntimeError`. Transport errors propagate. There is no automatic fallback or retry. To return an error to the primary model, explicitly set the handoff's `failure_error_function`. For immediate stream cancellation, call `result.cancel()` and drain `result.stream_events()`.
+- **Scope.** Both Runner modes support specialist selection. Decisions cannot invoke a tool, grant permissions or tell the source to continue. Realtime and dynamic agent factories are outside this integration.
+- **One available label.** The handoff still asks the provider to choose. `OpenAIDecisions` requires at least two choices and raises `ValueError` before sending a request. Use a provider that accepts one choice if your roster can narrow to one. The SDK never transfers by default.
+
+### Resume a specialist after a tool approval
+
+The handoff registers its targets for `RunState` automatically. Save `result.to_state().to_string()` when the run pauses. Protect the snapshot from edits. Restore only trusted snapshots with the same source, handoff names, labels and specialists. When rebuilding the graph, you authorize the agents, tools and permission checks you supply under those names.
+
+If you use `is_available`, pass fresh application permissions through `context_override`. The callback should read them from `ctx.context`. Saved permissions alone cannot authorize the active specialist. For a nested `Agent.as_tool()` run, pass the override when restoring the outer run. The nested specialist shares the application context and keeps its own approvals.
+
+```python
+from agents import RunState
+
+state = await RunState.from_string(source, saved, context_override=current_context)
+```
+
+Restore checks each Decisions label bound to the active specialist. All must still be available, even after a direct handoff to the same agent. Use separate agents if routes need independent permissions. A missing binding or denied label stops restore. Decisions does not run again. Review each pending tool call in `state.get_interruptions()` before calling `state.approve(item)` or `state.reject(item)`. Resume with `await Runner.run(source, state)`.
+
+If a handoff fails during approval resume, retain the updated `RunState`. It contains completed tool results that the session may lack. Keep the graph and permissions current through execution. When resuming an in-memory state directly, recheck access yourself. The restore checks run only when loading serialized state.
+
+## Ask for a value without transferring
+
+Call `await decide(question, provider=provider, input=evidence)` from `agents.decisions`. Supply nonempty text or a nonempty sequence of finite JSON objects. The call copies them before the first await. It never reads run history. The default result is a boolean. Use `choices` for distinct finite JSON scalars or `output_type` for a Pydantic-compatible type. The SDK validates the returned JSON against the schema and the application parser.
+
+A trusted `DecisionProvider` implements `async get_decision(request)` and returns `DecisionResult(value, request_id, model, usage)`. Read the validated answer from `result.value`. Both the result and `DecisionError` expose observed metadata. Missing metadata is `None`. Error reasons are `refusal` and `invalid_response`. The handoff adds reported usage to the run. Standalone calls leave accounting to the application.
+
+`OpenAIDecisions` requires `openai>=3.26.0` with the Decisions resource. It uses a predicate threshold of 0.5 or 2 to 255 string or boolean choices. It rejects other schemas before inference, including a roster narrowed to one label. Use a custom provider for other contracts. The adapter disables client retries and leaves the client open.
+
+In an async callback, use `async with decision_scope(ctx)` and pass `owner=ctx` to `decide`. Only the exact owner in that live scope can use the bound call. Scope exit cancels and joins outstanding provider work. The application remains responsible for awaiting its own child tasks.
+
+## Direct client recipes
 
 These examples compose the native `AsyncOpenAI.decisions.create()` client with existing Agents SDK APIs. They do not add a Decisions model adapter or a generic risk policy.
 
