@@ -31,11 +31,9 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
     ResponseToolSearchCall,
     ResponseToolSearchOutputItem,
-    ResponseUsage,
 )
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_reasoning_summary_part_added_event import Part as SummaryPart
-from openai.types.responses.response_usage import OutputTokensDetails
 
 from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import UserError
@@ -48,7 +46,6 @@ from ..usage import (
     Usage,
     _attach_raw_usage_snapshot,
     _extract_raw_usage_snapshot,
-    _make_input_tokens_details,
     _response_usage_to_usage,
 )
 from ._codex_inputs import prepare_codex_history, prepare_dynamic_tools, sdk_tool_call
@@ -60,6 +57,7 @@ from ._codex_items import (
 )
 from ._codex_tool_hooks import CodexToolHooks
 from ._codex_tracing import CodexOperationTracing
+from ._codex_usage import _usage
 from ._run_context import ModelToolHooks, get_model_tool_hooks
 from .interface import Model, ModelProvider, ModelTracing
 
@@ -888,20 +886,3 @@ class _CodexModel(Model):
         yield ResponseCompletedEvent(
             response=response, sequence_number=sequence, type="response.completed"
         )
-
-
-def _usage(total: dict[str, Any]) -> ResponseUsage:
-    return ResponseUsage(
-        input_tokens=total.get("input_tokens", 0),
-        output_tokens=total.get("output_tokens", 0),
-        total_tokens=total.get(
-            "total_tokens", total.get("input_tokens", 0) + total.get("output_tokens", 0)
-        ),
-        input_tokens_details=_make_input_tokens_details(
-            cached_tokens=total.get("cached_input_tokens", 0),
-            cache_write_tokens=total.get("cache_write_input_tokens"),
-        ),
-        output_tokens_details=OutputTokensDetails(
-            reasoning_tokens=total.get("reasoning_output_tokens", 0)
-        ),
-    )

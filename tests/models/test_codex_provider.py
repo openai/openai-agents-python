@@ -1677,8 +1677,19 @@ async def test_codex_operations_preserve_source_spans_and_capture_policy(
     assert models[0].started_at == "2026-11-20T00:00:01.000000000Z"
     assert models[0].ended_at == "2026-11-20T00:00:01.250Z"
     assert models[-1].ended_at == "2026-11-20T00:00:03.250Z"
-    assert models[0].span_data.usage == {"input_tokens": 10, "output_tokens": 5}
-    assert models[-1].span_data.usage == {"input_tokens": 30, "output_tokens": 15}
+    for index, span in [(1, models[0]), (3, models[-1])]:
+        usage = span.span_data.usage
+        assert {
+            key: usage[key] for key in ("requests", "input_tokens", "output_tokens", "total_tokens")
+        } == {
+            "requests": 1,
+            "input_tokens": 10 * index,
+            "output_tokens": 5 * index,
+            "total_tokens": 15 * index,
+        }
+        assert usage["input_tokens_details"]["cached_tokens"] == 0
+        assert usage["input_tokens_details"]["cache_write_tokens"] == 0
+        assert usage["output_tokens_details"]["reasoning_tokens"] == 0
     assert models[-1].span_data.operation.response_model == "observed-model"
     assert models[-1].span_data.operation.outcome == "completed"
     if detail is None:
@@ -1894,7 +1905,13 @@ async def test_codex_default_end_callback_receives_final_sdk_response_and_source
     assert response.id == "turn_1"
     assert response.output[0].content[0].text == "A Codex response"
     assert ended_at == "2026-11-20T00:00:03.250Z"
-    assert usage == {"input_tokens": 30, "output_tokens": 15}
+    assert usage["requests"] == 1
+    assert usage["input_tokens"] == 30
+    assert usage["output_tokens"] == 15
+    assert usage["total_tokens"] == 45
+    assert usage["input_tokens_details"]["cached_tokens"] == 0
+    assert usage["input_tokens_details"]["cache_write_tokens"] == 0
+    assert usage["output_tokens_details"]["reasoning_tokens"] == 0
 
 
 @pytest.mark.asyncio
