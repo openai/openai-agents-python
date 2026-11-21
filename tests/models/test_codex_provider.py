@@ -1274,7 +1274,9 @@ async def test_native_cleanup_preserves_cancellation_and_primary_failure(
             error = asyncio.CancelledError
             first_cancel = primary == "cancel" and (restored or not late_cancel)
             reason = "primary cancellation" if first_cancel else "cleanup cancellation"
-        with pytest.raises(error, match=reason):
+        # Python 3.10 has not been forwarding cancellation reasons across task boundaries.
+        match = None if error is asyncio.CancelledError and sys.version_info < (3, 11) else reason
+        with pytest.raises(error, match=match):
             await task
         assert closed == [True]
     finally:
