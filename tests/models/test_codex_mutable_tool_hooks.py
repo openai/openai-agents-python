@@ -465,13 +465,18 @@ async def test_native_hook_endpoint_rejects_untrusted_calls():
         "unselected",
         "invalid",
         "oversized",
+        "surrogate",
         "raise",
+        "disclose",
         "cancel",
     ],
 )
 async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, monkeypatch, mode):
     from importlib import import_module
 
+    from agents import UserError, _debug
+
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", mode != "disclose")
     port, requests, items = model_endpoint
     png = (
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1Pe"
@@ -551,8 +556,10 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
         assert not entered.is_set()
         entered.set()
         assert bool(result.get("isError")) == (mode == "peer_error")
-        if mode == "raise":
-            raise RuntimeError("callback failed")
+        if mode in ("raise", "disclose"):
+            raise RuntimeError("PEER_ONLY")
+        if mode == "surrogate":
+            return {"content": [{"type": "text", "text": "REJECTED_ONLY\ud800"}]}
         if mode == "cancel":
             await asyncio.Event().wait()
         if mode == "invalid":
@@ -591,7 +598,7 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
     )
 
     async def execute():
-        if mode == "media":
+        if mode in ("media", "surrogate"):
             streamed = Runner.run_streamed(
                 agent, "Look up a value", context=context, run_config=config
             )
@@ -608,11 +615,19 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-        elif mode in ("raise", "invalid", "oversized"):
-            with pytest.raises(
-                (ValueError, RuntimeError), match="callback failed|Invalid native MCP|exceeds 1 MiB"
-            ):
+        elif mode == "disclose":
+            with pytest.raises(RuntimeError, match="PEER_ONLY"):
                 await run
+        elif mode in ("raise", "invalid", "oversized", "surrogate"):
+            with pytest.raises(UserError, match="Native MCP result transform") as caught:
+                await run
+            assert caught.value.__cause__ is caught.value.__context__ is None
+            assert "PEER_ONLY" not in repr(caught.value)
+            assert "REJECTED_ONLY" not in repr(caught.value)
+            assert not any(
+                frame.frame.f_globals.get("__name__") == "agents.models.codex"
+                for frame in caught.traceback
+            )
         else:
             result = await run
             assert result.final_output == "done"

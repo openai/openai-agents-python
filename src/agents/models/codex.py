@@ -45,7 +45,7 @@ from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..model_settings import ModelSettings
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..run_config import ToolCallHookContext
-from ..run_internal.tool_hooks import _await_hook
+from ..run_internal.tool_hooks import _await_hook, hook_payload_diagnostics
 from ..tool import ApplyPatchTool, NativeTool, ShellTool, Tool, WebSearchTool
 from ..usage import (
     Usage,
@@ -442,19 +442,23 @@ class _CodexModel(Model):
                         )
                         if native_hooks is not None:
                             native_hooks.confirm_mcp_result(mcp_call.call_id, mcp_call.arguments)
-                        replacement = await _await_hook(
-                            partial(transforms[server, name], mcp_call, request["result"]),
-                            "native_mcp_result_transforms",
-                            name,
-                        )
-                        encoded.respond(
-                            json.dumps(
-                                replacement,
-                                allow_nan=False,
-                                ensure_ascii=False,
-                                separators=(",", ":"),
+                        with hook_payload_diagnostics(
+                            "Native MCP result transform failed or returned an invalid replacement "
+                            "(limit 1 MiB)."
+                        ):
+                            replacement = await _await_hook(
+                                partial(transforms[server, name], mcp_call, request["result"]),
+                                "native_mcp_result_transforms",
+                                name,
                             )
-                        )
+                            encoded.respond(
+                                json.dumps(
+                                    replacement,
+                                    allow_nan=False,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                            )
                     finally:
                         encoded.discard()
                     continue
