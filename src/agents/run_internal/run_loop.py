@@ -1506,8 +1506,13 @@ async def start_streaming(
                     # The resolver can checkpoint outputs before callbacks finish.
                     # Append this attempt's new items to its starting history only.
                     base_session_items = list(run_state._session_items)
+
+                    def on_resumed_policy_error() -> None:
+                        streamed_result._tool_error_selected = True
+
                     try:
                         turn_result = await resolve_interrupted_turn(
+                            on_tool_error_selected=on_resumed_policy_error,
                             agent_span=current_span,
                             bindings=current_bindings,
                             original_input=run_state._original_input,
@@ -2830,6 +2835,7 @@ async def run_single_turn_streamed(
         streamed_result._tool_error_selected = True
 
     single_step_result = await get_single_step_result_from_response(
+        current_turn=streamed_result.current_turn,
         bindings=bindings,
         original_input=streamed_result.input,
         pre_step_items=streamed_result._model_input_items,
@@ -2865,6 +2871,7 @@ async def run_single_turn_streamed(
 
 async def run_single_turn(
     *,
+    current_turn: int,
     bindings: AgentBindings[TContext],
     original_input: str | list[TResponseInputItem],
     generated_items: list[RunItem],
@@ -2983,6 +2990,7 @@ async def run_single_turn(
         return response_accepted
 
     return await get_single_step_result_from_response(
+        current_turn=current_turn,
         bindings=bindings,
         original_input=original_input,
         pre_step_items=generated_items,

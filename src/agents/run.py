@@ -1809,6 +1809,7 @@ class AgentRunner:
                             model_task = asyncio.create_task(
                                 preserve_tool_task_cancellation(
                                     run_single_turn(
+                                        current_turn=current_turn,
                                         bindings=current_bindings,
                                         original_input=original_input,
                                         generated_items=items_for_model,
@@ -1916,6 +1917,7 @@ class AgentRunner:
                                 turn_result = await model_task
                         else:
                             turn_result = await run_single_turn(
+                                current_turn=current_turn,
                                 bindings=current_bindings,
                                 original_input=original_input,
                                 generated_items=items_for_model,
