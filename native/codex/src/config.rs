@@ -449,6 +449,7 @@ pub async fn build_services(
         });
     let manager = Arc::new_cyclic(|weak| {
         let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+        extensions.tool_lifecycle_contributor(Arc::new(crate::mcp_results::Transform));
         codex_guardian_v2::install(&mut extensions, auth.clone(), weak.clone());
         codex_core::install_agent_message_board(&mut extensions, weak.clone());
         codex_mcp_extension::install(&mut extensions);

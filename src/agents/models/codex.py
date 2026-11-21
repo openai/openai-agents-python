@@ -7,6 +7,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import fields
+from functools import partial
 from importlib import import_module
 from importlib.resources import files
 from pathlib import Path
@@ -43,7 +44,9 @@ from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..model_settings import ModelSettings
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
-from ..tool import ApplyPatchTool, ShellTool, Tool, WebSearchTool
+from ..run_config import ToolCallHookContext
+from ..run_internal.tool_hooks import _await_hook
+from ..tool import ApplyPatchTool, NativeTool, ShellTool, Tool, WebSearchTool
 from ..usage import (
     Usage,
     _attach_raw_usage_snapshot,
@@ -287,6 +290,17 @@ class _CodexModel(Model):
             getattr(tool, "_sdk_sandbox", False) or isinstance(tool, (ShellTool, ApplyPatchTool))
             for tool in tools
         )
+        transforms = dict(tool_execution.native_mcp_result_transforms) if tool_execution else {}
+        if transforms and (sdk_sandbox or (tool_execution and tool_execution.sdk_only_tool_hooks)):
+            raise UserError("Native MCP result transforms require native Codex tools.")
+        for pair, callback in transforms.items():
+            if (
+                not isinstance(pair, tuple)
+                or len(pair) != 2
+                or not all(isinstance(part, str) and part for part in pair)
+                or not callable(callback)
+            ):
+                raise UserError("Map each (server name, tool name) pair to a native MCP callback.")
         native_hooks = None if sdk_sandbox else CodexToolHooks.for_run(bindings, identities)
         if sdk_sandbox:
             system_instructions = "\n\n".join(
@@ -382,7 +396,10 @@ class _CodexModel(Model):
             if native_hooks is not None:
                 settings["sdk_tool_hooks"] = await native_hooks.configure(resources)
             thread = await provider._native_manager().start_thread(
-                json.dumps(dynamic_tools), system_instructions, json.dumps(settings)
+                json.dumps(dynamic_tools),
+                system_instructions,
+                json.dumps(settings),
+                **({"mcp_tools": list(transforms)} if transforms else {}),
             )
             resources.push_async_callback(thread.close)
             if native_hooks is not None:
@@ -409,6 +426,38 @@ class _CodexModel(Model):
                 encoded = await thread.next_event()
                 if encoded is None:
                     raise RuntimeError("Codex finished without a completed response.")
+                if transforms and bindings is not None and not isinstance(encoded, str):
+                    try:
+                        request = json.loads(encoded.request)
+                        if request["turn_id"] != turn_id:
+                            raise RuntimeError("Unexpected native MCP result turn.")
+                        server, name = request["server"], request["name"]
+                        mcp_call = ToolCallHookContext(
+                            bindings.context,
+                            bindings.agent,
+                            NativeTool(name),
+                            request["call_id"],
+                            server,
+                            request["arguments"],
+                        )
+                        if native_hooks is not None:
+                            native_hooks.confirm_mcp_result(mcp_call.call_id, mcp_call.arguments)
+                        replacement = await _await_hook(
+                            partial(transforms[server, name], mcp_call, request["result"]),
+                            "native_mcp_result_transforms",
+                            name,
+                        )
+                        encoded.respond(
+                            json.dumps(
+                                replacement,
+                                allow_nan=False,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                        )
+                    finally:
+                        encoded.discard()
+                    continue
                 event = json.loads(encoded)
                 message = event["msg"]
                 kind = message["type"]
