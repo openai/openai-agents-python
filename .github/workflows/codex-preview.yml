@@ -6,6 +6,9 @@ on:
     paths: &wheel_paths
       - 'src/**'
       - 'native/**'
+      - 'tests/models/test_operation_tracing_parity.py'
+      - 'tests/testing_processor.py'
+      - 'tests/conftest.py'
       - 'scripts/**'
       - 'pyproject.toml'
       - 'uv.lock'
@@ -70,6 +73,7 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            test_native: true
             platform: manylinux_2_28_x86_64
             image: quay.io/pypa/manylinux_2_28_x86_64@sha256:9555ba6c479fa69a2aa80ad1dc57154a60d562b19df159361d9379a02beb1e36
           - runner: ubuntu-24.04-arm
@@ -161,11 +165,9 @@ jobs:
         run: |
           options=()
           if [[ "$RUNNER_OS" == Linux ]]; then options+=(--compatibility manylinux_2_28); fi
+          if [[ "${{ matrix.test_native }}" == true ]]; then options+=(--test-native); fi
           uv run --no-sync python scripts/build_codex_wheel.py \
             --out "$GITHUB_WORKSPACE/dist" --target "$WHEEL_TARGET" "${options[@]}"
-      - name: Test native policy and configuration
-        if: matrix.platform == 'manylinux_2_28_x86_64'
-        run: cargo test --locked --release --lib --manifest-path native/codex/Cargo.toml
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: codex-wheel-${{ matrix.platform }}
@@ -192,7 +194,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          sparse-checkout: native/codex/verify_installed.py
+          sparse-checkout: |
+            native/codex/verify_installed.py
+            pyproject.toml
+            tests/__init__.py
+            tests/models/__init__.py
+            tests/testing_processor.py
+            tests/conftest.py
+            tests/models/test_operation_tracing_parity.py
           sparse-checkout-cone-mode: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
@@ -214,6 +223,19 @@ jobs:
           subprocess.run([str(python), '-I', '-m', 'pip', 'install', '--only-binary=:all:', str(wheel)], check=True)
           shutil.copy2(os.environ['VERIFIER'], 'verify_installed.py')
           subprocess.run([str(python), '-I', 'verify_installed.py', '--output', 'installed.json'], check=True)
+      - name: Verify logical request parity through the installed wheel
+        working-directory: ${{ runner.temp }}
+        env:
+          CODEX_TRACING_NATIVE_TEST: '1'
+          PARITY_TESTS: ${{ github.workspace }}/tests/models/test_operation_tracing_parity.py
+        run: |
+          import os, subprocess
+          from pathlib import Path
+          python = Path('codex-venv') / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+          subprocess.run([str(python), '-I', '-m', 'pip', 'install', '--only-binary=:all:',
+                          'pytest>=9.0.3', 'pytest-asyncio', 'opentelemetry-sdk>=1.45.0,<2'], check=True)
+          subprocess.run([str(python), '-I', '-m', 'pytest', os.environ['PARITY_TESTS'],
+                          '--import-mode=importlib', '-q'], check=True)
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: codex-installed-${{ matrix.platform }}-${{ matrix.python }}

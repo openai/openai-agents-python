@@ -82,8 +82,18 @@ def _messages(value: Any, *, output: bool = False) -> list[dict[str, Any]]:
                 if isinstance(item.get(flag), bool):
                     part[flag] = item[flag]
             parts.append(part)
-        elif item.get("truncated") is True and "content" not in item and "tool_calls" not in item:
-            parts.append({"type": "openai.omitted", "reason": "truncated"})
+        elif (
+            (item.get("truncated") is True or item.get("omitted") is True)
+            and "content" not in item
+            and "tool_calls" not in item
+        ):
+            reason = item.get("reason")
+            parts.append(
+                {
+                    "type": "openai.omitted",
+                    "reason": reason if isinstance(reason, str) else "truncated",
+                }
+            )
         elif kind in ("function_call", "custom_tool_call"):
             role = "assistant"
             parts.append(
@@ -278,6 +288,13 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
                 otel_span.set_attribute("error.type", "_OTHER")
                 otel_span.set_status(StatusCode.ERROR)
             operation = getattr(span.span_data, "operation", None)
+            if isinstance(span.span_data, (ResponseSpanData, GenerationSpanData)):
+                for attempt, at in enumerate(span.span_data.operation.retry_timestamps, start=2):
+                    otel_span.add_event(
+                        "openai.agents.model.retry",
+                        {"openai.agents.model.attempt": attempt},
+                        timestamp=_timestamp(at),
+                    )
             if operation is not None and operation.outcome in (
                 "error",
                 "failed",
@@ -328,6 +345,27 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
                 ):
                     if isinstance(usage.get(source), int):
                         attributes[destination] = usage[source]
+                for group, source, destination in (
+                    (
+                        "input_tokens_details",
+                        "cached_tokens",
+                        "gen_ai.usage.cache_read.input_tokens",
+                    ),
+                    (
+                        "input_tokens_details",
+                        "cache_write_tokens",
+                        "gen_ai.usage.cache_write.input_tokens",
+                    ),
+                    (
+                        "output_tokens_details",
+                        "reasoning_tokens",
+                        "gen_ai.usage.reasoning.output_tokens",
+                    ),
+                ):
+                    details = usage.get(group)
+                    value = details.get(source) if isinstance(details, Mapping) else None
+                    if isinstance(value, int) and value != 0:
+                        attributes[destination] = value
             if data.operation.response_model:
                 attributes["gen_ai.response.model"] = data.operation.response_model
             if data.operation.response_id:
@@ -383,12 +421,11 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
             if data.output is not None:
                 values["gen_ai.tool.call.result"] = bound_content(data.output)
         else:
-            if isinstance(data, ResponseSpanData):
-                inputs = bound_content(data.input)
-                output = bound_content(data.response.output) if data.response is not None else None
-            else:
-                inputs = data.input
-                output = data.output
+            inputs = data.input
+            output = data.output
+            if isinstance(data, ResponseSpanData) and data.response is not None:
+                inputs = bound_content(inputs)
+                output = bound_content(data.response.output)
             request: dict[str, Any] = {}
             if inputs is not None:
                 request["messages"] = _messages(inputs)
@@ -396,7 +433,7 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
                 values["gen_ai.output.messages"] = _message_schema(
                     bound_content(_messages(output, output=True)), "assistant"
                 )
-            if isinstance(data, GenerationSpanData) and data.model_config:
+            if data.model_config:
                 instructions = data.model_config.get("instructions")
                 if isinstance(instructions, str):
                     request["instructions"] = [{"type": "text", "content": instructions}]

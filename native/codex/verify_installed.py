@@ -6,6 +6,7 @@ CodexProvider own requests, events, approvals, tools, and native cleanup.
 
 import argparse
 import asyncio
+import base64
 import importlib
 import importlib.abc
 import importlib.machinery
@@ -135,16 +136,22 @@ async def default_route():
 
 
 async def native_route(folder):
+    from unittest.mock import Mock
+
     from pydantic import BaseModel
 
     from agents import Agent, RunConfig, Runner, RunState
     from agents.decorators import tool
+    from agents.memory.resumable_session import ResumableSession
     from agents.models.codex import CodexProvider
+    from agents.tracing import TracingProcessor, set_trace_processors, set_tracing_disabled
 
     class Answer(BaseModel):
         label: str
 
+    image_path = folder / "workspace" / "trace-image.png"
     requests = []
+    approval_item = None
     errors = []
     tool_calls = []
     live_delta = threading.Event()
@@ -168,7 +175,7 @@ async def native_route(folder):
                 )
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 requests.append(body)
-                assert len(requests) <= 7, "Unexpected extra inference request."
+                assert len(requests) <= 13, "Unexpected extra inference request."
                 number = len(requests)
                 history = json.dumps(body["input"])
                 response = {"id": f"response-{number}"}
@@ -176,7 +183,10 @@ async def native_route(folder):
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
                 self.send_event({"type": "response.created", "response": response})
-                if number == 1:
+                if number > 9 and number % 2 == 0:
+                    assert approval_item is not None
+                    item = approval_item
+                elif number == 1:
                     item = {
                         "type": "function_call",
                         "call_id": "route-call",
@@ -190,8 +200,19 @@ async def native_route(folder):
                         "name": "lookup",
                         "arguments": '{"value":"record"}',
                     }
+                elif number == 8:
+                    item = {
+                        "type": "function_call",
+                        "call_id": "native-image-call",
+                        "name": "view_image",
+                        "arguments": json.dumps({"path": str(image_path)}),
+                    }
                 else:
-                    if "blocked-input" in history:
+                    if "approval-input" in history:
+                        text = "approval resolved"
+                    elif "content-input" in history:
+                        text = "native-content"
+                    elif "blocked-input" in history:
                         assert (
                             "survivor-input" not in history and "after-cancel-input" not in history
                         )
@@ -287,7 +308,15 @@ request_max_retries = 0
         encoding="utf-8",
     )
     provider = CodexProvider(cwd=folder / "workspace", api_key="synthetic-installed-key")
-    config = RunConfig(model_provider=provider, tracing_disabled=True)
+    # The isolated worker collects spans locally, without a network exporter.
+    processor = Mock(spec=TracingProcessor)
+    set_trace_processors([processor])
+    set_tracing_disabled(False)
+    config = RunConfig(
+        model_provider=provider,
+        trace_include_sensitive_data=False,
+        tracing={"operation_detail": "metadata"},
+    )
     try:
         paused = Runner.run_streamed(agent, "private-input", run_config=config)
         async for event in paused.stream_events():
@@ -317,7 +346,13 @@ request_max_retries = 0
         )
         assert usage.input_tokens_details.cached_tokens == 6
         assert usage.output_tokens_details.reasoning_tokens == 3
+        spans = [call.args[0].span_data for call in processor.on_span_end.call_args_list]
+        samples = [span for span in spans if span.type == "response"]
+        assert len(samples) == 3
+        assert all(span.input is None and span.output is None for span in samples)
+        assert all(span.usage["input_tokens"] == 12 for span in samples)
 
+        config.tracing_disabled = True
         streamed = Runner.run_streamed(plain, "fresh-input", run_config=config)
         deltas = []
         async for event in streamed.stream_events():
@@ -357,16 +392,119 @@ request_max_retries = 0
             await asyncio.gather(consumer, return_exceptions=True)
         reused = await Runner.run(plain, "after-cancel-input", run_config=config)
         assert reused.final_output == "reused" and len(requests) == 7
+        image_path.write_bytes(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNoaGgAAAMEAYFL09IQAAAAAElFTkSuQmCC"
+            )
+        )
+        before = len(processor.on_span_end.call_args_list)
+        content_config = RunConfig(
+            model_provider=provider,
+            trace_include_sensitive_data=True,
+            tracing={"operation_detail": "content"},
+        )
+        content_result = await Runner.run(plain, "content-input", run_config=content_config)
+        assert content_result.final_output == "native-content" and len(requests) == 9
+        captured = [
+            call.args[0].span_data for call in processor.on_span_end.call_args_list[before:]
+        ]
+        native_models = [span for span in captured if span.type == "response"]
+        native_tools = [
+            span
+            for span in captured
+            if span.type == "function" and span.name in {"view_image", "functions.view_image"}
+        ]
+        request_sizes = [len(json.dumps(body).encode()) for body in requests[-2:]]
+        assert len(native_models) == 2 and len(native_tools) == 1
+        assert "content-input" in json.dumps(native_models[0].input), (
+            f"Native content omitted; request sizes: {request_sizes}"
+        )
+        assert "native-content" in json.dumps(native_models[-1].output)
+        assert json.loads(native_tools[0].input)["path"] == str(image_path)
+        assert "omitted" in native_tools[0].output
+        rendered = json.dumps([span.export() for span in captured])
+        assert (
+            "synthetic-installed-key" not in rendered
+            and "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB" not in rendered
+        )
+        assert "opaque-late-reasoning" not in rendered
+
+        class ApprovalStore:
+            value = None
+
+            async def load(self, _session_id):
+                return self.value
+
+            async def save(self, _session_id, value, *, expected):
+                if self.value != expected:
+                    return False
+                self.value = value
+                return True
+
+        def fresh_provider():
+            return CodexProvider(
+                cwd=folder / "workspace",
+                api_key="synthetic-installed-key",
+                config_overrides=[
+                    'approval_policy="on-request"',
+                    'approvals_reviewer="user"',
+                ],
+            )
+
+        await provider.aclose()
+        approval_checks = []
+        for approved in (False, True):
+            target = folder / "workspace" / f"builtin-command-{approved}.txt"
+            call_id = f"builtin-command-{approved}"
+            approval_item = {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": call_id,
+                "arguments": json.dumps(
+                    {
+                        # Keep the process alive long enough for Codex's async exit watcher.
+                        "cmd": f'sleep 1; echo builtin-approved > "{target}"',
+                        "login": False,
+                        "sandbox_permissions": "require_escalated",
+                    }
+                ),
+            }
+            provider = fresh_provider()
+            options = RunConfig(model_provider=provider, tracing_disabled=True)
+            store = ApprovalStore()
+            session = await ResumableSession.create(store)
+            paused = await Runner.run(plain, "approval-input", session=session, run_config=options)
+            assert len(paused.interruptions) == 1 and not target.exists()
+            stored = store.value
+            await provider.aclose()
+            provider = fresh_provider()
+            options.model_provider = provider
+            recovered = await ResumableSession.resume(store, session.session_id)
+            state = await recovered.load_state(plain)
+            assert store.value == stored and not target.exists()
+            (pending,) = state.get_interruptions()
+            assert pending.raw_item.call_id == call_id
+            state.approve(pending) if approved else state.reject(pending)
+            result = await Runner.run(plain, state, run_config=options)
+            assert result.final_output == "approval resolved"
+            assert target.exists() == approved
+            if approved:
+                assert b"builtin-approved" in target.read_bytes().replace(b"\x00", b"")
+            approval_checks.append("approve" if approved else "deny")
+            await provider.aclose()
         assert "agents.models._codex_native" in sys.modules
         assert "agents.models._codex_app_server" not in sys.modules
         assert not config_path.with_name("auth.json").exists(), "The API key persisted to disk."
         assert not errors, errors
         return {
             "provider_requests": len(requests),
+            "native_content_request_bytes": request_sizes,
+            "native_content_roundtrip": True,
             "tool_effects": len(tool_calls),
             "resumed_tokens": usage.total_tokens,
             "live_streaming": True,
             "concurrent_survivor_and_reuse_after_cancel": True,
+            "native_approval_checks": approval_checks,
         }
     finally:
         dynamic_delta.set()
