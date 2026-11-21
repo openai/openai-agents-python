@@ -289,6 +289,18 @@ request_max_retries = 0
     provider = CodexProvider(cwd=folder / "workspace", api_key="synthetic-installed-key")
     config = RunConfig(model_provider=provider, tracing_disabled=True)
     try:
+        from agents.models.codex_goals import open_goal
+
+        goal_home = (folder / "goals").resolve()
+        goal_home.mkdir()
+        (goal_home / "config.toml").write_bytes(config_path.read_bytes())
+        async with open_goal(goal_home, thread_id=None, can_write=lambda: True) as root:
+            assert await root.get() is None
+            goal = await root.set_paused("Review the draft", token_budget=2**53 + 1)
+        async with open_goal(goal_home, thread_id=goal.thread_id) as root:
+            assert await root.get() == goal and goal.status == "paused"
+            assert goal.token_budget == 2**53 + 1 and not requests
+
         paused = Runner.run_streamed(agent, "private-input", run_config=config)
         async for event in paused.stream_events():
             if (

@@ -2435,6 +2435,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-goal-extension"
+version = "0.166.0"
+source = "git+https://github.com/openai/codex?rev=6ff1e1ca3b30fc8b914720681fcf5fe62e95f856#6ff1e1ca3b30fc8b914720681fcf5fe62e95f856"
+dependencies = [
+ "codex-analytics",
+ "codex-core",
+ "codex-extension-api",
+ "codex-otel",
+ "codex-prompts",
+ "codex-protocol",
+ "codex-rollout",
+ "codex-state",
+ "codex-tools",
+ "codex-utils-template",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "codex-guardian-context"
 version = "0.166.0"
 source = "git+https://github.com/openai/codex?rev=6ff1e1ca3b30fc8b914720681fcf5fe62e95f856#6ff1e1ca3b30fc8b914720681fcf5fe62e95f856"
@@ -8042,6 +8063,7 @@ dependencies = [
  "codex-core-api",
  "codex-exec-server",
  "codex-features",
+ "codex-goal-extension",
  "codex-guardian-v2",
  "codex-hooks",
  "codex-http-client",
@@ -8051,8 +8073,10 @@ dependencies = [
  "codex-model-provider",
  "codex-models-manager",
  "codex-protocol",
+ "codex-rollout",
  "codex-sandboxing",
  "codex-skills-extension",
+ "codex-thread-store",
  "codex-utils-rustls-provider",
  "codex-web-search-extension",
  "futures",

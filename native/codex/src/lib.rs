@@ -500,8 +500,11 @@ impl Thread {
     }
 }
 
+mod goals;
+
 #[pymodule]
 fn _codex_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(goals::open_goal, m)?)?;
     m.add("CODEX_VERSION", "0.166.0")?;
     m.add("CODEX_REVISION", "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856")?;
     m.add_class::<Manager>()?;
