@@ -16,10 +16,14 @@ from openai import APIStatusError, AsyncOpenAI
 
 from agents import (
     Agent,
+    GuardrailFunctionOutput,
+    InputGuardrail,
+    InputGuardrailTripwireTriggered,
     ModelRetrySettings,
     ModelSettings,
     RequestCapture,
     RunConfig,
+    RunHooks,
     Runner,
     UserError,
     function_tool,
@@ -558,3 +562,37 @@ async def test_failed_sync_setup_claims_first_invocation(peer):
     assert peer.requests == ["/responses"]
     assert capture.totals.routes == ()
     assert capture.totals.coverage == "complete"
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("timeout", [None, 5])
+async def test_stream_guardrail_during_preparation_skips_submission(peer, enabled, timeout):
+    release = asyncio.Event()
+
+    async def deny(ctx, agent, input):
+        await asyncio.wait_for(release.wait(), timeout=5)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    class Hooks(RunHooks):
+        async def on_llm_start(self, *args):
+            release.set()
+            assert result._input_guardrails_task is not None
+            await result._input_guardrails_task
+
+    agent = Agent(
+        name="root",
+        model=peer.provider.get_model("fixture"),
+        model_settings=ModelSettings(timeout=timeout),
+        input_guardrails=[InputGuardrail(guardrail_function=deny)],
+    )
+    capture = RequestCapture()
+    with capture if enabled else nullcontext():
+        result = Runner.run_streamed(agent, "input", hooks=Hooks())
+        with pytest.raises(InputGuardrailTripwireTriggered):
+            async for _ in result.stream_events():
+                pass
+    assert release.is_set()
+    assert not peer.requests
+    assert capture.totals.model_submissions == 0
+    if enabled:
+        assert capture.totals.observed == TransportCounts(0, 0, 0)

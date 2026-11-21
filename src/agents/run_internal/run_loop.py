@@ -74,6 +74,7 @@ from ..models._response_terminal import (
     response_terminal_failure_error,
 )
 from ..models._run_context import ModelToolHooks, model_run_context, model_run_context_stream
+from ..request_capture import _submit_model
 from ..result import RunResultStreaming
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
@@ -2648,10 +2649,15 @@ async def run_single_turn_streamed(
         session, context_wrapper, filtered.input
     )
 
+    submitted = False
+
     def get_model_stream() -> AsyncIterator[TResponseStreamEvent]:
+        nonlocal submitted
         tripwire = streamed_result._triggered_input_guardrail_result
         if tripwire is not None:
             raise _StreamAttemptSkipped(InputGuardrailTripwireTriggered(tripwire))
+        _submit_model(model, first=not submitted)
+        submitted = True
         return model.stream_response(
             filtered.instructions,
             filtered.input,
@@ -2690,7 +2696,6 @@ async def run_single_turn_streamed(
     # explicitly instead of waiting for garbage collection to finalize the generator chain.
     async with aclosing(
         model_run_context_stream(
-            model,
             retry_stream,
             tool_use_tracker,
             ModelToolHooks(public_agent, context_wrapper, hooks, run_config.tool_execution),

@@ -156,7 +156,8 @@ class RequestCapture:
     Coverage refers only to these local boundaries. HTTP/2 is partial. Native,
     hosted and custom models and borrowed HTTP transports have unknown counts.
     Partial coverage retains known observations. No count establishes delivery,
-    model success or billing. Unused captures have unknown coverage.
+    model success or billing. Capture cannot enforce a hard limit on physical
+    requests. Unused captures have unknown coverage.
     """
 
     def __init__(self) -> None:
@@ -254,15 +255,18 @@ def _route(model: object) -> Route:
     return "custom"
 
 
-@contextmanager
-def _model_submission(model: object, *, first: bool = True) -> Iterator[None]:
+def _submit_model(model: object, *, first: bool) -> None:
     run = _run.get()
     if model is None or run is None or run.scope.closed:
-        yield
         return
     route = _route(model)
     counts = run.submit("model", route, first=first)
-    token = _model.set((id(model), counts) if route in ("http", "websocket") else None)
+    _model.set((id(model), counts) if route in ("http", "websocket") else None)
+
+
+@contextmanager
+def _model_capture_scope() -> Iterator[None]:
+    token = _model.set(None)
     try:
         yield
     finally:

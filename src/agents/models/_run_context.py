@@ -6,7 +6,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from ..request_capture import _model_submission
+from ..request_capture import _model_capture_scope
 
 if TYPE_CHECKING:
     from ..agent import Agent
@@ -49,14 +49,13 @@ def get_model_tool_hooks() -> ModelToolHooks | None:
 
 
 async def model_run_context_stream(
-    model: object,
     stream: AsyncGenerator[T, None],
     owner: object,
     hooks: ModelToolHooks | None = None,
 ) -> AsyncGenerator[T, None]:
     # `aclosing` forwards an early `aclose()` on this generator to the delegate, so the
     # delegate's cleanup runs deterministically instead of waiting for garbage collection.
-    with model_run_context(owner, hooks), _model_submission(model):
+    with model_run_context(owner, hooks), _model_capture_scope():
         async with aclosing(stream):
             async for item in stream:
                 yield item
