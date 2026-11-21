@@ -121,6 +121,8 @@ def _import_any_llm_module(
     # together; otherwise a later ``from agents.extensions.models import any_llm_model``
     # would still see the stub-backed module while ``sys.modules`` has the original.
     parent_package = importlib.import_module("agents.extensions.models")
+    monkeypatch.setitem(sys.modules, "agents.extensions.models.any_llm_model", None)
+    monkeypatch.setattr(parent_package, "any_llm_model", None, raising=False)
     monkeypatch.delitem(sys.modules, "agents.extensions.models.any_llm_model", raising=False)
     monkeypatch.delattr(parent_package, "any_llm_model", raising=False)
     monkeypatch.setitem(sys.modules, "any_llm", fake_any_llm)
@@ -130,24 +132,36 @@ def _import_any_llm_module(
     return module, create_calls
 
 
-def test_import_any_llm_module_restores_module_bindings_on_teardown() -> None:
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_import_any_llm_module_restores_module_bindings_on_teardown(
+    monkeypatch: pytest.MonkeyPatch, preexisting: bool
+) -> None:
     pytest.importorskip(
         "any_llm",
         reason="`any-llm-sdk` is only available when the optional dependency is installed.",
     )
     parent_package = importlib.import_module("agents.extensions.models")
-    original = importlib.import_module("agents.extensions.models.any_llm_model")
+    if preexisting:
+        original = importlib.import_module("agents.extensions.models.any_llm_model")
+    else:
+        monkeypatch.delitem(sys.modules, "agents.extensions.models.any_llm_model", raising=False)
+        monkeypatch.delattr(parent_package, "any_llm_model", raising=False)
+        original = None
 
-    with pytest.MonkeyPatch.context() as monkeypatch:
+    with pytest.MonkeyPatch.context() as scoped_patch:
         module, _ = _import_any_llm_module(
-            monkeypatch, FakeAnyLLMProvider(supports_responses=False)
+            scoped_patch, FakeAnyLLMProvider(supports_responses=False)
         )
         assert module is not original
         assert sys.modules["agents.extensions.models.any_llm_model"] is module
         assert parent_package.any_llm_model is module
 
-    assert sys.modules["agents.extensions.models.any_llm_model"] is original
-    assert parent_package.any_llm_model is original
+    if preexisting:
+        assert sys.modules["agents.extensions.models.any_llm_model"] is original
+        assert parent_package.any_llm_model is original
+    else:
+        assert "agents.extensions.models.any_llm_model" not in sys.modules
+        assert not hasattr(parent_package, "any_llm_model")
 
 
 def _chat_completion(text: str) -> ChatCompletion:
