@@ -2,7 +2,7 @@
 
 use std::env;
 use std::ffi::OsStr;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpStream};
 use std::thread;
 
@@ -17,9 +17,18 @@ fn relay_stdio(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     });
     // The process exits when the relay closes, even if Codex still holds stdin open.
     let mut stdout = io::stdout().lock();
-    io::copy(&mut connection, &mut stdout)?;
-    stdout.flush()?;
-    Ok(())
+    // On Linux, io::copy can hold the stdout pipe lock while waiting for the next reply.
+    let mut buffer = [0; 8192];
+    loop {
+        let count = match connection.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(count) => count,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err.into()),
+        };
+        stdout.write_all(&buffer[..count])?;
+        stdout.flush()?;
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
