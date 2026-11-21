@@ -21,6 +21,7 @@ from .exceptions import (
     UserError,
     _await_data_redacted_error_boundary,
     _clear_data_redacted_error_traceback,
+    _data_redacted_error_boundary,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
     _is_tool_local_cancellation,
@@ -41,6 +42,7 @@ from .items import (
 from .lifecycle import RunHooks
 from .logger import log_model_and_tool_action_warning, log_tool_action_warning, logger
 from .memory import Session
+from .memory.resumable_session import ResumableSession
 from .result import RunResult, RunResultStreaming
 from .run_config import (
     DEFAULT_MAX_TURNS,
@@ -119,6 +121,7 @@ from .run_internal.model_provider_lifecycle import (
 )
 from .run_internal.oai_conversation import OpenAIServerConversationTracker
 from .run_internal.prompt_cache_key import PromptCacheKeyResolver
+from .run_internal.resumable_session import ResumableRun, prepare_run_session
 from .run_internal.run_grouping import resolve_run_grouping_id
 from .run_internal.run_loop import (
     _safe_redacted_persistence_error,
@@ -140,6 +143,7 @@ from .run_internal.run_steps import (
     NextStepInterruption,
     NextStepRunAgain,
     ProcessedResponse,
+    QueueCompleteSentinel,
     SingleStepResult,
 )
 from .run_internal.session_persistence import (
@@ -293,7 +297,7 @@ class Runner:
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
-        session: Session | None = None,
+        session: Session | ResumableSession | None = None,
     ) -> RunResult:
         """
         Run a workflow starting at the given agent.
@@ -398,7 +402,7 @@ class Runner:
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
-        session: Session | None = None,
+        session: Session | ResumableSession | None = None,
     ) -> RunResult:
         """
         Run a workflow synchronously, starting at the given agent.
@@ -499,7 +503,7 @@ class Runner:
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
-        session: Session | None = None,
+        session: Session | ResumableSession | None = None,
         *,
         error_handlers: RunErrorHandlers[TContext] | None = None,
     ) -> RunResultStreaming:
@@ -573,12 +577,15 @@ class AgentRunner:
     It should not be used directly or subclassed.
     """
 
+    @_data_redacted_error_boundary
     async def run(
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
+        session = prepare_run_session(kwargs.get("session"), input)
+        kwargs["session"] = session
         run_config, owns_model_provider = _normalize_run_config_for_runner(kwargs.get("run_config"))
         cast(dict[str, Any], kwargs)["run_config"] = run_config
         redacted_error: BaseException | None = None
@@ -609,7 +616,10 @@ class AgentRunner:
                         else starting_agent
                     )
                     with agent_tool_configuration_run(configuration_agent):
-                        return await self._run_impl(starting_agent, input, **kwargs)
+                        result = await self._run_impl(starting_agent, input, **kwargs)
+                        if isinstance(session, ResumableRun):
+                            await session.finish(result)
+                        return result
                 except BaseException as error:
                     if not _is_error_data_redacted(error):
                         raise
@@ -619,13 +629,7 @@ class AgentRunner:
                 if owns_model_provider:
                     await _close_runner_owned_model_provider(run_config.model_provider)
 
-        self = cast(Any, None)
-        starting_agent = cast(Any, None)
-        input = cast(Any, None)
-        run_config = cast(Any, None)
-        cast(dict[str, Any], kwargs).clear()
         assert redacted_error is not None
-        _detach_data_redacted_error_traceback(redacted_error)
         _raise_data_redacted_error(redacted_error)
 
     async def _run_impl(
@@ -642,7 +646,7 @@ class AgentRunner:
         previous_response_id = kwargs.get("previous_response_id")
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
-        session = kwargs.get("session")
+        session = cast(Session | None, kwargs.get("session"))
 
         run_config = cast(RunConfig, run_config)
 
@@ -695,6 +699,8 @@ class AgentRunner:
             context = context_wrapper.context
 
             reject_unrecoverable_terminal_state(run_state)
+            if isinstance(session, ResumableRun):
+                await session.begin(input)
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             max_turns = run_state._max_turns
         else:
@@ -708,6 +714,8 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
             )
             context_wrapper = ensure_context_wrapper(context)
+            if isinstance(session, ResumableRun):
+                await session.begin(input)
             context_wrapper._resolve_function_approval_owners(starting_agent)
             context = context_wrapper.context
             set_agent_tool_state_scope(context_wrapper, uuid4().hex)
@@ -2641,7 +2649,7 @@ class AgentRunner:
         previous_response_id = kwargs.get("previous_response_id")
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
-        session = kwargs.get("session")
+        session = prepare_run_session(kwargs.get("session"), input)
 
         run_config, owns_model_provider = _normalize_run_config_for_runner(run_config)
 
@@ -2883,8 +2891,18 @@ class AgentRunner:
             if sandbox_runtime.enabled:
                 sandbox_runtime.apply_result_metadata(streamed_result)
 
+        if isinstance(session, ResumableRun):
+            session.configure_stream(streamed_result)
+
         # Kick off the actual agent loop in the background and return the streamed result object.
         async def run_loop() -> None:
+            if isinstance(session, ResumableRun):
+                try:
+                    await session.begin(input)
+                except BaseException:
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    raise
             configuration_agent = (
                 run_state._current_agent
                 if run_state is not None and run_state._current_agent is not None

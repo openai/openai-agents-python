@@ -164,6 +164,7 @@ from .model_retry import (
 )
 from .oai_conversation import OpenAIServerConversationTracker
 from .prompt_cache_key import PromptCacheKeyResolver, model_settings_with_prompt_cache_key
+from .resumable_session import checkpoint_streamed_result
 from .run_steps import (
     NextStepFinalOutput,
     NextStepHandoff,
@@ -361,7 +362,7 @@ def _prepare_turn_input_items(
     return prepare_model_input_items(caller_items, continuation_items)
 
 
-def _complete_stream_interruption(
+async def _complete_stream_interruption(
     streamed_result: RunResultStreaming,
     *,
     interruptions: list[ToolApprovalItem],
@@ -369,6 +370,9 @@ def _complete_stream_interruption(
 ) -> None:
     if processed_response is not None:
         processed_response.tool_output_guardrail_result_start = None
+    await checkpoint_streamed_result(
+        streamed_result, interruptions=interruptions, processed_response=processed_response
+    )
     streamed_result.interruptions = interruptions
     streamed_result._last_processed_response = processed_response
     streamed_result.is_complete = True
@@ -731,6 +735,7 @@ async def _finalize_streamed_final_output(
 
     if stream_items_after_guardrails:
         stream_step_items_to_queue(items, streamed_result._event_queue)
+    await checkpoint_streamed_result(streamed_result)
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
         on_persisted_after_guardrails(True)
@@ -962,7 +967,7 @@ async def _finalize_streamed_interruption(
     processed_response: ProcessedResponse | None,
 ) -> None:
     await save_items(items, response_id, store_setting)
-    _complete_stream_interruption(
+    await _complete_stream_interruption(
         streamed_result,
         interruptions=interruptions,
         processed_response=processed_response,
@@ -1618,7 +1623,7 @@ async def start_streaming(
                                 current_agent, run_config
                             ),
                         )
-                        _complete_stream_interruption(
+                        await _complete_stream_interruption(
                             streamed_result,
                             interruptions=approvals_from_step(turn_result.next_step),
                             processed_response=run_state._last_processed_response,

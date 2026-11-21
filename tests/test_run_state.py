@@ -9000,6 +9000,21 @@ class TestRunStateSerializationEdgeCases:
             "payload": {"type": "program", "call_id": "not-a-run-item"}
         }
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("version", "marker"),
+        [("1.22", True), (CURRENT_SCHEMA_VERSION, None), (CURRENT_SCHEMA_VERSION, 1)],
+    )
+    async def test_rejects_invalid_resumable_session_marker(self, version, marker):
+        agent = Agent(name="TestAgent")
+        snapshot = make_state(
+            agent, context=RunContextWrapper(context=None), original_input="hello"
+        ).to_json()
+        snapshot["$schemaVersion"] = version
+        snapshot["requires_resumable_session"] = marker
+        with pytest.raises(UserError, match="session marker is invalid"):
+            await RunState.from_json(agent, snapshot)
+
     def test_supported_schema_versions_match_released_boundary(self):
         """The support set should include released versions plus the current unreleased writer."""
         assert SUPPORTED_SCHEMA_VERSIONS == frozenset(
