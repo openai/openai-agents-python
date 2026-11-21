@@ -18,6 +18,8 @@ from .run_context import RunContextWrapper, TContext
 from .usage import Usage
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from ._function_tool_arguments import PreparedFunctionArguments
     from .agent import AgentBase
     from .items import ToolApprovalItem, TResponseInputItem
@@ -117,6 +119,7 @@ class ToolContext(RunContextWrapper[TContext]):
         else:
             self.run_config = None
         # Internal adapter hook used to attach SDK-only custom data to the emitted output item.
+        self._edit_text: Callable[[tuple[str, ...]], Awaitable[tuple[str, ...]]] | None = None
         self._custom_data: dict[str, Any] | None = None
         self._function_tool_arguments: PreparedFunctionArguments | None = None
 

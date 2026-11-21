@@ -54,7 +54,7 @@ else:
     ToolOutput = Union[str, ToolOutputItem, list[ToolOutputItem]]  # noqa: UP007
 
 if TYPE_CHECKING:
-    from mcp.types import Tool as MCPTool
+    from mcp.types import CallToolResult, Tool as MCPTool
 
     from ..agent import AgentBase
     from .server import MCPServer
@@ -601,6 +601,7 @@ class MCPUtil:
                 mcp_server_name=get_mcp_server_log_name(server.name),
             ),
         )
+        function_tool._mcp_server_id = id(server)
         function_tool._mcp_annotations = copy.deepcopy(tool.annotations)
         function_tool._mcp_tool_binding = (get_mcp_server_log_name(server.name), tool.name, None)
         return function_tool
@@ -716,6 +717,12 @@ class MCPUtil:
                 f"Invalid JSON input for tool {tool_name_for_display}: expected a JSON object"
             )
 
+        async def call_peer() -> CallToolResult:
+            if merged_meta is None:
+                return await server.call_tool(tool.name, json_data)
+            return await server.call_tool(tool.name, json_data, meta=merged_meta)
+
+        invoke = call_peer
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug("Invoking MCP tool")
         else:
@@ -723,12 +730,12 @@ class MCPUtil:
 
         try:
             resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
+            if isinstance(context, ToolContext) and context._edit_text is not None:
+                from ..tool import _protect_selected_task
+
+                invoke = functools.partial(_protect_selected_task, invoke)
             merged_meta = cls._merge_mcp_meta(resolved_meta, meta)
-            call_task = asyncio.create_task(
-                server.call_tool(tool.name, json_data)
-                if merged_meta is None
-                else server.call_tool(tool.name, json_data, meta=merged_meta)
-            )
+            call_task = asyncio.create_task(invoke())
             try:
                 done, _ = await asyncio.wait({call_task}, return_when=asyncio.FIRST_COMPLETED)
                 finished_task = done.pop()
@@ -752,6 +759,8 @@ class MCPUtil:
             # will format them into model-visible tool errors when appropriate.
             raise
         except Exception as e:
+            if isinstance(context, ToolContext) and context._edit_text is not None:
+                raise
             if isinstance(e, MCPError):
                 # An MCP-level error (e.g. upstream HTTP 4xx/5xx, tool not found, etc.)
                 # is not a programming error – re-raise so the FunctionTool failure
@@ -781,6 +790,13 @@ class MCPUtil:
                 f"Error invoking MCP tool {tool_name_for_display} on server "
                 f"'{get_mcp_server_log_name(server.name)}': {e}"
             ) from e
+
+        if isinstance(context, ToolContext) and context._edit_text is not None:
+            from ..run_internal.tool_text import edit_mcp_result
+
+            result = await edit_mcp_result(
+                context._edit_text, result, server.use_structured_content
+            )
 
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug("MCP tool completed.")

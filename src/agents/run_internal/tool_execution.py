@@ -117,6 +117,7 @@ from .items import (
 )
 from .run_steps import ToolRunFunction
 from .tool_hooks import hook_payload_diagnostics, transform_tool_output
+from .tool_text import invoke_selected_tool, select_text_editor
 from .tool_use_tracker import AgentToolUseTracker
 
 if TYPE_CHECKING:
@@ -2121,7 +2122,19 @@ class _FunctionToolBatchExecutor:
     ) -> Any:
         bypass_output_schema = False
         try:
-            invocation_result = await _invoke_function_tool_with_metadata(
+            tool_context._edit_text = select_text_editor(
+                self.config.tool_execution,
+                self.public_agent,
+                func_tool,
+                tool_context,
+                tool_call.arguments,
+            )
+            invoke = (
+                invoke_selected_tool
+                if tool_context._edit_text is not None
+                else _invoke_function_tool_with_metadata
+            )
+            invocation_result = await invoke(
                 function_tool=func_tool,
                 context=tool_context,
                 arguments=tool_call.arguments,
@@ -2129,7 +2142,7 @@ class _FunctionToolBatchExecutor:
             real_result = invocation_result.output
             bypass_output_schema = invocation_result.is_sdk_generated_error
         except asyncio.CancelledError as e:
-            if outer_task in self.teardown_cancelled_tasks:
+            if tool_context._edit_text is not None or outer_task in self.teardown_cancelled_tasks:
                 raise
 
             result = await maybe_invoke_function_tool_failure_error_function(
@@ -2171,14 +2184,15 @@ class _FunctionToolBatchExecutor:
 
         task_state.in_post_invoke_phase = True
         unfiltered_result = real_result
-        real_result = await transform_tool_output(
-            self.config,
-            tool_context,
-            self.public_agent,
-            func_tool,
-            task_state.tool_run.tool_call,
-            real_result,
-        )
+        if tool_context._edit_text is None:
+            real_result = await transform_tool_output(
+                self.config,
+                tool_context,
+                self.public_agent,
+                func_tool,
+                task_state.tool_run.tool_call,
+                real_result,
+            )
         # Only the SDK's original failure may bypass a success schema.
         bypass_output_schema = bypass_output_schema and real_result is unfiltered_result
         output_guardrail_result = await _execute_tool_output_guardrails(
@@ -2214,7 +2228,7 @@ class _FunctionToolBatchExecutor:
                 provider_result,
                 output_json_schema=None if bypass_output_schema else func_tool.output_json_schema,
                 output_type_adapter=None
-                if bypass_output_schema
+                if bypass_output_schema or tool_context._edit_text is not None
                 else func_tool._output_type_adapter,
             )
         output_item: ToolCallOutputItem | None = None
