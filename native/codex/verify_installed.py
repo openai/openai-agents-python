@@ -420,7 +420,7 @@ request_max_retries = 0
             f"Native content omitted; request sizes: {request_sizes}"
         )
         assert "native-content" in json.dumps(native_models[-1].output)
-        assert str(image_path) in native_tools[0].input
+        assert json.loads(native_tools[0].input)["path"] == str(image_path)
         assert "omitted" in native_tools[0].output
         rendered = json.dumps([span.export() for span in captured])
         assert (
