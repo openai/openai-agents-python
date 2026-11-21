@@ -60,3 +60,24 @@ class AgentUpdatedStreamEvent:
 
 StreamEvent: TypeAlias = RawResponsesStreamEvent | RunItemStreamEvent | AgentUpdatedStreamEvent
 """A streaming event from an agent."""
+
+
+@dataclass(frozen=True)
+class ApprovedText:
+    """An application-approved prefix. Later run failures cannot retract it."""
+
+    submission_id: str
+    session_id: str | None
+    turn: int
+    turn_id: str
+    item_id: str
+    content_index: int
+    text: str
+
+
+@dataclass(frozen=True)
+class FinalOutputAccepted:
+    """Runner has finished successfully. Read the value from the result's final_output."""
+
+    submission_id: str
+    session_id: str | None
