@@ -179,7 +179,7 @@ config = RunConfig(
 
 The Runner has been recording agent execution, SDK turns, and Python function tools. Codex has been supplying observations for model inference and native workspace tools. The SDK has been using available source timestamps, parent identifiers, outcomes, and usage for those observations. Python function execution has been retaining one execution span from the Runner.
 
-With `operation_detail` omitted and sensitive data enabled, the first model span of each Runner request has been capturing the submitted input. The last model span of that request has been capturing the returned response. Intermediate model calls and native tools have been capturing metadata. With `"content"` selected and sensitive data allowed, each operation has been capturing bounded content at its source.
+With `operation_detail` omitted and sensitive data enabled, the first model span of each Runner request has been capturing the submitted input. The last model span of that request has been capturing the returned response. Under this default policy, native tool results such as file contents have been reaching SDK processors through returned responses and replayed input history. Intermediate model calls and native tools have been capturing metadata. With `"content"` selected and sensitive data allowed, each operation has been capturing bounded content at its source.
 
 When a run has been ending with unfinished operations, the SDK has been closing their spans with `outcome="interrupted"` and `estimated_end=True`. The SDK has been estimating that end time in Python.
 

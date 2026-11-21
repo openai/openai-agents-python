@@ -117,9 +117,14 @@ def _messages(value: Any, *, output: bool = False) -> list[dict[str, Any]]:
                         continue
                     if part.get("type") in ("input_text", "output_text", "text"):
                         parts.append({"type": "text", "content": part.get("text", "")})
+                    elif part.get("type") == "refusal":
+                        parts.append({"type": "text", "content": part.get("refusal", "")})
                     else:
                         # Preserve part order without exporting media or hidden reasoning.
                         parts.append({"type": "openai.omitted", "reason": "unsupported_content"})
+            refusal = item.get("refusal")
+            if isinstance(refusal, str):
+                parts.append({"type": "text", "content": refusal})
             for call in item.get("tool_calls") or ():
                 if not isinstance(call, Mapping) or call.get("type") != "function":
                     continue
@@ -378,19 +383,12 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
             if data.output is not None:
                 values["gen_ai.tool.call.result"] = bound_content(data.output)
         else:
-            inputs = data.input
-            output = (
-                data.output
-                if isinstance(data, GenerationSpanData)
-                else (
-                    [item.model_dump(exclude_none=True) for item in data.response.output]
-                    if data.response is not None
-                    else None
-                )
-            )
             if isinstance(data, ResponseSpanData):
-                inputs = bound_content(inputs) if inputs is not None else None
-                output = bound_content(output) if output is not None else None
+                inputs = bound_content(data.input)
+                output = bound_content(data.response.output) if data.response is not None else None
+            else:
+                inputs = data.input
+                output = data.output
             request: dict[str, Any] = {}
             if inputs is not None:
                 request["messages"] = _messages(inputs)

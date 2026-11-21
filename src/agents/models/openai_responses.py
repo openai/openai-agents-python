@@ -212,7 +212,7 @@ def _record_response_operation(
             data.response = response
             data.input = input
     elif data.operation.detail == "content":
-        data.output = bound_content([item.model_dump(mode="json") for item in response.output])
+        data.output = bound_content(response.output)
 
 
 def _record_prepared_request(request: Mapping[str, Any]) -> None:

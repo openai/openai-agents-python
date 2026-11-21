@@ -2376,14 +2376,16 @@ async def test_any_llm_responses_stream_populates_span_before_yielding_completed
 ) -> None:
     """The response span must carry the response and input when the completed event arrives."""
     stream = _ClosableStream([_completed_event()])
-    module, model = _responses_module_and_model_with_stream(monkeypatch, stream)
-    spans = _capture_spans(monkeypatch, module, "response_span")
+    from agents.tracing import get_current_span
+
+    _module, model = _responses_module_and_model_with_stream(monkeypatch, stream)
 
     with trace(workflow_name="any-llm-responses-span"):
         stream_agen = cast(Any, _stream_events(model, ModelTracing.ENABLED))
         async for event in stream_agen:
             if event.type == "response.completed":
-                [span] = spans
+                span = get_current_span()
+                assert span is not None
                 assert span.span_data.response is not None
                 assert span.span_data.response.id == "resp_123"
                 assert span.span_data.input == "hi"

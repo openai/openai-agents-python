@@ -8,6 +8,9 @@ on:
       - 'native/**'
       - 'patches/codex/**'
       - 'tests/models/test_operation_tracing_parity.py'
+      - 'tests/models/test_codex_mutable_tool_hooks.py'
+      - 'tests/mcp/helpers.py'
+      - 'tests/mcp/model_compat.py'
       - 'tests/testing_processor.py'
       - 'tests/conftest.py'
       - 'scripts/**'
@@ -201,6 +204,10 @@ jobs:
             tests/testing_processor.py
             tests/conftest.py
             tests/models/test_operation_tracing_parity.py
+            tests/models/test_codex_mutable_tool_hooks.py
+            tests/mcp/__init__.py
+            tests/mcp/helpers.py
+            tests/mcp/model_compat.py
           sparse-checkout-cone-mode: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
@@ -222,19 +229,23 @@ jobs:
           subprocess.run([str(python), '-I', '-m', 'pip', 'install', '--only-binary=:all:', str(wheel)], check=True)
           shutil.copy2(os.environ['VERIFIER'], 'verify_installed.py')
           subprocess.run([str(python), '-I', 'verify_installed.py', '--output', 'installed.json'], check=True)
-      - name: Verify operation tracing through the installed native wheel
+      - name: Verify tracing and native tool hooks through the installed native wheel
         working-directory: ${{ runner.temp }}
         env:
           CODEX_TRACING_NATIVE_TEST: '1'
           PARITY_TESTS: ${{ github.workspace }}/tests/models/test_operation_tracing_parity.py
         run: |
-          import os, subprocess
+          import os, subprocess, sys
           from pathlib import Path
           python = Path('codex-venv') / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
           subprocess.run([str(python), '-I', '-m', 'pip', 'install', '--only-binary=:all:',
                           'pytest>=9.0.3', 'pytest-asyncio', 'opentelemetry-sdk>=1.45.0,<2'], check=True)
           tests = Path(os.environ['PARITY_TESTS'])
-          subprocess.run([str(python), '-I', '-m', 'pytest', str(tests),
+          selected = [str(tests)]
+          if sys.platform == 'darwin':
+              # Hosted macOS has been providing the native sandbox required by these tests.
+              selected.append(str(tests.with_name('test_codex_mutable_tool_hooks.py')))
+          subprocess.run([str(python), '-I', '-m', 'pytest', *selected,
                           '--import-mode=importlib', '-q'], check=True)
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
