@@ -800,6 +800,27 @@ def _build_wrapped_function_tool(
     )
 
 
+def _builtin_tool_choice_name(choice: str) -> str:
+    """Resolve built-in selector aliases to their advertised SDK names."""
+    if choice == "web_search_preview":
+        return "web_search"
+    if choice in ("computer", "computer_use"):
+        return "computer_use_preview"
+    return choice
+
+
+async def _function_tool_enabled(
+    tool: FunctionTool, context: RunContextWrapper[Any], agent: AgentBase[Any]
+) -> bool:
+    from ._public_agent import get_public_agent
+
+    enabled = tool.is_enabled
+    if isinstance(enabled, bool):
+        return enabled
+    result = enabled(context, get_public_agent(agent))
+    return bool(await result if inspect.isawaitable(result) else result)
+
+
 def get_function_tool_origin(function_tool: FunctionTool) -> ToolOrigin | None:
     """Return scalar origin metadata for a function tool."""
     if not function_tool._emit_tool_origin:
@@ -2098,6 +2119,10 @@ def _coerce_tool_error_for_failure_error_function(error: BaseException) -> Excep
     return Exception(str(error) or error.__class__.__name__)
 
 
+class _ToolEligibilityError(UserError):
+    """Policy refusals must bypass tool failure formatters."""
+
+
 async def maybe_invoke_function_tool_failure_error_function(
     *,
     function_tool: FunctionTool,
@@ -2105,6 +2130,8 @@ async def maybe_invoke_function_tool_failure_error_function(
     error: BaseException,
 ) -> str | None:
     """Invoke the configured failure formatter, if one exists."""
+    if isinstance(error, _ToolEligibilityError):
+        return None
     failure_error_function = resolve_function_tool_failure_error_function(function_tool, context)
     if failure_error_function is None:
         return None

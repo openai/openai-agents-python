@@ -17,6 +17,7 @@ from uuid import uuid4
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
+    ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
 )
 from openai.types.responses.response_output_item import ResponseOutputItem
@@ -207,6 +208,7 @@ from .session_persistence import (
 )
 from .streaming import stream_step_items_to_queue, stream_step_result_to_queue
 from .tool_actions import ApplyPatchAction, ComputerAction, LocalShellAction, ShellAction
+from .tool_declarations import prepare_declarations, validate_prepared_choice
 from .tool_execution import (
     coerce_shell_call,
     execute_apply_patch_calls,
@@ -236,6 +238,7 @@ from .turn_preparation import (
     validate_run_hooks,
 )
 from .turn_resolution import (
+    _snapshot_function_calls,
     check_for_final_output_from_tools,
     execute_final_output,
     execute_handoffs,
@@ -2519,6 +2522,9 @@ async def run_single_turn_streamed(
         handoffs,
         collision_policy=run_config.tool_name_collision_policy,
     )
+    all_tools, model_tools, prepared_tools, omitted = await prepare_declarations(
+        all_tools, public_agent, context_wrapper, run_config
+    )
     if agent_span is not None:
         agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
         agent_span.span_data.tools = [
@@ -2544,6 +2550,7 @@ async def run_single_turn_streamed(
         has_tools=bool(all_tools or handoffs),
     )
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
+    validate_prepared_choice(omitted, model_settings.tool_choice, bool(all_tools or handoffs))
 
     final_response: ModelResponse | None = None
     streamed_response_output: list[ResponseOutputItem] = []
@@ -2656,7 +2663,7 @@ async def run_single_turn_streamed(
             filtered.instructions,
             filtered.input,
             model_settings,
-            all_tools,
+            model_tools,
             output_schema,
             handoffs,
             get_model_tracing_impl(
@@ -2702,12 +2709,28 @@ async def run_single_turn_streamed(
             if isinstance(event_response, Response):
                 stream_response_id = event_response.id
                 stream_request_id = getattr(event_response, "_request_id", None)
-            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+            if (
+                isinstance(event, ResponseCompletedEvent)
+                and not event.response.output
+                and streamed_response_output
+            ):
+                # Some backends leave completed output empty after item.done events.
+                event.response.output = list(streamed_response_output)
+
+            raw_event = event
+            if run_config.tool_execution is not None:
+                item = getattr(event, "item", None)
+                if isinstance(item, ResponseFunctionToolCall):
+                    raw_event = event.model_copy(update={"item": deepcopy(item)})
+                elif isinstance(event_response, Response) and event_response.output:
+                    output = _snapshot_function_calls(event_response.output)
+                    if output is not event_response.output:
+                        response_view = event_response.model_copy(update={"output": output})
+                        raw_event = event.model_copy(update={"response": response_view})
+            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=raw_event))
 
             terminal_response: Response | None = None
-            is_completed_event = False
             if isinstance(event, ResponseCompletedEvent):
-                is_completed_event = True
                 terminal_response = event.response
             elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
                 event_type = cast(str, event.type)
@@ -2723,11 +2746,6 @@ async def run_single_turn_streamed(
                 raise response_error_event_failure_error(cast(str, event.type), event)
 
             if terminal_response is not None:
-                if is_completed_event and not terminal_response.output and streamed_response_output:
-                    # Some streaming backends emit output items during item.done events while
-                    # leaving the terminal response output empty. Preserve those items so the
-                    # runner can resolve the completed step correctly.
-                    terminal_response.output = list(streamed_response_output)
                 # Always fold retry attempts into usage, even when the terminal response omits
                 # provider usage (common for some Chat Completions / LiteLLM streams). Skipping
                 # apply_retry_attempt_usage here would drop failed-attempt accounting and diverge
@@ -2801,7 +2819,8 @@ async def run_single_turn_streamed(
             )
             tool_execution = run_config.tool_execution
             if tool_execution is not None and (
-                tool_execution.prepare_tool_input is not None
+                tool_execution.prepare_tool_declaration is not None
+                or tool_execution.prepare_tool_input is not None
                 or tool_execution.prepare_tool_output is not None
             ):
                 # A stream consumer must not change the invocation seen by preparation hooks.
@@ -2836,6 +2855,7 @@ async def run_single_turn_streamed(
         new_response=final_response,
         output_schema=output_schema,
         all_tools=all_tools,
+        prepared_tools=prepared_tools,
         handoffs=handoffs,
         hooks=hooks,
         context_wrapper=context_wrapper,
@@ -2927,6 +2947,9 @@ async def run_single_turn(
         handoffs,
         collision_policy=run_config.tool_name_collision_policy,
     )
+    all_tools, model_tools, prepared_tools, omitted = await prepare_declarations(
+        all_tools, public_agent, context_wrapper, run_config
+    )
     if agent_span is not None:
         agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
         agent_span.span_data.tools = [
@@ -2946,7 +2969,7 @@ async def run_single_turn(
         system_prompt,
         input,
         output_schema,
-        all_tools,
+        model_tools,
         handoffs,
         hooks,
         context_wrapper,
@@ -2958,6 +2981,7 @@ async def run_single_turn(
         session_items_to_rewind=session_items_to_rewind,
         prompt_cache_key_resolver=prompt_cache_key_resolver,
         defer_llm_end_hooks=True,
+        omitted=omitted,
         reasoning_item_id_policy=reasoning_item_id_policy,
     )
 
@@ -2989,6 +3013,7 @@ async def run_single_turn(
         new_response=new_response,
         output_schema=output_schema,
         all_tools=all_tools,
+        prepared_tools=prepared_tools,
         handoffs=handoffs,
         hooks=hooks,
         context_wrapper=context_wrapper,
@@ -3021,6 +3046,8 @@ async def get_new_response(
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
     defer_llm_end_hooks: bool = False,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    *,
+    omitted: set[str] | None = None,
 ) -> ModelResponse:
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
@@ -3052,6 +3079,7 @@ async def get_new_response(
         has_tools=bool(all_tools or handoffs),
     )
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
+    validate_prepared_choice(omitted, model_settings.tool_choice, bool(all_tools or handoffs))
 
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_pending_input_filter(filtered.input)
