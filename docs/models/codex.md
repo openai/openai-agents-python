@@ -1,45 +1,60 @@
 # Codex provider
 
-Use `CodexProvider` to run an Agents SDK workflow through the stock Codex CLI. The SDK still runs the agent loop, function tools, handoffs, approvals, guardrails, and output validation. Codex supplies the model connection and its native workspace tools.
-
-This provider is experimental and is available on the `feat/simple-codex` branch. The instructions below use that checkout; installing a released `openai-agents` package does not install this branch's provider.
-
-Choose the integration that matches your application:
+Pass `RunConfig(model_provider=CodexProvider())` to the Runner to use Codex Core inside your Python process. The SDK loads the native extension on the first Codex model call. The Python Runner manages the agent loop, function tools, handoffs, approvals, guardrails, and output validation. Codex supplies the model connection and native workspace tools.
 
 | Goal | Integration |
 | --- | --- |
 | Switch an agent's model calls between the default provider and Codex | `RunConfig(model_provider=CodexProvider())`, described here |
 | Keep the agent's model and delegate one workspace task to Codex | [`codex_tool`](../tools.md#experimental-codex-tool) |
 
-## Set up the checkout and CLI
+## Install a GitHub prerelease wheel
 
-Check out the feature branch, then install the SDK and the stock CLI version used by this integration:
+The experimental `feat/simple-codex` branch packages the Python SDK, the compiled Codex extension, and its execution helpers in one `openai-agents` wheel. Use standard CPython 3.10 through 3.14. After publication, find **Agents SDK v1.0.0-alpha.1** in [GitHub Releases](https://github.com/openai/openai-agents-python/releases). Expand **Assets** and copy the link to the wheel for your platform. Its filename starts with `openai_agents-1.0.0a1-`.
+
+| Platform | Wheel filename ending |
+| --- | --- |
+| Linux x86-64 with glibc 2.28 or newer | `manylinux_2_28_x86_64.whl` |
+| Linux ARM64 with glibc 2.28 or newer | `manylinux_2_28_aarch64.whl` |
+| macOS 11 or newer on Apple Silicon | `macosx_11_0_arm64.whl` |
+| Windows x64 | `win_amd64.whl` |
+
+In an activated virtual environment, replace `WHEEL_URL` with the asset link. This installs prebuilt binaries.
 
 ```sh
-git clone --branch feat/simple-codex https://github.com/openai/openai-agents-python.git
-cd openai-agents-python
-uv sync
-npm install --global @openai/codex@0.166.0
-codex --version
-codex login
+python -m pip install --only-binary=:all: "WHEEL_URL"
 ```
 
-Codex reads its configuration and saved login from `CODEX_HOME`, or its default configuration directory when that variable is unset. The process needs write access to that directory. A managed host may restrict the available authentication methods. If the host permits API-key login, `CodexProvider(api_key=...)` authenticates the child process without replacing the saved CLI login.
+For repository examples, check out the preview tag. From the repository root, run `uv sync` with the extras required by the example. Then install the wheel in the project environment.
+
+```sh
+uv pip install --reinstall-package openai-agents "WHEEL_URL"
+```
+
+Run the examples with `uv run --no-sync` to keep the wheel installed. You can also set `UV_NO_SYNC=1` in your shell and use the repository's `uv run` commands as written. Each project sync reinstalls the pure Python SDK from the checkout.
+
+## Authenticate
+
+Codex reads the configuration and saved login under `CODEX_HOME`, which defaults to `~/.codex`. Python needs write access to that directory. To use your existing ChatGPT login, create `CodexProvider()` under the same account and Codex home that you used for `codex login`. For API-key authentication, supply `CodexProvider(api_key=...)` with a key from your application's secret store. The key belongs to that provider. Managed login policies apply to both methods.
+
+Create a new provider after you switch Codex accounts or change the model provider in your Codex configuration. If your organization requires US data residency, Codex applies that requirement across the Python process. It applies to all Codex providers until the process exits.
 
 The default provider needs the application's OpenAI credentials, typically `OPENAI_API_KEY`. Codex authentication does not configure credentials for separate OpenAI clients such as the tracing exporter or the compaction client.
 
 ## Run one agent with either provider
 
-Save this as `codex_switch.py` in the repository root:
+Save the example as `codex_switch.py`. For the Codex run, it uses `CODEX_API_KEY` when set or your saved login otherwise.
 
 ```python
 import argparse
+import asyncio
+import os
 
-from agents import Agent, ModelSettings, RunConfig, Runner, function_tool
+from agents import Agent, ModelSettings, RunConfig, Runner
+from agents.decorators import tool
 from agents.models.codex import CodexProvider
 
 
-@function_tool
+@tool
 def square(value: int) -> int:
     """Return the square of an integer."""
     print(f"square called with {value}")
@@ -57,19 +72,27 @@ agent = Agent(
     tools=[square],
     model_settings=ModelSettings(tool_choice="required"),
 )
-config = RunConfig(model=args.model, tracing_disabled=True)
-if args.codex:
-    config.model_provider = CodexProvider()
 
-result = Runner.run_sync(agent, "What is the square of 12?", run_config=config)
-print(result.final_output)
+
+async def main():
+    config = RunConfig(model=args.model, tracing_disabled=True)
+    if args.codex:
+        config.model_provider = CodexProvider(api_key=os.environ.get("CODEX_API_KEY"))
+    try:
+        result = await Runner.run(agent, "What is the square of 12?", run_config=config)
+        print(result.final_output)
+    finally:
+        await config.model_provider.aclose()
+
+
+asyncio.run(main())
 ```
 
-Run both commands from the same directory:
+Run the script in the environment where you installed the wheel.
 
 ```sh
-uv run python codex_switch.py
-uv run python codex_switch.py --codex
+python codex_switch.py
+python codex_switch.py --codex
 ```
 
 Each run should print `square called with 12` followed by an answer of `144`. The script disables hosted SDK tracing so Codex's saved login is sufficient for the Codex run. See [tracing](../tracing.md) to configure tracing credentials separately.
@@ -79,8 +102,8 @@ Omitting `--model` uses the selected provider's default model. A model name must
 For a longer example, run the [wildlife workflow](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/model_providers/codex_provider.py). It sends a local photograph, hands off to a specialist, calls an SDK function, and streams a structured report. It checks the handoff, tool call, output type, and expected catalog ID.
 
 ```sh
-uv run python -m examples.model_providers.codex_provider
-uv run python -m examples.model_providers.codex_provider --codex
+uv run --no-sync python -m examples.model_providers.codex_provider
+uv run --no-sync python -m examples.model_providers.codex_provider --codex
 ```
 
 ## Configure execution
@@ -90,12 +113,26 @@ uv run python -m examples.model_providers.codex_provider --codex
 | Option | Purpose |
 | --- | --- |
 | `cwd` | Codex's workspace. Defaults to the application's current directory. |
-| `codex_executable` | Path to the CLI executable. Defaults to `codex` on `PATH`. |
 | `config_overrides` | Sequence of Codex configuration overrides, such as `sandbox_mode="read-only"`. |
-| `env` | Complete environment for the child process. When supplied, it replaces the inherited environment. Include any required `PATH`, authentication, and configuration variables. |
-| `api_key` | API key for the child process, when the host allows that login method. |
+| `api_key` | API key for this provider, when the host permits API-key login. |
 
-Ordinary agents can use native Codex commands. These commands follow Codex's configured sandbox and approval policy. A host must allow the native sandbox to start; an outer container or filesystem policy can prevent workspace writes.
+Ordinary agents can use native Codex commands. Codex can start a separate helper process to execute a command in its configured sandbox. The host must allow that sandbox to start. An outer container or filesystem policy can limit workspace writes.
+
+Native commands inherit Codex's `core` set of environment variables by default. This includes `PATH` and the variables for your platform's temporary directories. An explicit `shell_environment_policy.inherit` in your Codex configuration takes precedence. To supply an extra variable for commands from one provider, use `config_overrides`.
+
+```python
+provider = CodexProvider(
+    config_overrides=('shell_environment_policy.set.BUILD_PROFILE="preview"',),
+)
+```
+
+Set `shell_environment_policy.inherit="none"` to start with an empty set of inherited variables. Then supply any variables the command and its sandbox need, such as `PATH`. This policy controls the environment Codex passes to commands. Core runs inside Python, and configured hooks can access the application's environment. To limit the variables available to the entire runtime, set the environment before starting Python.
+
+The provider disables shell snapshots by default so Codex can start each model call without launching a login shell. To capture your shell environment for native commands, pass `config_overrides=("features.shell_snapshot=true",)`.
+
+The workspace sandbox protects the directory that contains the installed helpers. For example, if you install the wheel in `.venv` at the workspace root, native commands can edit project files but cannot write to or rename `.venv`. Use a separate virtual environment for dependencies that native commands need to install.
+
+On Windows, the preview rejects a local Codex executor configured with the legacy elevated sandbox. That sandbox needs a setup helper that Codex cannot securely locate from a Python process. If your organization requires this sandbox, use an SDK-managed executor or configure a remote executor with `include_local = false` in `environments.toml`.
 
 Native Codex approval prompts are separate from SDK tool approvals. This provider cannot answer native approval requests and fails the model call when one arrives. For a non-interactive read-only workflow, configure Codex to avoid approval prompts:
 
@@ -113,11 +150,11 @@ Input guardrails with `run_in_parallel=False` finish before model execution. Can
 
 ## Streaming, history, and cancellation
 
-For each request from the Runner, the provider starts an ephemeral Codex thread. One request can include several model calls and native tool executions. The SDK supplies the instructions, supported messages and tool results, tool schemas, and output schema for the request. Keep conversation history in an [SDK session](../sessions/index.md) or pass `result.to_input_list()` to the next run.
+Reuse a `CodexProvider` across calls in the same workspace. The provider shares a native thread manager and starts a fresh, ephemeral Codex thread for each request from the Runner. One request can include several model calls and native tool executions. The SDK supplies the instructions, messages, tool results, and schemas for the request. Keep conversation history in an [SDK session](../sessions/index.md) or pass `result.to_input_list()` to the next run. When your application finishes using the provider, call `await provider.aclose()` to release its shared resources.
 
 Use `Runner.run_streamed()` and consume `result.stream_events()` as with the default provider. Text deltas arrive during generation. When the model supplies a requested reasoning summary, the stream also includes `response.reasoning_summary_text.delta` events. SDK function calls supply their complete JSON arguments in one update, rather than an argument-by-argument stream.
 
-Call `result.cancel()` to stop a streaming run immediately, or `result.cancel(mode="after_turn")` to stop after the current turn. Continue consuming the stream to observe completion. For a non-streaming async run, cancel its asyncio task. The provider closes the child App Server when the model call finishes or is cancelled; callers do not need to close the provider.
+Call `result.cancel()` to stop a streaming run immediately, or `result.cancel(mode="after_turn")` to stop after the current turn. Continue consuming the stream to observe completion. For a non-streaming async run, cancel its asyncio task. The provider has been closing the ephemeral thread at the end of each Runner request.
 
 Strict structured output uses Codex's output schema. With `strict_json_schema=False`, the provider puts the schema in the instructions and the SDK validates the final JSON. The latter does not constrain generation on the server.
 
@@ -125,37 +162,30 @@ Strict structured output uses Codex's output schema. With `strict_json_schema=Fa
 
 ## Operation tracing
 
-Use the existing SDK trace processors for Codex observations. Follow the [English tracing guide's OpenTelemetry section](https://openai.github.io/openai-agents-python/tracing/#opentelemetry) for one example across both providers, capture settings, and expected parent relationships.
+The embedded Codex provider has been forwarding model and native tool observations to the SDK trace processors. The [English OpenTelemetry example](https://openai.github.io/openai-agents-python/tracing/#opentelemetry) has been using the same processor registration for Codex and the default Responses provider.
 
-To trace individual model calls and native tools, build a CLI with the experimental protocol. Follow `patches/codex/README.md` in the SDK checkout. Pass the absolute path to the resulting executable.
+The SDK wheel has been bundling Codex Core in its native extension. `CodexProvider()` has been loading that extension for model calls and operation observations.
 
 ```python
 from agents import RunConfig
 from agents.models.codex import CodexProvider
 
 config = RunConfig(
-    model_provider=CodexProvider(
-        codex_executable="/absolute/path/to/patched/codex",
-    ),
+    model_provider=CodexProvider(),
     tracing={"operation_detail": "metadata"},
     trace_include_sensitive_data=False,
 )
 ```
 
-| Observation | Executable with operation tracing | Stock 0.166.0 |
-| --- | --- | --- |
-| Runner, agent, SDK turns, and SDK function execution | SDK spans | SDK spans |
-| Individual model invocations and automatic retries | One span per logical inference | Zero model spans |
-| Native Codex tools, including nested execution | Source observations with explicit parents | Not observed |
-| Per-inference timing, model identity, and token counts | Source values when available | Not available |
+The Runner has been recording agent execution, SDK turns, and Python function tools. Codex has been supplying observations for model inference and native workspace tools. The SDK has been using available source timestamps, parent identifiers, outcomes, and usage for those observations. Python function execution has been retaining one execution span from the Runner.
 
-Look for an SDK span named `codex.tracing.coverage` when observations are incomplete. Inspect its `reason` field. With the stock CLI, expect `reason="unsupported"` and `coverage="partial"` while the agent continues the run. In OTel, filter on `openai.agents.operation.coverage="partial"`.
+With `operation_detail` omitted and sensitive data enabled, the first model span of each Runner request has been capturing the submitted input. The last model span of that request has been capturing the returned response. Intermediate model calls and native tools have been capturing metadata. With `"content"` selected and sensitive data allowed, each operation has been capturing bounded content at its source.
 
-With the patched CLI, use each span's timestamps to measure the operation inside Codex. After a child process exits unexpectedly or a stream closes early, look for `outcome="interrupted"` and `estimated_end=True` on unfinished operations. For a Python tool requested by Codex, count one execution span from the Runner.
+When a run has been ending with unfinished operations, the SDK has been closing their spans with `outcome="interrupted"` and `estimated_end=True`. The SDK has been estimating that end time in Python.
 
-With `operation_detail` omitted and sensitive data enabled, find the input supplied by the Runner on the first model span and the response returned to the Runner on the last. Expect metadata on intermediate calls and native tools. To inspect what Codex sent on each call, select `"content"` and allow sensitive data for that run.
+A `codex.tracing.coverage` span has been identifying incomplete observations through `coverage="partial"` and a `reason` field. A completed model request without inference observations has been producing `reason="missing_operations"`. A full observation queue has been producing `reason="dropped_operations"`. OpenTelemetry has been exposing partial coverage as `openai.agents.operation.coverage="partial"`.
 
-Configure OTel export in Python. Set `tracing_disabled=True` to disable SDK capture and operation notifications for the run. For the settings shared by both providers, see the [English tracing guide's Payload capture section](https://openai.github.io/openai-agents-python/tracing/#payload-capture).
+`tracing_disabled=True` has been disabling SDK capture for the run. The [English payload capture table](https://openai.github.io/openai-agents-python/tracing/#payload-capture) has been describing the settings shared by both providers.
 
 ## Supported features and limits
 
@@ -165,7 +195,7 @@ Switching providers changes the model backend. It does not make every Responses 
 | --- | --- |
 | SDK function tools, handoffs, approvals, guardrails, sessions, and structured output | The SDK manages these features in either mode. |
 | Required tool use | `ModelSettings(tool_choice="required")` requires an exposed SDK tool call or handoff. Native Codex commands and hosted web search do not satisfy that requirement. It does not select a particular function by name. |
-| Deferred tool discovery | Requires a model whose stock Codex catalog advertises tool search. An unknown catalog model can support ordinary tool calls while exposing no discovery tool. Set `CODEX_MODEL` to a capable model and run `uv run -m examples.tools.tool_search --codex` to check discovery and callback results. |
+| Deferred tool discovery | Requires a model whose Codex catalog advertises tool search. Set `CODEX_MODEL` to a capable model and run `uv run --no-sync -m examples.tools.tool_search --codex` to check discovery and callback results. |
 | Local images | Supply an absolute local path, a `file:` URL, or inline image bytes as a data URL. The [basic examples](https://github.com/openai/openai-agents-python/tree/feat/simple-codex/examples/basic) show local input and app-managed downloads. Codex does not fetch remote image URLs supplied as model input. |
 | Audio input | Requires a Codex catalog model that declares audio input. Unsupported input is rejected. |
 | PDFs and uploaded files | Direct file inputs and hosted file IDs are unsupported. The basic PDF examples extract text in the app with Poppler. They do not perform OCR or interpret page layout. |
@@ -181,8 +211,8 @@ Switching providers changes the model backend. It does not make every Responses 
 
 | Symptom | What to check |
 | --- | --- |
-| CLI not found | Run `codex --version` in the application's environment, or pass `codex_executable`. |
-| Login or configuration-directory failure | Run the CLI under the same user and `CODEX_HOME`; check its login and directory access. An SDK OpenAI key alone does not configure a saved Codex login. |
+| Provider asks for a prebuilt SDK wheel | Install the wheel for your Python platform into the environment that runs your application. In a checkout, use `uv run --no-sync` after installing the wheel. |
+| Login or configuration-directory failure | Confirm that the process can write to `CODEX_HOME` and that the host permits your login method. Check the saved login or pass a provider key. |
 | Native shell cannot start | Check the host's native sandbox support and the configured sandbox mode. SDK tools and native commands use different executors. |
 | A paused sandbox run cannot resume | The SDK needs a writable snapshot directory in either mode. On Linux, if your home directory is read-only, set `XDG_STATE_HOME` to an absolute, writable directory before you run the app. Keep that directory available when you resume. Changing `CODEX_HOME` does not move SDK snapshots. |
 | Tools never load | Select a model whose Codex catalog declares tool search. The search examples fail if no tools load. |

@@ -184,10 +184,11 @@ pip install "openai-agents[opentelemetry]" opentelemetry-sdk
 
 ### One setup for both providers
 
-Save the following script as `otel_agent.py`. Register the processor once, before starting a run. Configure `OPENAI_API_KEY` for the default provider. For Codex, follow the [CLI and authentication setup](models/codex.md#set-up-the-checkout-and-cli).
+Save the following script as `otel_agent.py`. Register the processor once, before starting a run. Configure `OPENAI_API_KEY` for the default provider. For embedded Codex, follow the [wheel installation](models/codex.md#install-a-github-prerelease-wheel) and [authentication setup](models/codex.md#authenticate).
 
 ```python
 import argparse
+import asyncio
 
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
@@ -199,7 +200,6 @@ from agents.models.codex import CodexProvider
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--codex", action="store_true")
-parser.add_argument("--codex-executable")
 parser.add_argument("--model")
 parser.add_argument("--content", action="store_true")
 args = parser.parse_args()
@@ -229,19 +229,27 @@ config = RunConfig(
     trace_include_sensitive_data=args.content,
 )
 if args.codex:
-    config.model_provider = CodexProvider(codex_executable=args.codex_executable)
+    config.model_provider = CodexProvider()
+
+
+async def main():
+    try:
+        with tracer.start_as_current_span("calculator.request"):
+            result = await Runner.run(agent, "What is the square of 12?", run_config=config)
+        print(result.final_output)
+    finally:
+        await config.model_provider.aclose()
+
 
 try:
-    with tracer.start_as_current_span("calculator.request"):
-        result = Runner.run_sync(agent, "What is the square of 12?", run_config=config)
-    print(result.final_output)
+    asyncio.run(main())
 finally:
     provider.shutdown()
 ```
 
 ```sh
 python otel_agent.py
-python otel_agent.py --codex --codex-executable /absolute/path/to/patched/codex
+python otel_agent.py --codex
 ```
 
 Use `set_trace_processors()` to replace the default SDK processors, as above. Use `add_trace_processor()` to keep them alongside OTel. Configure sampling and export on your application's tracer provider. Flush and shut down that provider in your application.
@@ -260,7 +268,7 @@ calculator.request
         chat <model>
 ```
 
-Group runs, agents, model calls, and tools by `gen_ai.operation.name` using `invoke_runner`, `invoke_agent`, `chat`, and `execute_tool`. Use `openai.agents.turn` for SDK turns and `openai.agents.tool_approval` for approval records. Read tool durations from the start of execution after approval. For stock Codex coverage, see the [provider table](models/codex.md#operation-tracing).
+Group runs, agents, model calls, and tools by `gen_ai.operation.name` using `invoke_runner`, `invoke_agent`, `chat`, and `execute_tool`. Use `openai.agents.turn` for SDK turns and `openai.agents.tool_approval` for approval records. Read tool durations from the start of execution after approval. For embedded Codex observations, see [operation tracing](models/codex.md#operation-tracing).
 
 ### Payload capture
 

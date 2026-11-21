@@ -1,0 +1,42 @@
+{
+  "x86_64-unknown-linux-musl": [
+    {
+      "name": "codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "7588334fd47bc4003d970b70dfd4d1e4578491b1e9baa72976a4c2d7e97590da"
+    },
+    {
+      "name": "bwrap-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "a37212d853eec479c6ad4f0852ccf857dec422b76747f0349c70a382954be56f"
+    }
+  ],
+  "aarch64-unknown-linux-musl": [
+    {
+      "name": "codex-code-mode-host-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "ac98d1f878e353a16cba711fd47bfef2f6c814109bdd819ee2b6b6d6a19701e7"
+    },
+    {
+      "name": "bwrap-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "b59c26ee2cc939a1f3df81b639fcc4fb965609bdc704ca85777c168c12cfeb26"
+    }
+  ],
+  "aarch64-apple-darwin": [
+    {
+      "name": "codex-code-mode-host-aarch64-apple-darwin.tar.gz",
+      "sha256": "7abd50fe5f033495a7b693c45fb82dc57093a18f1c4ba3e8043577de46c5c7c5"
+    }
+  ],
+  "x86_64-pc-windows-msvc": [
+    {
+      "name": "codex-code-mode-host-x86_64-pc-windows-msvc.exe.tar.gz",
+      "sha256": "91ddc4847c18d364e641fbce4a0f50b747935b1d5548d9ebb4b2242a8cd09b96"
+    },
+    {
+      "name": "codex-command-runner-x86_64-pc-windows-msvc.exe.tar.gz",
+      "sha256": "a5fa7fd9b06bcbaa81505eac5cb170b22823fc40f40fe88f61d747502d950b8f"
+    },
+    {
+      "name": "codex-windows-sandbox-setup-x86_64-pc-windows-msvc.exe.tar.gz",
+      "sha256": "fb106ef832e019ff074ec65d8f251c5da6d46a510034e2f557c9c041dd8b7527"
+    }
+  ]
+}

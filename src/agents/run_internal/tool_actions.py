@@ -21,7 +21,7 @@ from openai.types.responses.response_input_param import ComputerCallOutput
 
 from .._tool_identity import get_mapping_or_attr, get_tool_trace_name_for_tool
 from ..agent import Agent
-from ..exceptions import ModelBehaviorError
+from ..exceptions import ModelBehaviorError, UserError
 from ..items import ItemHelpers, RunItem, ToolApprovalItem, ToolCallOutputItem
 from ..logger import logger
 from ..run_config import RunConfig
@@ -60,12 +60,14 @@ from .tool_execution import (
     resolve_approval_rejection_message,
     resolve_approval_status,
     run_native_tool_post_invoke,
+    run_tool_end_hooks,
     serialize_shell_output,
     truncate_shell_outputs,
 )
+from .tool_hooks import transform_tool_output
 
 if TYPE_CHECKING:
-    from ..lifecycle import RunHooks
+    from ..lifecycle import AgentHooks, RunHooks
     from .run_steps import (
         ToolRunApplyPatchCall,
         ToolRunComputerAction,
@@ -121,7 +123,7 @@ class ComputerAction:
         """Run a computer action, capturing a screenshot and notifying hooks."""
         trace_tool_name = get_tool_trace_name_for_tool(action.computer_tool) or cls.TRACE_TOOL_NAME
 
-        with pending_tool_span(config, trace_tool_name, action.tool_call.call_id) as span:
+        async def _run_action(span: Any) -> RunItem:
             if config.trace_include_sensitive_data:
                 span.span_data.input = _serialize_trace_payload(
                     cls._get_trace_input_payload(action.tool_call)
@@ -165,6 +167,16 @@ class ComputerAction:
                 log_tool_action_error("Failed to execute computer action", exc)
                 raise
 
+            return await run_native_tool_post_invoke(
+                finalize_output(output, span, agent_hooks), sibling_category_failure
+            )
+
+        async def finalize_output(
+            screenshot: str, span: Any, agent_hooks: AgentHooks[Any] | None
+        ) -> ToolCallOutputItem:
+            output = await transform_tool_output(
+                config, context_wrapper, agent, action.computer_tool, action.tool_call, screenshot
+            )
             image_url = f"data:image/png;base64,{output}" if output else ""
             raw_item = ComputerCallOutput(
                 call_id=action.tool_call.call_id,
@@ -185,36 +197,29 @@ class ComputerAction:
             if tool_output_committer is not None:
                 tool_output_committer(output_item)
 
-            async def finalize_output() -> None:
-                custom_data = await maybe_extract_custom_data(
-                    action.computer_tool.custom_data_extractor,
-                    ComputerToolCustomDataContext(
-                        run_context=context_wrapper,
-                        tool=action.computer_tool,
-                        tool_call=action.tool_call,
-                        output=image_url,
-                        raw_item=copy.deepcopy(raw_item),
-                    ),
-                )
-                output_item.custom_data = custom_data
+            custom_data = await maybe_extract_custom_data(
+                action.computer_tool.custom_data_extractor,
+                ComputerToolCustomDataContext(
+                    run_context=context_wrapper,
+                    tool=action.computer_tool,
+                    tool_call=action.tool_call,
+                    output=image_url,
+                    raw_item=copy.deepcopy(raw_item),
+                ),
+            )
+            output_item.custom_data = custom_data
 
-                await gather_with_cancel(
-                    hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
-                    (
-                        agent_hooks.on_tool_end(
-                            context_wrapper, agent, action.computer_tool, output
-                        )
-                        if agent_hooks is not None
-                        else _coro.noop_coroutine()
-                    ),
-                )
-
-            await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
+            await run_tool_end_hooks(
+                hooks, agent_hooks, context_wrapper, agent, action.computer_tool, output
+            )
 
             if config.trace_include_sensitive_data:
                 span.span_data.output = image_url
 
             return output_item
+
+        with pending_tool_span(config, trace_tool_name, action.tool_call.call_id) as span:
+            return await _run_action(span)
 
     @classmethod
     async def _execute_action_and_capture(
@@ -431,37 +436,36 @@ class LocalShellAction:
             if span.span_data.operation.detail == "content":
                 span.span_data.input = _serialize_trace_payload(call.tool_call.action)
             output = call.local_shell_tool.executor(request)
-            result = await output if inspect.isawaitable(output) else output
+            raw_result = await output if inspect.isawaitable(output) else output
             if span.span_data.operation.detail == "content":
-                span.span_data.output = result
+                span.span_data.output = raw_result
 
-        raw_payload: dict[str, Any] = {
-            "type": "local_shell_call_output",
-            "call_id": call.tool_call.call_id,
-            "output": result,
-        }
-        output_item = ToolCallOutputItem(
-            agent=agent,
-            output=result,
-            raw_item=raw_payload,
-        )
+        async def finalize_output() -> ToolCallOutputItem:
+            result = await transform_tool_output(
+                config, context_wrapper, agent, call.local_shell_tool, call.tool_call, raw_result
+            )
 
-        async def finalize_output() -> None:
+            raw_payload: dict[str, Any] = {
+                "type": "local_shell_call_output",
+                "call_id": call.tool_call.call_id,
+                "output": result,
+            }
+            output_item = ToolCallOutputItem(
+                agent=agent,
+                output=result,
+                raw_item=raw_payload,
+            )
+
             if tool_output_committer is not None:
                 tool_output_committer(output_item)
 
-            await gather_with_cancel(
-                hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
-                (
-                    agent_hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result)
-                    if agent_hooks is not None
-                    else _coro.noop_coroutine()
-                ),
+            await run_tool_end_hooks(
+                hooks, agent_hooks, context_wrapper, agent, call.local_shell_tool, result
             )
 
-        await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
+            return output_item
 
-        return output_item
+        return await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
 
 
 class ShellAction:
@@ -489,8 +493,8 @@ class ShellAction:
             tool_name=shell_tool.name,
         )
 
-        with pending_tool_span(config, shell_tool.name, shell_call.call_id) as span:
-            if config.trace_include_sensitive_data:
+        async def _run_call(span: Any) -> RunItem:
+            if span is not None and config.trace_include_sensitive_data:
                 span.span_data.input = _serialize_trace_payload(
                     dataclasses.asdict(shell_call.action)
                 )
@@ -561,16 +565,12 @@ class ShellAction:
             )
             request = ShellCommandRequest(ctx_wrapper=context_wrapper, data=shell_call)
             status: Literal["completed", "failed"] = "completed"
-            output_text = ""
-            shell_output_payload: list[dict[str, Any]] | None = None
-            provider_meta: dict[str, Any] | None = None
-            max_output_length: int | None = None
             requested_max_output_length = normalize_max_output_length(
                 shell_call.action.max_output_length
             )
 
             try:
-                executor = call.shell_tool.executor
+                executor = shell_tool.executor
                 if executor is None:
                     raise ModelBehaviorError("Shell tool has no local executor configured.")
                 executor_result = executor(request)
@@ -579,55 +579,57 @@ class ShellAction:
                     if inspect.isawaitable(executor_result)
                     else executor_result
                 )
+            except Exception as exc:
+                status = "failed"
+                result = record_shell_failure(exc, span)
 
+            return await run_native_tool_post_invoke(
+                finalize_output(result, status, requested_max_output_length, span),
+                sibling_category_failure,
+            )
+
+        async def finalize_output(
+            result: str | ShellResult,
+            status: Literal["completed", "failed"],
+            requested_max_output_length: int | None,
+            span: Any,
+        ) -> ToolCallOutputItem:
+            result = await transform_tool_output(
+                config, context_wrapper, agent, shell_tool, call.tool_call, result
+            )
+            max_output_length = requested_max_output_length
+            raw_entries: list[dict[str, Any]] | None = None
+            provider_meta: dict[str, Any] | None = None
+            try:
                 if isinstance(result, ShellResult):
                     normalized = [normalize_shell_output(entry) for entry in result.output]
-                    result_max_output_length = normalize_max_output_length(result.max_output_length)
-                    if result_max_output_length is None:
-                        max_output_length = requested_max_output_length
-                    elif requested_max_output_length is None:
-                        max_output_length = result_max_output_length
-                    else:
-                        max_output_length = min(
-                            result_max_output_length, requested_max_output_length
-                        )
+                    result_limit = normalize_max_output_length(result.max_output_length)
+                    limits = (requested_max_output_length, result_limit)
+                    max_output_length = min(
+                        (limit for limit in limits if limit is not None), default=None
+                    )
                     if max_output_length is not None:
                         normalized = truncate_shell_outputs(normalized, max_output_length)
                     output_text = render_shell_outputs(normalized)
-                    if max_output_length is not None:
-                        output_text = output_text[:max_output_length]
-                    shell_output_payload = [serialize_shell_output(entry) for entry in normalized]
+                    raw_entries = [serialize_shell_output(entry) for entry in normalized]
                     provider_meta = dict(result.provider_data or {})
                 else:
                     output_text = str(result)
-                    if requested_max_output_length is not None:
-                        max_output_length = requested_max_output_length
-                        output_text = output_text[:max_output_length]
+                output_text = output_text[:max_output_length]
             except Exception as exc:
+                if (
+                    config.tool_execution is not None
+                    and config.tool_execution.prepare_tool_output is not None
+                ):
+                    raise UserError(
+                        "prepare_tool_output returned an invalid shell result."
+                    ) from exc
                 status = "failed"
-                output_text = format_shell_error(exc)
-                trace_error = get_trace_tool_error(
-                    trace_include_sensitive_data=config.trace_include_sensitive_data,
-                    error_message=output_text,
-                )
-                span.set_error(
-                    SpanError(
-                        message="Error running tool",
-                        data={
-                            "tool_name": shell_tool.name,
-                            "error": trace_error,
-                        },
-                    )
-                )
+                output_text = record_shell_failure(exc, span)[:requested_max_output_length]
                 if requested_max_output_length is not None:
                     max_output_length = requested_max_output_length
-                    output_text = output_text[:max_output_length]
-                log_tool_action_error("Shell executor failed", exc)
 
-            raw_entries: list[dict[str, Any]] | None = None
-            if shell_output_payload is not None:
-                raw_entries = shell_output_payload
-            elif output_text:
+            if raw_entries is None and output_text:
                 raw_entries = [
                     {
                         "stdout": output_text,
@@ -637,12 +639,10 @@ class ShellAction:
                     }
                 ]
 
-            structured_output = normalize_shell_output_entries(raw_entries) if raw_entries else []
-
             raw_item: dict[str, Any] = {
                 "type": "shell_call_output",
                 "call_id": shell_call.call_id,
-                "output": structured_output,
+                "output": normalize_shell_output_entries(raw_entries or []),
                 "status": status,
             }
             ItemHelpers.copy_tool_call_caller(call.tool_call, raw_item)
@@ -653,34 +653,36 @@ class ShellAction:
             if provider_meta:
                 raw_item["provider_data"] = provider_meta
 
-            output_item = ToolCallOutputItem(
-                agent=agent,
-                output=output_text,
-                raw_item=raw_item,
+            output_item = ToolCallOutputItem(agent=agent, output=output_text, raw_item=raw_item)
+            if tool_output_committer is not None:
+                tool_output_committer(output_item)
+            await run_tool_end_hooks(
+                hooks, agent_hooks, context_wrapper, agent, shell_tool, output_text
             )
 
-            async def finalize_output() -> None:
-                if tool_output_committer is not None:
-                    tool_output_committer(output_item)
-
-                await gather_with_cancel(
-                    hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
-                    (
-                        agent_hooks.on_tool_end(
-                            context_wrapper, agent, call.shell_tool, output_text
-                        )
-                        if agent_hooks is not None
-                        else _coro.noop_coroutine()
-                    ),
-                )
-
-            await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
-
             span.span_data.operation.outcome = status
-            if config.trace_include_sensitive_data:
+            if span is not None and config.trace_include_sensitive_data:
                 span.span_data.output = output_text
-
             return output_item
+
+        def record_shell_failure(exc: Exception, span: Any) -> str:
+            message = format_shell_error(exc)
+            if span is not None:
+                trace_error = get_trace_tool_error(
+                    trace_include_sensitive_data=config.trace_include_sensitive_data,
+                    error_message=message,
+                )
+                span.set_error(
+                    SpanError(
+                        message="Error running tool",
+                        data={"tool_name": shell_tool.name, "error": trace_error},
+                    )
+                )
+            log_tool_action_error("Shell executor failed", exc)
+            return message
+
+        with pending_tool_span(config, shell_tool.name, shell_call.call_id) as span:
+            return await _run_call(span)
 
 
 class CustomToolAction:
@@ -721,7 +723,7 @@ class CustomToolAction:
             tool_name=custom_tool.name,
         )
 
-        with pending_tool_span(config, custom_tool.name, call_id) as span:
+        async def _run_call(span: Any) -> RunItem:
             if config.trace_include_sensitive_data:
                 span.span_data.input = tool_input
 
@@ -812,6 +814,14 @@ class CustomToolAction:
                 )
                 log_tool_action_error("Custom tool failed", exc)
 
+            return await run_native_tool_post_invoke(
+                finalize_output(output_text, span), sibling_category_failure
+            )
+
+        async def finalize_output(result: str, span: Any) -> ToolCallOutputItem:
+            output_text = await transform_tool_output(
+                config, tool_context, agent, custom_tool, call.tool_call, result
+            )
             raw_item = cls._raw_tool_output_item(
                 call_id,
                 output_text,
@@ -828,33 +838,28 @@ class CustomToolAction:
             if tool_output_committer is not None:
                 tool_output_committer(output_item)
 
-            async def finalize_output() -> None:
-                custom_data = await maybe_extract_custom_data(
-                    custom_tool.custom_data_extractor,
-                    CustomToolCustomDataContext(
-                        tool_context=tool_context,
-                        tool=custom_tool,
-                        input=tool_input,
-                        output=output_text,
-                        raw_item=copy.deepcopy(raw_item),
-                    ),
-                )
-                output_item.custom_data = custom_data
+            custom_data = await maybe_extract_custom_data(
+                custom_tool.custom_data_extractor,
+                CustomToolCustomDataContext(
+                    tool_context=tool_context,
+                    tool=custom_tool,
+                    input=tool_input,
+                    output=output_text,
+                    raw_item=copy.deepcopy(raw_item),
+                ),
+            )
+            output_item.custom_data = custom_data
 
-                await gather_with_cancel(
-                    hooks.on_tool_end(tool_context, agent, custom_tool, output_text),
-                    (
-                        agent_hooks.on_tool_end(tool_context, agent, custom_tool, output_text)
-                        if agent_hooks is not None
-                        else _coro.noop_coroutine()
-                    ),
-                )
-
-            await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
+            await run_tool_end_hooks(
+                hooks, agent_hooks, tool_context, agent, custom_tool, output_text
+            )
 
             if config.trace_include_sensitive_data:
                 span.span_data.output = output_text
             return output_item
+
+        with pending_tool_span(config, custom_tool.name, call_id) as span:
+            return await _run_call(span)
 
     @staticmethod
     def _normalize_output(output: Any) -> str:
@@ -923,7 +928,7 @@ class ApplyPatchAction:
             tool_name=apply_patch_tool.name,
         )
 
-        with pending_tool_span(config, apply_patch_tool.name, call_id) as span:
+        async def _run_call(span: Any) -> RunItem:
             if config.trace_include_sensitive_data:
                 span.span_data.input = _serialize_trace_payload(
                     [
@@ -1047,6 +1052,16 @@ class ApplyPatchAction:
                 )
                 log_tool_action_error("Apply patch editor failed", exc)
 
+            return await run_native_tool_post_invoke(
+                finalize_output(output_text, status, span), sibling_category_failure
+            )
+
+        async def finalize_output(
+            result: str, status: Literal["completed", "failed"], span: Any
+        ) -> ToolCallOutputItem:
+            output_text = await transform_tool_output(
+                config, context_wrapper, agent, apply_patch_tool, call.tool_call, result
+            )
             raw_item: dict[str, Any] = {
                 "type": "apply_patch_call_output",
                 "call_id": call_id,
@@ -1066,38 +1081,31 @@ class ApplyPatchAction:
             if tool_output_committer is not None:
                 tool_output_committer(output_item)
 
-            async def finalize_output() -> None:
-                custom_data = await maybe_extract_custom_data(
-                    apply_patch_tool.custom_data_extractor,
-                    ApplyPatchToolCustomDataContext(
-                        run_context=context_wrapper,
-                        tool=apply_patch_tool,
-                        operations=operations,
-                        output=output_text,
-                        status=status,
-                        raw_item=copy.deepcopy(raw_item),
-                    ),
-                )
-                output_item.custom_data = custom_data
+            custom_data = await maybe_extract_custom_data(
+                apply_patch_tool.custom_data_extractor,
+                ApplyPatchToolCustomDataContext(
+                    run_context=context_wrapper,
+                    tool=apply_patch_tool,
+                    operations=operations,
+                    output=output_text,
+                    status=status,
+                    raw_item=copy.deepcopy(raw_item),
+                ),
+            )
+            output_item.custom_data = custom_data
 
-                await gather_with_cancel(
-                    hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),
-                    (
-                        agent_hooks.on_tool_end(
-                            context_wrapper, agent, apply_patch_tool, output_text
-                        )
-                        if agent_hooks is not None
-                        else _coro.noop_coroutine()
-                    ),
-                )
-
-            await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
+            await run_tool_end_hooks(
+                hooks, agent_hooks, context_wrapper, agent, apply_patch_tool, output_text
+            )
 
             span.span_data.operation.outcome = status
             if config.trace_include_sensitive_data:
                 span.span_data.output = output_text
 
             return output_item
+
+        with pending_tool_span(config, apply_patch_tool.name, call_id) as span:
+            return await _run_call(span)
 
 
 __all__ = [

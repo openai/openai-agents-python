@@ -8,7 +8,8 @@ from pathlib import Path
 from openai.types.responses import ResponseTextDeltaEvent
 from pydantic import BaseModel
 
-from agents import Agent, RunConfig, Runner, function_tool
+from agents import Agent, RunConfig, Runner
+from agents.decorators import tool
 from agents.models.codex import CodexProvider
 
 
@@ -20,7 +21,7 @@ class WildlifeReport(BaseModel):
 async def main(use_codex: bool) -> None:
     calls: list[str] = []
 
-    @function_tool
+    @tool
     def lookup_animal_record(species: str) -> str:
         """Return the catalog record ID for the animal in the photograph."""
         calls.append(species)
@@ -60,9 +61,14 @@ async def main(use_codex: bool) -> None:
         ],
         run_config=config,
     )
-    async for event in result.stream_events():
-        if event.type == "raw_response_event" and isinstance(event.data, ResponseTextDeltaEvent):
-            print(event.data.delta, end="", flush=True)
+    try:
+        async for event in result.stream_events():
+            if event.type == "raw_response_event" and isinstance(
+                event.data, ResponseTextDeltaEvent
+            ):
+                print(event.data.delta, end="", flush=True)
+    finally:
+        await config.model_provider.aclose()
     report = result.final_output
     if result.last_agent is not specialist or not calls or not isinstance(report, WildlifeReport):
         raise RuntimeError(
@@ -75,5 +81,7 @@ async def main(use_codex: bool) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--codex", action="store_true", help="Use the stock Codex model provider")
+    parser.add_argument(
+        "--codex", action="store_true", help="Use the embedded Codex model provider"
+    )
     asyncio.run(main(parser.parse_args().codex))

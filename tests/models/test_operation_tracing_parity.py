@@ -1,12 +1,10 @@
-"""Exercise provider-wire conversion and actual subprocess tool ownership over loopback."""
+"""Exercise provider-wire conversion and real embedded Codex tools over loopback."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-import shlex
-import signal
 import sys
 import threading
 import time
@@ -214,10 +212,12 @@ class _LiveProcessor(SpanProcessorForTests):
 
 @pytest.fixture
 def telemetry(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> Iterator[tuple[Any, Any, SpanProcessorForTests, Any]]:
     monkeypatch.delenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", raising=False)
-    pytest.importorskip("opentelemetry.sdk.trace")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    if os.environ.get("CODEX_TRACING_NATIVE_TEST") != "1":
+        pytest.importorskip("opentelemetry.sdk.trace")
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -237,13 +237,9 @@ def telemetry(
         provider.shutdown()
 
 
-def _codex_provider(
-    tmp_path: Path, server: _ResponsesFixture, *, pid_file: Path | None = None
-) -> CodexProvider:
-    executable = os.environ.get("CODEX_TRACING_TEST_EXECUTABLE")
-    if not executable:
-        pytest.skip("Set CODEX_TRACING_TEST_EXECUTABLE to run patched Codex integration tests.")
-    assert Path(executable).is_file(), "CODEX_TRACING_TEST_EXECUTABLE must name a real binary."
+def _codex_provider(tmp_path: Path, server: _ResponsesFixture) -> CodexProvider:
+    if os.environ.get("CODEX_TRACING_NATIVE_TEST") != "1":
+        pytest.skip("Set CODEX_TRACING_NATIVE_TEST=1 to test the installed Codex native wheel.")
     home = tmp_path / "codex-home"
     home.mkdir(mode=0o700)
     config = f'''model = "{MODEL}"
@@ -289,29 +285,11 @@ trace_exporter = "none"
             + json.dumps(sys.executable)
             + "\nargs = "
             + json.dumps([str(mcp_server), str(tmp_path / "parity-native.txt")])
-            + "\nstartup_timeout_sec = 10\ntool_timeout_sec = 5\n"
+            + "\nrequired = true\nstartup_timeout_sec = 10\ntool_timeout_sec = 5\n"
             + 'default_tools_approval_mode = "approve"\n'
         )
     (home / "config.toml").write_text(config)
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if key in {"PATH", "HOME", "LANG", "LD_LIBRARY_PATH", "TMPDIR"}
-    }
-    environment["CODEX_HOME"] = str(home)
-    if pid_file is not None:
-        # The launcher records the real child PID and immediately executes the unmodified CLI.
-        launcher = tmp_path / "tracked-codex"
-        launcher.write_text(
-            "#!/bin/sh\nprintf '%s' \"$$\" > "
-            + shlex.quote(str(pid_file))
-            + "\nexec "
-            + shlex.quote(str(Path(executable).resolve()))
-            + ' "$@"\n'
-        )
-        launcher.chmod(0o700)
-        executable = str(launcher)
-    return CodexProvider(cwd=tmp_path, codex_executable=executable, env=environment)
+    return CodexProvider(cwd=tmp_path)
 
 
 def _ns(timestamp: str | None) -> int:
@@ -639,24 +617,17 @@ async def test_operation_tracing_observed_model_without_header(
 
 @pytest.mark.parametrize(
     ("provider_name", "termination"),
-    [("default", "cancel"), ("codex", "cancel"), ("codex", "child-exit")],
+    [("default", "cancel"), ("codex", "cancel"), ("codex", "provider-close")],
 )
 async def test_operation_tracing_live_start_and_cancel(
     tmp_path: Path, telemetry: Any, provider_name: str, termination: str
 ) -> None:
-    if termination == "child-exit" and os.name != "posix":
-        pytest.skip("The transparent child-PID launcher requires a POSIX shell.")
     tracer, exporter, native, _ = telemetry
     server = _ResponsesFixture(held=True)
     model_provider = None
     task = None
     try:
-        pid_file = tmp_path / "codex.pid"
-        model_provider = (
-            _codex_provider(tmp_path, server, pid_file=pid_file)
-            if termination == "child-exit"
-            else _model_provider(provider_name, tmp_path, server)
-        )
+        model_provider = _model_provider(provider_name, tmp_path, server)
         with tracer.start_as_current_span("host_job") as host:
             task = asyncio.create_task(
                 Runner.run(
@@ -671,9 +642,9 @@ async def test_operation_tracing_live_start_and_cancel(
             await asyncio.wait_for(native.model_started.wait(), 5)
             assert len(native.started_models) == 1
             assert native.started_models[0].ended_at is None
-            if termination == "child-exit":
-                os.kill(int(pid_file.read_text()), signal.SIGKILL)
-                with pytest.raises(Exception, match="Codex App Server.*(?:exited|closed)"):
+            if termination == "provider-close":
+                await asyncio.wait_for(model_provider.aclose(), 10)
+                with pytest.raises(RuntimeError):
                     await asyncio.wait_for(task, 10)
             else:
                 task.cancel()
@@ -694,8 +665,7 @@ async def test_operation_tracing_live_start_and_cancel(
         ]
         assert len(chats) == 1
         assert chats[0].end_time is not None
-        if termination == "child-exit":
-            assert models[0].span_data.operation.estimated_end is True
+        if models[0].span_data.operation.estimated_end:
             assert chats[0].attributes["openai.agents.operation.estimated_end"] is True
             assert chats[0].attributes["openai.agents.operation.outcome"] == "interrupted"
             coverage = [
@@ -766,75 +736,6 @@ async def test_operation_tracing_transport_retry(
         assert len(chats) == 1
         assert chats[0].attributes["gen_ai.usage.input_tokens"] == 10
         assert chats[0].attributes["gen_ai.usage.output_tokens"] == 5
-    finally:
-        if model_provider is not None:
-            await model_provider.aclose()
-        server.close()
-
-
-async def test_stock_codex_reports_partial_coverage(
-    tmp_path: Path, telemetry: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    stock = os.environ.get("CODEX_TRACING_STOCK_EXECUTABLE")
-    if not stock:
-        pytest.skip("Set CODEX_TRACING_STOCK_EXECUTABLE to run the stock binary coverage gate.")
-    monkeypatch.setenv("CODEX_TRACING_TEST_EXECUTABLE", stock)
-    tracer, exporter, native, _ = telemetry
-    server = _ResponsesFixture()
-    model_provider = None
-    calls: list[str] = []
-    try:
-        model_provider = _codex_provider(tmp_path, server)
-
-        @tool
-        async def lookup(key: str) -> str:
-            calls.append(key)
-            return TOOL_RESULT
-
-        with tracer.start_as_current_span("host_job") as host:
-            result = await asyncio.wait_for(
-                Runner.run(
-                    Agent(name="worker", model=MODEL, tools=[lookup]),
-                    PROMPT,
-                    run_config=RunConfig(
-                        model_provider=model_provider, tracing={"operation_detail": "metadata"}
-                    ),
-                ),
-                30,
-            )
-        assert result.final_output == ANSWER
-        assert calls == [ARGUMENT]
-        assert len(server.requests) == 2
-        spans = native.get_ordered_spans()
-        assert not [span for span in spans if span.span_data.type in {"response", "generation"}]
-        assert len([span for span in spans if span.span_data.type == "function"]) == 1
-        coverage = [
-            span
-            for span in spans
-            if span.span_data.type == "custom" and span.span_data.name == "codex.tracing.coverage"
-        ]
-        assert len(coverage) == 2
-        assert all(
-            span.span_data.data["coverage"] == "partial"
-            and span.span_data.data["reason"] == "unsupported"
-            for span in coverage
-        )
-        exported = exporter.get_finished_spans()
-        assert not [
-            span for span in exported if span.attributes.get("gen_ai.operation.name") == "chat"
-        ]
-        assert (
-            len(
-                [
-                    span
-                    for span in exported
-                    if span.attributes.get("gen_ai.operation.name") == "execute_tool"
-                ]
-            )
-            == 1
-        )
-        assert len([span for span in exported if span.name == "codex.tracing.coverage"]) == 2
-        assert all(span.context.trace_id == host.get_span_context().trace_id for span in exported)
     finally:
         if model_provider is not None:
             await model_provider.aclose()

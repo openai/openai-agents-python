@@ -262,6 +262,9 @@ class GenerationSpanData(
         tools: Sequence[Mapping[str, Any]] | None = None,
     ):
         self.operation = OperationMetadata(model=model)
+        self._input = None
+        self._model_config = None
+        self._tools = None
         self.input = input
         self.output = output
         self.model = model
@@ -269,13 +272,42 @@ class GenerationSpanData(
         self.usage = usage
         self.tools = tools
 
+    def _set_input_payload(self, field: str, value: Any) -> None:
+        if self.operation.detail != "content":
+            setattr(self, f"_{field}", _capture_payload(self.operation, value))
+            return
+        # Keep submitted messages ahead of optional configuration and tool definitions.
+        payload = {"input": self._input, "model_config": self._model_config, "tools": self._tools}
+        payload[field] = value
+        captured = bound_content({key: item for key, item in payload.items() if item is not None})
+        if not isinstance(captured, Mapping):
+            captured = {"input": [{"omitted": True, "reason": "serialization_failed"}]}
+        captured = cast(Mapping[str, Any], captured)
+        self._input = captured.get("input")
+        self._model_config = captured.get("model_config")
+        self._tools = captured.get("tools")
+        if captured.get("truncated"):
+            marker = {"truncated": True}
+            if self._input is None:
+                self._input = [marker]
+            elif isinstance(self._input, list) and marker not in self._input:
+                self._input = [*self._input, marker]
+
+    @property
+    def input(self) -> Sequence[Mapping[str, Any]] | None:
+        return self._input
+
+    @input.setter
+    def input(self, value: Sequence[Mapping[str, Any]] | None) -> None:
+        self._set_input_payload("input", value)
+
     @property
     def model_config(self) -> Mapping[str, Any] | None:
         return self._model_config
 
     @model_config.setter
     def model_config(self, value: Mapping[str, Any] | None) -> None:
-        self._model_config = _capture_payload(self.operation, value)
+        self._set_input_payload("model_config", value)
 
     @property
     def tools(self) -> Sequence[Mapping[str, Any]] | None:
@@ -283,7 +315,7 @@ class GenerationSpanData(
 
     @tools.setter
     def tools(self, value: Sequence[Mapping[str, Any]] | None) -> None:
-        self._tools = _capture_payload(self.operation, value)
+        self._set_input_payload("tools", value)
 
     @property
     def type(self) -> str:
