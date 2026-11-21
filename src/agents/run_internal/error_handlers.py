@@ -93,7 +93,7 @@ def attach_generic_agent_error(
             return
         detail = (
             _format_agent_error_detail(exc)
-            if trace_include_sensitive_data
+            if _error_tracing.include_error_text(trace_include_sensitive_data)
             else REDACTED_TRACE_ERROR_MESSAGE
         )
         _error_tracing.attach_error_to_span(

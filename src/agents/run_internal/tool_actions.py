@@ -55,6 +55,7 @@ from .tool_execution import (
     normalize_max_output_length,
     normalize_shell_output,
     normalize_shell_output_entries,
+    pending_tool_span,
     render_shell_outputs,
     resolve_approval_rejection_message,
     resolve_approval_status,
@@ -62,7 +63,6 @@ from .tool_execution import (
     run_tool_end_hooks,
     serialize_shell_output,
     truncate_shell_outputs,
-    with_tool_function_span,
 )
 from .tool_hooks import transform_tool_output
 
@@ -123,8 +123,8 @@ class ComputerAction:
         """Run a computer action, capturing a screenshot and notifying hooks."""
         trace_tool_name = get_tool_trace_name_for_tool(action.computer_tool) or cls.TRACE_TOOL_NAME
 
-        async def _run_action(span: Any | None) -> RunItem:
-            if span is not None and config.trace_include_sensitive_data:
+        async def _run_action(span: Any) -> RunItem:
+            if config.trace_include_sensitive_data:
                 span.span_data.input = _serialize_trace_payload(
                     cls._get_trace_input_payload(action.tool_call)
                 )
@@ -133,6 +133,7 @@ class ComputerAction:
                 tool=action.computer_tool, run_context=context_wrapper
             )
             agent_hooks = agent.hooks
+            span.start(mark_as_current=True)
             context_wrapper._mark_tool_invocation_executed(
                 action.tool_call,
                 tool_name=action.computer_tool.name,
@@ -154,16 +155,15 @@ class ComputerAction:
                     trace_include_sensitive_data=config.trace_include_sensitive_data,
                     error_message=error_text,
                 )
-                if span is not None:
-                    span.set_error(
-                        SpanError(
-                            message="Error running tool",
-                            data={
-                                "tool_name": trace_tool_name,
-                                "error": trace_error,
-                            },
-                        )
+                span.set_error(
+                    SpanError(
+                        message="Error running tool",
+                        data={
+                            "tool_name": trace_tool_name,
+                            "error": trace_error,
+                        },
                     )
+                )
                 log_tool_action_error("Failed to execute computer action", exc)
                 raise
 
@@ -172,7 +172,7 @@ class ComputerAction:
             )
 
         async def finalize_output(
-            screenshot: str, span: Any | None, agent_hooks: AgentHooks[Any] | None
+            screenshot: str, span: Any, agent_hooks: AgentHooks[Any] | None
         ) -> ToolCallOutputItem:
             output = await transform_tool_output(
                 config, context_wrapper, agent, action.computer_tool, action.tool_call, screenshot
@@ -213,16 +213,13 @@ class ComputerAction:
                 hooks, agent_hooks, context_wrapper, agent, action.computer_tool, output
             )
 
-            if span is not None and config.trace_include_sensitive_data:
+            if config.trace_include_sensitive_data:
                 span.span_data.output = image_url
 
             return output_item
 
-        return await with_tool_function_span(
-            config=config,
-            tool_name=trace_tool_name,
-            fn=_run_action,
-        )
+        with pending_tool_span(config, trace_tool_name, action.tool_call.call_id) as span:
+            return await _run_action(span)
 
     @classmethod
     async def _execute_action_and_capture(
@@ -434,35 +431,46 @@ class LocalShellAction:
             ctx_wrapper=context_wrapper,
             data=call.tool_call,
         )
-        output = call.local_shell_tool.executor(request)
-        raw_result = await output if inspect.isawaitable(output) else output
+        with pending_tool_span(config, call.local_shell_tool.name, call.tool_call.call_id) as span:
+            span.start(mark_as_current=True)
+            if span.span_data.operation.detail == "content":
+                span.span_data.input = _serialize_trace_payload(call.tool_call.action)
+            output = call.local_shell_tool.executor(request)
+            raw_result = await output if inspect.isawaitable(output) else output
 
-        async def finalize_output() -> ToolCallOutputItem:
-            result = await transform_tool_output(
-                config, context_wrapper, agent, call.local_shell_tool, call.tool_call, raw_result
-            )
+            async def finalize_output() -> ToolCallOutputItem:
+                result = await transform_tool_output(
+                    config,
+                    context_wrapper,
+                    agent,
+                    call.local_shell_tool,
+                    call.tool_call,
+                    raw_result,
+                )
+                if span.span_data.operation.detail == "content":
+                    span.span_data.output = result
 
-            raw_payload: dict[str, Any] = {
-                "type": "local_shell_call_output",
-                "call_id": call.tool_call.call_id,
-                "output": result,
-            }
-            output_item = ToolCallOutputItem(
-                agent=agent,
-                output=result,
-                raw_item=raw_payload,
-            )
+                raw_payload: dict[str, Any] = {
+                    "type": "local_shell_call_output",
+                    "call_id": call.tool_call.call_id,
+                    "output": result,
+                }
+                output_item = ToolCallOutputItem(
+                    agent=agent,
+                    output=result,
+                    raw_item=raw_payload,
+                )
 
-            if tool_output_committer is not None:
-                tool_output_committer(output_item)
+                if tool_output_committer is not None:
+                    tool_output_committer(output_item)
 
-            await run_tool_end_hooks(
-                hooks, agent_hooks, context_wrapper, agent, call.local_shell_tool, result
-            )
+                await run_tool_end_hooks(
+                    hooks, agent_hooks, context_wrapper, agent, call.local_shell_tool, result
+                )
 
-            return output_item
+                return output_item
 
-        return await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
+            return await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
 
 
 class ShellAction:
@@ -490,7 +498,7 @@ class ShellAction:
             tool_name=shell_tool.name,
         )
 
-        async def _run_call(span: Any | None) -> RunItem:
+        async def _run_call(span: Any) -> RunItem:
             if span is not None and config.trace_include_sensitive_data:
                 span.span_data.input = _serialize_trace_payload(
                     dataclasses.asdict(shell_call.action)
@@ -527,6 +535,7 @@ class ShellAction:
                 )
 
                 if approval_status is None:
+                    span.span_data.operation.outcome = "paused"
                     return approval_item
 
             if approval_status is False:
@@ -550,6 +559,7 @@ class ShellAction:
                 call.tool_call,
                 tool_name=shell_tool.name,
             )
+            span.start(mark_as_current=True)
             await gather_with_cancel(
                 hooks.on_tool_start(context_wrapper, agent, shell_tool),
                 (
@@ -587,7 +597,7 @@ class ShellAction:
             result: str | ShellResult,
             status: Literal["completed", "failed"],
             requested_max_output_length: int | None,
-            span: Any | None,
+            span: Any,
         ) -> ToolCallOutputItem:
             result = await transform_tool_output(
                 config, context_wrapper, agent, shell_tool, call.tool_call, result
@@ -655,11 +665,12 @@ class ShellAction:
                 hooks, agent_hooks, context_wrapper, agent, shell_tool, output_text
             )
 
+            span.span_data.operation.outcome = status
             if span is not None and config.trace_include_sensitive_data:
                 span.span_data.output = output_text
             return output_item
 
-        def record_shell_failure(exc: Exception, span: Any | None) -> str:
+        def record_shell_failure(exc: Exception, span: Any) -> str:
             message = format_shell_error(exc)
             if span is not None:
                 trace_error = get_trace_tool_error(
@@ -675,11 +686,8 @@ class ShellAction:
             log_tool_action_error("Shell executor failed", exc)
             return message
 
-        return await with_tool_function_span(
-            config=config,
-            tool_name=shell_tool.name,
-            fn=_run_call,
-        )
+        with pending_tool_span(config, shell_tool.name, shell_call.call_id) as span:
+            return await _run_call(span)
 
 
 class CustomToolAction:
@@ -720,8 +728,8 @@ class CustomToolAction:
             tool_name=custom_tool.name,
         )
 
-        async def _run_call(span: Any | None) -> RunItem:
-            if span is not None and config.trace_include_sensitive_data:
+        async def _run_call(span: Any) -> RunItem:
+            if config.trace_include_sensitive_data:
                 span.span_data.input = tool_input
 
             approval_status = context_wrapper.get_approval_status(
@@ -752,6 +760,7 @@ class CustomToolAction:
                 )
 
                 if approval_status is None:
+                    span.span_data.operation.outcome = "paused"
                     return approval_item
 
             if approval_status is False:
@@ -779,6 +788,7 @@ class CustomToolAction:
                 call.tool_call,
                 tool_name=custom_tool.name,
             )
+            span.start(mark_as_current=True)
             await gather_with_cancel(
                 hooks.on_tool_start(tool_context, agent, custom_tool),
                 (
@@ -798,23 +808,22 @@ class CustomToolAction:
                     trace_include_sensitive_data=config.trace_include_sensitive_data,
                     error_message=output_text,
                 )
-                if span is not None:
-                    span.set_error(
-                        SpanError(
-                            message="Error running tool",
-                            data={
-                                "tool_name": custom_tool.name,
-                                "error": trace_error,
-                            },
-                        )
+                span.set_error(
+                    SpanError(
+                        message="Error running tool",
+                        data={
+                            "tool_name": custom_tool.name,
+                            "error": trace_error,
+                        },
                     )
+                )
                 log_tool_action_error("Custom tool failed", exc)
 
             return await run_native_tool_post_invoke(
                 finalize_output(output_text, span), sibling_category_failure
             )
 
-        async def finalize_output(result: str, span: Any | None) -> ToolCallOutputItem:
+        async def finalize_output(result: str, span: Any) -> ToolCallOutputItem:
             output_text = await transform_tool_output(
                 config, tool_context, agent, custom_tool, call.tool_call, result
             )
@@ -850,15 +859,12 @@ class CustomToolAction:
                 hooks, agent_hooks, tool_context, agent, custom_tool, output_text
             )
 
-            if span is not None and config.trace_include_sensitive_data:
+            if config.trace_include_sensitive_data:
                 span.span_data.output = output_text
             return output_item
 
-        return await with_tool_function_span(
-            config=config,
-            tool_name=custom_tool.name,
-            fn=_run_call,
-        )
+        with pending_tool_span(config, custom_tool.name, call_id) as span:
+            return await _run_call(span)
 
     @staticmethod
     def _normalize_output(output: Any) -> str:
@@ -927,8 +933,8 @@ class ApplyPatchAction:
             tool_name=apply_patch_tool.name,
         )
 
-        async def _run_call(span: Any | None) -> RunItem:
-            if span is not None and config.trace_include_sensitive_data:
+        async def _run_call(span: Any) -> RunItem:
+            if config.trace_include_sensitive_data:
                 span.span_data.input = _serialize_trace_payload(
                     [
                         {
@@ -970,6 +976,7 @@ class ApplyPatchAction:
                 )
 
                 if approval_status is None:
+                    span.span_data.operation.outcome = "paused"
                     return approval_item
 
             if approval_status is False:
@@ -994,6 +1001,7 @@ class ApplyPatchAction:
                 call.tool_call,
                 tool_name=apply_patch_tool.name,
             )
+            span.start(mark_as_current=True)
             await gather_with_cancel(
                 hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),
                 (
@@ -1038,16 +1046,15 @@ class ApplyPatchAction:
                     trace_include_sensitive_data=config.trace_include_sensitive_data,
                     error_message=output_text,
                 )
-                if span is not None:
-                    span.set_error(
-                        SpanError(
-                            message="Error running tool",
-                            data={
-                                "tool_name": apply_patch_tool.name,
-                                "error": trace_error,
-                            },
-                        )
+                span.set_error(
+                    SpanError(
+                        message="Error running tool",
+                        data={
+                            "tool_name": apply_patch_tool.name,
+                            "error": trace_error,
+                        },
                     )
+                )
                 log_tool_action_error("Apply patch editor failed", exc)
 
             return await run_native_tool_post_invoke(
@@ -1055,7 +1062,7 @@ class ApplyPatchAction:
             )
 
         async def finalize_output(
-            result: str, status: Literal["completed", "failed"], span: Any | None
+            result: str, status: Literal["completed", "failed"], span: Any
         ) -> ToolCallOutputItem:
             output_text = await transform_tool_output(
                 config, context_wrapper, agent, apply_patch_tool, call.tool_call, result
@@ -1096,16 +1103,14 @@ class ApplyPatchAction:
                 hooks, agent_hooks, context_wrapper, agent, apply_patch_tool, output_text
             )
 
-            if span is not None and config.trace_include_sensitive_data:
+            span.span_data.operation.outcome = status
+            if config.trace_include_sensitive_data:
                 span.span_data.output = output_text
 
             return output_item
 
-        return await with_tool_function_span(
-            config=config,
-            tool_name=apply_patch_tool.name,
-            fn=_run_call,
-        )
+        with pending_tool_span(config, apply_patch_tool.name, call_id) as span:
+            return await _run_call(span)
 
 
 __all__ = [

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import copy
 from typing import Any
 
 from ..logger import log_model_action_warning, logger
@@ -16,6 +17,13 @@ def _normalize_run_config_for_runner(
         isinstance(value, dict) and "model_provider" not in value
     )
     run_config = RunConfig() if value is None else _coerce_run_config(value)
+    detail = run_config.tracing.get("operation_detail") if run_config.tracing else None
+    if detail not in (None, "metadata", "content"):
+        raise ValueError("operation_detail must be 'metadata' or 'content'")
+    if detail == "metadata" and run_config.trace_include_sensitive_data:
+        # Route every existing capture decision through the run's sensitive-data gate.
+        run_config = copy(run_config)
+        run_config.trace_include_sensitive_data = False
     return run_config, owns_model_provider
 
 

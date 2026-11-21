@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+
+from ._content import bound_content
+from .config import OperationDetail, get_operation_detail
 
 if TYPE_CHECKING:
     from openai.types.responses import Response, ResponseInputItemParam
@@ -132,13 +136,79 @@ class TurnSpanData(SpanData):
         }
 
 
-class FunctionSpanData(SpanData):
+@dataclass(slots=True)
+class OperationMetadata:
+    """Capture permission and source facts for one model call or tool execution."""
+
+    detail: OperationDetail | None = field(default_factory=get_operation_detail)
+    api_type: str | None = None
+    model: str | None = None
+    response_model: str | None = None
+    response_id: str | None = None
+    previous_response_id: str | None = None
+    tool_call_id: str | None = None
+    operation_id: str | None = None
+    outcome: str | None = None
+    estimated_end: bool = False
+
+    def export(self) -> dict[str, Any]:
+        """Supply detailed operation facts alongside the existing hosted span schema."""
+        values = {
+            "detail": self.detail,
+            "api_type": self.api_type,
+            "model": self.model,
+            "response_model": self.response_model,
+            "response_id": self.response_id,
+            "previous_response_id": self.previous_response_id,
+            "tool_call_id": self.tool_call_id,
+            "operation_id": self.operation_id,
+            "outcome": self.outcome,
+            "estimated_end": True if self.estimated_end else None,
+        }
+        return {key: value for key, value in values.items() if value is not None}
+
+
+_Payload = TypeVar("_Payload")
+_Input = TypeVar("_Input")
+_Output = TypeVar("_Output")
+
+
+def _capture_payload(operation: OperationMetadata, value: _Payload) -> _Payload | None:
+    if operation.detail == "metadata":
+        return None
+    if operation.detail == "content" and value is not None:
+        return cast(_Payload, bound_content(value))
+    return value
+
+
+class _CapturedSpanData(SpanData, Generic[_Input, _Output]):
+    __slots__ = ("_input", "_output", "operation")
+    operation: OperationMetadata
+
+    @property
+    def input(self) -> _Input | None:
+        return self._input
+
+    @input.setter
+    def input(self, value: _Input | None) -> None:
+        self._input = _capture_payload(self.operation, value)
+
+    @property
+    def output(self) -> _Output | None:
+        return self._output
+
+    @output.setter
+    def output(self, value: _Output | None) -> None:
+        self._output = _capture_payload(self.operation, value)
+
+
+class FunctionSpanData(_CapturedSpanData[str, Any]):
     """
     Represents a Function Span in the trace.
     Includes input, output and MCP data (if applicable).
     """
 
-    __slots__ = ("name", "input", "output", "mcp_data")
+    __slots__ = ("name", "mcp_data")
 
     def __init__(
         self,
@@ -148,6 +218,7 @@ class FunctionSpanData(SpanData):
         mcp_data: dict[str, Any] | None = None,
     ):
         self.name = name
+        self.operation = OperationMetadata()
         self.input = input
         self.output = output
         self.mcp_data = mcp_data
@@ -166,19 +237,19 @@ class FunctionSpanData(SpanData):
         }
 
 
-class GenerationSpanData(SpanData):
+class GenerationSpanData(
+    _CapturedSpanData[Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]]
+):
     """
     Represents a Generation Span in the trace.
     Includes input, output, model, model configuration, usage, and optional tool definitions.
     """
 
     __slots__ = (
-        "input",
-        "output",
         "model",
-        "model_config",
+        "_model_config",
         "usage",
-        "tools",
+        "_tools",
     )
 
     def __init__(
@@ -190,12 +261,61 @@ class GenerationSpanData(SpanData):
         usage: dict[str, Any] | None = None,
         tools: Sequence[Mapping[str, Any]] | None = None,
     ):
+        self.operation = OperationMetadata(model=model)
+        self._input = None
+        self._model_config = None
+        self._tools = None
         self.input = input
         self.output = output
         self.model = model
         self.model_config = model_config
         self.usage = usage
         self.tools = tools
+
+    def _set_input_payload(self, field: str, value: Any) -> None:
+        if self.operation.detail != "content":
+            setattr(self, f"_{field}", _capture_payload(self.operation, value))
+            return
+        # Keep submitted messages ahead of optional configuration and tool definitions.
+        payload = {"input": self._input, "model_config": self._model_config, "tools": self._tools}
+        payload[field] = value
+        captured = bound_content({key: item for key, item in payload.items() if item is not None})
+        if not isinstance(captured, Mapping):
+            captured = {"input": [{"omitted": True, "reason": "serialization_failed"}]}
+        captured = cast(Mapping[str, Any], captured)
+        self._input = captured.get("input")
+        self._model_config = captured.get("model_config")
+        self._tools = captured.get("tools")
+        if captured.get("truncated"):
+            marker = {"truncated": True}
+            if self._input is None:
+                self._input = [marker]
+            elif isinstance(self._input, list) and marker not in self._input:
+                self._input = [*self._input, marker]
+
+    @property
+    def input(self) -> Sequence[Mapping[str, Any]] | None:
+        return self._input
+
+    @input.setter
+    def input(self, value: Sequence[Mapping[str, Any]] | None) -> None:
+        self._set_input_payload("input", value)
+
+    @property
+    def model_config(self) -> Mapping[str, Any] | None:
+        return self._model_config
+
+    @model_config.setter
+    def model_config(self, value: Mapping[str, Any] | None) -> None:
+        self._set_input_payload("model_config", value)
+
+    @property
+    def tools(self) -> Sequence[Mapping[str, Any]] | None:
+        return self._tools
+
+    @tools.setter
+    def tools(self, value: Sequence[Mapping[str, Any]] | None) -> None:
+        self._set_input_payload("tools", value)
 
     @property
     def type(self) -> str:
@@ -219,7 +339,7 @@ class ResponseSpanData(SpanData):
     Includes response and input.
     """
 
-    __slots__ = ("response", "input", "usage", "_response_id")
+    __slots__ = ("response", "input", "usage", "_response_id", "operation")
 
     def __init__(
         self,
@@ -233,15 +353,19 @@ class ResponseSpanData(SpanData):
         self.input = input
         self.usage = usage
         self._response_id: str | None = None
+        self.operation = OperationMetadata()
 
     @property
     def type(self) -> str:
         return "response"
 
     def export(self) -> dict[str, Any]:
+        response_id = self.response.id if self.response is not None else self._response_id
+        if self.operation.operation_id is not None:
+            response_id = self.operation.response_id
         return {
             "type": self.type,
-            "response_id": (self.response.id if self.response is not None else self._response_id),
+            "response_id": response_id,
             "usage": self.usage,
         }
 

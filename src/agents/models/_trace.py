@@ -59,7 +59,10 @@ def populate_generation_span(
 ) -> None:
     """Populate generation trace data from a Chat Completions adapter response."""
     if tracing.include_data():
-        span_generation.span_data.output = [final_response.model_dump()]
+        if span_generation.span_data.operation.detail == "content":
+            span_generation.span_data.output = [item.model_dump() for item in final_response.output]
+        else:
+            span_generation.span_data.output = [final_response.model_dump()]
 
     if final_response.usage is not None:
         span_generation.span_data.usage = {

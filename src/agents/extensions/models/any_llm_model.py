@@ -51,10 +51,13 @@ from ...models.openai_responses import (
     Converter as OpenAIResponsesConverter,
     _coerce_response_includables,
     _materialize_responses_tool_params,
+    _record_prepared_request,
+    _record_response_operation,
 )
 from ...retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ...tool import Tool
-from ...tracing import generation_span, response_span
+from ...tracing import generation_span
+from ...tracing._model import model_span
 from ...tracing.span_data import GenerationSpanData
 from ...tracing.spans import Span
 from ...usage import (
@@ -414,7 +417,7 @@ class AnyLLMModel(Model):
         prompt: ResponsePromptParam | None,
     ) -> ModelResponse:
         with (
-            response_span(disabled=tracing.is_disabled()) as span_response,
+            model_span(tracing, self.model) as span_response,
             model_span_errors(
                 span_response,
                 message="Error getting response",
@@ -465,9 +468,7 @@ class AnyLLMModel(Model):
 
             span_response.span_data.usage = model_usage_to_span_usage(usage)
 
-            if tracing.include_data():
-                span_response.span_data.response = response
-                span_response.span_data.input = input
+            _record_response_operation(span_response, response, input, tracing)
 
             return ModelResponse(
                 output=response.output,
@@ -496,7 +497,7 @@ class AnyLLMModel(Model):
         prompt: ResponsePromptParam | None,
     ) -> AsyncGenerator[ResponseStreamEvent, None]:
         with (
-            response_span(disabled=tracing.is_disabled()) as span_response,
+            model_span(tracing, self.model) as span_response,
             model_span_errors(
                 span_response,
                 message="Error streaming response",
@@ -561,9 +562,10 @@ class AnyLLMModel(Model):
                                     requests=_requests_for_response_without_usage(final_response)
                                 )
                             )
-                        if tracing.include_data() and final_response is not None:
-                            span_response.span_data.response = final_response
-                            span_response.span_data.input = input
+                        if final_response is not None:
+                            _record_response_operation(
+                                span_response, final_response, input, tracing
+                            )
                         if terminal_failure_error is not None:
                             # The failure is already known here. A consumer that stops at
                             # this event closes the generator, which raises GeneratorExit
@@ -1123,6 +1125,11 @@ class AnyLLMModel(Model):
         }
         transport_kwargs = self._build_responses_transport_kwargs(model_settings)
 
+        prepared_request = dict(request_kwargs)
+        extra_body = prepared_request.get("extra_body")
+        if isinstance(extra_body, Mapping):
+            prepared_request.update(extra_body)
+        _record_prepared_request(prepared_request)
         response = await self._call_any_llm_responses(
             request_kwargs=request_kwargs,
             transport_kwargs=transport_kwargs,

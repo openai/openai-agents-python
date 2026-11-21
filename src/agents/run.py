@@ -185,7 +185,7 @@ from .tracing import (
     task_span,
     turn_span,
 )
-from .tracing.config import include_task_and_turn_spans
+from .tracing.config import include_task_and_turn_spans, operation_tracing_scope
 from .tracing.context import TraceCtxManager, create_trace_for_run
 from .tracing.span_data import AgentSpanData, TaskSpanData
 from .util import _error_tracing
@@ -591,6 +591,9 @@ class AgentRunner:
         redacted_error: BaseException | None = None
         # Mask caller tracing before any run-owned preparation or cleanup can execute.
         with contextlib.ExitStack() as trace_stack:
+            trace_stack.enter_context(
+                operation_tracing_scope(run_config.tracing, run_config.trace_include_sensitive_data)
+            )
             try:
                 try:
                     if run_config.tracing_disabled:
@@ -2656,6 +2659,7 @@ class AgentRunner:
         # Synchronous setup can invoke application providers before the task starts.
         # Restore caller context before creating the independently masked background task.
         with (
+            operation_tracing_scope(run_config.tracing, run_config.trace_include_sensitive_data),
             TraceCtxManager(
                 workflow_name=run_config.workflow_name,
                 trace_id=run_config.trace_id,
@@ -2665,7 +2669,7 @@ class AgentRunner:
                 disabled=True,
             )
             if run_config.tracing_disabled
-            else contextlib.nullcontext()
+            else contextlib.nullcontext(),
         ):
             # Handle RunState input
             is_resumed_state = isinstance(input, RunState)
@@ -2896,43 +2900,46 @@ class AgentRunner:
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         async def run_loop() -> None:
-            if isinstance(session, ResumableRun):
-                try:
-                    await session.begin(input)
-                except BaseException:
-                    streamed_result.is_complete = True
-                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                    raise
-            configuration_agent = (
-                run_state._current_agent
-                if run_state is not None and run_state._current_agent is not None
-                else starting_agent
-            )
             with (
+                operation_tracing_scope(
+                    run_config.tracing, run_config.trace_include_sensitive_data
+                ),
                 # Mask the inherited span in this task; the streaming loop owns the trace.
                 custom_span(name="Agent run", disabled=True)
                 if run_config.tracing_disabled
                 else contextlib.nullcontext(),
-                agent_tool_configuration_run(configuration_agent),
             ):
-                await start_streaming(
-                    starting_input=input_for_result,
-                    streamed_result=streamed_result,
-                    starting_agent=starting_agent,
-                    max_turns=max_turns,
-                    hooks=hooks,
-                    context_wrapper=context_wrapper,
-                    run_config=run_config,
-                    error_handlers=error_handlers,
-                    previous_response_id=previous_response_id,
-                    auto_previous_response_id=auto_previous_response_id,
-                    conversation_id=conversation_id,
-                    session=session,
-                    run_state=run_state,
-                    trace_workflow_name=trace_workflow_name,
-                    is_resumed_state=is_resumed_state,
-                    sandbox_runtime=sandbox_runtime,
+                if isinstance(session, ResumableRun):
+                    try:
+                        await session.begin(input)
+                    except BaseException:
+                        streamed_result.is_complete = True
+                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                        raise
+                configuration_agent = (
+                    run_state._current_agent
+                    if run_state is not None and run_state._current_agent is not None
+                    else starting_agent
                 )
+                with agent_tool_configuration_run(configuration_agent):
+                    await start_streaming(
+                        starting_input=input_for_result,
+                        streamed_result=streamed_result,
+                        starting_agent=starting_agent,
+                        max_turns=max_turns,
+                        hooks=hooks,
+                        context_wrapper=context_wrapper,
+                        run_config=run_config,
+                        error_handlers=error_handlers,
+                        previous_response_id=previous_response_id,
+                        auto_previous_response_id=auto_previous_response_id,
+                        conversation_id=conversation_id,
+                        session=session,
+                        run_state=run_state,
+                        trace_workflow_name=trace_workflow_name,
+                        is_resumed_state=is_resumed_state,
+                        sandbox_runtime=sandbox_runtime,
+                    )
 
         # Keep the outer task frame inside the boundary so it cannot retain run payloads.
         streamed_result.run_loop_task = asyncio.create_task(

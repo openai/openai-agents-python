@@ -128,6 +128,18 @@ class TracingProcessor(abc.ABC):
         """
         pass
 
+    def on_span_scope_enter(self, span: "Span[Any]") -> object | None:
+        """Activate optional execution context after a span becomes current.
+
+        The return value belongs to the matching scope exit, independently of span end.
+        Existing processors do not need to implement these optional methods.
+        """
+        return None
+
+    def on_span_scope_exit(self, span: "Span[Any]", token: object) -> None:
+        """Restore the execution context associated with a matching scope entry."""
+        return None
+
 
 class TracingExporter(abc.ABC):
     """Exports traces and spans. For example, could log them or send them to a backend."""
