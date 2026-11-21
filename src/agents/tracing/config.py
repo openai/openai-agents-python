@@ -11,6 +11,25 @@ from .scope import Scope
 
 OperationDetail = Literal["metadata", "content"]
 _operation_detail: ContextVar[OperationDetail | None] = ContextVar("operation_detail", default=None)
+_metadata_only_runs: ContextVar[bool] = ContextVar("metadata_only_runs", default=False)
+
+
+@contextmanager
+def metadata_only_run_tracing() -> Iterator[None]:
+    """Limit automatic model and tool capture for Runner calls in this context.
+
+    Nested runs use metadata detail with sensitive data disabled, even with an
+    explicit child config. Disabled tracing stays disabled. Enter before starting
+    the run and keep the scope open while consuming a stream. New asyncio tasks
+    inherit the scope. Independent resumes and remote services need their own scope.
+
+    This does not sanitize names, trace metadata, custom spans, logs or run results.
+    """
+    token = _metadata_only_runs.set(True)
+    try:
+        yield
+    finally:
+        _metadata_only_runs.reset(token)
 
 
 class TracingConfig(TypedDict, total=False):

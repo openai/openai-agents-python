@@ -7,6 +7,7 @@ from typing import Any
 from ..logger import log_model_action_warning, logger
 from ..models.interface import ModelProvider
 from ..run_config import RunConfig, _coerce_run_config
+from ..tracing.config import _metadata_only_runs
 
 
 def _normalize_run_config_for_runner(
@@ -20,9 +21,12 @@ def _normalize_run_config_for_runner(
     detail = run_config.tracing.get("operation_detail") if run_config.tracing else None
     if detail not in (None, "metadata", "content"):
         raise ValueError("operation_detail must be 'metadata' or 'content'")
-    if detail == "metadata" and run_config.trace_include_sensitive_data:
+    force_metadata = _metadata_only_runs.get() and detail != "metadata"
+    if force_metadata or (detail == "metadata" and run_config.trace_include_sensitive_data):
         # Route every existing capture decision through the run's sensitive-data gate.
         run_config = copy(run_config)
+        if force_metadata:
+            run_config.tracing = {**(run_config.tracing or {}), "operation_detail": "metadata"}
         run_config.trace_include_sensitive_data = False
     return run_config, owns_model_provider
 
