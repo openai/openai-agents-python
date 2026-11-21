@@ -1916,3 +1916,115 @@ async def test_native_input_replay_retains_core_preserved_selectors(
         "value": "prepared",
         "environment_id": "workspace",
     }
+
+
+class PlanThread(FakeThread):
+    thread_id = "native_thread"
+
+    async def next_event(self):
+        encoded = await super().next_event()
+        if encoded is None:
+            return None
+        event = json.loads(encoded)
+        event["id"] = event["msg"].pop("event_id", event["id"])
+        return json.dumps(event)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_checklist_is_latest_owned_update_in_idle_checkpoint(tmp_path, threads, streamed):
+    from agents import ResumableSession, ResumableSessionError
+    from tests.memory.test_resumable_session import MemoryStore
+
+    queue, _ = threads
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    agent = Agent(name="Planner")
+    cfg = config(tmp_path)
+    assert session.codex_checklist is None
+    clear = {"type": "plan_update", "plan": []}
+    revision = {
+        "type": "plan_update",
+        "explanation": "Two passes",
+        "plan": [
+            {"step": "Review", "status": "completed"},
+            {"step": "Review", "status": "pending"},
+        ],
+    }
+
+    async def turn(events):
+        queue.append(PlanThread(events=events))
+        if streamed:
+            result = Runner.run_streamed(agent, "Go", session=session, run_config=cfg)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "Go", session=session, run_config=cfg)
+
+    await turn([clear, revision, dict(clear, event_id=""), dict(clear, event_id="other")])
+    session = await ResumableSession.resume(store, session.session_id)
+    saved = session.codex_checklist
+    assert saved is not None
+    assert (saved.thread_id, saved.turn_id, saved.explanation) == (
+        "native_thread",
+        "turn_1",
+        "Two passes",
+    )
+    assert [(s.step, s.status) for s in saved.plan] == [
+        ("Review", "completed"),
+        ("Review", "pending"),
+    ]
+    await turn([])
+    assert session.codex_checklist == saved
+    await turn([clear])
+    cleared = session.codex_checklist
+    assert cleared is not None and cleared.plan == () and cleared.explanation is None
+
+    store.fail_checkpoint = True
+    with pytest.raises(ResumableSessionError):
+        await turn([revision])
+    with pytest.raises(ResumableSessionError) as error:
+        _ = session.codex_checklist
+    assert error.value.reason == "active"
+    assert store.checkpoint(session.session_id)["codex_checklist"]["plan"] == []
+
+
+async def test_checklist_survives_approval_and_excludes_nested_updates(tmp_path, threads):
+    from agents import ResumableSession, ResumableSessionError
+    from tests.memory.test_resumable_session import MemoryStore
+
+    queue, _ = threads
+    cfg = config(tmp_path)
+    worker = Agent(name="Worker")
+    manager = Agent(
+        name="Manager",
+        tools=[worker.as_tool("ask", "Ask worker", run_config=cfg, needs_approval=True)],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    queue.append(
+        PlanThread(
+            events=[
+                {"type": "plan_update", "plan": [{"step": "Consult", "status": "in_progress"}]}
+            ],
+            call={"callId": "ask1", "tool": "ask", "arguments": {"input": "Check"}},
+        )
+    )
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    await Runner.run(manager, "Go", session=session, run_config=cfg)
+    resumed = await ResumableSession.resume(store, session.session_id)
+    assert resumed.is_paused
+    saved = resumed.codex_checklist
+    assert saved is not None and saved.plan[0].step == "Consult"
+    state = await resumed.load_state(manager)
+    state.approve(state.get_interruptions()[0])
+    queue.append(PlanThread(events=[{"type": "plan_update", "plan": []}]))
+    result = await Runner.run(manager, state, run_config=cfg)
+    assert result.final_output == "A Codex response"
+    assert resumed.codex_checklist == saved
+
+    record = store.checkpoint(session.session_id)
+    record["codex_checklist"]["plan"][0]["status"] = "blocked"
+    store.records[session.session_id] = json.dumps(record)
+    with pytest.raises(ResumableSessionError) as error:
+        await ResumableSession.resume(store, session.session_id)
+    assert error.value.reason == "malformed"

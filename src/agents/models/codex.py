@@ -41,6 +41,7 @@ from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
+from ..memory.resumable_session import CodexChecklist
 from ..model_settings import ModelSettings
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import ApplyPatchTool, ShellTool, Tool, WebSearchTool
@@ -274,6 +275,8 @@ class _CodexModel(Model):
             )
         provider = self._provider
         bindings = get_model_tool_hooks()
+        checkpoint = bindings.checkpoint if bindings is not None else None
+        checklist = None
         tool_execution = bindings.settings if bindings is not None else None
         classic_preparation = (
             tool_execution is not None
@@ -424,6 +427,16 @@ class _CodexModel(Model):
                         "Use SDK-managed input compaction before starting another model call."
                     )
                 if event.get("id") not in ("", turn_id):
+                    continue
+                if kind == "plan_update":
+                    # Core emits this only after accepting update_plan on the leased thread.
+                    if checkpoint is not None and turn_id and event.get("id") == turn_id:
+                        checklist = CodexChecklist(
+                            thread_id=thread.thread_id,
+                            turn_id=turn_id,
+                            explanation=message.get("explanation"),
+                            plan=tuple(message["plan"]),
+                        )
                     continue
                 if kind == "dynamic_tool_call_request":
                     if message.get("turnId") != turn_id:
@@ -754,9 +767,12 @@ class _CodexModel(Model):
         )
         if raw_usage is not None:
             _attach_raw_usage_snapshot(response, raw_usage)
-        yield ResponseCompletedEvent(
+        completed = ResponseCompletedEvent(
             response=response, sequence_number=sequence, type="response.completed"
         )
+        if checkpoint is not None and checklist is not None:
+            checkpoint.codex_checklist = checklist
+        yield completed
 
 
 def _usage(total: dict[str, Any]) -> ResponseUsage:

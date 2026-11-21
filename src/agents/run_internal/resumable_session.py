@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..items import ToolApprovalItem, TResponseInputItem
 from ..memory.resumable_session import (
+    CodexChecklist,
     ResumableSession,
     ResumableSessionError,
     _ResumableSessionBinding,
@@ -28,6 +29,7 @@ class ResumableRun:
     def __init__(self, source: ResumableSession | None) -> None:
         self.session_id = source.session_id if source is not None else ""
         self.session_settings: SessionSettings | None = None
+        self.codex_checklist: CodexChecklist | None = None
         self._source = source
         self._items: list[TResponseInputItem] = []
 
@@ -42,7 +44,9 @@ class ResumableRun:
         state = result.to_state() if result.interruptions else None
         if state is not None:
             state._resumable_binding = "detached"
-        result._resumable_binding = await self._source._save_checkpoint(self._items, state)
+        result._resumable_binding = await self._source._save_checkpoint(
+            self._items, state, codex_checklist=self.codex_checklist
+        )
 
     def configure_stream(self, result: RunResultStreaming) -> None:
         queue = _CheckpointEventQueue()
