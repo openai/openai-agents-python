@@ -35,6 +35,7 @@ from .agent_tool_state import (
 from .exceptions import ModelBehaviorError, UserError
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
+from .items import RunItem
 from .logger import log_model_and_tool_action_error, logger
 from .mcp import MCPUtil
 from .model_settings import ModelSettings, _coerce_model_settings, _declared_model_settings_type
@@ -78,6 +79,22 @@ if TYPE_CHECKING:
 
 class _AgentToolStreamOverflow(UserError):
     """The agent tool callback queue exceeded its configured backlog limit."""
+
+
+@dataclass(frozen=True)
+class SettledStep(Generic[TContext]):
+    """A proposed final output from one SDK model turn. Treat its contents as read-only."""
+
+    agent: Agent[TContext]
+    turn: int
+    """One-based turn in this run. Resuming approvals keeps the same turn."""
+    kind: Literal["text", "structured", "tool"]
+    output: Any
+    """The candidate value, including empty text or a parsed structured value."""
+    items: tuple[RunItem, ...]
+    """Model items from this turn followed by any SDK function results in call order."""
+    response_id: str | None
+    request_id: str | None
 
 
 @dataclass
@@ -394,7 +411,8 @@ class Agent(AgentBase, Generic[TContext]):
     """
 
     hooks: AgentHooks[TContext] | None = None
-    """A class that receives callbacks on various lifecycle events for this agent.
+    """Callbacks for this agent. Set `AgentHooks(step_policy=...)` to control whether
+    a proposed final answer ends the run.
     """
 
     tool_use_behavior: (
