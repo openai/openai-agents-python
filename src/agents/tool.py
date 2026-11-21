@@ -597,6 +597,9 @@ class FunctionTool:
 
     _mcp_annotations: ToolAnnotations | None = field(default=None, kw_only=True, repr=False)
 
+    # The invocation partial retains the server. Its identity survives roster reordering.
+    _mcp_server_id: int | None = field(default=None, init=False, repr=False, compare=False)
+
     @property
     def mcp_annotations(self) -> ToolAnnotations | None:
         """Return a copy of the MCP annotations captured when this tool was converted.
@@ -698,6 +701,8 @@ class _FailureHandlingFunctionToolInvoker:
         try:
             return await self._invoke_tool_impl(ctx, input)
         except Exception as e:
+            if isinstance(ctx, ToolContext) and ctx._edit_text is not None:
+                raise
             assert self._function_tool is not None
             result = await maybe_invoke_function_tool_failure_error_function(
                 function_tool=self._function_tool,
@@ -2282,6 +2287,24 @@ class _FunctionToolInvocationResult:
     is_sdk_generated_error: bool = False
 
 
+_SelectedT = TypeVar("_SelectedT")
+
+
+class _SelectedTaskExit(BaseException):
+    """Carry a sanitized process-control signal to the selected invocation boundary."""
+
+
+async def _protect_selected_task(invoke: Callable[[], Awaitable[_SelectedT]]) -> _SelectedT:
+    # asyncio propagates these directly to the loop before the awaiting task can redact them.
+    try:
+        return await invoke()
+    except (SystemExit, KeyboardInterrupt) as error:
+        from .exceptions import _prepare_data_redacted_error
+
+        safe_error = _prepare_data_redacted_error(error)
+    raise _SelectedTaskExit(safe_error)
+
+
 async def _invoke_function_tool_with_metadata(
     *,
     function_tool: FunctionTool,
@@ -2299,8 +2322,9 @@ async def _invoke_function_tool_with_metadata(
             is_sdk_generated_error=_consume_function_tool_default_failure(context),
         )
 
+    invoke = functools.partial(function_tool.on_invoke_tool, cast(Any, invoke_context), arguments)
     tool_task: asyncio.Future[Any] = asyncio.ensure_future(
-        function_tool.on_invoke_tool(cast(Any, invoke_context), arguments)
+        _protect_selected_task(invoke) if context._edit_text is not None else invoke()
     )
     try:
         output = await asyncio.wait_for(tool_task, timeout=timeout_seconds)
@@ -2322,7 +2346,7 @@ async def _invoke_function_tool_with_metadata(
             tool_name=function_tool.name,
             timeout_seconds=timeout_seconds,
         )
-        if function_tool.timeout_behavior == "raise_exception":
+        if function_tool.timeout_behavior == "raise_exception" or context._edit_text is not None:
             raise timeout_error from exc
 
         timeout_error_function = function_tool.timeout_error_function
@@ -2850,7 +2874,9 @@ def function_tool(
                 result = None
                 raise
 
-            if _debug.DONT_LOG_TOOL_DATA:
+            if _debug.DONT_LOG_TOOL_DATA or (
+                isinstance(ctx, ToolContext) and ctx._edit_text is not None
+            ):
                 logger.debug("Tool %s completed.", tool_name)
             else:
                 logger.debug("Tool %s returned %s", tool_name, result)

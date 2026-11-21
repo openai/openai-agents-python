@@ -17,6 +17,7 @@ from uuid import uuid4
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
+    ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
 )
 from openai.types.responses.response_output_item import ResponseOutputItem
@@ -236,6 +237,7 @@ from .turn_preparation import (
     validate_run_hooks,
 )
 from .turn_resolution import (
+    _snapshot_function_calls,
     check_for_final_output_from_tools,
     execute_final_output,
     execute_handoffs,
@@ -2702,12 +2704,28 @@ async def run_single_turn_streamed(
             if isinstance(event_response, Response):
                 stream_response_id = event_response.id
                 stream_request_id = getattr(event_response, "_request_id", None)
-            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+            if (
+                isinstance(event, ResponseCompletedEvent)
+                and not event.response.output
+                and streamed_response_output
+            ):
+                # Some backends leave completed output empty after item.done events.
+                event.response.output = list(streamed_response_output)
+
+            raw_event = event
+            if run_config.tool_execution is not None:
+                item = getattr(event, "item", None)
+                if isinstance(item, ResponseFunctionToolCall):
+                    raw_event = event.model_copy(update={"item": deepcopy(item)})
+                elif isinstance(event_response, Response) and event_response.output:
+                    output = _snapshot_function_calls(event_response.output)
+                    if output is not event_response.output:
+                        response_view = event_response.model_copy(update={"output": output})
+                        raw_event = event.model_copy(update={"response": response_view})
+            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=raw_event))
 
             terminal_response: Response | None = None
-            is_completed_event = False
             if isinstance(event, ResponseCompletedEvent):
-                is_completed_event = True
                 terminal_response = event.response
             elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
                 event_type = cast(str, event.type)
@@ -2723,11 +2741,6 @@ async def run_single_turn_streamed(
                 raise response_error_event_failure_error(cast(str, event.type), event)
 
             if terminal_response is not None:
-                if is_completed_event and not terminal_response.output and streamed_response_output:
-                    # Some streaming backends emit output items during item.done events while
-                    # leaving the terminal response output empty. Preserve those items so the
-                    # runner can resolve the completed step correctly.
-                    terminal_response.output = list(streamed_response_output)
                 # Always fold retry attempts into usage, even when the terminal response omits
                 # provider usage (common for some Chat Completions / LiteLLM streams). Skipping
                 # apply_retry_attempt_usage here would drop failed-attempt accounting and diverge
@@ -2803,6 +2816,7 @@ async def run_single_turn_streamed(
             if tool_execution is not None and (
                 tool_execution.prepare_tool_input is not None
                 or tool_execution.prepare_tool_output is not None
+                or tool_execution.tool_text_transforms
             ):
                 # A stream consumer must not change the invocation seen by preparation hooks.
                 model_items = [

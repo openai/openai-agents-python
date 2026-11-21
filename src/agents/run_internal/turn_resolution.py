@@ -96,6 +96,7 @@ from ..items import (
     ToolSearchCallItem,
     ToolSearchOutputItem,
     TResponseInputItem,
+    TResponseOutputItem,
     coerce_tool_search_call_raw_item,
     coerce_tool_search_output_raw_item,
 )
@@ -4093,6 +4094,14 @@ def _preflight_response_invocations(
     }
 
 
+def _snapshot_function_calls(items: list[TResponseOutputItem]) -> list[TResponseOutputItem]:
+    if not any(isinstance(item, ResponseFunctionToolCall) for item in items):
+        return items
+    return [
+        deepcopy(item) if isinstance(item, ResponseFunctionToolCall) else item for item in items
+    ]
+
+
 async def get_single_step_result_from_response(
     *,
     bindings: AgentBindings[TContext],
@@ -4140,6 +4149,9 @@ async def get_single_step_result_from_response(
     ):
         # Keep the tool and its callbacks on the same arguments if a consumer edits a raw event.
         new_response.output = deepcopy(new_response.output)
+    elif settings is not None:
+        # A model adapter can retain the items it returned.
+        new_response.output = _snapshot_function_calls(new_response.output)
     new_bindings: dict[str, tuple[str, dict[str, Any]]] = {}
     try:
         processed_response = classify()

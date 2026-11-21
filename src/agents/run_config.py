@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Generic, Literal
@@ -35,13 +35,17 @@ from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .mcp import MCPServer
     from .run_context import RunContextWrapper
     from .sandbox.manifest import Manifest
     from .sandbox.session.base_sandbox_session import BaseSandboxSession
     from .sandbox.session.sandbox_client import BaseSandboxClient
     from .sandbox.session.sandbox_session_state import SandboxSessionState
     from .sandbox.snapshot import SnapshotBase, SnapshotSpec
-    from .tool import NativeTool, Tool
+    from .tool import FunctionTool, NativeTool, Tool
+else:
+    # Runtime config adapters must retain the registered instances. Validate them below.
+    FunctionTool = MCPServer = Any
 
 
 DEFAULT_MAX_TURNS = 10
@@ -157,6 +161,9 @@ class ToolCallHookContext(Generic[TContext]):
     The original text is available in the function's `ToolContext.tool_arguments`.
     """
 
+    mcp_target: tuple[MCPServer, str] | None = field(default=None, kw_only=True, repr=False)
+    """Server and original tool name for a selected Runner MCP text transform."""
+
 
 @dataclass
 class ToolExecutionConfig:
@@ -202,6 +209,47 @@ class ToolExecutionConfig:
     Raw provider stream events and provider-managed history may contain the original proposal.
     """
 
+    tool_text_transforms: Sequence[
+        tuple[
+            FunctionTool | tuple[MCPServer, str],
+            Callable[[ToolCallHookContext[Any], tuple[str, ...]], Awaitable[tuple[str, ...]]],
+        ]
+    ] = field(default=(), kw_only=True)
+    """Experimental. Edit selected Runner tool results before output hooks, traces and history.
+
+    Register the exact function in the agent's tools or the MCP server and raw tool name.
+    For a namespace, use the tool returned by `tool_namespace`. For example,
+
+    ```python
+    async def hide(call, texts):
+        return tuple(text.replace("internal draft", "[hidden]") for text in texts)
+
+    config = ToolExecutionConfig(tool_text_transforms=[
+        (report, hide),
+        ((server, "read.report"), hide),
+    ])
+    ```
+
+    The editor receives ordered text slots and must return one string per slot.
+    Images and function file parts stay in place. A typed function result uses one JSON
+    slot. The caller receives the accepted JSON object as a dictionary. Unchanged text
+    keeps the serialized values. Changed JSON must validate against the declared type
+    and serialize back to the same values. Ignored extra top-level fields are dropped.
+    Bare output schemas and arbitrary Python objects are unsupported.
+    MCP supports text and image blocks. If the server prefers structured content and
+    returns a JSON object, even an empty one, its JSON replaces the
+    first text slot. Remaining text slots start empty. If needed, the SDK appends a
+    text slot. Extractors see the edited result without MCP metadata or fallback data.
+
+    A tool failure, unsupported result, invalid edit or editor exception stops the run
+    without a successful output. Cancellation still cancels the call. Completed side
+    effects cannot be undone. Neither error formatters nor `prepare_tool_output` replace
+    a selected result. Other calls keep their usual behavior.
+
+    The editor and retained media are trusted. Configure the same targets again on resume.
+    This option does not intercept hosted or native tools, inputs or application logging.
+    """
+
     prepare_tool_output: Callable[[ToolCallHookContext[Any], Any], Awaitable[Any]] | None = None
     """Experimental. Return the tool result to use after the tool has executed.
 
@@ -231,6 +279,33 @@ class ToolExecutionConfig:
             raise ValueError("tool_execution.pre_approval_tool_input_guardrails must be a bool")
         if not isinstance(self.sdk_only_tool_hooks, bool):
             raise ValueError("tool_execution.sdk_only_tool_hooks must be a bool")
+        self.tool_text_transforms = tuple(self.tool_text_transforms)
+        if self.tool_text_transforms:
+            from .mcp import MCPServer
+            from .tool import FunctionTool
+
+            seen: set[tuple[int, str | None]] = set()
+            for target, edit in self.tool_text_transforms:
+                key: tuple[int, str | None]
+                if isinstance(target, FunctionTool):
+                    if target._is_agent_tool or target._is_codex_tool or target._mcp_tool_binding:
+                        raise ValueError(
+                            "Select a local function or an MCP server and raw tool name."
+                        )
+                    key = (id(target), None)
+                elif (
+                    isinstance(target, tuple)
+                    and len(target) == 2
+                    and isinstance(target[0], MCPServer)
+                    and isinstance(target[1], str)
+                    and target[1]
+                ):
+                    key = (id(target[0]), target[1])
+                else:
+                    raise ValueError("Invalid tool_text_transforms target.")
+                if key in seen or not callable(edit):
+                    raise ValueError("Each tool_text_transforms target requires one editor.")
+                seen.add(key)
 
 
 @dataclass
