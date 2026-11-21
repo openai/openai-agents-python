@@ -136,6 +136,8 @@ On Windows, the preview rejects a local Codex executor configured with the legac
 
 Native Codex approval prompts are separate from SDK tool approvals. With `session=ResumableSession(...)`, the Runner can pause a direct native `exec_command` or `apply_patch` call before execution and recover the original call after approval. Recovery on another worker requires the same workspace path and a compatible runtime. Native workspace tools must remain enabled, without native tool hooks. The approval applies only to that call; it does not grant permission for later calls. Recording or rechecking a patch approval scans at most 32 file paths, including new files and move destinations. Existing file content is limited to 16 MiB per scan and 8 MiB per file. Exceeding these limits causes approval recovery to fail.
 
+Treat saved approval checkpoints as sensitive application data. Original model patches and older checkpoints can retain private text even when trace payload capture is disabled.
+
 The provider rejects unsupported native approval requests or configurations, including network or remote-executor approvals and multiple outstanding calls. Without a `ResumableSession`, a native approval pause also fails. For a non-interactive read-only workflow, configure Codex to avoid approval prompts:
 
 ```python

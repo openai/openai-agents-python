@@ -290,6 +290,8 @@ Pass `--content` to the example to inspect the submitted messages, instructions,
 
 Each operation has a 32 KiB budget for its input and another 32 KiB for its output, measured as UTF-8 JSON. Tracing checks the remaining budget before parsing a string that looks like a JSON object or array. If the string exceeds that budget, the trace records an omission with the reason `capture_budget`. Check for markers for truncated text, binary media, hidden reasoning, and known credential fields. Treat ordinary text, including file contents and tool results, as potentially private. Configure separate policies for application logs and custom processors.
 
+For native tools, `unsupported_output` marks a result without a bounded capture format. A structured result that exceeds the capture budget is omitted as a whole with `capture_budget`.
+
 ## Tracing with non-OpenAI models
 
 When using non-OpenAI models, you can provide an OpenAI API key to the tracing exporter to enable free tracing in the OpenAI Traces dashboard without disabling tracing. See the [Third-party adapters](models/index.md#third-party-adapters) section in the Models guide for adapter selection and setup caveats.

@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Awaitable, Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import fields
 from importlib import import_module
@@ -39,6 +39,7 @@ from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
+from ..memory.session import await_session_mutation as _join_close
 from ..model_settings import ModelSettings
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import ApplyPatchTool, ShellTool, Tool, WebSearchTool
@@ -57,7 +58,7 @@ from ._codex_items import (
 )
 from ._codex_tool_hooks import CodexToolHooks
 from ._codex_tracing import CodexOperationTracing
-from ._codex_usage import _usage
+from ._codex_usage import _add_sample_usage, _usage
 from ._run_context import ModelToolHooks, get_model_tool_hooks
 from .interface import Model, ModelProvider, ModelTracing
 
@@ -126,6 +127,7 @@ class CodexProvider(ModelProvider):
         observations = CodexOperationTracing(tracing, None, checkpoint["model"])
         thread = await self._native_manager().start_thread("[]", None, json.dumps(settings))
         interrupted = True
+        cancellation: asyncio.CancelledError | None = None
         execution: asyncio.Future[Any] | None = None
         observed_turn: str | None = None
         observations.bind(thread.thread_id, "")
@@ -160,6 +162,9 @@ class CodexProvider(ModelProvider):
                 raise RuntimeError(failure)
             interrupted = False
             return str(output)
+        except asyncio.CancelledError as error:
+            cancellation = error
+            raise
         finally:
             if execution is not None:
                 execution.cancel()
@@ -174,7 +179,15 @@ class CodexProvider(ModelProvider):
             try:
                 observations.close(interrupted=interrupted)
             finally:
-                await _join_close(close())
+                try:
+                    await _join_close(close())
+                except asyncio.CancelledError:
+                    if cancellation is not None:
+                        raise cancellation from None
+                    raise
+                except Exception:
+                    if not interrupted:
+                        raise
 
 
 def _pending_native_call(
@@ -257,20 +270,6 @@ def _settings(settings: ModelSettings) -> tuple[str | None, str | None]:
                 f"CodexProvider does not support ModelSettings.reasoning.{sorted(unsupported)[0]}."
             )
     return (reasoning.effort if reasoning else None, reasoning.summary if reasoning else None)
-
-
-async def _join_close(operation: Awaitable[None]) -> None:
-    """Keep cleanup owned through repeated cancellation of the awaiting task."""
-    task = asyncio.ensure_future(operation)
-    cancelled = None
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError as error:
-            cancelled = error
-    task.result()
-    if cancelled is not None:
-        raise cancelled
 
 
 class _CodexModel(Model):
@@ -643,8 +642,10 @@ class _CodexModel(Model):
                         raw_usage["token_count"] = info
                     continue
                 if kind == "raw_response_completed":
-                    if usage is None and message.get("token_usage") is not None:
-                        usage = _usage(message["token_usage"])
+                    # An approval can pause before Core sends the cumulative token_count.
+                    # Include each completed sample now. The next count replaces this total.
+                    if message.get("token_usage") is not None:
+                        usage = _add_sample_usage(usage, message["token_usage"])
                     if (
                         model_settings.preserve_raw_usage
                         and message.get("usage_metadata") is not None
