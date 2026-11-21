@@ -106,6 +106,26 @@ def _history_adapter() -> TypeAdapter[list[TResponseInputItem]]:
     return TypeAdapter(list[TResponseInputItem])
 
 
+class CodexChecklistStep(BaseModel):
+    """One entry in the native checklist, in the order supplied by Codex."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    step: str
+    status: Literal["pending", "in_progress", "completed"]
+
+
+class CodexChecklist(BaseModel):
+    """The most recent native checklist and the ephemeral thread and turn that issued it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    thread_id: str = Field(min_length=1)
+    turn_id: str = Field(min_length=1)
+    plan: tuple[CodexChecklistStep, ...]
+    explanation: str | None = None
+
+
 class _Checkpoint(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -114,6 +134,7 @@ class _Checkpoint(BaseModel):
     status: Literal["ready", "paused", "active"]
     history: list[Any]
     run_state: str | None
+    codex_checklist: CodexChecklist | None = Field(default=None, exclude_if=lambda v: v is None)
 
     @field_validator("history")
     @classmethod
@@ -198,6 +219,26 @@ class ResumableSession:
         self._store = store
         self._checkpoint = _checkpoint
         self._serialized = _serialized
+
+    @property
+    def codex_checklist(self) -> CodexChecklist | None:
+        """Read the latest accepted native plan in this idle checkpoint without inference.
+
+        Use `CodexProvider(config_overrides=["tools.update_plan.enabled=true"])`
+        with this session. After the run finishes or pauses for approval, read
+        `session.codex_checklist`. To reopen, use
+        `session = await ResumableSession.resume(store, session_id)` first.
+
+        Each accepted update replaces the whole list. An empty plan clears it.
+        Invalid tool arguments leave it unchanged. None means no saved plan.
+        History-only sessions cannot store this snapshot. Nested agent tools
+        do not update their parent session. Use the plan for display only. It
+        cannot authorize tools or resume a native thread. Older SDK versions
+        cannot open checkpoints that contain a checklist.
+        """
+        if self._checkpoint.status == "active":
+            raise ResumableSessionError("active")
+        return self._checkpoint.codex_checklist
 
     @property
     def is_paused(self) -> bool:
@@ -310,7 +351,11 @@ class ResumableSession:
         await self._replace(active, expected=self._serialized)
 
     async def _save_checkpoint(
-        self, history: list[TResponseInputItem], state: RunState[Any, Any] | None
+        self,
+        history: list[TResponseInputItem],
+        state: RunState[Any, Any] | None,
+        *,
+        codex_checklist: CodexChecklist | None = None,
     ) -> _ResumableSessionBinding:
         if self._checkpoint.status != "active":
             raise ResumableSessionError("conflict")
@@ -321,6 +366,11 @@ class ResumableSession:
                 revision=uuid4().hex,
                 status="paused" if state is not None else "ready",
                 history=copy.deepcopy(history),
+                codex_checklist=(
+                    codex_checklist
+                    if codex_checklist is not None
+                    else self._checkpoint.codex_checklist
+                ),
                 run_state=state.to_string() if state is not None else None,
             )
         except Exception:

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from ..lifecycle import RunHooks
     from ..run_config import ToolExecutionConfig
     from ..run_context import RunContextWrapper
+    from ..run_internal.resumable_session import ResumableRun
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class ModelToolHooks:
     context: RunContextWrapper[Any]
     lifecycle: RunHooks[Any]
     settings: ToolExecutionConfig | None
+    checkpoint: ResumableRun | None = None
 
 
 _MODEL_RUN_CONTEXT: ContextVar[tuple[object | None, ModelToolHooks | None]] = ContextVar(

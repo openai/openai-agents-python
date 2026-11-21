@@ -387,6 +387,11 @@ struct Thread {
 #[pymethods]
 impl Thread {
     #[getter]
+    fn thread_id(&self) -> String {
+        self.lease.id.to_string()
+    }
+
+    #[getter]
     fn model(&self) -> String {
         self.lease.model.clone()
     }

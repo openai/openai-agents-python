@@ -164,7 +164,7 @@ from .model_retry import (
 )
 from .oai_conversation import OpenAIServerConversationTracker
 from .prompt_cache_key import PromptCacheKeyResolver, model_settings_with_prompt_cache_key
-from .resumable_session import checkpoint_streamed_result
+from .resumable_session import ResumableRun, checkpoint_streamed_result
 from .run_steps import (
     NextStepFinalOutput,
     NextStepHandoff,
@@ -2692,7 +2692,13 @@ async def run_single_turn_streamed(
         model_run_context_stream(
             retry_stream,
             tool_use_tracker,
-            ModelToolHooks(public_agent, context_wrapper, hooks, run_config.tool_execution),
+            ModelToolHooks(
+                public_agent,
+                context_wrapper,
+                hooks,
+                run_config.tool_execution,
+                checkpoint=session if isinstance(session, ResumableRun) else None,
+            ),
         )
     ) as model_events:
         async for event in model_events:
@@ -3117,7 +3123,13 @@ async def get_new_response(
     with (
         model_run_context(
             tool_use_tracker,
-            ModelToolHooks(public_agent, context_wrapper, hooks, run_config.tool_execution),
+            ModelToolHooks(
+                public_agent,
+                context_wrapper,
+                hooks,
+                run_config.tool_execution,
+                checkpoint=session if isinstance(session, ResumableRun) else None,
+            ),
         ),
         record_failed_attempt_usage_on_error(context_wrapper.usage) as reported_usage,
     ):
