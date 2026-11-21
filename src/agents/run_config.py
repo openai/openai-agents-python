@@ -222,7 +222,12 @@ class ToolExecutionConfig:
     request. This does not force a selection or order calls in a batch. Withholding
     the named choice or emptying a required catalog raises UserError before sampling.
 
-    Covers direct function tools and MCP tools discovered through agent.mcp_servers.
+    Covers direct functions, sandbox capability functions and MCP tools discovered through
+    agent.mcp_servers. Keep the same sandbox capabilities during a run. On in-memory
+    resume a fresh capability tool or the SDK sandbox patch adapter may rebind to
+    the current session if the tool type, method, schema and approval policy still match.
+    A pending capability call requires the same capability type, position and tool key
+    after restore. An approval cannot move between a direct tool and a capability.
     Preconverted MCP functions in agent.tools raise UserError. Handoffs, deferred tools,
     programmatic callers, agents as tools and provider-managed tools are outside this policy.
     Use the same policy on resume. A serialized run trusts the application's current tool

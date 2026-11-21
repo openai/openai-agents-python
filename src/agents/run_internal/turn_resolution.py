@@ -2505,7 +2505,7 @@ async def resolve_interrupted_turn(
             await resume_declaration(
                 current_function.function_tool if current_function else None,
                 call_id,
-                public_agent,
+                bindings,
                 context_wrapper,
                 run_config,
             )

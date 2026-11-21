@@ -13,7 +13,9 @@ from agents import (
     UserError,
     function_tool,
 )
-from agents.testing import ScriptedModel, assistant_message, function_call
+from agents.sandbox import ExecResult, SandboxAgent
+from agents.sandbox.capabilities import Filesystem, Shell
+from agents.testing import ScriptedModel, assistant_message, function_call, scripted_sandbox_session
 
 from .mcp.helpers import FakeMCPServer
 
@@ -465,3 +467,145 @@ async def test_named_choice_can_still_select_hosted_search(streamed):
     await run(streamed, agent, configure(omit))
     assert model.calls[0].tools == [search]
     assert model.calls[0].model_settings.tool_choice == "web_search_preview"
+
+
+@pytest.mark.parametrize("resume", [None, "allow", "restore", "replace", "move", "executor"])
+async def test_prepared_sandbox_capability(streamed, resume):
+    replace_executor = False
+
+    def enabled(ctx, owner):
+        assert owner is agent
+        return True
+
+    def shell_tools(tools):
+        tools.exec_command.needs_approval = resume is not None
+        if replace_executor:
+            tools.exec_command.on_invoke_tool = lambda *_: pytest.fail("Replacement ran")
+        tools.exec_command.is_enabled = enabled
+
+    session = scripted_sandbox_session(
+        [{"method": "exec", "result": ExecResult(stdout=b"ok", stderr=b"", exit_code=0)}]
+    )
+    model = ScriptedModel(
+        [
+            [function_call("exec_command", {"cmd": "pwd"}, call_id="one")],
+            [assistant_message("done")],
+        ]
+    )
+    agent = SandboxAgent(
+        name="host", model=model, capabilities=[Shell(configure_tools=shell_tools)]
+    )
+    config = RunConfig(sandbox={"session": session}, tool_execution=configure().tool_execution)
+    result = await run(streamed, agent, config)
+    if resume:
+        assert not session.calls
+        state = result.to_state()
+        state.approve(result.interruptions[0])
+        if resume == "restore":
+            state = await RunState.from_json(agent, state.to_json())
+        elif resume != "allow":
+            if resume == "replace":
+                agent.capabilities = [Shell(configure_tools=shell_tools)]
+            if resume == "move":
+                agent.capabilities = [Filesystem(), *agent.capabilities]
+                state = await RunState.from_json(agent, state.to_json())
+            replace_executor = resume == "executor"
+            with pytest.raises(
+                UserError, match="no longer configured|replacement tool|capability source"
+            ):
+                await run(streamed, agent, config, state)
+            assert not session.calls
+            return
+        result = await run(streamed, agent, config, state)
+    assert result.final_output == "done"
+    session.assert_complete()
+
+
+async def test_prepared_sandbox_checks_live_public_tools(streamed):
+    def enabled(ctx, owner):
+        assert owner is agent
+        return True
+
+    @function_tool(is_enabled=enabled)
+    def publish():
+        pytest.fail("Revoked tool ran")
+
+    class Hooks(RunHooks):
+        async def on_tool_start(self, context, owner, tool):
+            assert owner is agent
+            agent.tools = []
+
+    agent = SandboxAgent(
+        name="host", tools=[publish], capabilities=[], model=ScriptedModel([[call("publish")]])
+    )
+    config = RunConfig(
+        sandbox={"session": scripted_sandbox_session()}, tool_execution=configure().tool_execution
+    )
+    with pytest.raises(UserError, match="no longer configured"):
+        await run(streamed, agent, config, hooks=Hooks())
+
+
+@pytest.mark.parametrize("direct", [False, True])
+async def test_prepared_sandbox_approval_cannot_change_source(streamed, direct):
+    effects = []
+
+    @function_tool(needs_approval=True)
+    def exec_command(cmd: str):
+        effects.append(cmd)
+
+    def require_approval(tools):
+        tools.exec_command.needs_approval = True
+
+    shell = Shell(configure_tools=require_approval)
+    session = scripted_sandbox_session(
+        [{"method": "exec", "result": ExecResult(stdout=b"ok", stderr=b"", exit_code=0)}]
+    )
+    model = ScriptedModel(
+        [
+            [function_call("exec_command", {"cmd": "pwd"}, call_id="one")],
+            [assistant_message("done")],
+        ]
+    )
+    agent = SandboxAgent(
+        name="host",
+        model=model,
+        capabilities=[] if direct else [shell],
+        tools=[exec_command] if direct else [],
+    )
+    config = RunConfig(sandbox={"session": session}, tool_execution=configure().tool_execution)
+    result = await run(streamed, agent, config)
+    state = result.to_state()
+    state.approve(result.interruptions[0])
+    data = state.to_json()
+    agent.tools = [] if direct else [exec_command]
+    agent.capabilities = [shell] if direct else []
+    restored = await RunState.from_json(agent, data)
+    with pytest.raises(UserError, match="source"):
+        await run(streamed, agent, config, restored)
+    assert not session.calls and not effects
+
+
+async def test_prepared_view_image_requires_capability_source(streamed):
+    def require_approval(tools):
+        tools.view_image.needs_approval = True
+
+    session = scripted_sandbox_session([{"method": "read", "result": b""}])
+    agent = SandboxAgent(
+        name="host",
+        model=ScriptedModel([[function_call("view_image", {"path": "image.png"}, call_id="one")]]),
+        capabilities=[Filesystem(configure_tools=require_approval)],
+    )
+    config = RunConfig(sandbox={"session": session}, tool_execution=configure().tool_execution)
+    result = await run(streamed, agent, config)
+    state = result.to_state()
+    state.approve(result.interruptions[0])
+    data = state.to_json()
+    record = data["context"]["tool_invocations"]["one"]
+    record["capability_source"] = None
+    with pytest.raises(UserError, match="capability source"):
+        await RunState.from_json(agent, data)
+    del record["capability_source"]
+    restored = await RunState.from_json(agent, data)
+    with pytest.raises(UserError, match="capability source"):
+        await run(streamed, agent, config, restored)
+    assert not session.calls

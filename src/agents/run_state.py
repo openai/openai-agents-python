@@ -1529,6 +1529,8 @@ class RunState(Generic[TContext, TAgent]):
                 }
             if invocation.requires_declaration and not invocation.completed:
                 record["requires_declaration"] = True
+                if invocation.capability_source is not None:
+                    record["capability_source"] = invocation.capability_source
             serialized[call_id] = record
         return serialized
 
@@ -4365,7 +4367,8 @@ async def _build_run_state_from_json(
         (schema_major, schema_minor) < (1, 23)
         and isinstance(saved_invocations, Mapping)
         and any(
-            isinstance(record, Mapping) and "requires_declaration" in record
+            isinstance(record, Mapping)
+            and ("requires_declaration" in record or "capability_source" in record)
             for record in saved_invocations.values()
         )
     ):
@@ -5722,6 +5725,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "RunState tool input rewrite is invalid.",
         "Prepared declarations require RunState schema 1.23.",
         "RunState tool declaration requirement is invalid.",
+        "RunState capability source is invalid.",
         "Hosted MCP approval decisions require a non-empty request id.",
         (
             "Persistent hosted MCP approval decisions require a non-empty server_label "

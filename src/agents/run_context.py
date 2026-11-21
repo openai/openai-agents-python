@@ -159,6 +159,7 @@ class _ToolInvocationRecord:
     # The input admitted under this ID, paired with the digest of the original proposal.
     input_rewrite: tuple[str, dict[str, Any]] | None = None
     requires_declaration: bool = False
+    capability_source: str | None = None
 
     def __post_init__(self) -> None:
         # Never serialize the live executor and policy into a checkpoint.
@@ -1652,6 +1653,11 @@ class RunContextWrapper(Generic[TContext]):
             requires_declaration = serialized_invocation.get("requires_declaration", False)
             if not isinstance(requires_declaration, bool):
                 raise validation_error_factory("RunState tool declaration requirement is invalid.")
+            source = serialized_invocation.get("capability_source")
+            if "capability_source" in serialized_invocation and (
+                not requires_declaration or not is_tool_invocation_digest(source)
+            ):
+                raise validation_error_factory("RunState capability source is invalid.")
             input_rewrite = None
             if "input_rewrite" in serialized_invocation:
                 rewrite = serialized_invocation["input_rewrite"]
@@ -1673,6 +1679,7 @@ class RunContextWrapper(Generic[TContext]):
                 completed=completed,
                 input_rewrite=input_rewrite,
                 requires_declaration=requires_declaration,
+                capability_source=source,
             )
 
     def _mark_restored_unbound_approval_call_ids(self) -> None:

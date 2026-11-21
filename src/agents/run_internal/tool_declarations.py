@@ -6,7 +6,8 @@ import copy
 from types import MethodType
 from typing import TYPE_CHECKING, Any
 
-from .._tool_identity import get_function_tool_qualified_name
+from .._tool_identity import get_function_tool_lookup_key_for_tool, get_function_tool_qualified_name
+from .._tool_invocation import _fingerprint
 from ..exceptions import ModelBehaviorError, UserError
 from ..run_config import RunConfig, ToolDeclaration
 from ..tool import (
@@ -18,10 +19,11 @@ from ..tool import (
 )
 
 if TYPE_CHECKING:
-    from ..agent import Agent
     from ..model_settings import ToolChoice
     from ..run_context import RunContextWrapper
     from ..run_state import RunState
+    from ..sandbox.capabilities.tools import SandboxApplyPatchTool
+    from .agent_bindings import AgentBindings
     from .run_steps import ProcessedResponse
 
 
@@ -75,24 +77,35 @@ def validate_resume_policy(
 class PreparedTool:
     """In-memory authority for a sampled function. Never persisted with the call."""
 
-    def __init__(self, tool: FunctionTool, agent: Agent[Any], config: RunConfig):
+    def __init__(self, tool: FunctionTool, bindings: AgentBindings[Any], config: RunConfig):
         settings = config.tool_execution
         if settings is None or settings.prepare_tool_declaration is None:
             raise UserError("Restore prepare_tool_declaration to resume this tool call.")
         self.policy = settings.prepare_tool_declaration
         self.tool = tool
-        self.agent = agent
+        self.agent = agent = bindings.public_agent
+        self.execution = bindings.execution_agent
+        self.capability = self._capability_source()
+        self.source_digest = (
+            _fingerprint(
+                {"capability": self.capability, "key": get_function_tool_lookup_key_for_tool(tool)}
+            )
+            if self.capability is not None
+            else None
+        )
         self.binding = tool._mcp_tool_binding
         index = self.binding[2] if self.binding else None
         if self.binding and (
             index is None
             or not 0 <= index < len(agent.mcp_servers)
-            or any(item is tool for item in agent.tools)
+            or any(item is tool for item in self.execution.tools)
         ):
             raise UserError("Use agent.mcp_servers for MCP tools with prepare_tool_declaration.")
         self.server = agent.mcp_servers[index] if index is not None else None
         self.executor = tool.on_invoke_tool
         self.approval = tool.needs_approval
+        self.patch = self._patch_adapter()
+        self.operation_approval = self.patch.needs_approval if self.patch else self.approval
         self.peer_call = self.server.call_tool if self.server else None
         self.peer_approval = self.server._needs_approval_policy if self.server else None
         self.schema = copy.deepcopy(tool.params_json_schema)
@@ -117,6 +130,7 @@ class PreparedTool:
             or not _same_callback(settings.prepare_tool_declaration, self.policy)
             or tool.on_invoke_tool is not self.executor
             or tool.needs_approval is not self.approval
+            or (self.patch is not None and self.patch.needs_approval is not self.operation_approval)
             or tool.strict_json_schema != self.strict
             or tool.params_json_schema != self.schema
             or tool.name != self.view.name
@@ -140,8 +154,72 @@ class PreparedTool:
                 )
             ):
                 raise UserError("The prepared MCP recipient changed before execution.")
-        elif all(item is not tool for item in self.agent.tools):
+        elif (
+            self._capability_source() != self.capability
+            or all(item is not tool for item in self.execution.tools)
+            # Execution clones can retain a direct tool removed from the public agent.
+            or (
+                self.capability is None
+                and self.execution is not self.agent
+                and all(item is not tool for item in self.agent.tools)
+            )
+        ):
             raise UserError("The prepared function is no longer configured.")
+
+    def _capability_source(self) -> tuple[int, str] | None:
+        if self.agent is self.execution:
+            return None
+        from ..sandbox import SandboxAgent
+
+        if isinstance(self.execution, SandboxAgent) and isinstance(self.agent, SandboxAgent):
+            for index, tool in self.execution._sandbox_capability_tools or ():
+                if tool is self.tool:
+                    sources = self.execution._sandbox_capability_sources
+                    if (
+                        index >= len(sources)
+                        or index >= len(self.agent.capabilities)
+                        or sources[index] is not self.agent.capabilities[index]
+                    ):
+                        raise UserError("The prepared capability is no longer configured.")
+                    return index, sources[index].type
+        return None
+
+    def _patch_adapter(self) -> SandboxApplyPatchTool | None:
+        if self.capability is None or not isinstance(self.executor, MethodType):
+            return None
+        from ..sandbox.capabilities.tools import SandboxApplyPatchTool
+
+        owner = self.executor.__self__
+        if (
+            type(owner) is SandboxApplyPatchTool
+            and self.executor.__func__ is SandboxApplyPatchTool._invoke_function
+            and isinstance(self.approval, MethodType)
+            and self.approval.__func__ is SandboxApplyPatchTool._function_needs_approval
+            and self.approval.__self__ is owner
+        ):
+            return owner
+        return None
+
+    def _same_function(self, current: PreparedTool) -> bool:
+        if self.tool is current.tool:
+            return True
+        # Sandbox resume recreates session-bound tools. Allow the same method to bind
+        # to the fresh tool only under the original capability and approval policy.
+        return (
+            self.capability is not None
+            and self.agent is current.agent
+            and type(self.tool) is type(current.tool)
+            and type(self.patch) is type(current.patch)
+            and self.view.name == current.view.name
+            and self.view.namespace == current.view.namespace
+            and self.strict == current.strict
+            and _same_callback(self.operation_approval, current.operation_approval)
+            and isinstance(self.executor, MethodType)
+            and isinstance(current.executor, MethodType)
+            and self.executor.__self__ is (self.patch or self.tool)
+            and current.executor.__self__ is (current.patch or current.tool)
+            and self.executor.__func__ is current.executor.__func__
+        )
 
     async def describe(self, context: RunContextWrapper[Any]) -> str | None:
         result = await self.policy(context, self.view)
@@ -158,7 +236,10 @@ class PreparedTool:
 
 
 async def prepare_declarations(
-    tools: list[Tool], agent: Agent[Any], context: RunContextWrapper[Any], config: RunConfig
+    tools: list[Tool],
+    bindings: AgentBindings[Any],
+    context: RunContextWrapper[Any],
+    config: RunConfig,
 ) -> tuple[list[Tool], list[Tool], dict[int, PreparedTool], set[str]]:
     if config.tool_execution is None or config.tool_execution.prepare_tool_declaration is None:
         return tools, tools, {}, set()
@@ -166,7 +247,7 @@ async def prepare_declarations(
     admitted: list[Tool] = []
     presented: list[Tool] = []
     prepared = {
-        id(tool): PreparedTool(tool, agent, config)
+        id(tool): PreparedTool(tool, bindings, config)
         for tool in tools
         if isinstance(tool, FunctionTool) and _covered(tool)
     }
@@ -221,13 +302,14 @@ def bind_declarations(
             if record is None:
                 raise UserError("A prepared tool call requires a unique call ID.")
             record.requires_declaration = True
+            record.capability_source = binding.source_digest
             record.declaration = binding
 
 
 async def resume_declaration(
     tool: FunctionTool | None,
     call_id: str,
-    agent: Agent[Any],
+    bindings: AgentBindings[Any],
     context: RunContextWrapper[Any],
     config: RunConfig,
 ) -> None:
@@ -243,13 +325,17 @@ async def resume_declaration(
         return
     if tool is None or not _covered(tool):
         raise UserError("The prepared tool is no longer available.")
-    current = PreparedTool(tool, agent, config)
+    current = PreparedTool(tool, bindings, config)
+    if record.capability_source != current.source_digest:
+        raise UserError(
+            "Cannot resume a prepared call with a different or missing capability source."
+        )
     previous = record.declaration
     if previous is not None:
         previous.validate(config)
         if (
             previous.server is not current.server
-            or (previous.server is None and previous.tool is not tool)
+            or (previous.server is None and not previous._same_function(current))
             or previous.schema != current.schema
             or previous.binding != current.binding
         ):

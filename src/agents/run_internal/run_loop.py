@@ -2523,7 +2523,7 @@ async def run_single_turn_streamed(
         collision_policy=run_config.tool_name_collision_policy,
     )
     all_tools, model_tools, prepared_tools, omitted = await prepare_declarations(
-        all_tools, public_agent, context_wrapper, run_config
+        all_tools, bindings, context_wrapper, run_config
     )
     if agent_span is not None:
         agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
@@ -2948,7 +2948,7 @@ async def run_single_turn(
         collision_policy=run_config.tool_name_collision_policy,
     )
     all_tools, model_tools, prepared_tools, omitted = await prepare_declarations(
-        all_tools, public_agent, context_wrapper, run_config
+        all_tools, bindings, context_wrapper, run_config
     )
     if agent_span is not None:
         agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
