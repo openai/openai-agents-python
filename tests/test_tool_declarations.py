@@ -609,3 +609,91 @@ async def test_prepared_view_image_requires_capability_source(streamed):
     with pytest.raises(UserError, match="capability source"):
         await run(streamed, agent, config, restored)
     assert not session.calls
+
+
+@pytest.mark.parametrize("phase", ["initial", "live", "restored"])
+async def test_prepared_tools_reject_mixed_callers(streamed, phase):
+    effects = []
+
+    @function_tool(needs_approval=True, allowed_callers=["direct"])
+    def publish():
+        effects.append("published")
+
+    async def prepare(ctx, declaration):
+        return None if phase == "initial" else declaration.description
+
+    model = ScriptedModel([[call("publish")]])
+    agent = Agent(name="host", tools=[publish], model=model)
+    config = configure(prepare)
+    prompt = "go"
+    if phase != "initial":
+        result = await run(streamed, agent, config)
+        prompt = result.to_state()
+        prompt.approve(result.interruptions[0])
+        if phase == "restored":
+            prompt = await RunState.from_json(agent, prompt.to_json())
+
+    assert publish.allowed_callers is not None
+    publish.allowed_callers.append("programmatic")
+    with pytest.raises(UserError, match="both direct and programmatic"):
+        await run(streamed, agent, config, prompt)
+    assert not effects
+    assert len(model.calls) == (0 if phase == "initial" else 1)
+
+
+async def test_programmatic_tool_without_direct_policy(streamed):
+    @function_tool(allowed_callers=["programmatic"])
+    def publish():
+        pytest.fail("Unexpected invocation")
+
+    async def prepare(ctx, declaration):
+        pytest.fail("Programmatic-only tool reached declaration policy")
+
+    model = ScriptedModel([[assistant_message("done")], [assistant_message("done")]])
+    agent = Agent(name="host", tools=[publish], model=model)
+    await run(streamed, agent, configure(prepare))
+    assert model.calls[0].tools[0].allowed_callers == ["programmatic"]
+    publish.allowed_callers = ["programmatic", "direct"]
+    await run(streamed, agent, RunConfig())
+    assert model.calls[1].tools[0].allowed_callers == ["programmatic", "direct"]
+
+
+@pytest.mark.parametrize("callers", [None, ["direct"], ["direct", "programmatic"]])
+async def test_unprepared_function_cannot_become_direct_after_selection(streamed, callers):
+    @function_tool(allowed_callers=["programmatic"])
+    def publish():
+        pytest.fail("Unprepared function ran")
+
+    async def withhold(ctx, declaration):
+        return None
+
+    class Hooks(RunHooks):
+        async def on_llm_start(self, context, agent, system_prompt, input_items):
+            publish.allowed_callers = callers
+
+    model = ScriptedModel([[call("publish")]])
+    agent = Agent(name="host", tools=[publish], model=model)
+    with pytest.raises(UserError, match="not prepared|both direct and programmatic"):
+        await run(streamed, agent, configure(withhold), hooks=Hooks())
+    assert len(model.calls) == 1
+    assert model.calls[0].tools[0].allowed_callers == ["programmatic"]
+
+
+async def test_caller_change_during_declaration_stops_before_sampling(streamed):
+    @function_tool(allowed_callers=["programmatic"])
+    def publish():
+        pytest.fail("Unprepared function ran")
+
+    @function_tool
+    def inspect():
+        pass
+
+    async def prepare(ctx, declaration):
+        publish.allowed_callers = ["direct"]
+        return None
+
+    model = ScriptedModel([[assistant_message("done")]])
+    agent = Agent(name="host", tools=[inspect, publish], model=model)
+    with pytest.raises(UserError, match="not prepared"):
+        await run(streamed, agent, configure(prepare))
+    assert not model.calls

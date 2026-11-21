@@ -172,7 +172,12 @@ from .run_steps import (
 )
 from .session_persistence import extend_held_session_write
 from .tool_caller import ensure_programmatic_tool_call_parent, ensure_tool_caller_allowed
-from .tool_declarations import PreparedTool, bind_declarations, resume_declaration
+from .tool_declarations import (
+    PreparedTool,
+    bind_declarations,
+    resume_declaration,
+    validate_prepared_inventory,
+)
 from .tool_execution import (
     build_litellm_json_tool_call,
     coerce_apply_patch_operations,
@@ -4137,6 +4142,8 @@ async def get_single_step_result_from_response(
     item_agent = bindings.public_agent
 
     def classify() -> ProcessedResponse:
+        if prepared_tools is not None:
+            validate_prepared_inventory(all_tools, prepared_tools)
         return process_model_response(
             agent=item_agent,
             all_tools=all_tools,

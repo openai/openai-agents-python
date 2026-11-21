@@ -28,11 +28,14 @@ if TYPE_CHECKING:
 
 
 def _covered(tool: FunctionTool) -> bool:
-    return (
-        not tool.defer_loading
-        and tool._agent_instance is None
-        and not (tool.allowed_callers and "programmatic" in tool.allowed_callers)
-    )
+    if tool.allowed_callers and "programmatic" in tool.allowed_callers:
+        if "direct" in tool.allowed_callers:
+            raise UserError(
+                "prepare_tool_declaration cannot handle both direct and programmatic callers "
+                "on the same function. Configure one caller type."
+            )
+        return False
+    return not tool.defer_loading and tool._agent_instance is None
 
 
 def _same_callback(first: object, second: object) -> bool:
@@ -235,14 +238,20 @@ class PreparedTool:
         self.validate(config)
 
 
+def validate_prepared_inventory(tools: list[Tool], prepared: dict[int, PreparedTool]) -> None:
+    for tool in tools:
+        if isinstance(tool, FunctionTool) and id(tool) not in prepared and _covered(tool):
+            raise UserError("The function was not prepared for this model request.")
+
+
 async def prepare_declarations(
     tools: list[Tool],
     bindings: AgentBindings[Any],
     context: RunContextWrapper[Any],
     config: RunConfig,
-) -> tuple[list[Tool], list[Tool], dict[int, PreparedTool], set[str]]:
+) -> tuple[list[Tool], list[Tool], dict[int, PreparedTool] | None, set[str]]:
     if config.tool_execution is None or config.tool_execution.prepare_tool_declaration is None:
-        return tools, tools, {}, set()
+        return tools, tools, None, set()
     omitted: set[str] = set()
     admitted: list[Tool] = []
     presented: list[Tool] = []
@@ -267,6 +276,11 @@ async def prepare_declarations(
         else:
             presented.append(tool)
         admitted.append(tool)
+    validate_prepared_inventory(admitted, prepared)
+    # Detach the caller list before request hooks can change the execution inventory.
+    for index, tool in enumerate(presented):
+        if isinstance(tool, FunctionTool) and tool.allowed_callers == ["programmatic"]:
+            presented[index] = copy.copy(tool)
     for binding in prepared.values():
         binding.validate(config)
     if omitted:

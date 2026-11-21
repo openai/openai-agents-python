@@ -228,6 +228,8 @@ class ToolExecutionConfig:
     the current session if the tool type, method, schema and approval policy still match.
     A pending capability call requires the same capability type, position and tool key
     after restore. An approval cannot move between a direct tool and a capability.
+    During selection, functions allowing both direct and programmatic callers raise UserError.
+    A function cannot gain direct access after selection for the same request.
     Preconverted MCP functions in agent.tools raise UserError. Handoffs, deferred tools,
     programmatic callers, agents as tools and provider-managed tools are outside this policy.
     Use the same policy on resume. A serialized run trusts the application's current tool
