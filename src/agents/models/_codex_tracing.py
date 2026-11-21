@@ -19,6 +19,8 @@ from ..tracing.config import get_operation_detail
 from ..tracing.provider import _is_noop_span, _is_noop_trace
 from ..tracing.span_data import FunctionSpanData, GenerationSpanData, ResponseSpanData
 from ..tracing.util import _parse_iso_timestamp, time_iso
+from ..usage import _response_usage_to_usage, model_usage_to_span_usage
+from ._codex_usage import _usage
 from .interface import ModelTracing
 
 
@@ -174,7 +176,7 @@ class CodexOperationTracing:
             if isinstance(data, GenerationSpanData):
                 data.model = metadata.model
             if isinstance(usage, dict):
-                data.usage = {key: value for key, value in usage.items() if isinstance(value, int)}
+                data.usage = model_usage_to_span_usage(_response_usage_to_usage(_usage(usage)))
 
     def _content(self, operation: _Operation, event: dict[str, Any]) -> None:
         if self._detail != "content":

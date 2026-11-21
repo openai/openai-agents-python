@@ -134,7 +134,9 @@ The workspace sandbox protects the directory that contains the installed helpers
 
 On Windows, the preview rejects a local Codex executor configured with the legacy elevated sandbox. That sandbox needs a setup helper that Codex cannot securely locate from a Python process. If your organization requires this sandbox, use an SDK-managed executor or configure a remote executor with `include_local = false` in `environments.toml`.
 
-Native Codex approval prompts are separate from SDK tool approvals. This provider cannot answer native approval requests and fails the model call when one arrives. For a non-interactive read-only workflow, configure Codex to avoid approval prompts:
+Native Codex approval prompts are separate from SDK tool approvals. With `session=ResumableSession(...)`, the Runner can pause a direct native `exec_command` or `apply_patch` call before execution and recover the original call after approval. Recovery on another worker requires the same workspace path and a compatible runtime. Native workspace tools must remain enabled, without native tool hooks. The approval applies only to that call; it does not grant permission for later calls. Recording or rechecking a patch approval scans at most 32 file paths, including new files and move destinations. Existing file content is limited to 16 MiB per scan and 8 MiB per file. Exceeding these limits causes approval recovery to fail.
+
+The provider rejects unsupported native approval requests or configurations, including network or remote-executor approvals and multiple outstanding calls. Without a `ResumableSession`, a native approval pause also fails. For a non-interactive read-only workflow, configure Codex to avoid approval prompts:
 
 ```python
 provider = CodexProvider(
@@ -180,6 +182,8 @@ config = RunConfig(
 The Runner has been recording agent execution, SDK turns, and Python function tools. Codex has been supplying observations for model inference and native workspace tools. The SDK has been using available source timestamps, parent identifiers, outcomes, and usage for those observations. Python function execution has been retaining one execution span from the Runner.
 
 With `operation_detail` omitted and sensitive data enabled, the first model span of each Runner request has been capturing the submitted input. The last model span of that request has been capturing the returned response. Under this default policy, native tool results such as file contents have been reaching SDK processors through returned responses and replayed input history. Intermediate model calls and native tools have been capturing metadata. With `"content"` selected and sensitive data allowed, each operation has been capturing bounded content at its source.
+
+In content mode, an MCP tool span can capture the execution result before an output hook scrubs it, while the next model input contains the hook's replacement. Select explicit `"metadata"` mode when the raw tool result must stay private in traces.
 
 When a run has been ending with unfinished operations, the SDK has been closing their spans with `outcome="interrupted"` and `estimated_end=True`. The SDK has been estimating that end time in Python.
 

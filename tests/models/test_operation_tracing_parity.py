@@ -429,6 +429,14 @@ async def _exercise(
                     assert span.span_data.operation.response_id == f"resp_parity_{index}"
                 assert span.span_data.usage["input_tokens"] == 10 * index
                 assert span.span_data.usage["output_tokens"] == 5 * index
+                assert span.span_data.usage["requests"] == 1
+                assert span.span_data.usage["input_tokens_details"]["cached_tokens"] == index
+                assert (
+                    span.span_data.usage["input_tokens_details"].get("cache_write_tokens", 0) == 0
+                )
+                assert span.span_data.usage["output_tokens_details"] == {
+                    "reasoning_tokens": index,
+                }
                 started, ended = server.intervals[index - 1]
                 assert _ns(span.started_at) <= started + 1_000_000
                 assert _ns(span.ended_at) >= ended - 1_000_000
@@ -467,6 +475,9 @@ async def _exercise(
             assert span.attributes["gen_ai.response.model"] == observed_model
             assert span.attributes["gen_ai.usage.input_tokens"] == 10 * index
             assert span.attributes["gen_ai.usage.output_tokens"] == 5 * index
+            assert span.attributes["gen_ai.usage.cache_read.input_tokens"] == index
+            assert span.attributes["gen_ai.usage.reasoning.output_tokens"] == index
+            assert "gen_ai.usage.cache_write.input_tokens" not in span.attributes
             assert span.attributes["openai.api.type"] == "responses"
             assert span.kind.name == "CLIENT"
             started, ended = server.intervals[index - 1]

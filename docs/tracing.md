@@ -270,6 +270,8 @@ calculator.request
 
 Group runs, agents, model calls, and tools by `gen_ai.operation.name` using `invoke_runner`, `invoke_agent`, `chat`, and `execute_tool`. Use `openai.agents.turn` for SDK turns and `openai.agents.tool_approval` for approval records. Read tool durations from the start of execution after approval. For embedded Codex observations, see [operation tracing](models/codex.md#operation-tracing).
 
+Model spans report token totals as `gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens`. When the provider supplies nonzero counts, OTel also exports cache reads as `gen_ai.usage.cache_read.input_tokens`, cache writes as `gen_ai.usage.cache_write.input_tokens`, and reasoning as `gen_ai.usage.reasoning.output_tokens`. Missing or zero counts do not add these optional attributes.
+
 ### Payload capture
 
 For the Responses and Codex providers, select capture per run with `RunConfig.tracing["operation_detail"]`. Set `trace_include_sensitive_data=False` to suppress input and output even with `"content"` selected.

@@ -12,7 +12,7 @@ use codex_core_api::CodexThread;
 use codex_extension_api::ExtensionDataInit;
 use codex_protocol::protocol::EventMsg;
 use serde_json::json;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 
 const QUEUE_CAPACITY: usize = 64;
 
@@ -66,11 +66,13 @@ pub(crate) struct OperationEvents {
     sender: mpsc::Sender<String>,
     dropped: Arc<AtomicU64>,
     state: Mutex<State>,
+    resolution_finished: watch::Sender<bool>,
 }
 
 impl OperationEvents {
     pub(crate) fn new() -> Self {
         let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let (resolution_finished, _) = watch::channel(false);
         Self {
             sender,
             dropped: Arc::new(AtomicU64::new(0)),
@@ -78,6 +80,7 @@ impl OperationEvents {
                 receiver,
                 pending: None,
             }),
+            resolution_finished,
         }
     }
 
@@ -99,6 +102,56 @@ impl OperationEvents {
             init.insert(OperationObservation::new(mode, sink));
         }
         Ok(init)
+    }
+
+    // Release an idle observation reader before the resolver drains the final queue.
+    pub(crate) fn finish_resolution(&self) {
+        self.resolution_finished.send_replace(true);
+    }
+
+    pub(crate) async fn next_notification(&self, thread_id: &str) -> Option<String> {
+        let mut finished = self.resolution_finished.subscribe();
+        let mut state = self.state.lock().await;
+        if let Ok(event) = state.receiver.try_recv() {
+            return Some(event);
+        }
+        let dropped = self.dropped.swap(0, Ordering::Relaxed);
+        if dropped != 0 {
+            return Some(
+                json!({
+                    "method": "turn/operation/dropped",
+                    "params": {"threadId": thread_id, "droppedCount": dropped},
+                })
+                .to_string(),
+            );
+        }
+        if *finished.borrow() {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            event = state.receiver.recv() => event,
+            _ = finished.changed() => None,
+        }
+    }
+
+    pub(crate) async fn drain_notifications(&self, thread_id: &str) -> Vec<String> {
+        let mut state = self.state.lock().await;
+        let mut events = Vec::new();
+        while let Ok(event) = state.receiver.try_recv() {
+            events.push(event);
+        }
+        let dropped = self.dropped.swap(0, Ordering::Relaxed);
+        if dropped != 0 {
+            events.push(
+                json!({
+                    "method": "turn/operation/dropped",
+                    "params": {"threadId": thread_id, "droppedCount": dropped},
+                })
+                .to_string(),
+            );
+        }
+        events
     }
 
     pub(crate) async fn next_event(
@@ -128,12 +181,22 @@ impl OperationEvents {
                 event = thread.next_event() => {
                     let event = event.map_err(|_| "The Codex event stream ended unexpectedly.".to_owned())?;
                     match &event.msg {
-                        EventMsg::ExecApprovalRequest(_)
-                        | EventMsg::ApplyPatchApprovalRequest(_)
-                        | EventMsg::RequestPermissions(_)
+                        EventMsg::ExecApprovalRequest(_) | EventMsg::ApplyPatchApprovalRequest(_) => {
+                            let preconditions = thread
+                                .capture_tool_approval_preconditions(event.msg.clone())
+                                .await
+                                .map_err(|_| "This Codex approval cannot be safely resumed.".to_owned())?;
+                            state.pending = Some(json!({
+                                "id": event.id,
+                                "msg": event.msg,
+                                "preconditions": preconditions,
+                            }).to_string());
+                            continue;
+                        }
+                        EventMsg::RequestPermissions(_)
                         | EventMsg::RequestUserInput(_)
                         | EventMsg::ElicitationRequest(_) => {
-                            return Err("Codex requested interactive approval. This provider supports non-interactive execution only.".to_owned());
+                            return Err("Codex requested an unsupported kind of interactive approval.".to_owned());
                         }
                         _ => {}
                     }
@@ -153,6 +216,51 @@ mod tests {
     use codex_core::operation_observation::{OperationKind, OperationMetadata, OperationOutcome};
 
     #[tokio::test]
+    async fn restoration_delivers_start_before_completion_and_drains_once() {
+        let events = OperationEvents::new();
+        let init = events.initializer(Some("metadata")).unwrap();
+        let observation = init.get::<OperationObservation>().unwrap();
+        let guard = observation.start(
+            "thread_1".into(),
+            "turn_1".into(),
+            OperationKind::Tool,
+            OperationMetadata::default(),
+        );
+        let start = events.next_notification("thread_1").await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&start).unwrap()["method"],
+            "turn/operation/started"
+        );
+        guard.finish(OperationOutcome::Success);
+        events.finish_resolution();
+        let terminal = events.drain_notifications("thread_1").await;
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&terminal[0]).unwrap()["method"],
+            "turn/operation/completed"
+        );
+        assert!(events.next_notification("thread_1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn restoration_completion_releases_waiting_reader_before_drain() {
+        let events = OperationEvents::new();
+        let reader = async {
+            assert!(events.next_notification("thread_1").await.is_none());
+        };
+        let finish = async {
+            tokio::task::yield_now().await;
+            events.finish_resolution();
+            assert!(events.drain_notifications("thread_1").await.is_empty());
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(reader, finish);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn delivery_preserves_source_identity_and_per_turn_capture() {
         for mode in ["metadata", "content"] {
             let events = OperationEvents::new();
@@ -168,11 +276,10 @@ mod tests {
                 },
             );
             guard.finish_with_output(OperationOutcome::Success, &json!({"text": "visible"}));
-            let mut state = events.state.lock().await;
-            let start: serde_json::Value =
-                serde_json::from_str(&state.receiver.recv().await.unwrap()).unwrap();
-            let end: serde_json::Value =
-                serde_json::from_str(&state.receiver.recv().await.unwrap()).unwrap();
+            let notifications = events.drain_notifications("thread_1").await;
+            assert_eq!(notifications.len(), 2);
+            let start: serde_json::Value = serde_json::from_str(&notifications[0]).unwrap();
+            let end: serde_json::Value = serde_json::from_str(&notifications[1]).unwrap();
             assert_eq!(start["method"], "turn/operation/started");
             assert_eq!(end["method"], "turn/operation/completed");
             assert_eq!(start["params"]["operationId"], end["params"]["operationId"]);

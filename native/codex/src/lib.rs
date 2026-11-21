@@ -1,5 +1,6 @@
 //! Private, asynchronous Core bindings for the opt-in Codex model provider.
 mod config;
+mod native_approval;
 mod operation_events;
 mod tool_hooks;
 
@@ -449,7 +450,8 @@ impl Thread {
                     final_output_json_schema: schema,
                     ..Default::default()
                 });
-                let request = WithTurnExtensionData::new(request, capture);
+                let request =
+                    WithTurnExtensionData::new(request, capture).capture_native_approvals();
                 match Box::pin(lease.thread.start_turn_if_idle(request))
                     .await
                     .map_err(|_| "Unable to start the Codex turn.".to_owned())?
@@ -494,6 +496,51 @@ impl Thread {
             }
             .await;
             result.map_err(py_error)
+        })
+    }
+
+    // The approval resolver owns Core events; this reader consumes only observations.
+    fn next_operation_event<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let lease = self.lease.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            lease.ensure_open().map_err(py_error)?;
+            Ok(lease
+                .operations
+                .next_notification(&lease.id.to_string())
+                .await)
+        })
+    }
+
+    #[pyo3(signature = (call_json, request_json, preconditions_json, operation_capture=None))]
+    fn resolve_approval<'py>(
+        &self,
+        py: Python<'py>,
+        call_json: String,
+        request_json: String,
+        preconditions_json: String,
+        operation_capture: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let call = serde_json::from_str(&call_json)
+            .map_err(|_| py_error("Invalid saved Codex tool call."))?;
+        let request = serde_json::from_str(&request_json)
+            .map_err(|_| py_error("Invalid saved Codex approval request."))?;
+        let preconditions = serde_json::from_str(&preconditions_json)
+            .map_err(|_| py_error("Invalid saved Codex file preconditions."))?;
+        let lease = self.lease.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let outcome = async {
+                lease.ensure_open()?;
+                let capture = lease.operations.initializer(operation_capture.as_deref())?;
+                native_approval::resolve(&lease.thread, call, request, preconditions, capture).await
+            }
+            .await;
+            lease.operations.finish_resolution();
+            let (output, turn_id, failure) = outcome.map_err(py_error)?;
+            let notifications = lease
+                .operations
+                .drain_notifications(&lease.id.to_string())
+                .await;
+            Ok((output, turn_id, notifications, failure))
         })
     }
 
