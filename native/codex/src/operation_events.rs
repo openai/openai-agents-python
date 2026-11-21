@@ -182,13 +182,13 @@ impl OperationEvents {
                     let event = event.map_err(|_| "The Codex event stream ended unexpectedly.".to_owned())?;
                     match &event.msg {
                         EventMsg::ExecApprovalRequest(_) | EventMsg::ApplyPatchApprovalRequest(_) => {
-                            let preconditions = thread
-                                .capture_tool_approval_preconditions(event.msg.clone())
+                            let (request, preconditions) = thread
+                                .capture_tool_approval(event.msg)
                                 .await
                                 .map_err(|_| "This Codex approval cannot be safely resumed.".to_owned())?;
                             state.pending = Some(json!({
                                 "id": event.id,
-                                "msg": event.msg,
+                                "msg": request,
                                 "preconditions": preconditions,
                             }).to_string());
                             continue;

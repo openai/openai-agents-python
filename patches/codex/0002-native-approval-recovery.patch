@@ -23,7 +23,7 @@ index 542abf9..5ffc5cf 100644
  similar = { workspace = true }
  tempfile = { workspace = true }
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 968d331..9d0bd2e 100644
+index 968d331..a10c351 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -45,6 +45,7 @@ use codex_protocol::protocol::AskForApproval;
@@ -60,11 +60,11 @@ index 968d331..9d0bd2e 100644
 +        .await
 +    }
 +
-+    /// Captures live preconditions before retiring a worker waiting for its first native approval.
-+    pub async fn capture_tool_approval_preconditions(
++    /// Returns the live approval without file preimages, paired with its verified preconditions.
++    pub async fn capture_tool_approval(
 +        &self,
 +        approval: EventMsg,
-+    ) -> CodexResult<serde_json::Value> {
++    ) -> CodexResult<(EventMsg, serde_json::Value)> {
 +        crate::restore_tool_call::capture(&self.session, approval).await
 +    }
 +
@@ -91,10 +91,10 @@ index dcd01e4..dc14807 100644
  mod compact_model_fallback;
 diff --git a/codex-rs/core/src/patch_preconditions.rs b/codex-rs/core/src/patch_preconditions.rs
 new file mode 100644
-index 0000000..3b4ae7b
+index 0000000..d32a51c
 --- /dev/null
 +++ b/codex-rs/core/src/patch_preconditions.rs
-@@ -0,0 +1,643 @@
+@@ -0,0 +1,978 @@
 +//! Filesystem preconditions for restoring an interrupted native patch approval.
 +
 +use crate::session::step_context::StepContext;
@@ -120,9 +120,9 @@ index 0000000..3b4ae7b
 +use std::time::Duration;
 +
 +// Approval recovery fails closed for larger preimages instead of retaining large reads.
-+const MAX_PATCH_PREIMAGE_BYTES: u64 = 8 * 1024 * 1024;
++pub(crate) const MAX_PATCH_PREIMAGE_BYTES: u64 = 8 * 1024 * 1024;
 +const MAX_PATCH_PATHS: usize = 32;
-+const MAX_PATCH_SCAN_BYTES: u64 = 16 * 1024 * 1024;
++pub(crate) const MAX_PATCH_SCAN_BYTES: u64 = 16 * 1024 * 1024;
 +const MAX_PATCH_SCAN_DURATION: Duration = Duration::from_secs(10);
 +
 +#[derive(Debug, Serialize, PartialEq)]
@@ -156,6 +156,7 @@ index 0000000..3b4ae7b
 +async fn capture_step(
 +    step: &StepContext,
 +    changes: &HashMap<PathBuf, FileChange>,
++    check_deleted_content: bool,
 +) -> CodexResult<PatchPreconditions> {
 +    let environment = step
 +        .environments
@@ -163,7 +164,12 @@ index 0000000..3b4ae7b
 +        .ok_or_else(|| {
 +            invalid("Restoring patch approvals requires a single selected local environment")
 +        })?;
-+    capture(&step.fs_accessor(environment), changes).await
++    capture_with_deletion_check(
++        &step.fs_accessor(environment),
++        changes,
++        check_deleted_content,
++    )
++    .await
 +}
 +
 +pub(crate) async fn validate_patch_preconditions(
@@ -172,7 +178,8 @@ index 0000000..3b4ae7b
 +    checkpoint: &Value,
 +) -> CodexResult<()> {
 +    let expected = validate_checkpoint(&approval.changes, checkpoint)?;
-+    let observed = capture_step(step, &approval.changes).await?;
++    let check_deleted_content = checkpoint.get("version").and_then(Value::as_u64) == Some(1);
++    let observed = capture_step(step, &approval.changes, check_deleted_content).await?;
 +    if observed.files.iter().any(|(path, digest)| {
 +        match (digest, path.to_str().and_then(|path| expected.get(path))) {
 +            (Some(digest), Some(Value::String(expected))) => digest != expected,
@@ -228,7 +235,67 @@ index 0000000..3b4ae7b
 +    Ok(paths)
 +}
 +
++fn valid_digest(value: &str) -> bool {
++    value.len() == 64
++        && value
++            .bytes()
++            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
++}
++
 +fn validate_checkpoint<'a>(
++    changes: &HashMap<PathBuf, FileChange>,
++    checkpoint: &'a Value,
++) -> CodexResult<&'a serde_json::Map<String, Value>> {
++    let files = validate_checkpoint_shape(changes, checkpoint)?;
++    if checkpoint.get("version").and_then(Value::as_u64) == Some(2) {
++        for change in changes.values() {
++            match change {
++                FileChange::Delete { content } if !content.is_empty() => {
++                    return Err(invalid("Version 2 patch deletions must omit raw content"));
++                }
++                FileChange::Update { unified_diff, .. } if !valid_digest(unified_diff) => {
++                    return Err(invalid(
++                        "Version 2 patch updates require a SHA-256 diff digest",
++                    ));
++                }
++                _ => {}
++            }
++        }
++    }
++    Ok(files)
++}
++
++/// Binds a live native deletion to its saved digest before redacting its content.
++/// No file I/O or content cloning occurs here; callers bound any other live fields separately.
++pub(crate) fn matches_delete_preimages(
++    changes: &HashMap<PathBuf, FileChange>,
++    checkpoint: &Value,
++) -> bool {
++    let Ok(files) = validate_checkpoint_shape(changes, checkpoint) else {
++        return false;
++    };
++    let mut remaining = MAX_PATCH_SCAN_BYTES;
++    for change in changes.values() {
++        if let FileChange::Delete { content } = change {
++            let size = content.len() as u64;
++            if size > MAX_PATCH_PREIMAGE_BYTES.min(remaining) {
++                return false;
++            }
++            remaining -= size;
++        }
++    }
++    changes.iter().all(|(path, change)| {
++        let FileChange::Delete { content } = change else {
++            return true;
++        };
++        path.to_str()
++            .and_then(|path| files.get(path))
++            .and_then(Value::as_str)
++            .is_some_and(|expected| digest(content.as_bytes()) == expected)
++    })
++}
++
++fn validate_checkpoint_shape<'a>(
 +    changes: &HashMap<PathBuf, FileChange>,
 +    checkpoint: &'a Value,
 +) -> CodexResult<&'a serde_json::Map<String, Value>> {
@@ -241,7 +308,7 @@ index 0000000..3b4ae7b
 +        .and_then(Value::as_object)
 +        .ok_or_else(|| invalid("Invalid patch approval file map"))?;
 +    if root.len() != 2
-+        || root.get("version").and_then(Value::as_u64) != Some(1)
++        || !matches!(root.get("version").and_then(Value::as_u64), Some(1 | 2))
 +        || files.len() > MAX_PATCH_PATHS
 +        || files.len() != paths.len()
 +    {
@@ -258,12 +325,7 @@ index 0000000..3b4ae7b
 +                    "Pending patch destinations must have absent preimages",
 +                ));
 +            }
-+        } else if !value.as_str().is_some_and(|value| {
-+            value.len() == 64
-+                && value
-+                    .bytes()
-+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-+        }) {
++        } else if !value.as_str().is_some_and(valid_digest) {
 +            return Err(invalid("Invalid patch approval preimage digest"));
 +        }
 +    }
@@ -274,13 +336,21 @@ index 0000000..3b4ae7b
 +    fs: &impl EnvironmentAccess,
 +    changes: &HashMap<PathBuf, FileChange>,
 +) -> CodexResult<PatchPreconditions> {
++    capture_with_deletion_check(fs, changes, true).await
++}
++
++async fn capture_with_deletion_check(
++    fs: &impl EnvironmentAccess,
++    changes: &HashMap<PathBuf, FileChange>,
++    check_deleted_content: bool,
++) -> CodexResult<PatchPreconditions> {
 +    patch_paths(changes)?;
 +    tokio::time::timeout(MAX_PATCH_SCAN_DURATION, async {
 +        let mut files = BTreeMap::new();
 +        let mut remaining = MAX_PATCH_SCAN_BYTES;
 +        for (path, change) in changes {
 +            let deleted = match change {
-+                FileChange::Delete { content } => Some(content.as_bytes()),
++                FileChange::Delete { content } if check_deleted_content => Some(content.as_bytes()),
 +                _ => None,
 +            };
 +            let original = observe_file(
@@ -704,7 +774,7 @@ index 0000000..3b4ae7b
 +        let valid = serde_json::json!({"version": 1, "files": files});
 +        assert!(validate_checkpoint(&changes, &valid).is_ok());
 +        let mut invalid = valid.clone();
-+        invalid["version"] = serde_json::json!(2);
++        invalid["version"] = serde_json::json!(3);
 +        assert!(validate_checkpoint(&changes, &invalid).is_err());
 +        let mut invalid = valid.clone();
 +        invalid["files"]
@@ -737,13 +807,278 @@ index 0000000..3b4ae7b
 +            .is_err()
 +        );
 +    }
++    fn deletion_checkpoint(path: &Path, content: &[u8], version: u32) -> Value {
++        let files = [(path.to_path_buf(), Some(digest(content)))]
++            .into_iter()
++            .collect();
++        let mut checkpoint =
++            serde_json::to_value(PatchPreconditions { version: 1, files }).unwrap();
++        checkpoint["version"] = serde_json::json!(version);
++        checkpoint
++    }
++
++    #[test]
++    fn v2_deletion_requires_redaction_and_mandatory_digest() {
++        let path = PathBuf::from("/deleted");
++        let mut changes = [(
++            path.clone(),
++            FileChange::Delete {
++                content: "private contents".into(),
++            },
++        )]
++        .into_iter()
++        .collect();
++        let checkpoint = deletion_checkpoint(&path, b"private contents", 2);
++        assert!(validate_checkpoint(&changes, &checkpoint).is_err());
++        changes.insert(
++            path.clone(),
++            FileChange::Delete {
++                content: String::new(),
++            },
++        );
++        assert!(validate_checkpoint(&changes, &checkpoint).is_ok());
++        for value in [
++            Value::Null,
++            Value::String(String::new()),
++            Value::String("A".repeat(64)),
++        ] {
++            let mut malformed = checkpoint.clone();
++            malformed["files"][path.to_str().unwrap()] = value;
++            assert!(validate_checkpoint(&changes, &malformed).is_err());
++        }
++        let mut malformed = checkpoint;
++        malformed["files"].as_object_mut().unwrap().clear();
++        assert!(validate_checkpoint(&changes, &malformed).is_err());
++    }
++
++    #[test]
++    fn v2_update_requires_diff_digest_but_live_delete_matcher_accepts_raw_updates() {
++        let path = PathBuf::from("/updated");
++        let raw_diff = " private neighboring line\n-old\n+new";
++        let mut changes = [(
++            path.clone(),
++            FileChange::Update {
++                unified_diff: raw_diff.into(),
++                move_path: None,
++            },
++        )]
++        .into_iter()
++        .collect();
++        let checkpoint = deletion_checkpoint(&path, b"original file", 2);
++        assert!(matches_delete_preimages(&changes, &checkpoint));
++        assert!(validate_checkpoint(&changes, &checkpoint).is_err());
++        for diff in [String::new(), "A".repeat(64), "z".repeat(64)] {
++            changes.insert(
++                path.clone(),
++                FileChange::Update {
++                    unified_diff: diff,
++                    move_path: None,
++                },
++            );
++            assert!(validate_checkpoint(&changes, &checkpoint).is_err());
++        }
++        changes.insert(
++            path.clone(),
++            FileChange::Update {
++                unified_diff: digest(raw_diff.as_bytes()),
++                move_path: None,
++            },
++        );
++        assert!(validate_checkpoint(&changes, &checkpoint).is_ok());
++        let mut legacy = checkpoint;
++        legacy["version"] = serde_json::json!(1);
++        changes.insert(
++            path,
++            FileChange::Update {
++                unified_diff: raw_diff.into(),
++                move_path: None,
++            },
++        );
++        assert!(validate_checkpoint(&changes, &legacy).is_ok());
++    }
++
++    #[test]
++    fn live_delete_matcher_binds_raw_content_without_reading_the_path() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().canonicalize().unwrap().join("not-on-disk");
++        let mut changes = [(
++            path.clone(),
++            FileChange::Delete {
++                content: "original".into(),
++            },
++        )]
++        .into_iter()
++        .collect();
++        let checkpoint = deletion_checkpoint(&path, b"original", 2);
++        assert!(matches_delete_preimages(&changes, &checkpoint));
++        assert!(!path.exists());
++        changes.insert(
++            path.clone(),
++            FileChange::Delete {
++                content: "forged".into(),
++            },
++        );
++        assert!(!matches_delete_preimages(&changes, &checkpoint));
++        changes.insert(
++            path.clone(),
++            FileChange::Delete {
++                content: "original".into(),
++            },
++        );
++        let mut wrong_digest = checkpoint;
++        wrong_digest["files"][path.to_str().unwrap()] = Value::String(digest(b"different"));
++        assert!(!matches_delete_preimages(&changes, &wrong_digest));
++    }
++
++    #[test]
++    fn live_delete_matcher_enforces_content_budgets_before_hashing() {
++        let path = PathBuf::from("/large-delete");
++        let checkpoint = deletion_checkpoint(&path, b"irrelevant", 2);
++        let changes = [(
++            path,
++            FileChange::Delete {
++                content: "x".repeat(MAX_PATCH_PREIMAGE_BYTES as usize + 1),
++            },
++        )]
++        .into_iter()
++        .collect();
++        assert!(!matches_delete_preimages(&changes, &checkpoint));
++        let changes: HashMap<_, _> = (0..3)
++            .map(|index| {
++                (
++                    PathBuf::from(format!("/delete-{index}")),
++                    FileChange::Delete {
++                        content: "x".repeat(MAX_PATCH_PREIMAGE_BYTES as usize),
++                    },
++                )
++            })
++            .collect();
++        let files: BTreeMap<_, _> = changes
++            .keys()
++            .map(|path| (path.clone(), Some(digest(b"irrelevant"))))
++            .collect();
++        let checkpoint = serde_json::to_value(PatchPreconditions { version: 2, files }).unwrap();
++        assert!(!matches_delete_preimages(&changes, &checkpoint));
++        let path = PathBuf::from("/empty-delete");
++        let checkpoint = deletion_checkpoint(&path, b"", 2);
++        let changes = [(
++            path,
++            FileChange::Delete {
++                content: String::new(),
++            },
++        )]
++        .into_iter()
++        .collect();
++        assert!(matches_delete_preimages(&changes, &checkpoint));
++    }
++
++    #[tokio::test]
++    async fn v2_redacted_delete_validates_full_preimage_and_rejects_forged_digest_or_drift() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().canonicalize().unwrap().join("deleted");
++        std::fs::write(&path, b"private original file").unwrap();
++        let fs = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
++        let mut request = approval(
++            path.clone(),
++            FileChange::Delete {
++                content: "private original file".into(),
++            },
++        );
++        let initial = capture(&fs, &request.changes).await.unwrap();
++        assert_eq!(initial.version, 1);
++        let mut checkpoint = serde_json::to_value(initial).unwrap();
++        checkpoint["version"] = serde_json::json!(2);
++        request.changes.insert(
++            path.clone(),
++            FileChange::Delete {
++                content: String::new(),
++            },
++        );
++        let (session, turn) = crate::session::tests::make_session_and_context().await;
++        let session = std::sync::Arc::new(session);
++        let step = session
++            .capture_step_context(
++                std::sync::Arc::new(turn),
++                &tokio_util::sync::CancellationToken::new(),
++            )
++            .await
++            .unwrap();
++        validate_patch_preconditions(&step, &request, &checkpoint)
++            .await
++            .unwrap();
++        let mut forged = checkpoint.clone();
++        forged["files"][path.to_str().unwrap()] = Value::String(digest(b"forged"));
++        assert!(
++            validate_patch_preconditions(&step, &request, &forged)
++                .await
++                .is_err()
++        );
++        std::fs::write(&path, b"stale replacement").unwrap();
++        assert!(
++            validate_patch_preconditions(&step, &request, &checkpoint)
++                .await
++                .is_err()
++        );
++    }
++
++    #[tokio::test]
++    async fn legacy_delete_keeps_raw_equality_and_initial_capture() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().canonicalize().unwrap().join("legacy-deleted");
++        std::fs::write(&path, b"legacy contents").unwrap();
++        let fs = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
++        let mut request = approval(
++            path.clone(),
++            FileChange::Delete {
++                content: "legacy contents".into(),
++            },
++        );
++        let checkpoint =
++            serde_json::to_value(capture(&fs, &request.changes).await.unwrap()).unwrap();
++        assert_eq!(checkpoint["version"], 1);
++        let (session, turn) = crate::session::tests::make_session_and_context().await;
++        let session = std::sync::Arc::new(session);
++        let step = session
++            .capture_step_context(
++                std::sync::Arc::new(turn),
++                &tokio_util::sync::CancellationToken::new(),
++            )
++            .await
++            .unwrap();
++        validate_patch_preconditions(&step, &request, &checkpoint)
++            .await
++            .unwrap();
++        request.changes.insert(
++            path.clone(),
++            FileChange::Delete {
++                content: "forged".into(),
++            },
++        );
++        assert!(
++            validate_patch_preconditions(&step, &request, &checkpoint)
++                .await
++                .is_err()
++        );
++        assert!(capture(&fs, &request.changes).await.is_err());
++        request.changes.insert(
++            path,
++            FileChange::Delete {
++                content: String::new(),
++            },
++        );
++        assert!(
++            validate_patch_preconditions(&step, &request, &checkpoint)
++                .await
++                .is_err()
++        );
++    }
 +}
 diff --git a/codex-rs/core/src/restore_tool_call.rs b/codex-rs/core/src/restore_tool_call.rs
 new file mode 100644
-index 0000000..b04d400
+index 0000000..2818bcc
 --- /dev/null
 +++ b/codex-rs/core/src/restore_tool_call.rs
-@@ -0,0 +1,692 @@
+@@ -0,0 +1,809 @@
 +//! Model-free replay of one native call, requiring the same fresh human approval.
 +
 +use std::collections::HashMap;
@@ -761,6 +1096,7 @@ index 0000000..b04d400
 +use sha2::{Digest, Sha256};
 +use tokio_util::sync::CancellationToken;
 +
++use crate::patch_preconditions::{MAX_PATCH_PREIMAGE_BYTES, MAX_PATCH_SCAN_BYTES};
 +use crate::session::session::Session;
 +use crate::session::step_context::StepContext;
 +use crate::session::turn_context::TurnContext;
@@ -1103,7 +1439,39 @@ index 0000000..b04d400
 +    Ok(())
 +}
 +
-+pub(crate) async fn capture(session: &Arc<Session>, expected: EventMsg) -> CodexResult<Value> {
++// Prepared deletes include the complete file. Prepared diffs can include neighboring
++// lines absent from the submitted patch. Keep those bytes out of the SDK checkpoint.
++fn compact_patch(event: &mut EventMsg) -> CodexResult<bool> {
++    let EventMsg::ApplyPatchApprovalRequest(request) = event else {
++        return Ok(false);
++    };
++    let mut remaining = MAX_PATCH_SCAN_BYTES;
++    let mut compacted = false;
++    for change in request.changes.values_mut() {
++        match change {
++            FileChange::Add { .. } => continue,
++            FileChange::Delete { content } => {
++                // The trusted file snapshot already binds the entire deletion.
++                *content = String::new();
++            }
++            FileChange::Update { unified_diff, .. } => {
++                let bytes = unified_diff.len() as u64;
++                if bytes > MAX_PATCH_PREIMAGE_BYTES.min(remaining) {
++                    return Err(refusal("prepared patch diff exceeds the recovery limit"));
++                }
++                remaining -= bytes;
++                *unified_diff = format!("{:x}", Sha256::digest(unified_diff.as_bytes()));
++            }
++        }
++        compacted = true;
++    }
++    Ok(compacted)
++}
++
++pub(crate) async fn capture(
++    session: &Arc<Session>,
++    mut expected: EventMsg,
++) -> CodexResult<(EventMsg, Value)> {
 +    let (turn, cancellation) = session
 +        .active_turn_context_and_cancellation_token()
 +        .await
@@ -1116,20 +1484,40 @@ index 0000000..b04d400
 +    let step = session.capture_step_context(turn, &cancellation).await?;
 +    validate_step(session, &step).await?;
 +    let approvals = state.0.lock().unwrap();
-+    approvals
++    let mut checkpoint = approvals
 +        .get(id)
 +        .ok_or_else(|| refusal("not a pending first pre-execution approval"))?
-+        .checkpoint(&expected)
++        .checkpoint(&expected)?;
++    if compact_patch(&mut expected)? {
++        checkpoint["patch"]["version"] = json!(2);
++    }
++    Ok((expected, checkpoint))
 +}
 +
-+pub(crate) fn compare_request(turn: &TurnContext, event: &EventMsg) -> bool {
++pub(crate) fn compare_request(turn: &TurnContext, event: &mut EventMsg) -> bool {
 +    record_capture_event(turn, event);
 +    let Some(restore) = active(turn) else {
 +        return true;
 +    };
-+    !restore.requested.swap(true, Ordering::SeqCst)
-+        && approval_id(event) == approval_id(&restore.expected)
-+        && matches!((comparable(event), comparable(&restore.expected)), (Ok(observed), Ok(expected)) if observed == expected)
++    if restore.requested.swap(true, Ordering::SeqCst)
++        || approval_id(event) != approval_id(&restore.expected)
++    {
++        return false;
++    }
++    // Version 1 keeps comparing the original request verbatim, including any
++    // digest-looking text. Only v2 uses a compact request and file fingerprints.
++    let patch = &restore.checkpoint["patch"];
++    if patch["version"] == 2 {
++        let EventMsg::ApplyPatchApprovalRequest(request) = event else {
++            return false;
++        };
++        if !crate::patch_preconditions::matches_delete_preimages(&request.changes, patch)
++            || !matches!(compact_patch(event), Ok(true))
++        {
++            return false;
++        }
++    }
++    matches!((comparable(event), comparable(&restore.expected)), (Ok(observed), Ok(expected)) if observed == expected)
 +}
 +
 +pub(crate) fn record_decision(turn: &TurnContext, decision: ReviewDecision) -> ReviewDecision {
@@ -1229,6 +1617,70 @@ index 0000000..b04d400
 +        json!({"version":1,"first_approval":true,"permissions":"test-fingerprint","patch":null})
 +    }
 +
++    #[tokio::test]
++    async fn compact_approval_hides_prepared_file_text_and_matches_only_the_original_action() {
++        let deleted = PathBuf::from("/workspace/delete");
++        let updated = PathBuf::from("/workspace/update");
++        let raw = codex_protocol::approvals::ApplyPatchApprovalRequestEvent {
++            call_id: "original".into(),
++            turn_id: "first-turn".into(),
++            started_at_ms: 1,
++            changes: HashMap::from([
++                (
++                    deleted.clone(),
++                    FileChange::Delete {
++                        content: "private original".into(),
++                    },
++                ),
++                (
++                    updated.clone(),
++                    FileChange::Update {
++                        unified_diff: "-old\n+new\n private neighbor".into(),
++                        move_path: None,
++                    },
++                ),
++            ]),
++            reason: None,
++            grant_root: None,
++        };
++        let mut expected = EventMsg::ApplyPatchApprovalRequest(raw.clone());
++        assert!(compact_patch(&mut expected).unwrap());
++        assert!(
++            !serde_json::to_string(&expected)
++                .unwrap()
++                .contains("private")
++        );
++        let mut state = checkpoint();
++        state["patch"] = json!({"version":2,"files":{
++            "/workspace/delete": format!("{:x}", Sha256::digest(b"private original")),
++            "/workspace/update": format!("{:x}", Sha256::digest(b"old\nprivate neighbor")),
++        }});
++        let call: ResponseItem = serde_json::from_value(json!({
++            "type":"custom_tool_call", "name":"apply_patch", "call_id":"original",
++            "input":"original patch", "status":"completed"
++        }))
++        .unwrap();
++        let (_, turn) = crate::session::tests::make_session_and_context().await;
++        for changed_path in [None, Some(&deleted), Some(&updated)] {
++            let restore =
++                RestoreToolCall::new(call.clone(), expected.clone(), Some(state.clone())).unwrap();
++            assert!(restore.claim(&turn));
++            turn.extension_data.insert(restore);
++            let mut fresh = raw.clone();
++            if let Some(path) = changed_path {
++                match fresh.changes.get_mut(path).unwrap() {
++                    FileChange::Delete { content } => content.push('!'),
++                    FileChange::Update { unified_diff, .. } => unified_diff.push('!'),
++                    _ => unreachable!(),
++                }
++            }
++            assert_eq!(
++                compare_request(&turn, &mut EventMsg::ApplyPatchApprovalRequest(fresh)),
++                changed_path.is_none()
++            );
++        }
++    }
++
 +    #[test]
 +    fn reuses_patch_snapshot_only_for_the_live_event_and_original_changes() {
 +        let path = PathBuf::from("/workspace/new");
@@ -1311,14 +1763,14 @@ index 0000000..b04d400
 +        assert!(restore.claim(&turn));
 +        assert!(!restore.claim(&turn));
 +        assert!(validate_before_execution(&session, &step).await.is_err());
-+        assert!(compare_request(&turn, &approval()));
++        assert!(compare_request(&turn, &mut approval()));
 +        assert_eq!(
 +            record_decision(&turn, ReviewDecision::Approved),
 +            ReviewDecision::Approved
 +        );
 +        assert!(validate_before_execution(&session, &step).await.is_ok());
 +        assert!(validate_before_execution(&session, &step).await.is_err());
-+        assert!(!compare_request(&turn, &approval()));
++        assert!(!compare_request(&turn, &mut approval()));
 +    }
 +
 +    #[tokio::test]
@@ -1336,8 +1788,8 @@ index 0000000..b04d400
 +        if let EventMsg::ExecApprovalRequest(event) = &mut changed {
 +            event.command.push("unexpected".into());
 +        }
-+        assert!(!compare_request(&turn, &changed));
-+        assert!(!compare_request(&turn, &approval()));
++        assert!(!compare_request(&turn, &mut changed));
++        assert!(!compare_request(&turn, &mut approval()));
 +        assert!(!active(&turn).unwrap().approved.load(Ordering::SeqCst));
 +    }
 +
@@ -1372,7 +1824,7 @@ index 0000000..b04d400
 +                .unwrap()
 +                .claim(&turn)
 +        );
-+        assert!(compare_request(&turn, &approval()));
++        assert!(compare_request(&turn, &mut approval()));
 +        record_decision(&turn, ReviewDecision::Approved);
 +        assert!(validate_before_execution(&session, &step).await.is_err());
 +    }
@@ -1437,7 +1889,7 @@ index 0000000..b04d400
 +    }
 +}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 66476ae..c092ec5 100644
+index 66476ae..6bfe356 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -2930,7 +2930,7 @@ impl Session {
@@ -1449,11 +1901,20 @@ index 66476ae..c092ec5 100644
          &self,
      ) -> Option<(Arc<TurnContext>, CancellationToken)> {
          let active = self.active_turn.lock().await;
+@@ -3155,7 +3155,7 @@ impl Session {
+             .as_ref()
+             .map(PluginCommandAttribution::serialized_fields)
+             .unzip();
+-        let event = EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
++        let mut event = EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
+             model_context: Some(model_context),
+             kind,
+             call_id,
 @@ -3175,9 +3175,15 @@ impl Session {
              available_decisions: Some(available_decisions),
              parsed_cmd,
          });
-+        if !crate::restore_tool_call::compare_request(turn_context, &event) {
++        if !crate::restore_tool_call::compare_request(turn_context, &mut event) {
 +            return ReviewDecision::Abort;
 +        }
          let _user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
@@ -1466,11 +1927,20 @@ index 66476ae..c092ec5 100644
      }
 
      #[expect(
+@@ -3211,7 +3217,7 @@ impl Session {
+             warn!("Overwriting existing pending approval for call_id: {approval_id}");
+         }
+
+-        let event = EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
++        let mut event = EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
+             call_id,
+             turn_id: turn_context.sub_id.clone(),
+             started_at_ms: now_unix_timestamp_ms(),
 @@ -3219,9 +3225,15 @@ impl Session {
              reason,
              grant_root,
          });
-+        if !crate::restore_tool_call::compare_request(turn_context, &event) {
++        if !crate::restore_tool_call::compare_request(turn_context, &mut event) {
 +            return ReviewDecision::Abort;
 +        }
          let _user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
