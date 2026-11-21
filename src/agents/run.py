@@ -44,6 +44,7 @@ from .logger import log_model_and_tool_action_warning, log_tool_action_warning, 
 from .memory import Session
 from .memory.resumable_session import ResumableSession
 from .result import RunResult, RunResultStreaming
+from .run_budget import _prepare_budget
 from .run_config import (
     DEFAULT_MAX_TURNS,
     CallModelData,
@@ -657,6 +658,7 @@ class AgentRunner:
         run_state: RunState[TContext] | None = (
             cast(RunState[TContext], input) if is_resumed_state else None
         )
+        budget = _prepare_budget(run_config, starting_agent, run_state, session)
         resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
             run_config.reasoning_item_id_policy
             if run_config.reasoning_item_id_policy is not None
@@ -716,7 +718,7 @@ class AgentRunner:
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
             )
-            context_wrapper = ensure_context_wrapper(context)
+            context_wrapper = ensure_context_wrapper(context)._for_new_root(budget)
             if isinstance(session, ResumableRun):
                 await session.begin(input)
             context_wrapper._resolve_function_approval_owners(starting_agent)
@@ -2671,6 +2673,9 @@ class AgentRunner:
             if run_config.tracing_disabled
             else contextlib.nullcontext(),
         ):
+            budget = _prepare_budget(
+                run_config, starting_agent, input if isinstance(input, RunState) else None, session
+            )
             # Handle RunState input
             is_resumed_state = isinstance(input, RunState)
             run_state: RunState[TContext] | None = None
@@ -2739,7 +2744,7 @@ class AgentRunner:
                     previous_response_id=previous_response_id,
                     auto_previous_response_id=auto_previous_response_id,
                 )
-                context_wrapper = ensure_context_wrapper(context)
+                context_wrapper = ensure_context_wrapper(context)._for_new_root(budget)
                 context_wrapper._resolve_function_approval_owners(starting_agent)
                 set_agent_tool_state_scope(context_wrapper, uuid4().hex)
                 # input_for_state is the same as input_for_result here

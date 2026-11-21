@@ -320,6 +320,7 @@ class OpenAIChatCompletionsModel(Model):
                 # The request completed, so it counts even when the provider omits usage.
                 else Usage(requests=1)
             )
+            usage._total_missing = response.usage is None or response.usage.total_tokens is None
 
             # Record the request and token usage on the span before the terminal
             # branches below, so a ModelBehaviorError raised for a truncated empty

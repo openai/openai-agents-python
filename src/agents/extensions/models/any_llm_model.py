@@ -465,6 +465,7 @@ class AnyLLMModel(Model):
                 # The request completed, so it counts even when the provider omits usage.
                 else Usage(requests=1)
             )
+            usage._total_missing = response.usage is None or response.usage.total_tokens is None
 
             span_response.span_data.usage = model_usage_to_span_usage(usage)
 
@@ -672,6 +673,7 @@ class AnyLLMModel(Model):
                 # The request completed, so it counts even when the provider omits usage.
                 else Usage(requests=1)
             )
+            usage._total_missing = response.usage is None or response.usage.total_tokens is None
 
             # Some providers signal a filtered non-streaming completion only through
             # finish_reason="content_filter" and an otherwise empty message. Preserve

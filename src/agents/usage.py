@@ -8,8 +8,16 @@ from typing import Annotated, Any, cast
 
 from openai.types.completion_usage import CompletionTokensDetails, PromptTokensDetails
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
-from pydantic import BeforeValidator, JsonValue, TypeAdapter, ValidationError
+from pydantic import (
+    BeforeValidator,
+    JsonValue,
+    ModelWrapValidatorHandler,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 from pydantic.dataclasses import dataclass
+from pydantic_core import ArgsKwargs
 
 _RAW_USAGE_ATTRIBUTE = "_agents_sdk_raw_usage"
 _NORMALIZED_USAGE_ATTRIBUTE = "_agents_sdk_normalized_usage"
@@ -228,6 +236,23 @@ class Usage:
         cost calculation or context window management.
     """
 
+    _total_missing = False
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _remember_total_presence(
+        cls, value: Any, handler: ModelWrapValidatorHandler[Usage]
+    ) -> Usage:
+        usage = handler(value)
+        if isinstance(value, ArgsKwargs):
+            # total_tokens is the sixth positional field in the released constructor.
+            usage._total_missing = len(value.args) < 6 and "total_tokens" not in (
+                value.kwargs or {}
+            )
+        elif isinstance(value, Mapping):
+            usage._total_missing = "total_tokens" not in value
+        return usage
+
     def __post_init__(self) -> None:
         # Some providers don't populate optional token detail fields
         # (cached_tokens, cache_write_tokens, reasoning_tokens), and the OpenAI SDK's generated
@@ -262,6 +287,7 @@ class Usage:
         Args:
             other: The Usage object to add to this one.
         """
+        self._total_missing = self._total_missing and other._total_missing
         self.requests += other.requests if other.requests else 0
         self.input_tokens += other.input_tokens if other.input_tokens else 0
         self.output_tokens += other.output_tokens if other.output_tokens else 0
@@ -370,7 +396,7 @@ def _response_usage_to_usage(response_usage: Any) -> Usage:
         usage.requests = max(usage.requests, request_count)
         return usage
 
-    return Usage(
+    usage = Usage(
         requests=request_count,
         input_tokens=response_usage.input_tokens or 0,
         output_tokens=response_usage.output_tokens or 0,
@@ -378,6 +404,11 @@ def _response_usage_to_usage(response_usage: Any) -> Usage:
         input_tokens_details=response_usage.input_tokens_details,
         output_tokens_details=response_usage.output_tokens_details,
     )
+    usage._total_missing = (
+        response_usage.total_tokens is None
+        or getattr(response_usage, "_agents_sdk_total_missing", False) is True
+    )
+    return usage
 
 
 def _attach_normalized_usage(target: Any, usage: Usage) -> None:
