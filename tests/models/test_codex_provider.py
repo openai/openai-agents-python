@@ -1208,6 +1208,83 @@ async def test_cleanup_failure_never_returns_success_or_masks_attempt_error(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize("primary", ["success", "failure", "cancel"])
+@pytest.mark.parametrize("late_cancel", [False, True])
+async def test_native_cleanup_preserves_cancellation_and_primary_failure(
+    tmp_path, threads, restored, primary, late_cancel
+):
+    from agents.models.interface import ModelTracing
+
+    close_started, release_close = asyncio.Event(), asyncio.Event()
+    closed = []
+
+    class HeldCloseThread(FakeThread):
+        async def next_operation_event(self):
+            await self.started.wait()
+            return None
+
+        async def resolve_approval(self, *args):
+            self.started.set()
+            if primary == "cancel":
+                await asyncio.Event().wait()
+            if primary == "failure":
+                raise ValueError("primary failure")
+            return "accepted", "turn_1", [], None
+
+        async def close(self):
+            close_started.set()
+            try:
+                await release_close.wait()
+                raise RuntimeError("cleanup failure")
+            finally:
+                closed.append(True)
+                await super().close()
+
+    thread = HeldCloseThread(
+        events=[{"type": "error"}] if primary == "failure" else [],
+        gate=asyncio.Event() if primary == "cancel" else None,
+    )
+    threads[0].append(thread)
+    provider = CodexProvider(cwd=tmp_path)
+    checkpoint = {"version": 1, "cwd": str(tmp_path), "model": "fixture", "call": {}, "request": {}}
+    operation = (
+        provider._run_approved_native_call(checkpoint, ModelTracing.DISABLED)
+        if restored
+        else Runner.run(Agent(name="test"), "Answer", run_config=RunConfig(model_provider=provider))
+    )
+    task = asyncio.create_task(operation)
+    try:
+        await asyncio.wait_for(thread.started.wait(), 2)
+        if primary == "cancel":
+            task.cancel("primary cancellation")
+        await asyncio.wait_for(close_started.wait(), 2)
+        if late_cancel:
+            task.cancel("cleanup cancellation")
+            await asyncio.sleep(0)
+            task.cancel("repeated cancellation")
+            await asyncio.sleep(0)
+        assert not task.done()
+        release_close.set()
+        error, reason = RuntimeError, "cleanup failure"
+        if primary == "failure":
+            error = ValueError if restored else RuntimeError
+            reason = "primary failure" if restored else "Codex model turn failed"
+        if primary == "cancel" or late_cancel:
+            error = asyncio.CancelledError
+            first_cancel = primary == "cancel" and (restored or not late_cancel)
+            reason = "primary cancellation" if first_cancel else "cleanup cancellation"
+        with pytest.raises(error, match=reason):
+            await task
+        assert closed == [True]
+    finally:
+        release_close.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
 async def test_closing_stream_during_tool_publication_retires_pending_native_call(
     tmp_path, threads
 ):
