@@ -218,10 +218,10 @@ index 9f4ef92..34a88e0 100644
      };
 diff --git a/codex-rs/core/src/operation_observation.rs b/codex-rs/core/src/operation_observation.rs
 new file mode 100644
-index 0000000..cea2a98
+index 0000000..ccea56b
 --- /dev/null
 +++ b/codex-rs/core/src/operation_observation.rs
-@@ -0,0 +1,1970 @@
+@@ -0,0 +1,1987 @@
 +//! Opt-in, in-memory operation facts for the host that owns a turn.
 +//!
 +//! These observations never enter the rollout or the telemetry logger. The host
@@ -455,6 +455,23 @@ index 0000000..cea2a98
 +        let duration_ms = self.started.elapsed().as_secs_f64() * 1000.0;
 +        if self.observation.captures_content() {
 +            self.capture_output(&output());
++        }
++        self.finish_at(outcome, completed_at, duration_ms);
++    }
++
++    pub(crate) fn finish_with_bounded_output_fn(
++        &self,
++        outcome: OperationOutcome,
++        output: impl FnOnce() -> Result<Value, &'static str>,
++    ) {
++        let completed_at = timestamp();
++        let duration_ms = self.started.elapsed().as_secs_f64() * 1000.0;
++        if self.observation.captures_content() {
++            let content = match output() {
++                Ok(value) => project_content(&value),
++                Err(reason) => omitted_content(reason),
++            };
++            self.update(|event| event.output = Some(content));
 +        }
 +        self.finish_at(outcome, completed_at, duration_ms);
 +    }
@@ -2315,8 +2332,27 @@ index 317e029..4354977 100644
          let ToolInvocation {
              session,
              turn,
+diff --git a/codex-rs/core/src/tools/code_mode/output.rs b/codex-rs/core/src/tools/code_mode/output.rs
+index a85b77a..f264419 100644
+--- a/codex-rs/core/src/tools/code_mode/output.rs
++++ b/codex-rs/core/src/tools/code_mode/output.rs
+@@ -40,6 +40,14 @@ impl CodeModeToolOutput {
+ }
+
+ impl ToolOutput for CodeModeToolOutput {
++    fn bounded_code_mode_result(
++        &self,
++        payload: &ToolPayload,
++        max_bytes: usize,
++    ) -> Result<serde_json::Value, &'static str> {
++        self.output.bounded_code_mode_result(payload, max_bytes)
++    }
++
+     fn log_output(&self) -> String {
+         self.output.log_output()
+     }
 diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
-index fe7de2c..60aa2b8 100644
+index fe7de2c..718ea5c 100644
 --- a/codex-rs/core/src/tools/context.rs
 +++ b/codex-rs/core/src/tools/context.rs
 @@ -125,6 +125,8 @@ pub struct ToolInvocation {
@@ -2336,6 +2372,188 @@ index fe7de2c..60aa2b8 100644
              item_id,
              window_id: self.session.current_window_id().await,
          })
+@@ -176,6 +179,14 @@ pub struct McpToolOutput {
+ }
+
+ impl ToolOutput for McpToolOutput {
++    fn bounded_code_mode_result(
++        &self,
++        payload: &ToolPayload,
++        max_bytes: usize,
++    ) -> Result<JsonValue, &'static str> {
++        self.result.bounded_code_mode_result(payload, max_bytes)
++    }
++
+     fn log_output(&self) -> String {
+         // Logging has its own budget; do not first apply the model-context budget.
+         let output = self.result.log_output();
+@@ -262,6 +273,15 @@ pub struct ToolSearchOutput {
+ }
+
+ impl ToolOutput for ToolSearchOutput {
++    fn bounded_code_mode_result(
++        &self,
++        payload: &ToolPayload,
++        max_bytes: usize,
++    ) -> Result<JsonValue, &'static str> {
++        let _ = payload;
++        codex_tools::bounded_tool_output(&self.tools, max_bytes)
++    }
++
+     fn log_output(&self) -> String {
+         let tools = self
+             .tools
+@@ -329,6 +349,17 @@ impl FunctionToolOutput {
+ }
+
+ impl ToolOutput for FunctionToolOutput {
++    fn bounded_code_mode_result(
++        &self,
++        payload: &ToolPayload,
++        max_bytes: usize,
++    ) -> Result<JsonValue, &'static str> {
++        // The normal conversion clones and joins body items. Admit only a bounded
++        // serialized source first, including item count and embedded media bytes.
++        codex_tools::bounded_tool_output(&self.body, max_bytes)?;
++        Ok(self.code_mode_result(payload))
++    }
++
+     fn log_output(&self) -> String {
+         function_call_output_content_items_to_text(&self.body).unwrap_or_default()
+     }
+@@ -357,6 +388,15 @@ impl ApplyPatchToolOutput {
+ }
+
+ impl ToolOutput for ApplyPatchToolOutput {
++    fn bounded_code_mode_result(
++        &self,
++        payload: &ToolPayload,
++        max_bytes: usize,
++    ) -> Result<JsonValue, &'static str> {
++        let _ = max_bytes;
++        Ok(self.code_mode_result(payload))
++    }
++
+     fn log_output(&self) -> String {
+         self.text.clone()
+     }
+@@ -390,6 +430,15 @@ pub struct AbortedToolOutput {
+ }
+
+ impl ToolOutput for AbortedToolOutput {
++    fn bounded_code_mode_result(
++        &self,
++        payload: &ToolPayload,
++        max_bytes: usize,
++    ) -> Result<JsonValue, &'static str> {
++        codex_tools::bounded_tool_output(&self.message, max_bytes)?;
++        Ok(self.code_mode_result(payload))
++    }
++
+     fn log_output(&self) -> String {
+         self.message.clone()
+     }
+@@ -437,6 +486,17 @@ pub struct ExecCommandToolOutput {
+ }
+
+ impl ToolOutput for ExecCommandToolOutput {
++    fn bounded_code_mode_result(
++        &self,
++        payload: &ToolPayload,
++        max_bytes: usize,
++    ) -> Result<JsonValue, &'static str> {
++        // Rendering may clone raw text even when the model token budget is small.
++        // Establish a source bound before calling the existing formatter.
++        codex_tools::bounded_tool_output(&(&self.chunk_id, &self.raw_output.text), max_bytes)?;
++        Ok(self.code_mode_result(payload))
++    }
++
+     fn log_output(&self) -> String {
+         // The telemetry budget must not inherit the model's output-token limit.
+         let output = self
+diff --git a/codex-rs/core/src/tools/context_tests.rs b/codex-rs/core/src/tools/context_tests.rs
+index aa9a5f3..c62943d 100644
+--- a/codex-rs/core/src/tools/context_tests.rs
++++ b/codex-rs/core/src/tools/context_tests.rs
+@@ -554,3 +554,78 @@ fn exec_command_tool_output_preserves_omission_metadata_when_truncated() {
+     assert!(text.contains("Warning: truncated output (original token count: 42000)"));
+     assert_eq!(text.matches(&marker).count(), 1);
+ }
++
++#[test]
++fn bounded_capture_checks_function_source_before_cloning_and_joining() {
++    let payload = ToolPayload::Function {
++        arguments: "{}".into(),
++    };
++    let mut output = FunctionToolOutput::from_content(
++        vec![
++            FunctionCallOutputContentItem::InputText {
++                text: "first".into(),
++            },
++            FunctionCallOutputContentItem::InputText {
++                text: "second".into(),
++            },
++        ],
++        Some(true),
++    );
++    assert_eq!(
++        output.bounded_code_mode_result(&payload, 1024),
++        Ok(json!("first\nsecond"))
++    );
++    output.body.push(FunctionCallOutputContentItem::InputImage {
++        image: ImageReference::Inline {
++            image_url: "x".repeat(1024 * 1024),
++        },
++        detail: None,
++    });
++    assert_eq!(
++        output.bounded_code_mode_result(&payload, 1024),
++        Err("capture_budget")
++    );
++    output.body = (0..10000)
++        .map(|_| FunctionCallOutputContentItem::InputText {
++            text: String::new(),
++        })
++        .collect();
++    assert_eq!(
++        output.bounded_code_mode_result(&payload, 1024),
++        Err("capture_budget")
++    );
++}
++
++#[test]
++fn bounded_capture_checks_exec_source_before_rendering() {
++    let payload = ToolPayload::Function {
++        arguments: "{}".into(),
++    };
++    let mut output = ExecCommandToolOutput {
++        event_call_id: "call-42".into(),
++        chunk_id: "chunk".into(),
++        wall_time: Duration::from_millis(25),
++        raw_output: "visible".into(),
++        truncation_policy: TruncationPolicy::Bytes(10000),
++        max_output_tokens: None,
++        process_id: None,
++        exit_code: Some(0),
++        original_token_count: Some(1),
++        hook_command: None,
++        tool_cwd: None,
++    };
++    assert_eq!(
++        output.bounded_code_mode_result(&payload, 1024),
++        Ok(output.code_mode_result(&payload))
++    );
++    output.raw_output.text = "x".repeat(1024 * 1024);
++    assert_eq!(
++        output.bounded_code_mode_result(&payload, 1024),
++        Err("capture_budget")
++    );
++    output.max_output_tokens = Some(1);
++    assert_eq!(
++        output.bounded_code_mode_result(&payload, 1024),
++        Err("capture_budget")
++    );
++}
 diff --git a/codex-rs/core/src/tools/handlers/apply_patch.rs b/codex-rs/core/src/tools/handlers/apply_patch.rs
 index 64d6cc1..0c1c08a 100644
 --- a/codex-rs/core/src/tools/handlers/apply_patch.rs
@@ -2410,10 +2628,10 @@ index 3344ed8..ea173f5 100644
  pub(crate) mod registry;
 diff --git a/codex-rs/core/src/tools/operation_observation.rs b/codex-rs/core/src/tools/operation_observation.rs
 new file mode 100644
-index 0000000..2c84e35
+index 0000000..5ecf36d
 --- /dev/null
 +++ b/codex-rs/core/src/tools/operation_observation.rs
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,207 @@
 +//! Execution observations, separate from admission, approval, and result hooks.
 +
 +use std::sync::Arc;
@@ -2504,9 +2722,32 @@ index 0000000..2c84e35
 +        } else {
 +            OperationOutcome::Error
 +        };
-+        guard.finish_with_output_fn(outcome, || match result {
-+            Ok(output) => output.code_mode_result(&invocation.payload),
-+            Err(error) => serde_json::json!({"error": error.to_string()}),
++        guard.finish_with_bounded_output_fn(outcome, || match result {
++            Ok(output) => {
++                output.bounded_code_mode_result(&invocation.payload, CONTENT_VALUE_LIMIT_BYTES)
++            }
++            Err(error) => {
++                let message = match error {
++                    FunctionCallError::RespondToModel(message)
++                    | FunctionCallError::Fatal(message) => message,
++                };
++                // Bound source text before Display allocates the optional fatal prefix.
++                if message.len() > CONTENT_VALUE_LIMIT_BYTES {
++                    return Err("capture_budget");
++                }
++                #[derive(serde::Serialize)]
++                struct ErrorOutput<'a> {
++                    error: &'a str,
++                }
++                let rendered;
++                let error = if matches!(error, FunctionCallError::Fatal(_)) {
++                    rendered = error.to_string();
++                    rendered.as_str()
++                } else {
++                    message.as_str()
++                };
++                codex_tools::bounded_tool_output(&ErrorOutput { error }, CONTENT_VALUE_LIMIT_BYTES)
++            }
 +        });
 +    }
 +}
@@ -2600,10 +2841,10 @@ index 0000000..2c84e35
 +mod tests;
 diff --git a/codex-rs/core/src/tools/operation_observation_tests.rs b/codex-rs/core/src/tools/operation_observation_tests.rs
 new file mode 100644
-index 0000000..b94ecd9
+index 0000000..ed180f3
 --- /dev/null
 +++ b/codex-rs/core/src/tools/operation_observation_tests.rs
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,455 @@
 +use super::*;
 +use crate::operation_observation::OperationCaptureMode;
 +use crate::operation_observation::OperationEvent;
@@ -2952,6 +3193,113 @@ index 0000000..b94ecd9
 +            <= crate::operation_observation::CONTENT_LIMIT_BYTES
 +    );
 +}
++
++#[tokio::test]
++async fn bounded_capture_marks_unknown_outputs_and_large_errors_without_materialization() {
++    struct Unknown(Arc<std::sync::atomic::AtomicUsize>);
++    impl ToolOutput for Unknown {
++        fn bounded_code_mode_result(
++            &self,
++            _: &ToolPayload,
++            _: usize,
++        ) -> Result<Value, &'static str> {
++            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            Err("unsupported_output")
++        }
++        fn log_output(&self) -> String {
++            panic!("unexpected conversion")
++        }
++        fn success_for_logging(&self) -> bool {
++            true
++        }
++        fn to_response_item(
++            &self,
++            _: &str,
++            _: &ToolPayload,
++        ) -> codex_protocol::models::ResponseInputItem {
++            panic!("unexpected conversion")
++        }
++        fn code_mode_result(&self, _: &ToolPayload) -> Value {
++            panic!("unexpected conversion")
++        }
++    }
++    for mode in [
++        OperationCaptureMode::Metadata,
++        OperationCaptureMode::Content,
++    ] {
++        let (invocation, events) = fixture(mode).await;
++        let observation = invocation
++            .turn
++            .extension_data
++            .get::<OperationObservation>()
++            .unwrap();
++        let execution = ExecutionObservation {
++            observation,
++            thread_id: "thread".into(),
++            turn_id: "turn".into(),
++            metadata: OperationMetadata::default(),
++            input: None,
++            guard: Mutex::new(None),
++        };
++        execution.start(None);
++        let captures = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++        execution.finish(&invocation, &Ok(Box::new(Unknown(captures.clone()))));
++        assert_eq!(
++            captures.load(std::sync::atomic::Ordering::Relaxed),
++            usize::from(mode == OperationCaptureMode::Content)
++        );
++        let output = events.0.lock().unwrap()[1].output.clone();
++        if mode == OperationCaptureMode::Content {
++            assert_eq!(
++                output.unwrap().reason.as_deref(),
++                Some("unsupported_output")
++            );
++        } else {
++            assert!(output.is_none());
++        }
++    }
++    for (error, expected) in [
++        (
++            FunctionCallError::RespondToModel("x".repeat(1024 * 1024)),
++            None,
++        ),
++        (FunctionCallError::Fatal("x".repeat(1024 * 1024)), None),
++        (
++            FunctionCallError::RespondToModel("visible".into()),
++            Some("visible"),
++        ),
++        (
++            FunctionCallError::Fatal("visible".into()),
++            Some("Fatal error: visible"),
++        ),
++    ] {
++        let (invocation, events) = fixture(OperationCaptureMode::Content).await;
++        let execution = ExecutionObservation {
++            observation: invocation
++                .turn
++                .extension_data
++                .get::<OperationObservation>()
++                .unwrap(),
++            thread_id: "thread".into(),
++            turn_id: "turn".into(),
++            metadata: OperationMetadata::default(),
++            input: None,
++            guard: Mutex::new(None),
++        };
++        execution.start(None);
++        execution.finish(&invocation, &Err(error));
++        let events = events.0.lock().unwrap();
++        let output = events[1].output.as_ref().unwrap();
++        assert_eq!(events[1].outcome, Some(OperationOutcome::Error));
++        if let Some(expected) = expected {
++            assert_eq!(output.value, serde_json::json!({"error": expected}));
++            assert!(!output.omitted && !output.truncated);
++        } else {
++            assert!(output.omitted && output.truncated);
++            assert_eq!(output.reason.as_deref(), Some("capture_budget"));
++        }
++    }
++}
 diff --git a/codex-rs/core/src/tools/orchestrator.rs b/codex-rs/core/src/tools/orchestrator.rs
 index a1a88e4..d9afeb6 100644
 --- a/codex-rs/core/src/tools/orchestrator.rs
@@ -2965,7 +3313,7 @@ index a1a88e4..d9afeb6 100644
              .run(req, &attempt_with_network_approval, &attempt_tool_ctx)
              .await;
 diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
-index 3dccc2e..bbbf568 100644
+index 3dccc2e..e1db6de 100644
 --- a/codex-rs/core/src/tools/registry.rs
 +++ b/codex-rs/core/src/tools/registry.rs
 @@ -62,6 +62,16 @@ pub use codex_tools::ToolExposure;
@@ -2985,7 +3333,22 @@ index 3dccc2e..bbbf568 100644
      /// Opts this invocation into synchronous native-call review before the handler runs.
      fn requires_guardian_review(&self, _invocation: &ToolInvocation) -> bool {
          false
-@@ -1050,7 +1060,7 @@ async fn handle_any_tool(
+@@ -335,6 +345,14 @@ struct PostToolUseFeedbackOutput {
+ }
+
+ impl ToolOutput for PostToolUseFeedbackOutput {
++    fn bounded_code_mode_result(
++        &self,
++        payload: &ToolPayload,
++        max_bytes: usize,
++    ) -> Result<Value, &'static str> {
++        self.original.bounded_code_mode_result(payload, max_bytes)
++    }
++
+     fn log_output(&self) -> String {
+         self.original.log_output()
+     }
+@@ -1050,7 +1068,7 @@ async fn handle_any_tool(
  ) -> Result<AnyToolResult, FunctionCallError> {
      let call_id = invocation.call_id.clone();
      let payload = invocation.payload.clone();
@@ -3021,3 +3384,217 @@ index ced543a..193452e 100644
              ResponseEvent::ModelVerifications(_) => "model_verifications".into(),
              ResponseEvent::TurnModerationMetadata(_) => "turn_moderation_metadata".into(),
              ResponseEvent::GuardianAssessment(_) => "guardian_assessment".into(),
+diff --git a/codex-rs/tools/src/lib.rs b/codex-rs/tools/src/lib.rs
+index 8661659..1d31dfa 100644
+--- a/codex-rs/tools/src/lib.rs
++++ b/codex-rs/tools/src/lib.rs
+@@ -104,6 +104,7 @@ pub use tool_executor::ToolExposure;
+ pub use tool_executor::ToolExposures;
+ pub use tool_output::JsonToolOutput;
+ pub use tool_output::ToolOutput;
++pub use tool_output::bounded_tool_output;
+ pub use tool_payload::ToolPayload;
+ pub use tool_search::ToolSearchEntry;
+ pub use tool_search::ToolSearchInfo;
+diff --git a/codex-rs/tools/src/tool_output.rs b/codex-rs/tools/src/tool_output.rs
+index 3a4c1e8..6335093 100644
+--- a/codex-rs/tools/src/tool_output.rs
++++ b/codex-rs/tools/src/tool_output.rs
+@@ -68,6 +68,17 @@ pub trait ToolOutput: Send {
+         response_input_to_code_mode_result(self.to_response_item("", payload))
+     }
+
++    /// Produces capture data without first materializing an unbounded owned result.
++    /// Implementations must bound borrowed source data before cloning or rendering it.
++    /// Unknown output types omit capture; execution and normal model output are unchanged.
++    fn bounded_code_mode_result(
++        &self,
++        _payload: &ToolPayload,
++        _max_bytes: usize,
++    ) -> Result<JsonValue, &'static str> {
++        Err("unsupported_output")
++    }
++
+     /// Borrows original host-only metadata for recording, not for model output or logging.
+     fn tool_result_metadata(&self) -> Option<&JsonValue> {
+         None
+@@ -122,6 +133,14 @@ where
+         (**self).code_mode_result(payload)
+     }
+
++    fn bounded_code_mode_result(
++        &self,
++        payload: &ToolPayload,
++        max_bytes: usize,
++    ) -> Result<JsonValue, &'static str> {
++        (**self).bounded_code_mode_result(payload, max_bytes)
++    }
++
+     fn tool_result_metadata(&self) -> Option<&JsonValue> {
+         (**self).tool_result_metadata()
+     }
+@@ -197,9 +216,42 @@ impl ToolOutput for JsonToolOutput {
+     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
+         self.value.clone()
+     }
++
++    fn bounded_code_mode_result(
++        &self,
++        _payload: &ToolPayload,
++        max_bytes: usize,
++    ) -> Result<JsonValue, &'static str> {
++        bounded_tool_output(&self.value, max_bytes)
++    }
+ }
+
+ impl ToolOutput for codex_protocol::mcp::CallToolResult {
++    fn bounded_code_mode_result(
++        &self,
++        _payload: &ToolPayload,
++        max_bytes: usize,
++    ) -> Result<JsonValue, &'static str> {
++        // Borrow only public result fields: private _meta must not be cloned or serialized.
++        #[derive(serde::Serialize)]
++        #[serde(rename_all = "camelCase")]
++        struct PublicResult<'a> {
++            content: &'a [JsonValue],
++            #[serde(skip_serializing_if = "Option::is_none")]
++            structured_content: &'a Option<JsonValue>,
++            #[serde(skip_serializing_if = "Option::is_none")]
++            is_error: Option<bool>,
++        }
++        bounded_tool_output(
++            &PublicResult {
++                content: &self.content,
++                structured_content: &self.structured_content,
++                is_error: self.is_error,
++            },
++            max_bytes,
++        )
++    }
++
+     fn log_output(&self) -> String {
+         let output = self.as_function_call_output_payload();
+         // Do not fall back to serializing media or encrypted content into logs.
+@@ -286,3 +338,32 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
+ #[cfg(test)]
+ #[path = "tool_output_tests.rs"]
+ mod tests;
++
++/// Serializes borrowed capture data through a capped buffer before creating an owned tree.
++pub fn bounded_tool_output(
++    value: &(impl serde::Serialize + ?Sized),
++    max_bytes: usize,
++) -> Result<JsonValue, &'static str> {
++    struct CappedWriter {
++        bytes: Vec<u8>,
++        limit: usize,
++    }
++    impl std::io::Write for CappedWriter {
++        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
++            if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
++                return Err(std::io::Error::other("capture budget exceeded"));
++            }
++            self.bytes.extend_from_slice(bytes);
++            Ok(bytes.len())
++        }
++        fn flush(&mut self) -> std::io::Result<()> {
++            Ok(())
++        }
++    }
++    let mut writer = CappedWriter {
++        bytes: Vec::new(),
++        limit: max_bytes,
++    };
++    serde_json::to_writer(&mut writer, value).map_err(|_| "capture_budget")?;
++    serde_json::from_slice(&writer.bytes).map_err(|_| "unsupported_output")
++}
+diff --git a/codex-rs/tools/src/tool_output_tests.rs b/codex-rs/tools/src/tool_output_tests.rs
+index bca0e81..111131b 100644
+--- a/codex-rs/tools/src/tool_output_tests.rs
++++ b/codex-rs/tools/src/tool_output_tests.rs
+@@ -44,3 +44,84 @@ fn code_mode_text_preserves_message_content() {
+         )
+     );
+ }
++
++#[test]
++fn bounded_capture_preserves_json_and_rejects_large_nested_values() {
++    use super::{JsonToolOutput, ToolOutput};
++    let payload = crate::ToolPayload::Function {
++        arguments: "{}".into(),
++    };
++    let expected = serde_json::json!({"structured": ["α", {"value": true}]});
++    let output: Box<dyn ToolOutput> = Box::new(JsonToolOutput::new(expected.clone()));
++    assert_eq!(
++        output.bounded_code_mode_result(&payload, 1024),
++        Ok(expected)
++    );
++    let output = JsonToolOutput::new(serde_json::json!({"nested": ["x".repeat(1024 * 1024)]}));
++    assert_eq!(
++        output.bounded_code_mode_result(&payload, 1024),
++        Err("capture_budget")
++    );
++}
++
++#[test]
++fn bounded_capture_omits_private_mcp_metadata_before_serializing() {
++    use super::ToolOutput;
++    let payload = crate::ToolPayload::Function {
++        arguments: "{}".into(),
++    };
++    let mut output = codex_protocol::mcp::CallToolResult {
++        content: vec![serde_json::json!({"type":"text", "text":"visible"})],
++        structured_content: Some(serde_json::json!({"answer": 42})),
++        is_error: Some(false),
++        meta: Some(serde_json::json!({"private": "x".repeat(1024 * 1024)})),
++    };
++    assert_eq!(
++        output.bounded_code_mode_result(&payload, 1024),
++        Ok(serde_json::json!({
++            "content": [{"type":"text", "text":"visible"}],
++            "structuredContent": {"answer":42}, "isError":false
++        }))
++    );
++    output.structured_content = Some(serde_json::json!({"large": "x".repeat(1024 * 1024)}));
++    assert_eq!(
++        output.bounded_code_mode_result(&payload, 1024),
++        Err("capture_budget")
++    );
++    output.structured_content = None;
++    output.content = vec![serde_json::json!({"type":"image", "data":"x".repeat(1024 * 1024)})];
++    assert_eq!(
++        output.bounded_code_mode_result(&payload, 1024),
++        Err("capture_budget")
++    );
++}
++
++#[test]
++fn bounded_capture_never_calls_unknown_legacy_output_conversion() {
++    use super::ToolOutput;
++    struct Unknown;
++    impl ToolOutput for Unknown {
++        fn log_output(&self) -> String {
++            panic!("unbounded log")
++        }
++        fn success_for_logging(&self) -> bool {
++            true
++        }
++        fn to_response_item(&self, _: &str, _: &crate::ToolPayload) -> ResponseInputItem {
++            panic!("unbounded model conversion")
++        }
++        fn code_mode_result(&self, _: &crate::ToolPayload) -> serde_json::Value {
++            panic!("unbounded result conversion")
++        }
++    }
++    let output: Box<dyn ToolOutput> = Box::new(Unknown);
++    assert_eq!(
++        output.bounded_code_mode_result(
++            &crate::ToolPayload::Function {
++                arguments: "{}".into()
++            },
++            1024
++        ),
++        Err("unsupported_output")
++    );
++}

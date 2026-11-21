@@ -48,7 +48,7 @@ export RUST_MIN_STACK=8388608
 python scripts/build_codex_wheel.py --profile dev --test-native --out "$SDK_ROOT/dist"
 ```
 
-The script has been copying the exact pinned upstream source into a temporary build directory and applying the checked-in patch there. Cargo source overrides have been selecting that patched workspace for the extension and execution helper. The wheel has been including the helper assets, licenses, source revision, patch, and this guide. For a release build, omit `--profile dev`.
+The script has been copying the exact pinned upstream source into a temporary build directory and applying the checked-in patches in filename order there. Cargo source overrides have been selecting that patched workspace for the extension and execution helper. The wheel has been including the helper assets, licenses, source revision, patches, and this guide. For a release build, omit `--profile dev`.
 
 Set `WHEEL` to the absolute wheel path printed by the build. Create a clean environment and run the installed-package verifier outside the checkout.
 
@@ -91,9 +91,12 @@ test "$(git rev-parse HEAD)" = 6ff1e1ca3b30fc8b914720681fcf5fe62e95f856
 test -z "$(git status --porcelain)"
 git apply --check "$PATCH_FILE"
 git apply "$PATCH_FILE"
+git apply --check "$SDK_ROOT/patches/codex/0002-native-approval-recovery.patch"
+git apply "$SDK_ROOT/patches/codex/0002-native-approval-recovery.patch"
 git diff --check
 cd codex-rs
 cargo +1.95.0 test -p codex-core --lib operation_observation
+cargo +1.95.0 test -p codex-core -p codex-tools --lib bounded_capture
 cargo +1.95.0 test -p codex-core --lib mcp_tool_call_ids_are_added_to_request_meta
 cargo +1.95.0 test -p codex-api --lib process_sse_reports_body_model_without_routing_authority
 cargo +1.95.0 fmt --all -- --check
@@ -111,7 +114,7 @@ The [binding observer](../../native/codex/src/operation_events.rs) has been prov
 | Content | Permitted input and output with a separate 32 KiB UTF-8 JSON budget for each direction |
 | Disabled | No observer |
 
-Raw strings that resemble JSON have been receiving a byte check before parsing. Typed values have been passing through capped serialization before capture has been allocating JSON. Oversized text has been retaining a bounded UTF-8 prefix with truncation markers. Structured values and media have been receiving omission markers. Request identity hashing has been borrowing prepared fields. The upstream `ToolOutput::code_mode_result` conversion has been remaining outside auxiliary capture-memory accounting.
+Raw strings that resemble JSON have been receiving a byte check before parsing. Typed values have been passing through capped serialization before capture has been allocating JSON. Oversized text has been retaining a bounded UTF-8 prefix with truncation markers. Structured values and media have been receiving omission markers. Request identity hashing has been borrowing prepared fields. Tool-result capture has been using the opt-in `ToolOutput::bounded_code_mode_result` path before any owned result conversion. JSON and public MCP fields have been passing through capped serialization while borrowed; MCP `_meta` has been remaining outside that serializer. Common function, search, shell, aborted, patch, and wrapper outputs have been bounding their source before cloning or rendering. Oversized source has been producing `capture_budget` omission markers. Other output implementations have been producing `unsupported_output` omission markers without invoking their general output converter. Metadata mode has been skipping output conversion entirely. Tool errors have been receiving a source-byte check before error formatting.
 
 Content has been staying in memory, outside rollout storage and diagnostic logs. HTTP and WebSocket observations have been including the final submitted input and continuation fields. Identical-input retries have been sharing one model operation. Changed semantic input has been starting another. Response-body model names have been supplying observation metadata without changing routing authority. Stream completion has been ending the model observation before session code has been draining tool futures.
 
@@ -119,21 +122,24 @@ Native tool observations have been measuring handler execution after authorizati
 
 ## Prepare an upstream change
 
-Keep maintained Rust source and tests in the patch. Leave local Cargo lock changes out. Refresh the patch from the pinned checkout after reviewing source changes.
+Keep maintained Rust source and tests in the patch. Leave local Cargo lock changes out. Refresh the patch from the pinned checkout after reviewing source changes. The refresh below has been temporarily removing `0002-native-approval-recovery.patch` so the tracing patch has been containing only its own changes.
 
 ```sh
 cd "$CODEX_CHECKOUT"
 base=6ff1e1ca3b30fc8b914720681fcf5fe62e95f856
+git apply -R "$SDK_ROOT/patches/codex/0002-native-approval-recovery.patch"
 git add -N codex-rs/core/src/operation_observation.rs \
   codex-rs/core/src/tools/operation_observation.rs \
   codex-rs/core/src/tools/operation_observation_tests.rs
 git diff --check "$base"
 candidate=$(mktemp "${PATCH_FILE}.XXXXXX")
 git -c diff.suppressBlankEmpty=true diff --binary "$base" -- \
-  codex-rs/core codex-rs/codex-api codex-rs/otel > "$candidate"
+  codex-rs/core codex-rs/codex-api codex-rs/otel codex-rs/tools > "$candidate"
 test -s "$candidate"
 git apply --stat "$candidate"
 mv "$candidate" "$PATCH_FILE"
+git apply --check "$SDK_ROOT/patches/codex/0002-native-approval-recovery.patch"
+git apply "$SDK_ROOT/patches/codex/0002-native-approval-recovery.patch"
 ```
 
 Before opening an upstream PR, apply the refreshed patch in another clean checkout and rerun the Rust checks above. Include the pinned revision, observer API example, capture contract, source hashes, and actual source and installed-wheel test results in the PR. Follow the upstream repository's contribution instructions.
