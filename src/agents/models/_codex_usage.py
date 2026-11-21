@@ -5,7 +5,7 @@ from typing import Any
 from openai.types.responses import ResponseUsage
 from openai.types.responses.response_usage import OutputTokensDetails
 
-from ..usage import _make_input_tokens_details
+from ..usage import _make_input_tokens_details, _response_usage_to_usage
 
 
 def _usage(total: dict[str, Any]) -> ResponseUsage:
@@ -22,4 +22,19 @@ def _usage(total: dict[str, Any]) -> ResponseUsage:
         output_tokens_details=OutputTokensDetails(
             reasoning_tokens=total.get("reasoning_output_tokens", 0)
         ),
+    )
+
+
+def _add_sample_usage(previous: ResponseUsage | None, sample: dict[str, Any]) -> ResponseUsage:
+    current = _usage(sample)
+    if previous is None:
+        return current
+    total = _response_usage_to_usage(previous)
+    total.add(_response_usage_to_usage(current))
+    return ResponseUsage(
+        input_tokens=total.input_tokens,
+        output_tokens=total.output_tokens,
+        total_tokens=total.total_tokens,
+        input_tokens_details=total.input_tokens_details,
+        output_tokens_details=total.output_tokens_details,
     )

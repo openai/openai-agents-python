@@ -58,7 +58,7 @@ from ._codex_items import (
 )
 from ._codex_tool_hooks import CodexToolHooks
 from ._codex_tracing import CodexOperationTracing
-from ._codex_usage import _usage
+from ._codex_usage import _add_sample_usage, _usage
 from ._run_context import ModelToolHooks, get_model_tool_hooks
 from .interface import Model, ModelProvider, ModelTracing
 
@@ -642,8 +642,10 @@ class _CodexModel(Model):
                         raw_usage["token_count"] = info
                     continue
                 if kind == "raw_response_completed":
-                    if usage is None and message.get("token_usage") is not None:
-                        usage = _usage(message["token_usage"])
+                    # An approval can pause before Core sends the cumulative token_count.
+                    # Include each completed sample now. The next count replaces this total.
+                    if message.get("token_usage") is not None:
+                        usage = _add_sample_usage(usage, message["token_usage"])
                     if (
                         model_settings.preserve_raw_usage
                         and message.get("usage_metadata") is not None

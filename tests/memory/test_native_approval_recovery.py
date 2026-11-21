@@ -14,7 +14,7 @@ from agents.models._codex_items import CodexPendingCustomCall, CodexPendingFunct
 from agents.models.codex import CodexProvider
 from agents.testing import ScriptedModel
 from agents.usage import Usage
-from tests.memory.test_resumable_session import MemoryStore
+from tests.memory.test_resumable_session import MemoryStore, run_agent
 from tests.models.test_codex_provider import FakeThread, threads as threads
 from tests.test_responses import get_text_message
 from tests.testing_processor import fetch_ordered_spans
@@ -68,6 +68,92 @@ async def setup_native(tmp_path, monkeypatch, kind="exec_command"):
     session = await ResumableSession.create(store)
     config = RunConfig(tracing_disabled=True)
     return agent, store, session, config, pending, calls, requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("approval_after_count", [False, True], ids=["before-count", "after-count"])
+async def test_native_pause_preserves_all_sampling_usage_across_session_resume(
+    tmp_path, monkeypatch, threads, streamed, approval_after_count
+):
+    from tests.models.test_codex_pending_approval import ApprovalThread, approval, raw
+    from tests.models.test_codex_provider import native_pair
+
+    earlier = {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "cached_input_tokens": 1,
+        "cache_write_input_tokens": 1,
+        "reasoning_output_tokens": 1,
+    }
+    current = {
+        "input_tokens": 12,
+        "output_tokens": 3,
+        "total_tokens": 15,
+        "cached_input_tokens": 2,
+        "cache_write_input_tokens": 3,
+        "reasoning_output_tokens": 2,
+    }
+    cumulative = {key: earlier[key] + current[key] for key in earlier}
+
+    # The wire double preserves the completion/count ordering around a real Runner pause.
+    class SamplingApprovalThread(ApprovalThread):
+        async def events(self):
+            yield {
+                "type": "raw_response_completed",
+                "response_id": "earlier",
+                "token_usage": earlier,
+            }
+            yield {"type": "token_count", "info": {"total_token_usage": earlier}}
+            call, _ = native_pair(call_id="pending")
+            yield raw(call)
+            if not approval_after_count:
+                yield approval()
+            yield {
+                "type": "raw_response_completed",
+                "response_id": "current",
+                "token_usage": current,
+            }
+            yield {"type": "token_count", "info": {"total_token_usage": cumulative}}
+            if approval_after_count:
+                yield approval()
+
+    def tokens(usage):
+        return (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.total_tokens,
+            usage.input_tokens_details.cached_tokens,
+            usage.input_tokens_details.cache_write_tokens,
+            usage.output_tokens_details.reasoning_tokens,
+        )
+
+    model = CodexProvider(cwd=tmp_path).get_model("fixture-model")
+    agent = Agent(name="worker", model=model)
+    first = SamplingApprovalThread()
+    threads[0].extend([first, FakeThread(text="finished")])
+    calls = []
+
+    async def execute(checkpoint, *, tools, tracing):
+        calls.append(checkpoint["call"]["call_id"])
+        return "native accepted"
+
+    monkeypatch.setattr(model, "_run_approved_native_call", execute)
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    paused = await run_agent(agent, "start", session, streamed)
+    assert first.closed and len(paused.interruptions) == 1 and calls == []
+    assert tokens(paused.context_wrapper.usage) == (15, 5, 20, 3, 4, 3)
+    assert store.checkpoint(session.session_id)["status"] == "paused"
+
+    recovered = await ResumableSession.resume(store, session.session_id)
+    state = await recovered.load_state(agent)
+    state.approve(state.get_interruptions()[0])
+    completed = await run_agent(agent, state, None, streamed)
+    assert completed.final_output == "finished" and calls == ["pending"]
+    # The fresh native thread adds its own 10 input and 7 output tokens exactly once.
+    assert tokens(completed.context_wrapper.usage) == (25, 12, 37, 6, 4, 5)
 
 
 @pytest.mark.asyncio
