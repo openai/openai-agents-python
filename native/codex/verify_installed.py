@@ -135,11 +135,14 @@ async def default_route():
 
 
 async def native_route(folder):
+    from unittest.mock import Mock
+
     from pydantic import BaseModel
 
     from agents import Agent, RunConfig, Runner, RunState
     from agents.decorators import tool
     from agents.models.codex import CodexProvider
+    from agents.tracing import TracingProcessor, set_trace_processors, set_tracing_disabled
 
     class Answer(BaseModel):
         label: str
@@ -287,7 +290,15 @@ request_max_retries = 0
         encoding="utf-8",
     )
     provider = CodexProvider(cwd=folder / "workspace", api_key="synthetic-installed-key")
-    config = RunConfig(model_provider=provider, tracing_disabled=True)
+    # The isolated worker collects spans locally, without a network exporter.
+    processor = Mock(spec=TracingProcessor)
+    set_trace_processors([processor])
+    set_tracing_disabled(False)
+    config = RunConfig(
+        model_provider=provider,
+        trace_include_sensitive_data=False,
+        tracing={"operation_detail": "metadata"},
+    )
     try:
         paused = Runner.run_streamed(agent, "private-input", run_config=config)
         async for event in paused.stream_events():
@@ -317,7 +328,13 @@ request_max_retries = 0
         )
         assert usage.input_tokens_details.cached_tokens == 6
         assert usage.output_tokens_details.reasoning_tokens == 3
+        spans = [call.args[0].span_data for call in processor.on_span_end.call_args_list]
+        samples = [span for span in spans if span.type == "generation"]
+        assert len(samples) == 3
+        assert all(span.input is None and span.output is None for span in samples)
+        assert all(span.usage["input_tokens"] == 12 for span in samples)
 
+        config.tracing_disabled = True
         streamed = Runner.run_streamed(plain, "fresh-input", run_config=config)
         deltas = []
         async for event in streamed.stream_events():

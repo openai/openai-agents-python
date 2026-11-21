@@ -283,7 +283,6 @@ class ResumableSession:
         return state
 
     def _validate_run(self, input: Any) -> None:
-        from ..run_internal.native_approvals import native_receipts_from_snapshot
         from ..run_state import RunState
 
         if self._checkpoint.status == "active":
@@ -300,22 +299,6 @@ class ResumableSession:
             or binding.session is not self
             or binding.revision != self._checkpoint.revision
         ):
-            raise ResumableSessionError("invalid_state")
-        invalid_native_state = False
-        try:
-            assert self._checkpoint.run_state is not None
-            original = json.loads(self._checkpoint.run_state)
-            original_receipts = native_receipts_from_snapshot(original)
-            processed = input._last_processed_response
-            if original_receipts is not None or (
-                processed is not None and processed.native_approvals
-            ):
-                invalid_native_state = (
-                    native_receipts_from_snapshot(input.to_json()) != original_receipts
-                )
-        except Exception:
-            invalid_native_state = True
-        if invalid_native_state:
             raise ResumableSessionError("invalid_state")
 
     def _get_history(self) -> list[TResponseInputItem]:

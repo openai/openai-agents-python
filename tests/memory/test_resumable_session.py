@@ -11,7 +11,7 @@ import pytest
 
 from agents import Agent, RunConfig, Runner, RunState, Session, SQLiteSession, ToolExecutionConfig
 from agents.decorators import tool
-from agents.exceptions import AgentsException
+from agents.exceptions import AgentsException, UserError
 from agents.memory.resumable_session import ResumableSession, ResumableSessionError
 from agents.result import RunResult, RunResultStreaming
 from agents.run import AgentRunner
@@ -50,6 +50,45 @@ class MemoryStore:
 
 
 CONFIG = RunConfig(tracing_disabled=True)
+
+
+@pytest.mark.asyncio
+async def test_saved_native_approval_cannot_become_an_sdk_tool_approval() -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+
+    @tool(needs_approval=True)
+    def exec_command(command: str) -> str:
+        pytest.fail("A native approval cannot authorize a matching SDK tool.")
+
+    agent = Agent(
+        name="assistant",
+        model=ScriptedModel([[get_function_tool_call("exec_command", '{"command":"original"}')]]),
+        tools=[exec_command],
+    )
+    await Runner.run(
+        agent, "Run command", session=session, context={"test": True}, run_config=CONFIG
+    )
+    checkpoint = store.checkpoint(session.session_id)
+    snapshot = json.loads(checkpoint["run_state"])
+    processed = snapshot["last_processed_response"]
+    # An earlier preview stored native actions outside the SDK function queue.
+    processed["native_approvals"] = copy.deepcopy(processed["interruptions"])
+    processed["functions"] = []
+    checkpoint["run_state"] = json.dumps(snapshot)
+    stored = json.dumps(checkpoint)
+    store.records[session.session_id] = stored
+
+    def restore_context(value: dict[str, Any]) -> dict[str, Any]:
+        pytest.fail("Unsupported checkpoints must fail before restoring application context.")
+
+    with pytest.raises(UserError, match="unsupported native tool approvals"):
+        await RunState.from_json(agent, snapshot, context_deserializer=restore_context)
+    resumed = await ResumableSession.resume(store, session.session_id)
+    with pytest.raises(ResumableSessionError) as failure:
+        await resumed.load_state(agent, context_deserializer=restore_context)
+    assert failure.value.reason == "invalid_state"
+    assert store.records[session.session_id] == stored
 
 
 async def run_agent(

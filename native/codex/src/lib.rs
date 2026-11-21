@@ -1,7 +1,6 @@
 //! Private, asynchronous Core bindings for the opt-in Codex model provider.
 mod config;
-mod native_approval;
-mod operation_events;
+mod operation_tracing;
 mod tool_hooks;
 
 use std::path::PathBuf;
@@ -10,12 +9,11 @@ use std::sync::{Arc, Once, OnceLock};
 
 use codex_core_api::{
     CodexThread, StartIfIdleSubmission, StartThreadOptions, TurnInputRequest, TurnStartOptions,
-    WithTurnExtensionData,
 };
 use codex_protocol::ThreadId;
 use codex_protocol::dynamic_tools::normalize_dynamic_tool_specs;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::Op;
+use codex_protocol::protocol::{EventMsg, Op};
 use codex_protocol::user_input::UserInput;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared, join_all};
@@ -48,8 +46,8 @@ struct ThreadRecord {
     thread: Arc<CodexThread>,
     id: ThreadId,
     model: String,
+    operations: Arc<operation_tracing::Root>,
     cleanup: OnceLock<Cleanup>,
-    operations: operation_events::OperationEvents,
 }
 
 impl ThreadRecord {
@@ -59,33 +57,42 @@ impl ThreadRecord {
                 let thread = self.thread.clone();
                 let services = self.services.clone();
                 let id = self.id;
+                let operations = self.operations.clone();
                 let task = runtime().spawn(async move {
-                    // Each fresh root owns an independent local agent runtime. Fence that
-                    // exact tree before waiting, so native subagents cannot outlive an attempt.
-                    let shutdown = services.manager.request_agent_tree_shutdown(id).await;
-                    let result = match shutdown {
-                        Ok(shutdown) => shutdown.wait().await,
-                        Err(error) => {
-                            let _ = thread.shutdown_and_wait().await;
-                            Err(error)
-                        }
-                    };
-                    if result.is_ok() {
-                        let ids = services
-                            .manager
-                            .list_agent_subtree_thread_ids(id)
-                            .await
-                            .map_err(|_| "Unable to release the Codex agent tree.".to_owned())?;
-                        for id in ids {
-                            if let Ok(current) = services.manager.get_thread(id).await {
-                                services
-                                    .manager
-                                    .remove_thread_if_matches(&id, &current)
-                                    .await;
+                    let result = async {
+                        // Each fresh root owns an independent local agent runtime. Fence that
+                        // exact tree before waiting, so native subagents cannot outlive an attempt.
+                        let shutdown = services.manager.request_agent_tree_shutdown(id).await;
+                        let result = match shutdown {
+                            Ok(shutdown) => shutdown.wait().await,
+                            Err(error) => {
+                                let _ = thread.shutdown_and_wait().await;
+                                Err(error)
+                            }
+                        };
+                        if result.is_ok() {
+                            let ids = services
+                                .manager
+                                .list_agent_subtree_thread_ids(id)
+                                .await
+                                .map_err(|_| {
+                                    "Unable to release the Codex agent tree.".to_owned()
+                                })?;
+                            for id in ids {
+                                if let Ok(current) = services.manager.get_thread(id).await {
+                                    services
+                                        .manager
+                                        .remove_thread_if_matches(&id, &current)
+                                        .await;
+                                }
                             }
                         }
+                        result.map_err(|_| "Unable to shut down the Codex agent tree.".to_owned())
                     }
-                    result.map_err(|_| "Unable to shut down the Codex agent tree.".to_owned())
+                    .await;
+                    // Detach even when a joined shutdown returns an error; the buffer remains drainable.
+                    operations.close();
+                    result
                 });
                 async move {
                     task.await
@@ -192,14 +199,15 @@ async fn start_thread(
     let created = Box::pin(services.manager.start_thread(options))
         .await
         .map_err(|_| "Unable to start the Codex thread.".to_owned())?;
+    let operations = services.operations.root(created.thread_id.to_string());
     Ok(Arc::new(ThreadLease {
         record: Arc::new(ThreadRecord {
             model: created.session_configured.model,
             id: created.thread_id,
             thread: created.thread,
             services,
+            operations,
             cleanup: OnceLock::new(),
-            operations: operation_events::OperationEvents::new(),
         }),
     }))
 }
@@ -391,14 +399,22 @@ struct Thread {
 
 #[pymethods]
 impl Thread {
-    #[getter]
-    fn model(&self) -> String {
-        self.lease.model.clone()
+    fn enable_tracing(&self) -> PyResult<()> {
+        self.lease.ensure_open().map_err(py_error)?;
+        self.lease
+            .operations
+            .enable(self.lease.thread.thread_extension_data());
+        Ok(())
+    }
+
+    fn drain_operations(&self) -> Option<String> {
+        // Draining a closed lease is intentional: shutdown can finish or cancel observations.
+        self.lease.operations.buffer.drain()
     }
 
     #[getter]
-    fn thread_id(&self) -> String {
-        self.lease.id.to_string()
+    fn model(&self) -> String {
+        self.lease.model.clone()
     }
 
     fn tool_hook_orders(&self, server: &str) -> PyResult<Vec<(&'static str, i64)>> {
@@ -428,13 +444,11 @@ impl Thread {
         })
     }
 
-    #[pyo3(signature = (input_json, output_schema_json, operation_capture=None))]
     fn start_turn<'py>(
         &self,
         py: Python<'py>,
         input_json: String,
         output_schema_json: String,
-        operation_capture: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let lease = self.lease.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -445,13 +459,10 @@ impl Thread {
                 let schema: Option<serde_json::Value> =
                     serde_json::from_str(&output_schema_json)
                         .map_err(|_| "Invalid Codex output schema.".to_owned())?;
-                let capture = lease.operations.initializer(operation_capture.as_deref())?;
                 let request = TurnInputRequest::user_input(input).on_start(TurnStartOptions {
                     final_output_json_schema: schema,
                     ..Default::default()
                 });
-                let request =
-                    WithTurnExtensionData::new(request, capture).capture_native_approvals();
                 match Box::pin(lease.thread.start_turn_if_idle(request))
                     .await
                     .map_err(|_| "Unable to start the Codex turn.".to_owned())?
@@ -472,12 +483,19 @@ impl Thread {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let result = async {
                 lease.ensure_open()?;
-                lease
-                    .operations
-                    .next_event(&lease.thread, &lease.id.to_string())
-                    .await
-            }
-            .await;
+                let event = lease.thread.next_event().await.map_err(|_| "The Codex event stream ended unexpectedly.".to_owned())?;
+                match &event.msg {
+                    EventMsg::ExecApprovalRequest(_)
+                    | EventMsg::ApplyPatchApprovalRequest(_)
+                    | EventMsg::RequestPermissions(_)
+                    | EventMsg::RequestUserInput(_)
+                    | EventMsg::ElicitationRequest(_) => {
+                        return Err("Codex requested interactive approval. This provider supports non-interactive execution only.".to_owned());
+                    }
+                    _ => {}
+                }
+                serde_json::to_string(&event).map_err(|_| "Unable to decode the Codex event.".to_owned())
+            }.await;
             result.map_err(py_error)
         })
     }
@@ -496,51 +514,6 @@ impl Thread {
             }
             .await;
             result.map_err(py_error)
-        })
-    }
-
-    // The approval resolver owns Core events; this reader consumes only observations.
-    fn next_operation_event<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let lease = self.lease.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            lease.ensure_open().map_err(py_error)?;
-            Ok(lease
-                .operations
-                .next_notification(&lease.id.to_string())
-                .await)
-        })
-    }
-
-    #[pyo3(signature = (call_json, request_json, preconditions_json, operation_capture=None))]
-    fn resolve_approval<'py>(
-        &self,
-        py: Python<'py>,
-        call_json: String,
-        request_json: String,
-        preconditions_json: String,
-        operation_capture: Option<String>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let call = serde_json::from_str(&call_json)
-            .map_err(|_| py_error("Invalid saved Codex tool call."))?;
-        let request = serde_json::from_str(&request_json)
-            .map_err(|_| py_error("Invalid saved Codex approval request."))?;
-        let preconditions = serde_json::from_str(&preconditions_json)
-            .map_err(|_| py_error("Invalid saved Codex file preconditions."))?;
-        let lease = self.lease.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let outcome = async {
-                lease.ensure_open()?;
-                let capture = lease.operations.initializer(operation_capture.as_deref())?;
-                native_approval::resolve(&lease.thread, call, request, preconditions, capture).await
-            }
-            .await;
-            lease.operations.finish_resolution();
-            let (output, turn_id, failure) = outcome.map_err(py_error)?;
-            let notifications = lease
-                .operations
-                .drain_notifications(&lease.id.to_string())
-                .await;
-            Ok((output, turn_id, notifications, failure))
         })
     }
 
