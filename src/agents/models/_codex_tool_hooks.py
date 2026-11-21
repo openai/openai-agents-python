@@ -74,6 +74,7 @@ class CodexToolHooks:
         self.registered: set[tuple[str, int]] = set()
         self.error: BaseException | None = None
         self.prepared_inputs: dict[str, dict[str, Any] | None] = {}
+        self.transformed_mcp_calls: set[str] = set()
         self.prepared_outputs: dict[str, str] = {}
 
     @classmethod
@@ -239,7 +240,11 @@ class CodexToolHooks:
             return decision
         original = data["result"]
         prepared = original
-        if settings and settings.prepare_tool_output:
+        if (
+            settings
+            and settings.prepare_tool_output
+            and data["call_id"] not in self.transformed_mcp_calls
+        ):
             prepared = await _await_hook(
                 partial(settings.prepare_tool_output, call, deepcopy(original)),
                 "prepare_tool_output",
@@ -261,6 +266,12 @@ class CodexToolHooks:
             )
         )
         return decision
+
+    def confirm_mcp_result(self, call_id: str, arguments: dict[str, Any]) -> None:
+        self.transformed_mcp_calls.add(call_id)
+        # Core skips PostToolUse on failure. The result boundary already has effective input.
+        if call_id in self.prepared_inputs:
+            self.prepared_inputs[call_id] = deepcopy(arguments)
 
     def prepare_history_item(self, item: Any) -> None:
         """Keep persisted native history on the payloads approved by this attempt's hooks."""

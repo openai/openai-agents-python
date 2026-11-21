@@ -451,3 +451,209 @@ async def test_native_hook_endpoint_rejects_untrusted_calls():
             accepted = await client.call_tool("dispatch", {"event": "PreToolUse", "key": key})
             assert not result_is_error(accepted)
         assert received == [{"event": "PreToolUse"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "replace",
+        "media",
+        "peer_error",
+        "force_error",
+        "unselected",
+        "invalid",
+        "oversized",
+        "surrogate",
+        "raise",
+        "disclose",
+        "cancel",
+    ],
+)
+async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, monkeypatch, mode):
+    from importlib import import_module
+
+    from agents import UserError, _debug
+
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", mode != "disclose")
+    port, requests, items = model_endpoint
+    png = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1Pe"
+        "AAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC"
+    )
+    script = (
+        "try:\n from mcp.server.mcpserver import MCPServer\n"
+        "except ImportError:\n from mcp.server.fastmcp import FastMCP as MCPServer\n"
+        "server = MCPServer('fixture')\n"
+        "@server.tool()\ndef lookup(value: str):\n"
+        " if value == 'fail': raise ValueError('PEER_ONLY')\n"
+        " if value == 'media':\n"
+        "  from mcp.types import ImageContent, TextContent\n"
+        "  return [TextContent(type='text', text='PEER_ONLY'), "
+        f"ImageContent(type='image', data='{png}', mimeType='image/png')]\n"
+        " return 'PEER_ONLY'\n"
+        "server.run(transport='stdio')\n"
+    )
+    provider = codex_fixture(
+        tmp_path,
+        port,
+        monkeypatch,
+        [
+            "features.code_mode=false",
+            'approval_policy="never"',
+            f"mcp_servers.raw-peer.command={json.dumps(sys.executable)}",
+            f"mcp_servers.raw-peer.args={json.dumps(['-I', '-c', script])}",
+            'mcp_servers.raw-peer.default_tools_approval_mode="approve"',
+            "mcp_servers.raw-peer.required=true",
+        ],
+    )
+    changed_input = mode in ("peer_error", "force_error")
+    argument = {"peer_error": "fail", "media": "media"}.get(mode, "search")
+
+    def proposed(request):
+        spec, name = next(
+            (spec, tool["name"])
+            for spec in request["tools"]
+            for tool in spec.get("tools", [spec])
+            if tool.get("name", "").endswith("lookup")
+        )
+        return {
+            "type": "function_call",
+            "call_id": "lookup_1",
+            "name": name,
+            "arguments": json.dumps({"value": "initial" if changed_input else argument}),
+            **({"namespace": spec["name"]} if spec.get("type") == "namespace" else {}),
+        }
+
+    items.extend([proposed, final_message()])
+    events = []
+    native_thread = import_module("agents.models._codex_native").Thread
+    next_event = native_thread.next_event
+
+    async def record(thread):
+        event = await next_event(thread)
+        if isinstance(event, str):
+            events.append(json.loads(event)["msg"])
+        return event
+
+    monkeypatch.setattr(native_thread, "next_event", record)
+    entered = asyncio.Event()
+    context = object()
+    agent = Agent(name="test", model="fixture-direct-tools")
+
+    async def before(call):
+        return {"value": argument}
+
+    async def transform(call, result):
+        assert call.run_context.context is context and call.agent is agent
+        assert (call.tool_namespace, call.tool.name, call.call_id) == (
+            "raw-peer",
+            "lookup",
+            "lookup_1",
+        )
+        assert call.arguments == {"value": argument}
+        assert not entered.is_set()
+        entered.set()
+        assert bool(result.get("isError")) == (mode == "peer_error")
+        if mode in ("raise", "disclose"):
+            raise RuntimeError("PEER_ONLY")
+        if mode == "surrogate":
+            return {"content": [{"type": "text", "text": "REJECTED_ONLY\ud800"}]}
+        if mode == "cancel":
+            await asyncio.Event().wait()
+        if mode == "invalid":
+            return {"content": [{"type": "text"}]}
+        if mode == "oversized":
+            return {"content": [{"type": "text", "text": "x" * (1024 * 1024)}]}
+        if mode == "media":
+            result["content"][0]["text"] = "published"
+            return result
+        if mode == "replace":
+            return {
+                "content": [{"type": "text", "text": "published"}],
+                "structuredContent": {"summary": "published"},
+                "_meta": {"origin": "fixture"},
+            }
+        call.arguments.clear()
+        result.clear()
+        return {
+            "content": [{"type": "text", "text": "published"}],
+            "isError": mode == "force_error",
+        }
+
+    async def legacy(call, result):
+        pytest.fail("Selected results must bypass the text-only output hook")
+
+    config = RunConfig(
+        model_provider=provider,
+        tracing_disabled=True,
+        tool_execution=ToolExecutionConfig(
+            native_mcp_result_transforms={
+                ("other" if mode == "unselected" else "raw-peer", "lookup"): transform
+            },
+            prepare_tool_input=before if changed_input else None,
+            prepare_tool_output=legacy if mode == "replace" else None,
+        ),
+    )
+
+    async def execute():
+        if mode in ("media", "surrogate"):
+            streamed = Runner.run_streamed(
+                agent, "Look up a value", context=context, run_config=config
+            )
+            async for event in streamed.stream_events():
+                assert "PEER_ONLY" not in repr(event)
+            return streamed
+        return await Runner.run(agent, "Look up a value", context=context, run_config=config)
+
+    try:
+        run = execute()
+        if mode == "cancel":
+            task = asyncio.create_task(run)
+            await asyncio.wait_for(entered.wait(), 30)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif mode == "disclose":
+            with pytest.raises(RuntimeError, match="PEER_ONLY"):
+                await run
+        elif mode in ("raise", "invalid", "oversized", "surrogate"):
+            with pytest.raises(UserError, match="Native MCP result transform") as caught:
+                await run
+            assert caught.value.__cause__ is caught.value.__context__ is None
+            assert "PEER_ONLY" not in repr(caught.value)
+            assert "REJECTED_ONLY" not in repr(caught.value)
+            assert not any(
+                frame.frame.f_globals.get("__name__") == "agents.models.codex"
+                for frame in caught.traceback
+            )
+        else:
+            result = await run
+            assert result.final_output == "done"
+            expected = "PEER_ONLY" if mode == "unselected" else "published"
+            assert expected in json.dumps(result.to_input_list())
+            assert expected in json.dumps(requests[1]["input"])
+            completed = next(event for event in events if event["type"] == "mcp_tool_call_end")
+            assert expected in json.dumps(completed)
+            if mode == "replace":
+                assert completed["result"]["Ok"]["_meta"] == {"origin": "fixture"}
+                assert "summary" in json.dumps(requests[1]["input"])
+            if mode == "media":
+                assert png in json.dumps(completed)
+                assert png in json.dumps(requests[1]["input"])
+                assert png in json.dumps(result.to_input_list())
+            if changed_input:
+                assert completed["result"]["Ok"]["isError"]
+                call = next(
+                    item for item in result.to_input_list() if item.get("type") == "function_call"
+                )
+                assert json.loads(call["arguments"]) == {"value": argument}
+            if mode != "unselected":
+                assert "PEER_ONLY" not in json.dumps(result.to_input_list())
+        assert entered.is_set() == (mode != "unselected")
+    finally:
+        await provider.aclose()
+    if mode != "unselected":
+        assert "PEER_ONLY" not in json.dumps(events)
+        assert "PEER_ONLY" not in json.dumps(requests)

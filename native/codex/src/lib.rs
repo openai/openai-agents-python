@@ -1,5 +1,6 @@
 //! Private, asynchronous Core bindings for the opt-in Codex model provider.
 mod config;
+mod mcp_results;
 mod tool_hooks;
 
 use std::path::PathBuf;
@@ -106,6 +107,7 @@ impl ThreadRecord {
 /// Dropping a cancelled startup result therefore closes the thread, while manager
 /// shutdown can still wait for the detached cleanup task to finish.
 struct ThreadLease {
+    mcp_results: Option<tokio::sync::Mutex<mpsc::UnboundedReceiver<mcp_results::PendingResult>>>,
     record: Arc<ThreadRecord>,
 }
 
@@ -130,6 +132,7 @@ struct Settings {
 }
 
 struct StartRequest {
+    mcp_tools: Vec<(String, String)>,
     tools: String,
     instructions: Option<String>,
     settings: String,
@@ -185,10 +188,23 @@ async fn start_thread(
     }
     options.dynamic_tools = normalize_dynamic_tool_specs(values)
         .map_err(|_| "Invalid Codex dynamic tools.".to_owned())?;
+    let mcp_results = if request.mcp_tools.is_empty() {
+        None
+    } else {
+        let (requests, receiver) = mpsc::unbounded_channel();
+        options
+            .thread_extension_init
+            .insert(mcp_results::Selection {
+                tools: request.mcp_tools.clone(),
+                requests,
+            });
+        Some(tokio::sync::Mutex::new(receiver))
+    };
     let created = Box::pin(services.manager.start_thread(options))
         .await
         .map_err(|_| "Unable to start the Codex thread.".to_owned())?;
     Ok(Arc::new(ThreadLease {
+        mcp_results,
         record: Arc::new(ThreadRecord {
             model: created.session_configured.model,
             id: created.thread_id,
@@ -339,12 +355,14 @@ impl Manager {
         }
     }
 
+    #[pyo3(signature = (dynamic_tools_json, instructions, settings_json, *, mcp_tools=None))]
     fn start_thread<'py>(
         &self,
         py: Python<'py>,
         dynamic_tools_json: String,
         instructions: Option<String>,
         settings_json: String,
+        mcp_tools: Option<Vec<(String, String)>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if self.state.closed.load(Ordering::Acquire) {
             return Err(py_error("The Codex provider is closed."));
@@ -353,6 +371,7 @@ impl Manager {
         self.state
             .commands
             .send(ManagerCommand::Start(StartRequest {
+                mcp_tools: mcp_tools.unwrap_or_default(),
                 tools: dynamic_tools_json,
                 instructions,
                 settings: settings_json,
@@ -455,9 +474,13 @@ impl Thread {
     fn next_event<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let lease = self.lease.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = async {
+            let event = async {
                 lease.ensure_open()?;
-                let event = lease.thread.next_event().await.map_err(|_| "The Codex event stream ended unexpectedly.".to_owned())?;
+                let event = lease
+                    .thread
+                    .next_event()
+                    .await
+                    .map_err(|_| "The Codex event stream ended unexpectedly.".to_owned())?;
                 match &event.msg {
                     EventMsg::ExecApprovalRequest(_)
                     | EventMsg::ApplyPatchApprovalRequest(_)
@@ -468,9 +491,22 @@ impl Thread {
                     }
                     _ => {}
                 }
-                serde_json::to_string(&event).map_err(|_| "Unable to decode the Codex event.".to_owned())
-            }.await;
-            result.map_err(py_error)
+                serde_json::to_string(&event)
+                    .map_err(|_| "Unable to decode the Codex event.".to_owned())
+            };
+            let encoded = if let Some(requests) = &lease.mcp_results {
+                let mut receiver = requests.lock().await;
+                tokio::select! {
+                    Some(request) = receiver.recv() => {
+                        return Python::attach(|py| Py::new(py, request).map(Py::into_any));
+                    }
+                    result = event => result,
+                }
+            } else {
+                event.await
+            }
+            .map_err(py_error)?;
+            Python::attach(|py| Ok(encoded.into_pyobject(py)?.unbind().into_any()))
         })
     }
 

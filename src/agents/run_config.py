@@ -164,7 +164,8 @@ class ToolExecutionConfig:
 
     Callbacks cover SDK-executed tools and native tools for which Codex emits tool hooks.
     Codex reports native shell and patch inputs as `{"command": ...}`. A native output hook can
-    return the original result or replacement text for the model. API-hosted tools execute
+    return the original result or replacement text for the model. For structured MCP results,
+    use `native_mcp_result_transforms`. API-hosted tools execute
     outside the client hook lifecycle.
 
     Supply the same callbacks when resuming a run in another process.
@@ -220,6 +221,25 @@ class ToolExecutionConfig:
     """Run hooks only for SDK-executed tools, preserving classic behavior.
 
     When either preparation callback is set, the Codex provider disables native workspace tools.
+    """
+
+    native_mcp_result_transforms: dict[
+        tuple[str, str],
+        Callable[[ToolCallHookContext[Any], dict[str, Any]], Awaitable[dict[str, Any]]],
+    ] = field(default_factory=dict, kw_only=True)
+    """Experimental. Select configured Codex MCP tools by exact (server name, tool name).
+
+    Each async callback receives the raw names in `call.tool_namespace` and `call.tool.name`,
+    effective arguments and a detached MCP result. Return the entire replacement with `content` and
+    optional `structuredContent`, `isError` and `_meta` (up to 1 MiB encoded). Peer errors
+    stay errors. Return the received result to keep all fields and media. Remove sensitive fields,
+    including structured content, which Codex can prefer over text. Model limits still apply.
+
+    For selected responses, this replaces `prepare_tool_output` before native completion
+    events, history and model input. Earlier Core traces may contain the original result.
+    Callback or validation errors fail the run. Core may still sample with a withheld result.
+    Callbacks run one at a time in the current native thread. They exclude transport errors,
+    plugin or hosted tools, SDK-discovered tools, or independently started child threads.
     """
 
     def __post_init__(self) -> None:
