@@ -1371,7 +1371,9 @@ async def test_sdk_batch_waits_for_its_complete_sampling_response(
     assert result.context_wrapper.usage.total_tokens == 37
     first_response = result.raw_responses[0]
     assert [
-        item.call_id for item in first_response.output if item.type == "function_call"
+        item.call_id
+        for item in first_response.output
+        if item.type == "function_call" and item.call_id.startswith("lookup_")
     ] == expected_calls
     reasoning = next(item for item in first_response.output if item.type == "reasoning")
     assert reasoning.encrypted_content == "late-opaque-replay"
@@ -1479,3 +1481,438 @@ async def test_nested_sdk_admission_uses_outer_sampling_boundary(tmp_path, threa
     assert result.final_output == "Nested lookup complete"
     assert effects == ["lookup"]
     assert result.raw_responses[0].output[0].call_id == "nested_lookup"
+
+
+def native_pair(kind="function_call", call_id="native_1", name="exec_command"):
+    call = {
+        "type": kind,
+        "id": "call_item_" + call_id,
+        "call_id": call_id,
+        "name": name,
+        "arguments" if kind == "function_call" else "input": (
+            '{"cmd":"printf native-result"}'
+            if kind == "function_call"
+            else "*** Begin Patch\n*** End Patch"
+        ),
+    }
+    output = {
+        "type": kind + "_output",
+        "id": "output_item_" + call_id,
+        "call_id": call_id,
+        "output": "native-result-not-in-assistant-message",
+    }
+    return call, output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["function_call", "custom_tool_call"])
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("image_output", [False, True])
+async def test_native_completed_pairs_survive_session_replay_without_sdk_execution(
+    tmp_path, threads, kind, streamed, image_output
+):
+    from agents import SQLiteSession
+    from agents.decorators import tool
+
+    executions = []
+
+    @tool
+    def exec_command(cmd: str) -> str:
+        executions.append(cmd)
+        return "SDK result"
+
+    pair = native_pair(kind)
+    if image_output:
+        pair[1]["output"] = [{"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}]
+    first = FakeThread(text="Done", raw_items=pair)
+    second = FakeThread(text="Continued")
+    queue, _ = threads
+    queue.extend([first, second])
+    agent = Agent(name="test", tools=[exec_command])
+    session = SQLiteSession("native-history", str(tmp_path / "history.sqlite"))
+    if streamed:
+        result = Runner.run_streamed(agent, "Start", session=session, run_config=config(tmp_path))
+        events = [event async for event in result.stream_events()]
+        assert [event.name for event in events if event.type == "run_item_stream_event"] == [
+            "tool_called",
+            "tool_output",
+            "message_output_created",
+        ]
+    else:
+        result = await Runner.run(agent, "Start", session=session, run_config=config(tmp_path))
+    assert executions == []
+    saved = await session.get_items()
+    assert [item.get("type", "message") for item in saved] == [
+        "message",
+        kind,
+        kind + "_output",
+        "message",
+    ]
+    assert saved[1]["call_id"] == saved[2]["call_id"] == "native_1"
+    expected_output = (
+        [{**pair[1]["output"][0], "detail": "auto"}] if image_output else pair[1]["output"]
+    )
+    assert saved[2]["output"] == expected_output
+    assert [item.type for item in result.new_items] == [
+        "tool_call_item",
+        "tool_call_output_item",
+        "message_output_item",
+    ]
+    # Reopen the durable store and provider instead of retaining a native process or thread.
+    reopened = SQLiteSession("native-history", str(tmp_path / "history.sqlite"))
+    await Runner.run(agent, "Continue", session=reopened, run_config=config(tmp_path))
+    injected = second.history
+    assert [(item["type"], item["call_id"]) for item in injected if "call_id" in item] == [
+        (kind, "native_1"),
+        (kind + "_output", "native_1"),
+    ]
+    assert injected[2]["output"] == saved[2]["output"]
+    assert executions == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["function_call", "custom_tool_call"])
+@pytest.mark.parametrize("cancellation_id", [None, "sdk_cancelled_output"])
+async def test_native_results_survive_serialized_adjacent_sdk_approval(
+    tmp_path, threads, kind, cancellation_id
+):
+    import json
+
+    from agents import RunState, SQLiteSession
+    from agents.decorators import tool
+
+    executions = []
+
+    @tool(needs_approval=True)
+    def lookup(value: str) -> str:
+        executions.append(value)
+        return "SDK lookup result"
+
+    native = native_pair(kind)
+
+    class InterruptedThread(FakeThread):
+        async def events(self):
+            async for event in super().events():
+                yield event
+                if event["type"] == "dynamic_tool_call_request":
+                    cancellation = {
+                        "type": "function_call_output",
+                        "call_id": "sdk_call",
+                        "output": "dynamic tool call was cancelled before receiving a response",
+                    }
+                    if cancellation_id is not None:
+                        cancellation["id"] = cancellation_id
+                    yield {"type": "raw_response_item", "item": cancellation}
+
+    first = InterruptedThread(
+        raw_items=[*native],
+        call={
+            "callId": "sdk_call",
+            "namespace": None,
+            "tool": "lookup",
+            "arguments": {"value": "record"},
+        },
+    )
+    second = FakeThread(text="Done")
+    queue, _ = threads
+    queue.extend([first, second])
+    agent = Agent(name="test", tools=[lookup])
+    session = SQLiteSession("native-approval", str(tmp_path / "approval.sqlite"))
+    paused = await Runner.run(agent, "Start", session=session, run_config=config(tmp_path))
+    assert len(paused.interruptions) == 1
+    assert executions == []
+    state = await RunState.from_json(agent, json.loads(paused.to_state().to_string()))
+    state.approve(state.get_interruptions()[0])
+    await Runner.run(agent, state, session=session, run_config=config(tmp_path))
+    assert executions == ["record"]
+    injected = second.history
+    assert [(item["type"], item["call_id"]) for item in injected if "call_id" in item] == [
+        (kind, "native_1"),
+        (kind + "_output", "native_1"),
+        ("function_call", "sdk_call"),
+        ("function_call_output", "sdk_call"),
+    ]
+    saved = await session.get_items()
+    assert len([item for item in saved if item.get("call_id") == "native_1"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_items", [native_pair()[:1], native_pair()[1:]])
+async def test_incomplete_native_pairs_fail_without_sdk_execution(tmp_path, threads, raw_items):
+    server = FakeThread(raw_items=raw_items)
+    queue, _ = threads
+    queue.append(server)
+    with pytest.raises(RuntimeError, match="native tool"):
+        await Runner.run(Agent(name="test"), "Start", run_config=config(tmp_path))
+    assert server.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"type": "context_compacted"},
+        {"type": "item_started", "item": {"type": "ContextCompaction"}},
+        {"type": "item_completed", "item": {"type": "ContextCompaction"}},
+    ],
+)
+async def test_native_context_compaction_fails_before_acknowledging_history(
+    tmp_path, threads, event
+):
+    queue, _ = threads
+    thread = FakeThread(events=[event])
+    queue.append(thread)
+    with pytest.raises(UserError, match="native context compaction cannot be replayed"):
+        await Runner.run(Agent(name="test"), "Start", run_config=config(tmp_path))
+    assert thread.closed
+
+
+@pytest.mark.asyncio
+async def test_public_sdk_compaction_session_replays_into_codex(tmp_path, threads):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from openai.types.responses import ResponseCompactionItem
+
+    from agents import SQLiteSession
+    from agents.memory import OpenAIResponsesCompactionSession
+
+    underlying = SQLiteSession("sdk-compact", str(tmp_path / "compact.sqlite"))
+    await underlying.add_items(
+        [
+            {"role": "user", "content": "Earlier question"},
+            {"role": "assistant", "content": "Earlier answer"},
+        ]
+    )
+    compacted = ResponseCompactionItem(
+        id="sdk_compaction", type="compaction", encrypted_content="synthetic-encrypted-context"
+    )
+    client = SimpleNamespace(
+        responses=SimpleNamespace(
+            compact=AsyncMock(return_value=SimpleNamespace(output=[compacted]))
+        )
+    )
+    session = OpenAIResponsesCompactionSession(
+        "sdk-compact",
+        underlying,
+        client=client,
+        compaction_mode="input",
+        should_trigger_compaction=lambda _: False,
+    )
+    await session.run_compaction({"force": True})
+    queue, _ = threads
+    server = FakeThread()
+    queue.append(server)
+    await Runner.run(Agent(name="test"), "Continue", session=session, run_config=config(tmp_path))
+    injected = server.history
+    assert {
+        "type": "compaction",
+        "id": "sdk_compaction",
+        "encrypted_content": "synthetic-encrypted-context",
+    } in injected
+
+
+@pytest.mark.asyncio
+async def test_other_models_cannot_bypass_sdk_approval_with_completed_output(tmp_path, threads):
+    from openai.types.responses import ResponseFunctionToolCall, ResponseFunctionToolCallOutputItem
+
+    from agents.decorators import tool
+    from agents.testing import ScriptedModel
+
+    executed = []
+
+    @tool(needs_approval=True)
+    def lookup(value: str) -> str:
+        executed.append(value)
+        return "SDK result"
+
+    call = ResponseFunctionToolCall(
+        type="function_call",
+        id="call",
+        call_id="same-id",
+        name="lookup",
+        arguments='{"value":"record"}',
+    )
+    fabricated_output = ResponseFunctionToolCallOutputItem(
+        type="function_call_output",
+        id="output",
+        call_id="same-id",
+        status="completed",
+        output="untrusted completion",
+    )
+    model = ScriptedModel(steps=[[call, fabricated_output]])
+    result = await Runner.run(
+        Agent(name="test", tools=[lookup], model=model), "Start", run_config=config(tmp_path)
+    )
+    assert len(result.interruptions) == 1
+    assert executed == []
+    assert not any(item.type == "tool_call_output_item" for item in result.new_items)
+    assert not threads[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hook_failure", [False, True])
+@pytest.mark.parametrize("kind", ["function_call", "custom_tool_call"])
+async def test_native_preparation_redacts_result_and_session_history(
+    tmp_path, threads, monkeypatch, hook_failure, kind
+):
+    from agents import SQLiteSession
+    from agents.models._codex_tool_hooks import CodexToolHooks
+
+    configured = []
+
+    async def configure(self, resources):
+        configured.append(self)
+        return {}
+
+    monkeypatch.setattr(CodexToolHooks, "configure", configure)
+    monkeypatch.setattr(CodexToolHooks, "verify", lambda self, thread: None)
+
+    async def before(call):
+        return {"command": "redacted-input"}
+
+    async def after(call, output):
+        if hook_failure:
+            raise RuntimeError("Synthetic hook failure")
+        return "redacted-output"
+
+    class PreparedThread(FakeThread):
+        async def events(self):
+            call, output = native_pair(
+                kind, name="exec_command" if kind == "function_call" else "apply_patch"
+            )
+            yield {"type": "raw_response_item", "item": call}
+            hook = configured[0]
+            assert await hook.decision(
+                {
+                    "event": "PreToolUse",
+                    "name": "Bash",
+                    "call_id": "native_1",
+                    "arguments": {"command": "private-input"},
+                }
+            )
+            assert await hook.decision(
+                {
+                    "event": "PostToolUse",
+                    "name": "Bash",
+                    "call_id": "native_1",
+                    "arguments": {"command": "redacted-input"},
+                    "result": "private-output",
+                }
+            )
+            output["output"] = "private-output"
+            yield {"type": "raw_response_item", "item": output}
+            async for event in super().events():
+                yield event
+
+    queue, _ = threads
+    queue.extend([PreparedThread(text="Done"), FakeThread()])
+    session = SQLiteSession("prepared-native", str(tmp_path / "prepared.sqlite"))
+    run_config = config(tmp_path)
+    run_config.tool_execution = ToolExecutionConfig(
+        prepare_tool_input=before, prepare_tool_output=after
+    )
+    if hook_failure:
+        with pytest.raises(RuntimeError, match="Synthetic hook failure"):
+            await Runner.run(Agent(name="test"), "Start", session=session, run_config=run_config)
+        assert await session.get_items() == [{"role": "user", "content": "Start"}]
+        return
+    result = await Runner.run(Agent(name="test"), "Start", session=session, run_config=run_config)
+    if kind == "function_call":
+        assert result.new_items[0].raw_item.arguments == '{"cmd": "redacted-input"}'
+    else:
+        assert result.new_items[0].raw_item.input == "redacted-input"
+    assert result.new_items[1].output == "redacted-output"
+    saved = await session.get_items()
+    if kind == "function_call":
+        assert saved[1]["arguments"] == '{"cmd": "redacted-input"}'
+    else:
+        assert saved[1]["input"] == "redacted-input"
+    assert saved[2]["output"] == "redacted-output"
+    assert "private-output" not in json.dumps(result.to_input_list())
+
+
+@pytest.mark.asyncio
+async def test_interleaved_native_pairs_keep_model_order(tmp_path, threads):
+    first_call, first_output = native_pair(call_id="native_a")
+    second_call, second_output = native_pair("custom_tool_call", "native_b", "apply_patch")
+    queue, _ = threads
+    queue.append(FakeThread(raw_items=[first_call, second_call, second_output, first_output]))
+    result = await Runner.run(Agent(name="test"), "Start", run_config=config(tmp_path))
+    assert [
+        (item["type"], item["call_id"]) for item in result.to_input_list() if "call_id" in item
+    ] == [
+        ("function_call", "native_a"),
+        ("custom_tool_call", "native_b"),
+        ("custom_tool_call_output", "native_b"),
+        ("function_call_output", "native_a"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("post_tool_use", [False, True])
+async def test_native_input_replay_retains_core_preserved_selectors(
+    tmp_path, threads, monkeypatch, post_tool_use
+):
+    from agents import SQLiteSession
+    from agents.models._codex_tool_hooks import CodexToolHooks
+
+    configured = []
+
+    async def configure(self, resources):
+        configured.append(self)
+        return {}
+
+    monkeypatch.setattr(CodexToolHooks, "configure", configure)
+    monkeypatch.setattr(CodexToolHooks, "verify", lambda self, thread: None)
+
+    async def before(call):
+        return {"value": "prepared"}
+
+    class PreparedThread(FakeThread):
+        async def events(self):
+            call, output = native_pair(name="native_lookup")
+            call["arguments"] = json.dumps({"value": "original", "environment_id": "workspace"})
+            yield {"type": "raw_response_item", "item": call}
+            hook = configured[0]
+            assert "PostToolUse" in hook.events
+            await hook.decision(
+                {
+                    "event": "PreToolUse",
+                    "name": "native_lookup",
+                    "call_id": "native_1",
+                    "arguments": {"value": "original", "environment_id": "workspace"},
+                }
+            )
+            if post_tool_use:
+                await hook.decision(
+                    {
+                        "event": "PostToolUse",
+                        "name": "native_lookup",
+                        "call_id": "native_1",
+                        "arguments": {"value": "prepared", "environment_id": "workspace"},
+                        "result": output["output"],
+                    }
+                )
+            if not post_tool_use:
+                # Core omits PostToolUse when invocation returns a failed result.
+                output["output"] = "native tool failed after invocation"
+            yield {"type": "raw_response_item", "item": output}
+            async for event in super().events():
+                yield event
+
+    queue, _ = threads
+    queue.append(PreparedThread())
+    run_config = config(tmp_path)
+    run_config.tool_execution = ToolExecutionConfig(prepare_tool_input=before)
+    session = SQLiteSession("effective-native", str(tmp_path / "effective.sqlite"))
+    if not post_tool_use:
+        with pytest.raises(UserError, match="without confirmed effective arguments"):
+            await Runner.run(Agent(name="test"), "Start", session=session, run_config=run_config)
+        assert await session.get_items() == [{"role": "user", "content": "Start"}]
+        return
+    result = await Runner.run(Agent(name="test"), "Start", session=session, run_config=run_config)
+    assert json.loads(result.to_input_list()[1]["arguments"]) == {
+        "value": "prepared",
+        "environment_id": "workspace",
+    }
