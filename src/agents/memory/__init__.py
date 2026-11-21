@@ -4,6 +4,11 @@ from typing import TYPE_CHECKING, Any
 
 from .openai_conversations_session import OpenAIConversationsSession
 from .openai_responses_compaction_session import OpenAIResponsesCompactionSession
+from .resumable_session import (
+    ResumableSession,
+    ResumableSessionError,
+    ResumableSessionStore,
+)
 from .session import (
     OpenAIResponsesCompactionArgs,
     OpenAIResponsesCompactionAwareSession,
@@ -19,6 +24,9 @@ if TYPE_CHECKING:
     from .sqlite_session import SQLiteSession
 
 __all__ = [
+    "ResumableSession",
+    "ResumableSessionError",
+    "ResumableSessionStore",
     "Session",
     "SessionABC",
     "SessionInputCallback",

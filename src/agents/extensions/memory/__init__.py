@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .encrypt_session import EncryptedSession
     from .mongodb_session import MongoDBSession
     from .redis_session import RedisSession
+    from .redis_session_store import RedisSessionStore
     from .sqlalchemy_session import SQLAlchemySession
 
 __all__: list[str] = [
@@ -35,12 +36,14 @@ __all__: list[str] = [
     "EncryptedSession",
     "MongoDBSession",
     "RedisSession",
+    "RedisSessionStore",
     "SQLAlchemySession",
 ]
 
 _LAZY_EXPORTS: dict[str, tuple[str, tuple[str, str] | None]] = {
     "EncryptedSession": (".encrypt_session", ("cryptography", "encrypt")),
     "RedisSession": (".redis_session", ("redis", "redis")),
+    "RedisSessionStore": (".redis_session_store", ("redis", "redis")),
     "SQLAlchemySession": (".sqlalchemy_session", ("sqlalchemy", "sqlalchemy")),
     "AdvancedSQLiteSession": (".advanced_sqlite_session", None),
     "AsyncSQLiteSession": (".async_sqlite_session", None),

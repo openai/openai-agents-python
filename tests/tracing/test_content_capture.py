@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from typing import Any
 
 import httpx2
 import pytest
@@ -76,12 +77,16 @@ def test_public_tool_export_redacts_embedded_credentials_and_binary(exporter) ->
 
 
 def test_public_model_export_omits_hidden_reasoning_and_embedded_media(exporter) -> None:
+    incomplete_header = "data:" * 6_000
     with trace("content"), generation_span(model="test-model") as model:
         model.span_data.operation.detail = "content"
         model.span_data.input = [
             {
                 "role": "user",
-                "content": "visible before data:image/png;base64,BINARY_CANARY visible after",
+                "content": (
+                    f"{incomplete_header} visible before data:image/png;base64,BINARY_CANARY"
+                    " visible after"
+                ),
             }
         ]
         model.span_data.output = [
@@ -100,6 +105,7 @@ def test_public_model_export_omits_hidden_reasoning_and_embedded_media(exporter)
         ]
     serialized = json.dumps(dict(exporter.get_finished_spans()[0].attributes))
     assert "CANARY" not in serialized
+    assert incomplete_header in serialized
     assert "visible before" in serialized
     assert "visible after" in serialized
     assert "visible answer" in serialized
@@ -176,6 +182,77 @@ def test_oversized_content_preserves_message_role_and_part_identity() -> None:
     assert captured[0]["content"][0]["type"] == "input_text"
     assert captured[0]["content"][0]["text"].startswith("prefix ")
     assert captured[0]["content"][0]["text"].endswith("[truncated]")
+
+
+def test_tool_capture_limits_mapping_traversal_and_prioritizes_identity(exporter) -> None:
+    class CountedMapping(Mapping[str, Any]):
+        # The traversal guard distinguishes bounded capture from eager enumeration without timing.
+        def __init__(self, values: dict[str, Any]) -> None:
+            self.values = values
+            self.reads = 0
+
+        def __len__(self) -> int:
+            return len(self.values)
+
+        def __getitem__(self, key: str) -> Any:
+            return self.values[key]
+
+        def __iter__(self) -> Iterator[str]:
+            for key in self.values:
+                self.reads += 1
+                # Sixteen 5 KiB values cannot fit in a 32 KiB capture.
+                if self.reads > 16:
+                    raise AssertionError("Capture traversed fields beyond its byte budget.")
+                yield key
+
+    payload = CountedMapping(
+        {
+            "Authorization": "CREDENTIAL_CANARY",
+            "media": {"type": "input_image", "image_url": "MEDIA_CANARY"},
+            **{f"field_{index}": "visible " + "x" * 5_000 for index in range(1_000)},
+            "type": "message",
+            "role": "tool",
+            "id": "late-id",
+            "call_id": "late-call",
+            "name": "late-name",
+        }
+    )
+    native = SpanProcessorForTests()
+    add_trace_processor(native)
+    with trace("bounded"), function_span("lookup") as span:
+        span.span_data.operation.detail = "content"
+        span.span_data.output = payload
+    captured = next(
+        item.span_data.output
+        for item in native.get_ordered_spans()
+        if item.span_data.type == "function"
+    )
+    assert isinstance(captured, dict)
+    assert {key: captured[key] for key in ("type", "role", "id", "call_id", "name")} == {
+        "type": "message",
+        "role": "tool",
+        "id": "late-id",
+        "call_id": "late-call",
+        "name": "late-name",
+    }
+    encoded = json.dumps(captured, ensure_ascii=False)
+    assert len(encoded.encode()) <= CONTENT_LIMIT
+    assert "CANARY" not in encoded
+    assert "visible" in encoded and "truncated" in encoded
+    assert payload.reads <= 16
+
+
+def test_capture_rejects_oversized_mapping_key_before_encoding(monkeypatch) -> None:
+    original_dumps = json.dumps
+
+    def bounded_dumps(value: Any, *args: Any, **kwargs: Any) -> str:
+        if isinstance(value, str) and len(value) > CONTENT_LIMIT:
+            pytest.fail("Capture encoded a key that cannot fit its byte budget.")
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr("agents.tracing._content.json.dumps", bounded_dumps)
+    captured = bound_content({"k" * (CONTENT_LIMIT * 2): "discarded", "id": "late-id"})
+    assert captured == {"id": "late-id", "truncated": True}
 
 
 @pytest.mark.allow_call_model_methods

@@ -20,6 +20,7 @@ from .handoffs import HandoffHistoryMapper, HandoffInputFilter
 from .items import TResponseInputItem
 from .lifecycle import RunHooks
 from .memory import Session, SessionInputCallback, SessionSettings
+from .memory.resumable_session import ResumableSession
 from .memory.session_settings import (
     _coerce_session_settings,
     _declared_session_settings_type,
@@ -689,7 +690,7 @@ class RunOptions(TypedDict, Generic[TContext]):
     conversation_id: NotRequired[str | None]
     """The ID of the stored conversation, if any."""
 
-    session: NotRequired[Session | None]
+    session: NotRequired[Session | ResumableSession | None]
     """The session for the run."""
 
     error_handlers: NotRequired[RunErrorHandlers[TContext] | None]

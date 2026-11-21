@@ -358,6 +358,7 @@
         "EncryptedSession": "cryptography",
         "MongoDBSession": "pymongo",
         "RedisSession": "redis",
+        "RedisSessionStore": "redis",
         "SQLAlchemySession": "sqlalchemy"
       },
       "optional_exports": {}

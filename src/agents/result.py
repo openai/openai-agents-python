@@ -62,6 +62,7 @@ from .util._pretty_print import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from .memory.resumable_session import _ResumableSessionBinding
     from .sandbox.session.base_sandbox_session import BaseSandboxSession
 
 T = TypeVar("T")
@@ -121,6 +122,7 @@ def _populate_state_from_result(
     auto_previous_response_id: bool = False,
 ) -> RunState[Any]:
     """Populate a RunState with common fields from a RunResult."""
+    state._resumable_binding = result._resumable_binding
     state._current_agent = result.last_agent
     model_input_items = getattr(result, "_model_input_items", None)
     if isinstance(model_input_items, list):
@@ -428,6 +430,10 @@ class RunResultBase(abc.ABC):
         default=None, init=False, repr=False
     )
     """Held pending Session write preserved when a non-streaming result becomes a RunState."""
+    _resumable_binding: _ResumableSessionBinding | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    """The session and confirmed revision to use when resuming this result."""
     _current_step_for_state: Any = field(default=None, init=False, repr=False)
     """Current step preserved when a non-streaming result is converted back to RunState."""
 
@@ -720,6 +726,10 @@ class RunResultStreaming(RunResultBase):
     _active_stream_consumers: int = field(default=0, init=False, repr=False)
     _stream_consumers_stopped: asyncio.Event = field(
         default_factory=asyncio.Event, init=False, repr=False
+    )
+
+    _resumable_checkpoint: Callable[[RunResultStreaming], Awaitable[None]] | None = field(
+        default=None, init=False, repr=False
     )
 
     _current_turn_persisted_item_count: int = 0
@@ -1297,6 +1307,8 @@ class RunResultStreaming(RunResultBase):
                     pass
             ```
         """
+        if self._resumable_checkpoint is not None:
+            raise AgentsException("The resumable session checkpoint has not been acknowledged")
         # Create a RunState from the current result
         # Use _original_input (updated on handoffs/resume when input history changes).
         # This avoids serializing a mutated view of input history.

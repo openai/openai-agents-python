@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from itertools import chain
 from typing import Any
 
 from pydantic import BaseModel
@@ -53,7 +54,9 @@ _OMIT_TYPES = {
     "encrypted_content",
 }
 _OMIT_FIELDS = {key.replace("_", "") for key in _OMIT_FIELDS}
-_DATA_URI = re.compile(r"data:[^\s;,]+(?:;[^\s,]*)?,[^\s\"'<>]+", re.IGNORECASE)
+# Consume the entire header even if the payload is missing, so repeated
+# "data:" prefixes in one malformed header cannot trigger quadratic rescans.
+_DATA_URI = re.compile(r"data:[^\s;,][^\s,]*(,[^\s\"'<>]+)?", re.IGNORECASE)
 _JSON_PREFIX = re.compile(r"\s*[\[{]")
 
 
@@ -99,7 +102,10 @@ def _project(value: Any, budget: int, depth: int) -> Any:
                     # slicing encoded JSON into an invalid tool result.
                     encoded = _json(_project(embedded, (budget - 2) // 2, depth + 1))
                 return encoded
-        value = _DATA_URI.sub("[omitted: media]", _text(value, budget))
+        value = _DATA_URI.sub(
+            lambda match: "[omitted: media]" if match.start(1) >= 0 else match[0],
+            _text(value, budget),
+        )
         return _text(value, budget)
     if value is None or isinstance(value, (bool, float, int)):
         return value if _size(value) <= budget else _TRUNCATED
@@ -114,19 +120,26 @@ def _project(value: Any, budget: int, depth: int) -> Any:
             return {"type": kind, "omitted": True, "reason": "unsupported_content"}
         result: dict[str, Any] = {}
         used = 2
-        identity = {"type", "role", "id", "call_id", "name"}
-        for key, item in sorted(value.items(), key=lambda entry: entry[0] not in identity):
+        identity = ("type", "role", "id", "call_id", "name")
+        prioritized = ((key, value[key]) for key in identity if key in value)
+        remaining = ((key, item) for key, item in value.items() if key not in identity)
+        for key, item in chain(prioritized, remaining):
             if not isinstance(key, str):
                 continue
             # Reserve space for a trailing marker before accepting another field.
-            available = budget - used - _size(key) - 4 - 32
+            available = budget - used - 4 - 32
+            if len(key) > available:
+                result["truncated"] = True
+                break
+            key_size = _size(key)
+            available -= key_size
             if available < 84:
                 result["truncated"] = True
                 break
             if key.lower().replace("-", "").replace("_", "") in _OMIT_FIELDS:
                 item = "[omitted]"
             result[key] = _project(item, available, depth + 1)
-            used += _size(key) + _size(result[key]) + 4
+            used += key_size + _size(result[key]) + 4
         return result
     if isinstance(value, (list, tuple)):
         items: list[Any] = []
