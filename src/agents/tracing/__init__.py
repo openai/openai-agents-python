@@ -1,4 +1,4 @@
-from .config import TracingConfig
+from .config import TracingConfig, metadata_only_run_tracing
 from .context import TraceCtxManager
 from .create import (
     agent_span,
@@ -54,6 +54,7 @@ __all__ = [
     "get_trace_provider",
     "guardrail_span",
     "handoff_span",
+    "metadata_only_run_tracing",
     "response_span",
     "set_trace_processors",
     "set_trace_provider",
