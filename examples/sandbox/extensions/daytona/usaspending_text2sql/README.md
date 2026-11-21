@@ -48,7 +48,7 @@ uv run python -m examples.sandbox.extensions.daytona.usaspending_text2sql.local_
 uv run python -m examples.sandbox.extensions.daytona.usaspending_text2sql.local_agent --demo --codex --stream
 ```
 
-Omit `--codex` to use the default provider. `CODEX_MODEL` and `OPENAI_MODEL` select an optional model for their respective providers. Codex uses its CLI authentication; the default provider uses `OPENAI_API_KEY`.
+Omit `--codex` to use the default provider. `CODEX_MODEL` and `OPENAI_MODEL` select an optional model for their respective providers. Codex uses your saved login. The default provider uses `OPENAI_API_KEY`.
 
 To query an existing database produced by `setup_db.py`, replace `--demo` with `--database`:
 

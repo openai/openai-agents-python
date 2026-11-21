@@ -209,8 +209,12 @@ def test_release_checks_fail_closed(tmp_path: Path, failed_check: str | None) ->
     assert build["needs"] == "checks"
     assert check["shell"] == "bash"
     assert check["env"] == {"OPENAI_API_KEY": "fake-for-tests", "UV_LOCKED": "1"}
+    # Prereleases stop at checks; both later jobs retain their success dependency.
+    assert checks["if"] == "${{ !github.event.release.prerelease }}"
+    assert jobs["publish"]["needs"] == "build"
     for job in (checks, build, jobs["publish"]):
-        assert "if" not in job and "continue-on-error" not in job
+        assert ("if" in job) is (job is checks)
+        assert "continue-on-error" not in job
         for step in job["steps"]:
             assert "continue-on-error" not in step
             if step.get("name") in {

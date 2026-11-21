@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import ClassVar
 
@@ -14,6 +13,7 @@ from agents.sandbox.capabilities.tools import SandboxApplyPatchTool
 from agents.sandbox.errors import WorkspaceReadNotFoundError
 from agents.testing import ScriptedModel, scripted_sandbox_session
 from agents.tool import FunctionTool
+from tests.sandbox._filesystem_test_session import FilesystemTestSandboxClient
 from tests.test_responses import get_final_output_message, get_function_tool_call
 
 
@@ -29,10 +29,7 @@ class _FunctionSandboxModel(ScriptedModel):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approve", [True, False])
-@pytest.mark.skipif(sys.platform == "win32", reason="Filesystem test session requires Unix-local")
 async def test_function_sandbox_patch_uses_runner_approval_and_session_files(approve: bool) -> None:
-    from tests.sandbox._filesystem_test_session import FilesystemTestSandboxClient
-
     client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     model = _FunctionSandboxModel(
@@ -228,10 +225,7 @@ async def test_sandbox_keeps_custom_provider_resolution_once_per_model_call() ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(sys.platform == "win32", reason="Filesystem test session requires Unix-local")
 async def test_memory_generation_uses_bound_provider_for_both_omitted_phases() -> None:
-    from tests.sandbox._filesystem_test_session import FilesystemTestSandboxClient
-
     client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     model = _FunctionSandboxModel(
