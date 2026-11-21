@@ -37,7 +37,7 @@ index 968d331..9d0bd2e 100644
 @@ -474,10 +475,39 @@ impl CodexThread {
              .await
      }
- 
+
 +    /// Replays one native call without model sampling, requiring the original human approval.
 +    pub async fn restore_tool_call_if_idle(
 +        &self,
@@ -91,10 +91,9 @@ index dcd01e4..dc14807 100644
  mod compact_model_fallback;
 diff --git a/codex-rs/core/src/patch_preconditions.rs b/codex-rs/core/src/patch_preconditions.rs
 new file mode 100644
-index 0000000..2e9781e
 --- /dev/null
 +++ b/codex-rs/core/src/patch_preconditions.rs
-@@ -0,0 +1,306 @@
+@@ -0,0 +1,331 @@
 +//! Filesystem preconditions for restoring an interrupted native patch approval.
 +
 +use crate::session::step_context::StepContext;
@@ -117,6 +116,9 @@ index 0000000..2e9781e
 +use std::path::Component;
 +use std::path::Path;
 +use std::path::PathBuf;
++
++// Approval recovery fails closed for larger preimages instead of retaining large reads.
++const MAX_PATCH_PREIMAGE_BYTES: u64 = 8 * 1024 * 1024;
 +
 +#[derive(Debug, Deserialize, Serialize, PartialEq)]
 +#[serde(deny_unknown_fields)]
@@ -254,11 +256,12 @@ index 0000000..2e9781e
 +        }
 +        Ok(_) => {
 +            let bytes = fs
-+                .read_file(
++                .read_file_bounded(
 +                    &uri,
 +                    ReadFileOptions {
 +                        follow_symlinks: false,
 +                    },
++                    MAX_PATCH_PREIMAGE_BYTES,
 +                )
 +                .await
 +                .map_err(|error| invalid(format!("Cannot read pending patch file: {error}")))?;
@@ -399,6 +402,27 @@ index 0000000..2e9781e
 +            },
 +        );
 +        assert!(capture(&fs, &request).await.is_err());
++    }
++    #[tokio::test]
++    async fn rejects_preimage_larger_than_recovery_limit() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().canonicalize().unwrap().join("large.txt");
++        std::fs::File::create(&path)
++            .unwrap()
++            .set_len(MAX_PATCH_PREIMAGE_BYTES + 1)
++            .unwrap();
++        let fs = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
++        let request = approval(
++            path,
++            FileChange::Update {
++                unified_diff: "-old\n+new\n".into(),
++                move_path: None,
++            },
++        );
++        let error = capture(&fs, &request)
++            .await
++            .expect_err("large preimages must fail closed");
++        assert!(error.to_string().contains("limit is 8388608 bytes"));
 +    }
 +}
 diff --git a/codex-rs/core/src/restore_tool_call.rs b/codex-rs/core/src/restore_tool_call.rs
@@ -1056,7 +1080,7 @@ index 66476ae..c092ec5 100644
 @@ -2930,7 +2930,7 @@ impl Session {
              .map(|task| Arc::clone(&task.turn_context))
      }
- 
+
 -    async fn active_turn_context_and_cancellation_token(
 +    pub(crate) async fn active_turn_context_and_cancellation_token(
          &self,
@@ -1077,7 +1101,7 @@ index 66476ae..c092ec5 100644
 +            rx_approve.await.unwrap_or(ReviewDecision::Abort),
 +        )
      }
- 
+
      #[expect(
 @@ -3219,9 +3225,15 @@ impl Session {
              reason,
@@ -1094,7 +1118,7 @@ index 66476ae..c092ec5 100644
 +            rx_approve.await.unwrap_or(ReviewDecision::Abort),
 +        )
      }
- 
+
      #[expect(
 diff --git a/codex-rs/core/src/tasks/regular.rs b/codex-rs/core/src/tasks/regular.rs
 index 6c6f3d1..1309ac1 100644
@@ -1210,7 +1234,7 @@ index d9afeb6..32a5820 100644
              ExecApprovalRequirement::Skip { .. } => {
                  if strict_auto_review {
 @@ -228,12 +243,24 @@ impl ToolOrchestrator {
- 
+
          // 2) First attempt under the selected sandbox.
          let unsandboxed_allowed = unsandboxed_execution_allowed(&file_system_sandbox_policy);
 -        let sandbox_override = sandbox_override_for_first_attempt(
@@ -1240,3 +1264,459 @@ index d9afeb6..32a5820 100644
          let (escalated_profile, writable_root_metadata) = if sandbox_override
              == SandboxOverride::EscalatedSandboxWithRestrictions
          {
+diff --git a/codex-rs/exec-server/src/fs_helper.rs b/codex-rs/exec-server/src/fs_helper.rs
+--- a/codex-rs/exec-server/src/fs_helper.rs
++++ b/codex-rs/exec-server/src/fs_helper.rs
+@@ -71,6 +71,12 @@
+     Open(FsHelperOpenParams),
+     #[serde(rename = "fs/readFile")]
+     ReadFile(FsReadFileParams),
++    #[serde(rename = "fs/readFileBounded")]
++    ReadFileBounded {
++        path: PathUri,
++        follow_symlinks: bool,
++        max_bytes: u64,
++    },
+     #[serde(rename = "fs/writeFile")]
+     WriteFile(FsWriteFileParams),
+     #[serde(rename = "fs/createDirectory")]
+@@ -311,6 +317,19 @@
+                 data_base64: STANDARD.encode(data),
+             }))
+         }
++        FsHelperRequest::ReadFileBounded {
++            path,
++            follow_symlinks,
++            max_bytes,
++        } => {
++            let data = file_system
++                .read_file_bounded(&path, ReadFileOptions { follow_symlinks }, max_bytes, None)
++                .await
++                .map_err(map_fs_error)?;
++            Ok(FsHelperPayload::ReadFile(FsReadFileResponse {
++                data_base64: STANDARD.encode(data),
++            }))
++        }
+         FsHelperRequest::WriteFile(params) => {
+             let bytes = STANDARD.decode(params.data_base64).map_err(|err| {
+                 invalid_request(format!(
+diff --git a/codex-rs/exec-server/src/local_file_system.rs b/codex-rs/exec-server/src/local_file_system.rs
+--- a/codex-rs/exec-server/src/local_file_system.rs
++++ b/codex-rs/exec-server/src/local_file_system.rs
+@@ -304,6 +304,20 @@
+         Box::pin(LocalFileSystem::read_file(self, path, options, sandbox))
+     }
+
++    fn read_file_bounded<'a>(
++        &'a self,
++        path: &'a PathUri,
++        options: ReadFileOptions,
++        max_bytes: u64,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
++        Box::pin(async move {
++            let (fs, sandbox) = self.file_system_for_reads(sandbox)?;
++            fs.read_file_bounded(path, options, max_bytes, sandbox)
++                .await
++        })
++    }
++
+     fn read_file_stream<'a>(
+         &'a self,
+         path: &'a PathUri,
+@@ -517,6 +531,21 @@
+         Box::pin(UnsandboxedFileSystem::read_file(
+             self, path, options, sandbox,
+         ))
++    }
++
++    fn read_file_bounded<'a>(
++        &'a self,
++        path: &'a PathUri,
++        options: ReadFileOptions,
++        max_bytes: u64,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
++        Box::pin(async move {
++            reject_platform_sandbox_context(sandbox)?;
++            self.file_system
++                .read_file_bounded(path, options, max_bytes, None)
++                .await
++        })
+     }
+
+     fn read_file_stream<'a>(
+@@ -998,6 +1027,24 @@
+         Box::pin(DirectFileSystem::read_file(self, path, options, sandbox))
+     }
+
++    fn read_file_bounded<'a>(
++        &'a self,
++        path: &'a PathUri,
++        options: ReadFileOptions,
++        max_bytes: u64,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
++        Box::pin(async move {
++            reject_sandbox_context(sandbox)?;
++            crate::local_file_system_read::read_file_bounded(
++                path.to_abs_path()?,
++                options,
++                max_bytes,
++            )
++            .await
++        })
++    }
++
+     fn read_file_stream<'a>(
+         &'a self,
+         path: &'a PathUri,
+diff --git a/codex-rs/exec-server/src/local_file_system_read.rs b/codex-rs/exec-server/src/local_file_system_read.rs
+--- a/codex-rs/exec-server/src/local_file_system_read.rs
++++ b/codex-rs/exec-server/src/local_file_system_read.rs
+@@ -16,6 +16,15 @@
+     path: AbsolutePathBuf,
+     options: ReadFileOptions,
+ ) -> io::Result<Vec<u8>> {
++    read_file_bounded(path, options, MAX_READ_FILE_BYTES).await
++}
++
++pub(super) async fn read_file_bounded(
++    path: AbsolutePathBuf,
++    options: ReadFileOptions,
++    max_bytes: u64,
++) -> io::Result<Vec<u8>> {
++    let max_bytes = max_bytes.min(MAX_READ_FILE_BYTES);
+     let cancelled = CancellationToken::new();
+     let _cancel_on_drop = cancelled.clone().drop_guard();
+     tokio::task::spawn_blocking(move || {
+@@ -28,22 +37,31 @@
+             no_follow::open_file(path.as_path())?
+         };
+         let metadata = file.metadata()?;
+-        if metadata.len() > MAX_READ_FILE_BYTES {
+-            return Err(file_too_large_error());
+-        }
+-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+-        CancellableReader {
+-            reader: file.take(MAX_READ_FILE_BYTES + 1),
+-            cancelled,
+-        }
+-        .read_to_end(&mut bytes)?;
+-        if bytes.len() as u64 > MAX_READ_FILE_BYTES {
+-            return Err(file_too_large_error());
+-        }
+-        Ok(bytes)
++        read_with_limit(file, metadata.len(), max_bytes, cancelled)
+     })
+     .await
+     .map_err(|error| io::Error::other(format!("filesystem task failed: {error}")))?
++}
++
++fn read_with_limit(
++    reader: impl Read,
++    initial_len: u64,
++    max_bytes: u64,
++    cancelled: CancellationToken,
++) -> io::Result<Vec<u8>> {
++    if initial_len > max_bytes {
++        return Err(file_too_large_error(max_bytes));
++    }
++    let mut bytes = Vec::with_capacity(initial_len as usize);
++    CancellableReader {
++        reader: reader.take(max_bytes + 1),
++        cancelled,
++    }
++    .read_to_end(&mut bytes)?;
++    if bytes.len() as u64 > max_bytes {
++        return Err(file_too_large_error(max_bytes));
++    }
++    Ok(bytes)
+ }
+
+ struct CancellableReader<R> {
+@@ -62,10 +80,10 @@
+     }
+ }
+
+-fn file_too_large_error() -> io::Error {
++fn file_too_large_error(max_bytes: u64) -> io::Error {
+     io::Error::new(
+         io::ErrorKind::InvalidInput,
+-        format!("file is too large to read: limit is {MAX_READ_FILE_BYTES} bytes"),
++        format!("file is too large to read: limit is {max_bytes} bytes"),
+     )
+ }
+
+diff --git a/codex-rs/exec-server/src/local_file_system_read_tests.rs b/codex-rs/exec-server/src/local_file_system_read_tests.rs
+--- a/codex-rs/exec-server/src/local_file_system_read_tests.rs
++++ b/codex-rs/exec-server/src/local_file_system_read_tests.rs
+@@ -89,3 +89,64 @@
+     assert_eq!((first, error.kind()), (*b"x", std::io::ErrorKind::Other));
+     Ok(())
+ }
++
++#[tokio::test]
++async fn caller_limit_preserves_regular_read_and_rejects_larger_preimages() -> anyhow::Result<()> {
++    let directory = TempDir::new()?;
++    let path = directory.path().canonicalize()?.join("preimage");
++    let uri = PathUri::from_host_native_path(&path)?;
++    let contents = vec![0x5a; 16];
++    std::fs::write(&path, &contents)?;
++    assert_eq!(
++        LOCAL_FS
++            .read_file_bounded(
++                &uri,
++                ReadFileOptions {
++                    follow_symlinks: false
++                },
++                16,
++                None
++            )
++            .await?,
++        contents
++    );
++    assert!(
++        LOCAL_FS
++            .read_file_bounded(
++                &uri,
++                ReadFileOptions {
++                    follow_symlinks: false
++                },
++                15,
++                None
++            )
++            .await
++            .is_err()
++    );
++    assert_eq!(
++        LOCAL_FS
++            .read_file(
++                &uri,
++                ReadFileOptions {
++                    follow_symlinks: false
++                },
++                None
++            )
++            .await?,
++        contents
++    );
++    Ok(())
++}
++
++#[test]
++fn growth_or_misleading_metadata_cannot_read_past_limit_plus_one() {
++    use std::io::Cursor;
++    use tokio_util::sync::CancellationToken;
++    for initial_len in [0, 8, 16] {
++        let mut reader = Cursor::new(vec![0x5a; 1024]);
++        let error = super::read_with_limit(&mut reader, initial_len, 16, CancellationToken::new())
++            .unwrap_err();
++        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
++        assert_eq!(reader.position(), 17);
++    }
++}
+diff --git a/codex-rs/exec-server/src/sandboxed_file_system.rs b/codex-rs/exec-server/src/sandboxed_file_system.rs
+--- a/codex-rs/exec-server/src/sandboxed_file_system.rs
++++ b/codex-rs/exec-server/src/sandboxed_file_system.rs
+@@ -145,16 +145,34 @@
+         options: ReadFileOptions,
+         sandbox: Option<&FileSystemSandboxContext>,
+     ) -> FileSystemResult<Vec<u8>> {
++        self.read_file_with_limit(path, options, None, sandbox)
++            .await
++    }
++
++    async fn read_file_with_limit(
++        &self,
++        path: &PathUri,
++        options: ReadFileOptions,
++        max_bytes: Option<u64>,
++        sandbox: Option<&FileSystemSandboxContext>,
++    ) -> FileSystemResult<Vec<u8>> {
+         let sandbox = require_platform_sandbox(sandbox)?;
+         validate_native_path(path)?;
+         let response = self
+             .run_sandboxed(
+                 sandbox,
+-                FsHelperRequest::ReadFile(FsReadFileParams {
+-                    path: path.clone(),
+-                    follow_symlinks: (!options.follow_symlinks).then_some(false),
+-                    sandbox: None,
+-                }),
++                match max_bytes {
++                    Some(max_bytes) => FsHelperRequest::ReadFileBounded {
++                        path: path.clone(),
++                        follow_symlinks: options.follow_symlinks,
++                        max_bytes,
++                    },
++                    None => FsHelperRequest::ReadFile(FsReadFileParams {
++                        path: path.clone(),
++                        follow_symlinks: (!options.follow_symlinks).then_some(false),
++                        sandbox: None,
++                    }),
++                },
+             )
+             .await?
+             .expect_read_file()
+@@ -364,6 +382,16 @@
+         Box::pin(SandboxedFileSystem::read_file(self, path, options, sandbox))
+     }
+
++    fn read_file_bounded<'a>(
++        &'a self,
++        path: &'a PathUri,
++        options: ReadFileOptions,
++        max_bytes: u64,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
++        Box::pin(self.read_file_with_limit(path, options, Some(max_bytes), sandbox))
++    }
++
+     fn read_file_stream<'a>(
+         &'a self,
+         path: &'a PathUri,
+diff --git a/codex-rs/exec-server/tests/file_system_unix.rs b/codex-rs/exec-server/tests/file_system_unix.rs
+--- a/codex-rs/exec-server/tests/file_system_unix.rs
++++ b/codex-rs/exec-server/tests/file_system_unix.rs
+@@ -1571,3 +1571,71 @@
+
+     Ok(())
+ }
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn bounded_file_reads_preserve_sandbox_and_no_follow() -> Result<()> {
++    let context = create_file_system_context(FileSystemImplementation::Local).await?;
++    let temp = TempDir::new()?;
++    let root = temp.path().canonicalize()?;
++    let allowed = root.join("allowed");
++    std::fs::create_dir(&allowed)?;
++    let file = allowed.join("file");
++    std::fs::write(&file, b"hello")?;
++    let secret = root.join("secret");
++    std::fs::write(&secret, b"secret")?;
++    let link = allowed.join("link");
++    symlink(&file, &link)?;
++    let directory_link = allowed.join("directory-link");
++    symlink(&allowed, &directory_link)?;
++    let sandbox = read_only_sandbox(allowed);
++    let options = ReadFileOptions {
++        follow_symlinks: false,
++    };
++    for permissions in [None, Some(&sandbox)] {
++        let fs = &context.file_system;
++        assert_eq!(
++            fs.read_file_bounded(
++                &PathUri::from_host_native_path(&file)?,
++                options,
++                5,
++                permissions
++            )
++            .await?,
++            b"hello"
++        );
++        let oversized = fs
++            .read_file_bounded(
++                &PathUri::from_host_native_path(&file)?,
++                options,
++                4,
++                permissions,
++            )
++            .await
++            .unwrap_err();
++        assert!(oversized.to_string().contains("limit is 4 bytes"));
++        for path in [&link, &directory_link.join("file")] {
++            assert!(
++                fs.read_file_bounded(
++                    &PathUri::from_host_native_path(path)?,
++                    options,
++                    16,
++                    permissions
++                )
++                .await
++                .is_err()
++            );
++        }
++    }
++    let error = context
++        .file_system
++        .read_file_bounded(
++            &PathUri::from_host_native_path(&secret)?,
++            options,
++            16,
++            Some(&sandbox),
++        )
++        .await
++        .unwrap_err();
++    assert_sandbox_denied(&error);
++    Ok(())
++}
+diff --git a/codex-rs/file-system/src/environment_accessor.rs b/codex-rs/file-system/src/environment_accessor.rs
+--- a/codex-rs/file-system/src/environment_accessor.rs
++++ b/codex-rs/file-system/src/environment_accessor.rs
+@@ -40,6 +40,21 @@
+         options: ReadFileOptions,
+     ) -> ExecutorFileSystemFuture<'a, Vec<u8>>;
+
++    /// Reads a file with a hard byte limit, preserving this accessor's permissions.
++    fn read_file_bounded<'a>(
++        &'a self,
++        _path: &'a PathUri,
++        _options: ReadFileOptions,
++        _max_bytes: u64,
++    ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
++        Box::pin(async {
++            Err(std::io::Error::new(
++                std::io::ErrorKind::Unsupported,
++                "bounded file reads are unsupported",
++            ))
++        })
++    }
++
+     /// Opens an owned stream; subsequent reads do not borrow or reauthorize through the accessor.
+     fn read_file_stream<'a>(
+         &'a self,
+@@ -212,6 +227,16 @@
+             .read_file(path, options, self.key.sandbox.as_deref())
+     }
+
++    fn read_file_bounded<'a>(
++        &'a self,
++        path: &'a PathUri,
++        options: ReadFileOptions,
++        max_bytes: u64,
++    ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
++        self.file_system
++            .read_file_bounded(path, options, max_bytes, self.key.sandbox.as_deref())
++    }
++
+     fn read_file_stream<'a>(
+         &'a self,
+         path: &'a PathUri,
+diff --git a/codex-rs/file-system/src/lib.rs b/codex-rs/file-system/src/lib.rs
+--- a/codex-rs/file-system/src/lib.rs
++++ b/codex-rs/file-system/src/lib.rs
+@@ -667,6 +667,23 @@
+         sandbox: Option<&'a FileSystemSandboxContext>,
+     ) -> ExecutorFileSystemFuture<'a, Vec<u8>>;
+
++    /// Reads at most `max_bytes + 1` bytes, rejecting files larger than `max_bytes`.
++    /// Backends must enforce the bound during I/O rather than truncate a full read.
++    fn read_file_bounded<'a>(
++        &'a self,
++        _path: &'a PathUri,
++        _options: ReadFileOptions,
++        _max_bytes: u64,
++        _sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
++        Box::pin(async {
++            Err(io::Error::new(
++                io::ErrorKind::Unsupported,
++                "bounded file reads are unsupported",
++            ))
++        })
++    }
++
+     /// Reads a file as a stream of chunks no larger than [`FILE_READ_CHUNK_SIZE`].
+     fn read_file_stream<'a>(
+         &'a self,
