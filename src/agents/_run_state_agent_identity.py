@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
+import re
 import threading
 from collections import deque
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,6 +17,7 @@ from ._tool_identity import get_function_tool_namespace, get_function_tool_quali
 from .agent import Agent
 from .handoffs import Handoff
 from .logger import logger
+from .run_context import RunContextWrapper, TContext
 from .sandbox.capabilities.capability import Capability
 from .sandbox.session.base_sandbox_session import BaseSandboxSession
 from .tool import (
@@ -25,6 +28,23 @@ from .tool import (
     LocalShellTool,
     ShellTool,
 )
+
+_DECISION_PREFIX = "decision:"
+
+
+def _is_decision_identity(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and re.fullmatch(_DECISION_PREFIX + r"[0-9a-f]{64}", value) is not None
+    )
+
+
+class _DecisionHandoff(Handoff[TContext, Agent[TContext]]):
+    """Static graph edges and the live admission check owned by decision_handoff."""
+
+    _source: Agent[TContext]
+    _roster: Mapping[str, tuple[Agent[TContext], str]]
+    _can_restore: Callable[[RunContextWrapper[TContext] | None, str], bool]
 
 
 def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
@@ -41,6 +61,10 @@ def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
         yield current
 
         for handoff_item in current.handoffs:
+            if isinstance(handoff_item, _DecisionHandoff):
+                if handoff_item._source is current:
+                    queue.extend(agent for agent, _ in handoff_item._roster.values())
+                continue
             handoff_agent: Any | None = None
             handoff_agent_name: str | None = None
 
@@ -489,6 +513,16 @@ def _has_ambiguous_hook_identities(initial_agent: Agent[Any]) -> bool:
     )
 
 
+def _decision_edges(
+    agents: Mapping[str, Agent[Any]],
+) -> Iterator[tuple[str, _DecisionHandoff[Any], str, Agent[Any]]]:
+    for key, source in agents.items():
+        for route in source.handoffs:
+            if isinstance(route, _DecisionHandoff) and route._source is source:
+                for label, (target, _) in route._roster.items():
+                    yield key, route, label, target
+
+
 def _build_agent_identity_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
     """Build a stable identity map that preserves duplicate agent names."""
     ordered_agents = list(_iter_agent_graph(initial_agent))
@@ -532,6 +566,19 @@ def _build_agent_identity_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]
             agent_identity_map[candidate] = duplicate_agent
             next_index += 1
 
+    # Keep ordinary identities stable. Bind specialist identities to their incoming
+    # selectors so another edge cannot silently replace a removed selector or label.
+    bindings: dict[int, list[tuple[str, str, str]]] = {}
+    for key, route, label, target in _decision_edges(agent_identity_map):
+        bindings.setdefault(id(target), []).append((key, route.tool_name, label))
+    if bindings:
+        for key, target in list(agent_identity_map.items()):
+            if id(target) in bindings:
+                data = _stable_identity_text([key, sorted(bindings[id(target)])])
+                identity = _DECISION_PREFIX + hashlib.sha256(data.encode()).hexdigest()
+                if identity in agent_identity_map:
+                    raise ValueError("Conflicting specialist identity")
+                agent_identity_map[identity] = agent_identity_map.pop(key)
     return agent_identity_map
 
 

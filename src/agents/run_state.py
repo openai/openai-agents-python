@@ -42,9 +42,11 @@ from ._run_state_agent_identity import (
     _build_agent_identity_keys_by_id,
     _build_agent_identity_map,
     _build_agent_map,
+    _decision_edges,
     _get_ambiguous_agent_ids,
     _has_ambiguous_hook_identities,
     _has_legacy_hook_identity_ambiguity,
+    _is_decision_identity,
     _iter_agent_graph,
 )
 from ._tool_identity import (
@@ -3209,11 +3211,28 @@ def _build_handoffs_map(current_agent: Agent[Any]) -> dict[str, Handoff[Any, Age
     return handoffs_map
 
 
+def _has_pending_specialist(snapshot: Mapping[str, Any]) -> bool:
+    """Identify the interrupted branch even when its selector has been removed."""
+    agent = snapshot.get("current_agent")
+    if isinstance(agent, Mapping) and _is_decision_identity(agent.get("identity")):
+        return True
+    response = snapshot.get("last_processed_response")
+    if not isinstance(response, Mapping):
+        return False
+    return any(
+        _has_pending_specialist(nested)
+        for entry in response.get("functions") or ()
+        if isinstance(entry, Mapping)
+        and isinstance(nested := entry.get("agent_run_state"), Mapping)
+    )
+
+
 async def _restore_pending_nested_agent_tool_runs(
     *,
     current_agent: Agent[Any],
     function_actions: Sequence[_DeserializedFunctionAction],
     scope_id: str | None = None,
+    specialist_context: RunContextWrapper[Any] | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
     validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
@@ -3239,16 +3258,23 @@ async def _restore_pending_nested_agent_tool_runs(
         if not isinstance(nested_root_agent, Agent):
             nested_root_agent = current_agent
 
+        specialist = _has_pending_specialist(nested_state_data)
         try:
             nested_state = await _build_run_state_from_json(
                 initial_agent=nested_root_agent,
                 state_json=dict(nested_state_data),
+                # Agent.as_tool shares the application value but owns separate approvals.
+                context_override=(
+                    RunContextWrapper(context=specialist_context.context)
+                    if specialist and specialist_context is not None
+                    else None
+                ),
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
                 validation_error_factory=validation_error_factory,
             )
         except Exception:
-            if strict_context:
+            if strict_context or specialist:
                 raise
             logger.warning(
                 "Failed to deserialize nested agent run state for tool call %s.",
@@ -3274,6 +3300,7 @@ async def _deserialize_processed_response(
     *,
     agent_identity_map: Mapping[str, Agent[Any]] | None = None,
     scope_id: str | None = None,
+    specialist_context: RunContextWrapper[Any] | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
     program_call_ids: Collection[str] = (),
@@ -3597,6 +3624,7 @@ async def _deserialize_processed_response(
     await _restore_pending_nested_agent_tool_runs(
         current_agent=current_agent,
         function_actions=function_actions,
+        specialist_context=specialist_context,
         scope_id=scope_id,
         context_deserializer=context_deserializer,
         strict_context=strict_context,
@@ -4346,6 +4374,14 @@ async def _build_run_state_from_json(
     context._restored_unbound_approval_call_ids = set()
     context._allow_legacy_approval_binding_reconstruction = (schema_major, schema_minor) < (1, 15)
     context._rebuild_approvals(context_data.get("approvals", {}))
+    # Saved context alone cannot authorize a callback-gated specialist.
+    for _, route, label, target in _decision_edges(agent_identity_map):
+        if target is current_agent and not route._can_restore(
+            context if context_override is not None else None, label
+        ):
+            raise validation_error_factory(
+                "Decision specialist unavailable. Check the roster and context_override.", UserError
+            )
     saved_invocations = context_data.get("tool_invocations", {})
     if (
         (schema_major, schema_minor) < (1, 23)
@@ -4484,6 +4520,7 @@ async def _build_run_state_from_json(
             agent_map,
             agent_identity_map=agent_identity_map,
             scope_id=state._agent_tool_state_scope_id,
+            specialist_context=context if context_override is not None else None,
             context_deserializer=context_deserializer,
             strict_context=strict_context,
             program_call_ids=program_call_ids,
@@ -5656,6 +5693,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
             f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
         ),
         "Run state agent not found in agent map",
+        "Decision specialist unavailable. Check the roster and context_override.",
         (
             "RunState cannot distinguish same-name agents without hook instance state. "
             "Use unique agent names before starting a persistable run."
