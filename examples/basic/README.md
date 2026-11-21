@@ -19,6 +19,8 @@ With `--codex`, [remote_pdf.py](remote_pdf.py) and [remote_image.py](remote_imag
 
 For computation and data, see [local code execution](../tools/local_code_execution.md) and [querying a SQLite database](../sandbox/extensions/daytona/usaspending_text2sql/README.md).
 
+Related guide — [Hosted tool compatibility with direct Responses and embedded Codex](../tools/hosted_tool_compatibility.md).
+
 ## Use a local Ollama model
 
 Both modes use your local Ollama server at `http://localhost:11434/v1`. [Install and start Ollama](https://cookbook.openai.com/articles/gpt-oss/run-locally-ollama), then download the model:
