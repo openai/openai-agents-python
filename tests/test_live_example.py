@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from agents.decorators import tool
 from agents.testing import ScriptedModel
 from examples.live.app.agent import (
     OrderRequest,
@@ -74,6 +75,44 @@ async def test_specialist_executes_the_lookup_tool() -> None:
         == "Order A0042 has shipped."
     )
     assert "September 15" in json.dumps(model.calls[1].input)
+
+
+@pytest.mark.asyncio
+async def test_interrupted_specialist_returns_a_refusal_after_ungated_work() -> None:
+    executed: list[str] = []
+
+    @tool
+    def read_order() -> str:
+        executed.append("read")
+        return "Processing"
+
+    @tool(needs_approval=True)
+    def change_order() -> str:
+        executed.append("change")
+        return "Changed"
+
+    model = ScriptedModel(
+        [
+            [
+                get_function_tool_call("read_order", "{}", call_id="a"),
+                get_function_tool_call("change_order", "{}", call_id="b"),
+            ]
+        ]
+    )
+    agent = create_order_agent().clone(model=model, tools=[read_order, change_order])
+    send = AsyncMock()
+    handler = DelegationHandler(agent, send, AsyncMock())
+    batch(handler, [function_call("outer")])
+    await drain(handler)
+
+    assert executed == ["read"]
+    assert len(model.calls) == 1
+    result, continuation = [call.args[0] for call in send.await_args_list]
+    assert result["type"] == "response.item.create"
+    assert result["item"]["type"] == "function_call_output"
+    assert result["item"]["call_id"] == "outer"
+    assert "requires approval" in result["item"]["output"]
+    assert continuation["type"] == "response.create"
 
 
 @pytest.mark.asyncio
@@ -255,7 +294,8 @@ def test_live_configuration_advertises_only_the_specialist_function() -> None:
     backend = config["delegation"]["responses"]
     assert config["delegation"]["type"] == "responses"
     assert backend["parallel_tool_calls"] is False
-    assert backend["tools"][0]["name"] == "ask_order_agent"
+    assert [entry["name"] for entry in backend["tools"]] == ["ask_order_agent"]
+    assert backend["tools"][0]["strict"] is True
     assert backend["tools"][0]["parameters"]["required"] == ["request"]
     assert backend["tools"][0]["parameters"]["additionalProperties"] is False
 
