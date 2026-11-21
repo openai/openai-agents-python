@@ -53,6 +53,7 @@ from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import log_model_action_debug, log_model_action_error, logger
 from ..model_settings import MCPToolChoice
+from ..request_capture import _http_exchange, _model_counts, _send_frame
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest, ModelRetryNormalizedError
 from ..tool import (
     ApplyPatchTool,
@@ -994,7 +995,8 @@ class OpenAIResponsesModel(Model):
 
         if not stream:
             response_id_trusted = self._uses_official_openai_endpoint()
-            response = await client.responses.create(**create_kwargs)
+            with _http_exchange(_model_counts(self)):
+                response = await client.responses.create(**create_kwargs)
             if getattr(response, "status", None) in {"failed", "incomplete"}:
                 _record_failed_response(
                     response,
@@ -1012,7 +1014,8 @@ class OpenAIResponsesModel(Model):
             # Some tests and custom clients only implement `responses.create()`. Fall back to the
             # older path in that case and simply omit request IDs for streamed calls. Keep it in
             # the existing stream wrapper so terminal request accounting stays transport-owned.
-            response = await client.responses.create(**create_kwargs)
+            with _http_exchange(_model_counts(self)):
+                response = await client.responses.create(**create_kwargs)
             return _ResponseStreamWithRequestId(
                 cast(AsyncIterator[ResponseStreamEvent], response),
                 request_id=None,
@@ -1022,7 +1025,8 @@ class OpenAIResponsesModel(Model):
         # Keep the raw API response open while callers consume the SSE stream so we can expose
         # its request ID on terminal response payloads before cleanup closes the transport.
         api_response_cm = stream_create(**create_kwargs)
-        api_response = await api_response_cm.__aenter__()
+        with _http_exchange(_model_counts(self)):
+            api_response = await api_response_cm.__aenter__()
         try:
             stream_response = await api_response.parse()
         except BaseException as exc:
@@ -1511,8 +1515,12 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                     # Once we begin awaiting `send()`, treat the request as potentially
                     # transmitted to avoid replaying it on send/close races.
                     sent_request_frame = True
+                    counts = _model_counts(self)
+                    frame_text = json.dumps(request_frame, default=_json_dumps_default)
                     await self._await_websocket_with_timeout(
-                        connection.send(json.dumps(request_frame, default=_json_dumps_default)),
+                        connection.send(frame_text)
+                        if counts is None
+                        else _send_frame(counts, connection, frame_text),
                         request_timeouts.send,
                         "send",
                     )
@@ -1529,6 +1537,8 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                                 "response event."
                             )
 
+                        if counts is not None and not received_any_event:
+                            counts.replies += 1
                         if isinstance(frame, bytes):
                             frame = frame.decode("utf-8")
 

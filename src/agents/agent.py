@@ -43,6 +43,7 @@ from .models.default_models import (
 )
 from .models.interface import Model
 from .prompts import DynamicPromptFunction, Prompt, PromptUtil
+from .request_capture import _attached_run
 from .run_context import RunContextWrapper, TContext
 from .strict_schema import ensure_strict_json_schema
 from .tool import (
@@ -969,22 +970,23 @@ class Agent(AgentBase, Generic[TContext]):
             if run_result is None:
                 if on_stream is not None:
                     stream_handler = on_stream
-                    run_result_streaming = Runner.run_streamed(
-                        starting_agent=cast(Agent[Any], self),
-                        input=resume_state if resume_state is not None else resolved_input,
-                        # On resume, pass the parent application context so
-                        # resolve_resumed_context can update the nested restored
-                        # wrapper's .context without dropping nested approvals.
-                        context=cast(Any, nested_context),
-                        run_config=resolved_run_config,
-                        max_turns=resolved_max_turns,
-                        hooks=hooks,
-                        previous_response_id=None
-                        if resume_state is not None
-                        else previous_response_id,
-                        conversation_id=None if resume_state is not None else conversation_id,
-                        session=session,
-                    )
+                    with _attached_run():
+                        run_result_streaming = Runner.run_streamed(
+                            starting_agent=cast(Agent[Any], self),
+                            input=resume_state if resume_state is not None else resolved_input,
+                            # On resume, pass the parent application context so
+                            # resolve_resumed_context can update the nested restored
+                            # wrapper's .context without dropping nested approvals.
+                            context=cast(Any, nested_context),
+                            run_config=resolved_run_config,
+                            max_turns=resolved_max_turns,
+                            hooks=hooks,
+                            previous_response_id=None
+                            if resume_state is not None
+                            else previous_response_id,
+                            conversation_id=None if resume_state is not None else conversation_id,
+                            session=session,
+                        )
                     # Keep callbacks decoupled from event consumption within a bounded backlog.
                     # Reserve one extra slot for completion, including on failure/cancellation.
                     event_queue: asyncio.Queue[AgentToolStreamEvent | None] = asyncio.Queue(
@@ -1082,22 +1084,23 @@ class Agent(AgentBase, Generic[TContext]):
                         raise
                     run_result = run_result_streaming
                 else:
-                    run_result = await Runner.run(
-                        starting_agent=cast(Agent[Any], self),
-                        input=resume_state if resume_state is not None else resolved_input,
-                        # On resume, pass the parent application context so
-                        # resolve_resumed_context can update the nested restored
-                        # wrapper's .context without dropping nested approvals.
-                        context=cast(Any, nested_context),
-                        run_config=resolved_run_config,
-                        max_turns=resolved_max_turns,
-                        hooks=hooks,
-                        previous_response_id=None
-                        if resume_state is not None
-                        else previous_response_id,
-                        conversation_id=None if resume_state is not None else conversation_id,
-                        session=session,
-                    )
+                    with _attached_run():
+                        run_result = await Runner.run(
+                            starting_agent=cast(Agent[Any], self),
+                            input=resume_state if resume_state is not None else resolved_input,
+                            # On resume, pass the parent application context so
+                            # resolve_resumed_context can update the nested restored
+                            # wrapper's .context without dropping nested approvals.
+                            context=cast(Any, nested_context),
+                            run_config=resolved_run_config,
+                            max_turns=resolved_max_turns,
+                            hooks=hooks,
+                            previous_response_id=None
+                            if resume_state is not None
+                            else previous_response_id,
+                            conversation_id=None if resume_state is not None else conversation_id,
+                            session=session,
+                        )
             assert run_result is not None
 
             # Store the run result by tool call identity so nested interruptions can be read later.

@@ -11,6 +11,7 @@ from .._tool_identity import get_hosted_mcp_approval_request_identity
 from ..items import TResponseInputItem
 from ..logger import log_model_and_tool_action_warning
 from ..models._openai_shared import clean_responses_input_item, get_default_openai_client
+from ..request_capture import _compact_submission, _http_exchange, _instrument_http, _ObservedOpenAI
 from ..run_internal.items import (
     ReasoningItemIdPolicy,
     apply_reasoning_item_id_policy,
@@ -193,7 +194,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     def client(self) -> AsyncOpenAI:
         if self._client is None:
             default_client = get_default_openai_client()
-            self._client = default_client if default_client is not None else AsyncOpenAI()
+            self._client = default_client if default_client is not None else _ObservedOpenAI()
+            if default_client is None:
+                _instrument_http(getattr(self._client, "_client", None))
         return self._client
 
     def _resolve_compaction_mode_for_response(
@@ -476,7 +479,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 if (cleaned := clean_responses_input_item(item)) is not None
             ]
 
-        compacted = await self.client.responses.compact(**compact_kwargs)
+        client = self.client
+        with _http_exchange(_compact_submission(client) if is_automatic else None):
+            compacted = await client.responses.compact(**compact_kwargs)
 
         compacted_usage = getattr(compacted, "usage", None)
         if wrapper is not None and compacted_usage is not None:

@@ -100,6 +100,7 @@ from .models.openai_responses import (
 )
 from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
 from .repl import run_demo_loop
+from .request_capture import RequestCapture
 from .responses_websocket_session import ResponsesWebSocketSession, responses_websocket_session
 from .result import AgentToolInvocation, RunResult, RunResultStreaming
 from .retry import (
@@ -489,6 +490,7 @@ __all__ = [
     "RunErrorHandlerResult",
     "RunErrorHandlers",
     "AgentToolInvocation",
+    "RequestCapture",
     "RunResult",
     "RunResultStreaming",
     "ResponsesWebSocketSession",
