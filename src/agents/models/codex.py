@@ -16,8 +16,10 @@ from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseCustomToolCall,
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
+    ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
@@ -50,6 +52,7 @@ from ..usage import (
     _response_usage_to_usage,
 )
 from ._codex_inputs import prepare_codex_history, prepare_dynamic_tools, sdk_tool_call
+from ._codex_items import CodexCustomToolCallOutput, CodexFunctionToolCallOutput
 from ._codex_tool_hooks import CodexToolHooks
 from ._codex_tracing import CodexOperationTracing
 from ._run_context import get_model_tool_hooks
@@ -361,6 +364,8 @@ class _CodexModel(Model):
         started: set[str] = set()
         finished: set[str] = set()
         sdk_calls: dict[str, Any] = {}
+        native_pending: dict[str, tuple[str, str]] = {}
+        native_completed: set[str] = set()
         sampling_pending = False
         interrupt_requested = False
         sequence = 0
@@ -422,6 +427,14 @@ class _CodexModel(Model):
                 if kind == "hook_completed" and native_hooks is not None:
                     native_hooks.check_completion(message["run"])
                     continue
+                if kind == "context_compacted" or (
+                    kind in ("item_started", "item_completed")
+                    and message["item"]["type"] == "ContextCompaction"
+                ):
+                    raise UserError(
+                        "Codex native context compaction cannot be replayed by this provider. "
+                        "Use SDK-managed input compaction before starting another model call."
+                    )
                 if event.get("id") not in ("", turn_id):
                     continue
                 if kind == "dynamic_tool_call_request":
@@ -429,6 +442,12 @@ class _CodexModel(Model):
                         continue
                     call = sdk_tool_call(message, identities, tools)
                     call_id = message["callId"]
+                    if call_id in native_completed:
+                        raise RuntimeError("Codex reused a completed native tool call ID.")
+                    pending = native_pending.pop(call_id, None)
+                    if pending is not None:
+                        output.pop(pending[0], None)
+                        indices[call_id] = indices.pop(pending[0])
                     if call_id in sdk_calls:
                         continue
                     call = call.model_copy(update={"id": call_id})
@@ -471,6 +490,8 @@ class _CodexModel(Model):
                         sdk_calls and not interrupt_requested
                     ):
                         raise RuntimeError("Codex did not finish the turn successfully.")
+                    if native_hooks is not None and native_hooks.error is not None:
+                        raise native_hooks.error
                     break
                 if kind == "error":
                     raise RuntimeError("Codex model turn failed.")
@@ -534,7 +555,70 @@ class _CodexModel(Model):
                         # including calls that later invoke SDK tools from code mode.
                         sampling_pending = True
                     parsed: Any = None
-                    if item_type == "reasoning":
+                    if item_type in ("function_call", "custom_tool_call"):
+                        call_id = raw.get("call_id")
+                        if call_id in sdk_calls:
+                            continue
+                        if (
+                            not isinstance(call_id, str)
+                            or not call_id
+                            or call_id in native_pending
+                            or call_id in native_completed
+                        ):
+                            raise RuntimeError("Codex returned an invalid native tool call.")
+                        item_id = raw.get("id") or call_id
+                        call_type = (
+                            ResponseFunctionToolCall
+                            if item_type == "function_call"
+                            else ResponseCustomToolCall
+                        )
+                        call_keys = (
+                            "type",
+                            "call_id",
+                            "name",
+                            "namespace",
+                            "arguments",
+                            "input",
+                            "status",
+                            "encrypted_content",
+                        )
+                        parsed = call_type.model_validate(
+                            {"id": item_id, **{key: raw[key] for key in call_keys if key in raw}}
+                        )
+                        native_pending[call_id] = (item_id, item_type)
+                    elif item_type in ("function_call_output", "custom_tool_call_output"):
+                        call_id = raw.get("call_id")
+                        # The Runner owns SDK results, including native cancellation results.
+                        if call_id in sdk_calls:
+                            continue
+                        pending = native_pending.pop(call_id, None)
+                        if pending is None or item_type != pending[1] + "_output":
+                            raise RuntimeError("Codex returned an unmatched native tool output.")
+                        output_type = (
+                            CodexFunctionToolCallOutput
+                            if item_type == "function_call_output"
+                            else CodexCustomToolCallOutput
+                        )
+                        native_output = raw["output"]
+                        if isinstance(native_output, list):
+                            # Core omits default image detail; Responses output models require it.
+                            native_output = [
+                                {**part, "detail": "auto"}
+                                if part.get("type") == "input_image" and part.get("detail") is None
+                                else part
+                                for part in native_output
+                            ]
+                        output_keys = ("type", "call_id", "name", "namespace")
+                        parsed = output_type.model_validate(
+                            {
+                                "id": raw.get("id") or call_id + "_output",
+                                "status": "completed",
+                                "output": native_output,
+                                **{key: raw[key] for key in output_keys if key in raw},
+                            }
+                        )
+                        native_completed.add(call_id)
+                    elif item_type == "reasoning":
                         parsed = ResponseReasoningItem.model_validate(raw)
                     elif item_type == "web_search_call":
                         parsed = ResponseFunctionWebSearch.model_validate(raw)
@@ -625,16 +709,41 @@ class _CodexModel(Model):
                         type="response.output_item.done",
                     )
                     sequence += 1
+            if native_pending:
+                if not interrupt_requested:
+                    raise RuntimeError("Codex finished with an incomplete native tool call.")
+                # Interrupted code-mode parents have no completed result to replay.
+                for item_id, _ in native_pending.values():
+                    output.pop(item_id, None)
+            if native_hooks is not None:
+                for item in output.values():
+                    native_hooks.prepare_history_item(item)
             if require_sdk_call and not sdk_calls:
                 raise UserError(
-                    "CodexProvider tool_choice='required' did not return "
-                    "an SDK tool or handoff call."
+                    "CodexProvider tool_choice='required' did not return an SDK tool or handoff call."
                 )
             if not sdk_calls and not output:
                 raise RuntimeError("Codex finished without a completed response.")
             items = list(output.values()) + list(sdk_calls.values())
             if reasoning_summaries:
                 items[-1].codex_reasoning_summary = reasoning_summaries
+            for native_item in output.values():
+                if native_item.type not in (
+                    "function_call",
+                    "custom_tool_call",
+                    "function_call_output",
+                    "custom_tool_call_output",
+                ):
+                    continue
+                sdk_done_events.append(
+                    ResponseOutputItemDoneEvent(
+                        item=native_item,
+                        output_index=indices[native_item.id],
+                        sequence_number=sequence,
+                        type="response.output_item.done",
+                    )
+                )
+                sequence += 1
             for call_id, call in sdk_calls.items():
                 sdk_done_events.append(
                     ResponseOutputItemDoneEvent(
@@ -665,6 +774,7 @@ class _CodexModel(Model):
                     raise
         for event in sdk_done_events:
             yield event
+
         yield ResponseCompletedEvent(
             response=response, sequence_number=sequence, type="response.completed"
         )
