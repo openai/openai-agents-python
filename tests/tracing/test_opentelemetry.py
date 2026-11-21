@@ -46,7 +46,12 @@ def test_mapping_and_legacy_content_privacy(otel) -> None:
     with trace("group"), task_span("assistant"), agent_span("Worker"), turn_span(1, "Worker"):
         with generation_span(model="test-model", input=[{"content": "private-input"}]) as model:
             model.span_data.output = [{"content": "private-output"}]
-            model.span_data.usage = {"input_tokens": 13, "output_tokens": 5}
+            model.span_data.usage = {
+                "input_tokens": 13,
+                "output_tokens": 5,
+                "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": 4},
+                "output_tokens_details": {"reasoning_tokens": 2},
+            }
         with function_span("lookup", input="private-arguments") as tool:
             tool.span_data.output = "private-result"
     spans = exporter.get_finished_spans()
@@ -63,6 +68,9 @@ def test_mapping_and_legacy_content_privacy(otel) -> None:
     assert inference.name == "chat test-model"
     assert inference.attributes["gen_ai.usage.input_tokens"] == 13
     assert inference.attributes["gen_ai.usage.output_tokens"] == 5
+    assert inference.attributes["gen_ai.usage.cache_read.input_tokens"] == 3
+    assert inference.attributes["gen_ai.usage.cache_write.input_tokens"] == 4
+    assert inference.attributes["gen_ai.usage.reasoning.output_tokens"] == 2
     assert inference.parent.span_id == by_operation["openai.agents.turn"].context.span_id
     assert by_operation["execute_tool"].parent.span_id == inference.parent.span_id
     assert "private-" not in str([span.attributes for span in spans])
@@ -500,3 +508,29 @@ async def test_chat_completions_native_payloads_reach_otel(otel, monkeypatch, st
         {"type": "text", "content": "answer"},
         {"type": "tool_call", "id": "call-lookup", "name": "lookup", "arguments": {"key": "value"}},
     ]
+
+
+@pytest.mark.parametrize("details", [None, 0])
+def test_missing_or_zero_usage_details_do_not_add_optional_counts(otel, details) -> None:
+    _, exporter = otel
+    usage: dict[str, object] = {"input_tokens": 13, "output_tokens": 5}
+    if details is not None:
+        usage.update(
+            {
+                "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            }
+        )
+    with trace("usage"), generation_span(model="test-model") as model:
+        model.span_data.usage = usage
+    (span,) = exporter.get_finished_spans()
+    assert span.attributes["gen_ai.usage.input_tokens"] == 13
+    assert span.attributes["gen_ai.usage.output_tokens"] == 5
+    assert not any(
+        key in span.attributes
+        for key in (
+            "gen_ai.usage.cache_read.input_tokens",
+            "gen_ai.usage.cache_write.input_tokens",
+            "gen_ai.usage.reasoning.output_tokens",
+        )
+    )

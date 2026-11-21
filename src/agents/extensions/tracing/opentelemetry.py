@@ -328,6 +328,27 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
                 ):
                     if isinstance(usage.get(source), int):
                         attributes[destination] = usage[source]
+                for group, source, destination in (
+                    (
+                        "input_tokens_details",
+                        "cached_tokens",
+                        "gen_ai.usage.cache_read.input_tokens",
+                    ),
+                    (
+                        "input_tokens_details",
+                        "cache_write_tokens",
+                        "gen_ai.usage.cache_write.input_tokens",
+                    ),
+                    (
+                        "output_tokens_details",
+                        "reasoning_tokens",
+                        "gen_ai.usage.reasoning.output_tokens",
+                    ),
+                ):
+                    details = usage.get(group)
+                    value = details.get(source) if isinstance(details, Mapping) else None
+                    if isinstance(value, int) and value != 0:
+                        attributes[destination] = value
             if data.operation.response_model:
                 attributes["gen_ai.response.model"] = data.operation.response_model
             if data.operation.response_id:

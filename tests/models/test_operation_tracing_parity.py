@@ -475,6 +475,9 @@ async def _exercise(
             assert span.attributes["gen_ai.response.model"] == observed_model
             assert span.attributes["gen_ai.usage.input_tokens"] == 10 * index
             assert span.attributes["gen_ai.usage.output_tokens"] == 5 * index
+            assert span.attributes["gen_ai.usage.cache_read.input_tokens"] == index
+            assert span.attributes["gen_ai.usage.reasoning.output_tokens"] == index
+            assert "gen_ai.usage.cache_write.input_tokens" not in span.attributes
             assert span.attributes["openai.api.type"] == "responses"
             assert span.kind.name == "CLIENT"
             started, ended = server.intervals[index - 1]
