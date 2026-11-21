@@ -1,0 +1,1242 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index 1d27abb..f8972a1 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -3051,6 +3051,7 @@ dependencies = [
+  "serde_json",
+  "serial_test",
+  "sha1 0.10.6",
++ "sha2 0.10.9",
+  "shlex",
+  "similar",
+  "tempfile",
+diff --git a/codex-rs/core/Cargo.toml b/codex-rs/core/Cargo.toml
+index 542abf9..5ffc5cf 100644
+--- a/codex-rs/core/Cargo.toml
++++ b/codex-rs/core/Cargo.toml
+@@ -114,6 +114,7 @@ rmcp = { workspace = true, default-features = false, features = [
+ serde = { workspace = true, features = ["derive"] }
+ serde_json = { workspace = true }
+ sha1 = { workspace = true }
++sha2 = { workspace = true }
+ shlex = { workspace = true }
+ similar = { workspace = true }
+ tempfile = { workspace = true }
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 968d331..9d0bd2e 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -45,6 +45,7 @@ use codex_protocol::protocol::AskForApproval;
+ use codex_protocol::protocol::EnvironmentConfig;
+ use codex_protocol::protocol::EnvironmentConfigState;
+ use codex_protocol::protocol::Event;
++use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::MultiAgentVersion;
+ use codex_protocol::protocol::Op;
+ use codex_protocol::protocol::SandboxPolicy;
+@@ -474,10 +475,39 @@ impl CodexThread {
+             .await
+     }
+ 
++    /// Replays one native call without model sampling, requiring the original human approval.
++    pub async fn restore_tool_call_if_idle(
++        &self,
++        call: ResponseItem,
++        expected_approval: EventMsg,
++        preconditions: Option<serde_json::Value>,
++        turn_extension_init: Option<codex_extension_api::ExtensionDataInit>,
++    ) -> CodexResult<StartIfIdleSubmission> {
++        let restore =
++            crate::restore_tool_call::RestoreToolCall::new(call, expected_approval, preconditions)?;
++        let mut init = match turn_extension_init {
++            Some(init) => init,
++            None => self.config_snapshot().await.turn_extension_init,
++        };
++        init.insert(restore);
++        self.start_turn_if_idle(crate::WithTurnExtensionData::new(
++            TurnInputRequest::user_input(Vec::new()),
++            init,
++        ))
++        .await
++    }
++
++    /// Captures live preconditions before retiring a worker waiting for its first native approval.
++    pub async fn capture_tool_approval_preconditions(
++        &self,
++        approval: EventMsg,
++    ) -> CodexResult<serde_json::Value> {
++        crate::restore_tool_call::capture(&self.session, approval).await
++    }
++
+     /// Starts a regular turn only when the thread is idle.
+     ///
+-    /// Core declines the input without recording or enqueueing it when idle
+-    /// work cannot start.
++    /// Core declines the input without recording or enqueueing it when idle work cannot start.
+     pub async fn start_turn_if_idle(
+         &self,
+         request: impl Into<WithTurnExtensionData<TurnInputRequest>>,
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index dcd01e4..dc14807 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -32,6 +32,8 @@ pub use codex_protocol::turn_input::TurnStartOptions;
+ pub use responses_metadata::CodexResponsesMetadata;
+ pub use turn_metadata::detached_memory_responses_metadata;
+ mod codex_thread;
++mod restore_tool_call;
++mod patch_preconditions;
+ mod turn_extension_data;
+ pub use turn_extension_data::WithTurnExtensionData;
+ mod compact_model_fallback;
+diff --git a/codex-rs/core/src/patch_preconditions.rs b/codex-rs/core/src/patch_preconditions.rs
+new file mode 100644
+index 0000000..2e9781e
+--- /dev/null
++++ b/codex-rs/core/src/patch_preconditions.rs
+@@ -0,0 +1,306 @@
++//! Filesystem preconditions for restoring an interrupted native patch approval.
++
++use crate::session::step_context::StepContext;
++use crate::tools::ApprovalContext;
++use codex_file_system::EnvironmentAccess;
++use codex_file_system::GetMetadataOptions;
++use codex_file_system::ReadFileOptions;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
++use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
++use codex_protocol::protocol::FileChange;
++use codex_utils_path_uri::PathUri;
++use serde::Deserialize;
++use serde::Serialize;
++use serde_json::Value;
++use sha2::Digest;
++use sha2::Sha256;
++use std::collections::BTreeMap;
++use std::io::ErrorKind;
++use std::path::Component;
++use std::path::Path;
++use std::path::PathBuf;
++
++#[derive(Debug, Deserialize, Serialize, PartialEq)]
++#[serde(deny_unknown_fields)]
++struct PatchPreconditions {
++    version: u32,
++    files: BTreeMap<PathBuf, Option<String>>,
++}
++
++fn invalid(message: impl Into<String>) -> CodexErr {
++    CodexErr::InvalidRequest(message.into())
++}
++
++pub(crate) async fn capture_patch_approval_preconditions(
++    context: &ApprovalContext,
++    approval: &ApplyPatchApprovalRequestEvent,
++) -> CodexResult<Value> {
++    let review = &context.review_context;
++    let environment = review
++        .environments()
++        .single_local_environment()
++        .ok_or_else(|| {
++            invalid("Restoring patch approvals requires a single selected local environment")
++        })?;
++    let grants = review
++        .turn()
++        .granted_permissions(&environment.selection.environment_id);
++    serde_json::to_value(capture(&environment.fs_accessor(grants), approval).await?)
++        .map_err(|error| invalid(error.to_string()))
++}
++
++async fn capture_step(
++    step: &StepContext,
++    approval: &ApplyPatchApprovalRequestEvent,
++) -> CodexResult<PatchPreconditions> {
++    let environment = step
++        .environments
++        .single_local_environment()
++        .ok_or_else(|| {
++            invalid("Restoring patch approvals requires a single selected local environment")
++        })?;
++    capture(&step.fs_accessor(environment), approval).await
++}
++
++pub(crate) async fn validate_patch_preconditions(
++    step: &StepContext,
++    approval: &ApplyPatchApprovalRequestEvent,
++    checkpoint: &Value,
++) -> CodexResult<()> {
++    let expected: PatchPreconditions = serde_json::from_value(checkpoint.clone())
++        .map_err(|error| invalid(format!("Invalid patch approval preconditions: {error}")))?;
++    let observed = capture_step(step, approval).await?;
++    if expected != observed {
++        return Err(invalid(
++            "The pending patch or its files have changed since the original approval request",
++        ));
++    }
++    Ok(())
++}
++
++async fn capture(
++    fs: &impl EnvironmentAccess,
++    approval: &ApplyPatchApprovalRequestEvent,
++) -> CodexResult<PatchPreconditions> {
++    if approval.changes.is_empty() {
++        return Err(invalid("A pending patch must include file changes"));
++    }
++    let mut files = BTreeMap::new();
++    for (path, change) in &approval.changes {
++        let is_add = matches!(change, FileChange::Add { .. });
++        let original = observe_file(fs, path, is_add).await?;
++        if let FileChange::Delete { content } = change
++            && original.as_deref() != Some(&digest(content.as_bytes()))
++        {
++            return Err(invalid(
++                "The pending deletion no longer matches its original file",
++            ));
++        }
++        files.insert(path.clone(), original);
++        if let FileChange::Update {
++            move_path: Some(destination),
++            ..
++        } = change
++        {
++            if approval.changes.contains_key(destination) || files.contains_key(destination) {
++                return Err(invalid(
++                    "Pending patch move destinations must be distinct from changed files",
++                ));
++            }
++            files.insert(
++                destination.clone(),
++                observe_file(fs, destination, true).await?,
++            );
++        }
++    }
++    Ok(PatchPreconditions { version: 1, files })
++}
++
++fn digest(bytes: &[u8]) -> String {
++    format!("{:x}", Sha256::digest(bytes))
++}
++
++async fn observe_file(
++    fs: &impl EnvironmentAccess,
++    path: &Path,
++    must_be_absent: bool,
++) -> CodexResult<Option<String>> {
++    if !path.is_absolute()
++        || path
++            .components()
++            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
++    {
++        return Err(invalid(
++            "Pending patch paths must be normalized absolute local paths",
++        ));
++    }
++    // The selected local filesystem's no-follow operations reject symlinks in
++    // every component, including directory ancestors, without opening targets.
++    let uri = PathUri::from_host_native_path(path).map_err(|error| invalid(error.to_string()))?;
++    match fs
++        .get_metadata(
++            &uri,
++            GetMetadataOptions {
++                follow_symlinks: false,
++            },
++        )
++        .await
++    {
++        Err(error) if must_be_absent && error.kind() == ErrorKind::NotFound => Ok(None),
++        Err(error) => Err(invalid(format!(
++            "Cannot inspect pending patch file: {error}"
++        ))),
++        Ok(_) if must_be_absent => Err(invalid("A pending patch destination already exists")),
++        Ok(metadata) if !metadata.is_file || metadata.is_symlink => {
++            Err(invalid("Pending patch sources must be regular files"))
++        }
++        Ok(_) => {
++            let bytes = fs
++                .read_file(
++                    &uri,
++                    ReadFileOptions {
++                        follow_symlinks: false,
++                    },
++                )
++                .await
++                .map_err(|error| invalid(format!("Cannot read pending patch file: {error}")))?;
++            Ok(Some(digest(&bytes)))
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use codex_exec_server::LOCAL_FS;
++    use codex_file_system::FileSystemEnvironmentAccessor;
++
++    fn approval(path: PathBuf, change: FileChange) -> ApplyPatchApprovalRequestEvent {
++        ApplyPatchApprovalRequestEvent {
++            call_id: "original-call".into(),
++            turn_id: "original-turn".into(),
++            started_at_ms: 0,
++            changes: [(path, change)].into_iter().collect(),
++            reason: None,
++            grant_root: None,
++        }
++    }
++
++    #[tokio::test]
++    async fn existing_update_binds_full_original_contents() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("existing.txt");
++        std::fs::write(&path, "old\nuntouched\n").unwrap();
++        let fs = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
++        let request = approval(
++            path.clone(),
++            FileChange::Update {
++                unified_diff: "-old\n+new\n".into(),
++                move_path: None,
++            },
++        );
++        let original = capture(&fs, &request).await.unwrap();
++        assert_eq!(original, capture(&fs, &request).await.unwrap());
++        std::fs::write(&path, "old\nchanged outside patch context\n").unwrap();
++        assert_ne!(original, capture(&fs, &request).await.unwrap());
++    }
++
++    #[tokio::test]
++    async fn add_requires_absent_destination_and_blocks_completed_replay() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("new.txt");
++        let fs = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
++        let request = approval(
++            path.clone(),
++            FileChange::Add {
++                content: "new\n".into(),
++            },
++        );
++        assert!(capture(&fs, &request).await.is_ok());
++        std::fs::write(path, "new\n").unwrap();
++        assert!(capture(&fs, &request).await.is_err());
++    }
++
++    #[tokio::test]
++    async fn move_requires_absent_destination() {
++        let dir = tempfile::tempdir().unwrap();
++        let source = dir.path().join("old.txt");
++        let destination = dir.path().join("new.txt");
++        std::fs::write(&source, "old\n").unwrap();
++        let fs = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
++        let request = approval(
++            source,
++            FileChange::Update {
++                unified_diff: "-old\n+new\n".into(),
++                move_path: Some(destination.clone()),
++            },
++        );
++        assert!(capture(&fs, &request).await.is_ok());
++        std::fs::write(destination, "pre-existing work\n").unwrap();
++        assert!(capture(&fs, &request).await.is_err());
++    }
++
++    #[tokio::test]
++    async fn delete_requires_original_contents() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("old.txt");
++        std::fs::write(&path, "original\n").unwrap();
++        let fs = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
++        let request = approval(
++            path.clone(),
++            FileChange::Delete {
++                content: "original\n".into(),
++            },
++        );
++        assert!(capture(&fs, &request).await.is_ok());
++        std::fs::write(path, "changed\n").unwrap();
++        assert!(capture(&fs, &request).await.is_err());
++    }
++
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn rejects_symlink_sources_and_ancestors() {
++        let dir = tempfile::tempdir().unwrap();
++        let original = dir.path().join("original");
++        std::fs::create_dir(&original).unwrap();
++        std::fs::write(original.join("file"), "original\n").unwrap();
++        let link = dir.path().join("link");
++        std::os::unix::fs::symlink(&original, &link).unwrap();
++        let fs = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
++        let request = approval(
++            link.join("file"),
++            FileChange::Update {
++                unified_diff: "-original\n+new\n".into(),
++                move_path: None,
++            },
++        );
++        assert!(capture(&fs, &request).await.is_err());
++        let request = approval(
++            link.join("new"),
++            FileChange::Add {
++                content: "new".into(),
++            },
++        );
++        assert!(capture(&fs, &request).await.is_err());
++        let file_link = dir.path().join("file-link");
++        std::os::unix::fs::symlink(original.join("file"), &file_link).unwrap();
++        let request = approval(
++            file_link,
++            FileChange::Update {
++                unified_diff: "-original\n+new\n".into(),
++                move_path: None,
++            },
++        );
++        assert!(capture(&fs, &request).await.is_err());
++        let dangling_link = dir.path().join("dangling-link");
++        std::os::unix::fs::symlink(dir.path().join("absent"), &dangling_link).unwrap();
++        let request = approval(
++            dangling_link,
++            FileChange::Add {
++                content: "new".into(),
++            },
++        );
++        assert!(capture(&fs, &request).await.is_err());
++    }
++}
+diff --git a/codex-rs/core/src/restore_tool_call.rs b/codex-rs/core/src/restore_tool_call.rs
+new file mode 100644
+index 0000000..984cbce
+--- /dev/null
++++ b/codex-rs/core/src/restore_tool_call.rs
+@@ -0,0 +1,642 @@
++//! Model-free replay of one native call, requiring the same fresh human approval.
++
++use std::collections::HashMap;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::{Arc, Mutex, OnceLock};
++
++use codex_protocol::approvals::ExecApprovalKind;
++use codex_protocol::config_types::ApprovalsReviewer;
++use codex_protocol::error::{CodexErr, Result as CodexResult};
++use codex_protocol::models::ResponseItem;
++use codex_protocol::openai_models::ToolMode;
++use codex_protocol::protocol::{EventMsg, ReviewDecision};
++use serde_json::{Value, json};
++use sha2::{Digest, Sha256};
++use tokio_util::sync::CancellationToken;
++
++use crate::session::session::Session;
++use crate::session::step_context::StepContext;
++use crate::session::turn_context::TurnContext;
++use crate::state::TaskKind;
++use crate::tools::ApprovalContext;
++use crate::tools::parallel::ToolCallRuntime;
++use crate::tools::router::ToolRouter;
++use crate::tools::sandboxing::ApprovalAction;
++
++fn refusal(message: &str) -> CodexErr {
++    CodexErr::InvalidRequest(format!("Native tool restoration refused: {message}"))
++}
++
++#[derive(Debug, Clone)]
++struct CapturableApproval {
++    event: Option<EventMsg>,
++    permissions: Value,
++    patch: Option<Value>,
++}
++
++#[derive(Debug, Default)]
++struct CapturableApprovals(Mutex<HashMap<String, CapturableApproval>>);
++
++impl crate::WithTurnExtensionData<crate::TurnInputRequest> {
++    /// Enables pre-execution native approval checkpoint capture for SDK-owned turns.
++    pub fn capture_native_approvals(mut self) -> Self {
++        self.turn_extension_init
++            .get_or_insert_with(Default::default)
++            .insert(CapturableApprovals::default());
++        self
++    }
++}
++
++fn permission_snapshot(
++    turn: &TurnContext,
++    environments: &crate::environment_selection::TurnEnvironmentSnapshot,
++    policy: codex_protocol::protocol::AskForApproval,
++    reviewer: ApprovalsReviewer,
++) -> Value {
++    let environments: Vec<_> = environments
++        .turn_environments()
++        .map(|environment| {
++            json!({
++                "id": environment.selection.environment_id,
++                "profile": environment.permission_profile_with_workspace_roots(),
++                "symbolic_profile": environment.permission_profile(),
++                "network": environment.config().network_policy,
++                "grants": turn.granted_permissions(&environment.selection.environment_id),
++            })
++        })
++        .collect();
++    let mut snapshot = json!({
++        "approval_policy": policy, "reviewer": reviewer, "environments": environments,
++        "managed_network": turn.config.permissions.network.as_ref().map(|network| network.environment_policy()),
++    });
++    snapshot.sort_all_objects();
++    json!(format!(
++        "{:x}",
++        Sha256::digest(snapshot.to_string().as_bytes())
++    ))
++}
++
++pub(crate) struct CaptureLease {
++    state: Arc<CapturableApprovals>,
++    call_id: String,
++}
++
++impl Drop for CaptureLease {
++    fn drop(&mut self) {
++        self.state.0.lock().unwrap().remove(&self.call_id);
++    }
++}
++
++pub(crate) async fn capture_lease(
++    action: &ApprovalAction,
++    ctx: &ApprovalContext,
++) -> Option<CaptureLease> {
++    if ctx.retry_reason.is_some()
++        || ctx.network_approval_context.is_some()
++        || !matches!(
++            action,
++            ApprovalAction::ExecCommand { .. } | ApprovalAction::ApplyPatch { .. }
++        )
++    {
++        return None;
++    }
++    let state = ctx
++        .review_context
++        .turn()
++        .extension_data
++        .get::<CapturableApprovals>()?;
++    let patch = if let ApprovalAction::ApplyPatch { changes, .. } = action {
++        let event = codex_protocol::approvals::ApplyPatchApprovalRequestEvent {
++            call_id: ctx.call_id.clone(),
++            turn_id: ctx.review_context.turn().sub_id.clone(),
++            started_at_ms: 0,
++            changes: changes.as_ref().clone(),
++            reason: ctx.approval_reason.clone(),
++            grant_root: None,
++        };
++        crate::patch_preconditions::capture_patch_approval_preconditions(ctx, &event)
++            .await
++            .ok()
++    } else {
++        None
++    };
++    state.0.lock().unwrap().insert(
++        ctx.call_id.clone(),
++        CapturableApproval {
++            event: None,
++            patch,
++            permissions: permission_snapshot(
++                ctx.review_context.turn(),
++                ctx.review_context.environments(),
++                ctx.review_context.approval_policy,
++                ctx.review_context.approvals_reviewer,
++            ),
++        },
++    );
++    Some(CaptureLease {
++        state,
++        call_id: ctx.call_id.clone(),
++    })
++}
++
++fn approval_id(event: &EventMsg) -> Option<&str> {
++    match event {
++        EventMsg::ExecApprovalRequest(event)
++            if event.kind == ExecApprovalKind::Command
++                && event.approval_id.is_none()
++                && event.network_approval_context.is_none() =>
++        {
++            Some(&event.call_id)
++        }
++        EventMsg::ApplyPatchApprovalRequest(event) if event.grant_root.is_none() => {
++            Some(&event.call_id)
++        }
++        _ => None,
++    }
++}
++
++fn comparable(event: &EventMsg) -> CodexResult<Value> {
++    let mut value = serde_json::to_value(event).map_err(|_| refusal("invalid approval event"))?;
++    let object = value
++        .as_object_mut()
++        .ok_or_else(|| refusal("invalid approval event"))?;
++    object.remove("turn_id");
++    object.remove("started_at_ms");
++    Ok(value)
++}
++
++pub(crate) fn record_capture_event(turn: &TurnContext, event: &EventMsg) {
++    let Some(id) = approval_id(event) else { return };
++    if let Some(state) = turn.extension_data.get::<CapturableApprovals>() {
++        if let Some(pending) = state.0.lock().unwrap().get_mut(id) {
++            pending.event = Some(event.clone());
++        }
++    }
++}
++
++#[derive(Debug)]
++pub(crate) struct RestoreToolCall {
++    call: ResponseItem,
++    expected: EventMsg,
++    checkpoint: Value,
++    owner: OnceLock<String>,
++    requested: AtomicBool,
++    approved: AtomicBool,
++    executed: AtomicBool,
++}
++
++impl RestoreToolCall {
++    pub(crate) fn new(
++        call: ResponseItem,
++        expected: EventMsg,
++        checkpoint: Option<Value>,
++    ) -> CodexResult<Self> {
++        let id = approval_id(&expected).ok_or_else(|| refusal("unsupported approval request"))?;
++        let supported = match (&call, &expected) {
++            (
++                ResponseItem::FunctionCall {
++                    name,
++                    call_id,
++                    namespace,
++                    ..
++                },
++                EventMsg::ExecApprovalRequest(_),
++            ) => {
++                name == "exec_command"
++                    && call_id == id
++                    && namespace.as_deref().is_none_or(|ns| ns == "functions")
++            }
++            (
++                ResponseItem::CustomToolCall {
++                    name,
++                    call_id,
++                    namespace,
++                    ..
++                },
++                EventMsg::ApplyPatchApprovalRequest(_),
++            ) => {
++                name == "apply_patch"
++                    && call_id == id
++                    && namespace.as_deref().is_none_or(|ns| ns == "functions")
++            }
++            _ => false,
++        };
++        if !supported {
++            return Err(refusal(
++                "only one direct exec_command or apply_patch call is supported",
++            ));
++        }
++        let checkpoint =
++            checkpoint.ok_or_else(|| refusal("missing original pre-execution checkpoint"))?;
++        if checkpoint.get("version") != Some(&json!(1))
++            || checkpoint.get("first_approval") != Some(&json!(true))
++        {
++            return Err(refusal("checkpoint does not match the original approval"));
++        }
++        Ok(Self {
++            call,
++            expected,
++            checkpoint,
++            owner: OnceLock::new(),
++            requested: AtomicBool::new(false),
++            approved: AtomicBool::new(false),
++            executed: AtomicBool::new(false),
++        })
++    }
++
++    pub(crate) fn accepts_approval(&self, action: &ApprovalAction, ctx: &ApprovalContext) -> bool {
++        if ctx.retry_reason.is_some()
++            || ctx.network_approval_context.is_some()
++            || ctx.strict_auto_review
++            || self.requested.load(Ordering::SeqCst)
++            || approval_id(&self.expected) != Some(ctx.call_id.as_str())
++        {
++            return false;
++        }
++        matches!(
++            (&self.expected, action),
++            (
++                EventMsg::ExecApprovalRequest(_),
++                ApprovalAction::ExecCommand { .. }
++            ) | (
++                EventMsg::ApplyPatchApprovalRequest(_),
++                ApprovalAction::ApplyPatch { .. }
++            )
++        )
++    }
++
++    pub(crate) fn is_patch(&self) -> bool {
++        matches!(self.expected, EventMsg::ApplyPatchApprovalRequest(_))
++    }
++
++    pub(crate) fn claim(&self, turn: &TurnContext) -> bool {
++        self.owner.set(turn.sub_id.clone()).is_ok()
++    }
++}
++
++pub(crate) fn active(turn: &TurnContext) -> Option<Arc<RestoreToolCall>> {
++    turn.extension_data
++        .get::<RestoreToolCall>()
++        .filter(|restore| restore.owner.get() == Some(&turn.sub_id))
++}
++
++async fn validate_step(session: &Arc<Session>, step: &StepContext) -> CodexResult<()> {
++    let config = session.get_config().await;
++    let requirements = config.config_layer_stack.requirements();
++    if requirements.auto_review_required_for_model(&step.settings.model_info.slug)
++        || requirements
++            .approvals_reviewer
++            .can_set(&ApprovalsReviewer::User)
++            .is_err()
++    {
++        return Err(refusal("managed automatic review is unsupported"));
++    }
++    if step.tool_router.tool_mode() != ToolMode::Direct
++        || step.environments.single_local_environment().is_none()
++    {
++        return Err(refusal(
++            "only direct tools in one local environment are supported",
++        ));
++    }
++    if step.settings.approvals_reviewer() != ApprovalsReviewer::User
++        || step.turn.strict_auto_review_enabled()
++    {
++        return Err(refusal("automatic approval review is unsupported"));
++    }
++    let hooks = session.hooks().list_with_environment_hooks(
++        crate::hook_environment_executor::environment_hook_sources(&step.environments, &[]),
++    );
++    if !hooks.hooks.is_empty()
++        || !hooks.warnings.is_empty()
++        || !step.executor_hook_sources.is_empty()
++    {
++        return Err(refusal("configured hooks are unsupported"));
++    }
++    if let Some(restore) = active(&step.turn) {
++        if restore.checkpoint.get("permissions")
++            != Some(&permission_snapshot(
++                &step.turn,
++                &step.environments,
++                step.settings.approval_policy(),
++                step.settings.approvals_reviewer(),
++            ))
++        {
++            return Err(refusal("permissions or approval policy changed"));
++        }
++    }
++    Ok(())
++}
++
++pub(crate) async fn capture(session: &Arc<Session>, expected: EventMsg) -> CodexResult<Value> {
++    let (turn, cancellation) = session
++        .active_turn_context_and_cancellation_token()
++        .await
++        .ok_or_else(|| refusal("no active approval"))?;
++    let id = approval_id(&expected).ok_or_else(|| refusal("unsupported approval request"))?;
++    let state = turn
++        .extension_data
++        .get::<CapturableApprovals>()
++        .ok_or_else(|| refusal("not a first pre-execution approval"))?;
++    let recorded = state
++        .0
++        .lock()
++        .unwrap()
++        .get(id)
++        .cloned()
++        .ok_or_else(|| refusal("not a first pre-execution approval"))?;
++    if recorded
++        .event
++        .as_ref()
++        .and_then(|event| serde_json::to_value(event).ok())
++        != serde_json::to_value(&expected).ok()
++    {
++        return Err(refusal("approval does not match the live request"));
++    }
++    let step = session.capture_step_context(turn, &cancellation).await?;
++    validate_step(session, &step).await?;
++    let patch = match &expected {
++        EventMsg::ApplyPatchApprovalRequest(event) => {
++            let patch = recorded
++                .patch
++                .clone()
++                .ok_or_else(|| refusal("patch preimages could not be captured before approval"))?;
++            crate::patch_preconditions::validate_patch_preconditions(&step, event, &patch).await?;
++            Some(patch)
++        }
++        _ => None,
++    };
++    if !state.0.lock().unwrap().contains_key(id) {
++        return Err(refusal("approval is no longer pending"));
++    }
++    Ok(json!({"version":1,"first_approval":true,"permissions":recorded.permissions,"patch":patch}))
++}
++
++pub(crate) fn compare_request(turn: &TurnContext, event: &EventMsg) -> bool {
++    record_capture_event(turn, event);
++    let Some(restore) = active(turn) else {
++        return true;
++    };
++    !restore.requested.swap(true, Ordering::SeqCst)
++        && approval_id(event) == approval_id(&restore.expected)
++        && matches!((comparable(event), comparable(&restore.expected)), (Ok(observed), Ok(expected)) if observed == expected)
++}
++
++pub(crate) fn record_decision(turn: &TurnContext, decision: ReviewDecision) -> ReviewDecision {
++    if let Some(restore) = active(turn) {
++        if decision == ReviewDecision::Approved {
++            restore.approved.store(true, Ordering::SeqCst);
++        } else if !matches!(
++            decision,
++            ReviewDecision::Denied { .. } | ReviewDecision::Abort
++        ) {
++            return ReviewDecision::Abort;
++        }
++    }
++    decision
++}
++
++pub(crate) async fn validate_before_execution(
++    session: &Arc<Session>,
++    step: &StepContext,
++) -> CodexResult<()> {
++    let Some(restore) = active(&step.turn) else {
++        return Ok(());
++    };
++    validate_step(session, step).await?;
++    if !restore.approved.load(Ordering::SeqCst) {
++        return Err(refusal("a matching fresh human approval is required"));
++    }
++    if let EventMsg::ApplyPatchApprovalRequest(event) = &restore.expected {
++        let checkpoint = restore
++            .checkpoint
++            .get("patch")
++            .ok_or_else(|| refusal("missing patch preimages"))?;
++        crate::patch_preconditions::validate_patch_preconditions(step, event, checkpoint).await?;
++    }
++    if restore.executed.swap(true, Ordering::SeqCst) {
++        return Err(refusal("a restored native call cannot retry execution"));
++    }
++    Ok(())
++}
++
++pub(crate) async fn run(
++    session: Arc<Session>,
++    turn: Arc<TurnContext>,
++    restore: Arc<RestoreToolCall>,
++    cancellation: CancellationToken,
++) -> crate::tasks::SessionTaskResult {
++    session.emit_turn_started(&turn, TaskKind::Regular).await;
++    let step = session
++        .capture_step_context(Arc::clone(&turn), &cancellation)
++        .await?;
++    validate_step(&session, &step).await?;
++    if let EventMsg::ApplyPatchApprovalRequest(event) = &restore.expected {
++        let checkpoint = restore
++            .checkpoint
++            .get("patch")
++            .ok_or_else(|| refusal("missing patch preimages"))?;
++        crate::patch_preconditions::validate_patch_preconditions(&step, event, checkpoint).await?;
++    }
++    let call = ToolRouter::build_tool_call(restore.call.clone())
++        .map_err(|_| refusal("invalid native call"))?
++        .ok_or_else(|| refusal("unsupported native call"))?;
++    if !step.tool_router.exposes_tool(&call.tool_name) {
++        return Err(refusal("tool is unavailable in the replacement worker"));
++    }
++    crate::stream_events_utils::record_completed_response_item(&session, &step, &restore.call)
++        .await;
++    let result = ToolCallRuntime::new(Arc::clone(&session), Arc::clone(&step), Default::default())
++        .handle_tool_call(call, cancellation)
++        .await?;
++    crate::stream_events_utils::record_completed_response_item(&session, &step, &result.item).await;
++    Ok(None)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use codex_protocol::protocol::AskForApproval;
++
++    fn command() -> ResponseItem {
++        serde_json::from_value(json!({
++            "type":"function_call", "call_id":"original", "name":"exec_command",
++            "arguments":"{\"cmd\":\"printf original\"}",
++        }))
++        .unwrap()
++    }
++
++    fn approval() -> EventMsg {
++        serde_json::from_value(json!({
++            "type":"exec_approval_request", "kind":"command", "call_id":"original",
++            "turn_id":"first-turn", "started_at_ms":1, "command":["sh","-c","printf original"],
++            "cwd":"/workspace", "environmentId":"local", "parsed_cmd":[],
++        }))
++        .unwrap()
++    }
++
++    fn checkpoint() -> Value {
++        json!({"version":1,"first_approval":true,"permissions":"test-fingerprint","patch":null})
++    }
++
++    #[test]
++    fn rejects_unrelated_calls_and_noninitial_approvals() {
++        let mut call = command();
++        if let ResponseItem::FunctionCall { call_id, .. } = &mut call {
++            *call_id = "sibling".into();
++        }
++        assert!(RestoreToolCall::new(call, approval(), Some(checkpoint())).is_err());
++        let mut request = approval();
++        if let EventMsg::ExecApprovalRequest(event) = &mut request {
++            event.approval_id = Some("subcommand".into());
++        }
++        assert!(RestoreToolCall::new(command(), request, Some(checkpoint())).is_err());
++        assert!(RestoreToolCall::new(command(), approval(), None).is_err());
++    }
++
++    #[tokio::test]
++    async fn requires_exact_fresh_approval_and_consumes_execution_once() {
++        let (session, turn) = crate::session::tests::make_session_and_context().await;
++        let session = Arc::new(session);
++        let turn = Arc::new(turn);
++        let step = session
++            .capture_step_context(Arc::clone(&turn), &CancellationToken::new())
++            .await
++            .unwrap();
++        let mut preconditions = checkpoint();
++        preconditions["permissions"] = permission_snapshot(
++            &turn,
++            &step.environments,
++            step.settings.approval_policy(),
++            step.settings.approvals_reviewer(),
++        );
++        let restore = RestoreToolCall::new(command(), approval(), Some(preconditions)).unwrap();
++        turn.extension_data.insert(restore);
++        let restore = turn.extension_data.get::<RestoreToolCall>().unwrap();
++        assert!(restore.claim(&turn));
++        assert!(!restore.claim(&turn));
++        assert!(validate_before_execution(&session, &step).await.is_err());
++        assert!(compare_request(&turn, &approval()));
++        assert_eq!(
++            record_decision(&turn, ReviewDecision::Approved),
++            ReviewDecision::Approved
++        );
++        assert!(validate_before_execution(&session, &step).await.is_ok());
++        assert!(validate_before_execution(&session, &step).await.is_err());
++        assert!(!compare_request(&turn, &approval()));
++    }
++
++    #[tokio::test]
++    async fn refuses_changed_command_before_approval() {
++        let (_, turn) = crate::session::tests::make_session_and_context().await;
++        turn.extension_data
++            .insert(RestoreToolCall::new(command(), approval(), Some(checkpoint())).unwrap());
++        assert!(
++            turn.extension_data
++                .get::<RestoreToolCall>()
++                .unwrap()
++                .claim(&turn)
++        );
++        let mut changed = approval();
++        if let EventMsg::ExecApprovalRequest(event) = &mut changed {
++            event.command.push("unexpected".into());
++        }
++        assert!(!compare_request(&turn, &changed));
++        assert!(!compare_request(&turn, &approval()));
++        assert!(!active(&turn).unwrap().approved.load(Ordering::SeqCst));
++    }
++
++    #[tokio::test]
++    async fn refuses_changed_authority_even_with_matching_approval() {
++        let (session, turn) = crate::session::tests::make_session_and_context().await;
++        let session = Arc::new(session);
++        let turn = Arc::new(turn);
++        let step = session
++            .capture_step_context(Arc::clone(&turn), &CancellationToken::new())
++            .await
++            .unwrap();
++        assert_ne!(
++            permission_snapshot(
++                &turn,
++                &step.environments,
++                AskForApproval::OnRequest,
++                ApprovalsReviewer::User
++            ),
++            permission_snapshot(
++                &turn,
++                &step.environments,
++                AskForApproval::Never,
++                ApprovalsReviewer::User
++            ),
++        );
++        turn.extension_data
++            .insert(RestoreToolCall::new(command(), approval(), Some(checkpoint())).unwrap());
++        assert!(
++            turn.extension_data
++                .get::<RestoreToolCall>()
++                .unwrap()
++                .claim(&turn)
++        );
++        assert!(compare_request(&turn, &approval()));
++        record_decision(&turn, ReviewDecision::Approved);
++        assert!(validate_before_execution(&session, &step).await.is_err());
++    }
++    #[tokio::test]
++    async fn capture_is_opt_in_and_excludes_execution_retries() {
++        let (_, turn) = crate::session::tests::make_session_and_context().await;
++        let turn = Arc::new(turn);
++        let action = ApprovalAction::ExecCommand {
++            id: "original".into(),
++            environment_id: "local".into(),
++            command: vec!["printf".into(), "original".into()],
++            hook_command: "printf original".into(),
++            cwd: turn.cwd.clone().into(),
++            sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
++            additional_permissions: None,
++            justification: None,
++            tty: false,
++            proposed_execpolicy_amendment: None,
++        };
++        let mut ctx = ApprovalContext {
++            review_context: crate::guardian::GuardianReviewContext::from(&turn),
++            cancellation_token: None,
++            call_id: "original".into(),
++            tool_name: codex_tools::ToolName {
++                name: "exec_command".into(),
++                namespace: None,
++            },
++            strict_auto_review: false,
++            approval_reason: None,
++            retry_reason: None,
++            network_approval_context: None,
++        };
++        assert!(capture_lease(&action, &ctx).await.is_none());
++        let restore = RestoreToolCall::new(command(), approval(), Some(checkpoint())).unwrap();
++        assert!(restore.accepts_approval(&action, &ctx));
++        ctx.network_approval_context = Some(codex_protocol::approvals::NetworkApprovalContext {
++            host: "unexpected.invalid".into(),
++            protocol: codex_protocol::approvals::NetworkApprovalProtocol::Http,
++        });
++        assert!(!restore.accepts_approval(&action, &ctx));
++        ctx.network_approval_context = None;
++        turn.extension_data.insert(CapturableApprovals::default());
++        ctx.retry_reason = Some("sandbox retry".into());
++        assert!(!restore.accepts_approval(&action, &ctx));
++        assert!(capture_lease(&action, &ctx).await.is_none());
++        ctx.retry_reason = None;
++        let lease = capture_lease(&action, &ctx).await.unwrap();
++        record_capture_event(&turn, &approval());
++        let state = turn.extension_data.get::<CapturableApprovals>().unwrap();
++        assert!(
++            state
++                .0
++                .lock()
++                .unwrap()
++                .get("original")
++                .unwrap()
++                .event
++                .is_some()
++        );
++        drop(lease);
++        assert!(state.0.lock().unwrap().is_empty());
++    }
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 66476ae..c092ec5 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2930,7 +2930,7 @@ impl Session {
+             .map(|task| Arc::clone(&task.turn_context))
+     }
+ 
+-    async fn active_turn_context_and_cancellation_token(
++    pub(crate) async fn active_turn_context_and_cancellation_token(
+         &self,
+     ) -> Option<(Arc<TurnContext>, CancellationToken)> {
+         let active = self.active_turn.lock().await;
+@@ -3175,9 +3175,15 @@ impl Session {
+             available_decisions: Some(available_decisions),
+             parsed_cmd,
+         });
++        if !crate::restore_tool_call::compare_request(turn_context, &event) {
++            return ReviewDecision::Abort;
++        }
+         let _user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
+         self.send_event(turn_context, event).await;
+-        rx_approve.await.unwrap_or(ReviewDecision::Abort)
++        crate::restore_tool_call::record_decision(
++            turn_context,
++            rx_approve.await.unwrap_or(ReviewDecision::Abort),
++        )
+     }
+ 
+     #[expect(
+@@ -3219,9 +3225,15 @@ impl Session {
+             reason,
+             grant_root,
+         });
++        if !crate::restore_tool_call::compare_request(turn_context, &event) {
++            return ReviewDecision::Abort;
++        }
+         let _user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
+         self.send_event(turn_context, event).await;
+-        rx_approve.await.unwrap_or(ReviewDecision::Abort)
++        crate::restore_tool_call::record_decision(
++            turn_context,
++            rx_approve.await.unwrap_or(ReviewDecision::Abort),
++        )
+     }
+ 
+     #[expect(
+diff --git a/codex-rs/core/src/tasks/regular.rs b/codex-rs/core/src/tasks/regular.rs
+index 6c6f3d1..1309ac1 100644
+--- a/codex-rs/core/src/tasks/regular.rs
++++ b/codex-rs/core/src/tasks/regular.rs
+@@ -44,6 +44,14 @@ impl SessionTask for RegularTask {
+         input: Vec<TurnInput>,
+         cancellation_token: CancellationToken,
+     ) -> SessionTaskResult {
++        if let Some(restore) = ctx
++            .extension_data
++            .get::<crate::restore_tool_call::RestoreToolCall>()
++        {
++            if restore.claim(&ctx) {
++                return crate::restore_tool_call::run(sess, ctx, restore, cancellation_token).await;
++            }
++        }
+         if ctx
+             .config
+             .features
+diff --git a/codex-rs/core/src/tools/approvals.rs b/codex-rs/core/src/tools/approvals.rs
+index 74082aa..ebaa126 100644
+--- a/codex-rs/core/src/tools/approvals.rs
++++ b/codex-rs/core/src/tools/approvals.rs
+@@ -499,6 +499,18 @@ impl Session {
+         action: ApprovalAction,
+         ctx: ApprovalContext,
+     ) -> ApprovalResult {
++        if let Some(restore) = crate::restore_tool_call::active(ctx.review_context.turn()) {
++            if !restore.accepts_approval(&action, &ctx) {
++                return ApprovalResult {
++                    result: Err(ToolError::Rejected(
++                        "native restoration cannot request another approval or escalation".into(),
++                    )),
++                    source: None,
++                    cancellation_reason: None,
++                };
++            }
++        }
++        let _capture_lease = crate::restore_tool_call::capture_lease(&action, &ctx).await;
+         // Retained authority outside current grants needs a new sandbox approval.
+         // Current grants permit review of the input; they never approve the input itself.
+         let policy = ctx.review_context.turn().approval_policy();
+@@ -723,7 +735,7 @@ impl Session {
+                     .into_iter()
+                     .map(|key| (key, &policy_fingerprint))
+                     .collect();
+-                with_cached_approval(&self.services, tool_name, cache_keys, || async {
++                let request = || async {
+                     self.request_command_approval(
+                         ctx.review_context.turn(),
+                         ExecApprovalKind::Command,
+@@ -742,8 +754,12 @@ impl Session {
+                         /*plugin_attribution_override*/ None,
+                     )
+                     .await
+-                })
+-                .await
++                };
++                if crate::restore_tool_call::active(ctx.review_context.turn()).is_some() {
++                    request().await
++                } else {
++                    with_cached_approval(&self.services, tool_name, cache_keys, request).await
++                }
+             }
+             ApprovalAction::WriteStdin {
+                 id,
+@@ -788,9 +804,11 @@ impl Session {
+                     .retry_reason
+                     .clone()
+                     .or_else(|| ctx.approval_reason.clone());
+-                if *permissions_preapproved && reason.is_none() {
++                let restoring =
++                    crate::restore_tool_call::active(ctx.review_context.turn()).is_some();
++                if *permissions_preapproved && reason.is_none() && !restoring {
+                     ReviewDecision::Approved
+-                } else if reason.is_some() {
++                } else if reason.is_some() || restoring {
+                     self.request_patch_approval(
+                         ctx.review_context.turn(),
+                         ctx.call_id.clone(),
+diff --git a/codex-rs/core/src/tools/orchestrator.rs b/codex-rs/core/src/tools/orchestrator.rs
+index d9afeb6..32a5820 100644
+--- a/codex-rs/core/src/tools/orchestrator.rs
++++ b/codex-rs/core/src/tools/orchestrator.rs
+@@ -61,6 +61,14 @@ impl ToolOrchestrator {
+     where
+         T: ToolRuntime<Rq, Out>,
+     {
++        if let Err(error) = crate::restore_tool_call::validate_before_execution(
++            &tool_ctx.session,
++            &tool_ctx.step_context,
++        )
++        .await
++        {
++            return (Err(ToolError::Codex(error)), None);
++        }
+         let network_approval = match begin_network_approval(
+             &tool_ctx.session,
+             &tool_ctx.step_context.turn,
+@@ -165,6 +173,13 @@ impl ToolOrchestrator {
+         let requirement = tool.exec_approval_requirement(req).unwrap_or_else(|| {
+             default_exec_approval_requirement(approval_policy, &file_system_sandbox_policy)
+         });
++        if crate::restore_tool_call::active(turn_ctx).is_some()
++            && !matches!(requirement, ExecApprovalRequirement::NeedsApproval { .. })
++        {
++            return Err(ToolError::Rejected(
++                "native restoration requires a fresh human approval".into(),
++            ));
++        }
+         match &requirement {
+             ExecApprovalRequirement::Skip { .. } => {
+                 if strict_auto_review {
+@@ -228,12 +243,24 @@ impl ToolOrchestrator {
+ 
+         // 2) First attempt under the selected sandbox.
+         let unsandboxed_allowed = unsandboxed_execution_allowed(&file_system_sandbox_policy);
+-        let sandbox_override = sandbox_override_for_first_attempt(
+-            tool.sandbox_permissions(req),
+-            &requirement,
+-            &file_system_sandbox_policy,
+-            /*already_approved*/ initial_approval_source.is_some(),
+-        );
++        // Restored patches get one attempt. Use only authority the normal approved retry already grants.
++        let approved_restored_patch = crate::restore_tool_call::active(turn_ctx)
++            .is_some_and(|restore| restore.is_patch())
++            && initial_approval_source == Some(ApprovalResolutionSource::User)
++            && !strict_auto_review
++            && unsandboxed_allowed
++            && tool.wants_no_sandbox_approval(approval_policy)
++            && tool.should_bypass_approval(approval_policy, true);
++        let sandbox_override = if approved_restored_patch {
++            SandboxOverride::BypassSandboxFirstAttempt
++        } else {
++            sandbox_override_for_first_attempt(
++                tool.sandbox_permissions(req),
++                &requirement,
++                &file_system_sandbox_policy,
++                /*already_approved*/ initial_approval_source.is_some(),
++            )
++        };
+         let (escalated_profile, writable_root_metadata) = if sandbox_override
+             == SandboxOverride::EscalatedSandboxWithRestrictions
+         {

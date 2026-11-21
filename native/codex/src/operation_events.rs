@@ -101,6 +101,25 @@ impl OperationEvents {
         Ok(init)
     }
 
+    pub(crate) async fn drain_notifications(&self, thread_id: &str) -> Vec<String> {
+        let mut state = self.state.lock().await;
+        let mut events = Vec::new();
+        while let Ok(event) = state.receiver.try_recv() {
+            events.push(event);
+        }
+        let dropped = self.dropped.swap(0, Ordering::Relaxed);
+        if dropped != 0 {
+            events.push(
+                json!({
+                    "method": "turn/operation/dropped",
+                    "params": {"threadId": thread_id, "droppedCount": dropped},
+                })
+                .to_string(),
+            );
+        }
+        events
+    }
+
     pub(crate) async fn next_event(
         &self,
         thread: &CodexThread,
@@ -128,12 +147,22 @@ impl OperationEvents {
                 event = thread.next_event() => {
                     let event = event.map_err(|_| "The Codex event stream ended unexpectedly.".to_owned())?;
                     match &event.msg {
-                        EventMsg::ExecApprovalRequest(_)
-                        | EventMsg::ApplyPatchApprovalRequest(_)
-                        | EventMsg::RequestPermissions(_)
+                        EventMsg::ExecApprovalRequest(_) | EventMsg::ApplyPatchApprovalRequest(_) => {
+                            let preconditions = thread
+                                .capture_tool_approval_preconditions(event.msg.clone())
+                                .await
+                                .map_err(|_| "This Codex approval cannot be safely resumed.".to_owned())?;
+                            state.pending = Some(json!({
+                                "id": event.id,
+                                "msg": event.msg,
+                                "preconditions": preconditions,
+                            }).to_string());
+                            continue;
+                        }
+                        EventMsg::RequestPermissions(_)
                         | EventMsg::RequestUserInput(_)
                         | EventMsg::ElicitationRequest(_) => {
-                            return Err("Codex requested interactive approval. This provider supports non-interactive execution only.".to_owned());
+                            return Err("Codex requested an unsupported kind of interactive approval.".to_owned());
                         }
                         _ => {}
                     }
@@ -168,11 +197,10 @@ mod tests {
                 },
             );
             guard.finish_with_output(OperationOutcome::Success, &json!({"text": "visible"}));
-            let mut state = events.state.lock().await;
-            let start: serde_json::Value =
-                serde_json::from_str(&state.receiver.recv().await.unwrap()).unwrap();
-            let end: serde_json::Value =
-                serde_json::from_str(&state.receiver.recv().await.unwrap()).unwrap();
+            let notifications = events.drain_notifications("thread_1").await;
+            assert_eq!(notifications.len(), 2);
+            let start: serde_json::Value = serde_json::from_str(&notifications[0]).unwrap();
+            let end: serde_json::Value = serde_json::from_str(&notifications[1]).unwrap();
             assert_eq!(start["method"], "turn/operation/started");
             assert_eq!(end["method"], "turn/operation/completed");
             assert_eq!(start["params"]["operationId"], end["params"]["operationId"]);
