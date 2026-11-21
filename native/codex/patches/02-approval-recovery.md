@@ -16,7 +16,9 @@ Recovery requires direct tools in one local environment, human review and no too
 
 The patch includes a bounded file read because the existing stream can follow symbolic links. Before saving and again before execution, Codex checks file hashes and confirms that new destinations are absent. Each check covers at most 32 paths, 8 MiB per file, 16 MiB in total and 10 seconds. An unreadable or oversized file stops recovery.
 
-A restored call gets one attempt. When Codex policy already allows an approved edit to run outside the sandbox on retry, recovery uses that permission on the first attempt.
+A restored call gets one attempt. For a command, Codex checks the call ID and exit code and refuses a live process handle. This check works even if the exit notification arrives after the turn. A new worker cannot continue an interactive process.
+
+When Codex policy already allows an approved edit to run outside the sandbox on retry, recovery uses that permission on the first attempt.
 
 The application must restore the same workspace and prevent concurrent edits. If the worker stops after a write and before saving the result, the session stays active. Check the external system before retrying.
 

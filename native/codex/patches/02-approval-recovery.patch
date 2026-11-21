@@ -1025,6 +1025,30 @@ index 74082aa..ebaa126 100644
                      self.request_patch_approval(
                          ctx.review_context.turn(),
                          ctx.call_id.clone(),
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+index 6a81b62..59e4900 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+@@ -236,6 +236,19 @@ impl ExecCommandHandler {
+             }
+             None => manager.exec_command(request, &context).await,
+         };
++        // The exit event can arrive after the turn. A restored command needs a terminal
++        // result here because the next worker cannot use a live process handle.
++        if crate::restore_tool_call::active(&step_context.turn).is_some()
++            && !result.as_ref().is_ok_and(|output| {
++                output.event_call_id == call_id
++                    && output.process_id.is_none()
++                    && output.exit_code.is_some()
++            })
++        {
++            return Err(FunctionCallError::Fatal(
++                "Cannot confirm the restored command exited.".to_string(),
++            ));
++        }
+         match result {
+             Ok(response) => Ok(boxed_tool_output(response)),
+             Err(UnifiedExecError::SandboxDenied {
 diff --git a/codex-rs/core/src/tools/orchestrator.rs b/codex-rs/core/src/tools/orchestrator.rs
 index a1a88e4..c26c85d 100644
 --- a/codex-rs/core/src/tools/orchestrator.rs
