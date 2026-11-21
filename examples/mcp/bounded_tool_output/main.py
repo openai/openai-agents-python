@@ -13,7 +13,7 @@ from typing import Any
 
 from mcp.types import CallToolResult, ImageContent, TextContent
 
-from agents import Agent, RunConfig, Runner, ToolCallHookContext, ToolExecutionConfig, UserError
+from agents import Agent, FunctionTool, RunConfig, RunContextWrapper, Runner, UserError
 from agents.decorators import tool
 from agents.mcp import MCPServerStdio, MCPToolMetaContext
 from agents.testing import ScriptedModel, assistant_message, function_call
@@ -25,12 +25,6 @@ SERVER = "Inspection reports"
 async def site_report() -> str:
     """Read the local inspection report."""
     return "WARN: synthetic site detail\n" * 20
-
-
-@tool(failure_error_function=None)
-async def inspect_site() -> str:
-    """Read the local inspection report."""
-    return await site_report()
 
 
 async def summarize(texts: tuple[str, ...]) -> str:
@@ -57,17 +51,28 @@ class Reports:
             raise ValueError("Use a nonnegative part and offset")
         return self._texts[reference][part][offset : offset + 64]
 
-    def authorize(self, requester: str) -> None:
-        if self._texts is None or requester != self._owner:
+    def ensure_open(self) -> None:
+        if self._texts is None:
             raise PermissionError("Report unavailable")
 
-    async def prepare(self, call: ToolCallHookContext[str], output: Any) -> Any:
-        if call.tool is not inspect_site:
-            return output
-        self.authorize(call.run_context.context)
-        if not isinstance(output, str):
-            raise UserError("Expected a report string")
-        return await self.bound((output,)) or output
+    def authorize(self, requester: str) -> None:
+        self.ensure_open()
+        if requester != self._owner:
+            raise PermissionError("Report unavailable")
+
+    def site_tool(self) -> FunctionTool:
+        @tool(failure_error_function=None)
+        async def inspect_site(ctx: RunContextWrapper[str]) -> str:
+            """Read the local inspection report."""
+            self.authorize(ctx.context)
+            text = await site_report()
+            if not isinstance(text, str):
+                raise UserError("Expected a report string")
+            replacement = await self.bound((text,))
+            self.authorize(ctx.context)
+            return replacement or text
+
+        return inspect_site
 
     async def bound(self, texts: tuple[str, ...]) -> str | None:
         if sum(len(text.encode()) for text in texts) <= MAX_TEXT_BYTES:
@@ -115,6 +120,7 @@ class ReportServer(MCPServerStdio):
         fields = result.model_dump(by_alias=True, exclude={"content", "meta"})
         if fields.get("isError"):
             return result
+        self.reports.ensure_open()
         if any(not isinstance(block, (TextContent, ImageContent)) for block in result.content):
             raise UserError("Unsupported report media")
 
@@ -123,12 +129,14 @@ class ReportServer(MCPServerStdio):
             if structured == {"ticket": "site"}:
                 structured = {"report": await site_report()}
             text = json.dumps(structured)
-            replacement = await self.reports.bound((text,)) or text
+            replacement: str | None = await self.reports.bound((text,)) or text
         else:
             texts = tuple(part.text for part in result.content if isinstance(part, TextContent))
             replacement = await self.reports.bound(texts)
-            if replacement is None:
-                return result
+
+        self.reports.ensure_open()
+        if replacement is None:
+            return result
 
         # Start a new result so neither structuredContent nor _meta carries the original.
         parts = list(result.content)
@@ -141,7 +149,7 @@ class ReportServer(MCPServerStdio):
 
 
 async def main() -> None:
-    owner = "sample-user"  # Use the authenticated principal from your application.
+    requester = "sample-user"  # Use the authenticated principal from your application.
     model = ScriptedModel(
         [
             [
@@ -153,28 +161,27 @@ async def main() -> None:
             [assistant_message("Reports ready.")],
         ]
     )
-    with closing(Reports(owner)) as reports:
-        config = RunConfig(
-            tracing_disabled=True,
-            tool_execution=ToolExecutionConfig(prepare_tool_output=reports.prepare),
-        )
+    with closing(Reports(owner="sample-user")) as reports:
         async with ReportServer(reports) as server:
             agent = Agent(
                 name="Inspector",
                 model=model,
-                tools=[inspect_site],
+                tools=[reports.site_tool()],
                 mcp_servers=[server],
                 mcp_config={"include_server_in_tool_names": True},
             )
             result = await Runner.run(
-                agent, "Inspect both sites.", context=owner, run_config=config
+                agent,
+                "Inspect both sites.",
+                context=requester,
+                run_config=RunConfig(tracing_disabled=True),
             )
         for item in result.new_items:
             if item.type == "tool_call_output_item":
                 summary = item.output if isinstance(item.output, str) else item.output["text"]
                 print(summary)
                 reference = summary.split("Reference: ")[1]
-                page = reports.fetch(owner, reference)
+                page = reports.fetch(requester, reference)
                 print(f"Retrieved {len(page)} characters privately.")
 
 

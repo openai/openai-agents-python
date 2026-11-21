@@ -5,7 +5,15 @@ from typing import Any
 
 import pytest
 
-from agents import Agent, RunConfig, Runner, SQLiteSession, ToolExecutionConfig, UserError
+from agents import (
+    Agent,
+    AgentsException,
+    RunConfig,
+    Runner,
+    SQLiteSession,
+    ToolExecutionConfig,
+    UserError,
+)
 from agents.mcp import MCPToolCustomDataContext
 from agents.testing import ScriptedModel, assistant_message, function_call
 from agents.tool_context import ToolContext
@@ -13,13 +21,6 @@ from examples.mcp.bounded_tool_output import main as recipe
 from tests.testing_processor import fetch_ordered_spans
 
 OWNER = "sample-user"
-
-
-def config(reports: recipe.Reports) -> RunConfig:
-    return RunConfig(
-        trace_include_sensitive_data=True,
-        tool_execution=ToolExecutionConfig(prepare_tool_output=reports.prepare),
-    )
 
 
 @pytest.mark.asyncio
@@ -64,12 +65,16 @@ async def test_sdk_discovery_and_function_results_before_publication():
             agent = Agent(
                 name="Inspector",
                 model=model,
-                tools=[recipe.inspect_site],
+                tools=[reports.site_tool()],
                 mcp_servers=[selected, other],
                 mcp_config={"include_server_in_tool_names": True},
             )
             result = Runner.run_streamed(
-                agent, "Inspect", context=OWNER, run_config=config(reports), session=session
+                agent,
+                "Inspect",
+                context=OWNER,
+                run_config=RunConfig(trace_include_sensitive_data=True),
+                session=session,
             )
             events = [event async for event in result.stream_events()]
 
@@ -146,6 +151,59 @@ async def test_sdk_discovery_and_function_results_before_publication():
 
 
 @pytest.mark.asyncio
+async def test_local_tool_denies_access_before_reading(monkeypatch):
+    async def forbidden():
+        pytest.fail("Unauthorized caller reached the report reader")
+
+    monkeypatch.setattr(recipe, "site_report", forbidden)
+    model = ScriptedModel([[function_call("inspect_site", {}, call_id="site")]])
+    with closing(recipe.Reports(OWNER)) as reports:
+        agent = Agent(name="Inspector", model=model, tools=[reports.site_tool()])
+        with pytest.raises(UserError, match="Report unavailable"):
+            await Runner.run(agent, "Inspect", context="other-user")
+    assert len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_local_tool_rechecks_access_before_returning_a_small_report(monkeypatch):
+    model = ScriptedModel([[function_call("inspect_site", {}, call_id="site")]])
+    with closing(recipe.Reports(OWNER)) as reports:
+
+        async def revoke():
+            reports.close()
+            return "Private reading"
+
+        monkeypatch.setattr(recipe, "site_report", revoke)
+        agent = Agent(name="Inspector", model=model, tools=[reports.site_tool()])
+        with pytest.raises(UserError, match="Report unavailable"):
+            await Runner.run(agent, "Inspect", context=OWNER)
+    assert len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_local_output_is_bounded_before_an_independent_editor():
+    seen = []
+
+    async def replace(call, output):
+        seen.append(output)
+        return "Reviewed"
+
+    model = ScriptedModel(
+        [[function_call("inspect_site", {}, call_id="site")], [assistant_message("Done")]]
+    )
+    with closing(recipe.Reports(OWNER)) as reports:
+        agent = Agent(name="Inspector", model=model, tools=[reports.site_tool()])
+        config = RunConfig(tool_execution=ToolExecutionConfig(prepare_tool_output=replace))
+        await Runner.run(agent, "Inspect", context=OWNER, run_config=config)
+        (summary,) = seen
+        assert len(summary.encode()) <= 128
+        label, ref = summary.split(" Reference: ")
+        assert label == "Inspection report with 20 warning markers."
+        assert reports.fetch(OWNER, ref) == (await recipe.site_report())[:64]
+        assert "Reviewed" in repr(model.calls[1].input)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalid", [None, {"text": "private"}, "é" * 64], ids=["missing", "object", "oversized"]
 )
@@ -155,9 +213,9 @@ async def test_invalid_summary_never_reaches_model_or_events(monkeypatch, invali
 
     monkeypatch.setattr(recipe, "summarize", bad_summary)
     model = ScriptedModel([[function_call("inspect_site", {}, call_id="site")]])
-    agent = Agent(name="Inspector", model=model, tools=[recipe.inspect_site])
     with closing(recipe.Reports(OWNER)) as reports:
-        result = Runner.run_streamed(agent, "Inspect", context=OWNER, run_config=config(reports))
+        agent = Agent(name="Inspector", model=model, tools=[reports.site_tool()])
+        result = Runner.run_streamed(agent, "Inspect", context=OWNER)
         with pytest.raises(UserError, match="summary"):
             async for event in result.stream_events():
                 assert getattr(event, "name", None) != "tool_output"
@@ -178,7 +236,12 @@ async def test_rejected_mcp_output_withholds_raw_report_from_tracing(monkeypatch
         async with recipe.ReportServer(reports) as server:
             agent = Agent(name="Inspector", model=model, mcp_servers=[server])
             with pytest.raises(UserError, match=reason):
-                await Runner.run(agent, "Inspect", context=OWNER, run_config=config(reports))
+                await Runner.run(
+                    agent,
+                    "Inspect",
+                    context=OWNER,
+                    run_config=RunConfig(trace_include_sensitive_data=True),
+                )
     spans = [span.export() for span in fetch_ordered_spans()]
     assert reason in repr(spans)
     assert "QUJD" not in repr(spans)
@@ -204,9 +267,7 @@ async def test_cancel_during_mcp_ticket_resolution(monkeypatch):
     with closing(recipe.Reports(OWNER)) as reports:
         async with recipe.ReportServer(reports) as server:
             agent = Agent(name="Inspector", model=model, mcp_servers=[server])
-            task = asyncio.create_task(
-                Runner.run(agent, "Inspect", context=OWNER, run_config=config(reports))
-            )
+            task = asyncio.create_task(Runner.run(agent, "Inspect", context=OWNER))
             try:
                 await asyncio.wait_for(started.wait(), 5)
             finally:
@@ -215,3 +276,45 @@ async def test_cancel_during_mcp_ticket_resolution(monkeypatch):
                     await task
             await asyncio.wait_for(stopped.wait(), 5)
             assert len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "close_at"), [("brief", "peer"), ("ticket", "peer"), ("ticket", "read")]
+)
+async def test_closed_store_withholds_short_mcp_reports(monkeypatch, kind, close_at):
+    model = ScriptedModel(
+        [
+            [function_call("read.report", {"kind": kind}, call_id="report")],
+            [assistant_message("Done")],
+        ]
+    )
+    with closing(recipe.Reports(OWNER)) as reports:
+        peer = recipe.MCPServerStdio.call_tool
+
+        async def receive(*args, **kwargs):
+            result = await peer(*args, **kwargs)
+            if close_at == "peer":
+                reports.close()
+            return result
+
+        async def read():
+            if close_at != "read":
+                pytest.fail("Closed store reached the ticket reader")
+            reports.close()
+            return "Private reading"
+
+        monkeypatch.setattr(recipe.MCPServerStdio, "call_tool", receive)
+        monkeypatch.setattr(recipe, "site_report", read)
+        async with recipe.ReportServer(reports) as server:
+            agent = Agent(name="Inspector", model=model, mcp_servers=[server])
+            with pytest.raises(AgentsException, match="Report unavailable"):
+                await Runner.run(
+                    agent,
+                    "Inspect",
+                    context=OWNER,
+                    run_config=RunConfig(trace_include_sensitive_data=True),
+                )
+    assert len(model.calls) == 1
+    spans = repr([span.export() for span in fetch_ordered_spans()])
+    assert "Private reading" not in spans and "Sample reading" not in spans
