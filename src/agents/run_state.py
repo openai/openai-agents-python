@@ -110,6 +110,7 @@ from .logger import (
     log_model_and_tool_data_warning,
     logger,
 )
+from .run_budget import _BudgetCheckpointError, _BudgetState
 from .run_context import RunContextWrapper, _ApprovalRecord, _FunctionToolApprovalKey
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
@@ -312,7 +313,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.23": (
         "Binds prepared tool inputs to their original proposals across retries and resume, "
-        "and records required ResumableSession ownership for paused runs."
+        "and records ResumableSession ownership and optional root budgets for paused runs."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -1982,6 +1983,7 @@ class RunState(Generic[TContext, TAgent]):
                 "Use unique agent names before starting a persistable run."
             )
 
+        budget = self._context._budget.checkpoint() if self._context._budget is not None else None
         approvals_dict = self._serialize_approvals()
         tool_invocations = self._serialize_tool_invocations()
         hosted_mcp_approvals = self._serialize_hosted_mcp_approvals()
@@ -2000,6 +2002,8 @@ class RunState(Generic[TContext, TAgent]):
             # Preserve metadata so deserialization can warn when context types were erased.
             "context_meta": context_meta,
         }
+        if budget is not None:
+            context_entry["budget"] = budget
         tool_input = self._serialize_tool_input(self._context.tool_input)
         if tool_input is not None:
             context_entry["tool_input"] = tool_input
@@ -2567,6 +2571,10 @@ class RunState(Generic[TContext, TAgent]):
                 validation_error_factory=validation_error_factory,
             )
         except BaseException as error:
+            if isinstance(error, _BudgetCheckpointError):
+                error = validation_error_factory(
+                    "Invalid RunBudget checkpoint or schema version.", UserError
+                )
             trusted_error_message = _trusted_run_state_validation_message(
                 error,
                 trusted_validation_errors,
@@ -3049,6 +3057,8 @@ def _serialize_pending_nested_agent_tool_runs(
                 strict_context=strict_context,
                 include_tracing_api_key=include_tracing_api_key,
             )
+        except _BudgetCheckpointError:
+            raise
         except Exception:
             if strict_context:
                 raise
@@ -3247,6 +3257,8 @@ async def _restore_pending_nested_agent_tool_runs(
                 strict_context=strict_context,
                 validation_error_factory=validation_error_factory,
             )
+        except _BudgetCheckpointError:
+            raise
         except Exception:
             if strict_context:
                 raise
@@ -4280,6 +4292,11 @@ async def _build_run_state_from_json(
         raise validation_error_factory("Run state agent not found in agent map", UserError)
 
     context_data = state_json["context"]
+    budget = None
+    if "budget" in context_data:
+        if (schema_major, schema_minor) < (1, 23):
+            raise _BudgetCheckpointError("Run budgets require schema 1.23 or later.")
+        budget = _BudgetState.restore(context_data["budget"])
     usage = deserialize_usage(context_data.get("usage", {}))
 
     serialized_context: Any = context_data.get("context", _MISSING_CONTEXT_SENTINEL)
@@ -4342,6 +4359,7 @@ async def _build_run_state_from_json(
             "Serialized run state context must be a mapping. Please provide one.",
             UserError,
         )
+    context = context._for_new_root(budget)
     context.usage = usage
     context._restored_unbound_approval_call_ids = set()
     context._allow_legacy_approval_binding_reconstruction = (schema_major, schema_minor) < (1, 15)
@@ -5700,6 +5718,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Run state nested history ownership references a missing input item",
         "Run state nested history ownership session digest does not match",
         "Run state nested history ownership input digest does not match",
+        "Invalid RunBudget checkpoint or schema version.",
         "RunState tool_invocations must be a mapping.",
         "RunState tool_invocations contains an invalid call ID.",
         "RunState tool invocation must be a mapping.",

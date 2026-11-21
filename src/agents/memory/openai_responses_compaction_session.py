@@ -479,8 +479,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         compacted = await self.client.responses.compact(**compact_kwargs)
 
         compacted_usage = getattr(compacted, "usage", None)
-        if wrapper is not None and compacted_usage is not None:
-            wrapper.usage.add(_response_usage_to_usage(compacted_usage))
+        if wrapper is not None:
+            usage = (
+                _response_usage_to_usage(compacted_usage) if compacted_usage is not None else None
+            )
+            if wrapper._budget is not None:
+                wrapper._budget.observe(usage)
+            if usage is not None:
+                wrapper.usage.add(usage)
 
         output_items = _strip_orphaned_assistant_ids(
             _normalize_compaction_output_items(compacted.output or [])
