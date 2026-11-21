@@ -1,6 +1,6 @@
 import asyncio
 import json
-from threading import Event
+from threading import Barrier, Event
 
 import pytest
 
@@ -12,7 +12,7 @@ from .test_codex_mutable_tool_hooks import codex_fixture, final_message
 pytest_plugins = ["tests.models.test_codex_mutable_tool_hooks"]
 
 ROLE = CodexRole("editor", "Edit the draft.", 'Return "edited".\nStay concise.')
-PROFILE = CodexChildren(roles=(ROLE,), max_children=1)
+PROFILE = CodexChildren(roles=(ROLE,), max_delegations=1)
 
 
 @pytest.mark.parametrize("name", ["", " ", "default", "explorer", "worker", "a/b"])
@@ -25,10 +25,10 @@ def test_invalid_child_declarations():
     with pytest.raises(ValueError, match="nonblank"):
         CodexRole("editor", "description", " ")
     with pytest.raises(ValueError, match="Duplicate"):
-        CodexChildren(roles=(ROLE, ROLE), max_children=1)
+        CodexChildren(roles=(ROLE, ROLE), max_delegations=1)
     for limit in [0, -1, True, 1.5, 2**31]:
-        for field in ("max_depth", "max_children"):
-            kwargs = {"max_children": 1, field: limit}
+        for field in ("max_depth", "max_delegations"):
+            kwargs = {"max_delegations": 1, field: limit}
             with pytest.raises(ValueError, match="limits"):
                 CodexChildren(roles=(ROLE,), **kwargs)
 
@@ -110,6 +110,10 @@ def call(name, tag, **args):
     }
 
 
+def user_input(request):
+    return json.dumps([i for i in request["input"] if i.get("role") == "user"])
+
+
 def outputs(request):
     return {
         i["call_id"]: i["output"]
@@ -146,26 +150,21 @@ async def test_unsupported_children_before_generation(
 
 @pytest.mark.asyncio
 @pytest.mark.allow_call_model_methods
-async def test_native_children_slots_and_depth(tmp_path, monkeypatch, model_endpoint, catalog):
+async def test_native_children_at_depth_limit(tmp_path, monkeypatch, model_endpoint, catalog):
     port, requests, items = model_endpoint
-    provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=PROFILE)
-    release = Event()
+    children = CodexChildren(roles=(ROLE,), max_delegations=2)
+    provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=children)
 
     def step(request):
         receipts = outputs(request)
-        if "LEAF" in json.dumps([i for i in request["input"] if i.get("role") == "user"]):
+        if "LEAF" in user_input(request):
             if not receipts:
-                assert release.wait(10)
                 return call("spawn_agent", "grand", message="GRAND")
             return final_message()
         if not receipts:
-            return [
-                call("spawn_agent", tag, message="LEAF", agent_type=ROLE.name)
-                for tag in ("one", "two")
-            ]
+            return call("spawn_agent", "spawn", message="LEAF", agent_type=ROLE.name)
         if "wait" not in receipts:
-            release.set()
-            target = next(json.loads(v)["agent_id"] for v in receipts.values() if "agent_id" in v)
+            target = json.loads(receipts["spawn"])["agent_id"]
             return call("wait_agent", "wait", targets=[target], timeout_ms=10000)
         return final_message()
 
@@ -180,10 +179,8 @@ async def test_native_children_slots_and_depth(tmp_path, monkeypatch, model_endp
         assert all(i.get("type") != "additional_tools" for i in leaf["input"])
         assert "unsupported" in outputs(leaf)["grand"].lower()
         parent = outputs(requests[-1])
-        assert any("limit" in parent[tag] for tag in ("one", "two"))
         assert "done" in parent["wait"]
     finally:
-        release.set()
         await provider.aclose()
 
 
@@ -198,13 +195,13 @@ async def test_child_native_fork_reopen_and_model_selection(
         port,
         monkeypatch,
         [*catalog, 'agents.ambient.description="ambient specialist"'],
-        children=PROFILE,
+        children=CodexChildren(roles=(ROLE,), max_delegations=5),
     )
     child_id = ""
 
     def step(request):
         nonlocal child_id
-        if "LEAF" in json.dumps([i for i in request["input"] if i.get("role") == "user"]):
+        if "LEAF" in user_input(request):
             return final_message()
         receipts = outputs(request)
         if not receipts:
@@ -250,14 +247,14 @@ async def test_child_native_depth_two_and_live_tree_isolation(
     tmp_path, monkeypatch, model_endpoint, catalog
 ):
     port, requests, items = model_endpoint
-    children = CodexChildren(roles=(ROLE,), max_children=2, max_depth=2)
+    children = CodexChildren(roles=(ROLE,), max_delegations=2, max_depth=2)
     provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=children)
     started, release = Event(), Event()
     child_id = ""
 
     def step(request):
         nonlocal child_id
-        prompt = json.dumps([i for i in request["input"] if i.get("role") == "user"])
+        prompt = user_input(request)
         receipts = outputs(request)
         if "FOREIGN" in prompt:
             if not receipts:
@@ -296,4 +293,154 @@ async def test_child_native_depth_two_and_live_tree_isolation(
         release.set()
         root.cancel()
         await asyncio.gather(root, return_exceptions=True)
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+async def test_child_close_does_not_refund(tmp_path, monkeypatch, model_endpoint, catalog):
+    port, requests, items = model_endpoint
+    provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=PROFILE)
+
+    def step(request):
+        prompt = user_input(request)
+        if "LEAF" in prompt:
+            return final_message()
+        receipts = outputs(request)
+        if not receipts:
+            return call("spawn_agent", "spawn", message="LEAF")
+        target = json.loads(receipts["spawn"])["agent_id"]
+        if "wait" not in receipts:
+            return call("wait_agent", "wait", targets=[target], timeout_ms=10000)
+        if "close" not in receipts:
+            return call("close_agent", "close", target=target)
+        if "fresh" in prompt:
+            return final_message()
+        return call("spawn_agent", "spawn", message="REPLACEMENT")
+
+    items.extend([step] * 10)
+    try:
+        with pytest.raises(RuntimeError, match="delegation limit exceeded"):
+            await ask(provider)
+        assert len(requests) == 5
+        await ask(provider, prompt="fresh")
+        assert len(requests) == 10
+        assert sum("LEAF" in user_input(r) for r in requests) == 2
+        assert all("REPLACEMENT" not in user_input(r) for r in requests)
+        for i in (4, 9):
+            assert "done" in outputs(requests[i])["wait"]
+            assert "done" in outputs(requests[i])["close"]
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize(
+    "attempt",
+    [
+        call("resume_agent", "first", id="missing"),
+        call("send_input", "first", target="missing", message="continue"),
+        {**call("spawn_agent", "first"), "arguments": "{"},
+        {**call("wait_agent", "first"), "namespace": "functions"},
+    ],
+)
+async def test_child_failed_calls_consume_budget(
+    tmp_path, monkeypatch, model_endpoint, catalog, attempt
+):
+    port, requests, items = model_endpoint
+    provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=PROFILE)
+    items.extend([attempt, call("spawn_agent", "next", message="LEAF"), final_message()])
+    try:
+        with pytest.raises(RuntimeError, match="delegation limit exceeded"):
+            await ask(provider)
+        assert len(requests) == 2
+        assert "LEAF" not in user_input(requests[-1])
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+async def test_children_share_last_delegation(tmp_path, monkeypatch, model_endpoint, catalog):
+    port, requests, items = model_endpoint
+    children = CodexChildren(roles=(ROLE,), max_delegations=3, max_depth=2)
+    provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=children)
+    siblings = Barrier(2)
+
+    def step(request):
+        prompt = user_input(request)
+        receipts = outputs(request)
+        if "GRAND" in prompt:
+            return final_message()
+        if "LEAF" in prompt:
+            if not receipts:
+                siblings.wait(timeout=10)
+                return call("spawn_agent", "grand", message="GRAND")
+            names = ["grand"]
+        else:
+            names = ["one", "two"]
+            if not receipts:
+                return [call("spawn_agent", tag, message="LEAF") for tag in names]
+        for name in names:
+            if "wait" + name not in receipts:
+                target = json.loads(receipts[name])["agent_id"]
+                return call("wait_agent", "wait" + name, targets=[target], timeout_ms=10000)
+        return final_message()
+
+    items.extend([step] * 9)
+    try:
+        with pytest.raises(RuntimeError, match="delegation limit exceeded"):
+            await ask(provider)
+        waits = [outputs(requests[-1])["wait" + tag] for tag in ("one", "two")]
+        assert sum("delegation limit exceeded" in result for result in waits) == 1
+        assert sum("done" in result for result in waits) == 1
+        assert sum("GRAND" in user_input(r) for r in requests) == 1
+        assert len(requests) == 9
+    finally:
+        siblings.abort()
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+async def test_child_rejects_custom_payload(tmp_path, monkeypatch, model_endpoint, catalog):
+    port, requests, items = model_endpoint
+    provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=PROFILE)
+    items.append(
+        {
+            "type": "custom_tool_call",
+            "namespace": "multi_agent_v1",
+            "name": "close_agent",
+            "call_id": "first",
+            "input": "{}",
+        }
+    )
+    try:
+        with pytest.raises(RuntimeError, match="Unsupported native delegation"):
+            await ask(provider)
+        assert len(requests) == 1
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+async def test_child_counts_each_item_in_one_response(
+    tmp_path, monkeypatch, model_endpoint, catalog
+):
+    port, requests, items = model_endpoint
+    provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=PROFILE)
+    items.append(
+        [
+            call("send_input", "same", message="missing target"),
+            call("spawn_agent", "same", message="LEAF"),
+        ]
+    )
+    items.append(final_message())
+    try:
+        with pytest.raises(RuntimeError, match="delegation limit exceeded"):
+            await ask(provider)
+        assert len(requests) == 1
+    finally:
         await provider.aclose()

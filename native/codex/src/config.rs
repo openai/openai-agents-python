@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 type Result<T> = std::result::Result<T, String>;
 
 pub struct CoreServices {
+    pub budget: Option<Arc<crate::children::Budget>>,
     pub children: Option<Arc<crate::children::Children>>,
     pub config: Config,
     pub manager: Arc<ThreadManager>,
@@ -473,6 +474,7 @@ pub async fn build_services(
         } else {
             "codex-code-mode-host"
         });
+    let budget = children.as_ref().map(|profile| profile.budget());
     let manager = Arc::new_cyclic(|weak| {
         let mut extensions = ExtensionRegistryBuilder::<Config>::new();
         codex_guardian_v2::install(&mut extensions, auth.clone(), weak.clone());
@@ -506,6 +508,10 @@ pub async fn build_services(
                 shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
             },
         );
+        // Register last so every emitted item passes the same tree-wide budget.
+        if let Some(budget) = &budget {
+            extensions.model_request_contributor(budget.clone());
+        }
         let mut manager = ThreadManager::new(
             &config,
             auth.clone(),
@@ -543,6 +549,7 @@ pub async fn build_services(
         .borrow()
         .source_generation;
     Ok(CoreServices {
+        budget,
         children,
         config,
         manager,

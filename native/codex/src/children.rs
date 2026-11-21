@@ -1,11 +1,21 @@
 //! Restrict an ephemeral tree before Core registers its collaboration tools.
 use codex_core::config::{AgentRoleConfig, Config};
+use codex_extension_api::{
+    ModelRequestContributor, ModelRequestInput, ModelResponseError, ModelResponseInterceptor,
+    ModelResponseStream, ResponseEvent,
+};
 use codex_features::Feature;
 use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::{ConfigShellToolType, ModelsResponse};
 use codex_protocol::protocol::MultiAgentVersion;
+use futures::{StreamExt, stream};
 use pyo3::FromPyObject;
 use serde_json::json;
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicUsize, Ordering},
+};
 use tempfile::TempDir;
 
 use crate::NativeResult;
@@ -13,7 +23,7 @@ use crate::NativeResult;
 #[derive(FromPyObject)]
 pub struct Children {
     roles: Vec<Role>,
-    max_children: usize,
+    max_delegations: usize,
     max_depth: i32,
 }
 
@@ -38,6 +48,13 @@ const DISABLED: &[Feature] = &[
 ];
 
 impl Children {
+    pub fn budget(&self) -> Arc<Budget> {
+        Arc::new(Budget {
+            remaining: Arc::new(AtomicUsize::new(self.max_delegations)),
+            denial: Arc::default(),
+        })
+    }
+
     pub fn defaults(&self) -> Vec<String> {
         let mut overrides = vec![
             "agents.enabled=true".into(),
@@ -45,7 +62,7 @@ impl Children {
             "features.multi_agent_v2={enabled=false,disable_native_tools=true}".into(),
             format!(
                 "agents.max_concurrent_threads_per_session={}",
-                self.max_children
+                self.max_delegations
             ),
             format!("agents.max_depth={}", self.max_depth),
             "tools.update_plan.enabled=false".into(),
@@ -75,7 +92,7 @@ impl Children {
                 .any(|server| server.enabled)
             || !config.multi_agent_v2.disable_native_tools
             || config.agent_default_subagent_model.is_some()
-            || config.agent_max_threads != Some(self.max_children)
+            || config.agent_max_threads != Some(self.max_delegations)
             || config.agent_max_depth != self.max_depth
             || config.experimental_request_user_input_enabled
             || config.update_plan_enabled
@@ -134,4 +151,83 @@ pub fn catalog(mut catalog: ModelsResponse, model: &str) -> NativeResult<ModelsR
     entry.apply_patch_tool_type = None;
     entry.experimental_supported_tools.clear();
     Ok(catalog)
+}
+
+#[derive(Clone, Debug)]
+pub struct Budget {
+    remaining: Arc<AtomicUsize>,
+    denial: Arc<OnceLock<&'static str>>,
+}
+
+impl Budget {
+    pub fn denial(&self) -> Option<&'static str> {
+        self.denial.get().copied()
+    }
+
+    fn deny(&self, message: &'static str) -> ModelResponseError {
+        let _ = self.denial.set(message);
+        ModelResponseError::InvalidRequest {
+            message: message.to_owned(),
+        }
+    }
+
+    fn admit(&self, item: &ResponseItem) -> Result<(), ModelResponseError> {
+        use ResponseItem::*;
+        match item {
+            // Core routes V1 functions by namespace and name, never by arguments or ID.
+            FunctionCall {
+                namespace: Some(ns),
+                name,
+                ..
+            } if ns == "multi_agent_v1"
+                && matches!(name.as_str(), "wait_agent" | "close_agent") =>
+            {
+                return Ok(());
+            }
+            Message { .. }
+            | AgentMessage { .. }
+            | Reasoning { .. }
+            | AdditionalTools { .. }
+            | FunctionCallOutput { .. }
+            | CustomToolCallOutput { .. }
+            | ToolSearchOutput { .. }
+            | Compaction { .. }
+            | ConfigurationUpdate { .. }
+            | CompactionTrigger { .. }
+            | ContextCompaction { .. } => return Ok(()),
+            _ => {}
+        }
+        self.remaining
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                left.checked_sub(1)
+            })
+            .map_err(|_| self.deny("Codex native delegation limit exceeded."))?;
+        // V1 handlers cannot accept custom payloads. Fail before routing alternate forms.
+        if !matches!(item, FunctionCall { .. }) {
+            return Err(self.deny("Unsupported native delegation call."));
+        }
+        Ok(())
+    }
+}
+
+impl ModelRequestContributor for Budget {
+    fn request(&self, _: ModelRequestInput<'_>) -> Option<Box<dyn ModelResponseInterceptor>> {
+        Some(Box::new(self.clone()))
+    }
+}
+
+impl ModelResponseInterceptor for Budget {
+    fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
+        stream::try_unfold((self, stream), |(budget, mut stream)| async move {
+            let Some(event) = stream.next().await else {
+                return Ok(None);
+            };
+            let event = event?;
+            if let ResponseEvent::OutputItemDone(item) = &event {
+                budget.admit(item)?;
+            }
+            Ok(Some((event, (budget, stream))))
+        })
+        .boxed()
+    }
 }

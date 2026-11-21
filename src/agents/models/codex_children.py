@@ -33,13 +33,23 @@ class CodexChildren:
     and resume agents within this tree. Closed ephemeral threads have no
     stored history for reopening or full-history forks. Descendants inherit
     the parent's model and permissions. Roles supply instructions only.
-    max_children limits open child threads across the tree, excluding the root.
-    A completed child can still occupy a slot until closed. max_depth counts
-    generations below the root. Neither limit bounds total requests or cost.
+    max_delegations caps attempts to spawn, resume or send input across
+    the tree, including failed calls. Unknown functions also count.
+    Only namespaced V1 wait and close functions are exempt. Other call
+    forms are rejected. Closing a child does not restore the budget.
+    Exceeding it stops the calling thread. Even if the parent finishes
+    normally, the SDK raises RuntimeError after joining the tree.
+    Already admitted calls can still run. max_depth counts generations
+    below the root.
+
+    Waiting, model continuations and transport retries can still incur
+    requests. Neither limit caps model requests or cost. For a hard
+    request budget, use Agent.as_tool with separate parent and child turn
+    limits and shared application admission before each send and retry.
     """
 
     roles: tuple[CodexRole, ...]
-    max_children: int
+    max_delegations: int
     max_depth: int = 1
 
     def __post_init__(self) -> None:
@@ -51,6 +61,6 @@ class CodexChildren:
             raise ValueError("Provide a nonempty tuple of CodexRole declarations.")
         if len({role.name.lower() for role in self.roles}) != len(self.roles):
             raise ValueError("Duplicate Codex role name.")
-        for value in (self.max_children, self.max_depth):
+        for value in (self.max_delegations, self.max_depth):
             if type(value) is not int or not 1 <= value <= 2**31 - 1:
                 raise ValueError("Codex child limits must be positive 32-bit integers.")

@@ -65,7 +65,7 @@ class CodexProvider(ModelProvider):
     Codex owns workspace tools and authentication; the Runner owns SDK function tools,
     handoffs, approvals, and conversation history. Each request uses an ephemeral thread.
 
-    Pass `children=CodexChildren(roles=(role,), max_children=2)` to isolate
+    Pass `children=CodexChildren(roles=(role,), max_delegations=2)` to isolate
     native delegation within each request. Select an exact V1 catalog model
     with `get_model`. This profile disables workspace tools, Code Mode and
     MCP servers. SDK tools, handoffs and native tool hooks are
@@ -504,6 +504,8 @@ class _CodexModel(Model):
                         raise native_hooks.error
                     break
                 if kind == "error":
+                    if children is not None and thread.delegation_error:
+                        raise RuntimeError(thread.delegation_error)
                     raise RuntimeError("Codex model turn failed.")
                 if kind == "token_count":
                     info = message.get("info")
@@ -729,6 +731,9 @@ class _CodexModel(Model):
                 # Keep the attempt failure primary when joined cleanup also fails.
                 if failure is None:
                     raise
+        # A parent can finish without waiting for a child that exceeded the limit.
+        if children is not None and thread.delegation_error:
+            raise RuntimeError(thread.delegation_error)
         if native_pending:
             if not interrupt_requested:
                 raise RuntimeError("Codex finished with an incomplete native tool call.")

@@ -414,6 +414,11 @@ impl Thread {
         Ok(tool_hooks::registered(&self.lease.thread, server))
     }
 
+    #[getter]
+    fn delegation_error(&self) -> Option<&'static str> {
+        self.lease.services.budget.as_ref()?.denial()
+    }
+
     fn inject_items<'py>(
         &self,
         py: Python<'py>,
