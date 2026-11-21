@@ -112,6 +112,25 @@ def test_public_model_export_omits_hidden_reasoning_and_embedded_media(exporter)
     assert "omitted" in serialized
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"content": [{"type": "refusal", "refusal": "Visible refusal."}]},
+        {"content": None, "refusal": "Visible refusal."},
+    ],
+    ids=["responses", "chat-completions"],
+)
+def test_public_model_export_preserves_visible_refusal_text(exporter, message) -> None:
+    with trace("refusal"), generation_span(model="test-model") as model:
+        model.span_data.operation.detail = "content"
+        model.span_data.output = [{"role": "assistant", **message}]
+    attributes = exporter.get_finished_spans()[0].attributes
+    messages = json.loads(json.dumps(attributes["gen_ai.output.messages"]))
+    assert messages == [
+        {"role": "assistant", "parts": [{"type": "text", "content": "Visible refusal."}]}
+    ]
+
+
 def test_public_tool_export_omits_oversized_structured_result_with_bounded_json(exporter) -> None:
     with trace("content"), function_span("read_file") as tool:
         tool.span_data.operation.detail = "content"

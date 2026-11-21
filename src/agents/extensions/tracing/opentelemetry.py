@@ -117,9 +117,14 @@ def _messages(value: Any, *, output: bool = False) -> list[dict[str, Any]]:
                         continue
                     if part.get("type") in ("input_text", "output_text", "text"):
                         parts.append({"type": "text", "content": part.get("text", "")})
+                    elif part.get("type") == "refusal":
+                        parts.append({"type": "text", "content": part.get("refusal", "")})
                     else:
                         # Preserve part order without exporting media or hidden reasoning.
                         parts.append({"type": "openai.omitted", "reason": "unsupported_content"})
+            refusal = item.get("refusal")
+            if isinstance(refusal, str):
+                parts.append({"type": "text", "content": refusal})
             for call in item.get("tool_calls") or ():
                 if not isinstance(call, Mapping) or call.get("type") != "function":
                     continue
