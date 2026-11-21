@@ -26,6 +26,7 @@ from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..logger import log_model_action_debug, logger
+from ..request_capture import _http_exchange, _model_counts
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import Tool
 from ..tracing import generation_span
@@ -769,7 +770,8 @@ class OpenAIChatCompletionsModel(Model):
             )
         create_kwargs.update(model_settings.extra_args or {})
 
-        ret = await self._get_client().chat.completions.create(**create_kwargs)
+        with _http_exchange(_model_counts(self)):
+            ret = await self._get_client().chat.completions.create(**create_kwargs)
 
         if isinstance(ret, ChatCompletion):
             return ret

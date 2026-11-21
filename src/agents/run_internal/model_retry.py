@@ -23,6 +23,7 @@ from ..models._retry_runtime import (
     provider_managed_retries_disabled,
     websocket_pre_event_retries_disabled,
 )
+from ..request_capture import _model_submission
 from ..retry import (
     ModelRetryAdvice,
     ModelRetryAdviceRequest,
@@ -598,6 +599,7 @@ def _should_disable_websocket_pre_event_retry(
 async def get_response_with_retry(
     *,
     get_response: GetResponseCallable,
+    model: object = None,
     rewind: RewindCallable,
     retry_settings: ModelRetrySettings | None,
     get_retry_advice: GetRetryAdviceCallable,
@@ -637,6 +639,7 @@ async def get_response_with_retry(
                     ),
                     websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
                     model_retry_scope(model_spans, request_attempt),
+                    _model_submission(model, first=request_attempt == 1),
                 ):
                     response = await _await_model_attempt(get_response(), timeout)
                 response.usage = apply_retry_attempt_usage(

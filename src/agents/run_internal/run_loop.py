@@ -2690,6 +2690,7 @@ async def run_single_turn_streamed(
     # explicitly instead of waiting for garbage collection to finalize the generator chain.
     async with aclosing(
         model_run_context_stream(
+            model,
             retry_stream,
             tool_use_tracker,
             ModelToolHooks(public_agent, context_wrapper, hooks, run_config.tool_execution),
@@ -3139,6 +3140,7 @@ async def get_new_response(
             rewind=rewind_model_request,
             retry_settings=model_settings.retry,
             reported_usage=reported_usage,
+            model=model,
             get_retry_advice=model.get_retry_advice,
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,

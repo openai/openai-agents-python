@@ -43,6 +43,7 @@ from .lifecycle import RunHooks
 from .logger import log_model_and_tool_action_warning, log_tool_action_warning, logger
 from .memory import Session
 from .memory.resumable_session import ResumableSession
+from .request_capture import _capture_run, _claim_run
 from .result import RunResult, RunResultStreaming
 from .run_config import (
     DEFAULT_MAX_TURNS,
@@ -584,13 +585,16 @@ class AgentRunner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
-        session = prepare_run_session(kwargs.get("session"), input)
-        kwargs["session"] = session
-        run_config, owns_model_provider = _normalize_run_config_for_runner(kwargs.get("run_config"))
-        cast(dict[str, Any], kwargs)["run_config"] = run_config
         redacted_error: BaseException | None = None
         # Mask caller tracing before any run-owned preparation or cleanup can execute.
         with contextlib.ExitStack() as trace_stack:
+            trace_stack.enter_context(_capture_run(_claim_run()))
+            session = prepare_run_session(kwargs.get("session"), input)
+            kwargs["session"] = session
+            run_config, owns_model_provider = _normalize_run_config_for_runner(
+                kwargs.get("run_config")
+            )
+            cast(dict[str, Any], kwargs)["run_config"] = run_config
             trace_stack.enter_context(
                 operation_tracing_scope(run_config.tracing, run_config.trace_include_sensitive_data)
             )
@@ -2528,6 +2532,9 @@ class AgentRunner:
         try:
             return self._run_sync_impl(starting_agent, input, **kwargs)
         except BaseException as error:
+            # Setup can fail before the delegated async invocation claims the capture.
+            if (pending := _claim_run()) is not None:
+                pending.finish()
             if _is_error_data_redacted(error):
                 redacted_source = error
             else:
@@ -2639,6 +2646,19 @@ class AgentRunner:
                     default_loop.run_until_complete(default_loop.shutdown_asyncgens())
 
     def run_streamed(
+        self,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem] | RunState[TContext],
+        **kwargs: Unpack[RunOptions[TContext]],
+    ) -> RunResultStreaming:
+        run = _claim_run()
+        with _capture_run(run, streamed=True):
+            result = self._run_streamed_impl(starting_agent, input, **kwargs)
+            if run is not None and run.owner == "root" and result.run_loop_task is not None:
+                result.run_loop_task.add_done_callback(run.finish)
+            return result
+
+    def _run_streamed_impl(
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem] | RunState[TContext],
