@@ -152,15 +152,54 @@ Input guardrails with `run_in_parallel=False` finish before model execution. Can
 
 ## Streaming, history, and cancellation
 
-Reuse a `CodexProvider` across calls in the same workspace. The provider shares a native thread manager and starts a fresh, ephemeral Codex thread for each model call. The SDK supplies the instructions, messages, tool results, and schemas for that call. Keep conversation history in an [SDK session](../sessions/index.md) or pass `result.to_input_list()` to the next run. When your application finishes using the provider, call `await provider.aclose()` to release its shared resources.
+Reuse a `CodexProvider` across calls in the same workspace. The provider shares a native thread manager and starts a fresh, ephemeral Codex thread for each request from the Runner. One request can include several model calls and native tool executions. The SDK supplies the instructions, messages, tool results, and schemas for the request. Keep conversation history in an [SDK session](../sessions/index.md) or pass `result.to_input_list()` to the next run. When your application finishes using the provider, call `await provider.aclose()` to release its shared resources.
 
 Use `Runner.run_streamed()` and consume `result.stream_events()` as with the default provider. Text deltas arrive during generation. When the model supplies a requested reasoning summary, the stream also includes `response.reasoning_summary_text.delta` events. SDK function calls supply their complete JSON arguments in one update, rather than an argument-by-argument stream.
 
-Call `result.cancel()` to stop a streaming run immediately, or `result.cancel(mode="after_turn")` to stop after the current turn. Continue consuming the stream to observe completion. For a non-streaming async run, cancel its asyncio task. The provider closes the ephemeral thread when the model call ends.
+Call `result.cancel()` to stop a streaming run immediately, or `result.cancel(mode="after_turn")` to stop after the current turn. Continue consuming the stream to observe completion. For a non-streaming async run, cancel its asyncio task. The provider has been closing the ephemeral thread at the end of each Runner request.
 
 Strict structured output uses Codex's output schema. With `strict_json_schema=False`, the provider puts the schema in the instructions and the SDK validates the final JSON. The latter does not constrain generation on the server.
 
 `OpenAIResponsesCompactionSession` can compact full input history and replay the encrypted result into Codex. It calls the separate OpenAI compact endpoint and needs an OpenAI client or credentials. `compaction_mode="previous_response_id"` cannot use Codex's local turn IDs as stored Responses IDs. See [session compaction](../sessions/index.md).
+
+## Operation tracing
+
+The embedded Codex provider has been forwarding model and native tool observations to the SDK trace processors. The [English OpenTelemetry example](https://openai.github.io/openai-agents-python/tracing/#opentelemetry) has been using the same processor registration for Codex and the default Responses provider.
+
+The SDK wheel has been bundling Codex Core in its native extension. `CodexProvider()` has been loading that extension for model calls and operation observations.
+
+```python
+from agents import RunConfig
+from agents.models.codex import CodexProvider
+
+config = RunConfig(
+    model_provider=CodexProvider(),
+    tracing={"operation_detail": "metadata"},
+    trace_include_sensitive_data=False,
+)
+```
+
+Codex has been supplying timestamps, outcomes and available token counts for each model call and native tool execution. The Runner has been recording Python tool executions once. As with the Responses provider, each logical model call has been producing one `ResponseSpanData` span and one OTel `chat` span, including retry events.
+
+With `trace_include_sensitive_data=True`, SDK processors have been receiving the following fields for each invocation of the Codex model by the Runner.
+
+| `operation_detail` | Model spans | Native tool spans |
+| --- | --- | --- |
+| Omitted | Caller input on the first span (`.input`), raw returned response on the last successful span (`.response`), and no `.output`; paused approval responses have not been attached | Metadata |
+| `"metadata"` | Metadata | Metadata |
+| `"content"` | Bounded submitted messages (`.input`) and completed visible output items (`.output`) per call, without a raw `.response` | Bounded arguments and available results |
+
+By default, native tool results such as file contents have been reaching SDK processors through the returned response and replayed input history. OpenTelemetry has been exporting payloads only with `"content"`. Setting `trace_include_sensitive_data=False` has been blocking payload capture in all three modes.
+
+In content mode, model spans have been retaining completed output items and omitting deltas from unfinished items. Native tool spans have been capturing the accepted model-visible result after output hooks. If Core has reported tool completion without a corresponding accepted result, the SDK has been recording an omission with `reason="output_unavailable"`. Native content capture has been omitting unsupported or oversized values with `reason="unsupported_or_oversized_content"`.
+
+Paused native approval items have been carrying private recovery checkpoints. The SDK has not been attaching paused approval responses or their checkpoints to model spans, including under the default capture policy. Saved approval checkpoints have still been requiring protection as sensitive application data.
+
+When a run has been ending with unfinished operations, the SDK has been closing their spans with `outcome="interrupted"` and `estimated_end=True`. The SDK has been estimating that end time in Python.
+
+A `codex.tracing.coverage` span has been identifying incomplete observations through `coverage="partial"` and a `reason` field. A completed model request without inference observations has been producing `reason="missing_operations"`. A full observation queue has been producing `reason="dropped_operations"`. OpenTelemetry has been exposing partial coverage as `openai.agents.operation.coverage="partial"`.
+
+`tracing_disabled=True` has been disabling SDK capture for the run. For capture settings and retry event fields, see [Payload capture (English)](https://openai.github.io/openai-agents-python/tracing/#payload-capture).
 
 ## Supported features and limits
 
