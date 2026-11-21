@@ -397,3 +397,125 @@ async def test_chat_input_capture_shares_one_budget_without_changing_the_request
         assert "user-message" in json.dumps(captured)
         assert "truncated" in json.dumps(captured)
         assert data.tools is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("mode", ["default", "content", "metadata", "veto"])
+async def test_any_llm_responses_capture_bounds_sdk_and_otel_without_changing_provider_data(
+    exporter, monkeypatch, stream: bool, mode: str
+) -> None:
+    pytest.importorskip("any_llm")
+    from any_llm.providers.openai import base as any_llm_openai
+
+    from agents import ModelSettings
+    from agents.extensions.models.any_llm_model import AnyLLMModel
+    from agents.tracing.span_data import ResponseSpanData
+    from tests.models.test_any_llm_model import _response, _responses_output
+
+    native = SpanProcessorForTests()
+    add_trace_processor(native)
+    input_secret, output_secret = "INPUT_CREDENTIAL_CANARY", "OUTPUT_CREDENTIAL_CANARY"
+    prompt = "UNSENT_INPUT_CANARY"
+    wire_input = [
+        {"role": "user", "content": json.dumps({"api_key": input_secret, "query": "input-visible"})}
+    ]
+    wire_instructions = "wire-instructions-visible " + "i" * 40_000
+    long_output = "answer-visible " + "o" * 40_000
+    response = _response(json.dumps({"password": output_secret, "result": "output-visible"}))
+    content = response.output[0].content
+    assert content is not None
+    content.extend(_responses_output(long_output)[0].content)
+    payload = response.model_dump(mode="json")
+    requests = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(json.loads(request.content))
+        if stream:
+            event = {"type": "response.completed", "response": payload, "sequence_number": 0}
+            return httpx2.Response(
+                200,
+                content=f"event: response.completed\ndata: {json.dumps(event)}\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx2.Response(200, json=payload)
+
+    async with AsyncOpenAI(
+        api_key="test",
+        base_url="https://provider.example/v1",
+        max_retries=0,
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler), trust_env=False),
+    ) as client:
+        # Keep the real AnyLLM provider and replace only its HTTP client.
+        monkeypatch.setattr(any_llm_openai, "AsyncOpenAI", lambda **kwargs: client)
+        agent = Agent(
+            name="worker",
+            model=AnyLLMModel("openai/fixture", api="responses", api_key="test"),
+            instructions="UNSENT_INSTRUCTIONS_CANARY",
+            model_settings=ModelSettings(
+                extra_body={"input": wire_input, "instructions": wire_instructions}
+            ),
+        )
+        config = RunConfig(
+            tracing={}
+            if mode == "default"
+            else {"operation_detail": "metadata" if mode == "metadata" else "content"},
+            trace_include_sensitive_data=mode != "veto",
+        )
+        if stream:
+            result = Runner.run_streamed(agent, prompt, run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(agent, prompt, run_config=config)
+    assert len(requests) == 1
+    assert requests[0]["input"] == wire_input
+    assert requests[0]["instructions"] == wire_instructions
+    assert long_output in result.final_output and output_secret in result.final_output
+    data = next(
+        span.span_data
+        for span in native.get_ordered_spans()
+        if span.span_data.type in {"response", "generation"}
+    )
+    if isinstance(data, ResponseSpanData):
+        captured_input = data.input
+        captured_output = (
+            [item.model_dump(mode="json") for item in data.response.output]
+            if data.response
+            else None
+        )
+    else:
+        captured_input = {"input": data.input, "model_config": data.model_config}
+        captured_output = data.output
+    attributes = dict(
+        next(
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("gen_ai.operation.name") == "chat"
+        ).attributes
+    )
+    exported_input = {
+        key: attributes[key]
+        for key in ("gen_ai.input.messages", "gen_ai.system_instructions")
+        if key in attributes
+    }
+    exported_output = attributes.get("gen_ai.output.messages")
+    if mode == "default":
+        assert isinstance(data, ResponseSpanData)
+        assert data.input == [{"role": "user", "content": prompt}]
+        assert long_output in json.dumps(captured_output)
+        assert not exported_input and exported_output is None
+    elif mode in {"metadata", "veto"}:
+        assert data.input is None and captured_output is None
+        assert not exported_input and exported_output is None
+    else:
+        for value in (captured_input, captured_output, exported_input, exported_output):
+            encoded = json.dumps(value, ensure_ascii=False)
+            assert len(encoded.encode()) <= CONTENT_LIMIT
+            assert input_secret not in encoded and output_secret not in encoded
+            assert "UNSENT_" not in encoded and "truncated" in encoded
+        for value in (captured_input, exported_input):
+            assert "input-visible" in json.dumps(value)
+            assert "wire-instructions-visible" in json.dumps(value)
+        assert "output-visible" in json.dumps(captured_output)
