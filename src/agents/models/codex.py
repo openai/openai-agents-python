@@ -55,6 +55,7 @@ from ._codex_inputs import prepare_codex_history, prepare_dynamic_tools, sdk_too
 from ._codex_items import CodexCustomToolCallOutput, CodexFunctionToolCallOutput
 from ._codex_tool_hooks import CodexToolHooks
 from ._run_context import get_model_tool_hooks
+from .codex_children import CodexChildren as CodexChildren, CodexRole as CodexRole
 from .interface import Model, ModelProvider, ModelTracing
 
 
@@ -63,6 +64,17 @@ class CodexProvider(ModelProvider):
 
     Codex owns workspace tools and authentication; the Runner owns SDK function tools,
     handoffs, approvals, and conversation history. Each request uses an ephemeral thread.
+
+    Pass `children=CodexChildren(roles=(role,), max_children=2)` to isolate
+    native delegation within each request. Select an exact V1 catalog model
+    with `get_model`. This profile disables workspace tools, Code Mode and
+    MCP servers. SDK tools, handoffs and native tool hooks are
+    incompatible. Core can still accept structured inputs and read local
+    context under the parent's permissions. Core owns child results and joins
+    the tree when the request ends. Child IDs cannot resume in another request.
+
+    Without `children`, Core uses its ordinary settings, which can also enable
+    delegation. The SDK adds no roles or limits in that case.
     """
 
     _supports_stored_response_id = False
@@ -73,7 +85,11 @@ class CodexProvider(ModelProvider):
         cwd: str | os.PathLike[str] | None = None,
         config_overrides: Sequence[str] = (),
         api_key: str | None = None,
+        children: CodexChildren | None = None,
     ) -> None:
+        if children is not None and not isinstance(children, CodexChildren):
+            raise TypeError("children must be a CodexChildren declaration.")
+        self._children = children
         self._cwd = str(Path(cwd).resolve() if cwd is not None else Path.cwd())
         self._config_overrides = tuple(config_overrides)
         self._api_key = api_key
@@ -97,8 +113,11 @@ class CodexProvider(ModelProvider):
                 / "_codex_bin"
                 / ("codex-sdk-runtime.exe" if os.name == "nt" else "codex-sdk-runtime")
             )
+            options = {}
+            if self._children is not None:
+                options["children"] = self._children
             self._manager = native.Manager(
-                self._cwd, str(executable), list(self._config_overrides), self._api_key
+                self._cwd, str(executable), list(self._config_overrides), self._api_key, **options
             )
         return self._manager
 
@@ -288,6 +307,9 @@ class _CodexModel(Model):
             for tool in tools
         )
         native_hooks = None if sdk_sandbox else CodexToolHooks.for_run(bindings, identities)
+        children = provider._children
+        if children is not None and (tools or handoffs or sdk_sandbox or native_hooks):
+            raise UserError("Native children cannot use SDK tools, handoffs, or tool hooks.")
         if sdk_sandbox:
             system_instructions = "\n\n".join(
                 filter(

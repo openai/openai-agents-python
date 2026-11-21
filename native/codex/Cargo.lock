@@ -8053,6 +8053,7 @@ dependencies = [
  "codex-protocol",
  "codex-sandboxing",
  "codex-skills-extension",
+ "codex-thread-store",
  "codex-utils-rustls-provider",
  "codex-web-search-extension",
  "futures",

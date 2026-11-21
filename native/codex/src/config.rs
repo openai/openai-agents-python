@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 type Result<T> = std::result::Result<T, String>;
 
 pub struct CoreServices {
+    pub children: Option<Arc<crate::children::Children>>,
     pub config: Config,
     pub manager: Arc<ThreadManager>,
     home: PathBuf,
@@ -306,6 +307,8 @@ pub async fn build_services(
     helper_executable: PathBuf,
     overrides: Vec<String>,
     api_key: Option<String>,
+    children: Option<Arc<crate::children::Children>>,
+    model: Option<&str>,
 ) -> Result<CoreServices> {
     codex_utils_rustls_provider::ensure_rustls_crypto_provider();
     let cwd = PathBuf::from(cwd)
@@ -317,6 +320,9 @@ pub async fn build_services(
     let home = find_codex_home().map_err(|e| e.to_string())?.to_path_buf();
     let helpers = HelperPaths::prepare(helper_executable)?;
     let mut overrides = parse_overrides(overrides)?;
+    if let Some(profile) = &children {
+        overrides.splice(0..0, parse_overrides(profile.defaults())?);
+    }
     // These are the provider's defaults, preceding caller overrides.
     overrides.splice(
         0..0,
@@ -416,6 +422,22 @@ pub async fn build_services(
             .await
             .map_err(|e| e.to_string())?;
     }
+    let mut models = build_models_manager(&config, auth.clone());
+    if let Some(profile) = &children {
+        profile.validate(&config)?;
+        let name = model.ok_or("Select an explicit V1 catalog model for native children.")?;
+        let catalog = models
+            .raw_model_catalog(
+                codex_models_manager::manager::RefreshStrategy::OnlineIfUncached,
+                config.http_client_factory(),
+            )
+            .await;
+        models = Arc::new(codex_models_manager::manager::StaticModelsManager::new(
+            Some(auth.clone()),
+            crate::children::catalog(catalog, name)?,
+            codex_models_manager::ModelOrigin::ExplicitConfig,
+        ));
+    }
     let paths = ExecServerRuntimeOptions::from_optional_paths(
         config.codex_self_exe.clone(),
         config.codex_linux_sandbox_exe.clone(),
@@ -434,7 +456,11 @@ pub async fn build_services(
         .await
         .map_err(|e| e.to_string())?,
     );
-    let state_db = init_state_db(&config).await;
+    let state_db = if children.is_some() {
+        None
+    } else {
+        init_state_db(&config).await
+    };
     let installation_id = resolve_installation_id(&config.codex_home)
         .await
         .map_err(|e| e.to_string())?;
@@ -483,7 +509,7 @@ pub async fn build_services(
         let mut manager = ThreadManager::new(
             &config,
             auth.clone(),
-            build_models_manager(&config, auth.clone()),
+            models,
             CodexAppsToolsCache::default(),
             SessionSource::Exec,
             environments,
@@ -493,7 +519,11 @@ pub async fn build_services(
             )),
             None,
             passthrough_image_store(),
-            thread_store_from_config(&config, state_db.clone()),
+            if children.is_some() {
+                Arc::new(codex_thread_store::InMemoryThreadStore::default())
+            } else {
+                thread_store_from_config(&config, state_db.clone())
+            },
             local_agent_graph_store_from_state_db(state_db.as_ref()),
             installation_id,
             None,
@@ -513,6 +543,7 @@ pub async fn build_services(
         .borrow()
         .source_generation;
     Ok(CoreServices {
+        children,
         config,
         manager,
         home,
@@ -899,6 +930,12 @@ pub async fn prepare_config(services: &CoreServices, attempt: &Value) -> Result<
             hooks,
             config.multi_agent_v2.tool_namespace.as_deref(),
         )?;
+    }
+    if let Some(profile) = &services.children {
+        profile.validate(&config)?;
+        if config.model.as_deref() != attempt["model"].as_str() {
+            return Err("Codex policy changed the native child model.".into());
+        }
     }
     configure_tools(
         &mut config,

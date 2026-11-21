@@ -47,14 +47,17 @@ def model_endpoint():
                 "created_at": 1,
                 "model": request.get("model", "gpt-5.4"),
                 "status": "completed",
-                "output": [item],
+                "output": item if isinstance(item, list) else [item],
                 "parallel_tool_calls": True,
                 "tools": [],
                 "tool_choice": "auto",
             }
             events = [
                 {"type": "response.created", "response": response},
-                {"type": "response.output_item.done", "item": item},
+                *(
+                    {"type": "response.output_item.done", "item": value}
+                    for value in response["output"]
+                ),
                 {"type": "response.completed", "response": response},
             ]
             body = (
@@ -90,7 +93,7 @@ def final_message():
     }
 
 
-def codex_fixture(tmp_path, port, monkeypatch, extra=()):
+def codex_fixture(tmp_path, port, monkeypatch, extra=(), **options):
     if find_spec("agents.models._codex_native") is None:
         pytest.skip("Install the SDK's embedded Codex extension to exercise this path.")
     config_home = tmp_path / "codex"
@@ -112,6 +115,7 @@ def codex_fixture(tmp_path, port, monkeypatch, extra=()):
             "model_providers.fixture.stream_max_retries=0",
             *extra,
         ],
+        **options,
     )
 
 
