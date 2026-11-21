@@ -1765,11 +1765,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         )
 
     async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
-        """List the resources available on the server."""
+        """List resources, returning an empty page if the peer omitted the capability."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
         session = self.session
         assert session is not None
+        if mcp_compat.resources_not_advertised(session):
+            return ListResourcesResult(resources=[])
         return await self._run_request_with_transport_error_redaction(
             "list resources",
             lambda: self._maybe_serialize_request(
@@ -1788,11 +1790,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def list_resource_templates(
         self, cursor: str | None = None
     ) -> ListResourceTemplatesResult:
-        """List the resource templates available on the server."""
+        """List templates, returning an empty page if the peer omitted resource support."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
         session = self.session
         assert session is not None
+        if mcp_compat.resources_not_advertised(session):
+            return ListResourceTemplatesResult.model_validate({"resourceTemplates": []})
         return await self._run_request_with_transport_error_redaction(
             "list resource templates",
             lambda: self._maybe_serialize_request(
