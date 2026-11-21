@@ -462,7 +462,8 @@ request_max_retries = 0
                 "call_id": call_id,
                 "arguments": json.dumps(
                     {
-                        "cmd": f'echo builtin-approved > "{target}"',
+                        # Keep the process alive long enough for Codex's async exit watcher.
+                        "cmd": f'sleep 1; echo builtin-approved > "{target}"',
                         "login": False,
                         "sandbox_permissions": "require_escalated",
                     }

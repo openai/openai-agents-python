@@ -75,12 +75,6 @@ pub(super) async fn resolve(
             | EventMsg::DynamicToolCallRequest(_) => {
                 return Err("Codex requested another decision while restoring the call.".into());
             }
-            EventMsg::ExecCommandEnd(end)
-                if answered && !patch && end.call_id == call_id && end.turn_id == turn_id =>
-            {
-                finished = true;
-                continue;
-            }
             EventMsg::PatchApplyEnd(end)
                 if answered && patch && end.call_id == call_id && end.turn_id == turn_id =>
             {
@@ -107,18 +101,24 @@ pub(super) async fn resolve(
                         "Codex could not confirm the saved approval before dispatch.".into(),
                     );
                 }
+                if !patch {
+                    // Core only returns a successful restored command result after exit.
+                    // Its asynchronous ExecCommandEnd event may follow TurnComplete.
+                    finished = output.success == Some(true);
+                }
                 result = output.body.to_text();
                 continue;
             }
             EventMsg::TurnComplete(_) => {
                 if !finished {
-                    // An exec can yield a handle to a still-running process. That handle
-                    // dies with this thread. Don't checkpoint its uncertain effect as done.
                     return Err("Codex could not confirm that the approved call finished.".into());
                 }
                 return result.ok_or_else(|| "Codex did not complete the approved call.".into());
             }
             EventMsg::TurnAborted(_) | EventMsg::Error(_) | EventMsg::ShutdownComplete => {
+                if answered {
+                    return Err("Codex could not confirm that the approved call finished.".into());
+                }
                 return Err(
                     "Codex could not complete the restored approval under current policy.".into(),
                 );
