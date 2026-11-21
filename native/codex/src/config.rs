@@ -34,6 +34,7 @@ type Result<T> = std::result::Result<T, String>;
 pub struct CoreServices {
     pub config: Config,
     pub manager: Arc<ThreadManager>,
+    pub operations: Arc<crate::operation_tracing::Observers>,
     home: PathBuf,
     cwd: PathBuf,
     overrides: Vec<(String, toml::Value)>,
@@ -447,8 +448,11 @@ pub async fn build_services(
         } else {
             "codex-code-mode-host"
         });
+    let operations = Arc::new(crate::operation_tracing::Observers::default());
     let manager = Arc::new_cyclic(|weak| {
         let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+        extensions.model_request_contributor(operations.clone());
+        extensions.tool_lifecycle_contributor(operations.clone());
         codex_guardian_v2::install(&mut extensions, auth.clone(), weak.clone());
         codex_core::install_agent_message_board(&mut extensions, weak.clone());
         codex_mcp_extension::install(&mut extensions);
@@ -515,6 +519,7 @@ pub async fn build_services(
     Ok(CoreServices {
         config,
         manager,
+        operations,
         home,
         cwd,
         overrides,
