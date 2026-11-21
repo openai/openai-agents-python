@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from typing import Any
 
 import pytest
@@ -35,6 +36,13 @@ TOOL_RESULT = "parity_tool_result_canary"
 ANSWER = "parity_answer_canary"
 FILE_CONTENT = "parity_native_file_canary"
 PAYLOADS = (PROMPT, INSTRUCTIONS, ARGUMENT, TOOL_RESULT, ANSWER)
+
+
+class _LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self) -> None:
+        # This fixture has been using numeric loopback addresses without reverse DNS.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 class _ResponsesFixture:
@@ -126,7 +134,7 @@ class _ResponsesFixture:
                 fixture.intervals.append((started, time.time_ns()))
                 self._reply(body, content_type)
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = _LoopbackHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(
             target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
         )
