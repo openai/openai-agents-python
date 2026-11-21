@@ -2539,6 +2539,8 @@ class RunState(Generic[TContext, TAgent]):
                 state_json,
                 validation_error_factory=validation_error_factory,
             )
+            if _has_native_approvals(state_json):
+                raise validation_error_factory(_UNSUPPORTED_NATIVE_APPROVALS, UserError)
 
             from .sandbox._mount_security import sanitize_run_state_sandbox_mount_authority
 
@@ -2588,6 +2590,28 @@ class RunState(Generic[TContext, TAgent]):
 # --------------------------
 # Private helpers
 # --------------------------
+
+
+_UNSUPPORTED_NATIVE_APPROVALS = (
+    "Run state contains unsupported native tool approvals. "
+    "Check for prior effects before starting a new run with SDK tools."
+)
+
+
+def _has_native_approvals(state: dict[str, Any]) -> bool:
+    """Check nested agent runs before best-effort context restoration can skip a child."""
+    response = state.get("last_processed_response")
+    if not isinstance(response, dict):
+        return False
+    if response.get("native_approvals"):
+        return True
+    functions = response.get("functions")
+    if isinstance(functions, list):
+        for entry in functions:
+            child = entry.get("agent_run_state") if isinstance(entry, dict) else None
+            if isinstance(child, dict) and _has_native_approvals(child):
+                return True
+    return False
 
 
 def _validate_run_state_json_value(value: object) -> None:
@@ -4235,13 +4259,6 @@ async def _build_run_state_from_json(
         state_json,
         validation_error_factory=validation_error_factory,
     )
-    processed_response = state_json.get("last_processed_response")
-    if isinstance(processed_response, Mapping) and processed_response.get("native_approvals"):
-        raise validation_error_factory(
-            "Run state contains unsupported native tool approvals. "
-            "Start a new run using SDK tools.",
-            UserError,
-        )
     schema_major, schema_minor = (int(part) for part in schema_version.split(".", maxsplit=1))
     programmatic_major, programmatic_minor = (
         int(part) for part in _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
@@ -5712,7 +5729,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "RunState tool invocation must be a mapping.",
         "RunState tool invocation contains invalid lifecycle data.",
         "Tool input rewrites require RunState schema 1.23.",
-        "Run state contains unsupported native tool approvals. Start a new run using SDK tools.",
+        _UNSUPPORTED_NATIVE_APPROVALS,
         "RunState tool input rewrite is invalid.",
         "Hosted MCP approval decisions require a non-empty request id.",
         (

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -53,12 +54,22 @@ CONFIG = RunConfig(tracing_disabled=True)
 
 
 @pytest.mark.asyncio
-async def test_saved_native_approval_cannot_become_an_sdk_tool_approval() -> None:
+@pytest.mark.parametrize("nested", [False, True], ids=["direct", "agent-as-tool"])
+@pytest.mark.parametrize(
+    "with_context_callback", [False, True], ids=["default", "context-callback"]
+)
+@pytest.mark.parametrize("loader", ["run-state", "session"])
+async def test_saved_native_approval_cannot_become_an_sdk_tool_approval(
+    nested: bool, with_context_callback: bool, loader: str, tmp_path: Path
+) -> None:
     store = MemoryStore()
     session = await ResumableSession.create(store)
+    workspace = tmp_path / "unchanged.txt"
+    workspace.write_text("pre-existing work")
 
     @tool(needs_approval=True)
     def exec_command(command: str) -> str:
+        workspace.write_text(command)
         pytest.fail("A native approval cannot authorize a matching SDK tool.")
 
     agent = Agent(
@@ -66,12 +77,23 @@ async def test_saved_native_approval_cannot_become_an_sdk_tool_approval() -> Non
         model=ScriptedModel([[get_function_tool_call("exec_command", '{"command":"original"}')]]),
         tools=[exec_command],
     )
+    if nested:
+        agent = Agent(
+            name="coordinator",
+            model=ScriptedModel([[get_function_tool_call("delegate", '{"input":"Run command"}')]]),
+            tools=[agent.as_tool("delegate", "Delegate the command")],
+        )
     await Runner.run(
         agent, "Run command", session=session, context={"test": True}, run_config=CONFIG
     )
     checkpoint = store.checkpoint(session.session_id)
     snapshot = json.loads(checkpoint["run_state"])
-    processed = snapshot["last_processed_response"]
+    pending_state = (
+        snapshot["last_processed_response"]["functions"][0]["agent_run_state"]
+        if nested
+        else snapshot
+    )
+    processed = pending_state["last_processed_response"]
     # An earlier preview stored native actions outside the SDK function queue.
     processed["native_approvals"] = copy.deepcopy(processed["interruptions"])
     processed["functions"] = []
@@ -79,16 +101,25 @@ async def test_saved_native_approval_cannot_become_an_sdk_tool_approval() -> Non
     stored = json.dumps(checkpoint)
     store.records[session.session_id] = stored
 
-    def restore_context(value: dict[str, Any]) -> dict[str, Any]:
-        pytest.fail("Unsupported checkpoints must fail before restoring application context.")
+    context_callbacks: list[str] = []
 
-    with pytest.raises(UserError, match="unsupported native tool approvals"):
-        await RunState.from_json(agent, snapshot, context_deserializer=restore_context)
-    resumed = await ResumableSession.resume(store, session.session_id)
-    with pytest.raises(ResumableSessionError) as failure:
-        await resumed.load_state(agent, context_deserializer=restore_context)
-    assert failure.value.reason == "invalid_state"
+    def restore_context(value: dict[str, Any]) -> dict[str, Any]:
+        context_callbacks.append("restored")
+        return value
+
+    context_deserializer = restore_context if with_context_callback else None
+    if loader == "run-state":
+        with pytest.raises(UserError, match="unsupported native tool approvals"):
+            await RunState.from_json(agent, snapshot, context_deserializer=context_deserializer)
+    else:
+        resumed = await ResumableSession.resume(store, session.session_id)
+        with pytest.raises(ResumableSessionError) as failure:
+            await resumed.load_state(agent, context_deserializer=context_deserializer)
+        assert failure.value.reason == "invalid_state"
     assert store.records[session.session_id] == stored
+    assert store.checkpoint(session.session_id)["status"] == "paused"
+    assert workspace.read_text() == "pre-existing work"
+    assert not context_callbacks
 
 
 async def run_agent(
