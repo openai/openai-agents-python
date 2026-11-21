@@ -3916,7 +3916,56 @@ async def test_agent_as_tool_stream_backlog_overflow_stops_nested_run(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_manager_joins_its_streamed_specialist_only() -> None:
+async def test_cancelled_manager_stops_queued_callbacks_after_late_cleanup_error() -> None:
+    cleaning = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+    received: list[AgentToolStreamEvent] = []
+
+    async def observe(payload: AgentToolStreamEvent) -> None:
+        received.append(payload)
+        if len(received) > 1:
+            return
+        observer = asyncio.current_task()
+        assert observer is not None
+        observer.add_done_callback(lambda _: finished.set())
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+            raise OSError("callback cleanup failed")
+
+    worker = Agent(name="worker", model=ScriptedModel([[get_text_message("done")]]))
+    delegate = worker.as_tool(
+        "ask", "Ask worker", on_stream=observe, on_stream_max_pending_events=2
+    )
+    manager = Agent(
+        name="manager",
+        tools=[delegate],
+        model=ScriptedModel([[get_function_tool_call("ask", '{"input":"go"}')]]),
+    )
+    parent = asyncio.create_task(
+        Runner.run(manager, "go", run_config=RunConfig(tracing_disabled=True))
+    )
+    try:
+        # Overflow cancels the observer before the manager receives cancellation.
+        await asyncio.wait_for(cleaning.wait(), 2)
+        parent.cancel()
+        done, _ = await asyncio.wait((parent,), timeout=2)
+        assert parent in done and parent.cancelled()
+    finally:
+        release.set()
+        if not parent.done():
+            parent.cancel()
+        await asyncio.gather(parent, return_exceptions=True)
+    await asyncio.wait_for(finished.wait(), 2)
+    assert len(received) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stalled", [False, True], ids=["cooperative", "stalled"])
+async def test_cancelled_manager_joins_its_streamed_specialist_only(stalled: bool) -> None:
     started = asyncio.Event()
     sibling_started = asyncio.Event()
     cleaning = asyncio.Event()
@@ -3980,10 +4029,17 @@ async def test_cancelled_manager_joins_its_streamed_specialist_only() -> None:
         assert [
             item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)
         ] == ["worker finished"]
-        assert not first.done()
+        if stalled:
+            done, _ = await asyncio.wait((first,), timeout=2)
+            assert first in done
+            assert not cleaned.is_set()
+        else:
+            assert not first.done()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(first, 2)
+        if stalled:
+            await asyncio.wait_for(cleaned.wait(), 2)
         assert cleaned.is_set()
     finally:
         release.set()

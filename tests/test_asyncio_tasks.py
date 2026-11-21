@@ -154,9 +154,17 @@ async def test_parent_cancellation_during_stream_teardown_joins_cleanup(
             await release.wait()
             cleaned.set()
 
+    closed = asyncio.Event()
+
+    async def close() -> None:
+        if producer_fails or cleaned.is_set():
+            closed.set()
+
     producer, consumer = (fail, run) if producer_fails else (run, fail)
     task = asyncio.create_task(
-        run_producer_consumer(producer(), consumer(), fail_fast_exceptions=(asyncio.QueueFull,))
+        run_producer_consumer(
+            producer(), consumer(), fail_fast_exceptions=(asyncio.QueueFull,), close_producer=close
+        )
     )
     try:
         await asyncio.wait_for(cleaning.wait(), timeout=2)
@@ -165,6 +173,7 @@ async def test_parent_cancellation_during_stream_teardown_joins_cleanup(
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=2)
         assert cleaned.is_set()
+        assert closed.is_set()
     finally:
         release.set()
         task.cancel()

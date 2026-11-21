@@ -14,6 +14,8 @@ T6 = TypeVar("T6")
 TProducer = TypeVar("TProducer")
 TConsumer = TypeVar("TConsumer")
 
+_FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS = 0.25
+
 
 def _consume_future_exception(future: asyncio.Future[Any]) -> None:
     """Retrieve a completed future's exception without changing its result semantics."""
@@ -157,12 +159,16 @@ async def gather_with_cancel(
 
 
 async def _join_cleanup(*tasks: Awaitable[Any]) -> None:
-    """Finish teardown without forwarding further cancellation into child cleanup."""
-    drain = asyncio.gather(*tasks, return_exceptions=True)
+    """Wait one grace period without forwarding further cancellation into child cleanup."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS
+    pending = {asyncio.ensure_future(task) for task in tasks}
+    for task in pending:
+        task.add_done_callback(_consume_future_exception)
     cancellation: asyncio.CancelledError | None = None
-    while not drain.done():
+    while pending and (remaining := deadline - loop.time()) > 0:
         try:
-            await asyncio.shield(drain)
+            _, pending = await asyncio.wait(pending, timeout=remaining)
         except asyncio.CancelledError as exc:
             cancellation = exc
     if cancellation is not None:
@@ -176,6 +182,7 @@ async def run_producer_consumer(
     *,
     fail_fast_exceptions: tuple[type[BaseException], ...] = (),
     on_failure: Callable[[], None] | None = None,
+    close_producer: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[TProducer, TConsumer]:
     """Run a producer and consumer with asymmetric failure handling.
 
@@ -184,7 +191,8 @@ async def run_producer_consumer(
     parent cancellation cancels and drains the sibling task. Producer failures matching
     ``fail_fast_exceptions`` also cancel the consumer without waiting for it to drain;
     the producer must not wait to signal completion in those cases. Before awaiting cancelled
-    tasks, ``on_failure`` runs synchronously so callers can stop upstream work during cleanup.
+    tasks, ``on_failure`` runs synchronously so callers can stop upstream work. The optional
+    ``close_producer`` runs after the producer stops, even if cleanup exceeds the grace period.
     """
     producer_task = asyncio.ensure_future(producer)
     consumer_task = asyncio.ensure_future(consumer)
@@ -194,7 +202,7 @@ async def run_producer_consumer(
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         if consumer_task in done:
             consumer_result = consumer_task.result()
-            producer_result = await producer_task
+            producer_result = await asyncio.shield(producer_task)
             return producer_result, consumer_result
 
         try:
@@ -202,10 +210,10 @@ async def run_producer_consumer(
         except BaseException as exc:
             if isinstance(exc, fail_fast_exceptions):
                 raise
-            await consumer_task
+            await asyncio.shield(consumer_task)
             raise
 
-        consumer_result = await consumer_task
+        consumer_result = await asyncio.shield(consumer_task)
         return producer_result, consumer_result
     except GeneratorExit:
         # Coroutine closure cannot suspend; the owner must tear down child tasks.
@@ -216,5 +224,14 @@ async def run_producer_consumer(
                 task.cancel()
         if on_failure is not None:
             on_failure()
-        await _join_cleanup(*tasks)
+        if close_producer is None:
+            # The caller may own the iterator in an enclosing aclosing block.
+            await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+
+            async def finish_producer() -> None:
+                await asyncio.gather(producer_task, return_exceptions=True)
+                await close_producer()
+
+            await _join_cleanup(finish_producer(), consumer_task)
         raise

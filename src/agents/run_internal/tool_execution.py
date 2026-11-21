@@ -102,7 +102,12 @@ from ..tool_guardrails import (
 from ..tracing import FunctionSpanData, Span, SpanError, custom_span, function_span
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_function_tool_approval
-from ..util._asyncio_tasks import _consume_future_exception, _join_cleanup, gather_with_cancel
+from ..util._asyncio_tasks import (
+    _FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS,
+    _consume_future_exception,
+    _join_cleanup,
+    gather_with_cancel,
+)
 from ..util._custom_data import maybe_extract_custom_data, merge_custom_data
 from ..util._tool_errors import get_trace_tool_error
 from ._asyncio_progress import get_function_tool_task_progress_deadline
@@ -171,7 +176,6 @@ __all__ = [
 ]
 
 TToolSpanResult = TypeVar("TToolSpanResult")
-_FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS = 0.25
 _FUNCTION_TOOL_CANCELLED_IMMEDIATE_STEP_LIMIT = 64
 _FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS = 0.1
 
