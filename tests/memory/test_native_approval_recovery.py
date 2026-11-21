@@ -290,6 +290,9 @@ async def test_resume_exports_the_original_native_operation_under_current_trace_
     tmp_path, monkeypatch, threads, include_data
 ):
     class RestoredThread(FakeThread):
+        async def next_operation_event(self):
+            return None
+
         async def resolve_approval(self, call_json, request, preconditions, capture):
             assert capture == ("content" if include_data else "metadata")
             operation = {
@@ -334,3 +337,107 @@ async def test_resume_exports_the_original_native_operation_under_current_trace_
     assert operation_span.operation.outcome == "completed"
     assert operation_span.operation.tool_call_id == pending.call_id
     assert ("private commit message" in repr(operation_span.input)) == include_data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_data,cancel", [(False, False), (True, False), (False, True)])
+async def test_restored_native_execution_observes_live_start_and_interruption(
+    tmp_path, monkeypatch, threads, include_data, cancel
+):
+    from agents.tracing import get_current_span
+    from tests.testing_processor import SPAN_PROCESSOR_TESTING
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    closed = asyncio.Event()
+    notifications = asyncio.Queue()
+    calls = []
+    original_start = SPAN_PROCESSOR_TESTING.on_span_start
+    caller_spans = []
+
+    def on_start(span):
+        original_start(span)
+        if span.span_data.type == "function":
+            caller_spans.append(get_current_span())
+            started.set()
+
+    monkeypatch.setattr(SPAN_PROCESSOR_TESTING, "on_span_start", on_start)
+
+    # The FFI double preserves suspension and cancellation at the native execution boundary.
+    class RestoredThread(FakeThread):
+        async def next_operation_event(self):
+            return await notifications.get()
+
+        async def resolve_approval(self, call_json, request, preconditions, capture):
+            calls.append(capture)
+            operation = {
+                "threadId": self.thread_id,
+                "turnId": "restored-turn",
+                "operationId": "live-native-operation",
+                "kind": "tool",
+                "toolName": "exec_command",
+                "callId": json.loads(call_json)["call_id"],
+                "startedAt": "2026-11-20T06:00:00.000Z",
+            }
+            if capture == "content":
+                operation["input"] = {"value": "private command"}
+            await notifications.put(
+                json.dumps({"method": "turn/operation/started", "params": operation})
+            )
+            await release.wait()
+            completed = dict(operation, completedAt="2026-11-20T06:00:02.000Z", outcome="success")
+            await notifications.put(
+                json.dumps({"method": "turn/operation/completed", "params": completed})
+            )
+            await notifications.put(None)
+            return "native accepted", "restored-turn", [], None
+
+        async def close(self):
+            await super().close()
+            closed.set()
+
+    agent, store, session, config, _, _, _ = await setup_native(tmp_path, monkeypatch)
+    await Runner.run(agent, "start", session=session, run_config=config)
+    recovered = await ResumableSession.resume(store, session.session_id)
+    state = await recovered.load_state(agent)
+    state.approve(state.get_interruptions()[0])
+    monkeypatch.delattr(agent.model, "_run_approved_native_call")
+    threads[0].append(RestoredThread())
+    task = asyncio.create_task(
+        Runner.run(
+            agent,
+            state,
+            run_config=RunConfig(
+                tracing={"operation_detail": "content"},
+                trace_include_sensitive_data=include_data,
+            ),
+        )
+    )
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        assert not task.done()
+        assert calls == ["content" if include_data else "metadata"]
+        assert caller_spans[0] is not None
+        assert caller_spans[0].span_data.type == "agent"
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            release.set()
+            result = await asyncio.wait_for(task, 2)
+            assert result.final_output == "finished"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert closed.is_set()
+    (span,) = [
+        span
+        for span in fetch_ordered_spans()
+        if span.span_data.type == "function"
+        and span.span_data.operation.operation_id == "live-native-operation"
+    ]
+    assert span.span_data.operation.outcome == ("interrupted" if cancel else "completed")
+    assert span.started_at == "2026-11-20T06:00:00.000Z"
+    assert ("private command" in repr(span.span_data.input)) == include_data
+    assert span.parent_id == caller_spans[0].span_id

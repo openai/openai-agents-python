@@ -1003,6 +1003,7 @@ async def execute_tools_and_side_effects(
             new_response=new_response,
             processed_response=processed_response,
             run_state=run_state,
+            run_config=run_config,
         )
 
     execute_final_output_call = execute_final_output

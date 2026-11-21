@@ -10,6 +10,7 @@ from ..memory.resumable_session import _ResumableSessionBinding
 from ..models._codex_items import native_approval_checkpoint
 from ..models._run_context import ModelToolHooks, model_run_context
 from .run_steps import NextStepInterruption, NextStepRunAgain, SingleStepResult
+from .tool_execution import pending_tool_span
 from .turn_preparation import get_all_tools, get_model
 
 
@@ -65,6 +66,7 @@ def native_pending_step(
     new_response: Any,
     processed_response: Any,
     run_state: Any,
+    run_config: Any,
 ) -> SingleStepResult:
     _validate_native_plan(processed_response)
     binding = run_state._resumable_binding if run_state is not None else None
@@ -77,6 +79,8 @@ def native_pending_step(
         )
     pending = list(processed_response.native_approvals)
     processed_response.interruptions = pending
+    with pending_tool_span(run_config, pending[0].tool_name, pending[0].raw_item.call_id) as span:
+        span.span_data.operation.outcome = "paused"
     return SingleStepResult(
         original_input=original_input,
         model_response=new_response,
@@ -128,6 +132,8 @@ async def resolve_native_approval_step(
         tool_namespace=pending.tool_namespace,
     )
     if approved is None:
+        with pending_tool_span(run_config, pending.tool_name, call.call_id) as span:
+            span.span_data.operation.outcome = "paused"
         return SingleStepResult(
             original_input=original_input,
             model_response=new_response,
@@ -174,17 +180,18 @@ async def resolve_native_approval_step(
     else:
         from .tool_execution import resolve_approval_rejection_message
 
-        output = await resolve_approval_rejection_message(
-            context_wrapper=context_wrapper,
-            run_config=run_config,
-            tool_type="shell" if call.name == "exec_command" else "apply_patch",
-            tool_name=call.name,
-            call_id=call.call_id,
-            tool_call=call,
-            existing_pending=pending,
-            tool_lookup_key=pending.tool_lookup_key,
-            tool_namespace=pending.tool_namespace,
-        )
+        with pending_tool_span(run_config, pending.tool_name, call.call_id):
+            output = await resolve_approval_rejection_message(
+                context_wrapper=context_wrapper,
+                run_config=run_config,
+                tool_type="shell" if call.name == "exec_command" else "apply_patch",
+                tool_name=call.name,
+                call_id=call.call_id,
+                tool_call=call,
+                existing_pending=pending,
+                tool_lookup_key=pending.tool_lookup_key,
+                tool_namespace=pending.tool_namespace,
+            )
     result_item = ToolCallOutputItem(
         agent=bindings.public_agent,
         raw_item=cast(

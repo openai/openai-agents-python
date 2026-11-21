@@ -126,26 +126,55 @@ class CodexProvider(ModelProvider):
         observations = CodexOperationTracing(tracing, None, checkpoint["model"])
         thread = await self._native_manager().start_thread("[]", None, json.dumps(settings))
         interrupted = True
+        execution: asyncio.Future[Any] | None = None
+        observed_turn: str | None = None
+        observations.bind(thread.thread_id, "")
+
+        def observe(encoded: str) -> None:
+            nonlocal observed_turn
+            event = json.loads(encoded)
+            params = event.get("params")
+            if observed_turn is None and isinstance(params, dict):
+                turn = params.get("turnId")
+                if params.get("threadId") == thread.thread_id and isinstance(turn, str):
+                    observed_turn = turn
+                    observations.bind(thread.thread_id, turn)
+            observations.observe(event["method"], params)
+
         try:
-            output, turn_id, notifications, failure = await thread.resolve_approval(
-                json.dumps(checkpoint["call"]),
-                json.dumps(checkpoint["request"]),
-                json.dumps(checkpoint.get("preconditions")),
-                observations.request_mode(),
+            execution = asyncio.ensure_future(
+                thread.resolve_approval(
+                    json.dumps(checkpoint["call"]),
+                    json.dumps(checkpoint["request"]),
+                    json.dumps(checkpoint.get("preconditions")),
+                    observations.request_mode(),
+                )
             )
+            while (encoded := await thread.next_operation_event()) is not None:
+                observe(encoded)
+            output, turn_id, notifications, failure = await execution
             observations.bind(thread.thread_id, turn_id)
             for encoded in notifications:
-                event = json.loads(encoded)
-                observations.observe(event["method"], event.get("params"))
+                observe(encoded)
             if failure is not None:
                 raise RuntimeError(failure)
             interrupted = False
             return str(output)
         finally:
+            if execution is not None:
+                execution.cancel()
+
+            async def close() -> None:
+                try:
+                    await thread.close()
+                finally:
+                    if execution is not None:
+                        await asyncio.gather(execution, return_exceptions=True)
+
             try:
                 observations.close(interrupted=interrupted)
             finally:
-                await _join_close(thread.close())
+                await _join_close(close())
 
 
 def _pending_native_call(

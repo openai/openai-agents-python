@@ -499,6 +499,18 @@ impl Thread {
         })
     }
 
+    // The approval resolver owns Core events; this reader consumes only observations.
+    fn next_operation_event<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let lease = self.lease.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            lease.ensure_open().map_err(py_error)?;
+            Ok(lease
+                .operations
+                .next_notification(&lease.id.to_string())
+                .await)
+        })
+    }
+
     #[pyo3(signature = (call_json, request_json, preconditions_json, operation_capture=None))]
     fn resolve_approval<'py>(
         &self,
@@ -516,17 +528,18 @@ impl Thread {
             .map_err(|_| py_error("Invalid saved Codex file preconditions."))?;
         let lease = self.lease.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            lease.ensure_open().map_err(py_error)?;
-            // Restoration owns a separate capture queue, leaving normal next_event delivery intact.
-            let operations = operation_events::OperationEvents::new();
-            let capture = operations
-                .initializer(operation_capture.as_deref())
-                .map_err(py_error)?;
-            let (output, turn_id, failure) =
-                native_approval::resolve(&lease.thread, call, request, preconditions, capture)
-                    .await
-                    .map_err(py_error)?;
-            let notifications = operations.drain_notifications(&lease.id.to_string()).await;
+            let outcome = async {
+                lease.ensure_open()?;
+                let capture = lease.operations.initializer(operation_capture.as_deref())?;
+                native_approval::resolve(&lease.thread, call, request, preconditions, capture).await
+            }
+            .await;
+            lease.operations.finish_resolution();
+            let (output, turn_id, failure) = outcome.map_err(py_error)?;
+            let notifications = lease
+                .operations
+                .drain_notifications(&lease.id.to_string())
+                .await;
             Ok((output, turn_id, notifications, failure))
         })
     }
