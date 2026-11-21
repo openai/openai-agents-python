@@ -1,10 +1,14 @@
+"""Translate bounded native observations without affecting model or tool execution."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from datetime import datetime, timezone
 from typing import Any
 
 from openai.types.responses import Response
 
+from ..items import TResponseInputItem
 from ..tracing import (
     Span,
     custom_span,
@@ -14,246 +18,247 @@ from ..tracing import (
     response_span,
 )
 from ..tracing._content import _json, bound_content
-from ..tracing._model import acquire_model_span, finish_model_span, record_model_input
+from ..tracing._model import (
+    _add_usage,
+    acquire_model_span,
+    finish_model_span,
+    record_model_input,
+    record_retries,
+    restart_model_span,
+)
 from ..tracing.config import get_operation_detail
-from ..tracing.provider import _is_noop_span, _is_noop_trace
-from ..tracing.span_data import FunctionSpanData, GenerationSpanData, ResponseSpanData
-from ..tracing.util import _parse_iso_timestamp, time_iso
+from ..tracing.provider import _is_noop_span
 from ..usage import _response_usage_to_usage, model_usage_to_span_usage
 from ._codex_usage import _usage
 from .interface import ModelTracing
 
 
-@dataclass
-class _Operation:
-    span: Span[Any]
-    kind: str
-    ended_at: str | None = None
-
-
 class CodexOperationTracing:
-    """Translate turn-private operation facts into the current SDK trace."""
+    """Own observations for one ephemeral native thread, including tool restoration."""
 
-    def __init__(self, tracing: ModelTracing, input: Any, model: str | None) -> None:
-        self._tracing = tracing
-        self._detail = get_operation_detail(include_data=tracing.include_data())
+    def __init__(
+        self,
+        sdk_tools: set[tuple[str | None, str]],
+        input: str | list[TResponseInputItem] | None = None,
+        *,
+        expect_model: bool = True,
+    ) -> None:
+        # Core reports bare functions in its default "functions" namespace.
+        self._sdk_tools = {(namespace or "functions", name) for namespace, name in sdk_tools}
         self._input = input
-        self._model = model
-        self._parent = get_current_span()
-        active_trace = get_current_trace()
-        disabled = (
-            tracing.is_disabled()
-            or active_trace is None
-            or _is_noop_trace(active_trace)
-            or _is_noop_span(self._parent)
+        self._expect_model = expect_model
+        self._parent = get_current_span() or get_current_trace()
+        self._thread: Any = None
+        self._active: dict[tuple[str, str], Span[Any]] = {}
+        self._ends: dict[tuple[str, str], tuple[str, str]] = {}
+        self._ignored: set[str] = set()
+        self._reason: str | None = None
+        self._first_model: Span[Any] | None = None
+        self._last_model: tuple[Span[Any], str] | None = None
+        self._identity: str | None = None
+        self._tracing = ModelTracing.ENABLED_WITHOUT_DATA
+        self._capture = False
+
+    def bind(self, thread: Any, tracing: ModelTracing) -> None:
+        if tracing.is_disabled() or self._parent is None:
+            return
+        if _is_noop_span(response_span(parent=self._parent)):
+            return
+        self._capture = (
+            tracing.include_data() and get_operation_detail(include_data=True) == "content"
         )
-        self.mode = None if disabled else self._detail or "metadata"
-        self._thread_id: str | None = None
-        self._turn_id: str | None = None
-        self._operations: dict[str, _Operation] = {}
-        self._completed: dict[str, str] = {}
-        self._pending: _Operation | None = None
-        self._first_model = True
-        self._coverage_reason: str | None = None
-        self._coverage_emitted = False
+        self._tracing = tracing
+        try:
+            if self._capture:
+                thread.enable_tracing("content")
+            else:
+                thread.enable_tracing()
+            self._thread = thread
+        except Exception:
+            self._reason = "unavailable"
 
-    def request_mode(self) -> str | None:
-        # A hook may disable the provider after the active trace and parent were created.
-        if self.mode is not None and _is_noop_span(response_span(parent=self._parent)):
-            self.mode = None
-        return self.mode
-
-    def bind(self, thread_id: str, turn_id: str) -> None:
-        self._thread_id, self._turn_id = thread_id, turn_id
-
-    def observe(self, method: str, event: Any) -> None:
-        if self.mode is None:
+    async def watch(self) -> None:
+        if self._thread is None:
             return
         try:
-            if method == "turn/operation/dropped":
-                if event.get("threadId") != self._thread_id:
-                    raise ValueError("Unexpected observation thread.")
-                self._coverage_reason = "dropped_operations"
-                return
-            self._observe(method, event)
+            while True:
+                await self._thread.wait_for_operations()
+                self.drain()
         except Exception:
-            # Telemetry must never replay a model request or interrupt tool execution.
-            self._coverage_reason = "telemetry_error"
+            self._reason = "telemetry_error"
 
-    def _observe(self, method: str, event: dict[str, Any]) -> None:
-        if event.get("threadId") != self._thread_id or event.get("turnId") != self._turn_id:
-            self._coverage_reason = "telemetry_error"
+    def drain(self) -> None:
+        if self._thread is None:
             return
-        operation_id = event["operationId"]
-        if not isinstance(operation_id, str) or not operation_id:
-            raise ValueError("Missing operation identity.")
-        if method == "turn/operation/started":
-            if operation_id in self._operations or operation_id in self._completed:
-                raise ValueError("Duplicate operation start.")
-            kind = event["kind"]
-            started_at = self._timestamp(event["startedAt"])
-            parent_id = event.get("parentOperationId")
-            parent = self._parent
-            if parent_id is not None:
-                if parent_id in self._operations:
-                    parent = self._operations[parent_id].span
-                else:
-                    # Only identity is needed when a later child refers to a completed parent.
-                    parent = function_span(
-                        "codex.operation.parent",
-                        span_id=self._completed[parent_id],
-                        parent=self._parent,
-                    )
-            span: Span[Any]
+        try:
+            encoded = self._thread.drain_operations()
+            if not encoded or encoded == "[]":
+                return
+            for event in json.loads(encoded):
+                self._observe(event)
+        except Exception:
+            self._reason = "telemetry_error"
+
+    def _observe(self, event: dict[str, Any]) -> None:
+        kind = event["kind"]
+        if kind == "dropped":
+            self._reason = "dropped_operations"
+            return
+        phase = event["phase"]
+        namespace = event.get("namespace") or "functions"
+        if kind == "tool":
+            if phase == "start" and (namespace, event["name"]) in self._sdk_tools:
+                self._ignored.add(event["id"])
+            if event["id"] in self._ignored:
+                return
+        key = kind, event["id"]
+        if phase in ("input", "output"):
+            span = self._active.get(key)
+            if span is not None:
+                self._content(span, kind, event)
+                if phase == "output" and key in self._ends:
+                    outcome, at = self._ends.pop(key)
+                    self._finish(key, outcome, at)
+            return
+        at = datetime.fromtimestamp(event["at"] / 1000, tz=timezone.utc).isoformat()
+        if phase == "start":
+            if key in self._active or len(self._active) >= 128:
+                self._reason = "dropped_operations"
+                return
             if kind == "model":
-                self._finish_pending()
-                span = acquire_model_span(
-                    self._tracing,
-                    event.get("requestedModel") or self._model,
-                    parent=parent,
-                    started_at=started_at,
-                )
-                if isinstance(span.span_data, ResponseSpanData) and self._first_model:
-                    if self._tracing.include_data():
-                        span.span_data.input = self._input
-                self._first_model = False
+                span = self._start_model(event, at)
+                if self._first_model is None:
+                    self._first_model = span
             elif kind == "tool":
-                span = function_span(event["toolName"], parent=parent)
-                span.span_data.operation.detail = self._detail
+                name = event["name"]
+                if namespace != "functions":
+                    name = f"{namespace}.{name}"
+                span = function_span(name, parent=self._parent)
+                span.span_data.operation.detail = get_operation_detail(include_data=self._capture)
+                span.span_data.operation.tool_call_id = event["id"]
+                span.start_at(at)
             else:
-                raise ValueError("Unknown operation kind.")
-            operation = _Operation(span=span, kind=kind)
-            self._operations[operation_id] = operation
-            self._metadata(operation, event)
-            self._content(operation, event)
-            if kind == "tool":
-                span.start_at(started_at)
+                raise ValueError("Unknown native operation.")
+            self._active[key] = span
             return
-        operation = self._operations[operation_id]
-        if operation.ended_at is not None or event.get("kind") != operation.kind:
-            raise ValueError("Invalid operation terminal.")
-        ended_at = self._timestamp(event["completedAt"])
-        outcome = event["outcome"]
-        if outcome not in ("success", "error", "interrupted"):
-            raise ValueError("Unknown operation outcome.")
-        self._metadata(operation, event)
-        self._content(operation, event)
-        operation.ended_at = ended_at
-        operation.span.span_data.operation.outcome = {
-            "success": "completed",
-            "error": "failed",
-        }.get(outcome, outcome)
-        if outcome != "success":
-            operation.span.set_error({"message": f"Codex operation {outcome}.", "data": None})
-        if operation.kind == "model":
-            self._finish_pending()
-            self._pending = operation
+        if key not in self._active:
+            # Rejected calls never reached the post-authorization execution boundary.
+            return
+        span = self._active[key]
+        if kind == "model":
+            if phase == "retry":
+                record_retries(event["count"], span=span, at=at)
+                return
+            data = span.span_data
+            if event.get("usage") is not None:
+                usage = model_usage_to_span_usage(_response_usage_to_usage(_usage(event["usage"])))
+                data.usage = _add_usage(data.usage or {}, usage)
+            if (
+                data.operation.detail is None
+                and self._tracing.include_data()
+                and span is self._first_model
+                and event["outcome"] == "completed"
+            ):
+                data.input = self._input
+            self._content(span, kind, event)
+        if kind == "tool" and self._capture:
+            # Core publishes the accepted model-visible output after the lifecycle callback.
+            self._ends[key] = event["outcome"], at
         else:
-            operation.span.finish_at(operation.ended_at)
-        self._completed[operation_id] = operation.span.span_id
-        self._operations.pop(operation_id)
+            self._finish(key, event["outcome"], at)
 
-    @staticmethod
-    def _timestamp(value: Any) -> str:
-        if not isinstance(value, str):
-            raise ValueError("Missing source timestamp.")
-        _parse_iso_timestamp(value)
-        return value
-
-    def _metadata(self, operation: _Operation, event: dict[str, Any]) -> None:
-        data = operation.span.span_data
-        metadata = data.operation
-        metadata.operation_id = event["operationId"]
-        metadata.model = event.get("requestedModel") or metadata.model or self._model
-        metadata.response_model = event.get("observedModel") or metadata.response_model
-        metadata.tool_call_id = event.get("callId") or metadata.tool_call_id
-        if self._tracing.include_data() or event.get("responseIdTrusted") is True:
-            metadata.response_id = event.get("responseId") or metadata.response_id
-        else:
-            metadata.response_id = None
-        usage = event.get("usage")
-        if operation.kind == "model":
-            if isinstance(data, GenerationSpanData):
-                data.model = metadata.model
-            if isinstance(usage, dict):
-                data.usage = model_usage_to_span_usage(_response_usage_to_usage(_usage(usage)))
-
-    def _content(self, operation: _Operation, event: dict[str, Any]) -> None:
-        if self._detail != "content":
+    def _content(self, span: Span[Any], kind: str, event: dict[str, Any]) -> None:
+        if not self._capture:
             return
-        data = operation.span.span_data
-        for direction in ("input", "output"):
-            projection = event.get(direction)
-            if not isinstance(projection, dict):
-                continue
-            value = projection.get("value")
-            marker: dict[str, Any] = {
-                key: True for key in ("truncated", "omitted") if projection.get(key) is True
-            }
-            if marker and isinstance(projection.get("reason"), str):
-                marker["reason"] = projection["reason"]
-            if isinstance(data, GenerationSpanData) and direction == "input":
-                request = dict(value) if isinstance(value, dict) else {"input": value}
-                request.update(marker)
-                record_model_input(data, request)
-                continue
-            value = bound_content(value)
-            if value is None and marker:
-                value = marker
-            if isinstance(data, FunctionSpanData):
-                setattr(data, direction, value if isinstance(value, str) else _json(value))
-            elif isinstance(data, GenerationSpanData):
-                items = value if isinstance(value, list) else [{"content": value}]
-                if marker and marker not in items:
-                    items = [*items, marker]
-                data.output = bound_content(items)
-
-    def _finish_pending(self) -> None:
-        if self._pending is not None:
-            pending, self._pending = self._pending, None
-            finish_model_span(pending.span, ended_at=pending.ended_at)
-
-    def close(self, *, interrupted: bool) -> None:
-        if self.mode is None:
+        data = span.span_data
+        if kind == "tool":
+            for direction in ("input", "output"):
+                if direction in event:
+                    value = bound_content(event[direction])
+                    setattr(data, direction, value if isinstance(value, str) else _json(value))
             return
-        estimated_end = time_iso()
-        for operation_id, operation in self._operations.items():
-            if operation.ended_at is not None:
-                continue
-            operation.ended_at = estimated_end
-            operation.span.span_data.operation.outcome = "interrupted"
-            operation.span.span_data.operation.estimated_end = True
-            operation.span.set_error({"message": "Codex operation interrupted.", "data": None})
-            if operation.kind == "model":
-                finish_model_span(operation.span, ended_at=operation.ended_at)
-            else:
-                operation.span.finish_at(operation.ended_at)
-            self._completed[operation_id] = operation.span.span_id
-            self._coverage_reason = "interrupted"
-        self._operations.clear()
-        if interrupted:
-            if not self._completed:
-                self._coverage_reason = self._coverage_reason or "interrupted"
-            self._finish_pending()
-        self._emit_coverage()
+        if "input" in event:
+            request = event["input"]
+            record_model_input(data, {"input": [request]} if request.get("omitted") else request)
+        if "output" in event:
+            output = bound_content(event["output"])
+            data.output = [output] if isinstance(output, dict) else output
+            data.operation.response_id = event.get("response_id")
 
-    def finish_response(self, response: Response) -> None:
-        if self.mode is not None and self._first_model:
-            self._coverage_reason = "missing_operations"
-        if self._pending is not None:
-            data = self._pending.span.span_data
-            if isinstance(data, ResponseSpanData) and self._tracing.include_data():
-                data.response = response
-            self._finish_pending()
-        self.close(interrupted=False)
-
-    def _emit_coverage(self) -> None:
-        if self._coverage_reason is None or self._coverage_emitted:
-            return
-        self._coverage_emitted = True
-        with custom_span(
-            "codex.tracing.coverage",
-            {"coverage": "partial", "provider": "codex", "reason": self._coverage_reason},
-            parent=self._parent,
+    def _start_model(self, event: dict[str, Any], at: str) -> Span[Any]:
+        previous, self._last_model = self._last_model, None
+        identity = event.get("identity")
+        # A failed request can resume on another stream or transport. A tool
+        # result or a successful inference always starts a new logical call.
+        if (
+            previous
+            and previous[0].span_data.operation.outcome == "failed"
+            and identity is not None
+            and identity == self._identity
         ):
-            pass
+            span = previous[0]
+            restart_model_span(span, span.span_data.operation, at=at)
+        else:
+            if previous:
+                finish_model_span(previous[0], ended_at=previous[1])
+            span = acquire_model_span(
+                self._tracing, event["model"], parent=self._parent, started_at=at
+            )
+        self._identity = identity
+        span.span_data.operation.operation_id = event["id"]
+        self._content(span, "model", event)
+        return span
+
+    def _finish(self, key: tuple[str, str], outcome: str, at: str | None = None) -> None:
+        span = self._active.pop(key)
+        span.span_data.operation.outcome = outcome
+        span.span_data.operation.estimated_end = at is None
+        if outcome != "completed":
+            span.set_error(
+                {"message": "Native operation did not complete successfully.", "data": None}
+            )
+        if key[0] == "model" and at is not None:
+            # The next request identifies a retry. The final successful span
+            # can carry the caller-visible response under the default policy.
+            self._last_model = (span, at)
+        elif key[0] == "model":
+            finish_model_span(span)
+        elif at is None:
+            span.finish()
+        else:
+            span.finish_at(at)
+
+    def close(self, response: Response | None = None) -> None:
+        self.drain()
+        if self._last_model:
+            span, at = self._last_model
+            operation = span.span_data.operation
+            if (
+                operation.detail is None
+                and self._tracing.include_data()
+                and operation.outcome == "completed"
+            ):
+                span.span_data.response = response
+            finish_model_span(span, ended_at=at)
+        if self._thread is not None and self._expect_model and self._first_model is None:
+            self._reason = self._reason or "missing_operations"
+        for key in list(self._active):
+            if key in self._ends:
+                outcome, at = self._ends.pop(key)
+                if self._capture:
+                    self._content(
+                        self._active[key],
+                        key[0],
+                        {"output": {"omitted": True, "reason": "output_unavailable"}},
+                    )
+                self._finish(key, outcome, at)
+            else:
+                self._reason = self._reason or "interrupted"
+                self._finish(key, "interrupted")
+        if self._reason is not None:
+            with custom_span(
+                "codex.tracing.coverage",
+                {"coverage": "partial", "provider": "codex", "reason": self._reason},
+                parent=self._parent,
+            ):
+                pass

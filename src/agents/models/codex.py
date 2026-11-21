@@ -66,8 +66,9 @@ from .interface import Model, ModelProvider, ModelTracing
 class CodexProvider(ModelProvider):
     """Run opt-in Agents SDK requests through embedded Codex Core.
 
-    Codex owns workspace tools and authentication; the Runner owns SDK function tools,
-    handoffs, approvals, and conversation history. Each request uses an ephemeral thread.
+    Codex handles workspace tools and authentication. Each request uses a fresh
+    Codex thread. Pass a ResumableSession to the Runner to save a pending local
+    command or edit for approval. The SDK session ID stays the same across workers.
     """
 
     _supports_stored_response_id = False
@@ -124,70 +125,43 @@ class CodexProvider(ModelProvider):
             raise UserError("This Codex approval belongs to a different workspace or SDK version.")
 
         settings = {"model": checkpoint["model"]}
-        observations = CodexOperationTracing(tracing, None, checkpoint["model"])
+        observations = CodexOperationTracing(set(), expect_model=False)
         thread = await self._native_manager().start_thread("[]", None, json.dumps(settings))
-        interrupted = True
-        cancellation: asyncio.CancelledError | None = None
-        execution: asyncio.Future[Any] | None = None
-        observed_turn: str | None = None
-        observations.bind(thread.thread_id, "")
-
-        def observe(encoded: str) -> None:
-            nonlocal observed_turn
-            event = json.loads(encoded)
-            params = event.get("params")
-            if observed_turn is None and isinstance(params, dict):
-                turn = params.get("turnId")
-                if params.get("threadId") == thread.thread_id and isinstance(turn, str):
-                    observed_turn = turn
-                    observations.bind(thread.thread_id, turn)
-            observations.observe(event["method"], params)
-
+        watcher: asyncio.Task[None] | None = None
+        failure: BaseException | None = None
         try:
-            execution = asyncio.ensure_future(
-                thread.resolve_approval(
+            observations.bind(thread, tracing)
+            watcher = asyncio.create_task(observations.watch())
+            return str(
+                await thread.resolve_approval(
                     json.dumps(checkpoint["call"]),
                     json.dumps(checkpoint["request"]),
-                    json.dumps(checkpoint.get("preconditions")),
-                    observations.request_mode(),
+                    json.dumps(checkpoint["preconditions"]),
                 )
             )
-            while (encoded := await thread.next_operation_event()) is not None:
-                observe(encoded)
-            output, turn_id, notifications, failure = await execution
-            observations.bind(thread.thread_id, turn_id)
-            for encoded in notifications:
-                observe(encoded)
-            if failure is not None:
-                raise RuntimeError(failure)
-            interrupted = False
-            return str(output)
-        except asyncio.CancelledError as error:
-            cancellation = error
+        except BaseException as error:
+            failure = error
             raise
         finally:
-            if execution is not None:
-                execution.cancel()
 
             async def close() -> None:
                 try:
                     await thread.close()
                 finally:
-                    if execution is not None:
-                        await asyncio.gather(execution, return_exceptions=True)
+                    if watcher is not None:
+                        watcher.cancel()
+                        await asyncio.gather(watcher, return_exceptions=True)
+                    observations.close()
 
             try:
-                observations.close(interrupted=interrupted)
-            finally:
-                try:
-                    await _join_close(close())
-                except asyncio.CancelledError:
-                    if cancellation is not None:
-                        raise cancellation from None
+                await _join_close(close())
+            except asyncio.CancelledError:
+                if isinstance(failure, asyncio.CancelledError):
+                    raise failure from None
+                raise
+            except Exception:
+                if failure is None:
                     raise
-                except Exception:
-                    if not interrupted:
-                        raise
 
 
 def _pending_native_call(
@@ -465,7 +439,8 @@ class _CodexModel(Model):
             and output_schema.is_strict_json_schema()
             else None
         )
-        observations = CodexOperationTracing(tracing, input, self._name)
+        observations = CodexOperationTracing(identities, input)
+        completed: Response | None = None
         resources = AsyncExitStack()
         output: dict[str, Any] = {}
         streamed: set[str] = set()
@@ -483,7 +458,6 @@ class _CodexModel(Model):
         reasoning_summaries: list[str] = []
         usage = None
         failure: BaseException | None = None
-        done_events: list[ResponseOutputItemDoneEvent] = []
 
         async def interrupt_when_ready() -> None:
             nonlocal interrupt_requested
@@ -502,9 +476,15 @@ class _CodexModel(Model):
                 native_hooks.verify(thread)
             if history:
                 await thread.inject_items(json.dumps(history))
-            capture = observations.request_mode()
-            turn_id = await thread.start_turn(json.dumps(turn_input), json.dumps(schema), capture)
-            observations.bind(thread.thread_id, turn_id)
+            observations.bind(thread, tracing)
+            recover = bool(
+                bindings
+                and bindings.resumable
+                and not native_hooks
+                and not sdk_sandbox
+                and not require_sdk_call
+            )
+            turn_id = await thread.start_turn(json.dumps(turn_input), json.dumps(schema), recover)
             response = Response(
                 id=turn_id,
                 created_at=time.time(),
@@ -534,16 +514,10 @@ class _CodexModel(Model):
                     # Close the waiting thread before handing the pause to the Runner.
                     break
                 encoded = await thread.next_event()
+                observations.drain()
                 if encoded is None:
                     raise RuntimeError("Codex finished without a completed response.")
                 event = json.loads(encoded)
-                if event.get("method") in (
-                    "turn/operation/started",
-                    "turn/operation/completed",
-                    "turn/operation/dropped",
-                ):
-                    observations.observe(event["method"], event.get("params"))
-                    continue
                 message = event["msg"]
                 kind = message["type"]
                 if kind == "hook_completed" and native_hooks is not None:
@@ -642,8 +616,7 @@ class _CodexModel(Model):
                         raw_usage["token_count"] = info
                     continue
                 if kind == "raw_response_completed":
-                    # An approval can pause before Core sends the cumulative token_count.
-                    # Include each completed sample now. The next count replaces this total.
+                    # An SDK tool can interrupt before the next cumulative token count.
                     if message.get("token_usage") is not None:
                         usage = _add_sample_usage(usage, message["token_usage"])
                     if (
@@ -858,61 +831,56 @@ class _CodexModel(Model):
                     native_hooks.prepare_history_item(item)
             if require_sdk_call and not sdk_calls:
                 raise UserError(
-                    "CodexProvider tool_choice='required' did not return "
-                    "an SDK tool or handoff call."
+                    "CodexProvider tool_choice='required' did not return an SDK tool "
+                    "or handoff call."
                 )
             if not sdk_calls and not output:
                 raise RuntimeError("Codex finished without a completed response.")
             items = list(output.values()) + list(sdk_calls.values())
             if reasoning_summaries:
                 items[-1].codex_reasoning_summary = reasoning_summaries
-            for native_item in output.values():
-                if native_item.type not in (
-                    "function_call",
-                    "custom_tool_call",
-                    "function_call_output",
-                    "custom_tool_call_output",
-                ):
-                    continue
-                done_events.append(
-                    ResponseOutputItemDoneEvent(
-                        item=native_item,
-                        output_index=indices[native_item.id],
-                        sequence_number=sequence,
-                        type="response.output_item.done",
-                    )
-                )
-                sequence += 1
-            for call_id, call in sdk_calls.items():
-                done_events.append(
-                    ResponseOutputItemDoneEvent(
-                        item=call,
-                        output_index=indices[call_id],
-                        sequence_number=sequence,
-                        type="response.output_item.done",
-                    )
-                )
-                sequence += 1
             items.sort(key=lambda item: indices[item.id])
-            response = response.model_copy(
+            completed = response.model_copy(
                 update={"output": items, "status": "completed", "usage": usage}
             )
             if raw_usage is not None:
-                _attach_raw_usage_snapshot(response, raw_usage)
-            observations.finish_response(response)
+                _attach_raw_usage_snapshot(completed, raw_usage)
         except BaseException as error:
             failure = error
             raise
         finally:
-            observations.close(interrupted=True)
             try:
                 await _join_close(resources.aclose())
             except Exception:
                 # Keep the attempt failure primary when joined cleanup also fails.
                 if failure is None:
                     raise
-        for event in done_events:
-            yield event
+            finally:
+                # Pending items carry a private recovery checkpoint.
+                observations.close(completed if pending_approval is None else None)
+        for native_item in output.values():
+            if native_item.type not in (
+                "function_call",
+                "custom_tool_call",
+                "function_call_output",
+                "custom_tool_call_output",
+            ):
+                continue
+            yield ResponseOutputItemDoneEvent(
+                item=native_item,
+                output_index=indices[native_item.id],
+                sequence_number=sequence,
+                type="response.output_item.done",
+            )
+            sequence += 1
+        for call_id, call in sdk_calls.items():
+            yield ResponseOutputItemDoneEvent(
+                item=call,
+                output_index=indices[call_id],
+                sequence_number=sequence,
+                type="response.output_item.done",
+            )
+            sequence += 1
         yield ResponseCompletedEvent(
-            response=response, sequence_number=sequence, type="response.completed"
+            response=completed, sequence_number=sequence, type="response.completed"
         )

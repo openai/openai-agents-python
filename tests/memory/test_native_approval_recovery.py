@@ -40,6 +40,7 @@ def pending_call(tmp_path, kind):
         "call": copy.deepcopy(call),
         "request": {"type": "native_approval", "call_id": "native-call"},
         "model": "fixture-model",
+        "preconditions": {"version": 1, "first_approval": True},
     }
     item = item_type(**call, checkpoint=checkpoint)
     return item.model_copy(update={"codex_reasoning_summary": "Review this effect."})
@@ -143,6 +144,7 @@ async def test_native_pause_preserves_all_sampling_usage_across_session_resume(
     store = MemoryStore()
     session = await ResumableSession.create(store)
     paused = await run_agent(agent, "start", session, streamed)
+    assert first.recover_approvals
     assert first.closed and len(paused.interruptions) == 1 and calls == []
     assert tokens(paused.context_wrapper.usage) == (15, 5, 20, 3, 4, 3)
     assert store.checkpoint(session.session_id)["status"] == "paused"
@@ -371,61 +373,6 @@ async def test_native_pause_waits_for_checkpoint_ack(tmp_path, monkeypatch, stre
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("include_data", [False, True])
-async def test_resume_exports_the_original_native_operation_under_current_trace_policy(
-    tmp_path, monkeypatch, threads, include_data
-):
-    class RestoredThread(FakeThread):
-        async def next_operation_event(self):
-            return None
-
-        async def resolve_approval(self, call_json, request, preconditions, capture):
-            assert capture == ("content" if include_data else "metadata")
-            operation = {
-                "threadId": self.thread_id,
-                "turnId": "replacement-turn",
-                "operationId": "from-native-dispatch",
-                "kind": "tool",
-                "toolName": "exec_command",
-                "callId": json.loads(call_json)["call_id"],
-                "startedAt": "2026-11-20T06:00:00.000Z",
-                "input": {"value": "private commit message"},
-            }
-            completed = dict(operation, completedAt="2026-11-20T06:00:02.000Z", outcome="success")
-            events = [
-                json.dumps({"method": f"turn/operation/{kind}", "params": params})
-                for kind, params in [("started", operation), ("completed", completed)]
-            ]
-            return "native accepted", "replacement-turn", events, None
-
-    agent, store, session, config, _, _, _ = await setup_native(tmp_path, monkeypatch)
-    await Runner.run(agent, "start", session=session, run_config=config)
-    recovered = await ResumableSession.resume(store, session.session_id)
-    state = await recovered.load_state(agent)
-    pending = state.get_interruptions()[0]
-    state.approve(pending)
-    monkeypatch.delattr(agent.model, "_run_approved_native_call")
-    threads[0].append(RestoredThread())
-    result = await Runner.run(
-        agent,
-        state,
-        run_config=RunConfig(
-            tracing={"operation_detail": "content"}, trace_include_sensitive_data=include_data
-        ),
-    )
-    assert result.final_output == "finished"
-    (operation_span,) = [
-        span.span_data
-        for span in fetch_ordered_spans()
-        if span.span_data.type == "function"
-        and span.span_data.operation.operation_id == "from-native-dispatch"
-    ]
-    assert operation_span.operation.outcome == "completed"
-    assert operation_span.operation.tool_call_id == pending.call_id
-    assert ("private commit message" in repr(operation_span.input)) == include_data
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("include_data,cancel", [(False, False), (True, False), (False, True)])
 async def test_restored_native_execution_observes_live_start_and_interruption(
     tmp_path, monkeypatch, threads, include_data, cancel
@@ -436,7 +383,8 @@ async def test_restored_native_execution_observes_live_start_and_interruption(
     started = asyncio.Event()
     release = asyncio.Event()
     closed = asyncio.Event()
-    notifications = asyncio.Queue()
+    updates = asyncio.Event()
+    events = []
     calls = []
     original_start = SPAN_PROCESSOR_TESTING.on_span_start
     caller_spans = []
@@ -451,32 +399,30 @@ async def test_restored_native_execution_observes_live_start_and_interruption(
 
     # The FFI double preserves suspension and cancellation at the native execution boundary.
     class RestoredThread(FakeThread):
-        async def next_operation_event(self):
-            return await notifications.get()
+        def enable_tracing(self, mode="metadata"):
+            calls.append(mode)
 
-        async def resolve_approval(self, call_json, request, preconditions, capture):
-            calls.append(capture)
-            operation = {
-                "threadId": self.thread_id,
-                "turnId": "restored-turn",
-                "operationId": "live-native-operation",
-                "kind": "tool",
-                "toolName": "exec_command",
-                "callId": json.loads(call_json)["call_id"],
-                "startedAt": "2026-11-20T06:00:00.000Z",
-            }
-            if capture == "content":
-                operation["input"] = {"value": "private command"}
-            await notifications.put(
-                json.dumps({"method": "turn/operation/started", "params": operation})
-            )
+        async def wait_for_operations(self):
+            await updates.wait()
+
+        def drain_operations(self):
+            encoded = json.dumps(events)
+            events.clear()
+            updates.clear()
+            return encoded
+
+        async def resolve_approval(self, call_json, request, preconditions):
+            key = {"kind": "tool", "name": "exec_command", "id": json.loads(call_json)["call_id"]}
+            events.append(dict(key, phase="start", at=1_795_154_400_000))
+            if calls == ["content"]:
+                events.append(dict(key, phase="input", input="private command"))
+            updates.set()
             await release.wait()
-            completed = dict(operation, completedAt="2026-11-20T06:00:02.000Z", outcome="success")
-            await notifications.put(
-                json.dumps({"method": "turn/operation/completed", "params": completed})
-            )
-            await notifications.put(None)
-            return "native accepted", "restored-turn", [], None
+            events.append(dict(key, phase="end", outcome="completed", at=1_795_154_402_000))
+            if calls == ["content"]:
+                events.append(dict(key, phase="output", output="native accepted"))
+            updates.set()
+            return "native accepted"
 
         async def close(self):
             await super().close()
@@ -521,9 +467,9 @@ async def test_restored_native_execution_observes_live_start_and_interruption(
         span
         for span in fetch_ordered_spans()
         if span.span_data.type == "function"
-        and span.span_data.operation.operation_id == "live-native-operation"
+        and span.span_data.operation.tool_call_id == "native-call"
     ]
     assert span.span_data.operation.outcome == ("interrupted" if cancel else "completed")
-    assert span.started_at == "2026-11-20T06:00:00.000Z"
+    assert span.started_at == "2026-11-20T06:00:00+00:00"
     assert ("private command" in repr(span.span_data.input)) == include_data
     assert span.parent_id == caller_spans[0].span_id

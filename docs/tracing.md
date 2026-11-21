@@ -34,7 +34,7 @@ By default, the SDK traces the following:
 -   Each runner invocation is wrapped in a `task_span()`.
 -   Each model turn is wrapped in a `turn_span()`.
 -   Each time an agent runs, it is wrapped in `agent_span()`
--   Responses and Codex model calls have been using `response_span()` by default, or `generation_span()` with explicit operation detail.
+-   Responses and Codex have been using one `response_span()` for each logical model call, including retries.
 -   Function tool calls are each wrapped in `function_span()`
 -   Guardrails are wrapped in `guardrail_span()`
 -   Handoffs are wrapped in `handoff_span()`
@@ -278,19 +278,29 @@ For the Responses and Codex providers, select capture per run with `RunConfig.tr
 
 | `operation_detail` | `trace_include_sensitive_data` | SDK model and tool payload fields | OTel payload attributes |
 | --- | --- | --- | --- |
-| Omitted | `True`, the default | Existing SDK input and output fields | None |
+| Omitted | `True`, the default | Legacy model `.input` and `.response`, SDK function input/output, native tool metadata | None |
 | Omitted | `False` | None | None |
 | `"metadata"` | Either value | None | None |
 | `"content"` | `True` | Bounded model and tool content | Bounded permitted content |
 | `"content"` | `False` | None | None |
 
-In either detailed mode, count one model span for an inference, including retries of that inference and time spent waiting between attempts. With detail omitted, count each retry by the Runner as a separate SDK attempt. Count retries inside a provider as part of the same call in all modes. For an approval pause or rejection, look for a dedicated `tool_approval` SDK span in detailed mode.
+Responses and Codex have been recording retries on the original `ResponseSpanData` span, including time spent waiting between attempts. The first inference after a tool execution has been starting a new span. Retries of that inference have been sharing the new span.
+
+| Retry field or event | Role | Limit |
+| --- | --- | --- |
+| `span.span_data.operation.retry_timestamps` | ISO 8601 retry observation times | Up to 128 times per model span |
+| OTel `openai.agents.model.retry` event | One payload-free event per retained time | Subject to the tracer provider's event limits |
+| Event attribute `openai.agents.model.attempt` | Attempt number | Starting at `2` for the first retry |
+
+For retries visible to the Runner, the SDK has been recording the next attempt's start. For transports reporting only a count, all retries in that count have been sharing the time the SDK received it.
+
+For tool approvals, the SDK has been marking function spans with `span.span_data.operation.outcome` of `paused` or `rejected`. OTel has been mapping both outcomes to `openai.agents.tool_approval`. With either explicit detail setting, the SDK has been omitting inputs and outputs from these decision spans.
 
 Pass `--content` to the example to inspect the submitted messages, instructions, and visible output. Look for `gen_ai.input.messages`, `gen_ai.system_instructions`, `gen_ai.output.messages`, `gen_ai.tool.call.arguments`, and `gen_ai.tool.call.result`. For a continuation, look for the submitted messages and `openai.response.previous_response_id`. For response ID handling, see [Sensitive data](#sensitive-data).
 
-Each operation has a 32 KiB budget for its input and another 32 KiB for its output, measured as UTF-8 JSON. Tracing checks the remaining budget before parsing a string that looks like a JSON object or array. If the string exceeds that budget, the trace records an omission with the reason `capture_budget`. Check for markers for truncated text, binary media, hidden reasoning, and known credential fields. Treat ordinary text, including file contents and tool results, as potentially private. Configure separate policies for application logs and custom processors.
+Each operation has a 32 KiB budget for its input and another 32 KiB for its output, measured as UTF-8 JSON. Tracing checks the remaining budget before parsing a string that looks like a JSON object or array. For Python capture, a string exceeding that budget has been producing an omission with `reason="capture_budget"`. Native Codex capture has been using `reason="unsupported_or_oversized_content"` for unsupported or oversized values. Check for markers for truncated text, binary media, hidden reasoning, and known credential fields. Treat ordinary text, including file contents and tool results, as potentially private. Configure separate policies for application logs and custom processors.
 
-For native tools, `unsupported_output` marks a result without a bounded capture format. A structured result that exceeds the capture budget is omitted as a whole with `capture_budget`.
+For the SDK fields available on each Codex call, see [Codex operation tracing](models/codex.md#operation-tracing).
 
 ## Tracing with non-OpenAI models
 

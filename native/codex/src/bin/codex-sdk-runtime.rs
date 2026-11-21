@@ -16,8 +16,7 @@ fn relay_stdio(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         let _ = requests.shutdown(Shutdown::Write);
     });
     // The process exits when the relay closes, even if Codex still holds stdin open.
-    // Forward each reply before waiting for another request on the same connection.
-    let mut stdout = io::stdout();
+    let mut stdout = io::stdout().lock();
     io::copy(&mut connection, &mut stdout)?;
     stdout.flush()?;
     Ok(())

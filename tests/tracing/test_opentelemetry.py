@@ -350,16 +350,26 @@ def test_tool_approval_mapping_and_partial_coverage(otel) -> None:
     )
 
 
-def test_marker_only_content_preserves_omission(otel) -> None:
+@pytest.mark.parametrize(
+    "marker,reason",
+    [
+        ({"truncated": True}, "truncated"),
+        (
+            {"omitted": True, "reason": "unsupported_or_oversized_content"},
+            "unsupported_or_oversized_content",
+        ),
+    ],
+)
+def test_marker_only_content_preserves_omission(otel, marker, reason) -> None:
     _, exporter = otel
     with trace("group"), generation_span(model="test-model") as model:
         model.span_data.operation.detail = "content"
-        model.span_data.input = [{"truncated": True}]
-        model.span_data.output = [{"truncated": True}]
+        model.span_data.input = [marker]
+        model.span_data.output = [marker]
     span = exporter.get_finished_spans()[0]
     for attribute in ("gen_ai.input.messages", "gen_ai.output.messages"):
         assert list(span.attributes[attribute][0]["parts"]) == [
-            {"type": "openai.omitted", "reason": "truncated"}
+            {"type": "openai.omitted", "reason": reason}
         ]
 
 

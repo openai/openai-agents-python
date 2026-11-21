@@ -43,11 +43,9 @@ def native_approval_checkpoint(raw_item: Any) -> dict[str, Any] | None:
     if raw_type is not CodexPendingFunctionCall and raw_type is not CodexPendingCustomCall:
         return None
     checkpoint = raw_item.checkpoint
-    required = {"version", "cwd", "call", "request", "model"}
     if (
         not isinstance(checkpoint, dict)
-        or not required <= checkpoint.keys()
-        or set(checkpoint) - required - {"preconditions"}
+        or set(checkpoint) != {"version", "cwd", "call", "request", "model", "preconditions"}
         or type(checkpoint["version"]) is not int
         or checkpoint["version"] != 1
         or not isinstance(checkpoint["cwd"], str)
@@ -56,7 +54,7 @@ def native_approval_checkpoint(raw_item: Any) -> dict[str, Any] | None:
         or not checkpoint["model"]
         or not isinstance(checkpoint["request"], dict)
         or not isinstance(checkpoint["call"], dict)
-        or ("preconditions" in checkpoint and not isinstance(checkpoint["preconditions"], dict))
+        or not isinstance(checkpoint["preconditions"], dict)
     ):
         raise UserError("Invalid Codex native approval checkpoint.")
     model = (

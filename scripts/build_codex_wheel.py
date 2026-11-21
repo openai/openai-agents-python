@@ -53,44 +53,33 @@ def stage_asset(asset: dict[str, str], destination: Path, cache: Path) -> None:
     destination.chmod(0o755)
 
 
-def patch_codex_source(source: Path, upstream: Path, metadata: dict) -> Path:
-    """Apply the SDK's checked-in Core patch to the exact resolved upstream pin."""
-    patched = source / "native/codex-upstream"
-    shutil.copytree(upstream, patched, ignore=shutil.ignore_patterns(".git"))
-    patches = sorted((source / "patches/codex").glob("*.patch"))
+def patch_codex_source(source: Path, upstream: Path, metadata: dict) -> None:
+    """Stage the pinned Codex workspace and apply its documented changes in order."""
+    patches = sorted((source / "native/codex/patches").glob("*.patch"))
     if not patches:
-        raise ValueError("Missing bundled Codex Core patch")
-    patch_environment = os.environ | {"GIT_CEILING_DIRECTORIES": str(patched.parent.resolve())}
+        raise ValueError("The Codex wheel is missing its patches.")
     for patch in patches:
-        subprocess.run(
-            ["git", "apply", "--check", str(patch.resolve())],
-            cwd=patched,
-            env=patch_environment,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "apply", str(patch.resolve())],
-            cwd=patched,
-            env=patch_environment,
-            check=True,
-        )
-    # Redirect the entire upstream workspace, including transitive crates, so Core's
-    # API types retain one identity. Cargo keeps all other locked dependency pins.
-    packages = [
-        package
-        for package in metadata["packages"]
-        if (package.get("source") or "").startswith("git+https://github.com/openai/codex?")
-    ]
+        guide = patch.with_suffix(".md")
+        if not guide.is_file() or not guide.read_text(encoding="utf-8").strip():
+            raise ValueError(f"Document {patch.name} in {guide.name} before building.")
+
+    staged = source / "native/codex-upstream"
+    shutil.copytree(upstream, staged, ignore=shutil.ignore_patterns(".git"))
+    subprocess.run(
+        ["git", "apply", "--whitespace=error", *(str(p.resolve()) for p in patches)],
+        cwd=staged,
+        env=os.environ | {"GIT_CEILING_DIRECTORIES": str(staged.parent.resolve())},
+        check=True,
+    )
+    # All Codex crates must share the same types. Redirect only the resolved Codex workspace.
+    lines = ['[patch."https://github.com/openai/codex"]']
+    for package in metadata["packages"]:
+        if (package["source"] or "").startswith("git+https://github.com/openai/codex?"):
+            relative = Path(package["manifest_path"]).parent.relative_to(upstream)
+            lines.append(f"{package['name']} = {{ path = {json.dumps(str(staged / relative))} }}")
     config = source / ".cargo/config.toml"
     config.parent.mkdir(exist_ok=True)
-    lines = ['[patch."https://github.com/openai/codex"]']
-    for package in sorted(packages, key=lambda package: package["name"]):
-        relative = Path(package["manifest_path"]).parent.relative_to(upstream)
-        lines.append(
-            f"{json.dumps(package['name'])} = {{ path = {json.dumps(str(patched / relative))} }}"
-        )
-    config.write_text("\n".join(lines) + "\n")
-    return patched
+    config.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> None:
@@ -98,7 +87,7 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=ROOT / "dist")
     parser.add_argument("--target", choices=TARGETS)
     parser.add_argument("--compatibility")
-    parser.add_argument("--test-native", action="store_true")
+    parser.add_argument("--test-native", action="store_true", help="Test the staged SDK binding.")
     parser.add_argument("--profile", choices=("dev", "release"), default="release")
     args = parser.parse_args()
     environment = os.environ.copy()
@@ -189,50 +178,20 @@ def build_native(
             "--target",
             target,
         ]
-    upstream = patch_codex_source(source, upstream, metadata)
+    patch_codex_source(source, upstream, metadata)
+    # Resolve local paths in the temporary lockfile without fetching different dependencies.
     subprocess.run(
-        [
-            "cargo",
-            "metadata",
-            "--offline",
-            "--format-version",
-            "1",
-            "--manifest-path",
-            str(manifest),
-        ],
+        ["cargo", "metadata", "--offline", "--format-version=1", "--manifest-path", manifest],
         cwd=source,
         env=environment,
         stdout=subprocess.DEVNULL,
         check=True,
     )
+    flags = ["--locked", "--manifest-path", str(manifest), *target_flags, *profile]
     if args.test_native:
-        subprocess.run(
-            [
-                "cargo",
-                "test",
-                "--locked",
-                "--manifest-path",
-                str(manifest),
-                *target_flags,
-                "--lib",
-                *profile,
-            ],
-            cwd=source,
-            env=environment,
-            check=True,
-        )
+        subprocess.run(["cargo", "test", "--lib", *flags], cwd=source, env=environment, check=True)
     subprocess.run(
-        [
-            "cargo",
-            "build",
-            "--locked",
-            "--manifest-path",
-            str(manifest),
-            *target_flags,
-            "--bin",
-            "codex-sdk-runtime",
-            *profile,
-        ],
+        ["cargo", "build", "--bin", "codex-sdk-runtime", *flags],
         cwd=source,
         env=environment,
         check=True,
@@ -250,6 +209,7 @@ def build_native(
         stage_asset(asset, path, cache)
     licenses = staged / "licenses"
     licenses.mkdir()
+    shutil.copytree(native / "patches", licenses / "codex-patches")
     for name, path in {
         "CODEX_LICENSE": upstream / "LICENSE",
         "CODEX_NOTICE": upstream / "NOTICE",
@@ -260,13 +220,8 @@ def build_native(
         ),
     }.items():
         shutil.copy2(path, licenses / name)
-    for patch in (source / "patches/codex").glob("*"):
-        shutil.copy2(patch, licenses / f"CODEX_SDK_{patch.name}")
     if environment.get("OPENSSL_STATIC") == "1" and environment.get("OPENSSL_DIR"):
-        shutil.copy2(
-            Path(environment["OPENSSL_DIR"]) / "LICENSE.txt",
-            licenses / "OPENSSL_LICENSE",
-        )
+        shutil.copy2(Path(environment["OPENSSL_DIR"]) / "LICENSE.txt", licenses / "OPENSSL_LICENSE")
     for license_file in (native / "licenses").glob("*"):
         shutil.copy2(license_file, licenses)
     with tempfile.TemporaryDirectory(dir=target_dir, prefix="codex-wheel-") as directory:

@@ -1246,6 +1246,13 @@ class RunState(Generic[TContext, TAgent]):
             )
         return canonical_matches[0] if canonical_matches else None
 
+    def _decision_item(self, proposal: ToolApprovalItem) -> ToolApprovalItem:
+        current = self._find_current_approval_item(proposal)
+        expected = native_approval_checkpoint(current.raw_item) if current else None
+        if native_approval_checkpoint(proposal.raw_item) != expected:
+            raise UserError("Native approval does not match the current pending call.")
+        return current or proposal
+
     def _find_nested_approval_state(
         self,
         approval_item: ToolApprovalItem,
@@ -1418,15 +1425,8 @@ class RunState(Generic[TContext, TAgent]):
             nested_state, nested_item = nested_approval
             nested_state.approve(nested_item, always_approve=always_approve)
             return
-        current_approval_item = self._find_current_approval_item(approval_item)
-        native_checkpoint = native_approval_checkpoint(approval_item.raw_item)
-        if native_checkpoint is not None and (
-            current_approval_item is None
-            or native_approval_checkpoint(current_approval_item.raw_item) != native_checkpoint
-        ):
-            raise UserError("Native approval does not match the current pending call.")
         self._context.approve_tool(
-            current_approval_item or approval_item,
+            self._decision_item(approval_item),
             always_approve=always_approve,
         )
 
@@ -1455,15 +1455,8 @@ class RunState(Generic[TContext, TAgent]):
                 rejection_message=rejection_message,
             )
             return
-        current_approval_item = self._find_current_approval_item(approval_item)
-        native_checkpoint = native_approval_checkpoint(approval_item.raw_item)
-        if native_checkpoint is not None and (
-            current_approval_item is None
-            or native_approval_checkpoint(current_approval_item.raw_item) != native_checkpoint
-        ):
-            raise UserError("Native approval does not match the current pending call.")
         self._context.reject_tool(
-            current_approval_item or approval_item,
+            self._decision_item(approval_item),
             always_reject=always_reject,
             rejection_message=rejection_message,
         )
@@ -2574,6 +2567,9 @@ class RunState(Generic[TContext, TAgent]):
                 validation_error_factory=validation_error_factory,
             )
 
+            if _unsupported_native_approvals(state_json):
+                raise validation_error_factory(_UNSUPPORTED_NATIVE_APPROVALS, UserError)
+
             from .sandbox._mount_security import sanitize_run_state_sandbox_mount_authority
 
             if "sandbox" in state_json:
@@ -2622,6 +2618,35 @@ class RunState(Generic[TContext, TAgent]):
 # --------------------------
 # Private helpers
 # --------------------------
+
+
+_UNSUPPORTED_NATIVE_APPROVALS = (
+    "Run state contains unsupported native tool approvals. "
+    "Check for prior effects before starting a new run with SDK tools."
+)
+
+
+def _unsupported_native_approvals(state: dict[str, Any], *, nested: bool = False) -> bool:
+    """Check nested agent runs before best-effort context restoration can skip a child."""
+    response = state.get("last_processed_response")
+    if not isinstance(response, dict):
+        return False
+    approvals = response.get("native_approvals")
+    if approvals:
+        # Only the root session has a claimed checkpoint. A nested state cannot
+        # authorize an action, even when it contains an otherwise valid receipt.
+        if nested or not isinstance(approvals, list) or len(approvals) != 1:
+            return True
+        item = approvals[0]
+        if not isinstance(item, dict) or not isinstance(item.get("codex_native_checkpoint"), dict):
+            return True
+    functions = response.get("functions")
+    if isinstance(functions, list):
+        for entry in functions:
+            child = entry.get("agent_run_state") if isinstance(entry, dict) else None
+            if isinstance(child, dict) and _unsupported_native_approvals(child, nested=True):
+                return True
+    return False
 
 
 def _validate_run_state_json_value(value: object) -> None:
@@ -5766,6 +5791,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "RunState tool invocation must be a mapping.",
         "RunState tool invocation contains invalid lifecycle data.",
         "Tool input rewrites require RunState schema 1.23.",
+        _UNSUPPORTED_NATIVE_APPROVALS,
         "RunState tool input rewrite is invalid.",
         "Hosted MCP approval decisions require a non-empty request id.",
         (
