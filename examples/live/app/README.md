@@ -2,6 +2,8 @@
 
 This local browser example connects GPT Live to an ordinary Agents SDK Agent through Responses delegation. GPT Live handles speech; its managed Responses backend calls `ask_order_agent`; the Python server runs the order specialist with `Runner.run()` and returns a function result.
 
+The SDK tags `v0.25.0` and `v1.0.0-alpha.1` include this example. Existing [Realtime sessions](../../../docs/realtime/quickstart.md) and [voice pipelines](../../../docs/voice/quickstart.md) need no migration.
+
 ## When to use this pattern
 
 This example uses the following path for specialist work:
@@ -66,7 +68,11 @@ Each `Runner.run()` starts a separate specialist run. The specialist can use its
 
 Replace `create_order_agent()` in `agent.py` with your existing text Agent, and update the managed backend's function description and instructions. The two backend models can be chosen independently in `create_order_agent()` and `session_config()`. Keep detailed business logic in the specialist and pass relevant conversation context through the outer function's arguments.
 
-The sample does not implement tool approvals. If you add approval-requiring tools, implement an explicit approval and resume flow before treating an interrupted run as a completed operation. Specialist guardrails apply to that Agent's execution; they do not approve all output from the managed Responses backend or all speech from GPT Live.
+Keep the specialist read-only. The managed Responses backend has one function, `ask_order_agent`. Its `parallel_tool_calls=False` setting applies only to the backend. The specialist can request several tools in one turn.
+
+If the specialist pauses for approval, the tool awaiting approval does not run. Other tools in the same turn may already have run. The server returns a text refusal and sends one `response.create` after submitting all results in the batch. This continues the managed backend without resuming the specialist. The server makes no approval decision, saves no run state and cannot undo earlier work.
+
+Before adding tools that change data, replace the "No order was changed" failure message and implement an [approval and resume flow](../../../docs/human_in_the_loop.md). Keep the run state and pending function call ID on the server. Authenticate the decision, resume the interrupted run and return one result to the pending call. Specialist guardrails cover only the specialist's execution. They do not cover every backend reply or spoken response.
 
 ## Boundaries and failures
 
@@ -74,7 +80,7 @@ This is a localhost demo. The server binds to `127.0.0.1:8000` and accepts the t
 
 The example has no persistence, automatic reconnection, application-level retries, write operations, or client delegation. Duplicate function events are ignored within one connection. Agent errors become a short failure result; transport errors stop processing instead of rerunning work or blindly resending results. The normal SDK model retry policy still applies within a specialist run.
 
-Corrections are handled through the managed Responses model's conversation context and subsequent function calls. Every result includes its order ID and returns to the original call ID. The example does not infer cancellation from transcript fragments or claim that a spoken correction cancels work already running.
+Corrections are handled through the managed Responses model's conversation context and subsequent function calls. The specialist's instructions ask it to include the order ID in its answer. The server returns each result with the original function call ID, including refusals and errors. The example does not infer cancellation from transcript fragments or claim that a spoken correction cancels work already running.
 
 When setup fails after creation, the server attempts to attach only to close the created session. If a connection fails before `session.closed`, final voice usage is unconfirmed; the example reports this instead of claiming successful finalization. Canceling Agent work does not reverse an external operation. All tools in this demo are read-only.
 

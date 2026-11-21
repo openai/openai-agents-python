@@ -191,3 +191,5 @@ if __name__ == "__main__":
 ```
 
 If you run this example, the agent will produce spoken audio for you to hear! Check out the example in [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) to see a demo where you can speak to the agent yourself.
+
+In the optional [Live example in v0.25.0](https://github.com/openai/openai-agents-python/tree/v0.25.0/examples/live/app), the browser streams audio over WebRTC. The Python server calls `Runner.run()` to run a specialist agent for the managed Responses backend. Existing voice pipelines need no migration. Keep the specialist read-only. Pausing for approval does not undo completed tool calls.
