@@ -35,7 +35,10 @@ codex-login = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b
 codex-mcp-extension = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-models-manager = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-protocol = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
+codex-goal-extension = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
+codex-rollout = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-skills-extension = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
+codex-thread-store = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-utils-rustls-provider = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-web-search-extension = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-code-mode = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
