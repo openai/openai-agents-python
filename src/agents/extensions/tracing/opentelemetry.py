@@ -402,13 +402,15 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
                 instructions = data.model_config.get("instructions")
                 if isinstance(instructions, str):
                     request["instructions"] = [{"type": "text", "content": instructions}]
+            if isinstance(data, GenerationSpanData) and data.tools is not None:
+                request["tools"] = data.tools
             request = bound_content(request)
             if "messages" in request:
                 values["gen_ai.input.messages"] = _message_schema(request["messages"], "user")
             if "instructions" in request:
                 values["gen_ai.system_instructions"] = request["instructions"]
-            if isinstance(data, GenerationSpanData) and data.tools is not None:
-                values["gen_ai.tool.definitions"] = bound_content(data.tools)
+            if "tools" in request:
+                values["gen_ai.tool.definitions"] = request["tools"]
         return values
 
     def force_flush(self) -> None:

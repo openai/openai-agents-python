@@ -186,6 +186,7 @@ from .tool_execution import (
     resolve_approval_rejection_message,
     should_keep_hosted_mcp_item,
 )
+from .tool_hooks import prepare_tool_inputs
 from .tool_planning import (
     _append_mcp_callback_results,
     _build_plan_for_fresh_turn,
@@ -3937,14 +3938,15 @@ def process_model_response(
     )
 
 
-def _preflight_response_invocations_after_processing_error(
+def _preflight_response_invocations(
     *,
     response: ModelResponse,
     all_tools: Sequence[Tool],
     handoffs: Sequence[Handoff],
     context_wrapper: RunContextWrapper[Any],
-) -> None:
-    """Reject call-ID reuse before reporting an unrelated response-processing error."""
+    accept_input_replays: bool = False,
+) -> dict[str, tuple[str, list[int]]]:
+    """Validate call IDs and group response positions by invocation for input preparation."""
     handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
     function_map = build_function_tool_lookup_map(
         [tool for tool in all_tools if isinstance(tool, FunctionTool)]
@@ -3954,9 +3956,9 @@ def _preflight_response_invocations_after_processing_error(
     local_shell_tool = next((tool for tool in all_tools if isinstance(tool, LocalShellTool)), None)
     shell_tool = next((tool for tool in all_tools if isinstance(tool, ShellTool)), None)
     apply_patch_tool = next((tool for tool in all_tools if isinstance(tool, ApplyPatchTool)), None)
-    response_identities: dict[str, tuple[str, str, str, str] | None] = {}
+    response_identities: dict[str, tuple[tuple[str, str, str, str] | None, list[int]]] = {}
 
-    for output in response.output:
+    for index, output in enumerate(response.output):
         raw_item: Any = output
         output_type = get_mapping_or_attr(output, "type")
         tool_lookup_key: FunctionToolLookupKey | None = None
@@ -4004,14 +4006,13 @@ def _preflight_response_invocations_after_processing_error(
             tool_name=tool_name,
             invocation_role=invocation_role,
         )
-        if call_id in response_identities:
-            previous_identity = response_identities[call_id]
-            if previous_identity is None or identity is None or previous_identity != identity:
-                raise ModelBehaviorError(
-                    "Model reused a tool call ID for a different invocation in one response. "
-                    "Use a unique call ID for each tool invocation."
-                )
-        response_identities[call_id] = identity
+        previous_identity, positions = response_identities.setdefault(call_id, (identity, []))
+        if positions and (identity is None or previous_identity != identity):
+            raise ModelBehaviorError(
+                "Model reused a tool call ID for a different invocation in one response. "
+                "Use a unique call ID for each tool invocation."
+            )
+        positions.append(index)
 
         record = context_wrapper._tool_invocations.get(call_id)
         if record is None:
@@ -4025,6 +4026,13 @@ def _preflight_response_invocations_after_processing_error(
             continue
         invocation_type, _, approval_scope, fingerprint = identity
         if (
+            accept_input_replays
+            and record.input_rewrite is not None
+            and record.invocation_type == invocation_type
+            and record.input_rewrite[0] == fingerprint
+        ):
+            continue
+        if (
             record.invocation_type != invocation_type
             or record.approval_scope != approval_scope
             or record.fingerprint != fingerprint
@@ -4033,6 +4041,12 @@ def _preflight_response_invocations_after_processing_error(
                 "Model reused a tool call ID for a different invocation. "
                 "Use a unique call ID for each tool invocation."
             )
+
+    return {
+        call_id: (identity[3], positions)
+        for call_id, (identity, positions) in response_identities.items()
+        if identity is not None
+    }
 
 
 async def get_single_step_result_from_response(
@@ -4058,8 +4072,9 @@ async def get_single_step_result_from_response(
     on_tool_error_selected: Callable[[], None] | None = None,
 ) -> SingleStepResult:
     item_agent = bindings.public_agent
-    try:
-        processed_response = process_model_response(
+
+    def classify() -> ProcessedResponse:
+        return process_model_response(
             agent=item_agent,
             all_tools=all_tools,
             response=new_response,
@@ -4074,8 +4089,18 @@ async def get_single_step_result_from_response(
                 else None
             ),
         )
+
+    settings = run_config.tool_execution
+    if settings is not None and (
+        settings.prepare_tool_input is not None or settings.prepare_tool_output is not None
+    ):
+        # Keep the tool and its callbacks on the same arguments if a consumer edits a raw event.
+        new_response.output = deepcopy(new_response.output)
+    new_bindings: dict[str, tuple[str, dict[str, Any]]] = {}
+    try:
+        processed_response = classify()
     except ModelBehaviorError:
-        _preflight_response_invocations_after_processing_error(
+        _preflight_response_invocations(
             response=new_response,
             all_tools=all_tools,
             handoffs=handoffs,
@@ -4084,6 +4109,28 @@ async def get_single_step_result_from_response(
         if after_invocation_validation is not None:
             await after_invocation_validation(None)
         raise
+
+    if settings is not None and settings.prepare_tool_input is not None:
+        proposals = _preflight_response_invocations(
+            response=new_response,
+            all_tools=all_tools,
+            handoffs=handoffs,
+            context_wrapper=context_wrapper,
+            accept_input_replays=True,
+        )
+        replacements, new_bindings = await prepare_tool_inputs(
+            new_response.output,
+            processed_response,
+            settings,
+            context_wrapper,
+            item_agent,
+            proposals,
+        )
+        if replacements:
+            new_response.output = [
+                replacements.get(index, item) for index, item in enumerate(new_response.output)
+            ]
+            processed_response = classify()
 
     _register_tool_call_items(
         context_wrapper,
@@ -4095,6 +4142,9 @@ async def get_single_step_result_from_response(
         context_wrapper=context_wrapper,
         existing_items=pre_step_items,
     )
+
+    for call_id, rewrite in new_bindings.items():
+        context_wrapper._tool_invocations[call_id].input_rewrite = rewrite
 
     if after_invocation_validation is not None:
         await after_invocation_validation(processed_response)

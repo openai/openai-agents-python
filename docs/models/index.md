@@ -362,7 +362,7 @@ See the [OpenAI Multi-agent guide](https://developers.openai.com/api/docs/guides
 
 ## Codex provider
 
-The experimental [Codex provider](codex.md) runs ordinary agent model calls through the stock Codex CLI. The SDK continues to manage tools, handoffs, approvals, output validation, and sessions. The guide covers branch setup, running one agent with either provider, and the features that still require the default provider.
+The experimental [Codex provider](codex.md) runs model calls through Codex Core inside your Python process. The SDK manages function tools, handoffs, approvals, output validation, and sessions. The guide shows how to install a GitHub prerelease wheel and run an agent with either provider.
 
 ## Non-OpenAI models
 

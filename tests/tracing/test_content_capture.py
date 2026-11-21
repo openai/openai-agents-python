@@ -274,14 +274,21 @@ def test_generation_payload_capture_policy(detail: OperationDetail | None, assig
         assert captured == (None, None, None, None)
         assert "CANARY" not in json.dumps(data.export())
     else:
-        assert all(
-            len(json.dumps(value, ensure_ascii=False).encode()) <= CONTENT_LIMIT
-            for value in captured
+        assert (
+            len(
+                json.dumps(
+                    {"input": data.input, "model_config": data.model_config, "tools": data.tools},
+                    ensure_ascii=False,
+                ).encode()
+            )
+            <= CONTENT_LIMIT
         )
+        assert len(json.dumps(data.output, ensure_ascii=False).encode()) <= CONTENT_LIMIT
         exported = json.dumps(data.export(), ensure_ascii=False)
         assert "CANARY" not in exported
         assert "visible prompt" in exported and "visible answer" in exported
-        assert "visible instructions" in exported and "visible tool" in exported
+        assert "truncated" in exported
+        assert data.model_config is None and data.tools is None
 
 
 def test_generation_payload_assignments_honor_content_veto() -> None:
@@ -293,3 +300,100 @@ def test_generation_payload_assignments_honor_content_veto() -> None:
         data.tools = [{"description": "TOOL_CANARY"}]
     assert (data.input, data.output, data.model_config, data.tools) == (None, None, None, None)
     assert "CANARY" not in json.dumps(data.export())
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("mode", ["default", "content", "veto"])
+async def test_chat_input_capture_shares_one_budget_without_changing_the_request(
+    exporter, stream: bool, mode: str
+) -> None:
+    from agents import OpenAIChatCompletionsModel
+    from agents.decorators import tool
+    from tests.models.test_openai_chatcompletions import _minimal_chat_completion
+
+    native = SpanProcessorForTests()
+    add_trace_processor(native)
+
+    @tool
+    def lookup() -> str:
+        """Return a value."""
+        return "ok"
+
+    lookup.description = "tool-description " + "t" * 40_000
+    prompt = "user-message " + "i" * 40_000
+    requests = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(json.loads(request.content))
+        payload = _minimal_chat_completion("done").model_dump(mode="json")
+        if stream:
+            payload.update(
+                object="chat.completion.chunk",
+                choices=[
+                    {
+                        "index": 0,
+                        "delta": payload["choices"][0]["message"],
+                        "finish_reason": "stop",
+                    }
+                ],
+            )
+            return httpx2.Response(
+                200,
+                content=f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx2.Response(200, json=payload)
+
+    async with AsyncOpenAI(
+        api_key="test",
+        base_url="https://provider.example/v1",
+        max_retries=0,
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+    ) as client:
+        agent = Agent(
+            name="worker", model=OpenAIChatCompletionsModel("fixture", client), tools=[lookup]
+        )
+        config = RunConfig(
+            tracing={} if mode == "default" else {"operation_detail": "content"},
+            trace_include_sensitive_data=mode != "veto",
+        )
+        if stream:
+            result = Runner.run_streamed(agent, prompt, run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(agent, prompt, run_config=config)
+    assert result.final_output == "done"
+    assert requests[0]["messages"][-1]["content"] == prompt
+    assert requests[0]["tools"][0]["function"]["description"] == lookup.description
+    data = next(
+        span.span_data for span in native.get_ordered_spans() if span.span_data.type == "generation"
+    )
+    attributes = dict(
+        next(
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("gen_ai.operation.name") == "chat"
+        ).attributes
+    )
+    captured = {"input": data.input, "model_config": data.model_config, "tools": data.tools}
+    exported = {
+        key: value
+        for key, value in attributes.items()
+        if key in {"gen_ai.input.messages", "gen_ai.system_instructions", "gen_ai.tool.definitions"}
+    }
+    if mode == "default":
+        assert data.input[-1]["content"] == prompt
+        assert data.tools[0]["function"]["description"] == lookup.description
+        assert exported == {}
+    elif mode == "veto":
+        assert all(value is None for value in captured.values())
+        assert exported == {}
+    else:
+        assert len(json.dumps(captured, ensure_ascii=False).encode()) <= CONTENT_LIMIT
+        assert len(json.dumps(exported, ensure_ascii=False).encode()) <= CONTENT_LIMIT
+        assert "user-message" in json.dumps(captured)
+        assert "truncated" in json.dumps(captured)
+        assert data.tools is None

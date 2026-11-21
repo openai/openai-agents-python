@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Sequence
+from contextlib import AsyncExitStack
 from dataclasses import fields
+from importlib import import_module
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -38,15 +42,22 @@ from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..model_settings import ModelSettings
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import ApplyPatchTool, ShellTool, Tool, WebSearchTool
-from ..usage import Usage, _make_input_tokens_details, _response_usage_to_usage
-from ._codex_app_server import CodexAppServer, resolve_codex_executable
+from ..usage import (
+    Usage,
+    _attach_raw_usage_snapshot,
+    _extract_raw_usage_snapshot,
+    _make_input_tokens_details,
+    _response_usage_to_usage,
+)
 from ._codex_inputs import prepare_codex_history, prepare_dynamic_tools, sdk_tool_call
+from ._codex_tool_hooks import CodexToolHooks
 from ._codex_tracing import CodexOperationTracing
+from ._run_context import get_model_tool_hooks
 from .interface import Model, ModelProvider, ModelTracing
 
 
 class CodexProvider(ModelProvider):
-    """Run Agents SDK requests through the stock Codex App Server.
+    """Run opt-in Agents SDK requests through embedded Codex Core.
 
     Codex owns workspace tools and authentication; the Runner owns SDK function tools,
     handoffs, approvals, and conversation history. Each request uses an ephemeral thread.
@@ -58,18 +69,42 @@ class CodexProvider(ModelProvider):
         self,
         *,
         cwd: str | os.PathLike[str] | None = None,
-        codex_executable: str | os.PathLike[str] | None = None,
         config_overrides: Sequence[str] = (),
-        env: Mapping[str, str] | None = None,
         api_key: str | None = None,
     ) -> None:
         self._cwd = str(Path(cwd).resolve() if cwd is not None else Path.cwd())
-        self._codex_executable = (
-            Path(codex_executable).absolute() if codex_executable is not None else None
-        )
         self._config_overrides = tuple(config_overrides)
-        self._env = dict(env) if env is not None else None
         self._api_key = api_key
+        self._manager: Any = None
+        self._closed = False
+
+    def _native_manager(self) -> Any:
+        if self._closed:
+            raise RuntimeError("CodexProvider is closed.")
+        if self._manager is None:
+            try:
+                native = import_module("agents.models._codex_native")
+            except ModuleNotFoundError as error:
+                if error.name != "agents.models._codex_native":
+                    raise
+                raise UserError(
+                    "Install a prebuilt SDK wheel with Codex support to use CodexProvider."
+                ) from None
+            executable = (
+                files("agents.models")
+                / "_codex_bin"
+                / ("codex-sdk-runtime.exe" if os.name == "nt" else "codex-sdk-runtime")
+            )
+            self._manager = native.Manager(
+                self._cwd, str(executable), list(self._config_overrides), self._api_key
+            )
+        return self._manager
+
+    async def aclose(self) -> None:
+        """Join native attempts and release this provider's shared services."""
+        self._closed = True
+        if self._manager is not None:
+            await _join_close(self._manager.close())
 
     def get_model(self, model_name: str | None) -> Model:
         return _CodexModel(model_name, self)
@@ -109,11 +144,18 @@ def _settings(settings: ModelSettings) -> tuple[str | None, str | None]:
     return (reasoning.effort if reasoning else None, reasoning.summary if reasoning else None)
 
 
-def _id(result: Any, field: str) -> str:
-    value = result.get(field, {}).get("id") if isinstance(result, dict) else None
-    if not isinstance(value, str) or not value:
-        raise RuntimeError(f"Codex did not return a {field} ID.")
-    return value
+async def _join_close(operation: Awaitable[None]) -> None:
+    """Keep cleanup owned through repeated cancellation of the awaiting task."""
+    task = asyncio.ensure_future(operation)
+    cancelled = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            cancelled = error
+    task.result()
+    if cancelled is not None:
+        raise cancelled
 
 
 class _CodexModel(Model):
@@ -170,7 +212,7 @@ class _CodexModel(Model):
                     if response.usage
                     else Usage(requests=1),
                     response_id=None,
-                    raw_usage=getattr(response, "codex_raw_usage", None),
+                    raw_usage=_extract_raw_usage_snapshot(response),
                 )
         raise RuntimeError("Codex finished without a completed response.")
 
@@ -229,13 +271,21 @@ class _CodexModel(Model):
                 )
             )
         provider = self._provider
-        sdk_sandbox = any(
+        bindings = get_model_tool_hooks()
+        tool_execution = bindings.settings if bindings is not None else None
+        classic_preparation = (
+            tool_execution is not None
+            and tool_execution.sdk_only_tool_hooks
+            and (
+                tool_execution.prepare_tool_input is not None
+                or tool_execution.prepare_tool_output is not None
+            )
+        )
+        sdk_sandbox = classic_preparation or any(
             getattr(tool, "_sdk_sandbox", False) or isinstance(tool, (ShellTool, ApplyPatchTool))
             for tool in tools
         )
-        overrides = list(provider._config_overrides)
-        if sdk_sandbox or require_sdk_call:
-            overrides.extend(("features.shell_tool=false", "features.view_image=false"))
+        native_hooks = None if sdk_sandbox else CodexToolHooks.for_run(bindings, identities)
         if sdk_sandbox:
             system_instructions = "\n\n".join(
                 filter(
@@ -244,22 +294,8 @@ class _CodexModel(Model):
                         system_instructions,
                         "Use the SDK-provided tools for workspace commands, reads, and edits. "
                         "When agents_sdk tools are available, use that namespace for workspace "
-                        "operations; "
-                        "native Codex workspace tools are unavailable for this run.",
+                        "operations; native Codex workspace tools are unavailable for this run.",
                     ],
-                )
-            )
-        if sdk_sandbox:
-            overrides.extend(
-                (
-                    "features.apps=false",
-                    "features.plugins=false",
-                    "features.multi_agent=false",
-                    "features.multi_agent_v2=false",
-                    "features.hooks=false",
-                    "features.code_mode=false",
-                    "notify=[]",
-                    'web_search="disabled"',
                 )
             )
         deferred_namespaces = {
@@ -273,262 +309,91 @@ class _CodexModel(Model):
                 "Codex native tool discovery reserves the functions namespace; "
                 "use another namespace for deferred SDK tools."
             )
-        if deferred_namespaces:
-            overrides.append("features.code_mode=false")
         web_tools = [tool for tool in tools if isinstance(tool, WebSearchTool)]
         if len(web_tools) > 1:
             raise UserError("CodexProvider supports one WebSearchTool per request.")
+        web_request = None
         if web_tools:
+            web = web_tools[0]
             if sdk_sandbox:
                 raise UserError("Expose web search through SDK sandbox tools with CodexProvider.")
-            web = web_tools[0]
             if web.image_settings is not None:
                 raise UserError("CodexProvider does not support web search image settings.")
-            overrides.append("features.standalone_web_search=false")
-            overrides.append(
-                'web_search="cached"' if web.external_web_access is False else 'web_search="live"'
-            )
-            overrides.append("tools.web_search.context_size=" + json.dumps(web.search_context_size))
-            if web.filters is not None:
-                if web.filters.allowed_domains is not None:
-                    overrides.append(
-                        "tools.web_search.allowed_domains="
-                        + json.dumps(web.filters.allowed_domains)
-                    )
-            if web.user_location is not None:
-                location = dict(web.user_location)
-                if location.pop("type", "approximate") != "approximate":
-                    raise UserError("CodexProvider supports approximate web search locations.")
-                for key, value in location.items():
-                    if value is not None:
-                        overrides.append(
-                            "tools.web_search.location." + key + "=" + json.dumps(value)
-                        )
-        if provider._api_key is not None:
-            overrides.append('cli_auth_credentials_store="ephemeral"')
-        server = await CodexAppServer.open_initialized(
-            resolve_codex_executable(provider._codex_executable),
-            provider._cwd,
-            overrides,
-            provider._env,
+            location = dict(web.user_location) if web.user_location is not None else None
+            if location is not None and location.pop("type", "approximate") != "approximate":
+                raise UserError("CodexProvider supports approximate web search locations.")
+            web_request = {
+                "external_web_access": web.external_web_access,
+                "search_context_size": web.search_context_size,
+                "allowed_domains": web.filters.allowed_domains if web.filters else None,
+                "user_location": location,
+                "search_content_types": web.search_content_types,
+            }
+        settings = {
+            "model": self._name,
+            "reasoning_effort": effort,
+            "reasoning_summary": summary,
+            "verbosity": model_settings.verbosity,
+            "sdk_sandbox": sdk_sandbox,
+            "require_sdk_call": require_sdk_call,
+            "deferred_namespaces": sorted(deferred_namespaces),
+            "web_search": web_request,
+            "has_audio": any(part.get("type") == "audio" for part in turn_input)
+            or any(
+                part.get("type") == "input_audio"
+                for item in history
+                for part in (item.get("content") or item.get("output") or [])
+                if isinstance(part, dict)
+            ),
+        }
+        schema = (
+            output_schema.json_schema()
+            if output_schema is not None
+            and not output_schema.is_plain_text()
+            and output_schema.is_strict_json_schema()
+            else None
         )
         observations = CodexOperationTracing(tracing, input, self._name)
+        resources = AsyncExitStack()
         output: dict[str, Any] = {}
         streamed: set[str] = set()
         indices: dict[str, int] = {}
         started: set[str] = set()
         finished: set[str] = set()
-        sdk_call = None
-        completed = False
+        sdk_calls: dict[str, Any] = {}
+        sampling_pending = False
+        interrupt_requested = False
         sequence = 0
-        raw_usage = None
+        raw_usage: dict[str, Any] | None = None
         reasoning_summaries: list[str] = []
         usage = None
-        sdk_done_event = None
+        failure: BaseException | None = None
+        sdk_done_events: list[ResponseOutputItemDoneEvent] = []
+
+        async def interrupt_when_ready() -> None:
+            nonlocal interrupt_requested
+            if not interrupt_requested and sdk_calls and not sampling_pending:
+                await thread.interrupt()
+                interrupt_requested = True
+
         try:
-            if provider._api_key is not None:
-                await server.request(
-                    "account/login/start", {"type": "apiKey", "apiKey": provider._api_key}
-                )
-            thread_config: dict[str, Any] = {}
-            if sdk_sandbox or deferred_namespaces:
-                config = (
-                    await server.request(
-                        "config/read", {"cwd": provider._cwd, "includeLayers": False}
-                    )
-                ).get("config")
-                if not isinstance(config, dict):
-                    raise UserError("CodexProvider could not verify SDK tool configuration.")
-                if sdk_sandbox and any(
-                    entry.get("enabled") is not False
-                    for entry in (config.get("mcp_servers") or {}).values()
-                ):
-                    raise UserError(
-                        "CodexProvider with SandboxAgent requires Codex MCP servers "
-                        "to be disabled; "
-                        "expose tools through the SDK instead."
-                    )
-                code_mode = (config.get("features") or {}).get("code_mode") or {}
-                configured_direct = (
-                    code_mode.get("direct_only_tool_namespaces", [])
-                    if isinstance(code_mode, dict)
-                    else []
-                )
-                direct_namespaces = [
-                    name for name in configured_direct if name not in deferred_namespaces
-                ]
-                if deferred_namespaces and "functions" not in direct_namespaces:
-                    direct_namespaces.append("functions")
-                if (
-                    sdk_sandbox
-                    and "agents_sdk" not in deferred_namespaces
-                    and "agents_sdk" not in direct_namespaces
-                ):
-                    direct_namespaces.append("agents_sdk")
-                thread_config["features.code_mode.direct_only_tool_namespaces"] = direct_namespaces
-                if deferred_namespaces:
-                    thread_config["features.code_mode_tool_search"] = True
-            if web_tools:
-                capabilities = await server.request("modelProvider/capabilities/read", {})
-                if capabilities.get("webSearch") is not True:
-                    raise UserError(
-                        "The configured Codex model provider does not support hosted web search."
-                    )
-                config = (
-                    await server.request(
-                        "config/read", {"cwd": provider._cwd, "includeLayers": False}
-                    )
-                ).get("config")
-                if not isinstance(config, dict) or config.get("model_catalog_json") is not None:
-                    raise UserError(
-                        "CodexProvider cannot verify hosted web search with a custom model catalog."
-                    )
-                requested_mode = "cached" if web_tools[0].external_web_access is False else "live"
-                requirements = (await server.request("configRequirements/read", {})).get(
-                    "requirements"
-                ) or {}
-                modes = requirements.get("allowedWebSearchModes")
-                # Live access is permission to fetch. A managed host may narrow it to
-                # cached search. A cache-only request must never permit a live fetch.
-                if (
-                    modes is not None
-                    and requested_mode not in modes
-                    and not (requested_mode == "live" and "cached" in modes)
-                ):
-                    raise UserError(
-                        "Codex host policy does not allow the requested web search mode."
-                    )
-                if (
-                    config.get("web_search") != requested_mode
-                    or config.get("features", {}).get("standalone_web_search") is not False
-                ):
-                    raise UserError(
-                        "Codex did not apply the requested hosted web search configuration."
-                    )
-                effective_web = (config.get("tools") or {}).get("web_search") or {}
-                if effective_web.get("context_size") != web_tools[0].search_context_size:
-                    raise UserError("Codex did not apply the requested web search context size.")
-                if (
-                    web_tools[0].filters is not None
-                    and web_tools[0].filters.allowed_domains is not None
-                    and effective_web.get("allowed_domains") != web_tools[0].filters.allowed_domains
-                ):
-                    raise UserError("Codex did not apply the requested web search domain filter.")
-                if web_tools[0].user_location is not None and any(
-                    (effective_web.get("location") or {}).get(key) != value
-                    for key, value in web_tools[0].user_location.items()
-                    if key != "type" and value is not None
-                ):
-                    raise UserError("Codex did not apply the requested web search location.")
-            thread_params: dict[str, Any] = {
-                "cwd": provider._cwd,
-                "ephemeral": True,
-                "experimentalRawEvents": True,
-            }
-            if self._name is not None:
-                thread_params["model"] = self._name
-            if system_instructions is not None:
-                thread_params["developerInstructions"] = system_instructions
-            if dynamic_tools:
-                thread_params["dynamicTools"] = dynamic_tools
-            if model_settings.verbosity is not None:
-                thread_config["model_verbosity"] = model_settings.verbosity
-            if thread_config:
-                thread_params["config"] = thread_config
-            if sdk_sandbox:
-                thread_params["environments"] = []
-            thread_result = await server.request("thread/start", thread_params)
-            thread_id = _id(thread_result, "thread")
-            if web_tools and (
-                thread_result.get("model")
-                or thread_result.get("thread", {}).get("model")
-                or self._name
-            ) not in {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini"}:
-                raise UserError(
-                    "CodexProvider hosted web search requires a verified gpt-5.5, gpt-5.4, "
-                    "or gpt-5.4-mini model; other stock models may omit the hosted tool."
-                )
-            if web_tools and web_tools[0].search_content_types is not None:
-                effective_model = (
-                    thread_result.get("model")
-                    or thread_result.get("thread", {}).get("model")
-                    or self._name
-                )
-                expected_types = {"text", "image"} if effective_model == "gpt-5.5" else {"text"}
-                if set(web_tools[0].search_content_types) != expected_types:
-                    raise UserError(
-                        "CodexProvider supports only the selected stock model's default "
-                        "web search content types."
-                    )
-            if (
-                web_tools
-                and web_tools[0].external_web_access is False
-                and thread_result.get("sandbox", {}).get("type") == "dangerFullAccess"
-            ):
-                raise UserError(
-                    "Codex upgrades cached web search in danger-full-access; use a restricted "
-                    "sandbox for external_web_access=False."
-                )
-            has_audio = any(part.get("type") == "audio" for part in turn_input) or any(
-                part.get("type") == "input_audio"
-                for item in history
-                for part in item.get("content", [])
-                if isinstance(part, dict)
+            if native_hooks is not None:
+                settings["sdk_tool_hooks"] = await native_hooks.configure(resources)
+            thread = await provider._native_manager().start_thread(
+                json.dumps(dynamic_tools), system_instructions, json.dumps(settings)
             )
-            if has_audio:
-                effective_model = (
-                    thread_result.get("model")
-                    or thread_result.get("thread", {}).get("model")
-                    or self._name
-                )
-                cursor = None
-                found = False
-                while True:
-                    page = await server.request(
-                        "model/list", {"cursor": cursor, "includeHidden": True}
-                    )
-                    for candidate in page.get("data", []):
-                        if effective_model in (candidate.get("id"), candidate.get("model")):
-                            if "audio" not in candidate.get("inputModalities", []):
-                                raise UserError(
-                                    "The selected Codex model does not support audio input."
-                                )
-                            found = True
-                            break
-                    if found or not page.get("nextCursor"):
-                        break
-                    cursor = page["nextCursor"]
-                if not found:
-                    raise UserError(
-                        "CodexProvider could not verify audio support for the selected model."
-                    )
+            resources.push_async_callback(thread.close)
+            if native_hooks is not None:
+                native_hooks.verify(thread)
             if history:
-                await server.request(
-                    "thread/inject_items", {"threadId": thread_id, "items": history}
-                )
-            turn_params: dict[str, Any] = {"threadId": thread_id, "input": turn_input}
-            if effort is not None:
-                turn_params["effort"] = effort
-            if summary is not None:
-                turn_params["summary"] = summary
-            if (
-                output_schema is not None
-                and not output_schema.is_plain_text()
-                and output_schema.is_strict_json_schema()
-            ):
-                turn_params["outputSchema"] = output_schema.json_schema()
-            if sdk_sandbox:
-                turn_params["environments"] = []
-            operation_mode = observations.request_mode()
-            if operation_mode is not None:
-                turn_params["operationTracing"] = operation_mode
-            turn_result = await server.request("turn/start", turn_params)
-            turn_id = _id(turn_result, "turn")
-            observations.bind(thread_id, turn_id, turn_result.get("operationTracing"))
+                await thread.inject_items(json.dumps(history))
+            capture = observations.request_mode()
+            turn_id = await thread.start_turn(json.dumps(turn_input), json.dumps(schema), capture)
+            observations.bind(thread.thread_id, turn_id)
             response = Response(
                 id=turn_id,
                 created_at=time.time(),
-                model=self._name or "codex",
+                model=thread.model,
                 object="response",
                 output=[],
                 parallel_tool_calls=False,
@@ -540,108 +405,113 @@ class _CodexModel(Model):
                 response=response, sequence_number=sequence, type="response.created"
             )
             sequence += 1
-            async for event in server.events():
-                params = event.get("params") or {}
+            while True:
+                encoded = await thread.next_event()
+                if encoded is None:
+                    raise RuntimeError("Codex finished without a completed response.")
+                event = json.loads(encoded)
                 if event.get("method") in (
                     "turn/operation/started",
                     "turn/operation/completed",
+                    "turn/operation/dropped",
                 ):
-                    observations.observe(event["method"], params)
+                    observations.observe(event["method"], event.get("params"))
                     continue
-                if "id" in event:
-                    if (
-                        event["method"] != "item/tool/call"
-                        or params.get("threadId") != thread_id
-                        or params.get("turnId") != turn_id
-                    ):
-                        raise RuntimeError(
-                            "Codex requested an unsupported approval or client action."
-                        )
-                    call = sdk_tool_call(params, identities, tools)
-                    if sdk_call is None:
-                        sdk_call = call.model_copy(update={"id": params["callId"]})
-                        call_id = params["callId"]
-                        indices.setdefault(call_id, len(indices))
-                        if call_id not in started:
-                            started.add(call_id)
-                            changes = {"status": "in_progress"}
-                            if sdk_call.type == "function_call":
-                                changes["arguments"] = ""
-                            yield ResponseOutputItemAddedEvent(
-                                item=sdk_call.model_copy(update=changes),
-                                output_index=indices[call_id],
-                                sequence_number=sequence,
-                                type="response.output_item.added",
-                            )
-                            sequence += 1
-                        if sdk_call.type == "function_call":
-                            # Stock publishes one complete argument snapshot, not token deltas.
-                            yield ResponseFunctionCallArgumentsDeltaEvent(
-                                delta=sdk_call.arguments,
-                                item_id=call_id,
-                                output_index=indices[call_id],
-                                sequence_number=sequence,
-                                type="response.function_call_arguments.delta",
-                            )
-                            sequence += 1
-                            yield ResponseFunctionCallArgumentsDoneEvent(
-                                arguments=sdk_call.arguments,
-                                item_id=call_id,
-                                output_index=indices[call_id],
-                                sequence_number=sequence,
-                                type="response.function_call_arguments.done",
-                            )
-                            sequence += 1
-                        await server.request(
-                            "turn/interrupt", {"threadId": thread_id, "turnId": turn_id}
-                        )
+                message = event["msg"]
+                kind = message["type"]
+                if kind == "hook_completed" and native_hooks is not None:
+                    native_hooks.check_completion(message["run"])
                     continue
-                if params.get("threadId") != thread_id:
+                if event.get("id") not in ("", turn_id):
                     continue
-                method = event["method"]
-                if method == "turn/completed":
-                    turn = params.get("turn") or {}
-                    if turn.get("id") != turn_id:
+                if kind == "dynamic_tool_call_request":
+                    if message.get("turnId") != turn_id:
                         continue
-                    if turn.get("status") != ("interrupted" if sdk_call else "completed"):
-                        raise RuntimeError("Codex did not finish the turn successfully.")
-                    completed = True
-                    break
-                if method == "thread/tokenUsage/updated":
-                    token_usage = params.get("tokenUsage") or {}
-                    total = token_usage.get("total") or {}
-                    usage = ResponseUsage(
-                        input_tokens=total.get("inputTokens", 0),
-                        output_tokens=total.get("outputTokens", 0),
-                        total_tokens=total.get(
-                            "totalTokens",
-                            total.get("inputTokens", 0) + total.get("outputTokens", 0),
-                        ),
-                        input_tokens_details=_make_input_tokens_details(
-                            cached_tokens=total.get("cachedInputTokens", 0),
-                            cache_write_tokens=total.get("cacheWriteInputTokens"),
-                        ),
-                        output_tokens_details=OutputTokensDetails(
-                            reasoning_tokens=total.get("reasoningOutputTokens", 0)
-                        ),
+                    call = sdk_tool_call(message, identities, tools)
+                    call_id = message["callId"]
+                    if call_id in sdk_calls:
+                        continue
+                    call = call.model_copy(update={"id": call_id})
+                    sdk_calls[call_id] = call
+                    indices.setdefault(call_id, len(indices))
+                    changes: dict[str, Any] = {"status": "in_progress"}
+                    if call.type == "function_call":
+                        changes["arguments"] = ""
+                    yield ResponseOutputItemAddedEvent(
+                        item=call.model_copy(update=changes),
+                        output_index=indices[call_id],
+                        sequence_number=sequence,
+                        type="response.output_item.added",
                     )
-                    if model_settings.preserve_raw_usage:
-                        raw_usage = token_usage
+                    sequence += 1
+                    if call.type == "function_call":
+                        yield ResponseFunctionCallArgumentsDeltaEvent(
+                            delta=call.arguments,
+                            item_id=call_id,
+                            output_index=indices[call_id],
+                            sequence_number=sequence,
+                            type="response.function_call_arguments.delta",
+                        )
+                        sequence += 1
+                        yield ResponseFunctionCallArgumentsDoneEvent(
+                            arguments=call.arguments,
+                            item_id=call_id,
+                            output_index=indices[call_id],
+                            sequence_number=sequence,
+                            type="response.function_call_arguments.done",
+                        )
+                        sequence += 1
+                    # A tool may start while its model response is still streaming.
+                    # Drain that sampling response before handing actual admissions
+                    # to the Runner; other raw calls may never pass native tool hooks.
+                    await interrupt_when_ready()
                     continue
-                if params.get("turnId") != turn_id:
+                if kind in ("task_complete", "turn_aborted"):
+                    if kind != ("turn_aborted" if interrupt_requested else "task_complete") or (
+                        sdk_calls and not interrupt_requested
+                    ):
+                        raise RuntimeError("Codex did not finish the turn successfully.")
+                    break
+                if kind == "error":
+                    raise RuntimeError("Codex model turn failed.")
+                if kind == "token_count":
+                    info = message.get("info")
+                    total = (info or {}).get("total_token_usage")
+                    if total is not None:
+                        usage = _usage(total)
+                    if model_settings.preserve_raw_usage and info is not None:
+                        if raw_usage is None:
+                            raw_usage = {"responses": []}
+                        raw_usage["token_count"] = info
                     continue
-                if summary is not None and method in (
-                    "item/reasoning/summaryPartAdded",
-                    "item/reasoning/summaryTextDelta",
+                if kind == "raw_response_completed":
+                    if usage is None and message.get("token_usage") is not None:
+                        usage = _usage(message["token_usage"])
+                    if (
+                        model_settings.preserve_raw_usage
+                        and message.get("usage_metadata") is not None
+                    ):
+                        if raw_usage is None:
+                            raw_usage = {"responses": []}
+                        raw_usage["responses"].append(message["usage_metadata"])
+                    sampling_pending = False
+                    await interrupt_when_ready()
+                    continue
+                if kind == "model_reroute":
+                    response = response.model_copy(update={"model": message["to_model"]})
+                    continue
+                if summary is not None and kind in (
+                    "agent_reasoning_section_break",
+                    "reasoning_content_delta",
                 ):
-                    item_id = params["itemId"]
+                    item_id = message["item_id"]
                     indices.setdefault(item_id, len(indices))
-                    if method == "item/reasoning/summaryPartAdded":
+                    if kind == "agent_reasoning_section_break":
                         yield ResponseReasoningSummaryPartAddedEvent(
                             item_id=item_id,
                             output_index=indices[item_id],
                             part=SummaryPart(type="summary_text", text=""),
-                            summary_index=params["summaryIndex"],
+                            summary_index=message["summary_index"],
                             sequence_number=sequence,
                             type="response.reasoning_summary_part.added",
                         )
@@ -649,126 +519,93 @@ class _CodexModel(Model):
                         yield ResponseReasoningSummaryTextDeltaEvent(
                             item_id=item_id,
                             output_index=indices[item_id],
-                            delta=params["delta"],
-                            summary_index=params["summaryIndex"],
+                            delta=message["delta"],
+                            summary_index=message["summary_index"],
                             sequence_number=sequence,
                             type="response.reasoning_summary_text.delta",
                         )
                     sequence += 1
                     continue
-                if method == "item/started":
-                    item = params.get("item") or {}
-                    item_id = item.get("id")
-                    if not isinstance(item_id, str) or item_id in started:
+                if kind == "raw_response_item":
+                    raw = message["item"]
+                    item_type = raw.get("type")
+                    if item_type in ("function_call", "custom_tool_call"):
+                        # Core records the outer model call before dispatching it,
+                        # including calls that later invoke SDK tools from code mode.
+                        sampling_pending = True
+                    parsed: Any = None
+                    if item_type == "reasoning":
+                        parsed = ResponseReasoningItem.model_validate(raw)
+                    elif item_type == "web_search_call":
+                        parsed = ResponseFunctionWebSearch.model_validate(raw)
+                    elif item_type == "tool_search_call":
+                        parsed = ResponseToolSearchCall.model_validate(
+                            {"status": "completed", **raw}
+                        )
+                    elif item_type == "tool_search_output":
+                        parsed = ResponseToolSearchOutputItem.model_validate(raw)
+                    if parsed is not None:
+                        output[parsed.id] = parsed
+                        indices.setdefault(parsed.id, len(indices))
+                    continue
+                delta = None
+                done_message = None
+                item_id = message.get("item_id")
+                if kind == "agent_message_content_delta":
+                    delta = message["delta"]
+                    indices.setdefault(item_id, len(indices))
+                    streamed.add(item_id)
+                elif kind in ("item_started", "item_completed"):
+                    item = message["item"]
+                    if (
+                        item["type"] == "Reasoning"
+                        and kind == "item_completed"
+                        and summary is not None
+                    ):
+                        reasoning_summaries.extend(item["summary_text"])
+                    if item["type"] != "AgentMessage":
                         continue
-                    if item.get("type") == "agentMessage":
-                        beginning: Any = ResponseOutputMessage(
+                    item_id = item["id"]
+                    indices.setdefault(item_id, len(indices))
+                    if kind == "item_completed":
+                        if item_id in finished:
+                            continue
+                        text = "".join(
+                            part["text"] for part in item["content"] if part["type"] == "Text"
+                        )
+                        if item_id not in streamed:
+                            delta = text
+                        done_message = ResponseOutputMessage(
+                            id=item_id,
+                            type="message",
+                            role="assistant",
+                            status="completed",
+                            content=[
+                                ResponseOutputText(type="output_text", text=text, annotations=[])
+                            ],
+                        )
+                        if item.get("phase") in ("commentary", "final_answer"):
+                            done_message.phase = item["phase"]
+                        output[item_id] = done_message
+                else:
+                    continue
+                assert isinstance(item_id, str)
+                if item_id not in started:
+                    started.add(item_id)
+                    yield ResponseOutputItemAddedEvent(
+                        item=ResponseOutputMessage(
                             id=item_id,
                             type="message",
                             role="assistant",
                             status="in_progress",
                             content=[],
-                        )
-                    else:
-                        continue
-                    indices.setdefault(item_id, len(indices))
-                    started.add(item_id)
-                    yield ResponseOutputItemAddedEvent(
-                        item=beginning,
+                        ),
                         output_index=indices[item_id],
                         sequence_number=sequence,
                         type="response.output_item.added",
                     )
                     sequence += 1
-                    continue
-                if method == "rawResponseItem/completed":
-                    raw = params.get("item") or {}
-                    if raw.get("type") == "reasoning":
-                        output[raw["id"]] = ResponseReasoningItem.model_validate(raw)
-                    elif raw.get("type") == "web_search_call":
-                        output[raw["id"]] = ResponseFunctionWebSearch.model_validate(raw)
-                    elif raw.get("type") == "tool_search_call":
-                        output[raw["id"]] = ResponseToolSearchCall.model_validate(
-                            {"status": "completed", **raw}
-                        )
-                    elif raw.get("type") == "tool_search_output":
-                        output[raw["id"]] = ResponseToolSearchOutputItem.model_validate(raw)
-                    if raw.get("id") in output:
-                        indices.setdefault(raw["id"], len(indices))
-                    continue
-                delta = None
-                done_message = None
-                item_id = params.get("itemId")
-                if (
-                    method == "item/agentMessage/delta"
-                    and isinstance(item_id, str)
-                    and isinstance(params.get("delta"), str)
-                ):
-                    indices.setdefault(item_id, len(indices))
-                    if item_id not in started:
-                        started.add(item_id)
-                        beginning = ResponseOutputMessage(
-                            id=item_id,
-                            type="message",
-                            role="assistant",
-                            status="in_progress",
-                            content=[],
-                        )
-                        yield ResponseOutputItemAddedEvent(
-                            item=beginning,
-                            output_index=indices[item_id],
-                            sequence_number=sequence,
-                            type="response.output_item.added",
-                        )
-                        sequence += 1
-                    streamed.add(item_id)
-                    delta = params["delta"]
-                elif method == "item/completed":
-                    item = params.get("item") or {}
-                    if item.get("type") == "reasoning" and summary is not None:
-                        reasoning_summaries.extend(
-                            part for part in item.get("summary", []) if isinstance(part, str)
-                        )
-                    if (
-                        item.get("type") != "agentMessage"
-                        or not isinstance(item.get("id"), str)
-                        or not isinstance(item.get("text"), str)
-                    ):
-                        continue
-                    item_id = item["id"]
-                    if item_id in finished:
-                        continue
-                    indices.setdefault(item_id, len(indices))
-                    if item_id not in streamed and item_id not in output:
-                        delta = item["text"]
-                    message = ResponseOutputMessage(
-                        id=item_id,
-                        type="message",
-                        role="assistant",
-                        status="completed",
-                        content=[
-                            ResponseOutputText(
-                                type="output_text", text=item["text"], annotations=[]
-                            )
-                        ],
-                    )
-                    if item.get("phase") in ("commentary", "final_answer"):
-                        message.phase = item["phase"]
-                    if item_id not in started:
-                        started.add(item_id)
-                        yield ResponseOutputItemAddedEvent(
-                            item=message.model_copy(
-                                update={"status": "in_progress", "content": []}
-                            ),
-                            output_index=indices[item_id],
-                            sequence_number=sequence,
-                            type="response.output_item.added",
-                        )
-                        sequence += 1
-                    output[item_id] = message
-                    done_message = message
                 if delta is not None:
-                    assert isinstance(item_id, str)
                     yield ResponseTextDeltaEvent(
                         content_index=0,
                         delta=delta,
@@ -780,33 +617,32 @@ class _CodexModel(Model):
                     )
                     sequence += 1
                 if done_message is not None:
-                    finished.add(done_message.id)
+                    finished.add(item_id)
                     yield ResponseOutputItemDoneEvent(
                         item=done_message,
-                        output_index=indices[done_message.id],
+                        output_index=indices[item_id],
                         sequence_number=sequence,
                         type="response.output_item.done",
                     )
                     sequence += 1
-            if not completed:
-                raise RuntimeError("Codex finished without a completed response.")
-            if require_sdk_call and sdk_call is None:
+            if require_sdk_call and not sdk_calls:
                 raise UserError(
                     "CodexProvider tool_choice='required' did not return "
                     "an SDK tool or handoff call."
                 )
-            if sdk_call is None and not output:
+            if not sdk_calls and not output:
                 raise RuntimeError("Codex finished without a completed response.")
-            items = list(output.values()) + ([sdk_call] if sdk_call is not None else [])
+            items = list(output.values()) + list(sdk_calls.values())
             if reasoning_summaries:
                 items[-1].codex_reasoning_summary = reasoning_summaries
-            if sdk_call is not None:
-                assert isinstance(sdk_call.id, str)
-                sdk_done_event = ResponseOutputItemDoneEvent(
-                    item=sdk_call,
-                    output_index=indices[sdk_call.id],
-                    sequence_number=sequence,
-                    type="response.output_item.done",
+            for call_id, call in sdk_calls.items():
+                sdk_done_events.append(
+                    ResponseOutputItemDoneEvent(
+                        item=call,
+                        output_index=indices[call_id],
+                        sequence_number=sequence,
+                        type="response.output_item.done",
+                    )
                 )
                 sequence += 1
             items.sort(key=lambda item: indices[item.id])
@@ -814,13 +650,38 @@ class _CodexModel(Model):
                 update={"output": items, "status": "completed", "usage": usage}
             )
             if raw_usage is not None:
-                response.__dict__["codex_raw_usage"] = raw_usage
+                _attach_raw_usage_snapshot(response, raw_usage)
             observations.finish_response(response)
+        except BaseException as error:
+            failure = error
+            raise
         finally:
             observations.close(interrupted=True)
-            await server.close()
-        if sdk_done_event is not None:
-            yield sdk_done_event
+            try:
+                await _join_close(resources.aclose())
+            except Exception:
+                # Keep the attempt failure primary when joined cleanup also fails.
+                if failure is None:
+                    raise
+        for event in sdk_done_events:
+            yield event
         yield ResponseCompletedEvent(
             response=response, sequence_number=sequence, type="response.completed"
         )
+
+
+def _usage(total: dict[str, Any]) -> ResponseUsage:
+    return ResponseUsage(
+        input_tokens=total.get("input_tokens", 0),
+        output_tokens=total.get("output_tokens", 0),
+        total_tokens=total.get(
+            "total_tokens", total.get("input_tokens", 0) + total.get("output_tokens", 0)
+        ),
+        input_tokens_details=_make_input_tokens_details(
+            cached_tokens=total.get("cached_input_tokens", 0),
+            cache_write_tokens=total.get("cache_write_input_tokens"),
+        ),
+        output_tokens_details=OutputTokensDetails(
+            reasoning_tokens=total.get("reasoning_output_tokens", 0)
+        ),
+    )

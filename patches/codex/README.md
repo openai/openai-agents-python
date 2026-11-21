@@ -1,139 +1,145 @@
-# Codex operation tracing patch guide
+# Codex Core operation observations
 
-This patch adds private model and native tool observations to Codex 0.166.0. See the validation record for completed checks.
+The Agents SDK has been embedding Codex Core `0.166.0` at commit `6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`. This patch has been exposing model and native tool observations through the embedded Rust binding. Python has been turning those observations into SDK spans for registered trace processors, including OpenTelemetry.
 
-Apply `patches/codex/0001-operation-tracing.patch` to `rust-v0.166.0` at `6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`. Keep Python responsible for canonical Agents SDK spans and all OpenTelemetry export. Supply Rust observations for the active turn and nested native tools. Exclude independent agents and gateway propagation. Keep Rust exporter setup and PyO3 bindings outside this patch.
+## Why the patch has been needed
 
-## Wire contract
+Existing Core interfaces have been leaving gaps in operation tracing.
 
-Add an experimental `operationTracing` field to `turn/start` with `metadata` or `content`. Echo the effective mode in the reply. Ask for metadata by default when Python tracing is active. Python already holds the SDK-visible input and reply and can populate the existing SDK fields locally. Ask for content only with explicit per-run `"content"` and permission to trace sensitive data. With tracing disabled, omit the field and emit zero observations. Identify stock fallback as partial coverage.
+| Existing interface | Missing observation |
+| --- | --- |
+| Tool lifecycle hooks | General tool results and timing limited to handler execution after authorization |
+| Session events | The final assembled inference request and its exact stream completion |
+| File-backed inference traces | In-memory capture and one logical inference across identical-input transport retries |
 
-Emit `turn/operation/started` immediately, followed by `turn/operation/completed`. Include `operationId`, `threadId`, `turnId`, optional `parentOperationId`, and a `model` or `tool` kind. Identify each nested tool's parent. Include source start and end times, elapsed time from a monotonic clock, and a `success`, `error`, or `interrupted` outcome. Include the model name, source response ID subject to the SDK trust policy, and per-call usage when available. For a tool, include its name and call ID.
+The patch has been adding observations at those source boundaries. The maintained changes have been covering Core model requests, tool execution, bounded content capture, and response-body model metadata in `codex-api`. The SDK has been attaching an observer to each accepted turn through `WithTurnExtensionData`. Disabled tracing has been replacing the previous observer with an empty attachment.
 
-Metadata example without captured content.
+## Build and verify the wheel
 
-```json
-[
-  {
-    "method": "turn/operation/started",
-    "params": {
-      "operationId": "op-1",
-      "threadId": "thread-1",
-      "turnId": "turn-1",
-      "kind": "model",
-      "requestedModel": "example-model",
-      "startedAt": "2026-11-20T00:00:00.000Z"
-    }
-  },
-  {
-    "method": "turn/operation/completed",
-    "params": {
-      "operationId": "op-1",
-      "threadId": "thread-1",
-      "turnId": "turn-1",
-      "kind": "model",
-      "requestedModel": "example-model",
-      "startedAt": "2026-11-20T00:00:00.000Z",
-      "completedAt": "2026-11-20T00:00:01.000Z",
-      "durationMs": 1000,
-      "outcome": "success"
-    }
-  }
-]
-```
+The commands below have been targeting a POSIX development host with Python 3.12, Git, `uv`, and `rustup`. Linux builds have been requiring a C/C++ compiler, CMake, `pkg-config`, Perl, and OpenSSL development libraries. The [preview workflow](../../.github/workflows/codex-preview.yml) has been supplying platform-specific prerequisites and release-compatible builds for the supported wheel targets.
 
-Extend `TurnStartParams`, `TurnStartResponse`, and the notification registry. Keep payload fields exclusive to effective content mode. [Turn protocol](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/app-server-protocol/src/protocol/v2/turn.rs) · [Notification registry](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/app-server-protocol/src/protocol/common.rs)
-
-## Source observations
-
-Capture HTTP and WebSocket requests after final assembly and input bounding in `core/src/client.rs`. Include exact submitted values within the capture budget and `previous_response_id` for continuation. Label wire deltas separately from expanded context. Group identical-input retries under one operation and split after changed assembled input. End model timing at stream termination before draining tools. Preserve requested and observed model identity when available. [Client](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/client.rs) · [Sampling](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/session/turn.rs) · [Retry guidance](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/responses_retry.rs)
-
-Observe native execution at the tool registry, with deferred start points immediately after authorization for sandboxed tools and MCP. Project actual results at the registry result boundary, including nested code-mode results. Keep dynamic requests as Python-owned callback interrupts and trace callback execution in Python. [Lifecycle types](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs) · [Registry](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/tools/registry.rs)
-
-## Privacy and lifecycle
-
-Bind observations before sampling to the initiating opted-in connection. Deliver exclusively to that connection, including multiple-subscriber cases. Keep captured data in memory and exclude it from rollout persistence and logs. Existing outgoing helpers have been logging notifications and broadcasting to empty recipient lists. Add explicit targeting and redacted logging. [Outgoing delivery](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/app-server/src/outgoing_message.rs)
-
-Enforce a 32 KiB UTF-8 serialized capture budget per direction per operation before sending. Bound raw UTF-8 bytes before parsing JSON-looking strings or native function arguments. Oversized JSON becomes an explicit `omitted` and `truncated` marker with reason `capture_budget`, without retaining a raw prefix. Keep embedded markers valid JSON strings. Preserve in-budget structured content and sensitive-field omission. Borrow normalized JSON values and raw custom-tool text during projection. Bound ordinary text to a UTF-8 prefix before media replacement and JSON sizing. Serialize typed adapters through a capped writer before creating owned JSON trees. Preserve bounded visible text and explicit media omissions for oversized messages and tool results. Omit other oversized typed items. Hash borrowed request identity fields without retaining serialized request copies. The existing tool-result conversion supplies an owned value before projection. Mark missing content with `omitted` and shortened content with `truncated`, including the reason. Describe completeness accurately.
-
-Use one finalizer per operation. Source turn completion closes private queue admission and awaits its drain before publishing `turn/completed`, including interrupted turns. Empty turns also close their observers. On child-process termination without a Rust terminal, close open IDs in Python with interruption and incomplete-observation metadata.
-
-## Build and checks
-
-Use the pinned Rust 1.95.0 toolchain and build prerequisites, including `just`. Replace the absolute paths below. Require a fresh checkout and the exact SHA before application. [Installation](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/docs/install.md)
+Start at the SDK checkout root. Install the pinned build tools into a separate environment.
 
 ```sh
-set -eu
+export SDK_ROOT="$PWD"
+rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+uv venv --python 3.12 "$SDK_ROOT/.venv-codex-build"
+uv pip install --python "$SDK_ROOT/.venv-codex-build" \
+  --require-hashes --only-binary=:all: \
+  --requirements native/codex/build-requirements.txt
+```
+
+On Linux, install `patchelf` into that environment for wheel repair.
+
+```sh
+uv pip install --python "$SDK_ROOT/.venv-codex-build" patchelf
+```
+
+Build the combined SDK wheel and run the native binding tests against the patched dependency graph.
+
+```sh
+export VIRTUAL_ENV="$SDK_ROOT/.venv-codex-build"
+export PATH="$VIRTUAL_ENV/bin:$PATH"
+export RUSTUP_TOOLCHAIN=1.95.0
+export UV_NO_BUILD_ISOLATION=1
 export CARGO_PROFILE_DEV_DEBUG=0
 export CARGO_PROFILE_TEST_DEBUG=0
 export RUST_MIN_STACK=8388608
-SDK_ROOT=/path/to/sdk
-CODEX_CHECKOUT=/path/to/fresh-codex
+python scripts/build_codex_wheel.py --profile dev --test-native --out "$SDK_ROOT/dist"
+```
+
+The script has been copying the exact pinned upstream source into a temporary build directory and applying the checked-in patch there. Cargo source overrides have been selecting that patched workspace for the extension and execution helper. The wheel has been including the helper assets, licenses, source revision, patch, and this guide. For a release build, omit `--profile dev`.
+
+Set `WHEEL` to the absolute wheel path printed by the build. Create a clean environment and run the installed-package verifier outside the checkout.
+
+```sh
+WHEEL=/absolute/path/to/built-wheel.whl
+export VERIFY_ENV="$SDK_ROOT/.venv-codex-verify"
+uv venv --python 3.12 "$VERIFY_ENV"
+uv pip install --python "$VERIFY_ENV" "$WHEEL"
+VERIFY_DIR=$(mktemp -d)
+cd "$VERIFY_DIR"
+"$VERIFY_ENV/bin/python" -I "$SDK_ROOT/native/codex/verify_installed.py" \
+  --output "$VERIFY_DIR/installed.json"
+```
+
+The verifier has been checking the installed package, native imports, bundled helpers, authentication isolation, and real Runner behavior against a loopback model service. Python's `-I` option has been excluding checkout imports and ambient Python paths.
+
+Install the test dependencies and run the live operation-tracing matrix with that same wheel.
+
+```sh
+uv pip install --python "$VERIFY_ENV" --only-binary=:all: \
+  'pytest>=9.0.3' pytest-asyncio 'opentelemetry-sdk>=1.45.0,<2'
+CODEX_TRACING_NATIVE_TEST=1 "$VERIFY_ENV/bin/python" -I -m pytest \
+  "$SDK_ROOT/tests/models/test_operation_tracing_parity.py" \
+  --import-mode=importlib -q
+```
+
+The matrix has been exercising both Runner entry points, capture permissions, model retries, SDK and native tools, source timings, and interruption through the compiled extension. Its model service has been using loopback HTTP with fixture responses. The installed-wheel matrix has been passing 46 cases without skips against the pinned Core revision. API credentials have been remaining unnecessary for these checks.
+
+## Check the patch independently
+
+Use a second, clean Codex checkout to check source application independently of wheel assembly. Set `CODEX_CHECKOUT` to a new absolute directory.
+
+```sh
+CODEX_CHECKOUT=/absolute/path/to/fresh-codex
 PATCH_FILE="$SDK_ROOT/patches/codex/0001-operation-tracing.patch"
-git clone --branch rust-v0.166.0 --single-branch https://github.com/openai/codex.git "$CODEX_CHECKOUT"
+git clone --branch rust-v0.166.0 --single-branch \
+  https://github.com/openai/codex.git "$CODEX_CHECKOUT"
 cd "$CODEX_CHECKOUT"
 test "$(git rev-parse HEAD)" = 6ff1e1ca3b30fc8b914720681fcf5fe62e95f856
 test -z "$(git status --porcelain)"
 git apply --check "$PATCH_FILE"
 git apply "$PATCH_FILE"
-just write-app-server-schema
-just write-app-server-schema --experimental
-cd "$CODEX_CHECKOUT/codex-rs"
-cargo build -p codex-cli --bin codex
-CODEX_TRACING_TEST_EXECUTABLE="$CODEX_CHECKOUT/codex-rs/target/debug/codex"
-"$CODEX_TRACING_TEST_EXECUTABLE" --version
-cd "$CODEX_CHECKOUT"
-just fmt-check
 git diff --check
-cd "$CODEX_CHECKOUT/codex-rs"
-cargo test -p codex-core -p codex-app-server --lib operation_observation
-cargo test -p codex-core --lib new_turn_only
-cargo test -p codex-app-server-protocol --lib
-cargo test -p codex-api --lib process_sse_reports_body_model_without_routing_authority
-cd "$SDK_ROOT"
-CODEX_TRACING_TEST_EXECUTABLE="$CODEX_TRACING_TEST_EXECUTABLE" uv run --extra opentelemetry python -m pytest tests/models/test_operation_tracing_parity.py
+cd codex-rs
+cargo +1.95.0 test -p codex-core --lib operation_observation
+cargo +1.95.0 test -p codex-core --lib mcp_tool_call_ids_are_added_to_request_meta
+cargo +1.95.0 test -p codex-api --lib process_sse_reports_body_model_without_routing_authority
+cargo +1.95.0 fmt --all -- --check
 ```
 
-For the optional real-stock gate on Linux x86_64, download the pinned official asset below. Choose the corresponding platform asset from the same release on other hosts. Keep the patched executable selected separately.
+## Observation and capture contract
+
+The `codex_core::operation_observation` module has been exposing the observer, event, phase, attachment, and capture-mode types. Core has been calling `emit(OperationEvent)` synchronously and awaiting `turn_finished` before the ordinary turn terminal. The binding has been owning private delivery, bounded queues, loss reporting, and ordering into Python.
+
+The [binding observer](../../native/codex/src/operation_events.rs) has been providing a host integration example. Started and completed events have been carrying operation, thread, and turn identifiers with source timestamps. Available fields have been including parent identifiers, outcome, model metadata, usage, and tool identity. The Rust-only `phase` field has been selecting the Python envelopes `turn/operation/started` and `turn/operation/completed`.
+
+| Mode | Captured content |
+| --- | --- |
+| Metadata | Model and tool facts without input or output |
+| Content | Permitted input and output with a separate 32 KiB UTF-8 JSON budget for each direction |
+| Disabled | No observer |
+
+Raw strings that resemble JSON have been receiving a byte check before parsing. Typed values have been passing through capped serialization before capture has been allocating JSON. Oversized text has been retaining a bounded UTF-8 prefix with truncation markers. Structured values and media have been receiving omission markers. Request identity hashing has been borrowing prepared fields. The upstream `ToolOutput::code_mode_result` conversion has been remaining outside auxiliary capture-memory accounting.
+
+Content has been staying in memory, outside rollout storage and diagnostic logs. HTTP and WebSocket observations have been including the final submitted input and continuation fields. Identical-input retries have been sharing one model operation. Changed semantic input has been starting another. Response-body model names have been supplying observation metadata without changing routing authority. Stream completion has been ending the model observation before session code has been draining tool futures.
+
+Native tool observations have been measuring handler execution after authorization, including nested code-mode results. Python has been owning SDK function execution spans. Observer panics have been leaving model and tool execution unaffected, and operation guards have been producing one completion on success, error, or interruption.
+
+## Prepare an upstream change
+
+Keep maintained Rust source and tests in the patch. Leave local Cargo lock changes out. Refresh the patch from the pinned checkout after reviewing source changes.
 
 ```sh
-STOCK_DIRECTORY=/path/to/codex-stock-0.166.0
-mkdir -p "$STOCK_DIRECTORY"
-curl --fail --location --output "$STOCK_DIRECTORY/codex.tar.gz" \
-  https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-x86_64-unknown-linux-musl.tar.gz
-tar -xzf "$STOCK_DIRECTORY/codex.tar.gz" -C "$STOCK_DIRECTORY"
-CODEX_TRACING_STOCK_EXECUTABLE="$STOCK_DIRECTORY/codex-x86_64-unknown-linux-musl"
-"$CODEX_TRACING_STOCK_EXECUTABLE" --version
-CODEX_TRACING_TEST_EXECUTABLE="$CODEX_TRACING_TEST_EXECUTABLE" CODEX_TRACING_STOCK_EXECUTABLE="$CODEX_TRACING_STOCK_EXECUTABLE" uv run --extra opentelemetry python -m pytest tests/models/test_operation_tracing_parity.py
-```
-
-Require the executable and mode acknowledgment in full integration tests. Cover default, disabled, metadata, and content modes with SDK tracing and OpenTelemetry separately and together. Verify starts, retries, nested tools, cancellation, source timing, and owner isolation. Use a synthetic canary to detect content in other clients, logs, or stored telemetry. Keep Rust regressions inside the patch.
-
-The executable embeds generated exports, so run both generators before building. The shipped patch contains hand-maintained source and tests only. The stable generator updates JSON/TypeScript fixtures, stable exports, and Python SDK types. The experimental generator updates `codex-rs/app-server-protocol/schema/precomputed/app-server-exports-experimental.json.zst`. Include generated outputs in the future upstream Codex PR. [Schema generator](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/app-server-protocol/scripts/write_schema_fixtures.py)
-
-## Validation
-
-Require the shared matrix to pass against the selected patched binary. With `CODEX_TRACING_STOCK_EXECUTABLE`, also verify explicit partial coverage on stock 0.166.0. Check live start/terminal ordering and closure after child-process interruption. The steering regressions must preserve the current turn's owner, reject future observation authority from an unacknowledged steer, and retain the existing `WithTurnExtensionData::new` behavior for other callers.
-
-Verify a fresh apply followed by both generators against the complete source tree used for the build. Keep hashes, timings, logs, and the resulting tree comparison in the PR validation record.
-
-## Refresh and upstream handoff
-
-Review source, tests, and generated outputs in the Codex checkout. Mark new Rust files with `git add -N` before refreshing the SDK-maintained patch. Keep generated files available for the future upstream PR and exclude them from this reviewable patch. Use the paths from the build commands above.
-
-```sh
-set -eu
 cd "$CODEX_CHECKOUT"
 base=6ff1e1ca3b30fc8b914720681fcf5fe62e95f856
+git add -N codex-rs/core/src/operation_observation.rs \
+  codex-rs/core/src/tools/operation_observation.rs \
+  codex-rs/core/src/tools/operation_observation_tests.rs
 git diff --check "$base"
 candidate=$(mktemp "${PATCH_FILE}.XXXXXX")
-git -c diff.suppressBlankEmpty=true diff --binary "$base" -- . \
-  ':!codex-rs/Cargo.lock' \
-  ':!codex-rs/app-server-protocol/schema/**' \
-  ':!sdk/python/src/openai_codex/generated/**' > "$candidate"
+git -c diff.suppressBlankEmpty=true diff --binary "$base" -- \
+  codex-rs/core codex-rs/codex-api codex-rs/otel > "$candidate"
 test -s "$candidate"
 git apply --stat "$candidate"
 mv "$candidate" "$PATCH_FILE"
 ```
 
-Repeat the clone, apply, build, and checks with another unused checkout path. Prepare an upstream handoff containing the patch, base revision, wire examples, privacy decisions, and recorded validation. Remove the local patch after an upstream release with equivalent behavior passes integration. Retain capability negotiation and partial fallback during migration.
+Before opening an upstream PR, apply the refreshed patch in another clean checkout and rerun the Rust checks above. Include the pinned revision, observer API example, capture contract, source hashes, and actual source and installed-wheel test results in the PR. Follow the upstream repository's contribution instructions.
+
+## Retire the patch
+
+Wait for an upstream release with equivalent source facts, capture controls, and observer isolation. Run the installed-wheel matrix against that release and compare SDK and OpenTelemetry output for retries, native tools, interruption, concurrent capture permissions, and content canaries.
+
+After those checks pass, update the Core pin and remove the patch and its build-time application together. Rerun source checks, native binding tests, installed-package verification, and live parity for the resulting wheel.

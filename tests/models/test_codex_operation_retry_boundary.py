@@ -8,7 +8,7 @@ import pytest
 from agents import Agent, ModelSettings, RunConfig, Runner
 from agents.models.codex import CodexProvider
 from agents.retry import ModelRetrySettings, RetryDecision
-from tests.models.test_codex_provider import FakeServer, OperationServer, servers as servers
+from tests.models.test_codex_provider import FakeThread, OperationThread, threads as threads
 from tests.testing_processor import fetch_ordered_spans
 
 
@@ -17,10 +17,10 @@ from tests.testing_processor import fetch_ordered_spans
     "scenario", ["same_attempt", "multiple_before_retry", "single_before_retry"]
 )
 async def test_distinct_codex_inferences_do_not_merge_across_provider_or_runner_attempts(
-    tmp_path: Path, servers: Any, scenario: str
+    tmp_path: Path, threads: Any, scenario: str
 ) -> None:
-    # App Server observations preserve internal inference boundaries that ScriptedModel cannot emit.
-    class InferenceServer(OperationServer):
+    # Native observations preserve inference boundaries that ScriptedModel cannot emit.
+    class InferenceThread(OperationThread):
         def __init__(self, outcomes: list[str], complete: bool) -> None:
             super().__init__(capture="content")
             self.outcomes = outcomes
@@ -52,18 +52,18 @@ async def test_distinct_codex_inferences_do_not_merge_across_provider_or_runner_
                     )
                 yield {"method": "turn/operation/completed", "params": terminal}
             if self.complete:
-                async for event in FakeServer.events(self):
+                async for event in FakeThread.events(self):
                     yield event
 
-    queue, _ = servers
+    queue, _ = threads
     if scenario == "single_before_retry":
-        queue.extend([InferenceServer(["error"], False), InferenceServer(["success"], True)])
+        queue.extend([InferenceThread(["error"], False), InferenceThread(["success"], True)])
     elif scenario == "multiple_before_retry":
         queue.extend(
-            [InferenceServer(["success", "error"], False), InferenceServer(["success"], True)]
+            [InferenceThread(["success", "error"], False), InferenceThread(["success"], True)]
         )
     else:
-        queue.append(InferenceServer(["error", "success"], True))
+        queue.append(InferenceThread(["error", "success"], True))
     agent = Agent(
         name="boundaries",
         model_settings=ModelSettings(

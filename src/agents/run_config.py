@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Generic, Literal
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from .sandbox.session.sandbox_client import BaseSandboxClient
     from .sandbox.session.sandbox_session_state import SandboxSessionState
     from .sandbox.snapshot import SnapshotBase, SnapshotSpec
+    from .tool import NativeTool, Tool
 
 
 DEFAULT_MAX_TURNS = 10
@@ -140,8 +141,33 @@ OutputGuardrailBlockedMessageFormatter = Callable[
 
 
 @dataclass
+class ToolCallHookContext(Generic[TContext]):
+    """A tool call observed by a preparation callback in the host process."""
+
+    run_context: RunContextWrapper[TContext]
+    agent: Agent[TContext]
+    tool: Tool | NativeTool
+    call_id: str
+    tool_namespace: str | None
+    arguments: dict[str, Any]
+    """Function arguments or the local tool's input fields (for example, `{"action": ...}`).
+
+    If a function tool recovers from malformed JSON, its output hook receives an empty dictionary.
+    The original text is available in the function's `ToolContext.tool_arguments`.
+    """
+
+
+@dataclass
 class ToolExecutionConfig:
-    """Grouped SDK-side execution settings for local tool calls."""
+    """Configure tool execution and run-wide preparation callbacks.
+
+    Callbacks cover SDK-executed tools and native tools for which Codex emits tool hooks.
+    Codex reports native shell and patch inputs as `{"command": ...}`. A native output hook can
+    return the original result or replacement text for the model. API-hosted tools execute
+    outside the client hook lifecycle.
+
+    Supply the same callbacks when resuming a run in another process.
+    """
 
     max_function_tool_concurrency: int | None = None
     """Maximum number of local function tool calls to execute concurrently.
@@ -156,6 +182,45 @@ class ToolExecutionConfig:
     The same guardrails still run again immediately before tool execution after approval.
     """
 
+    prepare_tool_input: Callable[[ToolCallHookContext[Any]], Awaitable[dict[str, Any]]] | None = (
+        None
+    )
+    """Experimental. Return the arguments to approve and execute.
+
+    Return `call.arguments` to pass them through.
+
+    The runner awaits this callback for a new call so the approver sees what the tool will execute.
+    Approved SDK calls reuse those arguments on resume. SDK tools call `on_tool_start` after
+    approval. Codex calls it from its native pre-tool event, before its own permission checks.
+    Responses executes hosted tools such as web search inside the API, outside this callback.
+
+    Caution: If the hook relay fails to deliver a decision, Codex may execute the native tool
+    with its original arguments. This can happen if this callback raises and the relay cannot
+    report the error.
+
+    Raw provider stream events and provider-managed history may contain the original proposal.
+    """
+
+    prepare_tool_output: Callable[[ToolCallHookContext[Any], Any], Awaitable[Any]] | None = None
+    """Experimental. Return the tool result to use after the tool has executed.
+
+    The runner awaits this callback before function-tool output guardrails and before building the
+    tool-output item used for history and later model turns. `on_tool_end` observes the accepted
+    result after that item is built. For native tools it observes the prepared value before Codex
+    returns it to the model. Both executors ignore the observer's return value.
+    Responses-hosted tools such as file search return results to the model outside this callback.
+
+    Return the received result to pass it through. Return a copyable value to isolate concurrent
+    calls. Function tools use their normal output validation and serialization. Shell tools accept
+    text or `ShellResult`. Editors and custom tools use text. Computer tools use base64 screenshots.
+    """
+
+    sdk_only_tool_hooks: bool = False
+    """Run hooks only for SDK-executed tools, preserving classic behavior.
+
+    When either preparation callback is set, the Codex provider disables native workspace tools.
+    """
+
     def __post_init__(self) -> None:
         if self.max_function_tool_concurrency is not None and (
             self.max_function_tool_concurrency < 1
@@ -163,6 +228,8 @@ class ToolExecutionConfig:
             raise ValueError("tool_execution.max_function_tool_concurrency must be at least 1")
         if not isinstance(self.pre_approval_tool_input_guardrails, bool):
             raise ValueError("tool_execution.pre_approval_tool_input_guardrails must be a bool")
+        if not isinstance(self.sdk_only_tool_hooks, bool):
+            raise ValueError("tool_execution.sdk_only_tool_hooks must be a bool")
 
 
 @dataclass
@@ -649,6 +716,7 @@ __all__ = [
     "SandboxConcurrencyLimits",
     "SandboxRunConfig",
     "ToolExecutionConfig",
+    "ToolCallHookContext",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "_default_trace_include_sensitive_data",

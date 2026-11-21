@@ -202,7 +202,10 @@ def tool_invocation_identity_and_scope(
             return None
         if "input" not in mapping:
             return None
-    elif invocation_type in {"computer_call", "local_shell_call", "shell_call"}:
+    elif invocation_type == "computer_call":
+        if "actions" not in mapping and "action" not in mapping:
+            return None
+    elif invocation_type in {"local_shell_call", "shell_call"}:
         if "action" not in mapping:
             return None
     elif invocation_type == "apply_patch_call":

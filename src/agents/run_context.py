@@ -155,6 +155,8 @@ class _ToolInvocationRecord:
     fingerprint: str
     executed: bool = False
     completed: bool = False
+    # The input admitted under this ID, paired with the digest of the original proposal.
+    input_rewrite: tuple[str, dict[str, Any]] | None = None
 
 
 @dataclass(eq=False)
@@ -654,6 +656,7 @@ class RunContextWrapper(Generic[TContext]):
         record.invocation_type = invocation_type
         record.approval_scope = approval_scope
         record.fingerprint = fingerprint
+        record.input_rewrite = None
         return ((invocation_type, call_id), False, False)
 
     def _matching_sticky_approval_keys(
@@ -1639,12 +1642,26 @@ class RunContextWrapper(Generic[TContext]):
                 raise validation_error_factory(
                     "RunState tool invocation contains invalid lifecycle data."
                 )
+            input_rewrite = None
+            if "input_rewrite" in serialized_invocation:
+                rewrite = serialized_invocation["input_rewrite"]
+                if (
+                    not isinstance(rewrite, Mapping)
+                    or not is_tool_invocation_digest(rewrite.get("proposal_fingerprint"))
+                    or not isinstance(rewrite.get("arguments"), dict)
+                ):
+                    raise validation_error_factory("RunState tool input rewrite is invalid.")
+                input_rewrite = (
+                    rewrite["proposal_fingerprint"],
+                    copy.deepcopy(rewrite["arguments"]),
+                )
             self._tool_invocations[call_id] = _ToolInvocationRecord(
                 invocation_type=invocation_type,
                 approval_scope=approval_scope,
                 fingerprint=fingerprint,
                 executed=executed,
                 completed=completed,
+                input_rewrite=input_rewrite,
             )
 
     def _mark_restored_unbound_approval_call_ids(self) -> None:

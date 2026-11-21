@@ -30,7 +30,7 @@ class _Operation:
 
 
 class CodexOperationTracing:
-    """Translate connection-private operation facts into the current SDK trace."""
+    """Translate turn-private operation facts into the current SDK trace."""
 
     def __init__(self, tracing: ModelTracing, input: Any, model: str | None) -> None:
         self._tracing = tracing
@@ -48,8 +48,6 @@ class CodexOperationTracing:
         self.mode = None if disabled else self._detail or "metadata"
         self._thread_id: str | None = None
         self._turn_id: str | None = None
-        self._acknowledged = False
-        self._accepted_mode: str | None = None
         self._operations: dict[str, _Operation] = {}
         self._completed: dict[str, str] = {}
         self._pending: _Operation | None = None
@@ -63,30 +61,24 @@ class CodexOperationTracing:
             self.mode = None
         return self.mode
 
-    def bind(self, thread_id: str, turn_id: str, accepted_mode: Any) -> None:
+    def bind(self, thread_id: str, turn_id: str) -> None:
         self._thread_id, self._turn_id = thread_id, turn_id
-        self._acknowledged = self.mode is not None and (
-            accepted_mode == self.mode or accepted_mode == "metadata"
-        )
-        self._accepted_mode = accepted_mode if self._acknowledged else None
-        if self.mode is not None and not self._acknowledged:
-            self._coverage_reason = "unsupported"
-        elif self._acknowledged and accepted_mode != self.mode:
-            self._coverage_reason = "capture_downgraded"
 
     def observe(self, method: str, event: Any) -> None:
         if self.mode is None:
             return
         try:
+            if method == "turn/operation/dropped":
+                if event.get("threadId") != self._thread_id:
+                    raise ValueError("Unexpected observation thread.")
+                self._coverage_reason = "dropped_operations"
+                return
             self._observe(method, event)
         except Exception:
             # Telemetry must never replay a model request or interrupt tool execution.
             self._coverage_reason = "telemetry_error"
 
     def _observe(self, method: str, event: dict[str, Any]) -> None:
-        if not self._acknowledged:
-            self._coverage_reason = "telemetry_error"
-            return
         if event.get("threadId") != self._thread_id or event.get("turnId") != self._turn_id:
             self._coverage_reason = "telemetry_error"
             return
@@ -185,7 +177,7 @@ class CodexOperationTracing:
                 data.usage = {key: value for key, value in usage.items() if isinstance(value, int)}
 
     def _content(self, operation: _Operation, event: dict[str, Any]) -> None:
-        if self._detail != "content" or self._accepted_mode != "content":
+        if self._detail != "content":
             return
         data = operation.span.span_data
         for direction in ("input", "output"):
@@ -244,7 +236,7 @@ class CodexOperationTracing:
         self._emit_coverage()
 
     def finish_response(self, response: Response) -> None:
-        if self.mode is not None and self._acknowledged and self._first_model:
+        if self.mode is not None and self._first_model:
             self._coverage_reason = "missing_operations"
         if self._pending is not None:
             data = self._pending.span.span_data

@@ -30,6 +30,6 @@ uv run python -m examples.hosted_mcp.connectors --sdk-managed --codex
 uv run python -m examples.hosted_mcp.connectors --sdk-managed --codex --stream
 ```
 
-`OPENAI_MODEL` and `CODEX_MODEL` select an optional model for their respective providers. Codex uses its CLI authentication. The SDK sends the Google token as an authorization header to `https://calendarmcp.googleapis.com/mcp/v1`; the model receives the filtered tools and their results.
+`OPENAI_MODEL` and `CODEX_MODEL` select an optional model for their respective providers. For `--codex`, use the prerelease wheel and a saved Codex login. The SDK sends the Google token as an authorization header to `https://calendarmcp.googleapis.com/mcp/v1`. The model receives the filtered tools and their results.
 
 A successful query should include a tool result from the connected calendar. A local MCP protocol test cannot verify access to Google's service or a user's calendar; that requires the preview access and OAuth token above.
