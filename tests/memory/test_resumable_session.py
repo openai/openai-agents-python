@@ -96,6 +96,16 @@ async def test_saved_native_approval_cannot_become_an_sdk_tool_approval(
     processed = pending_state["last_processed_response"]
     # An earlier preview stored native actions outside the SDK function queue.
     processed["native_approvals"] = copy.deepcopy(processed["interruptions"])
+    if nested:
+        item = processed["native_approvals"][0]
+        item["codex_native_checkpoint"] = {
+            "version": 1,
+            "cwd": str(tmp_path.resolve()),
+            "model": "fixture-model",
+            "call": item["raw_item"],
+            "request": {"type": "exec_approval_request", "call_id": item["raw_item"]["call_id"]},
+            "preconditions": {"version": 1, "first_approval": True},
+        }
     processed["functions"] = []
     checkpoint["run_state"] = json.dumps(snapshot)
     stored = json.dumps(checkpoint)

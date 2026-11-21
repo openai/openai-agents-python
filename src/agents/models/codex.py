@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -49,21 +50,25 @@ from ..usage import (
     _response_usage_to_usage,
 )
 from ._codex_inputs import prepare_codex_history, prepare_dynamic_tools, sdk_tool_call
-from ._codex_items import CodexCustomToolCallOutput, CodexFunctionToolCallOutput
+from ._codex_items import (
+    CodexCustomToolCallOutput,
+    CodexFunctionToolCallOutput,
+    CodexPendingCustomCall,
+    CodexPendingFunctionCall,
+)
 from ._codex_tool_hooks import CodexToolHooks
 from ._codex_tracing import CodexOperationTracing
 from ._codex_usage import _add_sample_usage, _usage
-from ._run_context import get_model_tool_hooks
+from ._run_context import ModelToolHooks, get_model_tool_hooks
 from .interface import Model, ModelProvider, ModelTracing
 
 
 class CodexProvider(ModelProvider):
     """Run opt-in Agents SDK requests through embedded Codex Core.
 
-    Each request uses a fresh Codex thread. Native request and tool spans contain
-    metadata only. Interactive Codex approvals are unsupported. For resumable
-    workspace approvals, supply a local ShellTool or ApplyPatchTool with
-    needs_approval=True and an executor or editor that enforces your policy.
+    Codex handles workspace tools and authentication. Each request uses a fresh
+    Codex thread. Pass a ResumableSession to the Runner to save a pending local
+    command or edit for approval. The SDK session ID stays the same across workers.
     """
 
     _supports_stored_response_id = False
@@ -111,6 +116,100 @@ class CodexProvider(ModelProvider):
 
     def get_model(self, model_name: str | None) -> Model:
         return _CodexModel(model_name, self)
+
+    async def _run_approved_native_call(
+        self, checkpoint: dict[str, Any], tracing: ModelTracing
+    ) -> str:
+        """Run only the saved invocation, without a model turn or its old Codex home."""
+        if checkpoint.get("version") != 1 or checkpoint.get("cwd") != self._cwd:
+            raise UserError("This Codex approval belongs to a different workspace or SDK version.")
+
+        settings = {"model": checkpoint["model"]}
+        observations = CodexOperationTracing(set(), expect_model=False)
+        thread = await self._native_manager().start_thread("[]", None, json.dumps(settings))
+        watcher: asyncio.Task[None] | None = None
+        failure: BaseException | None = None
+        try:
+            observations.bind(thread, tracing)
+            watcher = asyncio.create_task(observations.watch())
+            return str(
+                await thread.resolve_approval(
+                    json.dumps(checkpoint["call"]),
+                    json.dumps(checkpoint["request"]),
+                    json.dumps(checkpoint["preconditions"]),
+                )
+            )
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+
+            async def close() -> None:
+                try:
+                    await thread.close()
+                finally:
+                    if watcher is not None:
+                        watcher.cancel()
+                        await asyncio.gather(watcher, return_exceptions=True)
+                    observations.close()
+
+            try:
+                await _join_close(close())
+            except asyncio.CancelledError:
+                if isinstance(failure, asyncio.CancelledError):
+                    raise failure from None
+                raise
+            except Exception:
+                if failure is None:
+                    raise
+
+
+def _pending_native_call(
+    call: Any, event: dict[str, Any], cwd: str, model: str
+) -> CodexPendingFunctionCall | CodexPendingCustomCall:
+    request = event["msg"]
+    wire = call.model_dump(exclude_none=True)
+    if event.get("preconditions") is None:
+        raise UserError("Codex could not confirm that this tool is still waiting to run.")
+    checkpoint = {
+        "version": 1,
+        "cwd": cwd,
+        "model": model,
+        "call": wire,
+        "request": request,
+        "preconditions": event["preconditions"],
+    }
+    if getattr(call, "namespace", None) not in (None, "functions"):
+        raise UserError("Only built-in Codex tools support native approval recovery.")
+    if (
+        isinstance(call, ResponseFunctionToolCall)
+        and call.name == "exec_command"
+        and request["type"] == "exec_approval_request"
+        and request.get("kind", "command") == "command"
+        and request.get("approval_id") is None
+        and request.get("network_approval_context") is None
+        and request.get("environmentId") in (None, "local")
+    ):
+        return CodexPendingFunctionCall(**wire, checkpoint=checkpoint)
+    if (
+        isinstance(call, ResponseCustomToolCall)
+        and call.name == "apply_patch"
+        and request["type"] == "apply_patch_approval_request"
+    ):
+        return CodexPendingCustomCall(**wire, checkpoint=checkpoint)
+    raise UserError("This Codex approval cannot safely be resumed on another worker.")
+
+
+def _uses_sdk_workspace(tools: list[Tool], bindings: ModelToolHooks | None) -> bool:
+    settings = bindings.settings if bindings else None
+    return bool(
+        settings
+        and settings.sdk_only_tool_hooks
+        and (settings.prepare_tool_input or settings.prepare_tool_output)
+    ) or any(
+        getattr(tool, "_sdk_sandbox", False) or isinstance(tool, (ShellTool, ApplyPatchTool))
+        for tool in tools
+    )
 
 
 def _settings(settings: ModelSettings) -> tuple[str | None, str | None]:
@@ -162,6 +261,16 @@ class _CodexModel(Model):
 
     def get_default_model_settings(self) -> ModelSettings:
         return ModelSettings()
+
+    async def _run_approved_native_call(
+        self, checkpoint: dict[str, Any], *, tools: list[Tool], tracing: ModelTracing
+    ) -> str:
+        bindings = get_model_tool_hooks()
+        if _uses_sdk_workspace(tools, bindings) or CodexToolHooks.for_run(bindings, set()):
+            raise UserError(
+                "The current workspace or native tool hooks do not allow restoring this call."
+            )
+        return await self._provider._run_approved_native_call(checkpoint, tracing)
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice:
         # Native Codex tools may have changed the workspace before a failed response.
@@ -261,19 +370,7 @@ class _CodexModel(Model):
             )
         provider = self._provider
         bindings = get_model_tool_hooks()
-        tool_execution = bindings.settings if bindings is not None else None
-        classic_preparation = (
-            tool_execution is not None
-            and tool_execution.sdk_only_tool_hooks
-            and (
-                tool_execution.prepare_tool_input is not None
-                or tool_execution.prepare_tool_output is not None
-            )
-        )
-        sdk_sandbox = classic_preparation or any(
-            getattr(tool, "_sdk_sandbox", False) or isinstance(tool, (ShellTool, ApplyPatchTool))
-            for tool in tools
-        )
+        sdk_sandbox = _uses_sdk_workspace(tools, bindings)
         native_hooks = None if sdk_sandbox else CodexToolHooks.for_run(bindings, identities)
         if sdk_sandbox:
             system_instructions = "\n\n".join(
@@ -352,6 +449,7 @@ class _CodexModel(Model):
         sdk_calls: dict[str, Any] = {}
         native_pending: dict[str, tuple[str, str]] = {}
         native_completed: set[str] = set()
+        pending_approval: dict[str, Any] | None = None
         sampling_pending = False
         interrupt_requested = False
         sequence = 0
@@ -378,7 +476,14 @@ class _CodexModel(Model):
             if history:
                 await thread.inject_items(json.dumps(history))
             observations.bind(thread, tracing)
-            turn_id = await thread.start_turn(json.dumps(turn_input), json.dumps(schema))
+            recover = bool(
+                bindings
+                and bindings.resumable
+                and not native_hooks
+                and not sdk_sandbox
+                and not require_sdk_call
+            )
+            turn_id = await thread.start_turn(json.dumps(turn_input), json.dumps(schema), recover)
             response = Response(
                 id=turn_id,
                 created_at=time.time(),
@@ -395,6 +500,18 @@ class _CodexModel(Model):
             )
             sequence += 1
             while True:
+                if pending_approval is not None and not sampling_pending:
+                    # All calls from this sampling response are now known. A sibling
+                    # still in flight has an unknown outcome and cannot be dropped.
+                    call_id = pending_approval["msg"]["call_id"]
+                    if set(native_pending) != {call_id} or sdk_calls:
+                        raise UserError("Codex can only pause one outstanding native call.")
+                    item_id, _ = native_pending.pop(call_id)
+                    output[item_id] = _pending_native_call(
+                        output[item_id], pending_approval, provider._cwd, thread.model
+                    )
+                    # Close the waiting thread before handing the pause to the Runner.
+                    break
                 encoded = await thread.next_event()
                 observations.drain()
                 if encoded is None:
@@ -414,6 +531,20 @@ class _CodexModel(Model):
                         "Use SDK-managed input compaction before starting another model call."
                     )
                 if event.get("id") not in ("", turn_id):
+                    continue
+                if kind in ("exec_approval_request", "apply_patch_approval_request"):
+                    if (
+                        message.get("turn_id") != turn_id
+                        or pending_approval is not None
+                        or native_hooks is not None
+                        or sdk_sandbox
+                        or require_sdk_call
+                    ):
+                        raise UserError(
+                            "Codex can only pause a single built-in tool call before execution, "
+                            "with native workspace tools enabled and without custom tool hooks."
+                        )
+                    pending_approval = event
                     continue
                 if kind == "dynamic_tool_call_request":
                     if message.get("turnId") != turn_id:

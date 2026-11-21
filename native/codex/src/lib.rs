@@ -1,5 +1,6 @@
 //! Private, asynchronous Core bindings for the opt-in Codex model provider.
 mod config;
+mod native_approval;
 mod operation_tracing;
 mod tool_hooks;
 
@@ -9,6 +10,7 @@ use std::sync::{Arc, Once, OnceLock};
 
 use codex_core_api::{
     CodexThread, StartIfIdleSubmission, StartThreadOptions, TurnInputRequest, TurnStartOptions,
+    WithTurnExtensionData,
 };
 use codex_protocol::ThreadId;
 use codex_protocol::dynamic_tools::normalize_dynamic_tool_specs;
@@ -399,12 +401,21 @@ struct Thread {
 
 #[pymethods]
 impl Thread {
-    fn enable_tracing(&self) -> PyResult<()> {
+    #[pyo3(signature=(mode=None))]
+    fn enable_tracing(&self, mode: Option<&str>) -> PyResult<()> {
         self.lease.ensure_open().map_err(py_error)?;
         self.lease
             .operations
-            .enable(self.lease.thread.thread_extension_data());
-        Ok(())
+            .enable(self.lease.thread.thread_extension_data(), mode)
+            .map_err(|message| py_error(message.to_owned()))
+    }
+
+    fn wait_for_operations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let buffer = self.lease.operations.buffer.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            buffer.updates.notified().await;
+            Ok(())
+        })
     }
 
     fn drain_operations(&self) -> Option<String> {
@@ -444,11 +455,13 @@ impl Thread {
         })
     }
 
+    #[pyo3(signature=(input_json, output_schema_json, recover_approvals=false))]
     fn start_turn<'py>(
         &self,
         py: Python<'py>,
         input_json: String,
         output_schema_json: String,
+        recover_approvals: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let lease = self.lease.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -463,6 +476,10 @@ impl Thread {
                     final_output_json_schema: schema,
                     ..Default::default()
                 });
+                let mut request = WithTurnExtensionData::from(request);
+                if recover_approvals {
+                    request = request.capture_native_approvals();
+                }
                 match Box::pin(lease.thread.start_turn_if_idle(request))
                     .await
                     .map_err(|_| "Unable to start the Codex turn.".to_owned())?
@@ -481,22 +498,62 @@ impl Thread {
     fn next_event<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let lease = self.lease.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = async {
-                lease.ensure_open()?;
-                let event = lease.thread.next_event().await.map_err(|_| "The Codex event stream ended unexpectedly.".to_owned())?;
-                match &event.msg {
-                    EventMsg::ExecApprovalRequest(_)
-                    | EventMsg::ApplyPatchApprovalRequest(_)
-                    | EventMsg::RequestPermissions(_)
-                    | EventMsg::RequestUserInput(_)
-                    | EventMsg::ElicitationRequest(_) => {
-                        return Err("Codex requested interactive approval. This provider supports non-interactive execution only.".to_owned());
-                    }
-                    _ => {}
+            lease.ensure_open().map_err(py_error)?;
+            let event = lease
+                .thread
+                .next_event()
+                .await
+                .map_err(|_| py_error("The Codex event stream ended unexpectedly."))?;
+            match &event.msg {
+                EventMsg::ExecApprovalRequest(_) | EventMsg::ApplyPatchApprovalRequest(_) => {
+                    let (request, preconditions) = lease.thread.capture_tool_approval(event.msg)
+                        .await.map_err(|_| py_error(
+                            "Cannot save this Codex approval. Use session=ResumableSession with a supported local command or file edit."
+                        ))?;
+                    return Ok(serde_json::json!({
+                        "id": event.id, "msg": request, "preconditions": preconditions
+                    })
+                    .to_string());
                 }
-                serde_json::to_string(&event).map_err(|_| "Unable to decode the Codex event.".to_owned())
-            }.await;
-            result.map_err(py_error)
+                EventMsg::RequestPermissions(_)
+                | EventMsg::RequestUserInput(_)
+                | EventMsg::ElicitationRequest(_) => {
+                    return Err(py_error(
+                        "Codex requested an unsupported kind of interactive approval.",
+                    ));
+                }
+                EventMsg::RawResponseItem(raw) => lease.operations.observe_item(&raw.item),
+                _ => {}
+            }
+            serde_json::to_string(&event).map_err(|_| py_error("Unable to decode the Codex event."))
+        })
+    }
+
+    fn resolve_approval<'py>(
+        &self,
+        py: Python<'py>,
+        call_json: String,
+        request_json: String,
+        preconditions_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let call =
+            serde_json::from_str(&call_json).map_err(|_| py_error("Invalid saved Codex call."))?;
+        let request = serde_json::from_str(&request_json)
+            .map_err(|_| py_error("Invalid saved Codex request."))?;
+        let preconditions = serde_json::from_str(&preconditions_json)
+            .map_err(|_| py_error("Invalid saved Codex preconditions."))?;
+        let lease = self.lease.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            lease.ensure_open().map_err(py_error)?;
+            native_approval::resolve(
+                &lease.thread,
+                call,
+                request,
+                preconditions,
+                &lease.operations,
+            )
+            .await
+            .map_err(py_error)
         })
     }
 

@@ -82,8 +82,18 @@ def _messages(value: Any, *, output: bool = False) -> list[dict[str, Any]]:
                 if isinstance(item.get(flag), bool):
                     part[flag] = item[flag]
             parts.append(part)
-        elif item.get("truncated") is True and "content" not in item and "tool_calls" not in item:
-            parts.append({"type": "openai.omitted", "reason": "truncated"})
+        elif (
+            (item.get("truncated") is True or item.get("omitted") is True)
+            and "content" not in item
+            and "tool_calls" not in item
+        ):
+            reason = item.get("reason")
+            parts.append(
+                {
+                    "type": "openai.omitted",
+                    "reason": reason if isinstance(reason, str) else "truncated",
+                }
+            )
         elif kind in ("function_call", "custom_tool_call"):
             role = "assistant"
             parts.append(

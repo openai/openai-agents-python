@@ -39,7 +39,8 @@ class FakeThread:
     async def inject_items(self, items):
         self.history = json.loads(items)
 
-    async def start_turn(self, inputs, schema):
+    async def start_turn(self, inputs, schema, recover_approvals=False):
+        self.recover_approvals = recover_approvals
         self.inputs = json.loads(inputs)
         self.schema = json.loads(schema)
         self.started.set()
@@ -1986,8 +1987,9 @@ class TracedThread(FakeThread):
         self.observations = list(observations)
         self.tracing = False
 
-    def enable_tracing(self):
+    def enable_tracing(self, mode=None):
         self.tracing = True
+        self.capture_mode = mode
 
     def drain_operations(self):
         assert self.tracing
@@ -1997,9 +1999,7 @@ class TracedThread(FakeThread):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
-async def test_stock_operations_stay_metadata_only_and_keep_source_times(
-    tmp_path, threads, streamed
-):
+async def test_metadata_operations_keep_source_times(tmp_path, threads, streamed):
     from tests.testing_processor import fetch_ordered_spans
 
     model = {"kind": "model", "id": "1", "model": "native-default"}
@@ -2019,7 +2019,7 @@ async def test_stock_operations_stay_metadata_only_and_keep_source_times(
     threads[0].append(thread)
     cfg = RunConfig(
         model_provider=CodexProvider(cwd=tmp_path),
-        tracing={"operation_detail": "content"},
+        tracing={"operation_detail": "metadata"},
         trace_include_sensitive_data=True,
     )
     if streamed:
@@ -2046,8 +2046,8 @@ async def test_stock_operations_stay_metadata_only_and_keep_source_times(
     for span in (request, execution):
         assert span.span_data.operation.detail == "metadata"
         assert span.span_data.input is span.span_data.output is None
-    (notice,) = [s for s in spans if getattr(s.span_data, "name", "") == "codex.tracing.coverage"]
-    assert notice.span_data.data["reason"] == "metadata_only"
+    assert thread.capture_mode is None
+    assert not [s for s in spans if getattr(s.span_data, "name", "") == "codex.tracing.coverage"]
 
 
 @pytest.mark.asyncio
@@ -2078,3 +2078,74 @@ async def test_disabled_tracing_never_subscribes_to_native_operations(tmp_path, 
     threads[0].append(thread)
     await Runner.run(Agent(name="test"), "Hello", run_config=config(tmp_path))
     assert not thread.tracing
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "detail,sensitive,captures",
+    [(None, True, False), ("content", False, False), ("content", True, True)],
+)
+async def test_native_content_requires_explicit_policy_and_correlates_final_output(
+    tmp_path, threads, detail, sensitive, captures
+):
+    from tests.testing_processor import fetch_ordered_spans
+
+    model = {"kind": "model", "id": "request", "model": "fixture"}
+    tool = {"kind": "tool", "id": "command", "name": "exec_command"}
+    thread = TracedThread(
+        {**model, "phase": "start", "at": 1000},
+        {
+            **model,
+            "phase": "input",
+            "input": {
+                "input": [{"role": "user", "content": "request text"}],
+                "tools": [{"type": "function", "name": "lookup"}],
+                "client_metadata": {"api_key": "never-export"},
+            },
+        },
+        {**tool, "phase": "start", "at": 1100},
+        {
+            **tool,
+            "phase": "input",
+            "input": {"command": ["echo", "prepared"], "password": "never-export"},
+        },
+        {**tool, "phase": "end", "at": 1200, "outcome": "completed"},
+        {"kind": "tool", "phase": "output", "id": "unrelated", "output": "wrong output"},
+        {"kind": "tool", "phase": "output", "id": "command", "output": "accepted result"},
+        {
+            **model,
+            "phase": "end",
+            "at": 1300,
+            "outcome": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "response text"}],
+                }
+            ],
+        },
+    )
+    threads[0].append(thread)
+    cfg = RunConfig(
+        model_provider=CodexProvider(cwd=tmp_path),
+        tracing={"operation_detail": detail} if detail else None,
+        trace_include_sensitive_data=sensitive,
+    )
+    await Runner.run(Agent(name="test"), "sdk boundary", run_config=cfg)
+    spans = fetch_ordered_spans()
+    (request,) = [s for s in spans if s.span_data.type in ("generation", "response")]
+    (execution,) = [s for s in spans if s.span_data.type == "function"]
+    assert thread.capture_mode == ("content" if captures else None)
+    if captures:
+        assert "request text" in json.dumps(request.span_data.input)
+        assert "response text" in json.dumps(request.span_data.output)
+        assert execution.span_data.output == "accepted result"
+        assert "prepared" in execution.span_data.input
+        assert "never-export" not in json.dumps([s.export() for s in (request, execution)])
+        assert "wrong output" not in execution.span_data.output
+    else:
+        assert request.span_data.input is None
+        assert execution.span_data.input is execution.span_data.output is None
+    assert execution.ended_at is not None and request.ended_at is not None
+    assert execution.ended_at < request.ended_at
