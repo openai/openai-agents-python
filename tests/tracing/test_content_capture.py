@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from typing import Any
 
 import httpx2
 import pytest
@@ -76,12 +77,16 @@ def test_public_tool_export_redacts_embedded_credentials_and_binary(exporter) ->
 
 
 def test_public_model_export_omits_hidden_reasoning_and_embedded_media(exporter) -> None:
+    incomplete_header = "data:" * 6_000
     with trace("content"), generation_span(model="test-model") as model:
         model.span_data.operation.detail = "content"
         model.span_data.input = [
             {
                 "role": "user",
-                "content": "visible before data:image/png;base64,BINARY_CANARY visible after",
+                "content": (
+                    f"{incomplete_header} visible before data:image/png;base64,BINARY_CANARY"
+                    " visible after"
+                ),
             }
         ]
         model.span_data.output = [
@@ -100,6 +105,7 @@ def test_public_model_export_omits_hidden_reasoning_and_embedded_media(exporter)
         ]
     serialized = json.dumps(dict(exporter.get_finished_spans()[0].attributes))
     assert "CANARY" not in serialized
+    assert incomplete_header in serialized
     assert "visible before" in serialized
     assert "visible after" in serialized
     assert "visible answer" in serialized
@@ -176,6 +182,77 @@ def test_oversized_content_preserves_message_role_and_part_identity() -> None:
     assert captured[0]["content"][0]["type"] == "input_text"
     assert captured[0]["content"][0]["text"].startswith("prefix ")
     assert captured[0]["content"][0]["text"].endswith("[truncated]")
+
+
+def test_tool_capture_limits_mapping_traversal_and_prioritizes_identity(exporter) -> None:
+    class CountedMapping(Mapping[str, Any]):
+        # The traversal guard distinguishes bounded capture from eager enumeration without timing.
+        def __init__(self, values: dict[str, Any]) -> None:
+            self.values = values
+            self.reads = 0
+
+        def __len__(self) -> int:
+            return len(self.values)
+
+        def __getitem__(self, key: str) -> Any:
+            return self.values[key]
+
+        def __iter__(self) -> Iterator[str]:
+            for key in self.values:
+                self.reads += 1
+                # Sixteen 5 KiB values cannot fit in a 32 KiB capture.
+                if self.reads > 16:
+                    raise AssertionError("Capture traversed fields beyond its byte budget.")
+                yield key
+
+    payload = CountedMapping(
+        {
+            "Authorization": "CREDENTIAL_CANARY",
+            "media": {"type": "input_image", "image_url": "MEDIA_CANARY"},
+            **{f"field_{index}": "visible " + "x" * 5_000 for index in range(1_000)},
+            "type": "message",
+            "role": "tool",
+            "id": "late-id",
+            "call_id": "late-call",
+            "name": "late-name",
+        }
+    )
+    native = SpanProcessorForTests()
+    add_trace_processor(native)
+    with trace("bounded"), function_span("lookup") as span:
+        span.span_data.operation.detail = "content"
+        span.span_data.output = payload
+    captured = next(
+        item.span_data.output
+        for item in native.get_ordered_spans()
+        if item.span_data.type == "function"
+    )
+    assert isinstance(captured, dict)
+    assert {key: captured[key] for key in ("type", "role", "id", "call_id", "name")} == {
+        "type": "message",
+        "role": "tool",
+        "id": "late-id",
+        "call_id": "late-call",
+        "name": "late-name",
+    }
+    encoded = json.dumps(captured, ensure_ascii=False)
+    assert len(encoded.encode()) <= CONTENT_LIMIT
+    assert "CANARY" not in encoded
+    assert "visible" in encoded and "truncated" in encoded
+    assert payload.reads <= 16
+
+
+def test_capture_rejects_oversized_mapping_key_before_encoding(monkeypatch) -> None:
+    original_dumps = json.dumps
+
+    def bounded_dumps(value: Any, *args: Any, **kwargs: Any) -> str:
+        if isinstance(value, str) and len(value) > CONTENT_LIMIT:
+            pytest.fail("Capture encoded a key that cannot fit its byte budget.")
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr("agents.tracing._content.json.dumps", bounded_dumps)
+    captured = bound_content({"k" * (CONTENT_LIMIT * 2): "discarded", "id": "late-id"})
+    assert captured == {"id": "late-id", "truncated": True}
 
 
 @pytest.mark.allow_call_model_methods
@@ -397,3 +474,125 @@ async def test_chat_input_capture_shares_one_budget_without_changing_the_request
         assert "user-message" in json.dumps(captured)
         assert "truncated" in json.dumps(captured)
         assert data.tools is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("mode", ["default", "content", "metadata", "veto"])
+async def test_any_llm_responses_capture_bounds_sdk_and_otel_without_changing_provider_data(
+    exporter, monkeypatch, stream: bool, mode: str
+) -> None:
+    pytest.importorskip("any_llm")
+    from any_llm.providers.openai import base as any_llm_openai
+
+    from agents import ModelSettings
+    from agents.extensions.models.any_llm_model import AnyLLMModel
+    from agents.tracing.span_data import ResponseSpanData
+    from tests.models.test_any_llm_model import _response, _responses_output
+
+    native = SpanProcessorForTests()
+    add_trace_processor(native)
+    input_secret, output_secret = "INPUT_CREDENTIAL_CANARY", "OUTPUT_CREDENTIAL_CANARY"
+    prompt = "UNSENT_INPUT_CANARY"
+    wire_input = [
+        {"role": "user", "content": json.dumps({"api_key": input_secret, "query": "input-visible"})}
+    ]
+    wire_instructions = "wire-instructions-visible " + "i" * 40_000
+    long_output = "answer-visible " + "o" * 40_000
+    response = _response(json.dumps({"password": output_secret, "result": "output-visible"}))
+    content = response.output[0].content
+    assert content is not None
+    content.extend(_responses_output(long_output)[0].content)
+    payload = response.model_dump(mode="json")
+    requests = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(json.loads(request.content))
+        if stream:
+            event = {"type": "response.completed", "response": payload, "sequence_number": 0}
+            return httpx2.Response(
+                200,
+                content=f"event: response.completed\ndata: {json.dumps(event)}\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx2.Response(200, json=payload)
+
+    async with AsyncOpenAI(
+        api_key="test",
+        base_url="https://provider.example/v1",
+        max_retries=0,
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler), trust_env=False),
+    ) as client:
+        # Keep the real AnyLLM provider and replace only its HTTP client.
+        monkeypatch.setattr(any_llm_openai, "AsyncOpenAI", lambda **kwargs: client)
+        agent = Agent(
+            name="worker",
+            model=AnyLLMModel("openai/fixture", api="responses", api_key="test"),
+            instructions="UNSENT_INSTRUCTIONS_CANARY",
+            model_settings=ModelSettings(
+                extra_body={"input": wire_input, "instructions": wire_instructions}
+            ),
+        )
+        config = RunConfig(
+            tracing={}
+            if mode == "default"
+            else {"operation_detail": "metadata" if mode == "metadata" else "content"},
+            trace_include_sensitive_data=mode != "veto",
+        )
+        if stream:
+            result = Runner.run_streamed(agent, prompt, run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(agent, prompt, run_config=config)
+    assert len(requests) == 1
+    assert requests[0]["input"] == wire_input
+    assert requests[0]["instructions"] == wire_instructions
+    assert long_output in result.final_output and output_secret in result.final_output
+    data = next(
+        span.span_data
+        for span in native.get_ordered_spans()
+        if span.span_data.type in {"response", "generation"}
+    )
+    if isinstance(data, ResponseSpanData):
+        captured_input = data.input
+        captured_output = (
+            [item.model_dump(mode="json") for item in data.response.output]
+            if data.response
+            else None
+        )
+    else:
+        captured_input = {"input": data.input, "model_config": data.model_config}
+        captured_output = data.output
+    attributes = dict(
+        next(
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("gen_ai.operation.name") == "chat"
+        ).attributes
+    )
+    exported_input = {
+        key: attributes[key]
+        for key in ("gen_ai.input.messages", "gen_ai.system_instructions")
+        if key in attributes
+    }
+    exported_output = attributes.get("gen_ai.output.messages")
+    if mode == "default":
+        assert isinstance(data, ResponseSpanData)
+        assert data.input == [{"role": "user", "content": prompt}]
+        assert long_output in json.dumps(captured_output)
+        assert not exported_input and exported_output is None
+    elif mode in {"metadata", "veto"}:
+        assert data.input is None and captured_output is None
+        assert not exported_input and exported_output is None
+    else:
+        for value in (captured_input, captured_output, exported_input, exported_output):
+            encoded = json.dumps(value, ensure_ascii=False)
+            assert len(encoded.encode()) <= CONTENT_LIMIT
+            assert input_secret not in encoded and output_secret not in encoded
+            assert "UNSENT_" not in encoded and "truncated" in encoded
+        for value in (captured_input, exported_input):
+            assert "input-visible" in json.dumps(value)
+            assert "wire-instructions-visible" in json.dumps(value)
+        assert "output-visible" in json.dumps(captured_output)

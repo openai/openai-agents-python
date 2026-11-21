@@ -17,6 +17,33 @@ from tests.test_responses import get_text_message
 from tests.testing_processor import fetch_ordered_spans
 
 
+def test_response_capture_stops_reading_output_at_the_budget() -> None:
+    from agents.models.interface import ModelTracing
+    from agents.models.openai_responses import _record_response_operation
+    from agents.tracing import generation_span
+    from agents.tracing._content import CONTENT_LIMIT
+    from agents.tracing.config import operation_tracing_scope
+
+    # Count reads at the capture boundary independently of response parsing and logging.
+    class OutputItems(list[Any]):
+        inspected = 0
+
+        def __iter__(self):
+            for item in super().__iter__():
+                self.inspected += 1
+                yield item
+
+    items = OutputItems([get_text_message("visible " + "x" * CONTENT_LIMIT)] * 100)
+    response = get_response_obj([]).model_copy(update={"output": items})
+    with operation_tracing_scope({"operation_detail": "content"}, True):
+        span = generation_span(disabled=True)
+        _record_response_operation(span, response, "prompt", ModelTracing.ENABLED)
+    retained = json.dumps(span.span_data.output)
+    assert "visible" in retained and "truncated" in retained
+    assert len(retained.encode()) <= CONTENT_LIMIT
+    assert items.inspected < len(items)
+
+
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])

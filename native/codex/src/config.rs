@@ -957,6 +957,11 @@ mod tests {
     }
 
     fn fixture_builder(root: &Path, overrides: &[&str]) -> ConfigBuilder {
+        let mut overrides: Vec<String> = overrides.iter().map(|s| (*s).to_owned()).collect();
+        if cfg!(target_os = "windows") {
+            // Keep managed workspace-write fixtures from falling back to read-only on Windows.
+            overrides.insert(0, "windows.sandbox=\"elevated\"".to_owned());
+        }
         ConfigBuilder::default()
             .codex_home(root.to_path_buf())
             .harness_overrides(ConfigOverrides {
@@ -966,15 +971,17 @@ mod tests {
             .loader_overrides(LoaderOverrides::with_managed_config_path_for_tests(
                 root.join("managed.toml"),
             ))
-            .cli_overrides(
-                parse_overrides(overrides.iter().map(|s| (*s).to_owned()).collect()).unwrap(),
-            )
+            .cli_overrides(parse_overrides(overrides).unwrap())
     }
 
     async fn fixture_config(requirements: &str, overrides: &[&str]) -> (tempfile::TempDir, Config) {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("requirements.toml"), requirements).unwrap();
-        let config = fixture_builder(root.path(), overrides)
+        let canonical_root = codex_core_api::AbsolutePathBuf::from_absolute_path(root.path())
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        std::fs::write(canonical_root.join("requirements.toml"), requirements).unwrap();
+        let config = fixture_builder(canonical_root.as_path(), overrides)
             .build()
             .await
             .unwrap();

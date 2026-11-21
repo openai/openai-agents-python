@@ -73,6 +73,8 @@ class CodexToolHooks:
         self.key = secrets.token_hex(32)
         self.registered: set[tuple[str, int]] = set()
         self.error: BaseException | None = None
+        self.prepared_inputs: dict[str, dict[str, Any] | None] = {}
+        self.prepared_outputs: dict[str, str] = {}
 
     @classmethod
     def for_run(
@@ -100,6 +102,9 @@ class CodexToolHooks:
                 events.append(event)
         if not events:
             return None
+        if settings and settings.prepare_tool_input and "PostToolUse" not in events:
+            # Observe Core's effective arguments after it preserves environment selectors.
+            events.append("PostToolUse")
         # Match Core's hook names, including the legacy name for multi_agent_v1.spawn_agent.
         sdk_names = {
             name
@@ -202,6 +207,8 @@ class CodexToolHooks:
             # SDK-owned calls reach the same callbacks when the runner dispatches them.
             return {}
         tool = NativeTool(name)
+        if data["event"] == "PostToolUse" and data["call_id"] in self.prepared_inputs:
+            self.prepared_inputs[data["call_id"]] = deepcopy(arguments)
         call = ToolCallHookContext(
             bindings.context, bindings.agent, tool, data["call_id"], None, deepcopy(arguments)
         )
@@ -225,6 +232,7 @@ class CodexToolHooks:
                             "updatedInput": prepared,
                         }
                     }
+                    self.prepared_inputs[data["call_id"]] = None
             await gather_with_cancel(
                 *(hook.on_tool_start(bindings.context, bindings.agent, tool) for hook in observers)
             )
@@ -240,6 +248,7 @@ class CodexToolHooks:
         if _same_json(prepared, original):
             decision = {}
         elif isinstance(prepared, str):
+            self.prepared_outputs[data["call_id"]] = prepared
             decision = {"continue": False, "stopReason": prepared}
         else:
             raise UserError(
@@ -252,3 +261,28 @@ class CodexToolHooks:
             )
         )
         return decision
+
+    def prepare_history_item(self, item: Any) -> None:
+        """Keep persisted native history on the payloads approved by this attempt's hooks."""
+        call_id = getattr(item, "call_id", None)
+        if item.type in ("function_call", "custom_tool_call") and call_id in self.prepared_inputs:
+            prepared = self.prepared_inputs[call_id]
+            if prepared is None:
+                raise UserError(
+                    "Codex cannot replay a rewritten native tool call without confirmed effective "
+                    "arguments. The native tool did not complete PostToolUse."
+                )
+            if item.type == "function_call":
+                if item.name == "exec_command":
+                    arguments = json.loads(item.arguments)
+                    arguments["cmd"] = prepared["command"]
+                else:
+                    arguments = prepared
+                item.arguments = json.dumps(arguments, ensure_ascii=False)
+            else:
+                item.input = (
+                    prepared["command"] if item.name == "apply_patch" else prepared["input"]
+                )
+        elif item.type in ("function_call_output", "custom_tool_call_output"):
+            if call_id in self.prepared_outputs:
+                item.output = self.prepared_outputs[call_id]

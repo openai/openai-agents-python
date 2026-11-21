@@ -437,35 +437,40 @@ class LocalShellAction:
                 span.span_data.input = _serialize_trace_payload(call.tool_call.action)
             output = call.local_shell_tool.executor(request)
             raw_result = await output if inspect.isawaitable(output) else output
-            if span.span_data.operation.detail == "content":
-                span.span_data.output = raw_result
 
-        async def finalize_output() -> ToolCallOutputItem:
-            result = await transform_tool_output(
-                config, context_wrapper, agent, call.local_shell_tool, call.tool_call, raw_result
-            )
+            async def finalize_output() -> ToolCallOutputItem:
+                result = await transform_tool_output(
+                    config,
+                    context_wrapper,
+                    agent,
+                    call.local_shell_tool,
+                    call.tool_call,
+                    raw_result,
+                )
+                if span.span_data.operation.detail == "content":
+                    span.span_data.output = result
 
-            raw_payload: dict[str, Any] = {
-                "type": "local_shell_call_output",
-                "call_id": call.tool_call.call_id,
-                "output": result,
-            }
-            output_item = ToolCallOutputItem(
-                agent=agent,
-                output=result,
-                raw_item=raw_payload,
-            )
+                raw_payload: dict[str, Any] = {
+                    "type": "local_shell_call_output",
+                    "call_id": call.tool_call.call_id,
+                    "output": result,
+                }
+                output_item = ToolCallOutputItem(
+                    agent=agent,
+                    output=result,
+                    raw_item=raw_payload,
+                )
 
-            if tool_output_committer is not None:
-                tool_output_committer(output_item)
+                if tool_output_committer is not None:
+                    tool_output_committer(output_item)
 
-            await run_tool_end_hooks(
-                hooks, agent_hooks, context_wrapper, agent, call.local_shell_tool, result
-            )
+                await run_tool_end_hooks(
+                    hooks, agent_hooks, context_wrapper, agent, call.local_shell_tool, result
+                )
 
-            return output_item
+                return output_item
 
-        return await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
+            return await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
 
 
 class ShellAction:
