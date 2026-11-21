@@ -138,6 +138,19 @@ async def resolve_native_approval_step(
             tool_output_guardrail_results=[],
             processed_response=processed_response,
         )
+    # A new checkpoint can carry the same model call ID. Claiming that checkpoint
+    # doesn't authorize repeating an invocation that already used its decision.
+    status = context_wrapper._tool_invocation_status(
+        call, tool_lookup_key=pending.tool_lookup_key, tool_name=pending.tool_name
+    )
+    if status is None:
+        raise UserError("Cannot match the native approval to a pending invocation.")
+    _, completed, executed = status
+    if executed or completed:
+        raise UserError(
+            "Cannot reuse a native call ID after the call has executed or completed. "
+            "Start a new invocation with a new call ID."
+        )
     if approved:
         from ..tracing.model_tracing import get_model_tracing_impl
 

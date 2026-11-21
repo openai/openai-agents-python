@@ -193,6 +193,45 @@ async def test_no_decision_repauses_and_unbound_copy_never_dispatches(tmp_path, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["exec_command", "apply_patch"])
+async def test_completed_native_call_id_cannot_reuse_a_previous_decision(
+    tmp_path, monkeypatch, kind
+):
+    agent, store, session, config, pending, calls, requests = await setup_native(
+        tmp_path, monkeypatch, kind
+    )
+
+    async def repeat_native_call(*args, **kwargs):
+        requests.append(kwargs.get("input", args[1] if len(args) > 1 else None))
+        if len(requests) <= 2:
+            # The adapter can attest a new native request with a repeated model call ID.
+            repeated = pending.model_copy(deep=True)
+            repeated.checkpoint["request"]["turn_id"] = f"native-turn-{len(requests)}"
+            output = [repeated]
+        else:
+            output = [get_text_message("finished")]
+        return ModelResponse(output=output, usage=Usage(), response_id=None)
+
+    monkeypatch.setattr(agent.model, "get_response", repeat_native_call)
+    await Runner.run(agent, "start", session=session, run_config=config)
+    recovered = await ResumableSession.resume(store, session.session_id)
+    state = await recovered.load_state(agent)
+    state.approve(state.get_interruptions()[0])
+
+    # Native execution stays at the adapter seam while public resume owns approval state.
+    with pytest.raises(UserError, match="completed"):
+        repeated_result = await Runner.run(agent, state, session=recovered, run_config=config)
+        assert len(repeated_result.interruptions) == 1
+        assert len(calls) == 1
+        replacement = await ResumableSession.resume(store, session.session_id)
+        repeated_state = await replacement.load_state(agent)
+        await Runner.run(agent, repeated_state, session=replacement, run_config=config)
+        assert len(calls) == 1, "The previous decision authorized another native dispatch."
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("approved", [True, False])
 async def test_sticky_native_decisions_are_rejected(tmp_path, monkeypatch, approved):
     agent, store, session, config, _, calls, _ = await setup_native(tmp_path, monkeypatch)
