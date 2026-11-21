@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from typing import Literal
 
 import pytest
@@ -351,7 +352,9 @@ async def test_policy_failure_after_approval_preserves_tool_effect(streamed, err
     paused = await run(streamed, agent)
     state = paused.to_state()
     state.approve(state.get_interruptions()[0])
-    with pytest.raises(error, match="decision failed"):
+    # Python 3.10 can drop a child task's cancellation message.
+    message = "decision failed" if error is RuntimeError or sys.version_info >= (3, 11) else None
+    with pytest.raises(error, match=message):
         await run(streamed, agent, state, hooks=hooks)
     assert hooks.outputs == []
     assert effects == ["record"]
@@ -400,7 +403,9 @@ async def test_policy_local_cancellation_keeps_completed_tool_in_session(streame
     )
     session = SQLiteSession("effects")
     try:
-        with pytest.raises(asyncio.CancelledError, match="local"):
+        with pytest.raises(
+            asyncio.CancelledError, match="local" if sys.version_info >= (3, 11) else None
+        ):
             await run(streamed, agent, hooks=hooks, session=session)
         items = await session.get_items()
     finally:
