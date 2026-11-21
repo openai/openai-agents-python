@@ -176,6 +176,12 @@ async fn start_thread(
     let values = serde_json::from_str(&request.tools)
         .map_err(|_| "Invalid Codex dynamic tools.".to_owned())?;
     let mut options = StartThreadOptions::new(config);
+    if let Some(key) = settings
+        .get("prompt_cache_key")
+        .and_then(serde_json::Value::as_str)
+    {
+        options.prompt_cache_key = codex_core_api::PromptCacheKey::Custom(key.to_owned());
+    }
     if settings
         .get("sdk_sandbox")
         .and_then(serde_json::Value::as_bool)

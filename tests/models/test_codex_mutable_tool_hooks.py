@@ -24,7 +24,12 @@ from ..mcp.helpers import FakeMCPServer
 
 
 @pytest.fixture
-def model_endpoint():
+def session_ids():
+    return []
+
+
+@pytest.fixture
+def model_endpoint(session_ids):
     # A loopback model exposes the tools offered by Codex and the exact inputs to its next turn.
     requests = []
     items = []
@@ -39,6 +44,7 @@ def model_endpoint():
                 return
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append(request)
+            session_ids.append(self.headers.get("session-id"))
             step = items.pop(0)
             item = step(request) if callable(step) else step
             response = {
@@ -113,6 +119,29 @@ def codex_fixture(tmp_path, port, monkeypatch, extra=()):
             *extra,
         ],
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+async def test_codex_prompt_cache_key_is_per_request(
+    tmp_path, model_endpoint, session_ids, monkeypatch
+):
+    port, requests, items = model_endpoint
+    provider = codex_fixture(tmp_path, port, monkeypatch)
+    items.extend([final_message(), final_message()])
+    try:
+        for key in ("shared-prefix", None):
+            await Runner.run(
+                Agent(name="test", model_settings={"prompt_cache_key": key}),
+                "hi",
+                run_config=RunConfig(model_provider=provider, tracing_disabled=True),
+            )
+    finally:
+        await provider.aclose()
+    first, second = requests
+    assert first["prompt_cache_key"] == "shared-prefix"
+    assert session_ids[0] and session_ids[0] != "shared-prefix"
+    assert session_ids[1] and second["prompt_cache_key"] == session_ids[1]
 
 
 @pytest.mark.asyncio
