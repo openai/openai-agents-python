@@ -1128,7 +1128,7 @@ class OpenAIResponsesModel(Model):
                 conversation_id,
             )
 
-        extra_args = dict(model_settings.extra_args or {})
+        extra_args = model_settings._request_extra_args()
         if model_settings.top_logprobs is not None:
             extra_args["top_logprobs"] = model_settings.top_logprobs
         if model_settings.verbosity is not None:

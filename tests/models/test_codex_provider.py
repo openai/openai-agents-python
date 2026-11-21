@@ -320,13 +320,22 @@ async def test_runner_replays_typed_function_tool_result(tmp_path, threads):
 
 
 @pytest.mark.asyncio
-async def test_unsupported_settings_fail_before_launch(tmp_path, threads):
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"temperature": 0.1},
+        {"prompt_cache_retention": "24h"},
+        {"prompt_cache_options": {"ttl": "30m"}},
+        {"extra_args": {"prompt_cache_key": "legacy"}},
+    ],
+    ids=["temperature", "retention", "ttl", "extras"],
+)
+async def test_unsupported_settings_fail_before_launch(tmp_path, threads, settings):
     queue, opened = threads
-    from agents import ModelSettings
 
-    with pytest.raises(UserError, match="temperature"):
+    with pytest.raises(UserError, match=next(iter(settings))):
         await Runner.run(
-            Agent(name="test", model_settings=ModelSettings(temperature=0.1)),
+            Agent(name="test", model_settings=settings),
             "Hello",
             run_config=config(tmp_path),
         )
