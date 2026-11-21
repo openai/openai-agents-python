@@ -4,7 +4,7 @@ import abc
 import asyncio
 import copy
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import InitVar, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
@@ -36,6 +36,7 @@ from .items import (
 )
 from .logger import log_tool_action_warning, logger
 from .run_context import RunContextWrapper
+from .run_internal._approved_output import Approve, ApprovedOutput
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
     digest_input_item,
@@ -50,7 +51,7 @@ from .run_internal.run_steps import (
     QueueCompleteSentinel,
 )
 from .run_state import RunState, _PendingSessionWrite
-from .stream_events import StreamEvent
+from .stream_events import ApprovedText, FinalOutputAccepted, StreamEvent
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Trace
 from .tracing.traces import TraceState
@@ -786,6 +787,8 @@ class RunResultStreaming(RunResultBase):
     )
 
     def __post_init__(self, _run_impl_task: asyncio.Task[Any] | None) -> None:
+        self._approved_output: ApprovedOutput | None = None
+        self._stream_started = False
         self._current_agent_ref = weakref.ref(self.current_agent)
         # Store the original input at creation time (it will be set via input field)
         if self._original_input is None:
@@ -1011,6 +1014,41 @@ class RunResultStreaming(RunResultBase):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def stream_approved_output(
+        self, approve: Approve | None = None
+    ) -> AsyncGenerator[ApprovedText | FinalOutputAccepted, None]:
+        """Subscribe once, immediately after Runner.run_streamed and before yielding control.
+
+        By default, yield only FinalOutputAccepted after guardrails, persistence and cleanup.
+        Read final_output separately. Interrupted, failed and cancelled runs never notify.
+
+        A sync or async callback receives pending text from one assistant message part.
+        Return an exact prefix to publish, or None or an empty string to wait.
+        Previews are live only. A new item, part or turn discards pending text.
+        Item or response completion discards queued text and approvals still in progress.
+        Published ApprovedText cannot be retracted, even if guardrails or the run later fail.
+
+        Prefixes require an isolated, numbered Responses stream with response and item IDs.
+        Hosted multi-agent streams support final notifications only.
+        Gaps, invalid prefixes and buffers over 65536 UTF-8 bytes raise ValueError in this reader.
+        The submission_id identifies this result. The turn_id is the provider response ID.
+
+        Cancelling or closing this reader leaves execution running.
+        Consume stream_events() concurrently or afterwards for run errors and cleanup.
+        """
+        if self.run_loop_task is None or self._stream_started or self._approved_output is not None:
+            raise RuntimeError("Subscribe once before the streaming run starts.")
+        reader = ApprovedOutput(approve)
+        self._approved_output = reader
+
+        def finished(_task: object) -> None:
+            if self._approved_output is not None:
+                self._approved_output.ready.set()
+                self._approved_output = None
+
+        self.run_loop_task.add_done_callback(finished)
+        return reader.read(self)
 
     async def stream_events(self) -> AsyncIterator[StreamEvent]:
         """Stream deltas for new items as they are generated. We're using the types from the
