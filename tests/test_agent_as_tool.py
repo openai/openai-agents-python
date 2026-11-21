@@ -3916,6 +3916,84 @@ async def test_agent_as_tool_stream_backlog_overflow_stops_nested_run(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_manager_joins_its_streamed_specialist_only() -> None:
+    started = asyncio.Event()
+    sibling_started = asyncio.Event()
+    cleaning = asyncio.Event()
+    release = asyncio.Event()
+    cleaned = asyncio.Event()
+    first_context = object()
+
+    @function_tool
+    async def work(ctx: RunContextWrapper[object]) -> str:
+        if ctx.context is first_context:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await release.wait()
+                cleaned.set()
+        sibling_started.set()
+        await cleaning.wait()
+        return "ready"
+
+    worker = Agent(
+        name="worker",
+        tools=[work],
+        model=ScriptedModel(
+            [
+                [get_function_tool_call("work", "{}")],
+                [get_function_tool_call("work", "{}")],
+                [get_text_message("worker finished")],
+            ]
+        ),
+    )
+    delegate = worker.as_tool("delegate", "Ask worker", on_stream=lambda _: None, max_turns=2)
+    manager = Agent(
+        name="manager",
+        tools=[delegate],
+        model=ScriptedModel(
+            [
+                [get_function_tool_call("delegate", '{"input":"go"}')],
+                [get_function_tool_call("delegate", '{"input":"go"}')],
+                [get_text_message("manager finished")],
+            ]
+        ),
+    )
+    config = RunConfig(tracing_disabled=True)
+    first = asyncio.create_task(Runner.run(manager, "go", context=first_context, run_config=config))
+    tasks = [first]
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        sibling = asyncio.create_task(
+            Runner.run(manager, "go", context=object(), run_config=config)
+        )
+        tasks.append(sibling)
+        await asyncio.wait_for(sibling_started.wait(), 2)
+        first.cancel()
+        await asyncio.wait_for(cleaning.wait(), 2)
+        first.cancel()
+        result = await asyncio.wait_for(sibling, 2)
+        assert result.last_agent is manager
+        assert result.final_output == "manager finished"
+        assert [
+            item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)
+        ] == ["worker finished"]
+        assert not first.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(first, 2)
+        assert cleaned.is_set()
+    finally:
+        release.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_parent", [True, False], ids=["parent", "handler"])
 async def test_agent_as_tool_cancellation_with_backlog_stops_nested_run(
     monkeypatch: pytest.MonkeyPatch, cancel_parent: bool
@@ -3992,12 +4070,12 @@ async def test_agent_as_tool_cancellation_with_backlog_stops_nested_run(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel_parent", [True, False], ids=["cancellation", "overflow"])
+@pytest.mark.parametrize("cancel_during", ["handler", "close", None])
 @pytest.mark.parametrize("close_error_type", [RuntimeError, asyncio.CancelledError])
 async def test_agent_as_tool_preserves_primary_failure_when_stream_close_fails(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    cancel_parent: bool,
+    cancel_during: str | None,
     close_error_type: type[BaseException],
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
@@ -4018,6 +4096,9 @@ async def test_agent_as_tool_preserves_primary_failure_when_stream_close_fails(
             async for event in events:
                 yield event
         finally:
+            if cancel_during == "close":
+                invocation.cancel()
+                await asyncio.sleep(0)
             await events.aclose()
             stream_closed.set()
             raise close_error
@@ -4042,7 +4123,7 @@ async def test_agent_as_tool_preserves_primary_failure_when_stream_close_fails(
 
     async def handler(payload: AgentToolStreamEvent) -> None:
         if payload["event"].type == "raw_response_event":
-            if cancel_parent:
+            if cancel_during == "handler":
                 invocation.cancel("primary cancellation")
             await asyncio.Event().wait()
 
@@ -4074,7 +4155,7 @@ async def test_agent_as_tool_preserves_primary_failure_when_stream_close_fails(
             raise
 
     invocation = asyncio.create_task(invoke_tool())
-    if cancel_parent:
+    if cancel_during is not None:
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(invocation, timeout=2)
         assert reported_errors == []

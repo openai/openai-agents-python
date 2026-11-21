@@ -156,6 +156,19 @@ async def gather_with_cancel(
         raise
 
 
+async def _join_cleanup(*tasks: Awaitable[Any]) -> None:
+    """Finish teardown without forwarding further cancellation into child cleanup."""
+    drain = asyncio.gather(*tasks, return_exceptions=True)
+    cancellation: asyncio.CancelledError | None = None
+    while not drain.done():
+        try:
+            await asyncio.shield(drain)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    if cancellation is not None:
+        raise cancellation
+
+
 async def run_producer_consumer(
     producer: Awaitable[TProducer],
     consumer: Awaitable[TConsumer],
@@ -203,5 +216,5 @@ async def run_producer_consumer(
                 task.cancel()
         if on_failure is not None:
             on_failure()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await _join_cleanup(*tasks)
         raise

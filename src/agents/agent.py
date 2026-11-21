@@ -61,7 +61,7 @@ from .tool import (
 )
 from .tool_context import ToolContext
 from .util import _transforms
-from .util._asyncio_tasks import gather_with_cancel, run_producer_consumer
+from .util._asyncio_tasks import _join_cleanup, gather_with_cancel, run_producer_consumer
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
@@ -1070,15 +1070,18 @@ class Agent(AgentBase, Generic[TContext]):
                     except BaseException:
                         # Cancellation can interrupt the producer between iterator advances.
                         # Explicitly close the iterator after its owning task has stopped.
-                        try:
-                            await stream_events.aclose()
-                        except BaseException as close_error:
-                            # Cleanup cancellation must not replace the primary failure either.
-                            log_model_and_tool_action_error(
-                                logger,
-                                "Error while closing an agent tool stream after failure",
-                                close_error,
-                            )
+                        async def close_stream() -> None:
+                            try:
+                                await stream_events.aclose()
+                            except BaseException as close_error:
+                                # Cleanup cancellation must not replace the primary failure either.
+                                log_model_and_tool_action_error(
+                                    logger,
+                                    "Error while closing an agent tool stream after failure",
+                                    close_error,
+                                )
+
+                        await _join_cleanup(close_stream())
                         raise
                     run_result = run_result_streaming
                 else:

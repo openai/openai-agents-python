@@ -102,7 +102,7 @@ from ..tool_guardrails import (
 from ..tracing import FunctionSpanData, Span, SpanError, custom_span, function_span
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_function_tool_approval
-from ..util._asyncio_tasks import _consume_future_exception, gather_with_cancel
+from ..util._asyncio_tasks import _consume_future_exception, _join_cleanup, gather_with_cancel
 from ..util._custom_data import maybe_extract_custom_data, merge_custom_data
 from ..util._tool_errors import get_trace_tool_error
 from ._asyncio_progress import get_function_tool_task_progress_deadline
@@ -1663,7 +1663,7 @@ class _FunctionToolBatchExecutor:
             if self.sibling_category_failure is not None and self.sibling_category_failure.is_set():
                 await self._drain_pending_tasks_for_sibling_category_failure()
             else:
-                self._cancel_pending_tasks_for_parent_cancellation()
+                await self._cancel_pending_tasks_for_parent_cancellation()
             raise
 
         return (
@@ -1794,7 +1794,7 @@ class _FunctionToolBatchExecutor:
             _, remaining_cancelled_tasks = await self._drain_cancelled_tasks(cancellable_tasks)
             _, remaining_post_invoke_tasks = await self._wait_post_invoke_tasks(post_invoke_tasks)
         except BaseException:
-            self._cancel_pending_tasks_for_parent_cancellation()
+            await self._cancel_pending_tasks_for_parent_cancellation()
             self.pending_tasks = set()
             raise
 
@@ -1808,13 +1808,27 @@ class _FunctionToolBatchExecutor:
         )
         self.pending_tasks = set()
 
-    def _cancel_pending_tasks_for_parent_cancellation(self) -> None:
+    async def _cancel_pending_tasks_for_parent_cancellation(self) -> None:
+        # An agent invocation and the tools it runs own work in the same cancellation tree.
+        # Keep ordinary top-level tools and post-invocation hooks on the prompt-return path.
+        attached = {
+            task
+            for task in self.pending_tasks
+            if (state := self.task_states[task]).invoke_task is not None
+            and not state.in_post_invoke_phase
+            and (
+                state.tool_run.function_tool._is_agent_tool
+                or isinstance(self.context_wrapper, ToolContext)
+            )
+        }
+        _cancel_function_tool_tasks(self.pending_tasks - (attached & self.teardown_cancelled_tasks))
         self.teardown_cancelled_tasks.update(self.pending_tasks)
-        _cancel_function_tool_tasks(self.pending_tasks)
         _attach_function_tool_task_result_callbacks(
             self.pending_tasks,
             message_for_exception=_parent_cancelled_task_exception_message,
         )
+        if attached:
+            await _join_cleanup(*attached)
 
     async def _run_single_tool(
         self,
