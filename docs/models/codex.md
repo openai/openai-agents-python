@@ -134,7 +134,9 @@ The workspace sandbox protects the directory that contains the installed helpers
 
 On Windows, the preview rejects a local Codex executor configured with the legacy elevated sandbox. That sandbox needs a setup helper that Codex cannot securely locate from a Python process. If your organization requires this sandbox, use an SDK-managed executor or configure a remote executor with `include_local = false` in `environments.toml`.
 
-Native Codex approval prompts are separate from SDK tool approvals. This provider cannot answer native approval requests and fails the model call when one arrives. For a non-interactive read-only workflow, configure Codex to avoid approval prompts:
+Pass a `ResumableSession` to `Runner.run(..., session=session)` to pause a built-in `exec_command` or `apply_patch` for approval. A new worker can load that session and approve or reject the original call. Recovery requires the same workspace and permissions, one local environment, and no tool hooks. Other native approval requests fail the model call.
+
+For a non-interactive read-only workflow, disable approval prompts.
 
 ```python
 provider = CodexProvider(

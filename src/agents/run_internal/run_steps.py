@@ -137,6 +137,7 @@ class ProcessedResponse:
     # Original invocation recipients, independent of the currently available callables.
     tool_output_guardrail_result_start: int | None = None
     # First checkpointed tool output guardrail result owned by this response.
+    native_approvals: list[ToolApprovalItem] = dataclasses.field(default_factory=list)
 
     def has_tools_or_approvals_to_run(self) -> bool:
         # Handoffs, functions and computer actions need local processing
@@ -152,6 +153,7 @@ class ProcessedResponse:
                 self.apply_patch_calls,
                 self.mcp_approval_requests,
                 self.function_tools_not_found,
+                self.native_approvals,
             ]
         )
 
