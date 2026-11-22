@@ -39,6 +39,13 @@ class ResumableRun:
         await self._source._begin_run(input)
         self._items = self._source._get_history()
 
+    def bind_state(self, state: Any) -> None:
+        """Attach the current store claim to the internal execution state."""
+        assert self._source is not None
+        state._resumable_binding = _ResumableSessionBinding(
+            self._source, self._source._checkpoint.revision
+        )
+
     async def finish(self, result: RunResult | RunResultStreaming) -> None:
         assert self._source is not None
         state = result.to_state() if result.interruptions else None
