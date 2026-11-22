@@ -2032,7 +2032,7 @@ async def test_metadata_operations_keep_source_times(tmp_path, threads, streamed
         assert result.final_output == thread.text
     spans = fetch_ordered_spans()
     (turn,) = [s for s in spans if s.span_data.type == "turn"]
-    (request,) = [s for s in spans if s.span_data.type == "generation"]
+    (request,) = [s for s in spans if s.span_data.type == "response"]
     (execution,) = [s for s in spans if s.span_data.type == "function"]
     assert request.parent_id == execution.parent_id == turn.span_id
     assert request.started_at and request.ended_at
@@ -2065,7 +2065,7 @@ async def test_native_operation_loss_does_not_block_runner_or_invent_success(tmp
     result = await Runner.run(Agent(name="test"), "Hello", run_config=cfg)
     assert result.final_output == thread.text
     spans = fetch_ordered_spans()
-    (request,) = [s for s in spans if s.span_data.type == "generation"]
+    (request,) = [s for s in spans if s.span_data.type == "response"]
     assert request.span_data.operation.outcome == "interrupted"
     assert request.span_data.operation.estimated_end
     (notice,) = [s for s in spans if getattr(s.span_data, "name", "") == "codex.tracing.coverage"]
@@ -2078,6 +2078,93 @@ async def test_disabled_tracing_never_subscribes_to_native_operations(tmp_path, 
     threads[0].append(thread)
     await Runner.run(Agent(name="test"), "Hello", run_config=config(tmp_path))
     assert not thread.tracing
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sensitive", [False, True])
+async def test_native_retry_requires_same_failed_request_and_respects_veto(
+    tmp_path, threads, sensitive
+):
+    from tests.testing_processor import fetch_ordered_spans
+
+    events = []
+    for index, (identity, outcome) in enumerate(
+        [("a", "failed"), ("a", "failed"), ("b", "completed"), ("b", "completed")]
+    ):
+        model = {"kind": "model", "model": "native-default", "id": str(index)}
+        events += [
+            {
+                **model,
+                "phase": "start",
+                "at": 1000 + index * 10,
+                "identity": identity,
+                "input": {"input": "private", "previous_response_id": "previous"},
+            },
+            {
+                **model,
+                "phase": "end",
+                "at": 1005 + index * 10,
+                "outcome": outcome,
+                "output": [{"type": "output_text", "text": f"output-{index}"}],
+                "usage": {"input_tokens": 5, "output_tokens": 1},
+            },
+        ]
+    thread = TracedThread(*events)
+    threads[0].append(thread)
+    await Runner.run(
+        Agent(name="test"),
+        "Hello",
+        run_config=RunConfig(
+            model_provider=CodexProvider(cwd=tmp_path),
+            tracing={"operation_detail": "content"},
+            trace_include_sensitive_data=sensitive,
+        ),
+    )
+    assert thread.capture_mode == ("content" if sensitive else None)
+    calls = [s.span_data for s in fetch_ordered_spans() if s.span_data.type == "response"]
+    assert [data.operation.outcome for data in calls] == ["failed", "completed", "completed"]
+    assert [data.usage["input_tokens"] for data in calls] == [10, 5, 5]
+    assert [len(data.operation.retry_timestamps) for data in calls] == [1, 0, 0]
+    for index, data in enumerate(calls, start=1):
+        assert data.response is None
+        if sensitive:
+            assert data.input == [{"role": "user", "content": "private"}]
+            assert data.operation.previous_response_id == "previous"
+            assert data.output == [{"type": "output_text", "text": f"output-{index}"}]
+        else:
+            assert data.input is data.output is data.operation.previous_response_id is None
+
+
+@pytest.mark.asyncio
+async def test_authorized_timeout_retry_reuses_interrupted_model_span(tmp_path, threads):
+    from agents import ModelSettings
+    from agents.retry import ModelRetrySettings, RetryDecision
+    from tests.testing_processor import fetch_ordered_spans
+
+    start = {"kind": "model", "id": "1", "model": "fake", "phase": "start", "at": 1000}
+    waiting = TracedThread(start, gate=asyncio.Event())
+    done = TracedThread(
+        {**start, "at": 2000},
+        {**start, "phase": "end", "outcome": "completed", "at": 2100},
+    )
+    threads[0].extend([waiting, done])
+    settings = ModelSettings(
+        timeout=0.5,
+        retry=ModelRetrySettings(
+            max_retries=1, policy=lambda _: RetryDecision(True, delay=0, approve_unsafe_replay=True)
+        ),
+    )
+    await Runner.run(
+        Agent(name="test", model_settings=settings),
+        "Hello",
+        run_config=RunConfig(model_provider=CodexProvider(cwd=tmp_path)),
+    )
+
+    assert waiting.closed and done.closed
+    (span,) = [s for s in fetch_ordered_spans() if s.span_data.type == "response"]
+    assert span.span_data.operation.outcome == "completed"
+    assert span.error is None
+    assert len(span.span_data.operation.retry_timestamps) == 1
 
 
 @pytest.mark.asyncio
@@ -2134,7 +2221,7 @@ async def test_native_content_requires_explicit_policy_and_correlates_final_outp
     )
     await Runner.run(Agent(name="test"), "sdk boundary", run_config=cfg)
     spans = fetch_ordered_spans()
-    (request,) = [s for s in spans if s.span_data.type in ("generation", "response")]
+    (request,) = [s for s in spans if s.span_data.type == "response"]
     (execution,) = [s for s in spans if s.span_data.type == "function"]
     assert thread.capture_mode == ("content" if captures else None)
     if captures:
@@ -2145,7 +2232,12 @@ async def test_native_content_requires_explicit_policy_and_correlates_final_outp
         assert "never-export" not in json.dumps([s.export() for s in (request, execution)])
         assert "wrong output" not in execution.span_data.output
     else:
-        assert request.span_data.input is None
+        if detail is None:
+            assert "sdk boundary" in repr(request.span_data.input)
+            assert "request text" not in repr(request.span_data.input)
+            assert request.span_data.response is not None
+        else:
+            assert request.span_data.input is request.span_data.response is None
         assert execution.span_data.input is execution.span_data.output is None
     assert execution.ended_at is not None and request.ended_at is not None
     assert execution.ended_at < request.ended_at

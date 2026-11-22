@@ -43,6 +43,7 @@ from .lifecycle import RunHooks
 from .logger import log_model_and_tool_action_warning, log_tool_action_warning, logger
 from .memory import Session
 from .memory.resumable_session import ResumableSession
+from .models._run_context import ModelToolHooks
 from .result import RunResult, RunResultStreaming
 from .run_budget import _prepare_budget
 from .run_config import (
@@ -705,7 +706,15 @@ class AgentRunner:
 
             reject_unrecoverable_terminal_state(run_state)
             if isinstance(session, ResumableRun):
-                await session.begin(input)
+                await session.begin(
+                    input,
+                    ModelToolHooks(
+                        run_state._current_agent or starting_agent,
+                        context_wrapper,
+                        hooks,
+                        run_config.tool_execution,
+                    ),
+                )
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             max_turns = run_state._max_turns
         else:
@@ -720,7 +729,12 @@ class AgentRunner:
             )
             context_wrapper = ensure_context_wrapper(context)._for_new_root(budget)
             if isinstance(session, ResumableRun):
-                await session.begin(input)
+                await session.begin(
+                    input,
+                    ModelToolHooks(
+                        starting_agent, context_wrapper, hooks, run_config.tool_execution
+                    ),
+                )
             context_wrapper._resolve_function_approval_owners(starting_agent)
             context = context_wrapper.context
             set_agent_tool_state_scope(context_wrapper, uuid4().hex)
@@ -2919,7 +2933,12 @@ class AgentRunner:
             ):
                 if isinstance(session, ResumableRun):
                     try:
-                        await session.begin(input)
+                        await session.begin(
+                            input,
+                            ModelToolHooks(
+                                schema_agent, context_wrapper, hooks, run_config.tool_execution
+                            ),
+                        )
                         session.bind_state(run_state)
                     except BaseException:
                         streamed_result.is_complete = True
