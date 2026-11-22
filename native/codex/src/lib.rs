@@ -501,14 +501,14 @@ impl Thread {
         let lease = self.lease.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             lease.ensure_open().map_err(py_error)?;
-            let event = lease
+            let mut event = lease
                 .thread
                 .next_event()
                 .await
                 .map_err(|_| py_error("The Codex event stream ended unexpectedly."))?;
             match &event.msg {
                 EventMsg::ExecApprovalRequest(_) | EventMsg::ApplyPatchApprovalRequest(_) => {
-                    let preconditions = native_approval::checkpoint(&lease.thread, &event)
+                    let preconditions = native_approval::checkpoint(&lease.thread, &mut event)
                         .await.ok_or_else(|| py_error(
                             "Cannot save this Codex approval. Use session=ResumableSession with a supported local command or file edit."
                         ))?;

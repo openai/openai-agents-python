@@ -34,7 +34,7 @@ By default, the SDK traces the following:
 -   Each runner invocation is wrapped in a `task_span()`.
 -   Each model turn is wrapped in a `turn_span()`.
 -   Each time an agent runs, it is wrapped in `agent_span()`
--   Responses and Codex have been using one `response_span()` for each logical model call, including retries.
+-   The Responses and embedded Codex providers use one `response_span()` per logical model call, including retries. Chat Completions uses `generation_span()`.
 -   Function tool calls are each wrapped in `function_span()`
 -   Guardrails are wrapped in `guardrail_span()`
 -   Handoffs are wrapped in `handoff_span()`
@@ -176,19 +176,23 @@ The redactor and destination are trusted application code. They must not indepen
 
 ## OpenTelemetry
 
-Use [`OpenTelemetryTracingProcessor`](ref/extensions/tracing/opentelemetry.md) with the default Responses provider or the [Codex provider](models/codex.md#operation-tracing). Install the `opentelemetry` extra for the integration and the OpenTelemetry SDK for the console example. Use OpenTelemetry 1.45 or later for structured message attributes.
+Use [`OpenTelemetryTracingProcessor`](ref/extensions/tracing/opentelemetry.md) to send SDK spans to your application's OpenTelemetry (OTel) tracer provider. Register it once for both the default Responses provider and the [embedded Codex provider](models/codex.md#operation-tracing).
+
+For the example below, [download a preview wheel with operation tracing](models/codex.md#install-a-github-prerelease-wheel). The published `v1.0.0-alpha.1` release predates this integration. In a fresh virtual environment, replace `WHEEL_FILE` with the local path to the matching `.whl` file. Keep the `[opentelemetry]` extra after the filename.
 
 ```sh
-pip install "openai-agents[opentelemetry]" opentelemetry-sdk
+python -m pip install --only-binary=:all: "WHEEL_FILE[opentelemetry]" "opentelemetry-sdk>=1.45,<2"
+python -c "from agents.extensions.tracing import OpenTelemetryTracingProcessor"
 ```
 
 ### One setup for both providers
 
-Save the following script as `otel_agent.py`. Register the processor once, before starting a run. Configure `OPENAI_API_KEY` for the default provider. For embedded Codex, follow the [wheel installation](models/codex.md#install-a-github-prerelease-wheel) and [authentication setup](models/codex.md#authenticate).
+Save this script as `otel_agent.py`. Set `OPENAI_API_KEY` for Responses. For Codex, set `CODEX_API_KEY` or [use your saved login](models/codex.md#authenticate). Both runs make model requests. By default, the example prints trace metadata and the agent's answer to the console.
 
 ```python
 import argparse
 import asyncio
+import os
 
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
@@ -204,10 +208,10 @@ parser.add_argument("--model")
 parser.add_argument("--content", action="store_true")
 args = parser.parse_args()
 
-provider = TracerProvider()
-provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
-tracer = provider.get_tracer("example")
-set_trace_processors([OpenTelemetryTracingProcessor(tracer_provider=provider)])
+tracer_provider = TracerProvider()
+tracer_provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+tracer = tracer_provider.get_tracer("example")
+set_trace_processors([OpenTelemetryTracingProcessor(tracer_provider=tracer_provider)])
 
 
 @tool
@@ -229,7 +233,7 @@ config = RunConfig(
     trace_include_sensitive_data=args.content,
 )
 if args.codex:
-    config.model_provider = CodexProvider()
+    config.model_provider = CodexProvider(api_key=os.environ.get("CODEX_API_KEY"))
 
 
 async def main():
@@ -244,15 +248,15 @@ async def main():
 try:
     asyncio.run(main())
 finally:
-    provider.shutdown()
+    tracer_provider.shutdown()
 ```
+
+Run the script with each provider. Use `--model` to select a model that supports tool calls.
 
 ```sh
 python otel_agent.py
 python otel_agent.py --codex
 ```
-
-Use `set_trace_processors()` to replace the default SDK processors, as above. Use `add_trace_processor()` to keep them alongside OTel. Configure sampling and export on your application's tracer provider. Flush and shut down that provider in your application.
 
 Check for an answer of `144` in either mode. In the console trace, look for `square.calculate` beneath `execute_tool square`.
 
@@ -268,13 +272,48 @@ calculator.request
         chat <model>
 ```
 
-Group runs, agents, model calls, and tools by `gen_ai.operation.name` using `invoke_runner`, `invoke_agent`, `chat`, and `execute_tool`. Use `openai.agents.turn` for SDK turns and `openai.agents.tool_approval` for approval records. Read tool durations from the start of execution after approval. For embedded Codex observations, see [operation tracing](models/codex.md#operation-tracing).
+### Send spans to a collector
 
-Model spans report token totals as `gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens`. When the provider supplies nonzero counts, OTel also exports cache reads as `gen_ai.usage.cache_read.input_tokens`, cache writes as `gen_ai.usage.cache_write.input_tokens`, and reasoning as `gen_ai.usage.reasoning.output_tokens`. Missing or zero counts do not add these optional attributes.
+If your application already configures an OTel tracer provider, pass it to `OpenTelemetryTracingProcessor`. Use `set_trace_processors()` for OTel alone or `add_trace_processor()` to keep the existing SDK processors, including the default OpenAI exporter. Configure sampling, batching, and delivery on the OTel provider. In a long-running worker, call `tracer_provider.force_flush()` when needed and `tracer_provider.shutdown()` when the worker exits. The SDK's `flush_traces()` does not flush the OTel provider.
+
+To send the example's spans over OTLP/HTTP, install the [Python exporter](https://opentelemetry.io/docs/languages/python/exporters/).
+
+```sh
+python -m pip install "opentelemetry-exporter-otlp-proto-http>=1.45,<2"
+```
+
+Set [`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`](https://opentelemetry.io/docs/languages/sdk-configuration/otlp-exporter/) to the collector's full trace URL, for example `http://127.0.0.1:4318/v1/traces` for a local collector. In `otel_agent.py`, replace the console exporter import and the `add_span_processor(...)` line with these imports and registration.
+
+```python
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+```
+
+Run the script again and look for `calculator.request` in your tracing backend. In a worker, call `Runner.run()` or start and consume `Runner.run_streamed()` under the current request span. Across processes, [extract the caller's trace context](https://opentelemetry.io/docs/languages/python/propagation/) before starting that span. Without a parent, the worker starts a new trace. The processor does not inject trace headers into model gateway requests.
+
+### Read the worker trace
+
+Group spans by `gen_ai.operation.name`. By default, each step of the Runner's agent loop has an `openai.agents.turn` span. One Codex step can contain several `chat` and `execute_tool` spans. A Python callback has one execution span. Instrumented calls inside the callback appear beneath it.
+
+For approvals, look for `openai.agents.tool_approval` with `openai.agents.operation.outcome` set to `paused` or `rejected`. An approved tool's execution time excludes the wait for a decision. On the replacement worker, start the resumed run under its current caller. If the tool has a call ID, match the decision and execution by `gen_ai.tool.call.id` within the same job.
+
+Use `gen_ai.request.model` and `gen_ai.response.model` when available. Model spans report token totals as `gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens`. Nonzero counts can also appear as `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_write.input_tokens`, and `gen_ai.usage.reasoning.output_tokens`. For billed cost, consult your gateway or provider.
+
+Each logical model call includes the time spent waiting between retries. After a tool result, the next inference starts a new model span. Use the following fields to inspect retries observed by the SDK.
+
+| Retry field or event | Role | Limit |
+| --- | --- | --- |
+| `span.span_data.operation.retry_timestamps` | ISO 8601 retry observation times | Up to 128 times per model span |
+| OTel `openai.agents.model.retry` | One event per retained time, without request content | Subject to the tracer provider's event limits |
+| `openai.agents.model.attempt` | Attempt number on the event | Starts at `2` for the first retry |
+
+For Runner retries, the timestamp marks the start of the next attempt. If a transport reports only a retry count, those events share the time the SDK received the count. Retries internal to a gateway may be invisible to the worker.
 
 ### Payload capture
 
-For the Responses and Codex providers, select capture per run with `RunConfig.tracing["operation_detail"]`. Set `trace_include_sensitive_data=False` to suppress input and output even with `"content"` selected.
+For Responses and Codex, `RunConfig.tracing["operation_detail"]` controls payload capture. The same calls, approvals, and retries appear in every mode. Set `trace_include_sensitive_data=False` to suppress model and tool payloads even with `"content"` selected.
 
 | `operation_detail` | `trace_include_sensitive_data` | SDK model and tool payload fields | OTel payload attributes |
 | --- | --- | --- | --- |
@@ -284,21 +323,17 @@ For the Responses and Codex providers, select capture per run with `RunConfig.tr
 | `"content"` | `True` | Bounded model and tool content | Bounded permitted content |
 | `"content"` | `False` | None | None |
 
-Responses and Codex have been recording retries on the original `ResponseSpanData` span, including time spent waiting between attempts. The first inference after a tool execution has been starting a new span. Retries of that inference have been sharing the new span.
+Both explicit detail settings omit inputs and outputs from approval decision spans.
 
-| Retry field or event | Role | Limit |
-| --- | --- | --- |
-| `span.span_data.operation.retry_timestamps` | ISO 8601 retry observation times | Up to 128 times per model span |
-| OTel `openai.agents.model.retry` event | One payload-free event per retained time | Subject to the tracer provider's event limits |
-| Event attribute `openai.agents.model.attempt` | Attempt number | Starting at `2` for the first retry |
+!!! warning "Trace settings do not redact stored data"
 
-For retries visible to the Runner, the SDK has been recording the next attempt's start. For transports reporting only a count, all retries in that count have been sharing the time the SDK received it.
+    Use `"metadata"` on every run, including nested and resumed runs, to keep automatic model and tool payloads out of SDK processors. With detail omitted, other processors can receive file contents even when OTel exports only metadata. Keep secrets out of span names, IDs, and custom data.
 
-For tool approvals, the SDK has been marking function spans with `span.span_data.operation.outcome` of `paused` or `rejected`. OTel has been mapping both outcomes to `openai.agents.tool_approval`. With either explicit detail setting, the SDK has been omitting inputs and outputs from these decision spans.
+    Protect logs, conversation history, and saved approvals separately. A session checkpoint can contain a tool's arguments even when its trace contains only metadata. In content mode, the model span can capture the original arguments before `prepare_tool_input` rewrites them for an SDK function tool.
 
-Pass `--content` to the example to inspect the submitted messages, instructions, and visible output. Look for `gen_ai.input.messages`, `gen_ai.system_instructions`, `gen_ai.output.messages`, `gen_ai.tool.call.arguments`, and `gen_ai.tool.call.result`. For a continuation, look for the submitted messages and `openai.response.previous_response_id`. For response ID handling, see [Sensitive data](#sensitive-data).
+Pass `--content` only if every registered processor and destination may receive the text. Look for `gen_ai.input.messages`, `gen_ai.system_instructions`, `gen_ai.output.messages`, `gen_ai.tool.call.arguments`, and `gen_ai.tool.call.result`. On a continuation, the submitted messages may contain only new items. Use `openai.response.previous_response_id`, when available, to find the earlier call. See [Sensitive data](#sensitive-data) for response ID handling.
 
-Each operation has a 32 KiB budget for its input and another 32 KiB for its output, measured as UTF-8 JSON. Tracing checks the remaining budget before parsing a string that looks like a JSON object or array. For Python capture, a string exceeding that budget has been producing an omission with `reason="capture_budget"`. Native Codex capture has been using `reason="unsupported_or_oversized_content"` for unsupported or oversized values. Check for markers for truncated text, binary media, hidden reasoning, and known credential fields. Treat ordinary text, including file contents and tool results, as potentially private. Configure separate policies for application logs and custom processors.
+In content mode, each operation has separate 32 KiB limits for input and output, measured as UTF-8 JSON. Look for truncation and omission markers for large values, binary media, hidden reasoning, and known credential fields. For example, an oversized JSON string can produce `reason="capture_budget"` in Python. Free text can still contain secrets.
 
 For the SDK fields available on each Codex call, see [Codex operation tracing](models/codex.md#operation-tracing).
 

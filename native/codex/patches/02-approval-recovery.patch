@@ -12,22 +12,22 @@ index 61400a1..f5aa8eb 100644
  mod compact_model_fallback;
 diff --git a/codex-rs/core/src/restore_tool_call.rs b/codex-rs/core/src/restore_tool_call.rs
 new file mode 100644
-index 0000000..9589151
+index 0000000..444601f
 --- /dev/null
 +++ b/codex-rs/core/src/restore_tool_call.rs
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,175 @@
 +//! Resume one direct native tool through the ordinary user review and tool runtime.
 +
 +use std::collections::HashMap;
 +use std::path::PathBuf;
-+use std::sync::{Arc, OnceLock, Weak};
++use std::sync::{Arc, Weak};
 +
 +use codex_file_system::EnvironmentAccess;
 +use codex_protocol::config_types::ApprovalsReviewer;
 +use codex_protocol::error::{CodexErr, Result};
 +use codex_protocol::models::ResponseItem;
 +use codex_protocol::openai_models::ToolMode;
-+use codex_protocol::protocol::{EventMsg, FileChange, ReviewDecision};
++use codex_protocol::protocol::FileChange;
 +use futures::future::BoxFuture;
 +use serde_json::Value;
 +use tokio_util::sync::CancellationToken;
@@ -35,35 +35,35 @@ index 0000000..9589151
 +use crate::session::session::Session;
 +use crate::session::step_context::StepContext;
 +use crate::session::turn_context::TurnContext;
-+use crate::tools::ApprovalContext;
 +use crate::tools::sandboxing::{ApprovalAction, ToolCtx};
 +
-+/// The first pre-execution request. The lease expires when review returns.
-+pub struct FirstApproval<'a> {
-+    pub call_id: &'a str,
-+    pub changes: Option<&'a HashMap<PathBuf, FileChange>>,
-+    pub live: Weak<()>,
++pub enum ApprovalStage<'a> {
++    /// The lease expires when the first pre-execution review returns.
++    Capture {
++        call_id: &'a str,
++        changes: Option<&'a HashMap<PathBuf, FileChange>>,
++        live: Weak<()>,
++    },
++    Prepare,
++    Execute {
++        turn_id: &'a str,
++        call_id: &'a str,
++    },
 +}
 +
-+/// A host may refuse an action or redact the review event. It cannot modify
-+/// the executable action, skip policy review, or grant a decision here.
++/// A host can veto execution. Codex still decides whether to approve and sandbox the call.
 +pub trait ApprovalCheck: Send + Sync {
 +    fn check<'a>(
 +        &'a self,
 +        policy: Value,
 +        fs: &'a dyn EnvironmentAccess,
-+        first: Option<FirstApproval<'a>>,
++        stage: ApprovalStage<'a>,
 +    ) -> BoxFuture<'a, Result<()>>;
-+    fn review(&self, event: &mut EventMsg) -> bool;
 +}
 +
 +pub struct NativeApproval {
-+    check: Arc<dyn ApprovalCheck>,
-+    call: Option<ResponseItem>,
-+    owner: OnceLock<String>,
-+    requested: OnceLock<()>,
-+    approved: OnceLock<()>,
-+    attempted: OnceLock<()>,
++    pub check: Arc<dyn ApprovalCheck>,
++    pub call: Option<ResponseItem>,
 +}
 +
 +fn refused() -> CodexErr {
@@ -71,26 +71,11 @@ index 0000000..9589151
 +}
 +
 +impl NativeApproval {
-+    pub fn new(check: Arc<dyn ApprovalCheck>, call: Option<ResponseItem>) -> Self {
-+        Self {
-+            check,
-+            call,
-+            owner: OnceLock::new(),
-+            requested: OnceLock::new(),
-+            approved: OnceLock::new(),
-+            attempted: OnceLock::new(),
-+        }
-+    }
-+
-+    pub(crate) fn is_patch(&self) -> bool {
-+        matches!(self.call, Some(ResponseItem::CustomToolCall { .. }))
-+    }
-+
 +    async fn check(
 +        &self,
 +        session: &Session,
 +        step: &StepContext,
-+        first: Option<FirstApproval<'_>>,
++        stage: ApprovalStage<'_>,
 +    ) -> Result<()> {
 +        let env = step
 +            .environments
@@ -128,7 +113,7 @@ index 0000000..9589151
 +            }],
 +        });
 +        self.check
-+            .check(policy, &env.fs_accessor(grants), first)
++            .check(policy, &env.fs_accessor(grants), stage)
 +            .await
 +    }
 +
@@ -138,29 +123,19 @@ index 0000000..9589151
 +        turn: Arc<TurnContext>,
 +        cancellation: CancellationToken,
 +    ) -> crate::tasks::SessionTaskResult {
-+        self.owner.set(turn.sub_id.clone()).map_err(|_| refused())?;
 +        let item = self.call.as_ref().ok_or_else(refused)?;
-+        let namespace = match item {
-+            ResponseItem::FunctionCall {
-+                name, namespace, ..
-+            } if name == "exec_command" => namespace,
-+            ResponseItem::CustomToolCall {
-+                name, namespace, ..
-+            } if name == "apply_patch" => namespace,
-+            _ => return Err(refused()),
-+        };
-+        if namespace.as_deref().is_some_and(|ns| ns != "functions") {
-+            return Err(refused());
-+        }
 +        session
 +            .emit_turn_started(&turn, crate::state::TaskKind::Regular)
 +            .await;
 +        let step = session.capture_step_context(turn, &cancellation).await?;
-+        self.check(&session, &step, None).await?;
++        self.check(&session, &step, ApprovalStage::Prepare).await?;
 +        let call = crate::tools::router::ToolRouter::build_tool_call(item.clone())
 +            .map_err(|_| refused())?
 +            .ok_or_else(refused)?;
-+        if !step.tool_router.exposes_tool(&call.tool_name) {
++        if !matches!(call.tool_name.name.as_str(), "exec_command" | "apply_patch")
++            || !call.tool_name.is_default_namespace()
++            || !step.tool_router.exposes_tool(&call.tool_name)
++        {
 +            return Err(refused());
 +        }
 +        use crate::stream_events_utils::record_completed_response_item;
@@ -183,25 +158,6 @@ index 0000000..9589151
 +        .filter(|r| r.call.is_some())
 +}
 +
-+pub(crate) fn active(turn: &TurnContext) -> Option<Arc<NativeApproval>> {
-+    restore(turn).filter(|r| r.owner.get() == Some(&turn.sub_id))
-+}
-+
-+pub(crate) fn allowed(ctx: &ApprovalContext, action: &ApprovalAction) -> bool {
-+    let Some(restore) = restore(ctx.review_context.turn()) else {
-+        return true;
-+    };
-+    restore.owner.get() == Some(&ctx.review_context.turn().sub_id)
-+        && ctx.retry_reason.is_none()
-+        && ctx.network_approval_context.is_none()
-+        && !ctx.strict_auto_review
-+        && restore.requested.get().is_none()
-+        && matches!((&restore.call, action),
-+            (Some(ResponseItem::FunctionCall { call_id, .. }), ApprovalAction::ExecCommand { .. })
-+            | (Some(ResponseItem::CustomToolCall { call_id, .. }), ApprovalAction::ApplyPatch { .. })
-+                if call_id == &ctx.call_id)
-+}
-+
 +// Called only at the first NeedsApproval, never on a retry or network prompt.
 +pub(crate) async fn capture(ctx: &ToolCtx, action: &ApprovalAction) -> Option<Arc<()>> {
 +    let step = &ctx.step_context;
@@ -215,109 +171,26 @@ index 0000000..9589151
 +        _ => return None,
 +    };
 +    let lease = Arc::new(());
-+    let first = FirstApproval {
++    let first = ApprovalStage::Capture {
 +        call_id: &ctx.call_id,
 +        changes,
 +        live: Arc::downgrade(&lease),
 +    };
-+    approval.check(&ctx.session, step, Some(first)).await.ok()?;
++    approval.check(&ctx.session, step, first).await.ok()?;
 +    Some(lease)
 +}
 +
-+pub(crate) fn review(turn: &TurnContext, event: &mut EventMsg) -> bool {
-+    let Some(approval) = turn.extension_data.get::<NativeApproval>() else {
-+        return true;
-+    };
-+    if approval.call.is_some()
-+        && (approval.owner.get() != Some(&turn.sub_id) || approval.requested.set(()).is_err())
-+    {
-+        return false;
-+    }
-+    approval.check.review(event)
-+}
-+
-+pub(crate) fn decision(turn: &TurnContext, decision: ReviewDecision) -> ReviewDecision {
-+    let Some(approval) = active(turn) else {
-+        return decision;
-+    };
-+    match decision {
-+        ReviewDecision::Approved
-+            if approval.requested.get().is_some() && approval.approved.set(()).is_ok() =>
-+        {
-+            decision
-+        }
-+        ReviewDecision::Denied { .. } => decision,
-+        _ => ReviewDecision::Abort,
-+    }
-+}
-+
 +pub(crate) async fn validate_before_execution(ctx: &ToolCtx) -> Result<()> {
-+    if let Some(approval) = active(&ctx.step_context.turn) {
-+        if approval.approved.get().is_none() || approval.attempted.set(()).is_err() {
-+            return Err(refused());
-+        }
-+        approval
-+            .check(&ctx.session, &ctx.step_context, None)
-+            .await?;
++    let step = &ctx.step_context;
++    if let Some(approval) = restore(&step.turn) {
++        let stage = ApprovalStage::Execute {
++            turn_id: &step.turn.sub_id,
++            call_id: &ctx.call_id,
++        };
++        approval.check(&ctx.session, step, stage).await?;
 +    }
 +    Ok(())
 +}
-diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index cc418ca..54352c0 100644
---- a/codex-rs/core/src/session/mod.rs
-+++ b/codex-rs/core/src/session/mod.rs
-@@ -3146,7 +3146,7 @@ impl Session {
-             .as_ref()
-             .map(PluginCommandAttribution::serialized_fields)
-             .unzip();
--        let event = EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
-+        let mut event = EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
-             model_context: Some(model_context),
-             kind,
-             call_id,
-@@ -3166,9 +3166,15 @@ impl Session {
-             available_decisions: Some(available_decisions),
-             parsed_cmd,
-         });
-+        if !crate::restore_tool_call::review(turn_context, &mut event) {
-+            return ReviewDecision::Abort;
-+        }
-         let _user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
-         self.send_event(turn_context, event).await;
--        rx_approve.await.unwrap_or(ReviewDecision::Abort)
-+        crate::restore_tool_call::decision(
-+            turn_context,
-+            rx_approve.await.unwrap_or(ReviewDecision::Abort),
-+        )
-     }
-
-     #[expect(
-@@ -3202,7 +3208,7 @@ impl Session {
-             warn!("Overwriting existing pending approval for call_id: {approval_id}");
-         }
-
--        let event = EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
-+        let mut event = EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
-             call_id,
-             turn_id: turn_context.sub_id.clone(),
-             started_at_ms: now_unix_timestamp_ms(),
-@@ -3210,9 +3216,15 @@ impl Session {
-             reason,
-             grant_root,
-         });
-+        if !crate::restore_tool_call::review(turn_context, &mut event) {
-+            return ReviewDecision::Abort;
-+        }
-         let _user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
-         self.send_event(turn_context, event).await;
--        rx_approve.await.unwrap_or(ReviewDecision::Abort)
-+        crate::restore_tool_call::decision(
-+            turn_context,
-+            rx_approve.await.unwrap_or(ReviewDecision::Abort),
-+        )
-     }
-
-     #[expect(
 diff --git a/codex-rs/core/src/tasks/regular.rs b/codex-rs/core/src/tasks/regular.rs
 index 6c6f3d1..eded760 100644
 --- a/codex-rs/core/src/tasks/regular.rs
@@ -332,54 +205,8 @@ index 6c6f3d1..eded760 100644
          if ctx
              .config
              .features
-diff --git a/codex-rs/core/src/tools/approvals.rs b/codex-rs/core/src/tools/approvals.rs
-index 74082aa..9e221de 100644
---- a/codex-rs/core/src/tools/approvals.rs
-+++ b/codex-rs/core/src/tools/approvals.rs
-@@ -499,6 +499,13 @@ impl Session {
-         action: ApprovalAction,
-         ctx: ApprovalContext,
-     ) -> ApprovalResult {
-+        if !crate::restore_tool_call::allowed(&ctx, &action) {
-+            return ApprovalResult {
-+                result: Err(ToolError::Codex(CodexErr::TurnAborted)),
-+                source: None,
-+                cancellation_reason: None,
-+            };
-+        }
-         // Retained authority outside current grants needs a new sandbox approval.
-         // Current grants permit review of the input; they never approve the input itself.
-         let policy = ctx.review_context.turn().approval_policy();
-@@ -695,6 +702,7 @@ impl Session {
-         action: &ApprovalAction,
-         ctx: &ApprovalContext,
-     ) -> ApprovalResolution {
-+        let restoring = crate::restore_tool_call::active(ctx.review_context.turn()).is_some();
-         let decision = match action {
-             ApprovalAction::ExecCommand {
-                 environment_id,
-@@ -721,6 +729,7 @@ impl Session {
-                 let cache_keys = action
-                     .cache_keys()
-                     .into_iter()
-+                    .filter(|_| !restoring) // Empty keys force a fresh user decision.
-                     .map(|key| (key, &policy_fingerprint))
-                     .collect();
-                 with_cached_approval(&self.services, tool_name, cache_keys, || async {
-@@ -788,9 +797,9 @@ impl Session {
-                     .retry_reason
-                     .clone()
-                     .or_else(|| ctx.approval_reason.clone());
--                if *permissions_preapproved && reason.is_none() {
-+                if *permissions_preapproved && reason.is_none() && !restoring {
-                     ReviewDecision::Approved
--                } else if reason.is_some() {
-+                } else if reason.is_some() || restoring {
-                     self.request_patch_approval(
-                         ctx.review_context.turn(),
-                         ctx.call_id.clone(),
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
-index 6a81b62..59e4900 100644
+index 6a81b62..7f50e89 100644
 --- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
 +++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
 @@ -236,6 +236,19 @@ impl ExecCommandHandler {
@@ -388,7 +215,7 @@ index 6a81b62..59e4900 100644
          };
 +        // The exit event can arrive after the turn. A restored command needs a terminal
 +        // result here because the next worker cannot use a live process handle.
-+        if crate::restore_tool_call::active(&step_context.turn).is_some()
++        if crate::restore_tool_call::restore(&step_context.turn).is_some()
 +            && !result.as_ref().is_ok_and(|output| {
 +                output.event_call_id == call_id
 +                    && output.process_id.is_none()
@@ -403,7 +230,7 @@ index 6a81b62..59e4900 100644
              Ok(response) => Ok(boxed_tool_output(response)),
              Err(UnifiedExecError::SandboxDenied {
 diff --git a/codex-rs/core/src/tools/orchestrator.rs b/codex-rs/core/src/tools/orchestrator.rs
-index a1a88e4..606436f 100644
+index c5f8077..902532e 100644
 --- a/codex-rs/core/src/tools/orchestrator.rs
 +++ b/codex-rs/core/src/tools/orchestrator.rs
 @@ -61,6 +61,9 @@ impl ToolOrchestrator {
@@ -416,22 +243,7 @@ index a1a88e4..606436f 100644
          let network_approval = match begin_network_approval(
              &tool_ctx.session,
              &tool_ctx.step_context.turn,
-@@ -164,6 +167,14 @@ impl ToolOrchestrator {
-         let requirement = tool.exec_approval_requirement(req).unwrap_or_else(|| {
-             default_exec_approval_requirement(approval_policy, &file_system_sandbox_policy)
-         });
-+        let restoring = crate::restore_tool_call::active(turn_ctx);
-+        if restoring.is_some()
-+            && !matches!(requirement, ExecApprovalRequirement::NeedsApproval { .. })
-+        {
-+            return Err(ToolError::Rejected(
-+                "native restoration requires a fresh human approval".into(),
-+            ));
-+        }
-         match &requirement {
-             ExecApprovalRequirement::Skip { .. } => {
-                 if strict_auto_review {
-@@ -216,6 +227,7 @@ impl ToolOrchestrator {
+@@ -228,6 +231,7 @@ impl ToolOrchestrator {
                      retry_reason: None,
                      network_approval_context: None,
                  };
@@ -439,30 +251,36 @@ index a1a88e4..606436f 100644
                  let approval = tool_ctx
                      .session
                      .request_approval(action, approval_ctx)
-@@ -227,12 +239,22 @@ impl ToolOrchestrator {
-
-         // 2) First attempt under the selected sandbox.
-         let unsandboxed_allowed = unsandboxed_execution_allowed(&file_system_sandbox_policy);
--        let sandbox_override = sandbox_override_for_first_attempt(
-+        let mut sandbox_override = sandbox_override_for_first_attempt(
-             tool.sandbox_permissions(req),
-             &requirement,
-             &file_system_sandbox_policy,
-             /*already_approved*/ initial_approval_source.is_some(),
-         );
-+        // A restored edit gets one attempt. Use only the ordinary approved retry's authority.
-+        if restoring.is_some_and(|restore| restore.is_patch())
-+            && initial_approval_source == Some(ApprovalResolutionSource::User)
-+            && !strict_auto_review
-+            && unsandboxed_allowed
-+            && tool.wants_no_sandbox_approval(approval_policy)
-+            && tool.should_bypass_approval(approval_policy, true)
-+        {
-+            sandbox_override = SandboxOverride::BypassSandboxFirstAttempt;
-+        }
-         let (escalated_profile, writable_root_metadata) = if sandbox_override
-             == SandboxOverride::EscalatedSandboxWithRestrictions
-         {
+@@ -502,6 +506,12 @@ impl ToolOrchestrator {
+                 let bypass_retry_approval = !strict_auto_review
+                     && tool.should_bypass_approval(approval_policy, retry_preapproved)
+                     && network_approval_context.is_none();
++                // A saved decision cannot authorize another command or a new escalation.
++                if crate::restore_tool_call::restore(turn_ctx).is_some()
++                    && (tool_ctx.tool_name.name != "apply_patch" || !bypass_retry_approval)
++                {
++                    return Err(ToolError::Codex(err));
++                }
+                 if !bypass_retry_approval {
+                     let approval_reason = match &requirement {
+                         ExecApprovalRequirement::NeedsApproval { reason, .. } => reason.clone(),
+diff --git a/codex-rs/core/src/tools/runtimes/apply_patch.rs b/codex-rs/core/src/tools/runtimes/apply_patch.rs
+index bb6dd3e..f269e5e 100644
+--- a/codex-rs/core/src/tools/runtimes/apply_patch.rs
++++ b/codex-rs/core/src/tools/runtimes/apply_patch.rs
+@@ -250,6 +250,12 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
+             if attempt.sandbox != SandboxType::None {
+                 record_filesystem_sandbox_violation(attempt.sandbox, &output);
+             }
++            // Even a no-op write is a committed edit. Never replay that prefix.
++            if !self.committed_delta.is_empty()
++                && crate::restore_tool_call::restore(&ctx.step_context.turn).is_some()
++            {
++                return Err(ToolError::Rejected("Restored patch partially applied.".into()));
++            }
+             return Err(ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied {
+                 output: Box::new(output),
+                 network_policy_decision: None,
 diff --git a/codex-rs/exec-server/src/fs_helper.rs b/codex-rs/exec-server/src/fs_helper.rs
 index d307663..1494d68 100644
 --- a/codex-rs/exec-server/src/fs_helper.rs

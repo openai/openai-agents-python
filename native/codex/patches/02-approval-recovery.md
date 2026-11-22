@@ -15,8 +15,8 @@ Only one worker can claim that session revision. Denial stops the call.
 | Where | Responsibility |
 | --- | --- |
 | Existing Codex APIs | Start a turn on an idle thread, pass data to that turn, and run the built-in tool through its usual permission checks. |
-| This patch | Identify the first live approval before execution. On restart, submit only the saved call, require a fresh matching approval, and stop if any check fails. |
-| [SDK approval checks](../src/native_approval.rs) | Save and compare the request and permissions. Match the saved decision to the action Codex prepares on the new worker. |
+| This patch | Identify the first live approval. On restart, dispatch the saved call and let the SDK stop each attempt before execution. |
+| [SDK approval checks](../src/native_approval.rs) | Compare the new request and permissions with the saved ones. Answer once and bind approval to this turn and call. A cached decision cannot authorize execution. |
 | [SDK file checks](../src/approval_files.rs) | Verify file contents and empty destinations. Replace prepared update diffs with hashes and remove the contents of deleted files. |
 
 The SDK uses the same session ID and saved format as before. The application only needs to collect the user's decision once.
@@ -27,11 +27,11 @@ Recovery requires direct tools in one local environment, human review and no too
 
 The patch adds a limit to Codex's permission-checked file reader because the existing stream can follow symbolic links. The SDK checks files before saving, on restart and just before execution. Each check covers at most 32 paths, 8 MiB per file, 16 MiB in total and 10 seconds. A changed, unreadable or oversized source file or an occupied destination stops recovery.
 
-A restored call gets one attempt. For a command, Codex checks the call ID and exit code and refuses a live process handle. This check works even if the exit notification arrives after the turn. A new worker cannot continue an interactive process.
+Codex chooses the sandbox for the first attempt as usual. A restored command runs at most once. Codex checks the call ID and exit code and refuses a live process handle.
 
-When Codex policy already allows an approved edit to run outside the sandbox on retry, recovery uses that permission on the first attempt.
+After a sandbox denial, Codex may retry an edit outside the sandbox if its policy allows that retry without another approval. The SDK checks the files and permissions again. Any committed edit stops the retry, even a write of identical contents. Earlier writes remain in place.
 
-The application must restore the same workspace and prevent concurrent edits. If the worker stops after a write and before saving the result, the session stays active. Check the external system before retrying.
+The application must restore the same workspace and prevent concurrent edits. A partial edit or a crash before the result is saved can leave the session active. Inspect the workspace and reconcile any effects before retrying.
 
 ## Check and remove
 
