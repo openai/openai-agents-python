@@ -134,7 +134,7 @@ The workspace sandbox protects the directory that contains the installed helpers
 
 On Windows, the preview rejects a local Codex executor configured with the legacy elevated sandbox. That sandbox needs a setup helper that Codex cannot securely locate from a Python process. If your organization requires this sandbox, use an SDK-managed executor or configure a remote executor with `include_local = false` in `environments.toml`.
 
-Pass a `ResumableSession` to `Runner.run(..., session=session)` to pause a built-in `exec_command` or `apply_patch` for approval. A new worker can load that session and approve or reject the original call. Recovery requires the same workspace and permissions, one local environment, and no tool hooks. Other native approval requests fail the model call.
+Pass a [`ResumableSession`](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/docs/sessions/index.md#use-your-own-storage-for-resumable-sessions) to `Runner.run(..., session=session)` to pause a built-in `exec_command` or `apply_patch` for approval. A new worker can load that session and approve or reject the original call. Recovery requires the same workspace and permissions, one local environment, and no tool hooks. Other native approval requests fail the model call.
 
 For a non-interactive read-only workflow, disable approval prompts.
 

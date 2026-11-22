@@ -247,6 +247,13 @@ def _settings(settings: ModelSettings) -> tuple[str | None, str | None]:
     return (reasoning.effort if reasoning else None, reasoning.summary if reasoning else None)
 
 
+def _validate_native_restore(tools: list[Tool], bindings: ModelToolHooks | None) -> None:
+    if _uses_sdk_workspace(tools, bindings) or CodexToolHooks.for_run(bindings, set()):
+        raise UserError(
+            "The current workspace or native tool hooks do not allow restoring this call."
+        )
+
+
 class _CodexModel(Model):
     _supports_stored_response_id = False
     _sandbox_model_capabilities: ClassVar[dict[str, Any]] = {
@@ -266,11 +273,7 @@ class _CodexModel(Model):
     async def _run_approved_native_call(
         self, checkpoint: dict[str, Any], *, tools: list[Tool], tracing: ModelTracing
     ) -> str:
-        bindings = get_model_tool_hooks()
-        if _uses_sdk_workspace(tools, bindings) or CodexToolHooks.for_run(bindings, set()):
-            raise UserError(
-                "The current workspace or native tool hooks do not allow restoring this call."
-            )
+        _validate_native_restore(tools, get_model_tool_hooks())
         return await self._provider._run_approved_native_call(checkpoint, tracing)
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice:
@@ -440,7 +443,8 @@ class _CodexModel(Model):
             and output_schema.is_strict_json_schema()
             else None
         )
-        observations = CodexOperationTracing(identities)
+        observations = CodexOperationTracing(identities, input)
+        completed: Response | None = None
         resources = AsyncExitStack()
         output: dict[str, Any] = {}
         streamed: set[str] = set()
@@ -831,6 +835,31 @@ class _CodexModel(Model):
                         type="response.output_item.done",
                     )
                     sequence += 1
+            if native_pending:
+                if not interrupt_requested:
+                    raise RuntimeError("Codex finished with an incomplete native tool call.")
+                # Interrupted code-mode parents have no completed result to replay.
+                for item_id, _ in native_pending.values():
+                    output.pop(item_id, None)
+            if native_hooks is not None:
+                for item in output.values():
+                    native_hooks.prepare_history_item(item)
+            if require_sdk_call and not sdk_calls:
+                raise UserError(
+                    "CodexProvider tool_choice='required' did not return an SDK tool "
+                    "or handoff call."
+                )
+            if not sdk_calls and not output:
+                raise RuntimeError("Codex finished without a completed response.")
+            items = list(output.values()) + list(sdk_calls.values())
+            if reasoning_summaries:
+                items[-1].codex_reasoning_summary = reasoning_summaries
+            items.sort(key=lambda item: indices[item.id])
+            completed = response.model_copy(
+                update={"output": items, "status": "completed", "usage": usage}
+            )
+            if raw_usage is not None:
+                _attach_raw_usage_snapshot(completed, raw_usage)
         except BaseException as error:
             failure = error
             raise
@@ -842,25 +871,8 @@ class _CodexModel(Model):
                 if failure is None:
                     raise
             finally:
-                observations.close()
-        if native_pending:
-            if not interrupt_requested:
-                raise RuntimeError("Codex finished with an incomplete native tool call.")
-            # Interrupted code-mode parents have no completed result to replay.
-            for item_id, _ in native_pending.values():
-                output.pop(item_id, None)
-        if native_hooks is not None:
-            for item in output.values():
-                native_hooks.prepare_history_item(item)
-        if require_sdk_call and not sdk_calls:
-            raise UserError(
-                "CodexProvider tool_choice='required' did not return an SDK tool or handoff call."
-            )
-        if not sdk_calls and not output:
-            raise RuntimeError("Codex finished without a completed response.")
-        items = list(output.values()) + list(sdk_calls.values())
-        if reasoning_summaries:
-            items[-1].codex_reasoning_summary = reasoning_summaries
+                # Pending items carry a private recovery checkpoint.
+                observations.close(completed if pending_approval is None else None)
         for native_item in output.values():
             if native_item.type not in (
                 "function_call",
@@ -884,15 +896,9 @@ class _CodexModel(Model):
                 type="response.output_item.done",
             )
             sequence += 1
-        items.sort(key=lambda item: indices[item.id])
-        response = response.model_copy(
-            update={"output": items, "status": "completed", "usage": usage}
-        )
-        if raw_usage is not None:
-            _attach_raw_usage_snapshot(response, raw_usage)
-        completed = ResponseCompletedEvent(
-            response=response, sequence_number=sequence, type="response.completed"
+        completed_event = ResponseCompletedEvent(
+            response=completed, sequence_number=sequence, type="response.completed"
         )
         if checkpoint is not None and checklist is not None:
             checkpoint.codex_checklist = checklist
-        yield completed
+        yield completed_event

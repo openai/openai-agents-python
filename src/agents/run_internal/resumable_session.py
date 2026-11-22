@@ -19,6 +19,7 @@ from .run_steps import QueueCompleteSentinel
 
 if TYPE_CHECKING:
     from ..memory.session import Session
+    from ..models._run_context import ModelToolHooks
     from ..result import RunResult, RunResultStreaming
     from .run_steps import ProcessedResponse
 
@@ -33,10 +34,10 @@ class ResumableRun:
         self._source = source
         self._items: list[TResponseInputItem] = []
 
-    async def begin(self, input: Any) -> None:
+    async def begin(self, input: Any, tool_hooks: ModelToolHooks) -> None:
         if self._source is None:
             raise ResumableSessionError("invalid_state")
-        await self._source._begin_run(input)
+        await self._source._begin_run(input, tool_hooks)
         self._items = self._source._get_history()
 
     def bind_state(self, state: Any) -> None:
