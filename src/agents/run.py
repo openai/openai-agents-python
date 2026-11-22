@@ -871,6 +871,9 @@ class AgentRunner:
                 run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
                 run_state.set_trace(get_current_trace())
 
+            if isinstance(session, ResumableRun):
+                session.bind_state(run_state)
+
             use_task_and_turn_spans = include_task_and_turn_spans(run_config.tracing)
             current_task_span: Span[TaskSpanData] | None = (
                 task_span(name=trace_workflow_name) if use_task_and_turn_spans else None
@@ -2912,6 +2915,7 @@ class AgentRunner:
                 if isinstance(session, ResumableRun):
                     try:
                         await session.begin(input)
+                        session.bind_state(run_state)
                     except BaseException:
                         streamed_result.is_complete = True
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
