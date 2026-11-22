@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Generic, Literal
@@ -223,11 +223,30 @@ class ToolExecutionConfig:
     When either preparation callback is set, the Codex provider disables native workspace tools.
     """
 
-    native_mcp_result_transforms: dict[
-        tuple[str, str],
-        Callable[[ToolCallHookContext[Any], dict[str, Any]], Awaitable[dict[str, Any]]],
-    ] = field(default_factory=dict, kw_only=True)
-    """Experimental. Select configured Codex MCP tools by exact (server name, tool name).
+    native_mcp_result_transforms: Sequence[
+        tuple[
+            tuple[str, str],
+            Callable[[ToolCallHookContext[Any], dict[str, Any]], Awaitable[dict[str, Any]]],
+        ]
+    ] = field(default=(), kw_only=True)
+    """Experimental. Edit whole results from selected native MCP tools.
+
+    Register one editor per exact server name and raw tool name. For example,
+
+    ```python
+    async def summarize(call, result):
+        text = "Lookup failed." if result.get("isError") else "Lookup completed."
+        return {"content": [{"type": "text", "text": text}]}
+
+    settings = ToolExecutionConfig(
+        native_mcp_result_transforms=[(("catalog", "lookup"), summarize)]
+    )
+    ```
+
+    This example discards all media and structured data. Before the first model request
+    on each native thread, the SDK checks the names against the configured peer's
+    available tools. This snapshot cannot detect later renames or changes of identity.
+    Supply the same selection when resuming. Unselected calls keep their usual behavior.
 
     Each async callback receives the raw names in `call.tool_namespace` and `call.tool.name`,
     effective arguments and a detached MCP result. Return the entire replacement with `content` and
@@ -236,13 +255,45 @@ class ToolExecutionConfig:
     including structured content, which Codex can prefer over text. Model limits still apply.
 
     For selected responses, this replaces `prepare_tool_output` before native completion
-    events, history and model input. Earlier Core traces may contain the original result.
+    events, SDK operation traces, history and model input. Core rollout recording captures
+    the original result. The SDK rejects this option if `CODEX_ROLLOUT_TRACE_ROOT` is
+    present at thread startup, even if empty. Leave it unset throughout startup.
+    The editor cannot erase earlier diagnostics or control peer and application logs.
+    SDK content tracing can include inputs and the edited result.
     Callback or validation errors fail the run. Core may still sample with a withheld result.
     Callbacks run one at a time in the current native thread. They exclude transport errors,
     plugin or hosted tools, SDK-discovered tools, or independently started child threads.
     """
 
+    def _native_mcp_editors(
+        self,
+    ) -> dict[
+        tuple[str, str],
+        Callable[[ToolCallHookContext[Any], dict[str, Any]], Awaitable[dict[str, Any]]],
+    ]:
+        entries = self.native_mcp_result_transforms
+        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes, bytearray)):
+            raise ValueError("native_mcp_result_transforms requires a sequence of pairs.")
+        editors = {}
+        for entry in entries:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise ValueError(
+                    "Each native_mcp_result_transforms entry requires a target and editor."
+                )
+            target, editor = entry
+            if (
+                not isinstance(target, tuple)
+                or len(target) != 2
+                or not all(isinstance(name, str) and name.strip() for name in target)
+            ):
+                raise ValueError("Select a native MCP tool by exact (server name, raw tool name).")
+            if target in editors or not callable(editor):
+                raise ValueError("Each native MCP target requires exactly one callable editor.")
+            editors[target] = editor
+        return editors
+
     def __post_init__(self) -> None:
+        self.native_mcp_result_transforms = tuple(self._native_mcp_editors().items())
         if self.max_function_tool_concurrency is not None and (
             self.max_function_tool_concurrency < 1
         ):

@@ -2,6 +2,7 @@
 use codex_extension_api::{
     McpToolResultInput, McpToolSource, ToolLifecycleContributor, ToolLifecycleFuture,
 };
+use codex_mcp::{McpServerSource, McpSnapshotDetail};
 use codex_protocol::mcp::CallToolResult;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -11,6 +12,56 @@ use tokio::sync::{mpsc, oneshot};
 pub struct Selection {
     pub tools: Vec<(String, String)>,
     pub requests: mpsc::UnboundedSender<PendingResult>,
+}
+
+// Core captures this process setting at root-thread startup, including an empty path.
+pub fn check_recording() -> Result<(), String> {
+    if std::env::var_os("CODEX_ROLLOUT_TRACE_ROOT").is_some() {
+        return Err(
+            "Unset CODEX_ROLLOUT_TRACE_ROOT to use native_mcp_result_transforms. \
+                    Rollout recording captures results before editing."
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+// Check the current thread's filtered catalog without fetching resources or starting
+// a second connection. The result hook still checks provenance on every call.
+pub async fn verify(thread: &codex_core::CodexThread, tools: &[(String, String)]) -> PyResult<()> {
+    check_recording().map_err(super::py_error)?;
+    let mut catalogs = std::collections::HashMap::new();
+    for (index, (server, name)) in tools.iter().enumerate() {
+        let unavailable = || {
+            PyValueError::new_err(format!(
+                "native_mcp_result_transforms[{index}] requires an enabled configured server and an available raw tool name."
+            ))
+        };
+        if !catalogs.contains_key(server) {
+            let (config, mut snapshot) = thread
+                .mcp_server_status_snapshot(server, McpSnapshotDetail::ToolsAndAuthOnly, None)
+                .await
+                .map_err(|_| unavailable())?;
+            let peer = config
+                .mcp_server_catalog
+                .server(server)
+                .ok_or_else(unavailable)?;
+            if peer.source() != &McpServerSource::Config || !peer.config().enabled {
+                return Err(unavailable());
+            }
+            catalogs.insert(
+                server,
+                snapshot
+                    .tools_by_server
+                    .remove(server)
+                    .ok_or_else(unavailable)?,
+            );
+        }
+        if !catalogs[server].contains_key(name) {
+            return Err(unavailable());
+        }
+    }
+    Ok(())
 }
 
 #[pyclass]

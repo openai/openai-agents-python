@@ -3,7 +3,10 @@
 import asyncio
 import json
 import os
+import socket
+import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from importlib.util import find_spec
@@ -412,8 +415,8 @@ async def test_native_hooks_respect_caller_disablement(tmp_path, model_endpoint,
         await provider.aclose()
 
 
-@pytest.mark.asyncio
-async def test_native_hook_endpoint_rejects_untrusted_calls():
+@pytest.fixture
+def hook_executable():
     executable = (
         files("agents.models")
         / "_codex_bin"
@@ -421,6 +424,39 @@ async def test_native_hook_endpoint_rejects_untrusted_calls():
     )
     if not executable.is_file():
         pytest.skip("Install the SDK's embedded Codex runtime helper to exercise this path.")
+    return str(executable)
+
+
+def test_native_hook_stdio_replies_before_eof(hook_executable):
+    with socket.create_server(("127.0.0.1", 0)) as listener, ThreadPoolExecutor(1) as reader:
+        listener.settimeout(5)
+        with subprocess.Popen(
+            [hook_executable, "--sdk-hook-stdio", str(listener.getsockname()[1])],
+            env={**os.environ, "AGENTS_CODEX_HOOK_KEY": "x"},
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+        ) as relay:
+            try:
+                assert relay.stdin is not None and relay.stdout is not None
+                with listener.accept()[0] as peer, peer.makefile("rb") as requests:
+                    peer.settimeout(5)
+                    assert requests.read(1) == b"x"
+                    for reply in (b"ok\n", b"\x00\xff"):
+                        relay.stdin.write(b"hello\n")
+                        relay.stdin.flush()
+                        assert requests.readline() == b"hello\n"
+                        peer.sendall(reply)
+                        # A blocked pipe read must not prevent timeout and child cleanup.
+                        assert (
+                            reader.submit(relay.stdout.read, len(reply)).result(timeout=5) == reply
+                        )
+                assert relay.wait(timeout=5) == 0
+            finally:
+                relay.kill()
+
+
+@pytest.mark.asyncio
+async def test_native_hook_endpoint_rejects_untrusted_calls(hook_executable):
     received = []
 
     async def dispatch(arguments):
@@ -439,7 +475,7 @@ async def test_native_hook_endpoint_rejects_untrusted_calls():
             await writer.wait_closed()
         async with MCPServerStdio(
             {
-                "command": str(executable),
+                "command": hook_executable,
                 "args": ["--sdk-hook-stdio", str(port)],
                 "env": {"AGENTS_CODEX_HOOK_KEY": key},
             }
@@ -453,6 +489,27 @@ async def test_native_hook_endpoint_rejects_untrusted_calls():
         assert received == [{"event": "PreToolUse"}]
 
 
+def test_native_mcp_result_registrations():
+    async def edit(call, result):
+        return result
+
+    pair = (("raw-peer", "lookup"), edit)
+    pairs = [pair]
+    config = ToolExecutionConfig(native_mcp_result_transforms=pairs)
+    pairs.clear()
+    assert config.native_mcp_result_transforms == (pair,)
+    assert ToolExecutionConfig().native_mcp_result_transforms == ()
+    for invalid in (
+        {},
+        [pair, pair],
+        [(("peer", ""), edit)],
+        [("lookup", edit)],
+        [(pair[0], None)],
+    ):
+        with pytest.raises(ValueError, match="native"):
+            ToolExecutionConfig(native_mcp_result_transforms=invalid)  # type: ignore[arg-type]
+
+
 @pytest.mark.asyncio
 @pytest.mark.allow_call_model_methods
 @pytest.mark.parametrize(
@@ -463,6 +520,11 @@ async def test_native_hook_endpoint_rejects_untrusted_calls():
         "peer_error",
         "force_error",
         "unselected",
+        "missing_server",
+        "missing_tool",
+        "disabled_tool",
+        "trace_path",
+        "trace_empty",
         "invalid",
         "oversized",
         "surrogate",
@@ -494,6 +556,7 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
         "  return [TextContent(type='text', text='PEER_ONLY'), "
         f"ImageContent(type='image', data='{png}', mimeType='image/png')]\n"
         " return 'PEER_ONLY'\n"
+        "@server.tool()\ndef other(): return 'other'\n"
         "server.run(transport='stdio')\n"
     )
     provider = codex_fixture(
@@ -507,6 +570,9 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
             f"mcp_servers.raw-peer.args={json.dumps(['-I', '-c', script])}",
             'mcp_servers.raw-peer.default_tools_approval_mode="approve"',
             "mcp_servers.raw-peer.required=true",
+            'mcp_servers.raw-peer.disabled_tools=["other"]'
+            if mode == "disabled_tool"
+            else "mcp_servers.raw-peer.disabled_tools=[]",
         ],
     )
     changed_input = mode in ("peer_error", "force_error")
@@ -586,14 +652,18 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
     async def legacy(call, result):
         pytest.fail("Selected results must bypass the text-only output hook")
 
+    target = {
+        "unselected": ("raw-peer", "other"),
+        "missing_server": ("raw_peer", "lookup"),
+        "missing_tool": ("raw-peer", "old_name"),
+        "disabled_tool": ("raw-peer", "other"),
+    }.get(mode, ("raw-peer", "lookup"))
     config = RunConfig(
         model_provider=provider,
         tracing={"operation_detail": "content"},
         trace_include_sensitive_data=True,
         tool_execution=ToolExecutionConfig(
-            native_mcp_result_transforms={
-                ("other" if mode == "unselected" else "raw-peer", "lookup"): transform
-            },
+            native_mcp_result_transforms=[(target, transform)],
             prepare_tool_input=before if changed_input else None,
             prepare_tool_output=legacy if mode == "replace" else None,
         ),
@@ -611,6 +681,22 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
 
     try:
         run = execute()
+        if mode in ("trace_path", "trace_empty"):
+            monkeypatch.chdir(tmp_path)
+            monkeypatch.setenv(
+                "CODEX_ROLLOUT_TRACE_ROOT", str(tmp_path) if mode == "trace_path" else ""
+            )
+            with pytest.raises(RuntimeError, match="Unset CODEX_ROLLOUT_TRACE_ROOT"):
+                await run
+            assert not requests
+            assert not list(tmp_path.rglob("trace.jsonl"))
+            return
+        if mode in ("missing_server", "missing_tool", "disabled_tool"):
+            with pytest.raises(ValueError, match="available raw tool name"):
+                await run
+            assert not entered.is_set()
+            assert not requests
+            return
         if mode == "cancel":
             task = asyncio.create_task(run)
             await asyncio.wait_for(entered.wait(), 30)

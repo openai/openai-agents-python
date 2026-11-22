@@ -1,4 +1,5 @@
 //! Private, asynchronous Core bindings for the opt-in Codex model provider.
+mod approval_files;
 mod config;
 mod mcp_results;
 mod native_approval;
@@ -204,6 +205,7 @@ async fn start_thread(
     let mcp_results = if request.mcp_tools.is_empty() {
         None
     } else {
+        mcp_results::check_recording()?;
         let (requests, receiver) = mpsc::unbounded_channel();
         options
             .thread_extension_init
@@ -386,7 +388,7 @@ impl Manager {
         self.state
             .commands
             .send(ManagerCommand::Start(StartRequest {
-                mcp_tools: mcp_tools.unwrap_or_default(),
+                mcp_tools: mcp_tools.clone().unwrap_or_default(),
                 tools: dynamic_tools_json,
                 instructions,
                 settings: settings_json,
@@ -398,6 +400,9 @@ impl Manager {
                 .await
                 .map_err(|_| py_error("The Codex manager stopped unexpectedly."))?
                 .map_err(py_error)?;
+            if let Some(tools) = mcp_tools {
+                mcp_results::verify(&lease.thread, &tools).await?;
+            }
             Python::attach(|py| Py::new(py, Thread { lease }))
         })
     }
@@ -495,10 +500,11 @@ impl Thread {
                     final_output_json_schema: schema,
                     ..Default::default()
                 });
-                let mut request = WithTurnExtensionData::from(request);
-                if recover_approvals {
-                    request = request.capture_native_approvals();
-                }
+                let request = if recover_approvals {
+                    native_approval::capture(request)
+                } else {
+                    WithTurnExtensionData::from(request)
+                };
                 match Box::pin(lease.thread.start_turn_if_idle(request))
                     .await
                     .map_err(|_| "Unable to start the Codex turn.".to_owned())?
@@ -519,7 +525,7 @@ impl Thread {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             lease.ensure_open().map_err(py_error)?;
             let next = lease.thread.next_event();
-            let event = if let Some(requests) = &lease.mcp_results {
+            let mut event = if let Some(requests) = &lease.mcp_results {
                 let mut receiver = requests.lock().await;
                 tokio::select! {
                     Some(request) = receiver.recv() => {
@@ -535,13 +541,13 @@ impl Thread {
                 |text: String| Python::attach(|py| pyo3::IntoPyObjectExt::into_py_any(text, py));
             match &event.msg {
                 EventMsg::ExecApprovalRequest(_) | EventMsg::ApplyPatchApprovalRequest(_) => {
-                    let (request, preconditions) = lease.thread.capture_tool_approval(event.msg)
-                        .await.map_err(|_| py_error(
+                    let preconditions = native_approval::checkpoint(&lease.thread, &mut event)
+                        .await.ok_or_else(|| py_error(
                             "Cannot save this Codex approval. Use session=ResumableSession with a supported local command or file edit."
                         ))?;
                     return encode(
                         serde_json::json!({
-                            "id": event.id, "msg": request, "preconditions": preconditions
+                            "id": event.id, "msg": event.msg, "preconditions": preconditions
                         })
                         .to_string(),
                     );

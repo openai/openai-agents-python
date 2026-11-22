@@ -20,6 +20,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 futures = "0.3"
 serde = "1"
 serde_json = "1"
+sha2 = "0.10"
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "98a54789b80110ad210495c4ad845c89e1980471", default-features = false }
 toml = "0.9.5"
 codex-arg0 = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
@@ -35,10 +36,12 @@ codex-http-client = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b
 codex-hooks = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-image-generation-extension = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-login = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
+codex-mcp = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-mcp-extension = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-models-manager = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-protocol = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-skills-extension = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
+codex-utils-path-uri = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-utils-rustls-provider = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-web-search-extension = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
 codex-code-mode = { git = "https://github.com/openai/codex", rev = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856" }
