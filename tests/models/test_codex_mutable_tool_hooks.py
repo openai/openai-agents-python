@@ -475,6 +475,7 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
     from importlib import import_module
 
     from agents import UserError, _debug
+    from tests.testing_processor import fetch_ordered_spans
 
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", mode != "disclose")
     port, requests, items = model_endpoint
@@ -587,7 +588,8 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
 
     config = RunConfig(
         model_provider=provider,
-        tracing_disabled=True,
+        tracing={"operation_detail": "content"},
+        trace_include_sensitive_data=True,
         tool_execution=ToolExecutionConfig(
             native_mcp_result_transforms={
                 ("other" if mode == "unselected" else "raw-peer", "lookup"): transform
@@ -654,6 +656,13 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
         assert entered.is_set() == (mode != "unselected")
     finally:
         await provider.aclose()
+    spans = fetch_ordered_spans()
+    if mode == "replace":
+        (tool,) = [s for s in spans if s.span_data.type == "function"]
+        assert "summary" in str(tool.span_data.output)
     if mode != "unselected":
+        exported = repr([s.export() for s in spans])
+        assert "PEER_ONLY" not in exported
+        assert "REJECTED_ONLY" not in exported
         assert "PEER_ONLY" not in json.dumps(events)
         assert "PEER_ONLY" not in json.dumps(requests)

@@ -1,6 +1,8 @@
 //! Private, asynchronous Core bindings for the opt-in Codex model provider.
 mod config;
 mod mcp_results;
+mod native_approval;
+mod operation_tracing;
 mod tool_hooks;
 
 use std::path::PathBuf;
@@ -9,6 +11,7 @@ use std::sync::{Arc, Once, OnceLock};
 
 use codex_core_api::{
     CodexThread, StartIfIdleSubmission, StartThreadOptions, TurnInputRequest, TurnStartOptions,
+    WithTurnExtensionData,
 };
 use codex_protocol::ThreadId;
 use codex_protocol::dynamic_tools::normalize_dynamic_tool_specs;
@@ -46,6 +49,7 @@ struct ThreadRecord {
     thread: Arc<CodexThread>,
     id: ThreadId,
     model: String,
+    operations: Arc<operation_tracing::Root>,
     cleanup: OnceLock<Cleanup>,
 }
 
@@ -56,33 +60,42 @@ impl ThreadRecord {
                 let thread = self.thread.clone();
                 let services = self.services.clone();
                 let id = self.id;
+                let operations = self.operations.clone();
                 let task = runtime().spawn(async move {
-                    // Each fresh root owns an independent local agent runtime. Fence that
-                    // exact tree before waiting, so native subagents cannot outlive an attempt.
-                    let shutdown = services.manager.request_agent_tree_shutdown(id).await;
-                    let result = match shutdown {
-                        Ok(shutdown) => shutdown.wait().await,
-                        Err(error) => {
-                            let _ = thread.shutdown_and_wait().await;
-                            Err(error)
-                        }
-                    };
-                    if result.is_ok() {
-                        let ids = services
-                            .manager
-                            .list_agent_subtree_thread_ids(id)
-                            .await
-                            .map_err(|_| "Unable to release the Codex agent tree.".to_owned())?;
-                        for id in ids {
-                            if let Ok(current) = services.manager.get_thread(id).await {
-                                services
-                                    .manager
-                                    .remove_thread_if_matches(&id, &current)
-                                    .await;
+                    let result = async {
+                        // Each fresh root owns an independent local agent runtime. Fence that
+                        // exact tree before waiting, so native subagents cannot outlive an attempt.
+                        let shutdown = services.manager.request_agent_tree_shutdown(id).await;
+                        let result = match shutdown {
+                            Ok(shutdown) => shutdown.wait().await,
+                            Err(error) => {
+                                let _ = thread.shutdown_and_wait().await;
+                                Err(error)
+                            }
+                        };
+                        if result.is_ok() {
+                            let ids = services
+                                .manager
+                                .list_agent_subtree_thread_ids(id)
+                                .await
+                                .map_err(|_| {
+                                    "Unable to release the Codex agent tree.".to_owned()
+                                })?;
+                            for id in ids {
+                                if let Ok(current) = services.manager.get_thread(id).await {
+                                    services
+                                        .manager
+                                        .remove_thread_if_matches(&id, &current)
+                                        .await;
+                                }
                             }
                         }
+                        result.map_err(|_| "Unable to shut down the Codex agent tree.".to_owned())
                     }
-                    result.map_err(|_| "Unable to shut down the Codex agent tree.".to_owned())
+                    .await;
+                    // Detach even when a joined shutdown returns an error; the buffer remains drainable.
+                    operations.close();
+                    result
                 });
                 async move {
                     task.await
@@ -203,6 +216,7 @@ async fn start_thread(
     let created = Box::pin(services.manager.start_thread(options))
         .await
         .map_err(|_| "Unable to start the Codex thread.".to_owned())?;
+    let operations = services.operations.root(created.thread_id.to_string());
     Ok(Arc::new(ThreadLease {
         mcp_results,
         record: Arc::new(ThreadRecord {
@@ -210,6 +224,7 @@ async fn start_thread(
             id: created.thread_id,
             thread: created.thread,
             services,
+            operations,
             cleanup: OnceLock::new(),
         }),
     }))
@@ -405,6 +420,28 @@ struct Thread {
 
 #[pymethods]
 impl Thread {
+    #[pyo3(signature=(mode=None))]
+    fn enable_tracing(&self, mode: Option<&str>) -> PyResult<()> {
+        self.lease.ensure_open().map_err(py_error)?;
+        self.lease
+            .operations
+            .enable(self.lease.thread.thread_extension_data(), mode)
+            .map_err(|message| py_error(message.to_owned()))
+    }
+
+    fn wait_for_operations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let buffer = self.lease.operations.buffer.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            buffer.updates.notified().await;
+            Ok(())
+        })
+    }
+
+    fn drain_operations(&self) -> Option<String> {
+        // Draining a closed lease is intentional: shutdown can finish or cancel observations.
+        self.lease.operations.buffer.drain()
+    }
+
     #[getter]
     fn model(&self) -> String {
         self.lease.model.clone()
@@ -437,11 +474,13 @@ impl Thread {
         })
     }
 
+    #[pyo3(signature=(input_json, output_schema_json, recover_approvals=false))]
     fn start_turn<'py>(
         &self,
         py: Python<'py>,
         input_json: String,
         output_schema_json: String,
+        recover_approvals: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let lease = self.lease.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -456,6 +495,10 @@ impl Thread {
                     final_output_json_schema: schema,
                     ..Default::default()
                 });
+                let mut request = WithTurnExtensionData::from(request);
+                if recover_approvals {
+                    request = request.capture_native_approvals();
+                }
                 match Box::pin(lease.thread.start_turn_if_idle(request))
                     .await
                     .map_err(|_| "Unable to start the Codex turn.".to_owned())?
@@ -474,39 +517,77 @@ impl Thread {
     fn next_event<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let lease = self.lease.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let event = async {
-                lease.ensure_open()?;
-                let event = lease
-                    .thread
-                    .next_event()
-                    .await
-                    .map_err(|_| "The Codex event stream ended unexpectedly.".to_owned())?;
-                match &event.msg {
-                    EventMsg::ExecApprovalRequest(_)
-                    | EventMsg::ApplyPatchApprovalRequest(_)
-                    | EventMsg::RequestPermissions(_)
-                    | EventMsg::RequestUserInput(_)
-                    | EventMsg::ElicitationRequest(_) => {
-                        return Err("Codex requested interactive approval. This provider supports non-interactive execution only.".to_owned());
-                    }
-                    _ => {}
-                }
-                serde_json::to_string(&event)
-                    .map_err(|_| "Unable to decode the Codex event.".to_owned())
-            };
-            let encoded = if let Some(requests) = &lease.mcp_results {
+            lease.ensure_open().map_err(py_error)?;
+            let next = lease.thread.next_event();
+            let event = if let Some(requests) = &lease.mcp_results {
                 let mut receiver = requests.lock().await;
                 tokio::select! {
                     Some(request) = receiver.recv() => {
                         return Python::attach(|py| Py::new(py, request).map(Py::into_any));
                     }
-                    result = event => result,
+                    event = next => event,
                 }
             } else {
-                event.await
+                next.await
             }
-            .map_err(py_error)?;
-            Python::attach(|py| Ok(encoded.into_pyobject(py)?.unbind().into_any()))
+            .map_err(|_| py_error("The Codex event stream ended unexpectedly."))?;
+            let encode =
+                |text: String| Python::attach(|py| pyo3::IntoPyObjectExt::into_py_any(text, py));
+            match &event.msg {
+                EventMsg::ExecApprovalRequest(_) | EventMsg::ApplyPatchApprovalRequest(_) => {
+                    let (request, preconditions) = lease.thread.capture_tool_approval(event.msg)
+                        .await.map_err(|_| py_error(
+                            "Cannot save this Codex approval. Use session=ResumableSession with a supported local command or file edit."
+                        ))?;
+                    return encode(
+                        serde_json::json!({
+                            "id": event.id, "msg": request, "preconditions": preconditions
+                        })
+                        .to_string(),
+                    );
+                }
+                EventMsg::RequestPermissions(_)
+                | EventMsg::RequestUserInput(_)
+                | EventMsg::ElicitationRequest(_) => {
+                    return Err(py_error(
+                        "Codex requested an unsupported kind of interactive approval.",
+                    ));
+                }
+                EventMsg::RawResponseItem(raw) => lease.operations.observe_item(&raw.item),
+                _ => {}
+            }
+            encode(
+                serde_json::to_string(&event)
+                    .map_err(|_| py_error("Unable to decode the Codex event."))?,
+            )
+        })
+    }
+
+    fn resolve_approval<'py>(
+        &self,
+        py: Python<'py>,
+        call_json: String,
+        request_json: String,
+        preconditions_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let call =
+            serde_json::from_str(&call_json).map_err(|_| py_error("Invalid saved Codex call."))?;
+        let request = serde_json::from_str(&request_json)
+            .map_err(|_| py_error("Invalid saved Codex request."))?;
+        let preconditions = serde_json::from_str(&preconditions_json)
+            .map_err(|_| py_error("Invalid saved Codex preconditions."))?;
+        let lease = self.lease.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            lease.ensure_open().map_err(py_error)?;
+            native_approval::resolve(
+                &lease.thread,
+                call,
+                request,
+                preconditions,
+                &lease.operations,
+            )
+            .await
+            .map_err(py_error)
         })
     }
 

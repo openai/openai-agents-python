@@ -8060,6 +8060,7 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "rmcp",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

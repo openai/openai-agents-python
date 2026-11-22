@@ -39,7 +39,8 @@ class FakeThread:
     async def inject_items(self, items):
         self.history = json.loads(items)
 
-    async def start_turn(self, inputs, schema):
+    async def start_turn(self, inputs, schema, recover_approvals=False):
+        self.recover_approvals = recover_approvals
         self.inputs = json.loads(inputs)
         self.schema = json.loads(schema)
         self.started.set()
@@ -1205,6 +1206,66 @@ async def test_cleanup_failure_never_returns_success_or_masks_attempt_error(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("primary", ["success", "failure", "cancel"])
+@pytest.mark.parametrize("late_cancel", [False, True])
+async def test_native_cleanup_preserves_cancellation_and_primary_failure(
+    tmp_path, threads, primary, late_cancel
+):
+    close_started, release_close = asyncio.Event(), asyncio.Event()
+    closed = []
+
+    class HeldCloseThread(FakeThread):
+        async def close(self):
+            close_started.set()
+            try:
+                await release_close.wait()
+                raise RuntimeError("cleanup failure")
+            finally:
+                closed.append(True)
+                await super().close()
+
+    thread = HeldCloseThread(
+        events=[{"type": "error"}] if primary == "failure" else [],
+        gate=asyncio.Event() if primary == "cancel" else None,
+    )
+    threads[0].append(thread)
+    provider = CodexProvider(cwd=tmp_path)
+    operation = Runner.run(
+        Agent(name="test"), "Answer", run_config=RunConfig(model_provider=provider)
+    )
+    task = asyncio.create_task(operation)
+    try:
+        await asyncio.wait_for(thread.started.wait(), 2)
+        if primary == "cancel":
+            task.cancel("primary cancellation")
+        await asyncio.wait_for(close_started.wait(), 2)
+        if late_cancel:
+            task.cancel("cleanup cancellation")
+            await asyncio.sleep(0)
+            task.cancel("repeated cancellation")
+            await asyncio.sleep(0)
+        assert not task.done()
+        release_close.set()
+        error, reason = RuntimeError, "cleanup failure"
+        if primary == "failure":
+            reason = "Codex model turn failed"
+        if primary == "cancel" or late_cancel:
+            error = asyncio.CancelledError
+            first_cancel = primary == "cancel" and not late_cancel
+            reason = "primary cancellation" if first_cancel else "cleanup cancellation"
+        # Python 3.10 has not been forwarding cancellation reasons across task boundaries.
+        match = None if error is asyncio.CancelledError and sys.version_info < (3, 11) else reason
+        with pytest.raises(error, match=match):
+            await task
+        assert closed == [True]
+    finally:
+        release_close.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
 async def test_closing_stream_during_tool_publication_retires_pending_native_call(
     tmp_path, threads
 ):
@@ -1346,7 +1407,8 @@ async def test_sdk_batch_waits_for_its_complete_sampling_response(
                     "output": "Invalid arguments",
                 },
             }
-            yield {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 20}}}
+            if first_callback_after_completion:
+                yield {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 20}}}
             yield {"type": "turn_aborted"}
 
     queue, _ = threads
@@ -1916,3 +1978,174 @@ async def test_native_input_replay_retains_core_preserved_selectors(
         "value": "prepared",
         "environment_id": "workspace",
     }
+
+
+class TracedThread(FakeThread):
+    # The native binding delivers passive, source-timed observations outside the response stream.
+    def __init__(self, *observations, **kwargs):
+        super().__init__(**kwargs)
+        self.observations = list(observations)
+        self.tracing = False
+
+    def enable_tracing(self, mode=None):
+        self.tracing = True
+        self.capture_mode = mode
+
+    def drain_operations(self):
+        assert self.tracing
+        observations, self.observations = self.observations, []
+        return json.dumps(observations)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_metadata_operations_keep_source_times(tmp_path, threads, streamed):
+    from tests.testing_processor import fetch_ordered_spans
+
+    model = {"kind": "model", "id": "1", "model": "native-default"}
+    tool = {"kind": "tool", "id": "c1", "name": "view_image"}
+    thread = TracedThread(
+        {**model, "phase": "start", "at": 1000},
+        {**tool, "phase": "start", "at": 1010},
+        {
+            **model,
+            "phase": "end",
+            "at": 1015,
+            "outcome": "completed",
+            "usage": {"input_tokens": 11, "output_tokens": 5},
+        },
+        {**tool, "phase": "end", "at": 1020, "outcome": "failed"},
+    )
+    threads[0].append(thread)
+    cfg = RunConfig(
+        model_provider=CodexProvider(cwd=tmp_path),
+        tracing={"operation_detail": "metadata"},
+        trace_include_sensitive_data=True,
+    )
+    if streamed:
+        stream = Runner.run_streamed(Agent(name="test"), "Private input", run_config=cfg)
+        async for _ in stream.stream_events():
+            pass
+        assert stream.final_output == thread.text
+    else:
+        result = await Runner.run(Agent(name="test"), "Private input", run_config=cfg)
+        assert result.final_output == thread.text
+    spans = fetch_ordered_spans()
+    (turn,) = [s for s in spans if s.span_data.type == "turn"]
+    (request,) = [s for s in spans if s.span_data.type == "generation"]
+    (execution,) = [s for s in spans if s.span_data.type == "function"]
+    assert request.parent_id == execution.parent_id == turn.span_id
+    assert request.started_at and request.ended_at
+    assert execution.started_at and execution.ended_at
+    assert request.started_at < execution.started_at < request.ended_at < execution.ended_at
+    assert request.span_data.usage["input_tokens"] == 11
+    assert request.span_data.operation.model == "native-default"
+    assert request.span_data.operation.outcome == "completed"
+    assert execution.span_data.operation.tool_call_id == "c1"
+    assert execution.span_data.operation.outcome == "failed"
+    for span in (request, execution):
+        assert span.span_data.operation.detail == "metadata"
+        assert span.span_data.input is span.span_data.output is None
+    assert thread.capture_mode is None
+    assert not [s for s in spans if getattr(s.span_data, "name", "") == "codex.tracing.coverage"]
+
+
+@pytest.mark.asyncio
+async def test_native_operation_loss_does_not_block_runner_or_invent_success(tmp_path, threads):
+    from tests.testing_processor import fetch_ordered_spans
+
+    thread = TracedThread(
+        {"kind": "model", "phase": "start", "id": "1", "model": "native-default", "at": 1000},
+        {"kind": "dropped"},
+    )
+    threads[0].append(thread)
+    cfg = RunConfig(
+        model_provider=CodexProvider(cwd=tmp_path), tracing={"operation_detail": "metadata"}
+    )
+    result = await Runner.run(Agent(name="test"), "Hello", run_config=cfg)
+    assert result.final_output == thread.text
+    spans = fetch_ordered_spans()
+    (request,) = [s for s in spans if s.span_data.type == "generation"]
+    assert request.span_data.operation.outcome == "interrupted"
+    assert request.span_data.operation.estimated_end
+    (notice,) = [s for s in spans if getattr(s.span_data, "name", "") == "codex.tracing.coverage"]
+    assert notice.span_data.data["reason"] == "dropped_operations"
+
+
+@pytest.mark.asyncio
+async def test_disabled_tracing_never_subscribes_to_native_operations(tmp_path, threads):
+    thread = TracedThread()
+    threads[0].append(thread)
+    await Runner.run(Agent(name="test"), "Hello", run_config=config(tmp_path))
+    assert not thread.tracing
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "detail,sensitive,captures",
+    [(None, True, False), ("content", False, False), ("content", True, True)],
+)
+async def test_native_content_requires_explicit_policy_and_correlates_final_output(
+    tmp_path, threads, detail, sensitive, captures
+):
+    from tests.testing_processor import fetch_ordered_spans
+
+    model = {"kind": "model", "id": "request", "model": "fixture"}
+    tool = {"kind": "tool", "id": "command", "name": "exec_command"}
+    thread = TracedThread(
+        {**model, "phase": "start", "at": 1000},
+        {
+            **model,
+            "phase": "input",
+            "input": {
+                "input": [{"role": "user", "content": "request text"}],
+                "tools": [{"type": "function", "name": "lookup"}],
+                "client_metadata": {"api_key": "never-export"},
+            },
+        },
+        {**tool, "phase": "start", "at": 1100},
+        {
+            **tool,
+            "phase": "input",
+            "input": {"command": ["echo", "prepared"], "password": "never-export"},
+        },
+        {**tool, "phase": "end", "at": 1200, "outcome": "completed"},
+        {"kind": "tool", "phase": "output", "id": "unrelated", "output": "wrong output"},
+        {"kind": "tool", "phase": "output", "id": "command", "output": "accepted result"},
+        {
+            **model,
+            "phase": "end",
+            "at": 1300,
+            "outcome": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "response text"}],
+                }
+            ],
+        },
+    )
+    threads[0].append(thread)
+    cfg = RunConfig(
+        model_provider=CodexProvider(cwd=tmp_path),
+        tracing={"operation_detail": detail} if detail else None,
+        trace_include_sensitive_data=sensitive,
+    )
+    await Runner.run(Agent(name="test"), "sdk boundary", run_config=cfg)
+    spans = fetch_ordered_spans()
+    (request,) = [s for s in spans if s.span_data.type in ("generation", "response")]
+    (execution,) = [s for s in spans if s.span_data.type == "function"]
+    assert thread.capture_mode == ("content" if captures else None)
+    if captures:
+        assert "request text" in json.dumps(request.span_data.input)
+        assert "response text" in json.dumps(request.span_data.output)
+        assert execution.span_data.output == "accepted result"
+        assert "prepared" in execution.span_data.input
+        assert "never-export" not in json.dumps([s.export() for s in (request, execution)])
+        assert "wrong output" not in execution.span_data.output
+    else:
+        assert request.span_data.input is None
+        assert execution.span_data.input is execution.span_data.output is None
+    assert execution.ended_at is not None and request.ended_at is not None
+    assert execution.ended_at < request.ended_at
