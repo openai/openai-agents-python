@@ -6,6 +6,7 @@ import functools
 import hashlib
 import inspect
 import json
+import weakref
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -601,7 +602,7 @@ class MCPUtil:
                 mcp_server_name=get_mcp_server_log_name(server.name),
             ),
         )
-        function_tool._mcp_server_id = id(server)
+        function_tool._mcp_server_ref = weakref.ref(server)
         function_tool._mcp_annotations = copy.deepcopy(tool.annotations)
         function_tool._mcp_tool_binding = (get_mcp_server_log_name(server.name), tool.name, None)
         return function_tool

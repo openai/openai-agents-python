@@ -1140,6 +1140,8 @@ class Agent(AgentBase, Generic[TContext]):
 
             return run_result.final_output
 
+        # Keep the live policy with the implementation, which survives tool rebinding.
+        cast(Any, _run_agent_impl).__agents_run_config__ = run_config
         run_agent_tool = _build_wrapped_function_tool(
             name=tool_name_resolved,
             description=tool_description_resolved,

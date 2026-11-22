@@ -42,7 +42,7 @@ print(result.final_output)  # "Approximately 39 million"
 
 ## Resuming interrupted runs with the same session
 
-If a run pauses for approval, resume it with the same session instance (or another instance configured with the same session ID and the same underlying storage backend) so the resumed turn continues the same stored conversation history.
+With a history session such as `SQLiteSession`, keep the paused run's `RunState` separately. Reuse the session or reopen it with the same ID and backend. To save history and pending approvals together, see [Use your own storage for resumable sessions](#use-your-own-storage-for-resumable-sessions).
 
 ```python
 result = await Runner.run(
@@ -52,7 +52,7 @@ result = await Runner.run(
 if result.interruptions:
     state = result.to_state()
     for interruption in result.interruptions:
-        state.approve(interruption)
+        state.reject(interruption)  # Simulate a user declining the request.
     result = await Runner.run(agent, state, session=session)
 ```
 
@@ -599,6 +599,8 @@ if __name__ == "__main__":
 
 ## Custom session implementations
 
+Use the four methods below for conversation history. To also save pending approvals, implement the [resumable session store](#use-your-own-storage-for-resumable-sessions) instead.
+
 You can implement your own session memory by creating a class that structurally follows the [`Session`][agents.memory.session.Session] protocol. You do not need to inherit from `SessionABC`; define `session_id` and `session_settings`, and implement the four history methods directly:
 
 ```python
@@ -677,6 +679,52 @@ class ContextAwareSession:
 ```
 
 The Agents SDK enables this integration only when `get_items`, `add_items`, `pop_item`, and `clear_session` all declare `wrapper`. A generic `**kwargs` parameter does not satisfy this signature check. Existing session implementations that omit `wrapper` keep their released call shape and continue to work without changes.
+
+## Use your own storage for resumable sessions
+
+In the `feat/simple-codex` preview, `ResumableSession` saves conversation history and pending tool approvals together under one session ID. Redis is optional. Use any durable store that can compare and replace a record in one atomic operation.
+
+### Try the SQLite example
+
+Check out `feat/simple-codex` and run the [SQLite example](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/memory/resumable_sqlite_session.py) from the repository root. It uses a scripted model and needs no API key or Redis server.
+
+```bash
+uv run python examples/memory/resumable_sqlite_session.py
+```
+
+The first worker pauses a tool call. The second reopens the database and simulates a user rejecting that call. Expect this output.
+
+```text
+publish_note {"text":"Hello"}
+Tool execution was not approved.
+```
+
+The example simulates two workers in one process and deletes the temporary database on exit. For workers on different hosts, use a database they can all reach.
+
+### Implement the store
+
+Give your class the two async methods in `agents.ResumableSessionStore`. No subclass or registration is required. Store one complete string (the *checkpoint*) per session ID. Preserve the string exactly, including whitespace and case.
+
+| Method call | Required behavior |
+| --- | --- |
+| `await store.load(session_id)` | Return the saved string, or `None` if the record is missing or expired. |
+| `await store.save(session_id, value, expected=None)` | Create the record only if it does not exist. |
+| `await store.save(session_id, value, expected=previous)` | Replace the record only if it exists and its value exactly matches `previous`. |
+
+Make `expected` a required keyword argument. Return `True` only after the write commits. Return `False` if the condition fails. Raise an exception for storage errors. Do not automatically retry a write if you cannot confirm the outcome.
+
+Check the condition and write in the same database operation. Separate reads and unconditional writes could let two workers act on the same approval.
+
+### Start and resume a run
+
+Authorize access to the session and select a store scoped to the authenticated tenant. The SDK trusts the checkpoint, which can include tool arguments, results and application context. Restrict who can read or write it.
+
+1. Create the session with `session = await ResumableSession.create(store)`. Keep `session.session_id` and start the run with `await Runner.run(agent, message, session=session)`.
+2. On the next worker, recreate the agent and tools. For built-in Codex tools, check the [workspace and permission requirements](../models/codex.md#configure-execution). Open the same record with `session = await ResumableSession.resume(store, session_id)`.
+3. If `session.is_paused` is false, send a new message with `await Runner.run(agent, message, session=session)`.
+4. If paused, load `state = await session.load_state(agent)`. Show the user the calls from `state.get_interruptions()`. For each decision, call `state.approve(request)` or `state.reject(request)` on the matching request. Continue with `await Runner.run(agent, state)`. The loaded state remembers the session.
+
+Allow one writer per session. If `ResumableSessionError.reason` is `"conflict"`, reload the session and review the current request. If the reason is `"active"`, check whether the previous worker is still running. If it stopped, verify any external effects before starting a new session.
 
 ## Community session implementations
 

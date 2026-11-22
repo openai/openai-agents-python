@@ -212,6 +212,7 @@ from .tool_planning import (
     _select_function_tool_runs_for_resume,
     _validate_unresolved_function_calls,
 )
+from .tool_text import bind_text_transform
 from .turn_preparation import get_handoffs, get_output_schema
 
 _DEFAULT_NEST_HANDOFF_HISTORY = nest_handoff_history
@@ -2528,6 +2529,13 @@ async def resolve_interrupted_turn(
             if approval_record is not None
             else True
         )
+        if approval_status is not False:
+            queued = current_functions.get(call_id)
+            bind_text_transform(
+                run_config.tool_execution,
+                queued.function_tool if queued else None,
+                context_wrapper._tool_invocations.get(call_id),
+            )
         stale_function = stale_functions.get(call_id)
         original_binding = processed_response.mcp_tool_bindings.get(call_id)
         current_function = current_functions.get(call_id)
@@ -4243,6 +4251,14 @@ async def get_single_step_result_from_response(
 
     for call_id, rewrite in new_bindings.items():
         context_wrapper._tool_invocations[call_id].input_rewrite = rewrite
+
+    if settings is not None and settings.tool_text_transforms:
+        for action in processed_response.functions:
+            bind_text_transform(
+                settings,
+                action.function_tool,
+                context_wrapper._tool_invocations.get(action.tool_call.call_id),
+            )
 
     if after_invocation_validation is not None:
         await after_invocation_validation(processed_response)

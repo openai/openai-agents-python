@@ -218,7 +218,14 @@ class ToolExecutionConfig:
     """Experimental. Edit selected Runner tool results before output hooks, traces and history.
 
     Register the exact function in the agent's tools or the MCP server and raw tool name.
-    For a namespace, use the tool returned by `tool_namespace`. For example,
+    For a namespace, use the tool returned by `tool_namespace`. Reuse that object.
+    If another local function has the same dispatch key (including namespace), or
+    another MCP server has the same name and raw tool name, the Runner raises
+    `UserError` before invoking it unless it has its own exact registration.
+    This applies across agents. Use distinct keys or register an editor on each
+    object. An editor can return its input unchanged.
+
+    For example,
 
     ```python
     async def hide(call, texts):
@@ -246,7 +253,9 @@ class ToolExecutionConfig:
     effects cannot be undone. Neither error formatters nor `prepare_tool_output` replace
     a selected result. Other calls keep their usual behavior.
 
-    The editor and retained media are trusted. Configure the same targets again on resume.
+    The editor and retained media are trusted. A pending selected call requires
+    an exact registration on resume. After restoring state, register the current
+    tool or server object. Only the requirement is saved in the checkpoint.
     This option does not intercept hosted or native tools, inputs or application logging.
     """
 

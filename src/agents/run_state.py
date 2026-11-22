@@ -8,7 +8,7 @@ import dataclasses
 import json
 import math
 from collections import deque
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, cast, get_args
 from uuid import uuid4
@@ -1253,6 +1253,27 @@ class RunState(Generic[TContext, TAgent]):
             raise UserError("Native approval does not match the current pending call.")
         return current or proposal
 
+    def _pending_agent_tool_states(
+        self,
+    ) -> Iterator[tuple[FunctionTool, RunState[Any, Any], list[ToolApprovalItem]]]:
+        from .agent_tool_state import peek_agent_tool_run_result
+
+        if self._last_processed_response is None:
+            return
+        for function_run in self._last_processed_response.functions:
+            pending_result = peek_agent_tool_run_result(
+                function_run.tool_call,
+                scope_id=self._agent_tool_state_scope_id,
+            )
+            interruptions = getattr(pending_result, "interruptions", None)
+            to_state = getattr(pending_result, "to_state", None)
+            if not isinstance(interruptions, list) or not interruptions or not callable(to_state):
+                continue
+            nested_state = to_state()
+            if not isinstance(nested_state, RunState) or nested_state is self:
+                continue
+            yield function_run.function_tool, nested_state, interruptions
+
     def _find_nested_approval_state(
         self,
         approval_item: ToolApprovalItem,
@@ -1261,22 +1282,10 @@ class RunState(Generic[TContext, TAgent]):
         if self._last_processed_response is None:
             return None
 
-        from .agent_tool_state import peek_agent_tool_run_result
         from .run_internal.run_steps import NextStepInterruption
 
         nested_candidates: list[tuple[RunState[Any, Agent[Any]], ToolApprovalItem]] = []
-        for function_run in self._last_processed_response.functions:
-            pending_result = peek_agent_tool_run_result(
-                function_run.tool_call,
-                scope_id=self._agent_tool_state_scope_id,
-            )
-            interruptions = getattr(pending_result, "interruptions", None)
-            to_state = getattr(pending_result, "to_state", None)
-            if not isinstance(interruptions, list) or not callable(to_state):
-                continue
-            nested_state = to_state()
-            if not isinstance(nested_state, RunState) or nested_state is self:
-                continue
+        for _, nested_state, interruptions in self._pending_agent_tool_states():
             for candidate in interruptions:
                 if not isinstance(candidate, ToolApprovalItem):
                     continue
@@ -1535,6 +1544,9 @@ class RunState(Generic[TContext, TAgent]):
                 "executed": invocation.executed,
                 "completed": invocation.completed,
             }
+            # Schema 1.23 retains the requirement, never the editor or selector objects.
+            if invocation.requires_text_transform and not invocation.completed:
+                record["requires_text_transform"] = True
             if invocation.input_rewrite is not None:
                 fingerprint, arguments = invocation.input_rewrite
                 record["input_rewrite"] = {
@@ -4433,6 +4445,17 @@ async def _build_run_state_from_json(
         (schema_major, schema_minor) < (1, 23)
         and isinstance(saved_invocations, Mapping)
         and any(
+            isinstance(record, Mapping) and "requires_text_transform" in record
+            for record in saved_invocations.values()
+        )
+    ):
+        raise validation_error_factory(
+            "Tool text transforms require RunState schema 1.23.", UserError
+        )
+    if (
+        (schema_major, schema_minor) < (1, 23)
+        and isinstance(saved_invocations, Mapping)
+        and any(
             isinstance(record, Mapping) and "input_rewrite" in record
             for record in saved_invocations.values()
         )
@@ -5788,6 +5811,8 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Run state nested history ownership input digest does not match",
         "RunState tool_invocations must be a mapping.",
         "RunState tool_invocations contains an invalid call ID.",
+        "Tool text transforms require RunState schema 1.23.",
+        "RunState tool text transform requirement is invalid.",
         "RunState tool invocation must be a mapping.",
         "RunState tool invocation contains invalid lifecycle data.",
         "Tool input rewrites require RunState schema 1.23.",

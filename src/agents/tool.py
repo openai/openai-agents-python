@@ -91,6 +91,7 @@ if TYPE_CHECKING:
 
     from .agent import Agent, AgentBase
     from .items import RunItem, ToolApprovalItem
+    from .mcp.server import MCPServer
 
 
 ToolParams = ParamSpec("ToolParams")
@@ -597,8 +598,11 @@ class FunctionTool:
 
     _mcp_annotations: ToolAnnotations | None = field(default=None, kw_only=True, repr=False)
 
-    # The invocation partial retains the server. Its identity survives roster reordering.
-    _mcp_server_id: int | None = field(default=None, init=False, repr=False, compare=False)
+    # The invocation partial owns the peer. Keep its identity across roster changes
+    # without copying the live connection when a tool is copied.
+    _mcp_server_ref: Callable[[], MCPServer | None] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     @property
     def mcp_annotations(self) -> ToolAnnotations | None:

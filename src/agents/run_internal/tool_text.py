@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
+from .._tool_identity import get_function_tool_lookup_key_for_tool
 from ..exceptions import (
     UserError,
     _mark_error_data_redacted,
@@ -32,11 +33,107 @@ if TYPE_CHECKING:
     from mcp.types import CallToolResult
 
     from ..agent import Agent
-    from ..run_config import ToolExecutionConfig
+    from ..run_config import RunConfig, ToolExecutionConfig
+    from ..run_context import _ToolInvocationRecord
+    from ..run_state import RunState
     from ..tool_context import ToolContext
 
 _PEER_ERROR = "Selected MCP tool reported an error."
 _Edit = Callable[[tuple[str, ...]], Awaitable[tuple[str, ...]]]
+
+
+def bind_text_transform(
+    settings: ToolExecutionConfig | None,
+    tool: FunctionTool | None,
+    record: _ToolInvocationRecord | None,
+) -> int | None:
+    """Require an exact selector at admission, on resume and before invocation."""
+    ambiguous = False
+    if settings is not None and tool is not None:
+        binding = tool._mcp_tool_binding
+        for index, (target, _) in enumerate(settings.tool_text_transforms):
+            if isinstance(target, tuple):
+                if binding is None or binding[1] != target[1]:
+                    continue
+                server = tool._mcp_server_ref() if tool._mcp_server_ref else None
+                if server is not target[0]:
+                    ambiguous |= server is None or server.name == target[0].name
+                    continue
+            elif target is not tool:
+                if binding is None and not tool._is_agent_tool and not tool._is_codex_tool:
+                    ambiguous |= get_function_tool_lookup_key_for_tool(
+                        target
+                    ) == get_function_tool_lookup_key_for_tool(tool)
+                continue
+            if record is not None:
+                record.requires_text_transform = True
+            return index
+    if ambiguous or (record is not None and record.requires_text_transform):
+        raise UserError(
+            "Missing exact tool_text_transforms target. Register the FunctionTool in the agent's "
+            "tools or the connected MCP server and original tool name. Each object sharing "
+            "a selected key needs its own editor, including on resume."
+        )
+    return None
+
+
+def validate_pending_text_transforms(
+    state: RunState[Any, Any], settings: ToolExecutionConfig | None
+) -> bool:
+    """Keep a paused session retryable when a required editor is missing."""
+    from .run_steps import NextStepInterruption
+
+    processed = state._last_processed_response
+    context, agent = state._context, state._current_agent
+    if (
+        processed is None
+        or context is None
+        or agent is None
+        or not isinstance(state._current_step, NextStepInterruption)
+    ):
+        return False
+    required = False
+    for delegate, child, _ in state._pending_agent_tool_states():
+        impl = getattr(delegate.on_invoke_tool, "_invoke_tool_impl", None)
+        override: RunConfig | None = getattr(impl, "__agents_run_config__", None)
+        child_settings = override.tool_execution if override is not None else settings
+        if validate_pending_text_transforms(child, child_settings):
+            if not any(candidate is delegate for candidate in agent.tools):
+                raise UserError("Reload the paused state after replacing a selected delegate.")
+            required = True
+    for item in state._current_step.interruptions:
+        call_id = item.call_id
+        record = context._tool_invocations.get(call_id) if call_id else None
+        if not call_id or record is None or record.completed or not record.requires_text_transform:
+            continue
+        if (
+            context.get_approval_status(
+                item.tool_name or "",
+                call_id,
+                tool_namespace=item.tool_namespace,
+                existing_pending=item,
+                current_invocation=item,
+            )
+            is False
+        ):
+            continue
+        tool = next(
+            (run.function_tool for run in processed.functions if run.tool_call.call_id == call_id),
+            None,
+        )
+        if tool is not None:
+            if tool._mcp_tool_binding is None:
+                configured = any(candidate is tool for candidate in agent.tools)
+            else:
+                server = tool._mcp_server_ref() if tool._mcp_server_ref else None
+                configured = any(peer is server for peer in agent.mcp_servers)
+            if not configured:
+                raise UserError(
+                    "Reload the paused state after replacing a selected tool or server."
+                )
+        bind_text_transform(settings, tool, record)
+        required = True
+    return required
 
 
 def select_text_editor(
@@ -46,27 +143,21 @@ def select_text_editor(
     context: ToolContext[Any],
     arguments: str,
 ) -> _Edit | None:
-    if settings is None:
+    index = bind_text_transform(settings, tool, context._tool_invocations.get(context.tool_call_id))
+    if index is None or settings is None:
         return None
-    for target, editor in settings.tool_text_transforms:
-        if isinstance(target, tuple):
-            binding = tool._mcp_tool_binding
-            if binding is None or tool._mcp_server_id != id(target[0]) or binding[1] != target[1]:
-                continue
-        elif target is not tool:
-            continue
-        call = ToolCallHookContext(
-            context,
-            agent,
-            tool,
-            context.tool_call_id,
-            context.tool_namespace,
-            _parse_function_tool_json_input(tool_name=tool.name, input_json=arguments),
-            mcp_target=target if isinstance(target, tuple) else None,
-        )
+    target, editor = settings.tool_text_transforms[index]
+    call = ToolCallHookContext(
+        context,
+        agent,
+        tool,
+        context.tool_call_id,
+        context.tool_namespace,
+        _parse_function_tool_json_input(tool_name=tool.name, input_json=arguments),
+        mcp_target=target if isinstance(target, tuple) else None,
+    )
 
-        return partial(_validated_edit, partial(editor, call), tool.name)
-    return None
+    return partial(_validated_edit, partial(editor, call), tool.name)
 
 
 async def _validated_edit(edit: _Edit, name: str, texts: tuple[str, ...]) -> tuple[str, ...]:

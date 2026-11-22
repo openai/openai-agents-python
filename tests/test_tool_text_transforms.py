@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from dataclasses import replace
 
 import pytest
 from mcp.types import CallToolResult
@@ -52,8 +53,8 @@ def exporter():
 
 
 class Source(FakeMCPServer):
-    def __init__(self, **kwargs):
-        super().__init__(server_name="Reports", **kwargs)
+    def __init__(self, server_name="Reports", **kwargs):
+        super().__init__(server_name=server_name, **kwargs)
         self.add_tool("read.report", {})
         self.use_structured_content = True
         self.result = {
@@ -347,8 +348,8 @@ async def test_exact_selection_across_parallel_calls_and_approval_resume():
 
 
 @pytest.mark.asyncio
-async def test_unselected_peer_with_same_name_keeps_legacy_behavior():
-    selected, other = Source(), Source()
+async def test_unselected_peer_with_same_tool_name_keeps_legacy_behavior():
+    selected, other = Source("Reports.A"), Source("Reports_A")
     seen = []
 
     async def legacy(call, output):
@@ -730,3 +731,277 @@ async def test_model_adapter_retaining_a_call_cannot_change_accepted_arguments()
         hooks=Hooks(),
     )
     assert result.final_output == "Blue"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("resume", [False, True])
+async def test_second_wrapper_requires_exact_editor_before_effect(streamed, resume):
+    effects = []
+
+    def report():
+        effects.append(True)
+        return RAW
+
+    async def edit(call, texts):
+        return (SAFE,)
+
+    selected = function_tool(report, needs_approval=resume)
+    replacement = function_tool(report, needs_approval=resume)
+    model = model_for("report")
+    agent = Agent(name="reports", tools=[selected if resume else replacement], model=model)
+    config = RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=[(selected, edit)]))
+    request: str | RunState = "go"
+    if resume:
+        paused = await Runner.run(agent, request, run_config=config)
+        snapshot = paused.to_state().to_string()
+        agent.tools = [replacement]
+        request = await RunState.from_string(agent, snapshot)
+        request.approve(request.get_interruptions()[0])
+
+    with pytest.raises(UserError, match="exact tool_text_transforms target"):
+        if streamed:
+            stream = Runner.run_streamed(agent, request, run_config=config)
+            async for _ in stream.stream_events():
+                pass
+        else:
+            await Runner.run(agent, request, run_config=config)
+    assert effects == [] and len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_same_name_on_distinct_agents_uses_only_exact_editors():
+    effects = []
+
+    def make_report(name="report"):
+        @function_tool(name_override=name)
+        def report():
+            effects.append(name)
+            return "original"
+
+        return report
+
+    first, second = make_report(), make_report()
+    other = make_report("other")
+
+    async def edit(call, texts):
+        return (SAFE,)
+
+    config = RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=[(first, edit)]))
+    with pytest.raises(UserError, match="exact tool_text_transforms target"):
+        await Runner.run(
+            Agent(name="second", tools=[second], model=model_for("report")), "go", run_config=config
+        )
+    assert not effects
+    config.tool_execution = ToolExecutionConfig(
+        tool_text_transforms=[(first, edit), (second, edit)]
+    )
+    for tool, expected in [(first, SAFE), (second, SAFE), (other, "original")]:
+        agent = Agent(name="reports", tools=[tool], model=model_for(tool.name))
+        result = await Runner.run(agent, "go", run_config=config)
+        assert (
+            next(i.output for i in result.new_items if i.type == "tool_call_output_item")
+            == expected
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize("selection", ["stale", "missing", "current"])
+async def test_pending_mcp_edit_requires_current_exact_selector(restored, selection):
+    previous = Source(require_approval="always")
+    current = Source(require_approval="always")
+
+    async def edit(call, texts):
+        assert call.mcp_target == (current, "read.report")
+        return tuple(SAFE for _ in texts)
+
+    def config(server):
+        return RunConfig(
+            tool_execution=ToolExecutionConfig(
+                tool_text_transforms=[((server, "read.report"), edit)]
+            )
+        )
+
+    model = model_for("read.report")
+    agent = Agent(name="reports", mcp_servers=[previous], model=model)
+    paused = await Runner.run(agent, "go", run_config=config(previous))
+    state = paused.to_state()
+    snapshot = state.to_string()
+    agent.mcp_servers = [current]
+    if restored:
+        state = await RunState.from_string(agent, snapshot)
+    state.approve(state.get_interruptions()[0])
+    if selection == "current":
+        result = await Runner.run(agent, state, run_config=config(current))
+        assert current.tool_calls == ["read.report"]
+        assert SAFE in str(model.calls[-1].input) and RAW not in result.to_state().to_string()
+    else:
+        settings = config(previous) if selection == "stale" else RunConfig()
+        with pytest.raises(UserError, match="exact tool_text_transforms target"):
+            await Runner.run(agent, state, run_config=settings)
+        assert not current.tool_calls and len(model.calls) == 1
+    assert not previous.tool_calls
+
+
+@pytest.mark.asyncio
+async def test_pending_text_requirement_uses_current_checkpoint_schema():
+    @function_tool(needs_approval=True)
+    def report():
+        return RAW
+
+    async def edit(call, texts):
+        return (SAFE,)
+
+    agent = Agent(name="reports", tools=[report], model=model_for("report"))
+    config = RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=[(report, edit)]))
+    paused = await Runner.run(agent, "go", run_config=config)
+    snapshot = paused.to_state().to_json()
+    snapshot["$schemaVersion"] = "1.22"
+    with pytest.raises(UserError, match="require RunState schema"):
+        await RunState.from_json(agent, snapshot)
+    del snapshot["context"]["tool_invocations"]["one"]["requires_text_transform"]
+    state = await RunState.from_json(agent, snapshot)
+    state.approve(state.get_interruptions()[0])
+    result = await Runner.run(agent, state, run_config=config)
+    assert RAW not in result.to_state().to_string()
+
+
+@pytest.mark.asyncio
+async def test_admitted_call_cannot_lose_editor_before_invocation():
+    @function_tool
+    def report():
+        pytest.fail("executed after the editor was removed")
+
+    async def edit(call, texts):
+        return (SAFE,)
+
+    settings = ToolExecutionConfig(tool_text_transforms=[(report, edit)])
+
+    class Hooks(RunHooks):
+        async def on_tool_start(self, context, agent, tool):
+            settings.tool_text_transforms = ()
+
+    agent = Agent(name="reports", tools=[report], model=model_for("report"))
+    with pytest.raises(UserError, match="exact tool_text_transforms target"):
+        await Runner.run(agent, "go", run_config=RunConfig(tool_execution=settings), hooks=Hooks())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rotate", [False, True])
+async def test_reconnected_server_with_same_name_needs_its_own_editor(rotate):
+    stale, current = Source(), Source()
+
+    async def edit(call, texts):
+        assert call.mcp_target == (current, "read.report")
+        return tuple(SAFE for _ in texts)
+
+    selected = ((stale, "read.report"), edit)
+    agent = Agent(name="reports", mcp_servers=[current], model=model_for("read.report"))
+    config = RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=[selected]))
+
+    class Hooks(RunHooks):
+        async def on_llm_start(self, *args):
+            if rotate:
+                agent.mcp_servers = [stale]
+
+    with pytest.raises(UserError, match="exact tool_text_transforms target"):
+        await Runner.run(agent, "go", run_config=config, hooks=Hooks())
+    assert not current.tool_calls
+    agent.mcp_servers = [current]
+    agent.model = model_for("read.report")
+    config.tool_execution = ToolExecutionConfig(
+        tool_text_transforms=[selected, ((current, "read.report"), edit)]
+    )
+    result = await Runner.run(agent, "go", run_config=config)
+    assert RAW not in result.to_state().to_string()
+    assert current.tool_calls == ["read.report"] and not stale.tool_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize(
+    "route", ["function", "mcp", "child", "namespaced", "copied", "reject_child"]
+)
+async def test_missing_editor_leaves_session_paused_for_corrected_retry(streamed, route):
+    from agents import ResumableSession
+
+    from .memory.test_resumable_session import MemoryStore
+
+    effects = []
+
+    @function_tool(needs_approval=True)
+    def report():
+        effects.append(True)
+        return RAW
+
+    async def edit(call, texts):
+        return tuple(SAFE for _ in texts)
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    peer = Source(require_approval="always")
+    mcp = route == "mcp"
+    model = model_for("read.report" if mcp else "report")
+    worker = Agent(name="reports", tools=[report], mcp_servers=[peer], model=model)
+
+    def config(target):
+        return RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=[(target, edit)]))
+
+    correct = config((peer, "read.report") if mcp else report)
+    namespace = "team" if route == "namespaced" else None
+    parent = Agent(
+        name="parent",
+        model=ScriptedModel(
+            [
+                [function_call("delegate", {"input": "go"}, namespace=namespace, call_id="parent")],
+                [assistant_message("done")],
+            ]
+        ),
+    )
+
+    def configure(settings):
+        if route in ("child", "reject_child", "namespaced", "copied"):
+            delegate = worker.as_tool(
+                "delegate", "Delegate", run_config=settings, failure_error_function=None
+            )
+            if namespace:
+                (delegate,) = tool_namespace(name=namespace, description="Team", tools=[delegate])
+            if route == "copied":
+                delegate = replace(delegate)
+            parent.tools = [delegate]
+            return parent, correct if route == "copied" else RunConfig()
+        return worker, settings
+
+    agent, settings = configure(correct)
+    await Runner.run(agent, "go", session=session, run_config=settings)
+    saved = store.records[session.session_id]
+
+    async def resume(settings, reject=False):
+        agent, settings = configure(settings)
+        restored = await ResumableSession.resume(store, session.session_id)
+        state = await restored.load_state(agent)
+        pending = state.get_interruptions()[0]
+        if reject:
+            state.reject(pending)
+        else:
+            state.approve(pending)
+        if streamed:
+            stream = Runner.run_streamed(agent, state, run_config=settings)
+            async for _ in stream.stream_events():
+                pass
+            return stream
+        return await Runner.run(agent, state, run_config=settings)
+
+    stale = config((Source(), "read.report")) if mcp else RunConfig()
+    with pytest.raises(UserError, match="exact tool_text_transforms target"):
+        await resume(stale)
+    assert store.records[session.session_id] == saved
+    assert not effects and not peer.tool_calls and len(model.calls) == 1
+    if route == "reject_child":
+        result = await resume(stale, reject=True)
+        assert result.final_output == "done" and not effects
+        return
+    result = await resume(correct)
+    assert result.final_output == "done" and RAW not in result.to_state().to_string()
+    assert bool(peer.tool_calls) == mcp and bool(effects) != mcp
