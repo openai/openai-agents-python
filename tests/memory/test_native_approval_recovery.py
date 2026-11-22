@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agents import Agent, ResumableSession, RunConfig, Runner, RunState
+from agents import Agent, ResumableSession, RunConfig, Runner, RunState, ToolExecutionConfig
 from agents.exceptions import AgentsException, UserError
 from agents.items import ModelResponse
 from agents.memory.resumable_session import ResumableSessionError
@@ -190,6 +190,53 @@ async def test_native_approval_round_trip_uses_original_runtime_only(
         item.get("call_id") == interruption.call_id and item.get("output") == expected_message
         for item in requests[-1]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("kind", "streamed"), [("exec_command", False), ("apply_patch", True)])
+async def test_incompatible_hooks_leave_native_approval_pending(
+    tmp_path, monkeypatch, kind, streamed
+):
+    agent, store, session, config, pending, calls, requests = await setup_native(
+        tmp_path, monkeypatch, kind
+    )
+    await Runner.run(agent, "start", session=session, run_config=config)
+    saved = store.records[session.session_id]
+    recovered = await ResumableSession.resume(store, session.session_id)
+    state = await recovered.load_state(agent)
+    state.approve(state.get_interruptions()[0])
+
+    def unexpected_hook(*args):
+        pytest.fail("Restoring the approval must not run a tool hook.")
+
+    hooked = RunConfig(
+        tracing_disabled=True,
+        tool_execution=ToolExecutionConfig(prepare_tool_input=unexpected_hook),
+    )
+    with monkeypatch.context() as patch, pytest.raises(UserError, match="native tool hooks"):
+        patch.delattr(agent.model, "_run_approved_native_call")
+        if streamed:
+            result = Runner.run_streamed(agent, state, run_config=hooked)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, state, session=recovered, run_config=hooked)
+
+    assert store.records[session.session_id] == saved
+    assert not calls
+    assert len(requests) == 1
+    replacement = await ResumableSession.resume(store, session.session_id)
+    state = await replacement.load_state(agent)
+    (original,) = state.get_interruptions()
+    if streamed:
+        state.reject(original)
+        result = await Runner.run(agent, state, run_config=hooked)
+        assert not calls
+    else:
+        state.approve(original)
+        result = await Runner.run(agent, state, run_config=config)
+        assert calls == [pending.checkpoint]
+    assert result.final_output == "finished"
 
 
 @pytest.mark.asyncio
