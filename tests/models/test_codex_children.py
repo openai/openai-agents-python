@@ -6,8 +6,11 @@ import pytest
 
 from agents import Agent, RunConfig, Runner, UserError, function_tool
 from agents.models.codex import CodexChildren, CodexProvider, CodexRole
+from agents.models.interface import ModelTracing
 
 from .test_codex_mutable_tool_hooks import codex_fixture, final_message
+from .test_codex_pending_approval import ApprovalThread, approval, raw, response
+from .test_codex_provider import native_pair, threads as threads
 
 pytest_plugins = ["tests.models.test_codex_mutable_tool_hooks"]
 
@@ -48,6 +51,37 @@ async def test_child_incompatible_sdk_tool_rejected_without_native_start():
                 "draft",
                 run_config=RunConfig(tracing_disabled=True),
             )
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_children_reject_saved_workspace_approval_before_start(tmp_path, threads):
+    call, _ = native_pair(call_id="pending")
+    threads[0].append(
+        ApprovalThread(events=[raw(call), approval(), {"type": "raw_response_completed"}])
+    )
+    checkpoint = (await response(tmp_path)).output[0].checkpoint
+    provider = CodexProvider(cwd=tmp_path, children=PROFILE)
+    with pytest.raises(UserError, match="cannot resume workspace approvals"):
+        await provider._run_approved_native_call(checkpoint, ModelTracing.DISABLED)
+    assert provider._manager is None
+
+
+@pytest.mark.asyncio
+async def test_native_children_reject_unexpected_workspace_approval(tmp_path, threads):
+    thread = ApprovalThread(events=[approval()])
+    threads[0].append(thread)
+    provider = CodexProvider(cwd=tmp_path, children=PROFILE)
+    provider._manager = CodexProvider(cwd=tmp_path)._native_manager()
+    try:
+        with pytest.raises(UserError, match="native workspace tools enabled"):
+            await Runner.run(
+                Agent(name="manager", model=provider.get_model(None)),
+                "draft",
+                run_config=RunConfig(tracing_disabled=True),
+            )
+        assert thread.closed
     finally:
         await provider.aclose()
 

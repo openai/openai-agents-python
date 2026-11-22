@@ -36,6 +36,7 @@ pub struct CoreServices {
     pub children: Option<Arc<crate::children::Children>>,
     pub config: Config,
     pub manager: Arc<ThreadManager>,
+    pub operations: Arc<crate::operation_tracing::Observers>,
     home: PathBuf,
     cwd: PathBuf,
     overrides: Vec<(String, toml::Value)>,
@@ -474,9 +475,12 @@ pub async fn build_services(
         } else {
             "codex-code-mode-host"
         });
+    let operations = Arc::new(crate::operation_tracing::Observers::default());
     let budget = children.as_ref().map(|profile| profile.budget());
     let manager = Arc::new_cyclic(|weak| {
         let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+        extensions.model_request_contributor(operations.clone());
+        extensions.tool_lifecycle_contributor(operations.clone());
         codex_guardian_v2::install(&mut extensions, auth.clone(), weak.clone());
         codex_core::install_agent_message_board(&mut extensions, weak.clone());
         codex_mcp_extension::install(&mut extensions);
@@ -553,6 +557,7 @@ pub async fn build_services(
         children,
         config,
         manager,
+        operations,
         home,
         cwd,
         overrides,
