@@ -2668,7 +2668,9 @@ async def run_single_turn_streamed(
             prompt=prompt_config,
         )
 
-    await _admit(context_wrapper._budget, model, session, all_tools)
+    await _admit(
+        context_wrapper._budget, model, session, all_tools, streamed_result=streamed_result
+    )
     retry_stream = stream_response_with_retry(
         get_stream=get_model_stream,
         rewind=rewind_model_request,

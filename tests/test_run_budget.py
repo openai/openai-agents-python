@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -28,7 +29,7 @@ from agents import (
 )
 from agents.decorators import tool
 from agents.memory.openai_responses_compaction_session import OpenAIResponsesCompactionSession
-from agents.memory.resumable_session import ResumableSession
+from agents.memory.resumable_session import ResumableSession, ResumableSessionError
 from agents.models.codex import CodexProvider
 from agents.models.openai_responses import OpenAIResponsesModel
 from agents.testing import ModelStep, ScriptedModel
@@ -602,3 +603,46 @@ async def test_child_budget_stop_uses_existing_tool_error_policy(streamed):
     assert len(inner.calls) == 1
     assert "An error occurred while running the tool" in str(outer.calls[-1].input)
     assert store.checkpoint(session.session_id)["status"] == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", [False, True])
+async def test_stream_budget_stop_publishes_only_committed_work(fail):
+    effects = []
+
+    @tool
+    def record() -> str:
+        effects.append(1)
+        return "saved"
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    store.block_checkpoint = True
+    store.fail_checkpoint = fail
+    model = ScriptedModel([[get_text_message("working"), get_function_tool_call("record")]])
+    agent = Agent(name="root", model=model, tools=[record])
+    result = Runner.run_streamed(
+        agent,
+        "begin",
+        session=session,
+        run_config=RunConfig(budget=RunBudget(max_requests=1), tracing_disabled=True),
+    )
+    events = []
+
+    async def consume():
+        async for event in result.stream_events():
+            if event.type == "run_item_stream_event":
+                events.append(event.name)
+
+    consumer = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(store.saving.wait(), timeout=5)
+        assert not events
+    finally:
+        store.release.set()
+        with pytest.raises(ResumableSessionError if fail else RunBudgetError):
+            await asyncio.wait_for(consumer, timeout=5)
+    assert len(model.calls) == 1 and effects == [1]
+    assert store.checkpoint(session.session_id)["status"] == ("active" if fail else "ready")
+    assert result.final_output is None
+    assert events == ([] if fail else ["message_output_created", "tool_called", "tool_output"])

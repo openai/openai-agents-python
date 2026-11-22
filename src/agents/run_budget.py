@@ -8,13 +8,14 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
-from .exceptions import AgentsException, UserError
+from .exceptions import AgentsException, UserError, _mark_error_to_drain_stream_events
 from .usage import Usage
 
 if TYPE_CHECKING:
     from .agent import Agent
     from .memory import Session
     from .models.interface import Model
+    from .result import RunResultStreaming
     from .run_config import RunConfig
     from .run_state import RunState
     from .tool import Tool
@@ -226,9 +227,14 @@ def _check_tools(tools: Iterable[Tool]) -> None:
 
 
 async def _admit(
-    budget: _BudgetState | None, model: Model, session: Session | None, tools: Iterable[Tool]
+    budget: _BudgetState | None,
+    model: Model,
+    session: Session | None,
+    tools: Iterable[Tool],
+    *,
+    streamed_result: RunResultStreaming | None = None,
 ) -> None:
-    from .run_internal.resumable_session import ResumableRun
+    from .run_internal.resumable_session import ResumableRun, checkpoint_streamed_result
 
     try:
         if isinstance(session, ResumableRun):
@@ -238,9 +244,13 @@ async def _admit(
             _check_model(model)
             budget.check()
             budget.requests += 1
-    except (RunBudgetError, UserError):
+    except (RunBudgetError, UserError) as error:
         if isinstance(session, ResumableRun):
-            await session.finish_budget_stop()
+            if streamed_result is None:
+                await session.finish_budget_stop()
+            else:
+                await checkpoint_streamed_result(streamed_result, interruptions=[])
+                _mark_error_to_drain_stream_events(error)
         raise
 
 
