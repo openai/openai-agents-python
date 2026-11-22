@@ -3,7 +3,10 @@
 import asyncio
 import json
 import os
+import socket
+import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from importlib.util import find_spec
@@ -416,8 +419,8 @@ async def test_native_hooks_respect_caller_disablement(tmp_path, model_endpoint,
         await provider.aclose()
 
 
-@pytest.mark.asyncio
-async def test_native_hook_endpoint_rejects_untrusted_calls():
+@pytest.fixture
+def hook_executable():
     executable = (
         files("agents.models")
         / "_codex_bin"
@@ -425,6 +428,39 @@ async def test_native_hook_endpoint_rejects_untrusted_calls():
     )
     if not executable.is_file():
         pytest.skip("Install the SDK's embedded Codex runtime helper to exercise this path.")
+    return str(executable)
+
+
+def test_native_hook_stdio_replies_before_eof(hook_executable):
+    with socket.create_server(("127.0.0.1", 0)) as listener, ThreadPoolExecutor(1) as reader:
+        listener.settimeout(5)
+        with subprocess.Popen(
+            [hook_executable, "--sdk-hook-stdio", str(listener.getsockname()[1])],
+            env={**os.environ, "AGENTS_CODEX_HOOK_KEY": "x"},
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+        ) as relay:
+            try:
+                assert relay.stdin is not None and relay.stdout is not None
+                with listener.accept()[0] as peer, peer.makefile("rb") as requests:
+                    peer.settimeout(5)
+                    assert requests.read(1) == b"x"
+                    for reply in (b"ok\n", b"\x00\xff"):
+                        relay.stdin.write(b"hello\n")
+                        relay.stdin.flush()
+                        assert requests.readline() == b"hello\n"
+                        peer.sendall(reply)
+                        # A blocked pipe read must not prevent timeout and child cleanup.
+                        assert (
+                            reader.submit(relay.stdout.read, len(reply)).result(timeout=5) == reply
+                        )
+                assert relay.wait(timeout=5) == 0
+            finally:
+                relay.kill()
+
+
+@pytest.mark.asyncio
+async def test_native_hook_endpoint_rejects_untrusted_calls(hook_executable):
     received = []
 
     async def dispatch(arguments):
@@ -443,7 +479,7 @@ async def test_native_hook_endpoint_rejects_untrusted_calls():
             await writer.wait_closed()
         async with MCPServerStdio(
             {
-                "command": str(executable),
+                "command": hook_executable,
                 "args": ["--sdk-hook-stdio", str(port)],
                 "env": {"AGENTS_CODEX_HOOK_KEY": key},
             }
