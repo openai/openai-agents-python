@@ -102,7 +102,13 @@ from ..items import (
 )
 from ..lifecycle import RunHooks
 from ..logger import log_tool_action_error, logger
-from ..models._codex_items import CodexCustomToolCallOutput, CodexFunctionToolCallOutput
+from ..models._codex_items import (
+    CodexCustomToolCallOutput,
+    CodexFunctionToolCallOutput,
+    CodexPendingCustomCall,
+    CodexPendingFunctionCall,
+    native_approval_checkpoint,
+)
 from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
@@ -152,6 +158,7 @@ from .items import (
     run_item_to_input_item,
     shell_rejection_item,
 )
+from .native_approvals import native_pending_step, resolve_native_approval_step
 from .run_steps import (
     NOT_FINAL_OUTPUT,
     NextStepFinalOutput,
@@ -994,6 +1001,18 @@ async def execute_tools_and_side_effects(
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
     public_agent = bindings.public_agent
 
+    if processed_response.native_approvals:
+        _register_tool_call_items(context_wrapper, processed_response.new_items)
+        return native_pending_step(
+            bindings=bindings,
+            original_input=original_input,
+            pre_step_items=pre_step_items,
+            new_response=new_response,
+            processed_response=processed_response,
+            run_state=run_state,
+            run_config=run_config,
+        )
+
     execute_final_output_call = execute_final_output
     execute_handoffs_call = execute_handoffs
 
@@ -1413,6 +1432,18 @@ async def resolve_interrupted_turn(
     """Continue a turn that was previously interrupted waiting for tool approval."""
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
+    if processed_response.native_approvals:
+        return await resolve_native_approval_step(
+            bindings=bindings,
+            original_input=original_input,
+            original_pre_step_items=original_pre_step_items,
+            new_response=new_response,
+            processed_response=processed_response,
+            context_wrapper=context_wrapper,
+            hooks=hooks,
+            run_config=run_config,
+            run_state=run_state,
+        )
     output_index = _build_tool_output_index(original_pre_step_items)
     response_boundary = _current_response_boundary((), processed_response, run_state)
     generated_output_start = response_boundary.generated_start
@@ -3187,6 +3218,7 @@ def process_model_response(
     allow_apply_patch_function_fallback: bool = True,
 ) -> ProcessedResponse:
     items: list[RunItem] = []
+    native_approvals: list[ToolApprovalItem] = []
 
     # Only the Codex adapter creates these types, after validating native call/output pairing.
     provider_completed = {
@@ -3291,6 +3323,12 @@ def process_model_response(
             output.__class__.__name__ if hasattr(output, "__class__") else type(output),
         )
         caller = get_mapping_or_attr(output, "caller")
+        if isinstance(output, (CodexPendingFunctionCall, CodexPendingCustomCall)):
+            native_approval_checkpoint(output)
+            items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))
+            native_approvals.append(ToolApprovalItem(agent=agent, raw_item=output))
+            tools_used.append(output.name)
+            continue
         is_program_owned = get_mapping_or_attr(caller, "type") == "program"
         if (
             not is_program_owned
@@ -3979,6 +4017,7 @@ def process_model_response(
         tools_used=tools_used,
         mcp_approval_requests=mcp_approval_requests,
         interruptions=[],
+        native_approvals=native_approvals,
         function_tools_not_found=function_tools_not_found,
         mcp_tool_bindings={
             run.tool_call.call_id: binding
@@ -4014,6 +4053,9 @@ def _preflight_response_invocations(
         if isinstance(item, (CodexFunctionToolCallOutput, CodexCustomToolCallOutput))
     }
     for index, output in enumerate(response.output):
+        if isinstance(output, (CodexPendingFunctionCall, CodexPendingCustomCall)):
+            native_approval_checkpoint(output)
+            continue
         if isinstance(output, (ResponseFunctionToolCall, ResponseCustomToolCall)) and (
             output.call_id in provider_completed
         ):
