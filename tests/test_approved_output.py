@@ -667,32 +667,46 @@ async def test_display_joins_native_execution_on_early_exit(tmp_path, threads, e
     assert thread.closed
 
 
-async def test_early_display_exit_joins_sandbox_snapshot():
-    from .sandbox.test_runtime import (
-        Manifest,
-        SandboxAgent,
-        _FakeClient,
-        _MarkerSnapshot,
-        _PersistingStopSession,
-        _sandbox_run_config,
-        get_final_output_message,
+async def test_early_display_exit_joins_sandbox_snapshot(monkeypatch, tmp_path):
+    from io import BytesIO
+
+    from agents import RunConfig
+    from agents.sandbox import SandboxAgent, SandboxRunConfig
+    from agents.sandbox.snapshot import LocalSnapshot
+
+    from .sandbox._filesystem_test_session import (
+        FilesystemTestSandboxClient,
+        FilesystemTestSandboxSession,
     )
 
-    release = asyncio.Event()
-    session = _PersistingStopSession(Manifest(), release)
-    model = ScriptedModel([[get_final_output_message("draft")]])
+    stopping, release = asyncio.Event(), asyncio.Event()
+    snapshot = LocalSnapshot(id="marker", base_path=tmp_path)
+    sessions = []
+    stop = FilesystemTestSandboxSession.stop
+
+    async def save_on_stop(session):
+        sessions.append(session)
+        stopping.set()
+        await release.wait()
+        await snapshot.persist(BytesIO(b"persisted"))
+        session.state.snapshot = snapshot
+        await stop(session)
+
+    monkeypatch.setattr(FilesystemTestSandboxSession, "stop", save_on_stop)
     run = Runner.run_streamed(
-        SandboxAgent(name="root", model=model),
+        SandboxAgent(name="root", model=ScriptedModel([[get_text_message("draft")]])),
         "start",
-        run_config=_sandbox_run_config(_FakeClient(session)),
+        run_config=RunConfig(sandbox=SandboxRunConfig(client=FilesystemTestSandboxClient())),
     )
     async with run.stream_approved_output():
-        while not session.stop_calls:
-            await asyncio.sleep(0)
-        asyncio.get_running_loop().call_soon(release.set)
-    assert session.stop_calls == 1
-    assert isinstance(session.state.snapshot, _MarkerSnapshot)
-    assert session.state.snapshot.marker == "persisted"
+        try:
+            await asyncio.wait_for(stopping.wait(), 5)
+        finally:
+            asyncio.get_running_loop().call_soon(release.set)
+    assert len(sessions) == 1
+    assert sessions[0].state.snapshot is snapshot
+    with await snapshot.restore() as saved:
+        assert saved.read() == b"persisted"
 
 
 @pytest.mark.parametrize("early", [False, True])
