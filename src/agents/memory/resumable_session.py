@@ -28,6 +28,7 @@ from .session import await_session_mutation
 
 if TYPE_CHECKING:
     from ..agent import Agent
+    from ..models._run_context import ModelToolHooks
     from ..run_state import ContextDeserializer, ContextOverride, RunState
 
 
@@ -321,8 +322,14 @@ class ResumableSession:
     def _get_history(self) -> list[TResponseInputItem]:
         return copy.deepcopy(self._checkpoint.history)
 
-    async def _begin_run(self, input: Any) -> None:
+    async def _begin_run(self, input: Any, tool_hooks: ModelToolHooks) -> None:
         self._validate_run(input)
+        if self.is_paused:
+            from ..run_internal.native_approvals import validate_native_restore_hooks
+
+            processed = input._last_processed_response
+            if processed is not None and processed.native_approvals:
+                validate_native_restore_hooks(processed, tool_hooks)
         active = self._checkpoint.model_copy(update={"status": "active", "revision": uuid4().hex})
         await self._replace(active, expected=self._serialized)
 
