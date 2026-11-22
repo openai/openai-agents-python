@@ -110,6 +110,10 @@ from .logger import (
     log_model_and_tool_data_warning,
     logger,
 )
+from .models._codex_items import (
+    native_approval_checkpoint,
+    restore_native_approval_call,
+)
 from .run_context import RunContextWrapper, _ApprovalRecord, _FunctionToolApprovalKey
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
@@ -312,7 +316,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.23": (
         "Binds prepared tool inputs to their original proposals across retries and resume, "
-        "and records required ResumableSession ownership for paused runs."
+        "records required ResumableSession ownership, and preserves native approval receipts."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -785,6 +789,11 @@ def _restore_pydantic_fields_set(value: Any, source: Any) -> None:
 
 def _copy_tool_approval_raw_item(raw_item: Any) -> Any:
     """Copy a supported approval raw item through public Pydantic APIs."""
+    native_checkpoint = native_approval_checkpoint(raw_item)
+    if native_checkpoint is not None:
+        return restore_native_approval_call(
+            raw_item.model_dump(exclude_unset=True), native_checkpoint
+        )
     active_container_ids: set[int] = set()
     raw_item_mro = _static_type_mro(raw_item)
     for model_type, model_adapter in _TOOL_APPROVAL_MODEL_ADAPTERS:
@@ -1237,6 +1246,13 @@ class RunState(Generic[TContext, TAgent]):
             )
         return canonical_matches[0] if canonical_matches else None
 
+    def _decision_item(self, proposal: ToolApprovalItem) -> ToolApprovalItem:
+        current = self._find_current_approval_item(proposal)
+        expected = native_approval_checkpoint(current.raw_item) if current else None
+        if native_approval_checkpoint(proposal.raw_item) != expected:
+            raise UserError("Native approval does not match the current pending call.")
+        return current or proposal
+
     def _find_nested_approval_state(
         self,
         approval_item: ToolApprovalItem,
@@ -1409,9 +1425,8 @@ class RunState(Generic[TContext, TAgent]):
             nested_state, nested_item = nested_approval
             nested_state.approve(nested_item, always_approve=always_approve)
             return
-        current_approval_item = self._find_current_approval_item(approval_item)
         self._context.approve_tool(
-            current_approval_item or approval_item,
+            self._decision_item(approval_item),
             always_approve=always_approve,
         )
 
@@ -1441,7 +1456,7 @@ class RunState(Generic[TContext, TAgent]):
             )
             return
         self._context.reject_tool(
-            self._find_current_approval_item(approval_item) or approval_item,
+            self._decision_item(approval_item),
             always_reject=always_reject,
             rejection_message=rejection_message,
         )
@@ -2167,6 +2182,15 @@ class RunState(Generic[TContext, TAgent]):
                 for call_id, binding in processed_response.mcp_tool_bindings.items()
             },
         }
+        if processed_response.native_approvals:
+            result["native_approvals"] = [
+                _serialize_tool_approval_interruption(
+                    item,
+                    include_tool_name=True,
+                    agent_identity_keys_by_id=agent_identity_keys_by_id,
+                )
+                for item in processed_response.native_approvals
+            ]
         if processed_response.tool_output_guardrail_result_start is not None:
             result["tool_output_guardrail_result_start"] = (
                 processed_response.tool_output_guardrail_result_start
@@ -2226,6 +2250,9 @@ class RunState(Generic[TContext, TAgent]):
                 agent_identity_keys_by_id=agent_identity_keys_by_id,
             ),
         }
+        native_checkpoint = native_approval_checkpoint(item.raw_item)
+        if native_checkpoint is not None:
+            result["codex_native_checkpoint"] = native_checkpoint
 
         if isinstance(item, InputItem):
             result["input_id"] = item.input_id
@@ -2540,6 +2567,9 @@ class RunState(Generic[TContext, TAgent]):
                 validation_error_factory=validation_error_factory,
             )
 
+            if _unsupported_native_approvals(state_json):
+                raise validation_error_factory(_UNSUPPORTED_NATIVE_APPROVALS, UserError)
+
             from .sandbox._mount_security import sanitize_run_state_sandbox_mount_authority
 
             if "sandbox" in state_json:
@@ -2588,6 +2618,35 @@ class RunState(Generic[TContext, TAgent]):
 # --------------------------
 # Private helpers
 # --------------------------
+
+
+_UNSUPPORTED_NATIVE_APPROVALS = (
+    "Run state contains unsupported native tool approvals. "
+    "Check for prior effects before starting a new run with SDK tools."
+)
+
+
+def _unsupported_native_approvals(state: dict[str, Any], *, nested: bool = False) -> bool:
+    """Check nested agent runs before best-effort context restoration can skip a child."""
+    response = state.get("last_processed_response")
+    if not isinstance(response, dict):
+        return False
+    approvals = response.get("native_approvals")
+    if approvals:
+        # Only the root session has a claimed checkpoint. A nested state cannot
+        # authorize an action, even when it contains an otherwise valid receipt.
+        if nested or not isinstance(approvals, list) or len(approvals) != 1:
+            return True
+        item = approvals[0]
+        if not isinstance(item, dict) or not isinstance(item.get("codex_native_checkpoint"), dict):
+            return True
+    functions = response.get("functions")
+    if isinstance(functions, list):
+        for entry in functions:
+            child = entry.get("agent_run_state") if isinstance(entry, dict) else None
+            if isinstance(child, dict) and _unsupported_native_approvals(child, nested=True):
+                return True
+    return False
 
 
 def _validate_run_state_json_value(value: object) -> None:
@@ -2896,6 +2955,9 @@ def _serialize_tool_approval_interruption(
             agent_identity_keys_by_id=agent_identity_keys_by_id,
         ),
     }
+    native_checkpoint = native_approval_checkpoint(interruption.raw_item)
+    if native_checkpoint is not None:
+        interruption_dict["codex_native_checkpoint"] = native_checkpoint
     if include_tool_name and interruption.tool_name is not None:
         interruption_dict["tool_name"] = interruption.tool_name
     if interruption.tool_namespace is not None:
@@ -3643,6 +3705,19 @@ async def _deserialize_processed_response(
         if approval_item is not None:
             interruptions.append(approval_item)
 
+    native_approvals: list[ToolApprovalItem] = []
+    for approval_data in processed_response_data.get("native_approvals", []):
+        approval = _deserialize_tool_approval_item(
+            approval_data,
+            agent_map=agent_map,
+            agent_identity_map=agent_identity_map,
+            fallback_agent=current_agent,
+            validation_error_factory=validation_error_factory,
+        )
+        if approval is None or native_approval_checkpoint(approval.raw_item) is None:
+            raise validation_error_factory("Invalid native approval plan", UserError)
+        native_approvals.append(approval)
+
     saved_bindings = processed_response_data.get("mcp_tool_bindings", {})
     mcp_tool_bindings = {
         call_id: cast(tuple[str, str, int | None], tuple(binding))
@@ -3656,6 +3731,7 @@ async def _deserialize_processed_response(
 
     return ProcessedResponse(
         new_items=new_items,
+        native_approvals=native_approvals,
         handoffs=handoffs,
         functions=functions,
         computer_actions=computer_actions,
@@ -3835,6 +3911,8 @@ def _deserialize_tool_approval_item(
     tool_lookup_key = deserialize_function_tool_lookup_key(item_data.get("tool_lookup_key"))
     allow_bare_name_alias = item_data.get("allow_bare_name_alias") is True
     raw_item = _deserialize_tool_approval_raw_item(raw_item_data)
+    if "codex_native_checkpoint" in item_data:
+        raw_item = restore_native_approval_call(raw_item_data, item_data["codex_native_checkpoint"])
     return ToolApprovalItem(
         agent=agent,
         raw_item=raw_item,
@@ -4236,6 +4314,10 @@ async def _build_run_state_from_json(
         validation_error_factory=validation_error_factory,
     )
     schema_major, schema_minor = (int(part) for part in schema_version.split(".", maxsplit=1))
+    if (schema_major, schema_minor) < (1, 23) and (
+        (state_json.get("last_processed_response") or {}).get("native_approvals")
+    ):
+        raise validation_error_factory("Native approvals require RunState schema 1.23.", UserError)
     programmatic_major, programmatic_minor = (
         int(part) for part in _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
     )
@@ -5343,6 +5425,10 @@ def _deserialize_items(
                 # Tool call items can be function calls, shell calls, apply_patch calls,
                 # MCP calls, etc. Check the type field to determine which type to deserialize as
                 raw_item_tool = _deserialize_tool_call_raw_item(normalized_raw_item)
+                if "codex_native_checkpoint" in item_data:
+                    raw_item_tool = restore_native_approval_call(
+                        normalized_raw_item, item_data["codex_native_checkpoint"]
+                    )
                 # Preserve display metadata if it was stored with the item.
                 description = item_data.get("description")
                 title = item_data.get("title")
@@ -5705,6 +5791,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "RunState tool invocation must be a mapping.",
         "RunState tool invocation contains invalid lifecycle data.",
         "Tool input rewrites require RunState schema 1.23.",
+        _UNSUPPORTED_NATIVE_APPROVALS,
         "RunState tool input rewrite is invalid.",
         "Hosted MCP approval decisions require a non-empty request id.",
         (
