@@ -314,7 +314,7 @@ async def test_provider_error_cannot_export_a_reflected_transport_credential(
 
     assert authorization_headers == ["Bearer TRANSPORT_CREDENTIAL_CANARY"]
     spans = native.get_ordered_spans()
-    model_spans = [span for span in spans if span.span_data.type == "generation"]
+    model_spans = [span for span in spans if span.span_data.type == "response"]
     assert len(model_spans) == 1
     assert model_spans[0].error is not None
     assert model_spans[0].span_data.operation.outcome == "failed"
@@ -574,7 +574,8 @@ async def test_any_llm_responses_capture_bounds_sdk_and_otel_without_changing_pr
         for span in native.get_ordered_spans()
         if span.span_data.type in {"response", "generation"}
     )
-    if isinstance(data, ResponseSpanData):
+    assert isinstance(data, ResponseSpanData)
+    if mode == "default":
         captured_input = data.input
         captured_output = (
             [item.model_dump(mode="json") for item in data.response.output]
