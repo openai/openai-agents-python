@@ -8,13 +8,24 @@ Codex normally keeps a pending approval in memory. When the process stops, resto
 2. On the replacement worker, load the same session with `session = await ResumableSession.resume(store, session_id)`. Then use `state = await session.load_state(agent)`.
 3. Match the user's decision to the call in `state.get_interruptions()`. Use `state.approve(call)` or `state.reject(call)`, then `await Runner.run(agent, state, session=session, run_config=config)`.
 
-Only one worker can claim that session revision. Denial stops the call. On approval, Codex checks the workspace, permissions and newly prepared action. A mismatch stops execution.
+Only one worker can claim that session revision. Denial stops the call.
+
+## Which checks need a Codex patch?
+
+| Where | Responsibility |
+| --- | --- |
+| Existing Codex APIs | Start a turn on an idle thread, pass data to that turn, and run the built-in tool through its usual permission checks. |
+| This patch | Identify the first live approval before execution. On restart, submit only the saved call, require a fresh matching approval, and stop if any check fails. |
+| [SDK approval checks](../src/native_approval.rs) | Save and compare the request and permissions. Match the saved decision to the action Codex prepares on the new worker. |
+| [SDK file checks](../src/approval_files.rs) | Verify file contents and empty destinations. Replace prepared update diffs with hashes and remove the contents of deleted files. |
+
+The SDK uses the same session ID and saved format as before. The application only needs to collect the user's decision once.
 
 ## Safety limits
 
-Recovery requires direct tools in one local environment, human review and no tool hooks. The SDK saves the model's submitted command or patch, so protect the session store. Codex replaces prepared update diffs with hashes and removes the original contents of deleted files.
+Recovery requires direct tools in one local environment, human review and no tool hooks. The SDK saves the model's submitted command or patch, so protect the session store.
 
-The patch includes a bounded file read because the existing stream can follow symbolic links. Before saving and again before execution, Codex checks file hashes and confirms that new destinations are absent. Each check covers at most 32 paths, 8 MiB per file, 16 MiB in total and 10 seconds. An unreadable or oversized file stops recovery.
+The patch adds a limit to Codex's permission-checked file reader because the existing stream can follow symbolic links. The SDK checks files before saving, on restart and just before execution. Each check covers at most 32 paths, 8 MiB per file, 16 MiB in total and 10 seconds. A changed, unreadable or oversized source file or an occupied destination stops recovery.
 
 A restored call gets one attempt. For a command, Codex checks the call ID and exit code and refuses a live process handle. This check works even if the exit notification arrives after the turn. A new worker cannot continue an interactive process.
 
