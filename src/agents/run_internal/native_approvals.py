@@ -9,6 +9,7 @@ from ..items import ToolCallOutputItem, ToolCallOutputTypes
 from ..memory.resumable_session import _ResumableSessionBinding
 from ..models._codex_items import native_approval_checkpoint
 from ..models._run_context import ModelToolHooks, model_run_context
+from ..run_context import RunContextWrapper
 from .run_steps import NextStepInterruption, NextStepRunAgain, SingleStepResult
 from .tool_execution import pending_tool_span
 from .turn_preparation import get_all_tools, get_model
@@ -56,6 +57,32 @@ def _validate_native_plan(processed: Any) -> None:
     item = processed.native_approvals[0]
     if native_approval_checkpoint(item.raw_item) is None or item.tool_name != item.raw_item.name:
         raise UserError("Invalid native approval plan.")
+
+
+def _native_decision(context_wrapper: RunContextWrapper[Any], pending: Any) -> bool | None:
+    key = context_wrapper._resolve_approval_key(pending)
+    decision = context_wrapper._approvals.get(
+        context_wrapper._function_approval_key(key, pending) or key
+    )
+    if decision is not None and (decision.approved is True or decision.rejected is True):
+        raise UserError("Native approvals require a decision for the original call only.")
+    return context_wrapper.get_approval_status(
+        pending.tool_name,
+        pending.raw_item.call_id,
+        existing_pending=pending,
+        current_invocation=pending,
+        tool_lookup_key=pending.tool_lookup_key,
+        tool_namespace=pending.tool_namespace,
+    )
+
+
+def validate_native_restore_hooks(processed: Any, bindings: ModelToolHooks) -> None:
+    from ..models.codex import _validate_native_restore
+
+    _validate_native_plan(processed)
+    if _native_decision(bindings.context, processed.native_approvals[0]):
+        # Check hooks before claiming the session. Discover tools and recheck at dispatch.
+        _validate_native_restore([], bindings)
 
 
 def native_pending_step(
@@ -118,19 +145,7 @@ async def resolve_native_approval_step(
     checkpoint = native_approval_checkpoint(pending.raw_item)
     assert checkpoint is not None
     call = pending.raw_item
-    key = context_wrapper._resolve_approval_key(pending)
-    key = context_wrapper._function_approval_key(key, pending) or key
-    decision = context_wrapper._approvals.get(key)
-    if decision is not None and (decision.approved is True or decision.rejected is True):
-        raise UserError("Native approvals require a decision for the original call only.")
-    approved = context_wrapper.get_approval_status(
-        pending.tool_name,
-        call.call_id,
-        existing_pending=pending,
-        current_invocation=pending,
-        tool_lookup_key=pending.tool_lookup_key,
-        tool_namespace=pending.tool_namespace,
-    )
+    approved = _native_decision(context_wrapper, pending)
     if approved is None:
         with pending_tool_span(run_config, pending.tool_name, call.call_id) as span:
             span.span_data.operation.outcome = "paused"

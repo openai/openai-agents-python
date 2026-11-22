@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from . import util
 from .config import get_operation_detail
 from .create import generation_span, response_span
+from .provider import _is_noop_span
+from .scope import Scope
 from .span_data import GenerationSpanData, OperationMetadata, ResponseSpanData
 from .spans import Span
 from .traces import Trace
@@ -21,6 +23,46 @@ if TYPE_CHECKING:
     from ..models.interface import ModelTracing
 
 ModelSpan = Span[GenerationSpanData] | Span[ResponseSpanData]
+_Data = TypeVar("_Data", GenerationSpanData, ResponseSpanData)
+
+
+def current_model_span() -> ModelSpan | None:
+    span = Scope.get_current_span()
+    if span is None or _is_noop_span(span):
+        return None
+    return span if isinstance(span.span_data, (GenerationSpanData, ResponseSpanData)) else None
+
+
+def record_retries(count: int = 1, *, span: ModelSpan | None = None, at: str | None = None) -> None:
+    """Record observed attempts only, without error text, headers or request payloads."""
+    if type(count) is not int or count <= 0:
+        return
+    span = span or current_model_span()
+    if span is not None:
+        # Match the default OpenTelemetry event limit, even for unlimited retries.
+        timestamps = span.span_data.operation.retry_timestamps
+        timestamps.extend([at or util.time_iso()] * min(count, 128 - len(timestamps)))
+
+
+def restart_model_span(
+    span: ModelSpan, operation: OperationMetadata, *, at: str | None = None
+) -> None:
+    """Retain lifetime, retries and usage while replacing attempt-specific data."""
+    data = span.span_data
+    data.operation = OperationMetadata(
+        detail=operation.detail,
+        api_type=operation.api_type,
+        model=operation.model,
+        retry_timestamps=data.operation.retry_timestamps,
+    )
+    data.input = data.output = None
+    if isinstance(data, ResponseSpanData):
+        data.response = data._response_id = None
+        data.model_config = None
+    else:
+        data.tools = None
+    span.clear_error()
+    record_retries(span=span, at=at)
 
 
 @dataclass
@@ -70,40 +112,36 @@ def acquire_model_span(
     *,
     parent: Trace | Span[Any] | None = None,
     started_at: str | None = None,
-) -> ModelSpan:
-    detail = get_operation_detail(include_data=tracing.include_data())
-    group = _retry_spans.get() if detail is not None else None
-    if group is not None:
-        if group.operations == 0 and group.pending is not None:
-            span, group.pending = group.pending, None
-            group.ended_at = None
-            group.carried_usage = span.span_data.usage
-            span.span_data.usage = None
-            span.span_data.operation = OperationMetadata(
-                detail=detail, api_type="responses", model=model
-            )
-            if isinstance(span.span_data, GenerationSpanData):
-                span.span_data.input = None
-                span.span_data.output = None
-                span.span_data.model_config = None
-                span.span_data.tools = None
-                span.span_data.model = model
-            span.clear_error()
-            group.operations += 1
-            group.active = span
-            return span
-        group.finish()
-        group.operations += 1
-    span = (
-        generation_span(model=model, parent=parent, disabled=tracing.is_disabled())
-        if detail is not None
-        else response_span(parent=parent, disabled=tracing.is_disabled())
-    )
-    if group is not None:
-        group.active = span
+) -> Span[ResponseSpanData]:
+    span = response_span(parent=parent, disabled=tracing.is_disabled())
     span.span_data.operation.api_type = "responses"
-    span.span_data.operation.detail = detail
+    span.span_data.operation.detail = get_operation_detail(include_data=tracing.include_data())
     span.span_data.operation.model = model
+    return _start(span, started_at)
+
+
+def _start(span: Span[_Data], started_at: str | None = None) -> Span[_Data]:
+    group = _retry_spans.get()
+    if group is not None:
+        group.operations += 1
+        pending = group.pending
+        if (
+            group.operations == 1
+            and pending is not None
+            and pending.trace_id == span.trace_id
+            and type(pending.span_data) is type(span.span_data)
+        ):
+            group.pending = None
+            group.ended_at = None
+            group.carried_usage = pending.span_data.usage
+            pending.span_data.usage = None
+            # A retry policy may have revoked capture permission since the first attempt.
+            restart_model_span(pending, span.span_data.operation, at=started_at)
+            pending.span_data.model_config = span.span_data.model_config
+            group.active = pending
+            return cast("Span[_Data]", pending)
+        group.finish()
+        group.active = span
     if started_at is not None:
         span.start_at(started_at)
     else:
@@ -113,7 +151,7 @@ def acquire_model_span(
 
 def finish_model_span(span: ModelSpan, *, ended_at: str | None = None) -> None:
     operation = span.span_data.operation
-    group = _retry_spans.get() if operation.detail is not None else None
+    group = _retry_spans.get()
     if span.ended_at is not None or (group is not None and group.pending is span):
         return
     if operation.outcome is None:
@@ -123,7 +161,11 @@ def finish_model_span(span: ModelSpan, *, ended_at: str | None = None) -> None:
     if group is not None and group.carried_usage is not None:
         span.span_data.usage = _add_usage(group.carried_usage, span.span_data.usage or {})
         group.carried_usage = None
-    if group is not None and group.operations == 1 and operation.outcome == "failed":
+    if (
+        group is not None
+        and group.operations == 1
+        and operation.outcome in ("failed", "interrupted")
+    ):
         group.finish()
         group.pending = span
         group.ended_at = ended_at or util.time_iso()
@@ -134,9 +176,23 @@ def finish_model_span(span: ModelSpan, *, ended_at: str | None = None) -> None:
         span.finish()
 
 
+def model_span(
+    tracing: ModelTracing, model: str | None = None
+) -> AbstractContextManager[Span[ResponseSpanData]]:
+    return _model_scope(acquire_model_span(tracing, model))
+
+
+def chat_model_span(
+    *, model: str, model_config: Mapping[str, Any], tracing: ModelTracing
+) -> AbstractContextManager[Span[GenerationSpanData]]:
+    span = generation_span(model=model, disabled=tracing.is_disabled())
+    span.span_data.operation.detail = get_operation_detail(include_data=tracing.include_data())
+    span.span_data.model_config = model_config
+    return _model_scope(_start(span))
+
+
 @contextmanager
-def model_span(tracing: ModelTracing, model: str | None = None) -> Iterator[ModelSpan]:
-    span = acquire_model_span(tracing, model)
+def _model_scope(span: Span[_Data]) -> Iterator[Span[_Data]]:
     with span.as_current():
         try:
             yield span
@@ -163,46 +219,29 @@ def _add_usage(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, A
     return result
 
 
-def record_model_input(data: GenerationSpanData, request: Any) -> None:
+def record_model_input(data: ResponseSpanData, request: Mapping[str, Any]) -> None:
     """Capture the approved request fields under one shared input-direction budget."""
     from ._content import bound_content
 
     if data.operation.detail != "content":
         return
-    if not isinstance(request, dict):
-        data.input = [{"omitted": True, "reason": "unsupported input projection"}]
-        return
     previous_response_id = request.get("previous_response_id")
     if isinstance(previous_response_id, str):
         data.operation.previous_response_id = previous_response_id
-    approved = {
-        key: request[key] for key in ("input", "truncated", "omitted", "reason") if key in request
-    }
-    if isinstance(approved.get("input"), str):
-        approved["input"] = [{"role": "user", "content": approved["input"]}]
+    inputs = request.get("input")
+    if isinstance(inputs, str):
+        inputs = [{"role": "user", "content": inputs}]
+    approved = {"input": inputs}
     instructions = request.get("instructions")
     if isinstance(instructions, str):
         approved["instructions"] = instructions
     captured = bound_content(approved)
     if not isinstance(captured, dict):
-        data.input = [{"omitted": True, "reason": "input serialization failed"}]
-        return
-    if "input" not in captured and captured.get("omitted"):
-        data.input = [captured]
-        return
-    marker = {key: captured[key] for key in ("truncated", "omitted", "reason") if key in captured}
-    if marker:
-        items = captured.get("input", [])
-        if isinstance(items, list):
-            # Rebudget after moving the outer marker so exporters cannot lose it on extraction.
-            with_marker = {"input": [*items, marker]}
-            if "instructions" in captured:
-                with_marker["instructions"] = captured["instructions"]
-            captured = bound_content(with_marker)
-    items = captured.get("input")
-    if isinstance(items, str):
-        items = [{"role": "user", "content": items}]
-    data.input = items
+        captured = {"input": [{"omitted": True, "reason": "serialization_failed"}]}
+    if captured.get("truncated"):
+        items = captured.get("input") or []
+        captured["input"] = [*items, {"truncated": True}]
+    data.input = captured.get("input")
     data.model_config = (
         {"instructions": captured["instructions"]} if "instructions" in captured else None
     )

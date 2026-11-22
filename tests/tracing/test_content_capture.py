@@ -318,7 +318,7 @@ async def test_provider_error_cannot_export_a_reflected_transport_credential(
 
     assert authorization_headers == ["Bearer TRANSPORT_CREDENTIAL_CANARY"]
     spans = native.get_ordered_spans()
-    model_spans = [span for span in spans if span.span_data.type == "generation"]
+    model_spans = [span for span in spans if span.span_data.type == "response"]
     assert len(model_spans) == 1
     assert model_spans[0].error is not None
     assert model_spans[0].span_data.operation.outcome == "failed"
@@ -578,7 +578,8 @@ async def test_any_llm_responses_capture_bounds_sdk_and_otel_without_changing_pr
         for span in native.get_ordered_spans()
         if span.span_data.type in {"response", "generation"}
     )
-    if isinstance(data, ResponseSpanData):
+    assert isinstance(data, ResponseSpanData)
+    if mode == "default":
         captured_input = data.input
         captured_output = (
             [item.model_dump(mode="json") for item in data.response.output]
@@ -696,10 +697,12 @@ async def test_metadata_only_scope_bounds_agent_tool_and_nested_runner(exporter,
     assert answer == "OUTPUT_CANARY"
     spans = native.get_ordered_spans()
     operations = [s.span_data for s in spans if hasattr(s.span_data, "operation")]
-    assert {"generation", "function"} <= {op.type for op in operations}
+    assert {"response", "function"} <= {op.type for op in operations}
     for op in operations:
         assert op.operation.detail == "metadata"
         assert op.input is None and op.output is None
+        if op.type == "response":
+            assert op.response is None
     assert "CANARY" not in json.dumps([s.export() for s in spans])
     exported = exporter.get_finished_spans()
     assert any(s.name == "execute_tool lookup" for s in exported)

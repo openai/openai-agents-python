@@ -22,7 +22,7 @@ async def run_private(agent, request):
         return await Runner.run(agent, request)
 ```
 
-For streaming, start `Runner.run_streamed` and consume `result.stream_events()` inside the scope. Each run in the scope uses metadata detail and `trace_include_sensitive_data=False`. Disabled tracing stays disabled. Metadata detail can group model retries into one span. The scope leaves caller configs and normal behavior outside it unchanged.
+For streaming, start `Runner.run_streamed` and consume `result.stream_events()` inside the scope. Each run in the scope uses metadata detail and `trace_include_sensitive_data=False`. Disabled tracing stays disabled. The scope leaves caller configs and normal behavior outside it unchanged.
 
 New asyncio tasks inherit the context at creation. Leaving the scope restores the previous setting in the current task. Enter a fresh scope on independent resume, in an existing worker task or in another service.
 
