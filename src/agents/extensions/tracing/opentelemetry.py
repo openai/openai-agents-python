@@ -288,6 +288,13 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
                 otel_span.set_attribute("error.type", "_OTHER")
                 otel_span.set_status(StatusCode.ERROR)
             operation = getattr(span.span_data, "operation", None)
+            if isinstance(span.span_data, (ResponseSpanData, GenerationSpanData)):
+                for attempt, at in enumerate(span.span_data.operation.retry_timestamps, start=2):
+                    otel_span.add_event(
+                        "openai.agents.model.retry",
+                        {"openai.agents.model.attempt": attempt},
+                        timestamp=_timestamp(at),
+                    )
             if operation is not None and operation.outcome in (
                 "error",
                 "failed",
@@ -414,12 +421,11 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
             if data.output is not None:
                 values["gen_ai.tool.call.result"] = bound_content(data.output)
         else:
-            if isinstance(data, ResponseSpanData):
-                inputs = bound_content(data.input)
-                output = bound_content(data.response.output) if data.response is not None else None
-            else:
-                inputs = data.input
-                output = data.output
+            inputs = data.input
+            output = data.output
+            if isinstance(data, ResponseSpanData) and data.response is not None:
+                inputs = bound_content(inputs)
+                output = bound_content(data.response.output)
             request: dict[str, Any] = {}
             if inputs is not None:
                 request["messages"] = _messages(inputs)
@@ -427,7 +433,7 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
                 values["gen_ai.output.messages"] = _message_schema(
                     bound_content(_messages(output, output=True)), "assistant"
                 )
-            if isinstance(data, GenerationSpanData) and data.model_config:
+            if data.model_config:
                 instructions = data.model_config.get("instructions")
                 if isinstance(instructions, str):
                     request["instructions"] = [{"type": "text", "content": instructions}]

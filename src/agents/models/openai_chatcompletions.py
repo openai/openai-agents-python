@@ -28,7 +28,7 @@ from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..logger import log_model_action_debug, logger
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import Tool
-from ..tracing import generation_span
+from ..tracing._model import chat_model_span
 from ..tracing.span_data import GenerationSpanData
 from ..tracing.spans import Span
 from ..usage import (
@@ -37,7 +37,7 @@ from ..usage import (
 )
 from ..util._error_tracing import model_span_errors
 from ..util._json import _to_dump_compatible
-from ._openai_retry import get_openai_retry_advice
+from ._openai_retry import create_with_retry_observation, get_openai_retry_advice
 from ._retry_runtime import should_disable_provider_managed_retries
 from ._trace import model_config_for_trace, populate_generation_span, record_generation_tools
 from .chatcmpl_converter import Converter
@@ -254,12 +254,12 @@ class OpenAIChatCompletionsModel(Model):
         self._handle_unsupported_prompt(prompt)
 
         with (
-            generation_span(
+            chat_model_span(
                 model=str(self.model),
                 model_config=model_config_for_trace(
                     model_settings, tracing, base_url=self._client.base_url
                 ),
-                disabled=tracing.is_disabled(),
+                tracing=tracing,
             ) as span_generation,
             model_span_errors(
                 span_generation,
@@ -468,12 +468,12 @@ class OpenAIChatCompletionsModel(Model):
         self._handle_unsupported_prompt(prompt)
 
         with (
-            generation_span(
+            chat_model_span(
                 model=str(self.model),
                 model_config=model_config_for_trace(
                     model_settings, tracing, base_url=self._client.base_url
                 ),
-                disabled=tracing.is_disabled(),
+                tracing=tracing,
             ) as span_generation,
             model_span_errors(
                 span_generation,
@@ -768,7 +768,8 @@ class OpenAIChatCompletionsModel(Model):
             )
         create_kwargs.update(extra_args)
 
-        ret = await self._get_client().chat.completions.create(**create_kwargs)
+        client = self._get_client()
+        ret = await create_with_retry_observation(client, client.chat.completions, create_kwargs)
 
         if isinstance(ret, ChatCompletion):
             return ret
