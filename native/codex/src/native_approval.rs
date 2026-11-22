@@ -1,27 +1,268 @@
 //! Resume one native call after the SDK has atomically claimed its saved approval.
 
-use codex_core_api::{CodexThread, StartIfIdleSubmission};
-use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::{EventMsg, Op, ReviewDecision};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use crate::NativeResult;
+use codex_core::restore_tool_call::{ApprovalCheck, ApprovalStage, NativeApproval};
+use codex_core_api::{CodexThread, StartIfIdleSubmission, TurnInputRequest, WithTurnExtensionData};
+use codex_exec_server::EnvironmentAccess;
+use codex_extension_api::ExtensionDataInit;
+use codex_protocol::approvals::ExecApprovalKind;
+use codex_protocol::error::{CodexErr, Result as CodexResult};
+use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::{Event, EventMsg, Op, ReviewDecision};
+use futures::future::BoxFuture;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+use crate::{NativeResult, approval_files};
+
+struct Pending {
+    live: Weak<()>,
+    checkpoint: Value,
+}
+
+enum Checks {
+    Capture(Mutex<HashMap<String, Option<Pending>>>),
+    Restore {
+        expected: Box<EventMsg>,
+        approved_turn: OnceLock<String>,
+        checkpoint: Value,
+    },
+}
+
+fn call_id(event: &EventMsg) -> Option<&str> {
+    match event {
+        EventMsg::ExecApprovalRequest(e)
+            if e.kind == ExecApprovalKind::Command
+                && e.approval_id.is_none()
+                && e.network_approval_context.is_none() =>
+        {
+            Some(&e.call_id)
+        }
+        EventMsg::ApplyPatchApprovalRequest(e) if e.grant_root.is_none() => Some(&e.call_id),
+        _ => None,
+    }
+}
+
+// Only these two fields change when Codex prepares the same action on a new turn.
+fn action(event: &EventMsg) -> Option<Value> {
+    let mut value = serde_json::to_value(event).ok()?;
+    let fields = value.as_object_mut()?;
+    fields.remove("turn_id");
+    fields.remove("started_at_ms");
+    Some(value)
+}
+
+impl ApprovalCheck for Checks {
+    fn check<'a>(
+        &'a self,
+        mut policy: Value,
+        fs: &'a dyn EnvironmentAccess,
+        stage: ApprovalStage<'a>,
+    ) -> BoxFuture<'a, CodexResult<()>> {
+        Box::pin(async move {
+            policy.sort_all_objects();
+            let permissions = format!("{:x}", Sha256::digest(policy.to_string().as_bytes()));
+            match (self, stage) {
+                (
+                    Self::Capture(pending),
+                    ApprovalStage::Capture {
+                        call_id,
+                        changes,
+                        live,
+                    },
+                ) => {
+                    let patch = match changes {
+                        Some(changes) => approval_files::capture(fs, changes).await?,
+                        None => Value::Null,
+                    };
+                    let checkpoint = json!({
+                        "version": 1, "first_approval": true, "permissions": permissions, "patch": patch,
+                    });
+                    // A repeated ID invalidates both requests for the rest of the turn.
+                    pending
+                        .lock()
+                        .unwrap()
+                        .entry(call_id.to_owned())
+                        .and_modify(|old| *old = None)
+                        .or_insert(Some(Pending { live, checkpoint }));
+                }
+                (
+                    Self::Restore {
+                        expected,
+                        checkpoint,
+                        approved_turn,
+                    },
+                    stage,
+                ) if checkpoint["permissions"] == permissions => {
+                    match stage {
+                        ApprovalStage::Prepare if approved_turn.get().is_none() => {}
+                        ApprovalStage::Execute {
+                            turn_id,
+                            call_id: id,
+                        } if approved_turn.get().map(String::as_str) == Some(turn_id)
+                            && call_id(expected) == Some(id) => {}
+                        _ => {
+                            return Err(CodexErr::InvalidRequest(
+                                "A restored call requires a fresh matching approval.".into(),
+                            ));
+                        }
+                    }
+                    if let EventMsg::ApplyPatchApprovalRequest(request) = expected.as_ref() {
+                        approval_files::validate(fs, &request.changes, &checkpoint["patch"])
+                            .await?;
+                    }
+                }
+                _ => {
+                    return Err(CodexErr::InvalidRequest(
+                        "Cannot verify saved permissions.".into(),
+                    ));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+impl Checks {
+    fn decision(&self, event: &mut EventMsg, turn_id: &str) -> Option<Op> {
+        let Self::Restore {
+            expected,
+            checkpoint,
+            approved_turn,
+        } = self
+        else {
+            return None;
+        };
+        if approved_turn.get().is_some() || call_id(event)? != call_id(expected)? {
+            return None;
+        }
+        // Legacy records use literal changes, even when a file looks like a digest.
+        if checkpoint["patch"]["version"] == 2 {
+            let EventMsg::ApplyPatchApprovalRequest(edit) = event else {
+                return None;
+            };
+            if !approval_files::compact(&mut edit.changes, &checkpoint["patch"]).ok()? {
+                return None;
+            }
+        }
+        if action(event)? != action(expected)? {
+            return None;
+        }
+        let decision = match event {
+            EventMsg::ExecApprovalRequest(e)
+                if e.turn_id == turn_id
+                    && e.effective_available_decisions()
+                        .contains(&ReviewDecision::Approved) =>
+            {
+                Op::ExecApproval {
+                    id: e.call_id.clone(),
+                    turn_id: Some(turn_id.to_owned()),
+                    decision: ReviewDecision::Approved,
+                }
+            }
+            EventMsg::ApplyPatchApprovalRequest(e) if e.turn_id == turn_id => Op::PatchApproval {
+                id: e.call_id.clone(),
+                decision: ReviewDecision::Approved,
+            },
+            _ => return None,
+        };
+        // A cached approval or a policy skip never passes through this gate.
+        approved_turn.set(turn_id.to_owned()).ok()?;
+        Some(decision)
+    }
+}
+
+pub(super) fn capture(request: TurnInputRequest) -> WithTurnExtensionData<TurnInputRequest> {
+    let mut init = ExtensionDataInit::new();
+    init.insert(Checks::Capture(Mutex::default()));
+    let checks = init.get::<Checks>().unwrap();
+    init.insert(NativeApproval {
+        check: checks,
+        call: None,
+    });
+    WithTurnExtensionData::new(request, init)
+}
+
+pub(super) async fn checkpoint(thread: &CodexThread, event: &mut Event) -> Option<Value> {
+    let checks = thread
+        .current_turn_extension_data::<Checks>(&event.id)
+        .await?;
+    let Checks::Capture(pending) = checks.as_ref() else {
+        return None;
+    };
+    let mut saved = pending
+        .lock()
+        .unwrap()
+        .get_mut(call_id(&event.msg)?)?
+        .take()?;
+    let _live = saved.live.upgrade()?;
+    let patch = &mut saved.checkpoint["patch"];
+    match &mut event.msg {
+        EventMsg::ApplyPatchApprovalRequest(edit) if edit.turn_id == event.id => {
+            if approval_files::compact(&mut edit.changes, patch).ok()? {
+                patch["version"] = json!(2);
+            }
+        }
+        EventMsg::ExecApprovalRequest(e) if e.turn_id == event.id && patch.is_null() => {}
+        _ => return None,
+    }
+    Some(saved.checkpoint)
+}
 
 pub(super) async fn resolve(
     thread: &CodexThread,
     call: ResponseItem,
     expected: EventMsg,
-    preconditions: serde_json::Value,
+    checkpoint: Value,
     operations: &crate::operation_tracing::Root,
 ) -> NativeResult<String> {
-    let (call_id, patch) = match &expected {
-        EventMsg::ExecApprovalRequest(request) => (request.call_id.clone(), false),
-        EventMsg::ApplyPatchApprovalRequest(request) => (request.call_id.clone(), true),
+    let (id, patch) = match (&call, &expected) {
+        (
+            ResponseItem::FunctionCall {
+                call_id,
+                name,
+                namespace,
+                ..
+            },
+            EventMsg::ExecApprovalRequest(_),
+        ) if name == "exec_command" && matches!(namespace.as_deref(), None | Some("functions")) => {
+            (call_id, false)
+        }
+        (
+            ResponseItem::CustomToolCall {
+                call_id,
+                name,
+                namespace,
+                ..
+            },
+            EventMsg::ApplyPatchApprovalRequest(_),
+        ) if name == "apply_patch" && matches!(namespace.as_deref(), None | Some("functions")) => {
+            (call_id, true)
+        }
         _ => return Err("Unsupported Codex approval request.".into()),
     };
-    // Restoration dispatches this call through Core. Core checks the saved request
-    // against its freshly prepared action before it can ask us for the decision.
+    if call_id(&expected) != Some(id)
+        || checkpoint["version"] != 1
+        || checkpoint["first_approval"] != true
+    {
+        return Err("Invalid saved Codex approval.".into());
+    }
+    let call_id = id.clone();
+    let mut init = thread.config_snapshot().await.turn_extension_init;
+    let checks = Arc::new(Checks::Restore {
+        expected: Box::new(expected),
+        approved_turn: OnceLock::new(),
+        checkpoint,
+    });
+    init.insert(NativeApproval {
+        check: checks.clone(),
+        call: Some(call),
+    });
+    let request = WithTurnExtensionData::new(TurnInputRequest::user_input(Vec::new()), init);
     let StartIfIdleSubmission::Started { turn_id, .. } =
-        Box::pin(thread.restore_tool_call_if_idle(call, expected, preconditions))
+        Box::pin(thread.start_turn_if_idle(request))
             .await
             .map_err(|_| "Could not restore the pending Codex approval.")?
     else {
@@ -40,36 +281,11 @@ pub(super) async fn resolve(
             continue;
         }
         let decision = match event.msg {
-            EventMsg::ExecApprovalRequest(request)
-                if !patch
-                    && !answered
-                    && request.call_id == call_id
-                    && request.approval_id.is_none()
-                    && request.turn_id == turn_id
-                    && request
-                        .effective_available_decisions()
-                        .contains(&ReviewDecision::Approved) =>
-            {
-                Op::ExecApproval {
-                    id: request.call_id,
-                    turn_id: Some(turn_id.clone()),
-                    decision: ReviewDecision::Approved,
-                }
-            }
-            EventMsg::ApplyPatchApprovalRequest(request)
-                if patch
-                    && !answered
-                    && request.call_id == call_id
-                    && request.turn_id == turn_id =>
-            {
-                Op::PatchApproval {
-                    id: request.call_id,
-                    decision: ReviewDecision::Approved,
-                }
-            }
-            EventMsg::ExecApprovalRequest(_)
-            | EventMsg::ApplyPatchApprovalRequest(_)
-            | EventMsg::RequestPermissions(_)
+            mut review @ (EventMsg::ExecApprovalRequest(_)
+            | EventMsg::ApplyPatchApprovalRequest(_)) => checks
+                .decision(&mut review, &turn_id)
+                .ok_or("The fresh Codex approval does not match the saved call.")?,
+            EventMsg::RequestPermissions(_)
             | EventMsg::RequestUserInput(_)
             | EventMsg::ElicitationRequest(_)
             | EventMsg::DynamicToolCallRequest(_) => {
@@ -78,7 +294,7 @@ pub(super) async fn resolve(
             EventMsg::PatchApplyEnd(end)
                 if answered && patch && end.call_id == call_id && end.turn_id == turn_id =>
             {
-                finished = true;
+                finished = end.success;
                 continue;
             }
             EventMsg::RawResponseItem(item) => {

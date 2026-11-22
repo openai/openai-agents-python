@@ -33,10 +33,12 @@ from agents.models import openai_provider
 from agents.models.openai_provider import OpenAIProvider
 from agents.request_capture import TransportCounts
 from agents.testing import ScriptedModel
+from agents.tracing.span_data import ResponseSpanData
 from tests.memory.test_openai_responses_compaction_session import SimpleListSession
 from tests.model_test_helpers import get_response_obj
 from tests.models.test_codex_provider import FakeThread, config, threads as threads
 from tests.test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
+from tests.testing_processor import fetch_ordered_spans
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.allow_call_model_methods]
 
@@ -147,8 +149,18 @@ async def test_client_and_runner_retries_and_redirect(peer, stream):
         ),
     )
     with RequestCapture() as capture:
-        result = await run(Agent(name="root", model=model, model_settings=settings), stream)
+        result = await run(
+            Agent(name="root", model=model, model_settings=settings),
+            stream,
+            run_config=RunConfig(tracing={"operation_detail": "metadata"}),
+        )
     assert result.final_output == "done"
+    (span,) = [
+        span.span_data
+        for span in fetch_ordered_spans()
+        if isinstance(span.span_data, ResponseSpanData)
+    ]
+    assert len(span.operation.retry_timestamps) == 2
     assert len(peer.requests) == 4
     totals = capture.totals
     (row,) = totals.routes

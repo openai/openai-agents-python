@@ -1,8 +1,14 @@
 from __future__ import annotations
 
-from openai import APIConnectionError, APITimeoutError
+import inspect
+from collections.abc import Mapping
+from typing import Any
 
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
+
+from ..request_capture import _ObservedOpenAI
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest, ModelRetryNormalizedError
+from ..tracing._model import current_model_span, record_retries
 from ._retry_runtime import (
     get_error_code as _get_error_code,
     get_error_header as _get_header_value,
@@ -11,6 +17,48 @@ from ._retry_runtime import (
     get_status_code as _get_status_code,
     iter_error_chain as _iter_error_chain,
 )
+
+
+def record_openai_error_retries(
+    client: AsyncOpenAI, error: Exception, create_kwargs: Mapping[str, Any]
+) -> None:
+    # A failed send has no raw response. The standard client marks its final
+    # outgoing request unless the caller supplied or removed this header.
+    if type(client) not in (AsyncOpenAI, _ObservedOpenAI) or not isinstance(
+        error, (APIStatusError, APIConnectionError)
+    ):
+        return
+    header = "x-stainless-retry-count"
+    overrides = create_kwargs.get("extra_headers") or {}
+    if not isinstance(overrides, Mapping) or any(key.lower() == header for key in overrides):
+        return
+    count = error.request.headers.get(header, "")
+    if (
+        len(count) <= 10
+        and count.isascii()
+        and count.isdecimal()
+        and int(count) <= client.max_retries
+    ):
+        record_retries(int(count))
+
+
+async def create_with_retry_observation(
+    client: AsyncOpenAI, resource: Any, create_kwargs: dict[str, Any]
+) -> Any:
+    create = resource.create
+    if current_model_span() is None or not inspect.ismethod(create):
+        return await create(**create_kwargs)
+    raw_create = getattr(getattr(resource, "with_raw_response", None), "create", None)
+    try:
+        if not callable(raw_create):
+            return await create(**create_kwargs)
+        response = await raw_create(**create_kwargs)
+    except (APIStatusError, APIConnectionError) as error:
+        record_openai_error_retries(client, error, create_kwargs)
+        raise
+    record_retries(getattr(response, "retries_taken", 0))
+    parsed = response.parse()
+    return await parsed if inspect.isawaitable(parsed) else parsed
 
 
 def _is_stateful_request(request: ModelRetryAdviceRequest) -> bool:
