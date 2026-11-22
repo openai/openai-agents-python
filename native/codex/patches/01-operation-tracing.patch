@@ -1,0 +1,147 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 2ac9b93..7257291 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -2017,7 +2017,7 @@ impl ResponsesHttpExecutor<'_> {
+             let request_session_telemetry =
+                 session_telemetry_for_request(session_telemetry, &request);
+             options.extra_headers.extend(responses_headers);
+-            let interceptors = crate::model_request::prepare(
++            let mut interceptors = crate::model_request::prepare(
+                 &self.client.request_contributors,
+                 &self.client.state.thread_id.to_string(),
+                 &model_info.slug,
+@@ -2032,6 +2032,11 @@ impl ResponsesHttpExecutor<'_> {
+                 }
+                 request.input = input;
+             }
++            for interceptor in &mut interceptors {
++                interceptor.observe_request(codex_extension_api::ModelRequestContent::Responses(
++                    &request,
++                ));
++            }
+             inference_trace_attempt.record_started(&request);
+             let client = ApiResponsesClient::new(
+                 transport,
+@@ -2040,6 +2045,11 @@ impl ResponsesHttpExecutor<'_> {
+             )
+             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+             let stream_result = client.stream_request(request, options).await;
++            if stream_result.is_err() {
++                for interceptor in &mut interceptors {
++                    interceptor.request_failed();
++                }
++            }
+
+             match stream_result {
+                 Ok(stream) => {
+@@ -2315,7 +2325,7 @@ impl ModelClientSession {
+                 client_setup.auth.as_ref(),
+                 &responses_headers,
+             );
+-            let interceptors = crate::model_request::prepare(
++            let mut interceptors = crate::model_request::prepare(
+                 &self.client.request_contributors,
+                 &self.client.state.thread_id.to_string(),
+                 &model_info.slug,
+@@ -2337,6 +2347,11 @@ impl ModelClientSession {
+                 let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
+                 payload.input = input;
+             }
++            let ResponsesWsRequest::ResponseCreate(payload) = &ws_request;
++            for interceptor in &mut interceptors {
++                interceptor
++                    .observe_request(codex_extension_api::ModelRequestContent::WebSocket(payload));
++            }
+             if !previous_response_id_from_untraced_warmup {
+                 inference_trace_attempt.record_started(&ws_request);
+             }
+@@ -2377,6 +2392,9 @@ impl ModelClientSession {
+             self.websocket_session.last_request = Some(request);
+             self.websocket_session.last_response_from_untraced_warmup = warmup;
+             let stream_result = stream_result.map_err(|err| {
++                for interceptor in &mut interceptors {
++                    interceptor.request_failed();
++                }
+                 let response_debug_context = extract_response_debug_context_from_api_error(&err);
+                 let err = self.client.state.provider.map_api_error(err);
+                 inference_trace_attempt.record_failed(
+diff --git a/codex-rs/core/src/tools/orchestrator.rs b/codex-rs/core/src/tools/orchestrator.rs
+index a1a88e4..c5f8077 100644
+--- a/codex-rs/core/src/tools/orchestrator.rs
++++ b/codex-rs/core/src/tools/orchestrator.rs
+@@ -102,6 +102,18 @@ impl ToolOrchestrator {
+                 .as_ref()
+                 .map(ActiveNetworkApproval::execution_proxy),
+         };
++        for contributor in tool_ctx
++            .session
++            .services
++            .extensions
++            .tool_lifecycle_contributors()
++        {
++            contributor.on_tool_execution_start(
++                &tool_ctx.session.thread_id.to_string(),
++                &tool_ctx.step_context.turn.sub_id,
++                &tool_ctx.call_id,
++            );
++        }
+         let run_result = tool
+             .run(req, &attempt_with_network_approval, &attempt_tool_ctx)
+             .await;
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index dc95f99..e985a9a 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -413,6 +413,10 @@ pub trait ToolContributor: Send + Sync {
+ /// rewriting the invocation. Use `ToolContributor` for owning a tool implementation
+ /// and hooks for policy that changes tool payloads.
+ pub trait ToolLifecycleContributor: Send + Sync {
++    /// One admitted native runtime attempt, after approval and network admission.
++    /// May repeat on sandbox retry; denied attempts never reach this callback.
++    fn on_tool_execution_start(&self, _thread_id: &str, _turn_id: &str, _call_id: &str) {}
++
+     /// Observe direct calls before readiness, dispatch waiting, and hooks, including blocked calls.
+     /// Excludes nested code-mode calls. Observers must return promptly.
+     fn on_tool_dispatch(&self, _input: ToolDispatchInput<'_>) {}
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 147b52f..bd94076 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -128,6 +128,7 @@ pub use contributors::ToolDispatchInput;
+ mod model_request;
+ pub use model_request::GuardianAssessment;
+ pub use model_request::ModelRequestContributor;
++pub use model_request::ModelRequestContent;
+ pub use model_request::ModelRequestInput;
+ pub use model_request::ModelRequestKind;
+ pub use model_request::ModelResponseError;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 0f477aa..6514694 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -35,10 +35,24 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+     fn request(&self, input: ModelRequestInput<'_>) -> Option<Box<dyn ModelResponseInterceptor>>;
+ }
+
++/// Borrowed final request body, after transport-specific input adjustment.
++/// Headers and authentication are deliberately outside this view.
++pub enum ModelRequestContent<'a> {
++    Responses(&'a codex_api::ResponsesApiRequest),
++    WebSocket(&'a codex_api::ResponseCreateWsRequest<'a>),
++}
++
+ /// Owns request state until consumed by the response stream or dropped on failure.
+ /// Interceptors compose in registration order; dropping their stream must release unfinished work.
+ /// Trusted host implementations must bound any model-visible content they synthesize.
+ pub trait ModelResponseInterceptor: Send + Sync {
++    /// Observe the final request without modifying it. Implementations must opt in,
++    /// bound any retained content, and return promptly; the default retains nothing.
++    fn observe_request(&mut self, _request: ModelRequestContent<'_>) {}
++
++    /// The transport returned an error before opening a response stream.
++    fn request_failed(&mut self) {}
++
+     /// Wrap the response stream, optionally buffering, inspecting, or transforming events.
+     /// The returned stream must own request state and propagate cancellation by dropping upstream.
+     fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream;

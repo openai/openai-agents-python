@@ -1203,6 +1203,10 @@ class RunContextWrapper(Generic[TContext]):
         rejection_message: str | None = None,
     ) -> None:
         """Record an approval or rejection decision."""
+        from .models._codex_items import native_approval_checkpoint
+
+        if native_approval_checkpoint(approval_item.raw_item) is not None and always:
+            raise UserError("Native approvals require a decision for the original call only.")
         hosted_request = get_hosted_mcp_approval_request_identity(approval_item)
         if hosted_request is not None:
             call_id = hosted_request.request_id
