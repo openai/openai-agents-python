@@ -70,9 +70,9 @@ async def test_native_prefixes_and_raw_consumer_are_independent(tmp_path, thread
         seen.append(text)
         return text[:1]
 
-    reader = run.stream_approved_output(approve)
+    reader = run.subscribe_approved_output(approve)
     with pytest.raises(RuntimeError):
-        run.stream_approved_output()
+        run.subscribe_approved_output()
     raw, approved = await asyncio.gather(collect(run.stream_events()), collect(reader))
     assert [
         event.data.delta
@@ -92,7 +92,7 @@ async def test_native_prefixes_and_raw_consumer_are_independent(tmp_path, thread
 @pytest.mark.parametrize("approval", [None, ""])
 async def test_no_forced_flush(approval):
     run = scripted()
-    events = await collect(run.stream_approved_output(lambda text: approval))
+    events = await collect(run.subscribe_approved_output(lambda text: approval))
     assert len(events) == 1 and isinstance(events[0], FinalOutputAccepted)
     await collect(run.stream_events())
 
@@ -101,7 +101,7 @@ async def test_no_forced_flush(approval):
 async def test_invalid_approval_fails_only_reader(approval):
     run = scripted("🙂")
     with pytest.raises(ValueError, match="exact text prefix"):
-        await collect(run.stream_approved_output(lambda text: approval))
+        await collect(run.subscribe_approved_output(lambda text: approval))
     await collect(run.stream_events())
     assert run.final_output == "🙂"
 
@@ -111,7 +111,7 @@ async def test_byte_bound_includes_unapproved_remainder(tmp_path, threads):
     threads[0].append(FakeThread(text=text))
     run = Runner.run_streamed(Agent(name="root"), "start", run_config=config(tmp_path))
     with pytest.raises(ValueError, match="65536"):
-        await collect(run.stream_approved_output(lambda text: None))
+        await collect(run.subscribe_approved_output(lambda text: None))
     await collect(run.stream_events())
     assert run.final_output == text
 
@@ -128,7 +128,7 @@ async def test_sequence_gap_fails_reader_without_reconstructing_text():
     model.enqueue([get_text_message("answer")])
     run = Runner.run_streamed(Agent(name="root", model=model), "start")
     with pytest.raises(ValueError, match="Gap"):
-        await anext(run.stream_approved_output(lambda text: text))
+        await anext(run.subscribe_approved_output(lambda text: text))
     await collect(run.stream_events())
     assert run.final_output == "answer"
 
@@ -154,7 +154,7 @@ async def test_item_switch_revokes_awaited_approval(tmp_path, threads):
             await release.wait()
         return text
 
-    reader = run.stream_approved_output(approve)
+    reader = run.subscribe_approved_output(approve)
     try:
         first = await asyncio.wait_for(anext(reader), 5)
         assert isinstance(first, ApprovedText) and (first.item_id, first.text) == ("item_1", "ok")
@@ -181,7 +181,7 @@ async def test_cancel_during_approval(tmp_path, threads, cancel):
             pass
         return text
 
-    reading = asyncio.create_task(collect(run.stream_approved_output(approve)))
+    reading = asyncio.create_task(collect(run.subscribe_approved_output(approve)))
     try:
         await asyncio.wait_for(entered.wait(), 5)
         if cancel == "reader":
@@ -213,7 +213,7 @@ async def test_early_prefix_survives_later_guardrail_failure(tmp_path, threads):
     run = Runner.run_streamed(
         Agent(name="root", output_guardrails=[reject]), "start", run_config=config(tmp_path)
     )
-    reader = run.stream_approved_output(lambda text: text)
+    reader = run.subscribe_approved_output(lambda text: text)
     try:
         first = await asyncio.wait_for(anext(reader), 5)
         assert isinstance(first, ApprovedText) and first.text == "A "
@@ -224,7 +224,8 @@ async def test_early_prefix_survives_later_guardrail_failure(tmp_path, threads):
     assert await collect(reader) == []
 
 
-async def test_no_final_after_persistence_failure():
+@pytest.mark.parametrize("display", [False, True])
+async def test_no_final_after_persistence_failure(display):
     class FailingSession(SimpleListSession):
         async def add_items(self, items):
             if any(item.get("role") == "assistant" for item in items):
@@ -232,12 +233,19 @@ async def test_no_final_after_persistence_failure():
             await super().add_items(items)
 
     run = scripted(session=FailingSession())
-    assert await collect(run.stream_approved_output()) == []
+    if display:
+        with pytest.raises(RuntimeError, match="save failed"):
+            async with run.stream_approved_output() as events:
+                async for _ in events:
+                    pytest.fail("Unexpected receipt")
+        return
+    assert await collect(run.subscribe_approved_output()) == []
     with pytest.raises(RuntimeError, match="save failed"):
         await collect(run.stream_events())
 
 
-async def test_no_final_on_interruption():
+@pytest.mark.parametrize("display", [False, True])
+async def test_no_final_on_interruption(display):
     @function_tool(needs_approval=True)
     def pause():
         return "ok"
@@ -245,8 +253,12 @@ async def test_no_final_on_interruption():
     model = ScriptedModel()
     model.enqueue([get_function_tool_call("pause", "{}")])
     run = Runner.run_streamed(Agent(name="root", model=model, tools=[pause]), "start")
-    assert await collect(run.stream_approved_output()) == []
-    await collect(run.stream_events())
+    if display:
+        async with run.stream_approved_output() as events:
+            assert await collect(events) == []
+    else:
+        assert await collect(run.subscribe_approved_output()) == []
+        await collect(run.stream_events())
     assert run.interruptions
 
 
@@ -262,7 +274,7 @@ async def test_final_only_waits_for_provider_cleanup_even_with_empty_output(monk
 
     monkeypatch.setattr(MultiProvider, "aclose", held_close)
     run = scripted("")
-    reading = asyncio.create_task(collect(run.stream_approved_output()))
+    reading = asyncio.create_task(collect(run.subscribe_approved_output()))
     try:
         await asyncio.wait_for(entered.wait(), 5)
         assert run.final_output == ""
@@ -298,7 +310,7 @@ async def test_nested_agent_and_tool_correction_stay_out_of_root_reader():
         seen.append(text)
         return text
 
-    events = await collect(run.stream_approved_output(approve))
+    events = await collect(run.subscribe_approved_output(approve))
     await collect(run.stream_events())
     assert seen == ["public answer"]
     assert [(e.turn, e.text) for e in events if isinstance(e, ApprovedText)] == [
@@ -362,7 +374,7 @@ async def test_approval_cannot_outlive_its_candidate(boundary):
         output_type=Answer if boundary == "replacement" else None,
     )
     run = Runner.run_streamed(root, "start", error_handlers={"invalid_final_output": recover})
-    reading = asyncio.create_task(collect(run.stream_approved_output(approve)))
+    reading = asyncio.create_task(collect(run.subscribe_approved_output(approve)))
     try:
         await asyncio.wait_for(retired.wait(), 5)
         # Register after the reader so it resumes before the provider is released.
@@ -406,7 +418,7 @@ async def test_retry_before_text_starts_a_fresh_response():
     retry = ModelRetrySettings(max_retries=1, policy=lambda _: RetryDecision(retry=True, delay=0))
     root = Agent(name="root", model=model, model_settings=ModelSettings(retry=retry))
     run = Runner.run_streamed(root, "start")
-    events = await collect(run.stream_approved_output(lambda text: text))
+    events = await collect(run.subscribe_approved_output(lambda text: text))
     await collect(run.stream_events())
     chunk, final = events
     assert (chunk.turn, chunk.turn_id, chunk.text) == (1, "second", "answer")
@@ -449,9 +461,9 @@ async def test_hosted_child_raw_text_never_reaches_approval(previews):
     )
     run = Runner.run_streamed(Agent(name="root", model=model), "start")
     reader = (
-        run.stream_approved_output(lambda _: pytest.fail("Child draft"))
+        run.subscribe_approved_output(lambda _: pytest.fail("Child draft"))
         if previews
-        else run.stream_approved_output()
+        else run.subscribe_approved_output()
     )
     if previews:
         with pytest.raises(ValueError, match="isolate root"):
@@ -520,7 +532,7 @@ async def test_pending_approval_expires_before_attempt_cleanup(ending):
         model_settings=ModelSettings(timeout=1 if ending == "timeout" else None),
     )
     run = Runner.run_streamed(root, "start")
-    reading = asyncio.create_task(collect(run.stream_approved_output(approve)))
+    reading = asyncio.create_task(collect(run.subscribe_approved_output(approve)))
     try:
         await asyncio.wait_for(entered.wait(), 5)
         if ending == "cancel":
@@ -577,9 +589,131 @@ async def test_cancelled_provider_close_releases_both_readers(timeout, terminal)
         model_settings=ModelSettings(timeout=timeout),
     )
     run = Runner.run_streamed(root, "start")
-    reader = run.stream_approved_output(lambda text: text)
+    reader = run.subscribe_approved_output(lambda text: text)
     _, approved = await asyncio.wait_for(
         asyncio.gather(collect(run.stream_events()), collect(reader)), 5
     )
     assert [type(event) for event in approved] == [ApprovedText]
     assert run.final_output is None
+
+
+async def test_display_owns_the_raw_reader_and_accepts_empty_output():
+    run = scripted("")
+    raw = run.stream_events()
+    async with run.stream_approved_output() as events:
+        with pytest.raises(RuntimeError, match="owns"):
+            await anext(raw)
+        with pytest.raises(RuntimeError):
+            run.subscribe_approved_output()
+        (receipt,) = await collect(events)
+        assert isinstance(receipt, FinalOutputAccepted)
+        assert run.final_output == ""
+    with pytest.raises(RuntimeError, match="before"):
+        async with run.stream_approved_output():
+            pass
+
+
+async def test_display_preview_survives_guardrail_rejection(tmp_path, threads):
+    @output_guardrail
+    def reject(ctx, agent, output):
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    thread = FakeThread(text="OK secret")
+    threads[0].append(thread)
+    run = Runner.run_streamed(
+        Agent(name="root", output_guardrails=[reject]), "private", run_config=config(tmp_path)
+    )
+    seen = []
+    async with run.stream_approved_output(
+        lambda text: "OK" if text.startswith("OK") else None
+    ) as events:
+        with pytest.raises(OutputGuardrailTripwireTriggered):
+            async for event in events:
+                assert isinstance(event, ApprovedText)
+                seen.append(event.text)
+    assert seen == ["OK"]
+    assert thread.closed
+
+
+@pytest.mark.parametrize("ending", ["break", "cancel", "invalid"])
+async def test_display_joins_native_execution_on_early_exit(tmp_path, threads, ending):
+    thread = FakeThread(gate=asyncio.Event())
+    threads[0].append(thread)
+    shown = asyncio.Event()
+
+    async def display():
+        run = Runner.run_streamed(Agent(name="root"), "start", run_config=config(tmp_path))
+        async with run.stream_approved_output(
+            lambda text: "!" if ending == "invalid" else text
+        ) as events:
+            async for event in events:
+                assert isinstance(event, ApprovedText)
+                shown.set()
+                if ending == "break":
+                    break
+
+    task = asyncio.create_task(display())
+    if ending == "cancel":
+        await asyncio.wait_for(shown.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+    elif ending == "invalid":
+        with pytest.raises(ValueError, match="prefix"):
+            await asyncio.wait_for(task, 5)
+    else:
+        await asyncio.wait_for(task, 5)
+        assert shown.is_set()
+    assert thread.closed
+
+
+async def test_early_display_exit_joins_sandbox_snapshot():
+    from .sandbox.test_runtime import (
+        Manifest,
+        SandboxAgent,
+        _FakeClient,
+        _MarkerSnapshot,
+        _PersistingStopSession,
+        _sandbox_run_config,
+        get_final_output_message,
+    )
+
+    release = asyncio.Event()
+    session = _PersistingStopSession(Manifest(), release)
+    model = ScriptedModel([[get_final_output_message("draft")]])
+    run = Runner.run_streamed(
+        SandboxAgent(name="root", model=model),
+        "start",
+        run_config=_sandbox_run_config(_FakeClient(session)),
+    )
+    async with run.stream_approved_output():
+        while not session.stop_calls:
+            await asyncio.sleep(0)
+        asyncio.get_running_loop().call_soon(release.set)
+    assert session.stop_calls == 1
+    assert isinstance(session.state.snapshot, _MarkerSnapshot)
+    assert session.state.snapshot.marker == "persisted"
+
+
+@pytest.mark.parametrize("early", [False, True])
+async def test_display_keeps_checkpoint_errors_detached(early):
+    from agents import ResumableSession, ResumableSessionError
+
+    from .memory.test_resumable_session import MemoryStore
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    store.fail_checkpoint = True
+    try:
+        raise ValueError("private caller data")
+    except ValueError:
+        run = scripted(session=session)
+        with pytest.raises(ResumableSessionError) as caught:
+            async with run.stream_approved_output() as events:
+                if early:
+                    assert run.run_loop_task is not None
+                    await asyncio.wait((run.run_loop_task,))
+                else:
+                    async for _ in events:
+                        pytest.fail("Unexpected receipt")
+    assert caught.value.__context__ is None

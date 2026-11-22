@@ -5,6 +5,7 @@ import asyncio
 import copy
 import weakref
 from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import InitVar, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
@@ -789,6 +790,7 @@ class RunResultStreaming(RunResultBase):
     def __post_init__(self, _run_impl_task: asyncio.Task[Any] | None) -> None:
         self._approved_output: ApprovedOutput | None = None
         self._stream_started = False
+        self._display_driver: asyncio.Task[None] | None = None
         self._current_agent_ref = weakref.ref(self.current_agent)
         # Store the original input at creation time (it will be set via input field)
         if self._original_input is None:
@@ -1015,7 +1017,7 @@ class RunResultStreaming(RunResultBase):
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    def stream_approved_output(
+    def subscribe_approved_output(
         self, approve: Approve | None = None
     ) -> AsyncGenerator[ApprovedText | FinalOutputAccepted, None]:
         """Subscribe once, immediately after Runner.run_streamed and before yielding control.
@@ -1036,8 +1038,25 @@ class RunResultStreaming(RunResultBase):
 
         Cancelling or closing this reader leaves execution running.
         Consume stream_events() concurrently or afterwards for run errors and cleanup.
+        This passive reader does not propagate run errors. Use stream_approved_output()
+        for a single reader, or drain raw events privately. For example, with no previews:
+
+        .. code-block:: python
+
+            run = Runner.run_streamed(agent, prompt)
+            receipts = run.subscribe_approved_output()
+            progress = 0
+            async for event in run.stream_events():
+                progress += 1
+            async for receipt in receipts:
+                await show_if_permitted(run.final_output)
         """
-        if self.run_loop_task is None or self._stream_started or self._approved_output is not None:
+        if (
+            self.run_loop_task is None
+            or self.run_loop_task.done()
+            or self._stream_started
+            or self._approved_output is not None
+        ):
             raise RuntimeError("Subscribe once before the streaming run starts.")
         reader = ApprovedOutput(approve)
         self._approved_output = reader
@@ -1050,6 +1069,98 @@ class RunResultStreaming(RunResultBase):
         self.run_loop_task.add_done_callback(finished)
         return reader.read(self)
 
+    @asynccontextmanager
+    async def stream_approved_output(
+        self, approve: Approve | None = None
+    ) -> AsyncIterator[AsyncIterator[ApprovedText | FinalOutputAccepted]]:
+        """Own the streaming run and privately drain its raw events.
+
+        Enter immediately after Runner.run_streamed(), before yielding control.
+        The iterator uses the same approval rules as subscribe_approved_output().
+        Omit approve for final notifications only. Check final_output separately
+        for disclosure before displaying it. Published previews cannot be
+        retracted, even if the run later fails or returns a different answer.
+
+        .. code-block:: python
+
+            from agents.stream_events import ApprovedText, FinalOutputAccepted
+
+            run = Runner.run_streamed(agent, prompt)
+            async with run.stream_approved_output(approve) as events:
+                async for event in events:
+                    if isinstance(event, ApprovedText):
+                        await show_preview(event.text)
+                    elif isinstance(event, FinalOutputAccepted):
+                        await show_if_permitted(run.final_output)
+
+        Do not consume stream_events() separately. Run errors propagate during
+        iteration or on early context exit. Consume the iterator inside this
+        context. Leaving early cancels unfinished work and waits for cleanup.
+        Use subscribe_approved_output() for a passive subscription.
+        """
+        if self._active_stream_consumers:
+            raise RuntimeError("stream_events() already has a reader.")
+        reader = self.subscribe_approved_output(approve)
+
+        async def drain() -> None:
+            async for _ in self.stream_events():
+                pass
+
+        driver = self._display_driver = asyncio.create_task(
+            _await_data_redacted_error_boundary(drain)
+        )
+        joined = False
+
+        async def display(
+            result: RunResultStreaming,
+        ) -> AsyncGenerator[ApprovedText | FinalOutputAccepted, None]:
+            nonlocal joined
+            receipt = None
+            async for event in reader:
+                if isinstance(event, ApprovedText):
+                    yield event
+                else:
+                    receipt = event
+                del event
+
+            # Wait for the ordinary stream's cleanup and recheck cancellation
+            # before publishing the receipt. Never cancel the drain with the caller.
+            await asyncio.wait((driver,))
+            joined = True
+            if result._cancel_mode != "none":
+                receipt = None
+            del result  # Do not retain run data on a redacted exception traceback.
+            await _await_data_redacted_error_boundary(lambda: driver)
+            if receipt is not None:
+                yield receipt
+
+        events = display(self)
+        try:
+            yield events
+        finally:
+            await events.aclose()
+            await reader.aclose()
+            if (
+                self._cancel_mode != "immediate"
+                and self.run_loop_task is not None
+                and not self.run_loop_task.done()
+            ):
+                self.cancel()
+            cancellation = None
+            while not driver.done():
+                try:
+                    await asyncio.wait((driver,))
+                except asyncio.CancelledError as exc:
+                    cancellation = exc
+            self._display_driver = None
+            if not driver.cancelled():
+                driver.exception()  # Retrieve secondary failures without masking a caller error.
+            if cancellation is not None:
+                raise cancellation
+        if not joined:
+            del self, reader, events, approve, drain
+            await _await_data_redacted_error_boundary(lambda: driver)
+
     async def stream_events(self) -> AsyncIterator[StreamEvent]:
         """Stream deltas for new items as they are generated. We're using the types from the
         OpenAI Responses API, so these are semantic events: each event has a `type` field that
@@ -1060,6 +1171,8 @@ class RunResultStreaming(RunResultBase):
         - A tripwire exception if a guardrail is tripped, e.g. InputGuardrailTripwireTriggered
           or OutputGuardrailTripwireTriggered.
         """
+        if self._display_driver is not None and self._display_driver is not asyncio.current_task():
+            raise RuntimeError("stream_approved_output() owns the raw event stream.")
         consumer_registered = False
         registered_consumer_task: asyncio.Task[Any] | None = None
         item_acknowledgement_pending = False
@@ -1266,8 +1379,11 @@ class RunResultStreaming(RunResultBase):
                     self._stored_exception = in_guard_exc
 
     def _cleanup_tasks(self):
-        if self.run_loop_task and not self.run_loop_task.done():
-            self.run_loop_task.cancel()
+        # An owning display joins the sandbox wrapper. Cancel only its producer
+        # below so a snapshot already being saved can finish.
+        if self._display_driver is None or self._sandbox_wrapped_run_loop_task is None:
+            if self.run_loop_task and not self.run_loop_task.done():
+                self.run_loop_task.cancel()
 
         if self._sandbox_wrapped_run_loop_task and not self._sandbox_wrapped_run_loop_task.done():
             self._sandbox_wrapped_run_loop_task.cancel()
