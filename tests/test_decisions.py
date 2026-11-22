@@ -466,6 +466,67 @@ async def test_model_cannot_extend_routing_input(arguments):
     assert not provider.requests
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("failure", ["arguments", "refusal", "invalid_response"])
+@pytest.mark.parametrize("hide_model,hide_tool", [(True, False), (False, True), (False, False)])
+@pytest.mark.parametrize("recover", [False, True])
+async def test_handoff_error_redaction(
+    monkeypatch, stream, failure, hide_model, hide_tool, recover
+):
+    from agents import _debug
+    from agents.exceptions import _is_error_data_redacted
+    from tests.test_error_logging_redaction import _agents_traceback_frame_locals
+
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", hide_model)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", hide_tool)
+    marker = "SYNTHETIC_PRIVATE_ROUTING_EVIDENCE"
+    arguments = {"input": marker}
+    if failure == "arguments":
+        arguments["extra"] = "unknown"
+    source = source_agent(arguments)
+
+    class RefusingProvider(Provider):
+        async def get_decision(self, request):
+            self.requests.append(request)
+            raise DecisionError("refusal", request_id="observed") from ValueError(request.input)
+
+    provider = RefusingProvider(None) if failure == "refusal" else Provider("unknown")
+    handoff = decision_handoff(
+        source, provider=provider, question="Which?", targets={"blue": source}
+    )
+    source.handoffs.append(handoff)
+    errors: list[Exception] = []
+    if recover:
+
+        def report(ctx, error):
+            if hide_model or hide_tool:
+                assert error.__traceback__ is None
+            errors.append(error)
+            return "Selection failed"
+
+        handoff.failure_error_function = report
+        assert isinstance(source.model, ScriptedModel)
+        source.model.enqueue([assistant_message("recovered")])
+        assert (await run(source, stream)).final_output == "recovered"
+        (error,) = errors
+    else:
+        with pytest.raises(ValueError) as caught:
+            await run(source, stream)
+        error = caught.value
+    if failure == "arguments":
+        assert not provider.requests
+    else:
+        assert isinstance(error, DecisionError) and error.reason == failure
+        assert error.request_id == ("observed" if failure == "refusal" else "request")
+    assert _is_error_data_redacted(error) == (hide_model or hide_tool)
+    if hide_model or hide_tool:
+        assert error.__cause__ is error.__context__ is None
+        assert marker not in str(error)
+        assert marker not in repr(_agents_traceback_frame_locals(error))
+    elif failure == "refusal":
+        assert marker in str(error.__cause__)
+
+
 async def test_immediate_stream_cancellation_drains_late_selection():
     source = source_agent()
     model = ScriptedModel()

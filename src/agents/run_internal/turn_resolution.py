@@ -621,6 +621,7 @@ async def execute_handoffs(
                 raise
             # A failed invocation is not a transfer. Do not run transfer hooks or filters.
             span_handoff.set_error(SpanError(message="Handoff invocation failed", data={}))
+            _detach_data_redacted_error_traceback(error)
             error_output = handoff.failure_error_function(context_wrapper, error)
             if inspect.isawaitable(error_output):
                 error_output = await error_output

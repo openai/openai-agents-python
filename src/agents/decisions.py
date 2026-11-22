@@ -16,9 +16,11 @@ from openai import AsyncOpenAI
 from openai.types.responses.response_usage import ResponseUsage
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
+from . import _debug
 from ._public_agent import get_public_agent
 from ._run_state_agent_identity import _DecisionHandoff
 from .agent import Agent
+from .exceptions import _data_redacted_error_boundary, _mark_error_data_redacted
 from .handoffs import Handoff
 from .run_context import RunContextWrapper
 from .usage import Usage, _response_usage_to_usage
@@ -436,7 +438,16 @@ def decision_handoff(
     def authorized(ctx: RunContextWrapper[_T] | None, label: str) -> bool:
         return admitted(ctx, label) and attached()
 
+    @_data_redacted_error_boundary
     async def invoke(ctx: RunContextWrapper[_T], arguments: str) -> Agent[_T]:
+        try:
+            return await select(ctx, arguments)
+        except (Exception, asyncio.CancelledError) as error:
+            if _debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA:
+                _mark_error_data_redacted(error)
+            raise
+
+    async def select(ctx: RunContextWrapper[_T], arguments: str) -> Agent[_T]:
         evidence = _routing_input(arguments)
         choices = available_choices(ctx)
         if not choices or not attached():
