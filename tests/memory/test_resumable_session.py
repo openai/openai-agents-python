@@ -451,11 +451,11 @@ async def test_delayed_stream_claim_uses_history_after_shared_handle_advances(mo
     release = asyncio.Event()
     original_begin = session._begin_run
 
-    async def gated_begin(input: Any) -> None:
+    async def gated_begin(input: Any, tool_hooks: Any) -> None:
         if input == "later":
             entered.set()
             await release.wait()
-        await original_begin(input)
+        await original_begin(input, tool_hooks)
 
     # Suspend only the claim boundary so another public run can advance the same handle.
     monkeypatch.setattr(session, "_begin_run", gated_begin)

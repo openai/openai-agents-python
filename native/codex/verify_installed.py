@@ -13,6 +13,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import sysconfig
@@ -135,6 +136,73 @@ async def default_route():
         sys.meta_path.remove(guard)
 
 
+class ApprovalStore:
+    value = None
+
+    async def load(self, _session_id):
+        return self.value
+
+    async def save(self, _session_id, value, *, expected):
+        if self.value != expected:
+            return False
+        self.value = value
+        return True
+
+
+def approval_provider(folder):
+    from agents.models.codex import CodexProvider
+
+    return CodexProvider(
+        cwd=(folder / "workspace").resolve(),
+        api_key="synthetic-installed-key",
+        config_overrides=[
+            'approval_policy="on-request"',
+            'approvals_reviewer="user"',
+            'model="installed"',
+            f"model_catalog_json={json.dumps(str(folder / 'catalog.json'))}",
+        ],
+    )
+
+
+def supports_file_sandbox():
+    if sys.platform != "linux":
+        return sys.platform == "darwin"  # The Windows test runner has no sandbox provisioned.
+    # Some hosts disallow user namespaces. Like Codex, prefer the system Bubblewrap.
+    native = importlib.import_module("agents.models._codex_native")
+    bundled = Path(native.__file__).parent / "_codex_bin" / "codex-resources" / "bwrap"
+    command = [
+        shutil.which("bwrap") or str(bundled),
+        "--unshare-user",
+        "--ro-bind",
+        "/",
+        "/",
+        "true",
+    ]
+    return subprocess.run(command, capture_output=True, timeout=5).returncode == 0
+
+
+async def pause_approval(folder):
+    from agents import Agent, RunConfig, Runner
+    from agents.memory.resumable_session import ResumableSession
+
+    provider = approval_provider(folder)
+    try:
+        store = ApprovalStore()
+        session = await ResumableSession.create(store)
+        result = await Runner.run(
+            Agent(name="Plain"),
+            "approval-input",
+            session=session,
+            run_config=RunConfig(model_provider=provider, tracing_disabled=True),
+        )
+        assert len(result.interruptions) == 1
+        (folder / "paused.json").write_text(
+            json.dumps([session.session_id, store.value]), encoding="utf-8"
+        )
+    finally:
+        await provider.aclose()
+
+
 async def native_route(folder):
     from unittest.mock import Mock
 
@@ -175,7 +243,7 @@ async def native_route(folder):
                 )
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 requests.append(body)
-                assert len(requests) <= 13, "Unexpected extra inference request."
+                assert len(requests) <= 17, "Unexpected extra inference request."
                 number = len(requests)
                 history = json.dumps(body["input"])
                 response = {"id": f"response-{number}"}
@@ -359,7 +427,7 @@ request_max_retries = 0
         assert usage.input_tokens_details.cached_tokens == 6
         assert usage.output_tokens_details.reasoning_tokens == 3
         spans = [call.args[0].span_data for call in processor.on_span_end.call_args_list]
-        samples = [span for span in spans if span.type == "generation"]
+        samples = [span for span in spans if span.type == "response"]
         assert len(samples) == 3
         assert all(span.input is None and span.output is None for span in samples)
         assert all(span.usage["input_tokens"] == 12 for span in samples)
@@ -420,7 +488,7 @@ request_max_retries = 0
         captured = [
             call.args[0].span_data for call in processor.on_span_end.call_args_list[before:]
         ]
-        native_models = [span for span in captured if span.type == "generation"]
+        native_models = [span for span in captured if span.type == "response"]
         native_tools = [
             span
             for span in captured
@@ -441,29 +509,48 @@ request_max_retries = 0
         )
         assert "opaque-late-reasoning" not in rendered
 
-        class ApprovalStore:
-            value = None
-
-            async def load(self, _session_id):
-                return self.value
-
-            async def save(self, _session_id, value, *, expected):
-                if self.value != expected:
-                    return False
-                self.value = value
-                return True
-
-        def fresh_provider():
-            return CodexProvider(
-                cwd=folder / "workspace",
-                api_key="synthetic-installed-key",
-                config_overrides=[
-                    'approval_policy="on-request"',
-                    'approvals_reviewer="user"',
-                ],
-            )
-
         await provider.aclose()
+        # Give the synthetic peer both direct tools regardless of the bundled catalog.
+        catalog = {
+            "slug": "installed",
+            "display_name": "Installed peer",
+            "base_instructions": "Use the available local tools.",
+            "shell_type": "unified_exec",
+            "apply_patch_tool_type": "freeform",
+            "tool_mode": "direct",
+            "supported_reasoning_levels": [],
+            "visibility": "list",
+            "supported_in_api": True,
+            "support_verbosity": False,
+            "experimental_supported_tools": [],
+            "priority": 0,
+            "truncation_policy": {"mode": "tokens", "limit": 10000},
+        }
+        (folder / "catalog.json").write_text(json.dumps({"models": [catalog]}), encoding="utf-8")
+
+        async def resume(approved):
+            before = target.read_bytes() if target.exists() else None
+            # Only the serialized session survives the worker process.
+            await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, "-I", __file__, "--pause", str(folder)],
+                check=True,
+                timeout=25,
+            )
+            store = ApprovalStore()
+            session_id, store.value = json.loads(
+                (folder / "paused.json").read_text(encoding="utf-8")
+            )
+            assert "workspace-only-marker" not in store.value
+            assert (target.read_bytes() if target.exists() else None) == before
+            recovered = await ResumableSession.resume(store, session_id)
+            state = await recovered.load_state(plain)
+            (pending,) = state.get_interruptions()
+            assert pending.raw_item.call_id == approval_item["call_id"]
+            state.approve(pending) if approved else state.reject(pending)
+            options = RunConfig(model_provider=provider, tracing_disabled=True)
+            return await Runner.run(plain, state, run_config=options)
+
         approval_checks = []
         for approved in (False, True):
             target = folder / "workspace" / f"builtin-command-{approved}.txt"
@@ -481,29 +568,68 @@ request_max_retries = 0
                     }
                 ),
             }
-            provider = fresh_provider()
-            options = RunConfig(model_provider=provider, tracing_disabled=True)
-            store = ApprovalStore()
-            session = await ResumableSession.create(store)
-            paused = await Runner.run(plain, "approval-input", session=session, run_config=options)
-            assert len(paused.interruptions) == 1 and not target.exists()
-            stored = store.value
-            await provider.aclose()
-            provider = fresh_provider()
-            options.model_provider = provider
-            recovered = await ResumableSession.resume(store, session.session_id)
-            state = await recovered.load_state(plain)
-            assert store.value == stored and not target.exists()
-            (pending,) = state.get_interruptions()
-            assert pending.raw_item.call_id == call_id
-            state.approve(pending) if approved else state.reject(pending)
-            result = await Runner.run(plain, state, run_config=options)
+            provider = approval_provider(folder)
+            result = await resume(approved)
             assert result.final_output == "approval resolved"
             assert target.exists() == approved
             if approved:
                 assert b"builtin-approved" in target.read_bytes().replace(b"\x00", b"")
             approval_checks.append("approve" if approved else "deny")
             await provider.aclose()
+
+        target = folder / "workspace" / "edit.txt"
+        target.write_text("before\nworkspace-only-marker\n", encoding="utf-8")
+        approval_item = {
+            "type": "custom_tool_call",
+            "name": "apply_patch",
+            "call_id": "edit",
+            "input": (
+                "*** Begin Patch\n*** Update File: edit.txt\n@@\n-before\n+updated\n*** End Patch"
+            ),
+        }
+        provider = approval_provider(folder)
+        assert (await resume(True)).final_output == "approval resolved"
+        assert target.read_text(encoding="utf-8") == "updated\nworkspace-only-marker\n"
+        approval_checks.append("edit")
+        await provider.aclose()
+
+        assert len(requests) == 15
+        if await asyncio.to_thread(supports_file_sandbox):
+            os.utime(target, (1_000_000_000, 1_000_000_000))
+            written_at = target.stat().st_mtime_ns
+            # A write followed by a sandbox denial must stop even if the first file still matches.
+            text = config_path.read_text(encoding="utf-8").replace(
+                'sandbox_mode = "read-only"', 'default_permissions = "partial"'
+            )
+            config_path.write_text(
+                text
+                + """
+[permissions.partial]
+extends = ":workspace"
+[permissions.partial.filesystem.":workspace_roots"]
+"protected.txt" = "read"
+""",
+                encoding="utf-8",
+            )
+            protected = folder / "workspace" / "protected.txt"
+            protected.write_text("safe\n", encoding="utf-8")
+            approval_item["call_id"] = "partial-edit"
+            approval_item["input"] = (
+                "*** Begin Patch\n*** Update File: edit.txt\n@@\n-updated\n+updated\n"
+                "*** Update File: protected.txt\n@@\n-safe\n+blocked\n*** End Patch"
+            )
+            provider = approval_provider(folder)
+            try:
+                await resume(True)
+            except RuntimeError as error:
+                assert "could not confirm" in str(error)
+            else:
+                raise AssertionError("A partially applied edit resumed.")
+            assert protected.read_text(encoding="utf-8") == "safe\n" and len(requests) == 16
+            approval_checks.append("partial edit stopped")
+            assert target.stat().st_mtime_ns != written_at, "The first write never ran."
+        else:
+            approval_checks.append("partial edit skipped (no filesystem sandbox)")
         assert "agents.models._codex_native" in sys.modules
         assert "agents.models._codex_app_server" not in sys.modules
         assert not config_path.with_name("auth.json").exists(), "The API key persisted to disk."
@@ -545,7 +671,11 @@ def main():
     parser.add_argument("--pure", action="store_true", help="verify the ordinary pure Python wheel")
     parser.add_argument("--output", type=Path, help="write the JSON receipt here")
     parser.add_argument("--worker", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--pause", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.pause is not None:
+        asyncio.run(pause_approval(args.pause))
+        return 0
     if args.worker is not None:
         try:
             report = asyncio.run(asyncio.wait_for(verify(args.pure, args.worker), timeout=90))
