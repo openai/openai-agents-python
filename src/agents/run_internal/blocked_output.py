@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses as _dc
 import inspect
 from collections.abc import Sequence
@@ -161,12 +162,19 @@ def blocked_function_output_payload(raw_item: Any) -> dict[str, Any]:
 _SIDE_EFFECT_ITEM_TYPES = frozenset({"tool_call_item", "tool_call_output_item"})
 
 
+def _blocked_output_errors(continuing: bool) -> tuple[type[BaseException], ...]:
+    # A continuation may enter history only after validation succeeds.
+    if continuing:
+        return (Exception, asyncio.CancelledError)
+    return (OutputGuardrailTripwireTriggered,)
+
+
 def _sanitize_blocked_output_guardrail_results(
     results: Sequence[OutputGuardrailResult],
-    tripwire: OutputGuardrailTripwireTriggered,
+    error: BaseException,
     blocked_message: str = OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
 ) -> list[OutputGuardrailResult]:
-    """Build data-free guardrail results and detach the tripwire from raw output."""
+    """Build data-free guardrail results and detach any tripwire from raw output."""
     sanitized_by_id: dict[int, OutputGuardrailResult] = {}
 
     def sanitize(result: OutputGuardrailResult) -> OutputGuardrailResult:
@@ -186,14 +194,17 @@ def _sanitize_blocked_output_guardrail_results(
         return sanitized
 
     sanitized_results = [sanitize(result) for result in results]
-    object.__setattr__(tripwire, "guardrail_result", sanitize(tripwire.guardrail_result))
-    _mark_error_data_redacted(tripwire)
-    _detach_data_redacted_error_traceback(tripwire)
+    if isinstance(error, OutputGuardrailTripwireTriggered):
+        object.__setattr__(error, "guardrail_result", sanitize(error.guardrail_result))
+    if isinstance(error, AgentsException):
+        # Do not attach the original candidate as run_data on a validator failure.
+        _mark_error_data_redacted(error)
+        _detach_data_redacted_error_traceback(error)
     return sanitized_results
 
 
 def _resolve_output_guardrail_blocked_message(
-    tripwire: OutputGuardrailTripwireTriggered,
+    error: BaseException,
     *,
     agent: Agent[Any],
     run_config: RunConfig,
@@ -202,7 +213,7 @@ def _resolve_output_guardrail_blocked_message(
     """Resolve a custom placeholder without suspending the redaction pipeline."""
     blocked_message = OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
     configured = run_config.output_guardrail_blocked_message
-    if configured is None:
+    if configured is None or not isinstance(error, OutputGuardrailTripwireTriggered):
         return blocked_message
     if type(configured) is str:
         resolved: Any = configured
@@ -212,7 +223,7 @@ def _resolve_output_guardrail_blocked_message(
             resolved = formatter(
                 OutputGuardrailBlockedMessageArgs(
                     default_message=blocked_message,
-                    guardrail_name=tripwire.guardrail_result.guardrail.get_name(),
+                    guardrail_name=error.guardrail_result.guardrail.get_name(),
                     agent=agent,
                     run_context=context_wrapper,
                 )

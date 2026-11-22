@@ -147,8 +147,9 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     Return `"finish"` to use normal finalization, the default without a policy. Return
     `"continue"` for another turn with this agent, subject to `max_turns`. To guide that
     turn, update application context used by dynamic instructions. Completed tools keep
-    their effects. Continued items remain provisional and can appear in model input,
-    session history and stream events without passing final output guardrails.
+    their effects. Agent and run output guardrails check the candidate before
+    continuation. Allowed items remain provisional in session history and subsequent
+    model input. These checks cannot retract earlier stream events or tool data.
     Policy errors propagate. Invalid decisions raise `UserError`.
     """
 

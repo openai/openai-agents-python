@@ -116,6 +116,7 @@ from .agent_tool_configuration import guard_agent_tool_configuration
 from .approvals import approvals_from_step
 from .blocked_output import (
     OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+    _blocked_output_errors,
     _BlockedOutputOwnerStarts,
     _current_response_boundary,
     _final_turn_items_for_persistence,
@@ -579,6 +580,7 @@ async def _finalize_streamed_final_output(
     on_persisted_after_guardrails: Callable[[bool], None] | None = None,
     stream_items_after_guardrails: bool = False,
     retry_on_guardrail_error: bool = False,
+    continue_after_guardrails: bool = False,
 ) -> None:
     output_guardrail_result_start = len(streamed_result.output_guardrail_results)
     redacted_persistence_error: BaseException | None = None
@@ -590,8 +592,8 @@ async def _finalize_streamed_final_output(
             context_wrapper=context_wrapper,
             streamed_result=streamed_result,
         )
-    except OutputGuardrailTripwireTriggered as exc:
-        if not _is_terminal_tool_output_response(
+    except _blocked_output_errors(continue_after_guardrails) as exc:
+        if not continue_after_guardrails and not _is_terminal_tool_output_response(
             items,
             processed_response,
             streamed_result._state,
@@ -651,6 +653,8 @@ async def _finalize_streamed_final_output(
                     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     return
                 raise safe_error from None
+        if isinstance(exc, asyncio.CancelledError) and streamed_result._cancel_mode != "immediate":
+            streamed_result._stored_exception = exc
         raise
     except Exception as guardrail_error:
         guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
@@ -735,6 +739,8 @@ async def _finalize_streamed_final_output(
 
     if stream_items_after_guardrails:
         stream_step_items_to_queue(items, streamed_result._event_queue)
+    if continue_after_guardrails:
+        return
     await checkpoint_streamed_result(streamed_result)
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
@@ -1674,6 +1680,7 @@ async def start_streaming(
                             agent=current_agent,
                             run_config=run_config,
                             output=turn_result.next_step.output,
+                            continue_after_guardrails=turn_result.next_step.continue_after_guardrails,
                             context_wrapper=context_wrapper,
                             save_items=_save_resumed_items,
                             items=list(turn_session_items),
@@ -1702,6 +1709,14 @@ async def start_streaming(
                         streamed_result.tool_output_guardrail_results.extend(
                             turn_result.tool_output_guardrail_results
                         )
+                        if turn_result.next_step.continue_after_guardrails:
+                            if run_state is not None:
+                                run_state._current_step = NextStepRunAgain()
+                            if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
+                                streamed_result
+                            ):
+                                break
+                            continue
                         if session is None:
                             # A detached final output has no Session to settle against
                             # and the run ends here, so the batch is discarded rather
@@ -2247,6 +2262,7 @@ async def start_streaming(
                         agent=current_agent,
                         run_config=run_config,
                         output=turn_result.next_step.output,
+                        continue_after_guardrails=turn_result.next_step.continue_after_guardrails,
                         context_wrapper=context_wrapper,
                         save_items=_save_stream_items_with_count,
                         items=turn_session_items,
@@ -2258,6 +2274,14 @@ async def start_streaming(
                     )
                     if streamed_result._stored_exception is not None:
                         break
+                    if turn_result.next_step.continue_after_guardrails:
+                        if run_state is not None:
+                            run_state._current_step = NextStepRunAgain()
+                        if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
+                            streamed_result
+                        ):
+                            break
+                        continue
                     if session is None:
                         # A detached completion has no Session to settle against and
                         # the run ends here, so the batch is discarded rather than

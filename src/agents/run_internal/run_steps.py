@@ -170,6 +170,7 @@ class NextStepHandoff:
 @dataclass
 class NextStepFinalOutput:
     output: Any
+    continue_after_guardrails: bool = False
 
 
 @dataclass

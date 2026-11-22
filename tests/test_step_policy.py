@@ -14,6 +14,7 @@ from agents import (
     ModelBehaviorError,
     ModelRefusalError,
     OutputGuardrailTripwireTriggered,
+    RunConfig,
     RunContextWrapper,
     RunHooks,
     Runner,
@@ -195,7 +196,7 @@ async def test_parsed_candidates_still_require_output_guardrails(streamed):
     @output_guardrail
     async def block(ctx, agent, output):
         checked.append(output.count)
-        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=output.count == 1)
 
     model = ScriptedModel([[get_text_message('{"count":0}')], [get_text_message('{"count":1}')]])
     agent = Agent(
@@ -208,7 +209,93 @@ async def test_parsed_candidates_still_require_output_guardrails(streamed):
     with pytest.raises(OutputGuardrailTripwireTriggered):
         await run(streamed, agent)
     assert seen == [("structured", Answer(count=0)), ("structured", Answer(count=1))]
-    assert checked == [1]
+    assert checked == [0, 1]
+
+
+@pytest.mark.parametrize("kind", ["text", "structured", "tool", "approval"])
+@pytest.mark.parametrize(
+    "failure", [OutputGuardrailTripwireTriggered, LookupError, UserError, asyncio.CancelledError]
+)
+async def test_blocked_continue_never_reaches_next_turn_or_session(streamed, kind, failure):
+    marker = "867530923"
+    decisions = []
+    checked = []
+    effects = []
+
+    @tool(needs_approval=kind == "approval")
+    def note() -> str:
+        effects.append("note")
+        return marker
+
+    @output_guardrail
+    def block(ctx, agent, output):
+        checked.append(output)
+        if failure is not OutputGuardrailTripwireTriggered:
+            raise failure("validation interrupted")
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=True)
+
+    def decide(ctx, step):
+        decisions.append(step.output)
+        return "continue"
+
+    tool_step = kind in ("tool", "approval")
+    candidate = Answer(count=int(marker)) if kind == "structured" else marker
+    item = (
+        get_function_tool_call("note", "{}", "call")
+        if tool_step
+        else get_text_message(
+            candidate.model_dump_json() if isinstance(candidate, Answer) else marker
+        )
+    )
+    model = ScriptedModel([[item]])
+    agent = Agent(
+        name="worker",
+        model=model,
+        tools=[note],
+        tool_use_behavior="stop_on_first_tool",
+        output_type=Answer if kind == "structured" else None,
+        hooks=AgentHooks(step_policy=decide),
+    )
+    hooks = EndHooks()
+    session = SQLiteSession("blocked")
+    config = RunConfig(output_guardrails=[block])
+    value: str | RunState = "start"
+    try:
+        if kind == "approval":
+            paused = await run(streamed, agent, session=session, run_config=config, hooks=hooks)
+            assert not decisions and not checked and not effects
+            value = await RunState.from_string(agent, paused.to_state().to_string())
+            value.approve(value.get_interruptions()[0])
+        with pytest.raises(failure) as caught:
+            if streamed:
+                stream = Runner.run_streamed(
+                    agent, value, session=session, hooks=hooks, run_config=config
+                )
+                async for _ in stream.stream_events():
+                    pass
+            else:
+                await run(False, agent, value, session=session, hooks=hooks, run_config=config)
+        if streamed:
+            assert stream.final_output is None
+            assert marker not in str(stream.new_items)
+        saved = await session.get_items()
+        assert marker not in str(saved)
+        if tool_step:
+            assert sum(item.get("type") == "function_call_output" for item in saved) == 1
+        if isinstance(caught.value, UserError):
+            assert str(caught.value) == "validation interrupted"
+            assert caught.value.run_data is None
+        if isinstance(caught.value, OutputGuardrailTripwireTriggered):
+            assert marker not in str(caught.value.guardrail_result.output.output_info)
+        followup = ScriptedModel([[get_text_message("ok")]])
+        await run(streamed, Agent(name="next", model=followup), session=session)
+        assert marker not in str(followup.calls[0].input)
+    finally:
+        session.close()
+    assert effects == (["note"] if tool_step else [])
+    assert decisions == checked == [candidate]
+    assert len(model.calls) == 1
+    assert hooks.outputs == []
 
 
 async def test_handoff_and_nonterminal_tools_precede_candidate_policy(streamed):

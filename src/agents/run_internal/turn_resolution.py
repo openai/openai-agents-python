@@ -483,7 +483,7 @@ async def execute_final_output(
                 model_response=new_response,
                 pre_step_items=pre_step_items,
                 new_step_items=new_step_items,
-                next_step=NextStepRunAgain(),
+                next_step=NextStepFinalOutput(final_output, continue_after_guardrails=True),
                 tool_input_guardrail_results=tool_input_guardrail_results,
                 tool_output_guardrail_results=tool_output_guardrail_results,
             )
