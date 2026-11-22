@@ -246,6 +246,13 @@ def _settings(settings: ModelSettings) -> tuple[str | None, str | None]:
     return (reasoning.effort if reasoning else None, reasoning.summary if reasoning else None)
 
 
+def _validate_native_restore(tools: list[Tool], bindings: ModelToolHooks | None) -> None:
+    if _uses_sdk_workspace(tools, bindings) or CodexToolHooks.for_run(bindings, set()):
+        raise UserError(
+            "The current workspace or native tool hooks do not allow restoring this call."
+        )
+
+
 class _CodexModel(Model):
     _supports_stored_response_id = False
     _sandbox_model_capabilities: ClassVar[dict[str, Any]] = {
@@ -265,11 +272,7 @@ class _CodexModel(Model):
     async def _run_approved_native_call(
         self, checkpoint: dict[str, Any], *, tools: list[Tool], tracing: ModelTracing
     ) -> str:
-        bindings = get_model_tool_hooks()
-        if _uses_sdk_workspace(tools, bindings) or CodexToolHooks.for_run(bindings, set()):
-            raise UserError(
-                "The current workspace or native tool hooks do not allow restoring this call."
-            )
+        _validate_native_restore(tools, get_model_tool_hooks())
         return await self._provider._run_approved_native_call(checkpoint, tracing)
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice:
