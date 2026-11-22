@@ -302,6 +302,9 @@ def _validate(
         )
 
 
+_OPENAI_CHOICE_COUNTS = range(2, 256)
+
+
 class OpenAIDecisions:
     """Ask a predicate or string/boolean choice with a caller-owned client and no retries."""
 
@@ -316,7 +319,7 @@ class OpenAIDecisions:
             question["type"] = "predicate"
         elif (
             set(schema) == {"enum"}
-            and 2 <= len(schema["enum"]) <= 255
+            and len(schema["enum"]) in _OPENAI_CHOICE_COUNTS
             and all(type(value) in (bool, str) for value in schema["enum"])
         ):
             question.update(type="choice", choices=[{"value": v} for v in schema["enum"]])
@@ -391,6 +394,7 @@ def decision_handoff(
 
     Labels bind to concrete agents at construction. Removing or replacing a target
     revokes it. A synchronous is_available callback can further restrict each run.
+    OpenAIDecisions requires 2 to 255 available labels to offer or invoke the handoff.
     Restoring a specialist from serialized RunState checks its incoming selectors.
     Supply a fresh context_override if any of them uses is_available.
     """
@@ -412,8 +416,14 @@ def decision_handoff(
             and agent.name == name
         )
 
+    def available_choices(ctx: RunContextWrapper[_T]) -> list[str]:
+        labels = [label for label in roster if admitted(ctx, label)]
+        if isinstance(provider, OpenAIDecisions) and len(labels) not in _OPENAI_CHOICE_COUNTS:
+            return []
+        return labels
+
     def enabled(ctx: RunContextWrapper[_T], agent: Any) -> bool:
-        return get_public_agent(agent) is source and any(admitted(ctx, label) for label in roster)
+        return get_public_agent(agent) is source and bool(available_choices(ctx))
 
     def attached() -> bool:
         return (
@@ -428,11 +438,9 @@ def decision_handoff(
 
     async def invoke(ctx: RunContextWrapper[_T], arguments: str) -> Agent[_T]:
         evidence = _routing_input(arguments)
-        choices = [label for label in roster if admitted(ctx, label)]
-        if not attached():
+        choices = available_choices(ctx)
+        if not choices or not attached():
             raise ValueError("Decision handoff is unavailable")
-        if not choices:
-            raise ValueError("No specialist is available")
         async with decision_scope(ctx):
             try:
                 result = await decide(

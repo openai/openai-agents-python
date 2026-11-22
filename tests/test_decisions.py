@@ -3,6 +3,7 @@
 import asyncio
 import json
 from typing import Any
+from unittest.mock import Mock
 
 import httpx2
 import pytest
@@ -251,6 +252,49 @@ async def run(source, stream, value="history", **kwargs):
             pass
         return result
     return await Runner.run(source, value, run_config=CONFIG, **kwargs)
+
+
+@pytest.mark.parametrize("count", [0, 1, 2, 255, 256])
+async def test_openai_handoff_catalog_uses_permitted_choice_count(count):
+    model = ScriptedModel([[assistant_message("stay")]])
+    source = Agent(name="Source", model=model)
+    targets = {str(i): Agent(name=str(i)) for i in range(max(2, count))}
+    client = Mock(spec=AsyncOpenAI)
+    route = decision_handoff(
+        source,
+        provider=OpenAIDecisions(client, model="fixture"),
+        question="Which?",
+        targets=targets,
+        is_available=lambda ctx, label: int(label) < count,
+    )
+    source.handoffs.append(route)
+    await run(source, False)
+    assert model.calls[0].handoffs == ([route] if 2 <= count <= 255 else [])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_openai_handoff_revoked_after_catalog_skips_provider(stream, monkeypatch):
+    source = source_agent()
+    targets = {"blue": Agent(name="Blue", model=ScriptedModel()), "red": Agent(name="Red")}
+
+    class Hooks(RunHooks):
+        async def on_llm_end(self, context, agent, response):
+            del targets["red"]
+
+    client = Mock(spec=AsyncOpenAI)
+    provider = OpenAIDecisions(client, model="fixture")
+    with pytest.raises(ValueError, match="2 to 255"):
+        await decide("Which?", provider=provider, input="item", choices=["blue"])
+    calls = Provider("blue")
+    monkeypatch.setattr(provider, "get_decision", calls.get_decision)
+    source.handoffs.append(
+        decision_handoff(source, provider=provider, question="Which?", targets=targets)
+    )
+    with pytest.raises(ValueError, match="unavailable"):
+        await run(source, stream, hooks=Hooks())
+    assert not calls.requests
+    assert isinstance(source.model, ScriptedModel)
+    assert len(source.model.calls) == 1 and source.model.calls[0].handoffs
 
 
 @pytest.mark.parametrize("stream", [False, True])

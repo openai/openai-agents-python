@@ -43,7 +43,7 @@ async def answer(client: AsyncOpenAI, decisions_model: str, text: str):
 - **Authority.** The handoff belongs to the source agent. Create a new handoff for a clone. Labels bind to the original agent objects and names. Removing, replacing or renaming a target makes it unavailable. Use a synchronous, side-effect-free `is_available(ctx, label)` to check application permissions. The handoff checks the selected route again before transfer. Runner keeps the run context, call IDs, tool restrictions and approvals.
 - **Failures.** Refusals and invalid answers raise `DecisionError`. Revoked routes raise `ValueError`. The provider deadline defaults to 30 seconds. On timeout or cancellation, the SDK waits for provider cleanup and discards late answers. Timeout raises `asyncio.TimeoutError`. If the provider cancels its own request, the SDK raises `RuntimeError`. Transport errors propagate. There is no automatic fallback or retry. To return an error to the primary model, explicitly set the handoff's `failure_error_function`. For immediate stream cancellation, call `result.cancel()` and drain `result.stream_events()`.
 - **Scope.** Both Runner modes support specialist selection. Decisions cannot invoke a tool, grant permissions or tell the source to continue. Realtime and dynamic agent factories are outside this integration.
-- **One available label.** The handoff still asks the provider to choose. `OpenAIDecisions` requires at least two choices and raises `ValueError` before sending a request. Use a provider that accepts one choice if your roster can narrow to one. The SDK never transfers by default.
+- **Available labels.** With `OpenAIDecisions`, the model sees the handoff only when 2 to 255 labels are available. If the count falls outside that range before invocation, the handoff raises `ValueError` without asking the provider or transferring. A custom provider can select a single available label. The SDK never transfers by default.
 
 ### Resume a specialist after a tool approval
 
@@ -67,7 +67,7 @@ Call `await decide(question, provider=provider, input=evidence)` from `agents.de
 
 A trusted `DecisionProvider` implements `async get_decision(request)` and returns `DecisionResult(value, request_id, model, usage)`. Read the validated answer from `result.value`. Both the result and `DecisionError` expose observed metadata. Missing metadata is `None`. Error reasons are `refusal` and `invalid_response`. The handoff adds reported usage to the run. Standalone calls leave accounting to the application.
 
-`OpenAIDecisions` requires `openai>=3.26.0` with the Decisions resource. It uses a predicate threshold of 0.5 or 2 to 255 string or boolean choices. It rejects other schemas before inference, including a roster narrowed to one label. Use a custom provider for other contracts. The adapter disables client retries and leaves the client open.
+`OpenAIDecisions` requires `openai>=3.26.0` with the Decisions resource. It uses a predicate threshold of 0.5 or 2 to 255 string or boolean choices. Standalone calls reject other schemas before inference. Use a custom provider for other contracts. The adapter disables client retries and leaves the client open.
 
 In an async callback, use `async with decision_scope(ctx)` and pass `owner=ctx` to `decide`. Only the exact owner in that live scope can use the bound call. Scope exit cancels and joins outstanding provider work. The application remains responsible for awaiting its own child tasks.
 
