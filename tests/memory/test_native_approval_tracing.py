@@ -60,15 +60,26 @@ async def test_native_pause_and_denial_emit_only_approval_metadata(
         assert result.final_output == "finished"
         assert not calls
         spans = fetch_ordered_spans()
-        decisions = [s.span_data for s in spans if s.span_data.type == "function"]
-        assert [s.operation.outcome for s in decisions] == (
-            [] if mode == "disabled" else ["paused", "paused", "rejected"]
-        )
-        assert all(
-            s.name == pending.name and s.operation.tool_call_id == pending.call_id
-            for s in decisions
-        )
-        assert all(s.input is None and s.output is None for s in decisions)
+        if mode == "default":
+            decisions = [s.span_data for s in spans if s.span_data.type == "function"]
+            assert [s.operation.outcome for s in decisions] == ["paused", "paused", "rejected"]
+            assert all(s.operation.tool_call_id == pending.call_id for s in decisions)
+            assert all(s.input is None and s.output is None for s in decisions)
+        else:
+            assert not [s for s in spans if s.span_data.type == "function"]
+            decisions = [
+                s.span_data.data
+                for s in spans
+                if getattr(s.span_data, "name", None) == "tool_approval"
+            ]
+            assert decisions == (
+                []
+                if mode == "disabled"
+                else [
+                    {"tool_name": pending.name, "tool_call_id": pending.call_id, "outcome": outcome}
+                    for outcome in ["paused", "paused", "rejected"]
+                ]
+            )
         otel = exporter.get_finished_spans()
         approvals = [s for s in otel if s.name == "openai.agents.tool_approval exec_command"]
         assert len(approvals) == (0 if mode == "disabled" else 3)

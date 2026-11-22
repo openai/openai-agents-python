@@ -347,7 +347,7 @@ request_max_retries = 0
         assert usage.input_tokens_details.cached_tokens == 6
         assert usage.output_tokens_details.reasoning_tokens == 3
         spans = [call.args[0].span_data for call in processor.on_span_end.call_args_list]
-        samples = [span for span in spans if span.type == "response"]
+        samples = [span for span in spans if span.type == "generation"]
         assert len(samples) == 3
         assert all(span.input is None and span.output is None for span in samples)
         assert all(span.usage["input_tokens"] == 12 for span in samples)
@@ -408,7 +408,7 @@ request_max_retries = 0
         captured = [
             call.args[0].span_data for call in processor.on_span_end.call_args_list[before:]
         ]
-        native_models = [span for span in captured if span.type == "response"]
+        native_models = [span for span in captured if span.type == "generation"]
         native_tools = [
             span
             for span in captured
@@ -462,7 +462,8 @@ request_max_retries = 0
                 "call_id": call_id,
                 "arguments": json.dumps(
                     {
-                        "cmd": f'echo builtin-approved > "{target}"',
+                        # Keep the process alive long enough for Codex's async exit watcher.
+                        "cmd": f'sleep 1; echo builtin-approved > "{target}"',
                         "login": False,
                         "sandbox_permissions": "require_escalated",
                     }

@@ -9,7 +9,6 @@ import pytest
 from openai import AsyncOpenAI
 
 from agents import Agent, ModelSettings, RunConfig, Runner
-from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_responses import OpenAIResponsesModel
 from agents.retry import ModelRetrySettings
 from agents.tracing.span_data import GenerationSpanData, ResponseSpanData
@@ -21,7 +20,7 @@ from tests.testing_processor import fetch_ordered_spans
 def test_response_capture_stops_reading_output_at_the_budget() -> None:
     from agents.models.interface import ModelTracing
     from agents.models.openai_responses import _record_response_operation
-    from agents.tracing import response_span
+    from agents.tracing import generation_span
     from agents.tracing._content import CONTENT_LIMIT
     from agents.tracing.config import operation_tracing_scope
 
@@ -37,7 +36,7 @@ def test_response_capture_stops_reading_output_at_the_budget() -> None:
     items = OutputItems([get_text_message("visible " + "x" * CONTENT_LIMIT)] * 100)
     response = get_response_obj([]).model_copy(update={"output": items})
     with operation_tracing_scope({"operation_detail": "content"}, True):
-        span = response_span(disabled=True)
+        span = generation_span(disabled=True)
         _record_response_operation(span, response, "prompt", ModelTracing.ENABLED)
     retained = json.dumps(span.span_data.output)
     assert "visible" in retained and "truncated" in retained
@@ -49,70 +48,31 @@ def test_response_capture_stops_reading_output_at_the_budget() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(
-    ("detail", "retry_owner", "scenario"),
+    ("detail", "exhausted", "retry_owner"),
     [
-        (None, "runner", "recover"),
-        ("content", "runner", "recover"),
-        ("content", "runner", "revoke"),
-        ("metadata", "runner", "fail"),
-        (None, "transport", "recover"),
-        ("metadata", "transport", "recover"),
-        ("metadata", "transport", "fail"),
-        ("metadata", "transport", "connection"),
-        ("metadata", "transport", "caller_header"),
+        (None, False, "runner"),
+        ("metadata", False, "runner"),
+        ("content", False, "runner"),
+        ("metadata", True, "runner"),
+        (None, False, "transport"),
     ],
 )
-@pytest.mark.parametrize("chat", [False, True])
-async def test_one_span_per_logical_call_in_every_capture_mode(
+async def test_runner_retries_preserve_default_attempts_and_coalesce_detailed_operations(
     stream: bool,
     detail: Literal["metadata", "content"] | None,
+    exhausted: bool,
     retry_owner: str,
-    scenario: str,
-    chat: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requests: list[dict[str, Any]] = []
-    exhausted = scenario not in {"recover", "revoke"}
-    config = RunConfig(tracing={} if detail is None else {"operation_detail": detail})
-
-    def retry(_: Any) -> bool:
-        if scenario == "revoke":
-            config.trace_include_sensitive_data = False
-        return True
 
     # A wire double preserves provider errors, stream parsing, and actual Runner retry ownership.
     async def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(json.loads(request.content))
-        if scenario == "connection":
-            raise httpx2.ConnectError("synthetic", request=request)
         if len(requests) == 1 or exhausted:
             return httpx2.Response(
-                503,
-                json={"error": {"message": "retry", "type": "server_error"}},
-                headers={"x-stainless-retry-count": "999"},
+                503, json={"error": {"message": "retry", "type": "server_error"}}
             )
-        if chat:
-            chunk = {
-                "id": "chat_mock",
-                "created": 0,
-                "object": "chat.completion.chunk" if stream else "chat.completion",
-                "model": "fake",
-                "choices": [
-                    {
-                        "index": 0,
-                        "finish_reason": "stop",
-                        "logprobs": None,
-                        "delta" if stream else "message": {"role": "assistant", "content": "done"},
-                    }
-                ],
-            }
-            if stream:
-                return httpx2.Response(
-                    200,
-                    content=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n",
-                    headers={"content-type": "text/event-stream"},
-                )
-            return httpx2.Response(200, json=chunk)
         payload = get_response_obj([get_text_message("done")]).model_dump(mode="json")
         if stream:
             event = {"type": "response.completed", "response": payload, "sequence_number": 0}
@@ -132,22 +92,18 @@ async def test_one_span_per_logical_call_in_every_capture_mode(
         monkeypatch.setattr(client, "_calculate_retry_timeout", lambda *args, **kwargs: 0)
         agent = Agent(
             name="retry",
-            model=(OpenAIChatCompletionsModel if chat else OpenAIResponsesModel)(
-                model="fake", openai_client=client
-            ),
+            model=OpenAIResponsesModel(model="fake", openai_client=client),
             model_settings=ModelSettings(
-                extra_headers={"X-Stainless-Retry-Count": "1"}
-                if scenario == "caller_header"
-                else None,
                 retry=ModelRetrySettings(
                     max_retries=1,
                     backoff={"initial_delay": 0},
-                    policy=retry,
+                    policy=lambda _: True,
                 )
                 if retry_owner == "runner"
-                else None,
+                else None
             ),
         )
+        config = RunConfig(tracing={} if detail is None else {"operation_detail": detail})
         error: Exception | None = None
         result = None
         try:
@@ -170,29 +126,12 @@ async def test_one_span_per_logical_call_in_every_capture_mode(
         for span in fetch_ordered_spans()
         if isinstance(span.span_data, (GenerationSpanData, ResponseSpanData))
     ]
-    assert len(spans) == 1
-    data = spans[0].span_data
-    assert isinstance(data, GenerationSpanData if chat else ResponseSpanData)
-    # A caller-supplied request header and a server-supplied response header
-    # are both unsuitable as evidence of an exhausted client's attempt count.
-    assert len(data.operation.retry_timestamps) == (0 if scenario == "caller_header" else 1)
-    exported = spans[0].export()
-    assert exported is not None
-    assert exported["metadata"]["operation"].get("retry_timestamps", []) == (
-        data.operation.retry_timestamps
-    )
-    if scenario == "revoke":
-        assert data.operation.detail == "metadata"
-        assert data.input is data.output is data.model_config is None
-    if isinstance(data, ResponseSpanData):
-        if detail is None and not exhausted:
-            assert data.response is not None and data.response.output_text == "done"
-            assert "hello" in str(data.input)
-        else:
-            assert data.response is None
+    assert len(spans) == (2 if detail is None and retry_owner == "runner" else 1)
     assert all(span.started_at is not None and span.ended_at is not None for span in spans)
     assert (spans[-1].error is not None) is exhausted
     assert spans[-1].span_data.operation.outcome == ("failed" if exhausted else "completed")
+    if detail is not None:
+        assert isinstance(spans[0].span_data, GenerationSpanData)
 
 
 @pytest.mark.allow_call_model_methods
@@ -264,7 +203,7 @@ async def test_content_uses_prepared_request_overrides(
     data = next(
         span.span_data
         for span in fetch_ordered_spans()
-        if isinstance(span.span_data, ResponseSpanData)
+        if isinstance(span.span_data, GenerationSpanData)
     )
     assert requests[0]["input"] == submitted
     if detail == "metadata":
@@ -280,7 +219,7 @@ async def test_content_uses_prepared_request_overrides(
     else:
         assert data.input == submitted
         assert data.model_config == {"instructions": requests[0]["instructions"]}
-    assert data.operation.model == "submitted-model"
+    assert data.model == "submitted-model"
     assert data.operation.previous_response_id == (
         "previous-response" if detail == "content" else None
     )
@@ -333,11 +272,12 @@ async def test_cancel_during_retry_backoff_finishes_logical_model_span(
             if not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-    spans = [span for span in fetch_ordered_spans() if isinstance(span.span_data, ResponseSpanData)]
+    spans = [
+        span for span in fetch_ordered_spans() if isinstance(span.span_data, GenerationSpanData)
+    ]
     assert len(spans) == 1
     assert spans[0].ended_at is not None
     assert spans[0].span_data.operation.outcome == "interrupted"
-    assert not spans[0].span_data.operation.retry_timestamps
 
 
 @pytest.mark.allow_call_model_methods
@@ -424,12 +364,11 @@ async def test_failed_terminal_records_outcome_before_exposure_and_preserves_sou
                 assert live.span_data.operation.response_id == (
                     "terminal-response" if sensitive or official else None
                 )
-                assert isinstance(live.span_data, ResponseSpanData)
-                assert live.span_data.response is None
-                assert live.span_data.export()["response_id"] is None
-                if detail == "content" and sensitive:
-                    assert live.span_data.output == payload["output"]
-                else:
+                if isinstance(live.span_data, ResponseSpanData):
+                    assert live.span_data.input is None
+                    assert live.span_data.response is None
+                    assert live.span_data.export()["response_id"] is None
+                elif not sensitive:
                     assert live.span_data.input is None
                     assert live.span_data.output is None
             finally:
@@ -522,10 +461,12 @@ async def test_nonstream_terminal_retains_permitted_metadata_and_partial_output(
     assert data.operation.response_model == response["model"]
     assert data.usage["input_tokens"] == 7
     assert data.usage["output_tokens"] == 2
-    assert isinstance(data, ResponseSpanData)
-    assert data.response is None
-    assert data.export()["response_id"] is None
-    assert data.operation.response_id == ("terminal-response" if sensitive or official else None)
-    assert data.output == (response["output"] if detail == "content" and sensitive else None)
-    if detail != "content" or not sensitive:
+    if isinstance(data, ResponseSpanData):
+        assert data.response is None
         assert data.input is None
+        assert data.export()["response_id"] is None
+    else:
+        assert data.operation.response_id == (
+            "terminal-response" if sensitive or official else None
+        )
+        assert data.output == (response["output"] if detail == "content" and sensitive else None)

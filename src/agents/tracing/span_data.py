@@ -150,8 +150,6 @@ class OperationMetadata:
     operation_id: str | None = None
     outcome: str | None = None
     estimated_end: bool = False
-    retry_timestamps: list[str] = field(default_factory=list)
-    """ISO 8601 observation times for attempts after the first, in order."""
 
     def export(self) -> dict[str, Any]:
         """Supply detailed operation facts alongside the existing hosted span schema."""
@@ -166,7 +164,6 @@ class OperationMetadata:
             "operation_id": self.operation_id,
             "outcome": self.outcome,
             "estimated_end": True if self.estimated_end else None,
-            "retry_timestamps": self.retry_timestamps or None,
         }
         return {key: value for key, value in values.items() if value is not None}
 
@@ -339,19 +336,10 @@ class GenerationSpanData(
 class ResponseSpanData(SpanData):
     """
     Represents a Response Span in the trace.
-    Default capture keeps the SDK response and input. Content capture keeps
-    bounded input, output and instructions without retaining the raw response.
+    Includes response and input.
     """
 
-    __slots__ = (
-        "response",
-        "input",
-        "output",
-        "model_config",
-        "usage",
-        "_response_id",
-        "operation",
-    )
+    __slots__ = ("response", "input", "usage", "_response_id", "operation")
 
     def __init__(
         self,
@@ -363,8 +351,6 @@ class ResponseSpanData(SpanData):
         # This is not used by the OpenAI trace processors, but is useful for other tracing
         # processor implementations
         self.input = input
-        self.output: Sequence[Mapping[str, Any]] | None = None
-        self.model_config: Mapping[str, Any] | None = None
         self.usage = usage
         self._response_id: str | None = None
         self.operation = OperationMetadata()

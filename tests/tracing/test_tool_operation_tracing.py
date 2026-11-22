@@ -57,14 +57,6 @@ async def test_approved_tool_runs_under_the_resuming_caller(
         with tracer.start_as_current_span("original") as original:
             paused = await invoke("lookup")
         assert not calls
-        (pending,) = [s for s in fetch_ordered_spans() if s.span_data.type == "function"]
-        assert pending.span_data.name == "lookup"
-        assert pending.span_data.operation.outcome == "paused"
-        decision_data = pending.export()
-        assert decision_data and decision_data["metadata"]["operation"]["outcome"] == "paused"
-        assert pending.span_data.operation.tool_call_id == "lookup-1"
-        if detail is not None:
-            assert pending.span_data.input is pending.span_data.output is None
         state = paused.to_state()
         state.approve(paused.interruptions[0])
         with tracer.start_as_current_span("resume") as resume:

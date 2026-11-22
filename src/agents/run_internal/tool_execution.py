@@ -99,7 +99,7 @@ from ..tool_guardrails import (
     ToolOutputGuardrailData,
     ToolOutputGuardrailResult,
 )
-from ..tracing import FunctionSpanData, Span, SpanError, function_span
+from ..tracing import FunctionSpanData, Span, SpanError, custom_span, function_span
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_function_tool_approval
 from ..util._asyncio_tasks import _consume_future_exception, gather_with_cancel
@@ -1156,11 +1156,20 @@ def pending_tool_span(
         else:
             # An early return is a decision about a tool, before execution begins.
             operation.outcome = operation.outcome or "rejected"
-            # Keep the legacy decision payload only when capture is omitted.
-            if operation.detail is not None:
-                span.span_data.input = span.span_data.output = None
-            span.start()
-            span.finish()
+            if operation.detail is None:
+                # Existing processors read approval inputs and results from function spans.
+                span.start()
+                span.finish()
+            else:
+                with custom_span(
+                    "tool_approval",
+                    data={
+                        "tool_name": tool_name,
+                        "tool_call_id": call_id,
+                        "outcome": operation.outcome,
+                    },
+                ):
+                    pass
 
 
 def build_litellm_json_tool_call(output: ResponseFunctionToolCall) -> FunctionTool:

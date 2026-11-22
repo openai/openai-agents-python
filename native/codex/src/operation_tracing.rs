@@ -1,8 +1,6 @@
 //! Model and tool spans for the root thread. Content capture requires explicit opt-in.
 
-use std::collections::{HashMap, hash_map::RandomState};
-use std::hash::{BuildHasher, Hasher};
-use std::io::{self, Write};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,9 +10,9 @@ mod content;
 
 use codex_extension_api::ToolPayload;
 use codex_extension_api::{
-    CommandStartInput, ExtensionData, ModelRequestContributor, ModelRequestInput, ModelRequestKind,
-    ModelResponseError, ModelResponseInterceptor, ModelResponseStream, ResponseEvent,
-    ResponsesApiRequest, ToolCallOutcome, ToolFinishInput, ToolLifecycleContributor,
+    CommandStartInput, ExtensionData, ModelRequestContent, ModelRequestContributor,
+    ModelRequestInput, ModelRequestKind, ModelResponseError, ModelResponseInterceptor,
+    ModelResponseStream, ResponseEvent, ToolCallOutcome, ToolFinishInput, ToolLifecycleContributor,
     ToolLifecycleFuture, ToolStartInput,
 };
 use codex_protocol::ToolName;
@@ -25,18 +23,6 @@ use serde_json::{Value, json};
 
 const MAX_EVENTS: usize = 512;
 const MAX_STRING_BYTES: usize = 256;
-
-// Salted identity never retains a serialized request or exposes its identifiers.
-struct IdentityWriter<H>(H);
-impl<H: Hasher> Write for IdentityWriter<H> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.write(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
 
 fn now() -> u64 {
     SystemTime::now()
@@ -49,7 +35,6 @@ fn now() -> u64 {
 pub(crate) struct Buffer {
     events: Mutex<Events>,
     sequence: AtomicU64,
-    identity: RandomState,
     content: AtomicBool,
     pending: Mutex<HashMap<String, (ToolName, Option<Value>, bool)>>,
     pub(crate) updates: tokio::sync::Notify,
@@ -226,7 +211,6 @@ struct ModelObservation {
     buffer: Arc<Buffer>,
     id: String,
     finished: bool,
-    started: bool,
     output: Vec<Value>,
     output_bytes: usize,
     response_id: Option<String>,
@@ -234,7 +218,7 @@ struct ModelObservation {
 
 impl ModelObservation {
     fn finish(&mut self, outcome: &str, usage: Option<&TokenUsage>) {
-        if self.finished || !self.started {
+        if self.finished {
             return;
         }
         self.finished = true;
@@ -260,64 +244,32 @@ impl Drop for ModelObservation {
 }
 
 impl ModelResponseInterceptor for ModelObservation {
-    fn on_request(
-        &mut self,
-        request: &ResponsesApiRequest,
-        submitted_input: &[ResponseItem],
-        previous_response_id: Option<&str>,
-    ) {
-        if self.started || !self.buffer.bounded(&request.model) {
-            return;
-        }
-        let mut identity = IdentityWriter(self.buffer.identity.build_hasher());
-        if serde_json::to_writer(
-            &mut identity,
-            &(
-                &request.model,
-                &request.input,
-                &request.tools,
-                &request.tool_choice,
-                request.parallel_tool_calls,
-                &request.reasoning,
-                &request.text,
-                &request.service_tier,
-            ),
-        )
-        .is_err()
-        {
-            return;
-        }
-        let mut event = json!({"kind":"model", "phase":"start", "id":self.id,
-            "at":now(), "model":request.model, "identity":format!("{:016x}", identity.0.finish())});
-        if self.buffer.content.load(Ordering::Acquire) {
-            event["input"] = content::request(
-                submitted_input,
-                request.tools.as_ref(),
-                previous_response_id,
-                &request.tool_choice,
-                request.parallel_tool_calls,
-            );
-        }
-        self.started = true;
-        self.buffer.push(event);
+    fn request_failed(&mut self) {
+        self.finish("failed", None);
     }
 
-    fn on_request_result(
-        &mut self,
-        http_attempts: Option<u64>,
-        error: Option<&ModelResponseError>,
-    ) {
-        if !self.started {
+    fn observe_request(&mut self, request: ModelRequestContent<'_>) {
+        if !self.buffer.content.load(Ordering::Acquire) {
             return;
         }
-        if let Some(count) = http_attempts.filter(|count| *count > 1) {
-            self.buffer.push(
-                json!({"kind":"model", "phase":"retry", "id":self.id, "at":now(), "count":count-1}),
-            );
-        }
-        if error.is_some() {
-            self.finish("failed", None);
-        }
+        let value = match request {
+            ModelRequestContent::Responses(value) => content::request(
+                &value.input,
+                value.tools.as_ref(),
+                None,
+                &value.tool_choice,
+                value.parallel_tool_calls,
+            ),
+            ModelRequestContent::WebSocket(value) => content::request(
+                value.input,
+                value.tools,
+                value.previous_response_id.as_deref(),
+                value.tool_choice,
+                value.parallel_tool_calls,
+            ),
+        };
+        self.buffer
+            .push(json!({"kind":"model", "phase":"input", "id":self.id, "input":value}));
     }
 
     fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
@@ -372,11 +324,14 @@ impl ModelRequestContributor for Observers {
             return None;
         }
         let id = format!("model-{}", buffer.sequence.fetch_add(1, Ordering::Relaxed));
+        buffer.push(json!({
+            "kind": "model", "phase": "start", "id": id,
+            "at": now(), "model": input.model,
+        }));
         Some(Box::new(ModelObservation {
             buffer,
             id,
             finished: false,
-            started: false,
             output: Vec::new(),
             output_bytes: 0,
             response_id: None,
@@ -485,36 +440,12 @@ mod tests {
         root: &str,
         kind: ModelRequestKind,
     ) -> Option<Box<dyn ModelResponseInterceptor>> {
-        let mut observation = observers.request(ModelRequestInput {
+        observers.request(ModelRequestInput {
             kind,
             thread_id: root,
             client_metadata: &mut None,
             model: "fixture-model",
-        });
-        if let Some(observer) = observation.as_mut() {
-            observer.on_request(&model_request(vec![]), &[], None);
-        }
-        observation
-    }
-
-    fn model_request(input: Vec<ResponseItem>) -> ResponsesApiRequest {
-        ResponsesApiRequest {
-            model: "fixture-model".into(),
-            stream: true,
-            input,
-            tool_choice: "auto".into(),
-            parallel_tool_calls: true,
-            reasoning: None,
-            store: false,
-            include: vec![],
-            service_tier: None,
-            tools: None,
-            stream_options: None,
-            prompt_cache_key: None,
-            text: None,
-            client_metadata: None,
-            access_programs: None,
-        }
+        })
     }
 
     fn drain(buffer: &Buffer) -> Vec<Value> {
@@ -569,61 +500,6 @@ mod tests {
         assert!(root.buffer.drain().is_none());
     }
 
-    #[test]
-    fn submitted_requests_group_retries_but_separate_continuations_without_metadata_content() {
-        let observers = Arc::new(Observers::default());
-        let root = observers.root("root".into());
-        root.enable(&ExtensionData::new("root"), None).unwrap();
-        let input: Vec<ResponseItem> = serde_json::from_value(json!([
-            {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"private prompt"}]}
-        ])).unwrap();
-        let mut full = model_request(input);
-        let submit =
-            |full: &ResponsesApiRequest, submitted: &[ResponseItem], previous: Option<&str>| {
-                let mut observer = observers
-                    .request(ModelRequestInput {
-                        kind: ModelRequestKind::Generation,
-                        thread_id: "root",
-                        client_metadata: &mut None,
-                        model: "fixture-model",
-                    })
-                    .unwrap();
-                assert!(root.buffer.drain().is_none());
-                observer.on_request(full, submitted, previous);
-                observer.on_request(full, submitted, previous); // A callback cannot duplicate its start.
-                observer.on_request_result(Some(3), None);
-                drop(observer);
-                drain(&root.buffer)
-            };
-        let first = submit(&full, &full.input, None);
-        let retry = submit(&full, &[], Some("private-response-id"));
-        assert_eq!(first.len(), 3);
-        assert_eq!(first[0]["identity"], retry[0]["identity"]);
-        assert_ne!(first[0]["id"], retry[0]["id"]);
-        assert_eq!(first[1]["phase"], "retry");
-        assert_eq!(first[1]["count"], 2);
-        assert!(first[0].get("input").is_none());
-        assert!(!format!("{first:?}{retry:?}").contains("private"));
-        full.input.push(
-            serde_json::from_value(json!({
-                "type":"function_call_output", "call_id":"call", "output":"accepted continuation"
-            }))
-            .unwrap(),
-        );
-        let continuation = submit(&full, &full.input, None);
-        assert_ne!(first[0]["identity"], continuation[0]["identity"]);
-        root.enable(&ExtensionData::new("root"), Some("content"))
-            .unwrap();
-        let captured = submit(&full, &full.input[1..], Some("previous"));
-        assert_eq!(captured[0]["identity"], continuation[0]["identity"]);
-        assert_eq!(captured[0]["input"]["previous_response_id"], "previous");
-        assert_eq!(
-            captured[0]["input"]["input"][0]["output"],
-            "accepted continuation"
-        );
-        assert!(!captured[0]["input"].to_string().contains("private prompt"));
-    }
-
     #[tokio::test]
     async fn failure_drop_and_close_remain_isolated_and_drainable() {
         let observers = Arc::new(Observers::default());
@@ -633,10 +509,7 @@ mod tests {
         second.enable(&ExtensionData::new("second"), None).unwrap();
         let pending = request(&observers, "second", ModelRequestKind::Generation).unwrap();
         let mut failed = request(&observers, "first", ModelRequestKind::Generation).unwrap();
-        failed.on_request_result(
-            Some(1),
-            Some(&ModelResponseError::Stream("private error".into())),
-        );
+        failed.request_failed();
         drop(failed);
         let events = drain(&first.buffer);
         assert_eq!(events.len(), 2);

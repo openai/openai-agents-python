@@ -506,11 +506,7 @@ class SpanImpl(Span[TSpanData]):
                 {key: value for key, value in span_data_metadata.items() if key not in metadata}
             )
         operation = getattr(self.span_data, "operation", None)
-        if isinstance(operation, OperationMetadata) and (
-            operation.detail is not None
-            or operation.retry_timestamps
-            or operation.outcome in ("paused", "rejected")
-        ):
+        if isinstance(operation, OperationMetadata) and operation.detail is not None:
             metadata["operation"] = operation.export()
         if metadata:
             payload["metadata"] = metadata

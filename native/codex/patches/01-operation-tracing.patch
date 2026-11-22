@@ -1,16 +1,8 @@
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 2ac9b93..5c71c92 100644
+index 2ac9b93..7257291 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -30,6 +30,7 @@ use std::sync::Arc;
- use std::sync::Mutex as StdMutex;
- use std::sync::OnceLock;
- use std::sync::atomic::AtomicBool;
-+use std::sync::atomic::AtomicU64;
- use std::sync::atomic::Ordering;
-
- #[path = "client_tool_metadata.rs"]
-@@ -2017,7 +2018,7 @@ impl ResponsesHttpExecutor<'_> {
+@@ -2017,7 +2017,7 @@ impl ResponsesHttpExecutor<'_> {
              let request_session_telemetry =
                  session_telemetry_for_request(session_telemetry, &request);
              options.extra_headers.extend(responses_headers);
@@ -19,27 +11,26 @@ index 2ac9b93..5c71c92 100644
                  &self.client.request_contributors,
                  &self.client.state.thread_id.to_string(),
                  &model_info.slug,
-@@ -2032,14 +2033,23 @@ impl ResponsesHttpExecutor<'_> {
+@@ -2032,6 +2032,11 @@ impl ResponsesHttpExecutor<'_> {
                  }
                  request.input = input;
              }
 +            for interceptor in &mut interceptors {
-+                interceptor.on_request(&request, &request.input, None);
++                interceptor.observe_request(codex_extension_api::ModelRequestContent::Responses(
++                    &request,
++                ));
 +            }
              inference_trace_attempt.record_started(&request);
              let client = ApiResponsesClient::new(
                  transport,
-                 client_setup.api_provider,
-                 client_setup.api_auth,
+@@ -2040,6 +2045,11 @@ impl ResponsesHttpExecutor<'_> {
              )
--            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
-+            .with_telemetry(Some(request_telemetry.clone()), Some(sse_telemetry));
+             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
              let stream_result = client.stream_request(request, options).await;
-+            for interceptor in &mut interceptors {
-+                interceptor.on_request_result(
-+                    Some(request_telemetry.http_attempts.load(Ordering::Relaxed)),
-+                    stream_result.as_ref().err(),
-+                );
++            if stream_result.is_err() {
++                for interceptor in &mut interceptors {
++                    interceptor.request_failed();
++                }
 +            }
 
              match stream_result {
@@ -53,76 +44,28 @@ index 2ac9b93..5c71c92 100644
                  &self.client.request_contributors,
                  &self.client.state.thread_id.to_string(),
                  &model_info.slug,
-@@ -2337,6 +2347,14 @@ impl ModelClientSession {
+@@ -2337,6 +2347,11 @@ impl ModelClientSession {
                  let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
                  payload.input = input;
              }
 +            let ResponsesWsRequest::ResponseCreate(payload) = &ws_request;
 +            for interceptor in &mut interceptors {
-+                interceptor.on_request(
-+                    &request,
-+                    payload.input,
-+                    payload.previous_response_id.as_deref(),
-+                );
++                interceptor
++                    .observe_request(codex_extension_api::ModelRequestContent::WebSocket(payload));
 +            }
              if !previous_response_id_from_untraced_warmup {
                  inference_trace_attempt.record_started(&ws_request);
              }
-@@ -2369,6 +2387,9 @@ impl ModelClientSession {
-                     Some(Arc::clone(&self.turn_state)),
-                 )
-                 .await;
-+            for interceptor in &mut interceptors {
-+                interceptor.on_request_result(None, stream_result.as_ref().err());
-+            }
-             if let Some(original_item_ids) = original_item_ids {
-                 for (item, original_item_id) in request.input.iter_mut().zip(original_item_ids) {
-                     item.set_id(original_item_id);
-@@ -2406,16 +2427,15 @@ impl ModelClientSession {
-         auth_context: AuthRequestTelemetryContext,
-         request_route_telemetry: RequestRouteTelemetry,
-         auth_env_telemetry: AuthEnvTelemetry,
--    ) -> (Arc<dyn RequestTelemetry>, Arc<dyn SseTelemetry>) {
-+    ) -> (Arc<ApiTelemetry>, Arc<dyn SseTelemetry>) {
-         let telemetry = Arc::new(ApiTelemetry::new(
-             session_telemetry.clone(),
-             auth_context,
-             request_route_telemetry,
-             auth_env_telemetry,
-         ));
--        let request_telemetry: Arc<dyn RequestTelemetry> = telemetry.clone();
--        let sse_telemetry: Arc<dyn SseTelemetry> = telemetry;
--        (request_telemetry, sse_telemetry)
-+        let sse_telemetry: Arc<dyn SseTelemetry> = telemetry.clone();
-+        (telemetry, sse_telemetry)
-     }
-
-     /// Builds telemetry for the Responses API WebSocket transport.
-@@ -3115,6 +3135,7 @@ fn api_error_http_status(error: &ApiError) -> Option<u16> {
- }
-
- struct ApiTelemetry {
-+    http_attempts: AtomicU64,
-     session_telemetry: SessionTelemetry,
-     auth_context: AuthRequestTelemetryContext,
-     request_route_telemetry: RequestRouteTelemetry,
-@@ -3129,6 +3150,7 @@ impl ApiTelemetry {
-         auth_env_telemetry: AuthEnvTelemetry,
-     ) -> Self {
-         Self {
-+            http_attempts: AtomicU64::new(0),
-             session_telemetry,
-             auth_context,
-             request_route_telemetry,
-@@ -3145,6 +3167,8 @@ impl RequestTelemetry for ApiTelemetry {
-         error: Option<&TransportError>,
-         duration: Duration,
-     ) {
-+        self.http_attempts
-+            .store(attempt.saturating_add(1), Ordering::Relaxed);
-         let error_message = error.map(telemetry_transport_error_message);
-         let status = status.map(|s| s.as_u16());
-         let debug = error
+@@ -2377,6 +2392,9 @@ impl ModelClientSession {
+             self.websocket_session.last_request = Some(request);
+             self.websocket_session.last_response_from_untraced_warmup = warmup;
+             let stream_result = stream_result.map_err(|err| {
++                for interceptor in &mut interceptors {
++                    interceptor.request_failed();
++                }
+                 let response_debug_context = extract_response_debug_context_from_api_error(&err);
+                 let err = self.client.state.provider.map_api_error(err);
+                 inference_trace_attempt.record_failed(
 diff --git a/codex-rs/core/src/tools/orchestrator.rs b/codex-rs/core/src/tools/orchestrator.rs
 index a1a88e4..c5f8077 100644
 --- a/codex-rs/core/src/tools/orchestrator.rs
@@ -162,48 +105,42 @@ index dc95f99..e985a9a 100644
      /// Excludes nested code-mode calls. Observers must return promptly.
      fn on_tool_dispatch(&self, _input: ToolDispatchInput<'_>) {}
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index 147b52f..aeb511f 100644
+index 147b52f..bd94076 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
-@@ -134,3 +134,4 @@ pub use model_request::ModelResponseError;
- pub use model_request::ModelResponseInterceptor;
- pub use model_request::ModelResponseStream;
- pub use model_request::ResponseEvent;
-+pub use model_request::ResponsesApiRequest;
+@@ -128,6 +128,7 @@ pub use contributors::ToolDispatchInput;
+ mod model_request;
+ pub use model_request::GuardianAssessment;
+ pub use model_request::ModelRequestContributor;
++pub use model_request::ModelRequestContent;
+ pub use model_request::ModelRequestInput;
+ pub use model_request::ModelRequestKind;
+ pub use model_request::ModelResponseError;
 diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
-index 0f477aa..36ed01d 100644
+index 0f477aa..6514694 100644
 --- a/codex-rs/ext/extension-api/src/model_request.rs
 +++ b/codex-rs/ext/extension-api/src/model_request.rs
-@@ -2,6 +2,7 @@
- pub use codex_api::ApiError as ModelResponseError;
- pub use codex_api::GuardianAssessment;
- pub use codex_api::ResponseEvent;
-+pub use codex_api::ResponsesApiRequest;
- use futures::stream::BoxStream;
- use std::collections::HashMap;
+@@ -35,10 +35,24 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+     fn request(&self, input: ModelRequestInput<'_>) -> Option<Box<dyn ModelResponseInterceptor>>;
+ }
 
-@@ -39,6 +40,25 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
++/// Borrowed final request body, after transport-specific input adjustment.
++/// Headers and authentication are deliberately outside this view.
++pub enum ModelRequestContent<'a> {
++    Responses(&'a codex_api::ResponsesApiRequest),
++    WebSocket(&'a codex_api::ResponseCreateWsRequest<'a>),
++}
++
+ /// Owns request state until consumed by the response stream or dropped on failure.
  /// Interceptors compose in registration order; dropping their stream must release unfinished work.
  /// Trusted host implementations must bound any model-visible content they synthesize.
  pub trait ModelResponseInterceptor: Send + Sync {
-+    /// Borrows the assembled request and exact submitted input after transport preparation.
-+    /// Instructions are included in the assembled input; WebSocket input may be a delta.
-+    fn on_request(
-+        &mut self,
-+        _request: &ResponsesApiRequest,
-+        _submitted_input: &[codex_protocol::models::ResponseItem],
-+        _previous_response_id: Option<&str>,
-+    ) {
-+    }
++    /// Observe the final request without modifying it. Implementations must opt in,
++    /// bound any retained content, and return promptly; the default retains nothing.
++    fn observe_request(&mut self, _request: ModelRequestContent<'_>) {}
 +
-+    /// Reports stream setup, before any stream events. HTTP attempts include the first send.
-+    /// A missing attempt count denotes WebSocket transport, not an HTTP attempt estimate.
-+    fn on_request_result(
-+        &mut self,
-+        _http_attempts: Option<u64>,
-+        _error: Option<&ModelResponseError>,
-+    ) {
-+    }
++    /// The transport returned an error before opening a response stream.
++    fn request_failed(&mut self) {}
 +
      /// Wrap the response stream, optionally buffering, inspecting, or transforming events.
      /// The returned stream must own request state and propagate cancellation by dropping upstream.

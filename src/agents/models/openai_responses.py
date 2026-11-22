@@ -75,15 +75,9 @@ from ..tool import (
     validate_responses_tool_search_configuration,
 )
 from ..tracing._content import bound_content
-from ..tracing._model import (
-    finish_model_span,
-    model_span,
-    record_model_input,
-    record_retries,
-)
+from ..tracing._model import ModelSpan, finish_model_span, model_span, record_model_input
 from ..tracing.scope import Scope
-from ..tracing.span_data import ResponseSpanData
-from ..tracing.spans import Span
+from ..tracing.span_data import GenerationSpanData, ResponseSpanData
 from ..tracing.util import time_iso
 from ..usage import (
     Usage,
@@ -100,11 +94,7 @@ from ..util._error_tracing import (
 )
 from ..util._json import _to_dump_compatible
 from ..version import __version__
-from ._openai_retry import (
-    create_with_retry_observation,
-    get_openai_retry_advice,
-    record_openai_error_retries,
-)
+from ._openai_retry import get_openai_retry_advice
 from ._openai_shared import clean_responses_input_item
 from ._openai_websocket import (
     get_openai_websocket_logger,
@@ -198,13 +188,14 @@ def _materialize_responses_tool_params(
     return typed_tools
 
 
-def _record_response_id(span: Span[ResponseSpanData], response_id: str) -> None:
+def _record_response_id(span: ModelSpan, response_id: str) -> None:
     span.span_data.operation.response_id = response_id
-    span.span_data._response_id = response_id
+    if isinstance(span.span_data, ResponseSpanData):
+        span.span_data._response_id = response_id
 
 
 def _record_response_operation(
-    span: Span[ResponseSpanData],
+    span: ModelSpan,
     response: Response,
     input: str | list[TResponseInputItem],
     tracing: ModelTracing,
@@ -216,34 +207,47 @@ def _record_response_operation(
     data.operation.outcome = outcome
     if tracing.include_data():
         data.operation.response_id = response.id
-    if data.operation.detail == "content":
+    if isinstance(data, ResponseSpanData):
+        if tracing.include_data() and outcome == "completed":
+            data.response = response
+            data.input = input
+    elif data.operation.detail == "content":
         data.output = bound_content(response.output)
-        if outcome == "completed":
-            data._response_id = data.operation.response_id
-    elif data.operation.detail is None and tracing.include_data() and outcome == "completed":
-        data.response = response
-        data.input = input
 
 
 def _record_prepared_request(request: Mapping[str, Any]) -> None:
     span = Scope.get_current_span()
-    if span is None or not isinstance(span.span_data, ResponseSpanData):
+    if span is None or not isinstance(span.span_data, (GenerationSpanData, ResponseSpanData)):
         return
+    data = span.span_data
     model = request.get("model")
-    span.span_data.operation.model = model if isinstance(model, str) else None
-    record_model_input(span.span_data, request)
+    data.operation.model = model if isinstance(model, str) else None
+    if isinstance(data, GenerationSpanData):
+        data.model = data.operation.model
+    if not isinstance(data, GenerationSpanData) or data.operation.detail != "content":
+        return
+    record_model_input(data, dict(request))
 
 
 def _record_failed_response(response: Response, *, response_id_trusted: bool) -> None:
     span = Scope.get_current_span()
-    if span is None or not isinstance(span.span_data, ResponseSpanData):
+    if span is None or not isinstance(span.span_data, (GenerationSpanData, ResponseSpanData)):
         return
-    operation = span.span_data.operation
-    operation.response_model = getattr(response, "model", None)
-    if operation.detail == "content":
-        span.span_data.output = bound_content(response.output)
-    if operation.detail == "content" or response_id_trusted:
-        operation.response_id = response.id
+    data = span.span_data
+    if isinstance(data, GenerationSpanData):
+        _record_response_operation(
+            span,
+            response,
+            [],
+            ModelTracing.ENABLED
+            if data.operation.detail == "content"
+            else ModelTracing.ENABLED_WITHOUT_DATA,
+            outcome="failed",
+        )
+        if response_id_trusted:
+            data.operation.response_id = response.id
+    else:
+        data.operation.response_model = getattr(response, "model", None)
 
 
 async def _refresh_openai_client_api_key_if_supported(client: Any) -> None:
@@ -990,7 +994,7 @@ class OpenAIResponsesModel(Model):
 
         if not stream:
             response_id_trusted = self._uses_official_openai_endpoint()
-            response = await create_with_retry_observation(client, client.responses, create_kwargs)
+            response = await client.responses.create(**create_kwargs)
             if getattr(response, "status", None) in {"failed", "incomplete"}:
                 _record_failed_response(
                     response,
@@ -1018,13 +1022,8 @@ class OpenAIResponsesModel(Model):
         # Keep the raw API response open while callers consume the SSE stream so we can expose
         # its request ID on terminal response payloads before cleanup closes the transport.
         api_response_cm = stream_create(**create_kwargs)
+        api_response = await api_response_cm.__aenter__()
         try:
-            api_response = await api_response_cm.__aenter__()
-        except Exception as error:
-            record_openai_error_retries(client, error, create_kwargs)
-            raise
-        try:
-            record_retries(getattr(api_response, "retries_taken", 0))
             stream_response = await api_response.parse()
         except BaseException as exc:
             await api_response_cm.__aexit__(type(exc), exc, exc.__traceback__)
@@ -1602,7 +1601,6 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                             raise
                     if retry_pre_event_disconnect and is_retryable_pre_event_disconnect:
                         retry_pre_event_disconnect = False
-                        record_retries()
                         continue
                     if is_pre_event_disconnect:
                         wrapped_disconnect = RuntimeError(

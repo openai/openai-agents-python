@@ -23,11 +23,10 @@ class TracingConfig(TypedDict, total=False):
     """Whether the runner creates task and turn spans. Defaults to True when omitted."""
 
     operation_detail: OperationDetail
-    """Select the payloads captured for model calls and tools in this run.
+    """Select metadata or bounded content for model calls and tools in this run.
 
     Omit to use existing SDK payload fields. Explicit content capture requires
-    trace_include_sensitive_data in the run configuration. All settings keep
-    one span per logical model call, with retries recorded on that span.
+    trace_include_sensitive_data in the run configuration.
     """
 
 
