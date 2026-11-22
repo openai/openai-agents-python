@@ -478,3 +478,55 @@ async def test_child_counts_each_item_in_one_response(
         assert len(requests) == 1
     finally:
         await provider.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+async def test_native_wait_and_close_share_a_finite_allowance(
+    tmp_path, monkeypatch, model_endpoint, catalog
+):
+    port, requests, items = model_endpoint
+    provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=PROFILE)
+    # Even without a child, failed calls can each trigger another provider request.
+    attempts = [call("wait_agent", "wait"), call("close_agent", "close")]
+    try:
+        items.extend([*attempts, call("wait_agent", "again"), final_message()])
+        with pytest.raises(RuntimeError, match="wait/close limit exceeded"):
+            await ask(provider)
+        assert len(requests) == 3
+        items.clear()
+        items.extend([*attempts, final_message()])
+        await ask(provider)
+        assert len(requests) == 6
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+async def test_native_child_uses_the_same_wait_and_close_allowance(
+    tmp_path, monkeypatch, model_endpoint, catalog
+):
+    port, requests, items = model_endpoint
+    children = CodexChildren(roles=(ROLE,), max_delegations=1, max_depth=2)
+    provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=children)
+
+    def step(request):
+        receipts = outputs(request)
+        if "LEAF" in user_input(request):
+            return final_message() if receipts else call("wait_agent", "empty")
+        if not receipts:
+            return call("spawn_agent", "spawn", message="LEAF")
+        target = json.loads(receipts["spawn"])["agent_id"]
+        if "wait" not in receipts:
+            return call("wait_agent", "wait", targets=[target], timeout_ms=10000)
+        return call("close_agent", "close", target=target)
+
+    items.extend([step] * 5 + [final_message()])
+    try:
+        with pytest.raises(RuntimeError, match="wait/close limit exceeded"):
+            await ask(provider)
+        assert len(requests) == 5
+        assert "done" in outputs(requests[-1])["wait"]
+    finally:
+        await provider.aclose()

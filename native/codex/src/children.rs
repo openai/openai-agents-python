@@ -48,11 +48,16 @@ const DISABLED: &[Feature] = &[
 ];
 
 impl Children {
-    pub fn budget(&self) -> Arc<Budget> {
-        Arc::new(Budget {
+    pub fn budget(&self) -> NativeResult<Arc<Budget>> {
+        let wait_close = self
+            .max_delegations
+            .checked_mul(2)
+            .ok_or("Codex native delegation limit is too large.")?;
+        Ok(Arc::new(Budget {
+            wait_close: Arc::new(AtomicUsize::new(wait_close)),
             remaining: Arc::new(AtomicUsize::new(self.max_delegations)),
             denial: Arc::default(),
-        })
+        }))
     }
 
     pub fn defaults(&self) -> Vec<String> {
@@ -156,6 +161,7 @@ pub fn catalog(mut catalog: ModelsResponse, model: &str) -> NativeResult<ModelsR
 #[derive(Clone, Debug)]
 pub struct Budget {
     remaining: Arc<AtomicUsize>,
+    wait_close: Arc<AtomicUsize>,
     denial: Arc<OnceLock<&'static str>>,
 }
 
@@ -173,7 +179,7 @@ impl Budget {
 
     fn admit(&self, item: &ResponseItem) -> Result<(), ModelResponseError> {
         use ResponseItem::*;
-        match item {
+        let (remaining, error) = match item {
             // Core routes V1 functions by namespace and name, never by arguments or ID.
             FunctionCall {
                 namespace: Some(ns),
@@ -182,7 +188,7 @@ impl Budget {
             } if ns == "multi_agent_v1"
                 && matches!(name.as_str(), "wait_agent" | "close_agent") =>
             {
-                return Ok(());
+                (&self.wait_close, "Codex native wait/close limit exceeded.")
             }
             Message { .. }
             | AgentMessage { .. }
@@ -195,13 +201,13 @@ impl Budget {
             | ConfigurationUpdate { .. }
             | CompactionTrigger { .. }
             | ContextCompaction { .. } => return Ok(()),
-            _ => {}
-        }
-        self.remaining
+            _ => (&self.remaining, "Codex native delegation limit exceeded."),
+        };
+        remaining
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
                 left.checked_sub(1)
             })
-            .map_err(|_| self.deny("Codex native delegation limit exceeded."))?;
+            .map_err(|_| self.deny(error))?;
         // V1 handlers cannot accept custom payloads. Fail before routing alternate forms.
         if !matches!(item, FunctionCall { .. }) {
             return Err(self.deny("Unsupported native delegation call."));

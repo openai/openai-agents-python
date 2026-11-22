@@ -476,7 +476,10 @@ pub async fn build_services(
             "codex-code-mode-host"
         });
     let operations = Arc::new(crate::operation_tracing::Observers::default());
-    let budget = children.as_ref().map(|profile| profile.budget());
+    let budget = children
+        .as_ref()
+        .map(|profile| profile.budget())
+        .transpose()?;
     let manager = Arc::new_cyclic(|weak| {
         let mut extensions = ExtensionRegistryBuilder::<Config>::new();
         extensions.model_request_contributor(operations.clone());

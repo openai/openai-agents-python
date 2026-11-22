@@ -35,15 +35,16 @@ class CodexChildren:
     the parent's model and permissions. Roles supply instructions only.
     max_delegations caps attempts to spawn, resume or send input across
     the tree, including failed calls. Unknown functions also count.
-    Only namespaced V1 wait and close functions are exempt. Other call
-    forms are rejected. Closing a child does not restore the budget.
-    Exceeding it stops the calling thread. Even if the parent finishes
-    normally, the SDK raises RuntimeError after joining the tree.
+    Namespaced V1 wait and close calls share a separate tree-wide limit
+    of twice max_delegations. Repeated, failed and timed-out calls count.
+    Other call forms are rejected. Closing a child restores neither allowance.
+    Exceeding either limit stops the calling thread. Even if the parent
+    finishes normally, the SDK raises RuntimeError after joining the tree.
     Already admitted calls can still run. max_depth counts generations
     below the root.
 
     Waiting, model continuations and transport retries can still incur
-    requests. Neither limit caps model requests or cost. For a hard
+    requests. These limits do not cap model requests, tokens or cost. For a hard
     request budget, use Agent.as_tool with separate parent and child turn
     limits and shared application admission before each send and retry.
     """
