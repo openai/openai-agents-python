@@ -1,4 +1,5 @@
 //! Private, asynchronous Core bindings for the opt-in Codex model provider.
+mod approval_files;
 mod config;
 mod native_approval;
 mod operation_tracing;
@@ -476,10 +477,11 @@ impl Thread {
                     final_output_json_schema: schema,
                     ..Default::default()
                 });
-                let mut request = WithTurnExtensionData::from(request);
-                if recover_approvals {
-                    request = request.capture_native_approvals();
-                }
+                let request = if recover_approvals {
+                    native_approval::capture(request)
+                } else {
+                    WithTurnExtensionData::from(request)
+                };
                 match Box::pin(lease.thread.start_turn_if_idle(request))
                     .await
                     .map_err(|_| "Unable to start the Codex turn.".to_owned())?
@@ -506,12 +508,12 @@ impl Thread {
                 .map_err(|_| py_error("The Codex event stream ended unexpectedly."))?;
             match &event.msg {
                 EventMsg::ExecApprovalRequest(_) | EventMsg::ApplyPatchApprovalRequest(_) => {
-                    let (request, preconditions) = lease.thread.capture_tool_approval(event.msg)
-                        .await.map_err(|_| py_error(
+                    let preconditions = native_approval::checkpoint(&lease.thread, &event)
+                        .await.ok_or_else(|| py_error(
                             "Cannot save this Codex approval. Use session=ResumableSession with a supported local command or file edit."
                         ))?;
                     return Ok(serde_json::json!({
-                        "id": event.id, "msg": request, "preconditions": preconditions
+                        "id": event.id, "msg": event.msg, "preconditions": preconditions
                     })
                     .to_string());
                 }
