@@ -21,6 +21,7 @@ class ModelToolHooks:
     context: RunContextWrapper[Any]
     lifecycle: RunHooks[Any]
     settings: ToolExecutionConfig | None
+    resumable: bool = False
 
 
 _MODEL_RUN_CONTEXT: ContextVar[tuple[object | None, ModelToolHooks | None]] = ContextVar(
