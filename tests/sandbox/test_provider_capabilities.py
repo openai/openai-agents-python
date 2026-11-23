@@ -6,7 +6,7 @@ from typing import ClassVar
 
 import pytest
 
-from agents import ModelSettings, RunConfig, Runner
+from agents import ModelSettings, RunConfig, Runner, RunState, ToolExecutionConfig, UserError
 from agents.sandbox import Manifest, MemoryGenerateConfig, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Filesystem, Memory
 from agents.sandbox.capabilities.tools import SandboxApplyPatchTool
@@ -28,8 +28,11 @@ class _FunctionSandboxModel(ScriptedModel):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("approve", [True, False])
-async def test_function_sandbox_patch_uses_runner_approval_and_session_files(approve: bool) -> None:
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("decision", ["approve", "reject", "prepared", "restored", "changed"])
+async def test_function_sandbox_patch_uses_runner_approval_and_session_files(
+    streamed: bool, decision: str
+) -> None:
     client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     model = _FunctionSandboxModel(
@@ -51,8 +54,10 @@ async def test_function_sandbox_patch_uses_runner_approval_and_session_files(app
         ]
     )
 
+    requires_approval = True
+
     def configure_tools(tools) -> None:
-        tools.apply_patch.needs_approval = True
+        tools.apply_patch.needs_approval = requires_approval
 
     agent = SandboxAgent(
         name="sandbox",
@@ -60,20 +65,44 @@ async def test_function_sandbox_patch_uses_runner_approval_and_session_files(app
         capabilities=[Filesystem(configure_tools=configure_tools)],
     )
     config = RunConfig(sandbox=SandboxRunConfig(session=session), tracing_disabled=True)
+
+    async def describe(ctx, declaration):
+        return declaration.description
+
+    if decision in ("prepared", "restored", "changed"):
+        config.tool_execution = ToolExecutionConfig(prepare_tool_declaration=describe)
+
+    async def run(prompt):
+        if streamed:
+            result = Runner.run_streamed(agent, prompt, run_config=config)
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, prompt, run_config=config)
+
     try:
         async with session:
-            first = await Runner.run(agent, "create note", run_config=config)
+            first = await run("create note")
             assert len(first.interruptions) == 1
             with pytest.raises(WorkspaceReadNotFoundError):
                 await session.read(Path("note.txt"))
             state = first.to_state()
-            if approve:
+            if decision != "reject":
                 state.approve(first.interruptions[0])
             else:
                 state.reject(first.interruptions[0])
-            result = await Runner.run(agent, state, run_config=config)
+            if decision == "restored":
+                state = await RunState.from_json(agent, state.to_json())
+            if decision == "changed":
+                requires_approval = False
+                with pytest.raises(UserError, match="replacement tool"):
+                    await run(state)
+                with pytest.raises(WorkspaceReadNotFoundError):
+                    await session.read(Path("note.txt"))
+                return
+            result = await run(state)
             assert result.final_output == "done"
-            if approve:
+            if decision != "reject":
                 with await session.read(Path("note.txt")) as handle:
                     assert handle.read() == b"hello"
             else:

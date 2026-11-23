@@ -337,6 +337,25 @@ def _register_tool_call_items(
             context_wrapper._mark_tool_call_completed(item.raw_item)
 
 
+def _check_workspace_approvals(
+    pending: Sequence[ToolApprovalItem], agent: Agent[Any], processed: ProcessedResponse
+) -> None:
+    """Stop before claiming a session if restore skipped a pending shell or edit."""
+    restored = {
+        tool_invocation_call_id(run.tool_call)
+        for run in processed.shell_calls
+        if run.shell_tool.executor is not None
+    }
+    restored.update(tool_invocation_call_id(run.tool_call) for run in processed.apply_patch_calls)
+    for item in pending:
+        if (
+            item.agent is agent
+            and get_mapping_or_attr(item.raw_item, "type") in ("shell_call", "apply_patch_call")
+            and tool_invocation_call_id(item.raw_item) not in restored
+        ):
+            raise ModelBehaviorError(f"Tool {item.qualified_name} not found in agent {agent.name}")
+
+
 def _check_approved_functions(
     pending: Sequence[ToolApprovalItem], agent: Agent[Any], context: RunContextWrapper[Any]
 ) -> None:

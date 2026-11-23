@@ -18,8 +18,10 @@ from agents.result import RunResult, RunResultStreaming
 from agents.run import AgentRunner
 from agents.run_state import CURRENT_SCHEMA_VERSION
 from agents.testing import ScriptedModel, UnexpectedModelCall
+from agents.tool import ApplyPatchTool, ShellTool
 from tests.test_error_logging_redaction import _assert_secret_absent_from_agents_traceback
 from tests.test_responses import get_function_tool_call, get_text_message
+from tests.utils.hitl import RecordingEditor, make_apply_patch_dict, make_shell_call
 
 
 class MemoryStore:
@@ -339,6 +341,53 @@ async def test_missing_approved_python_tool_preserves_checkpoint_for_compatible_
     result = await run_agent(compatible, state, fresh, streamed)
     assert result.final_output == "resolved"
     assert effects == ["changed"] and len(compatible_model.calls) == 1
+    assert store.checkpoint(session.session_id)["status"] == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("missing", ["shell", "apply_patch"])
+async def test_missing_workspace_tool_preserves_both_pending_calls(
+    streamed: bool, missing: str
+) -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    editor = RecordingEditor()
+    commands: list[str] = []
+
+    def execute(request: Any) -> str:
+        commands.extend(request.data.action.commands)
+        return "done"
+
+    original = Agent(
+        name="assistant",
+        tools=[
+            ShellTool(executor=execute, needs_approval=True),
+            ApplyPatchTool(editor=editor, needs_approval=True),
+        ],
+        model=ScriptedModel([[make_shell_call("command"), make_apply_patch_dict("edit")]]),
+    )
+    await run_agent(original, "start", session, False)
+    saved = store.records[session.session_id]
+    model = ScriptedModel([[get_text_message("done")]])
+    worker = original.clone(model=model, tools=[t for t in original.tools if t.name != missing])
+    recovered = await ResumableSession.resume(store, session.session_id)
+    state = await recovered.load_state(worker)
+    for item in state.get_interruptions():
+        state.approve(item)
+    with pytest.raises(ModelBehaviorError, match=f"Tool {missing} not found"):
+        await run_agent(worker, state, recovered, streamed)
+    assert not model.calls and not commands and not editor.operations
+    assert store.records[session.session_id] == saved
+
+    fresh = await ResumableSession.resume(store, session.session_id)
+    compatible = original.clone(model=model)
+    state = await fresh.load_state(compatible)
+    assert {item.call_id for item in state.get_interruptions()} == {"command", "edit"}
+    for item in state.get_interruptions():
+        state.approve(item)
+    await run_agent(compatible, state, fresh, streamed)
+    assert commands == ["echo test"] and len(editor.operations) == 1
     assert store.checkpoint(session.session_id)["status"] == "ready"
 
 

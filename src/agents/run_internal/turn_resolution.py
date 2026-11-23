@@ -34,7 +34,12 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from .. import _debug
 from .._function_tool_arguments import FunctionToolApproval
 from .._mcp_tool_metadata import collect_mcp_list_tools_metadata
-from .._redaction import require_clean_agent
+from .._redaction import (
+    redact_payload,
+    require_clean_agent,
+    require_clean_final_output,
+    set_final_output_item,
+)
 from .._tool_identity import (
     FunctionToolLookupKey,
     build_function_tool_lookup_map,
@@ -180,6 +185,12 @@ from .run_steps import (
 )
 from .session_persistence import extend_held_session_write
 from .tool_caller import ensure_programmatic_tool_call_parent, ensure_tool_caller_allowed
+from .tool_declarations import (
+    PreparedTool,
+    bind_declarations,
+    resume_declaration,
+    validate_prepared_inventory,
+)
 from .tool_execution import (
     build_litellm_json_tool_call,
     coerce_apply_patch_operations,
@@ -276,7 +287,7 @@ async def _maybe_finalize_from_tool_results(
         new_response=new_response,
         pre_step_items=pre_step_items,
         new_step_items=new_step_items,
-        final_output=check_tool_use.final_output,
+        final_output=redact_payload(check_tool_use.final_output),
         hooks=hooks,
         context_wrapper=context_wrapper,
         tool_input_guardrail_results=tool_input_guardrail_results,
@@ -406,6 +417,7 @@ async def execute_final_output_step(
         if run_final_output_hooks_fn is not None
         else run_final_output_hooks
     )
+    require_clean_final_output(final_output, original_input, pre_step_items, new_step_items)
     await final_output_hooks(public_agent, hooks, context_wrapper, final_output)
 
     return SingleStepResult(
@@ -500,6 +512,7 @@ async def _resolve_invalid_final_output(
             if handler_result.include_in_history
             else None
         )
+        set_final_output_item(message_item)
         return final_output, message_item
     except Exception:
         if not redacted:
@@ -824,11 +837,13 @@ async def check_for_final_output_from_tools(
     if agent.tool_use_behavior == "run_llm_again":
         return NOT_FINAL_OUTPUT
     elif agent.tool_use_behavior == "stop_on_first_tool":
+        set_final_output_item(tool_results[0].run_item)
         return ToolsToFinalOutputResult(is_final_output=True, final_output=tool_results[0].output)
     elif isinstance(agent.tool_use_behavior, dict):
         names = agent.tool_use_behavior.get("stop_at_tool_names", [])
         for tool_result in tool_results:
             if tool_result.tool.name in names or tool_result.tool.qualified_name in names:
+                set_final_output_item(tool_result.run_item)
                 return ToolsToFinalOutputResult(
                     is_final_output=True, final_output=tool_result.output
                 )
@@ -1259,6 +1274,7 @@ async def execute_tools_and_side_effects(
                     if handler_result.include_in_history:
                         output_text = format_final_output_text(public_agent, final_output)
                         new_step_items.append(create_message_output_item(public_agent, output_text))
+                        set_final_output_item(new_step_items[-1])
                     return await execute_final_output_call(
                         public_agent=public_agent,
                         original_input=original_input,
@@ -1276,6 +1292,7 @@ async def execute_tools_and_side_effects(
                         validation_error: ModelBehaviorError | None = None
                         try:
                             final_output = output_schema.validate_json(potential_final_output_text)
+                            set_final_output_item(message_items[-1])
                         except ModelBehaviorError as error:
                             if _is_error_data_redacted(error):
                                 validation_error = error
@@ -1349,6 +1366,7 @@ async def execute_tools_and_side_effects(
                         tool_output_guardrail_results=tool_output_guardrail_results,
                     )
                 if output_schema is None or output_schema.is_plain_text():
+                    set_final_output_item(message_items[-1] if message_items else None)
                     return await execute_final_output_call(
                         public_agent=public_agent,
                         original_input=original_input,
@@ -2541,6 +2559,14 @@ async def resolve_interrupted_turn(
         stale_function = stale_functions.get(call_id)
         original_binding = processed_response.mcp_tool_bindings.get(call_id)
         current_function = current_functions.get(call_id)
+        if approval_status is not False:
+            await resume_declaration(
+                current_function.function_tool if current_function else None,
+                call_id,
+                bindings,
+                context_wrapper,
+                run_config,
+            )
         if current_function is not None:
             current_binding = current_function.function_tool._mcp_tool_binding
             missing_mcp_binding = (
@@ -4169,6 +4195,7 @@ async def get_single_step_result_from_response(
     tool_use_tracker,
     error_handlers: RunErrorHandlers[TContext] | None = None,
     server_manages_conversation: bool = False,
+    prepared_tools: dict[int, PreparedTool] | None = None,
     after_invocation_validation: Callable[[ProcessedResponse | None], Awaitable[bool]]
     | None = None,
     before_side_effects: Callable[[], Awaitable[None]] | None = None,
@@ -4179,6 +4206,8 @@ async def get_single_step_result_from_response(
     item_agent = bindings.public_agent
 
     def classify() -> ProcessedResponse:
+        if prepared_tools is not None:
+            validate_prepared_inventory(all_tools, prepared_tools)
         return process_model_response(
             agent=item_agent,
             all_tools=all_tools,
@@ -4251,6 +4280,8 @@ async def get_single_step_result_from_response(
         existing_items=pre_step_items,
     )
 
+    if prepared_tools:
+        bind_declarations(prepared_tools, processed_response, context_wrapper, run_config)
     for call_id, rewrite in new_bindings.items():
         context_wrapper._tool_invocations[call_id].input_rewrite = rewrite
 

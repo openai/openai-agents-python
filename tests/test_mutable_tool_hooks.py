@@ -1,7 +1,7 @@
 import asyncio
 import json
 import traceback
-from typing import Any
+from typing import Any, get_type_hints
 
 import pytest
 from openai.types.responses import (
@@ -9,7 +9,7 @@ from openai.types.responses import (
     ResponseCustomToolCall,
     ResponseFunctionWebSearch,
 )
-from pydantic import BaseModel, Field, Json, SkipValidation, field_validator
+from pydantic import BaseModel, Field, Json, SkipValidation, TypeAdapter, field_validator
 
 from agents import (
     Agent,
@@ -838,3 +838,56 @@ async def test_output_hook_preserves_serializer_warnings():
         )
     output = next(i for i in model.calls[1].input if i.get("type") == "function_call_output")
     assert json.loads(output["output"]) == {"reading": "pending"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("point", "fallback"),
+    [
+        ("response.output_item.done", True),
+        ("response.completed", False),
+        ("response.completed", True),
+    ],
+)
+async def test_declaration_preserves_streamed_call_before_admission(point, fallback):
+    displayed = asyncio.Event()
+
+    @function_tool
+    def report(color: str):
+        return color
+
+    async def allow(ctx, declaration):
+        return declaration.description
+
+    class PausedModel(ScriptedModel):
+        async def stream_response(self, *args, **kwargs):
+            async for event in super().stream_response(*args, **kwargs):
+                if event.type == "response.completed" and fallback:
+                    event.response.output = []
+                yield event
+                if event.type == point:
+                    await asyncio.wait_for(displayed.wait(), timeout=5)
+
+    model = PausedModel([[function_call("report", {"color": "Blue"}, call_id="one")]])
+    result = Runner.run_streamed(
+        Agent(name="host", model=model, tools=[report], tool_use_behavior="stop_on_first_tool"),
+        "go",
+        run_config=RunConfig(tool_execution=ToolExecutionConfig(prepare_tool_declaration=allow)),
+    )
+    async for event in result.stream_events():
+        if event.type == "raw_response_event" and event.data.type == point:
+            item = (
+                event.data.item
+                if point == "response.output_item.done"
+                else event.data.response.output[0]
+            )
+            item.arguments = '{"color":"blue"}'
+            displayed.set()
+    assert result.final_output == "Blue"
+
+
+def test_tool_execution_annotations_resolve_for_settings_adapters():
+    assert "prepare_tool_declaration" in get_type_hints(ToolExecutionConfig)
+    config = TypeAdapter(ToolExecutionConfig).validate_python({"max_function_tool_concurrency": 2})
+    assert config.max_function_tool_concurrency == 2
+    assert config.prepare_tool_declaration is None
