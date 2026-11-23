@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -45,7 +46,7 @@ async def read_secret(query: str) -> str:
     return "SECRET-VALUE-42"
 
 
-def _make_secret_handoff_agent(input_filter: Any) -> Agent:
+def _make_secret_handoff_agent(input_filter: Any, *, query: str = "x") -> Agent:
     """A gated secret-bearing tool resolved into a handoff with the given filter."""
     from agents import handoff
 
@@ -61,7 +62,7 @@ def _make_secret_handoff_agent(input_filter: Any) -> Agent:
             [
                 ModelStep(
                     output=[
-                        function_call("read_secret", {"query": "x"}, call_id="call_SECRET"),
+                        function_call("read_secret", {"query": query}, call_id="call_SECRET"),
                         function_call("transfer_to_target", {}, call_id="call_HANDOFF"),
                     ]
                 ),
@@ -73,6 +74,135 @@ def _make_secret_handoff_agent(input_filter: Any) -> Agent:
         output_guardrails=[always_fine],
         tool_use_behavior=_DEFERRING_BEHAVIOR,
     )
+
+
+def _redact_call_arguments(data: HandoffInputData) -> HandoffInputData:
+    items = copy.deepcopy(data.pre_handoff_items)
+    for item in items:
+        if item.type == "tool_call_item":
+            item.raw_item.arguments = json.dumps({"query": "allowed"})
+    return data.clone(pre_handoff_items=items)
+
+
+def _replace_call_arguments(data: HandoffInputData) -> HandoffInputData:
+    return data.clone(
+        pre_handoff_items=tuple(
+            replace(
+                item,
+                raw_item=item.raw_item.model_copy(
+                    update={"arguments": json.dumps({"query": "allowed"})}
+                ),
+            )
+            if item.type == "tool_call_item" and item.raw_item.name == "read_secret"
+            else item
+            for item in data.pre_handoff_items
+        )
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("input_filter", [None, _redact_call_arguments, _replace_call_arguments])
+async def test_deferred_call_arguments_follow_the_handoff_history_view(
+    streamed: bool, input_filter: Any
+) -> None:
+    sentinel = "SYNTHETIC-ARGUMENT-REDACTED-1171"
+    filtered = input_filter is not None
+    agent = _make_secret_handoff_agent(input_filter, query=sentinel)
+    session = SimpleListSession()
+    parked = await _run(agent, "go", session, streamed=streamed)
+    state = await _serialized_round_trip(parked, agent)
+    # Pending approvals still need the original arguments for authorized execution.
+    assert sentinel in state.get_interruptions()[0].raw_item.arguments
+    assert sentinel in json.dumps(state.to_json()["pending_session_write"]["items"])
+    state.approve(state.get_interruptions()[0])
+    resumed = await _run(agent, state, session, streamed=streamed)
+    assert sentinel in json.dumps([response.to_input_items() for response in resumed.raw_responses])
+
+    history = await session.get_items()
+    pair = [item for item in history if item.get("call_id") == "call_SECRET"]
+    assert [item["type"] for item in pair] == ["function_call", "function_call_output"]
+    assert json.loads(pair[0]["arguments"]) == {"query": "allowed" if filtered else sentinel}
+    assert pair[1]["output"] == "SECRET-VALUE-42"
+    assert (sentinel in json.dumps(history)) is not filtered
+    assert _orphaned_outputs(history) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("detached", [False, True])
+async def test_replacement_call_arguments_preserve_an_unrelated_call(
+    streamed: bool, detached: bool
+) -> None:
+    agent = _make_secret_handoff_agent(_replace_call_arguments, query="SYNTHETIC-PRIVATE")
+    agent.tools.append(look_up)
+    agent.model = ScriptedModel(
+        [
+            ModelStep(
+                output=[
+                    function_call("look_up", {"query": "public"}, call_id="call_UNRELATED"),
+                    function_call(
+                        "read_secret", {"query": "SYNTHETIC-PRIVATE"}, call_id="call_SECRET"
+                    ),
+                    function_call("transfer_to_target", {}, call_id="call_HANDOFF"),
+                ]
+            ),
+        ]
+    )
+    session = SimpleListSession()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+    if detached:
+        result = Runner.run_streamed(agent, state, session=None)
+        result.cancel(mode="after_turn")
+        async for _ in result.stream_events():
+            pass
+        state = result.to_state()
+        assert "SYNTHETIC-PRIVATE" not in json.dumps(state.to_json()["pending_session_write"])
+    await _run(agent, state, session, streamed=streamed)
+    history = await session.get_items()
+    calls = [item for item in history if item.get("type") == "function_call"]
+    assert [(item["call_id"], json.loads(item["arguments"])) for item in calls] == [
+        ("call_UNRELATED", {"query": "public"}),
+        ("call_SECRET", {"query": "allowed"}),
+        ("call_HANDOFF", {}),
+    ]
+    assert "SYNTHETIC-PRIVATE" not in json.dumps(history)
+    assert _orphaned_outputs(history) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("input_filter", [None, _redact_call_arguments, _replace_call_arguments])
+async def test_redacted_deferred_call_survives_detached_checkpoint_and_live_reattach(
+    streamed: bool, input_filter: Any
+) -> None:
+    sentinel = "SYNTHETIC-ARGUMENT-REDACTED-1171"
+    filtered = input_filter is not None
+    agent = _make_secret_handoff_agent(input_filter, query=sentinel)
+    session = SimpleListSession()
+    state = await _parked_and_approved(agent, session, streamed=True)
+
+    detached = Runner.run_streamed(agent, state, session=None)
+    detached.cancel(mode="after_turn")
+    async for _ in detached.stream_events():
+        pass
+
+    checkpoint = detached.to_state().to_json()
+    # Session redaction does not rewrite the raw execution record.
+    assert sentinel in json.dumps(checkpoint["model_responses"])
+    pending = checkpoint["pending_session_write"]["items"]
+    assert (sentinel in json.dumps(pending)) is not filtered
+    call = next(item for item in pending if item.get("call_id") == "call_SECRET")
+    assert json.loads(call["arguments"]) == {"query": "allowed" if filtered else sentinel}
+    restored = detached.to_state()
+    await _run(agent, restored, session, streamed=streamed)
+    history = await session.get_items()
+    assert (sentinel in json.dumps(history)) is not filtered
+    pair = [item for item in history if item.get("call_id") == "call_SECRET"]
+    assert [item["type"] for item in pair] == ["function_call", "function_call_output"]
+    assert json.loads(pair[0]["arguments"]) == {"query": "allowed" if filtered else sentinel}
+    assert pair[1]["output"] == "SECRET-VALUE-42"
+    assert _orphaned_outputs(history) == []
 
 
 def _make_emptying_handoff_agent() -> Agent:
