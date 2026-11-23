@@ -51,6 +51,7 @@ struct ThreadRecord {
     id: ThreadId,
     model: String,
     operations: Arc<operation_tracing::Root>,
+    approval_hooks: Vec<codex_hooks::HookListEntry>,
     cleanup: OnceLock<Cleanup>,
 }
 
@@ -222,6 +223,10 @@ async fn start_thread(
     Ok(Arc::new(ThreadLease {
         mcp_results,
         record: Arc::new(ThreadRecord {
+            approval_hooks: settings["sdk_tool_hooks"]["server"]
+                .as_str()
+                .map(|name| tool_hooks::trusted(&created.thread, name))
+                .unwrap_or_default(),
             model: created.session_configured.model,
             id: created.thread_id,
             thread: created.thread,
@@ -501,7 +506,7 @@ impl Thread {
                     ..Default::default()
                 });
                 let request = if recover_approvals {
-                    native_approval::capture(request)
+                    native_approval::capture(request, lease.approval_hooks.clone())
                 } else {
                     WithTurnExtensionData::from(request)
                 };
@@ -541,13 +546,14 @@ impl Thread {
                 |text: String| Python::attach(|py| pyo3::IntoPyObjectExt::into_py_any(text, py));
             match &event.msg {
                 EventMsg::ExecApprovalRequest(_) | EventMsg::ApplyPatchApprovalRequest(_) => {
-                    let preconditions = native_approval::checkpoint(&lease.thread, &mut event)
+                    let (preconditions, input_hash) = native_approval::checkpoint(&lease.thread, &mut event)
                         .await.ok_or_else(|| py_error(
                             "Cannot save this Codex approval. Use session=ResumableSession with a supported local command or file edit."
                         ))?;
                     return encode(
                         serde_json::json!({
-                            "id": event.id, "msg": event.msg, "preconditions": preconditions
+                            "id": event.id, "msg": event.msg, "preconditions": preconditions,
+                            "input_hash": input_hash,
                         })
                         .to_string(),
                     );
@@ -591,6 +597,7 @@ impl Thread {
                 request,
                 preconditions,
                 &lease.operations,
+                lease.approval_hooks.clone(),
             )
             .await
             .map_err(py_error)
