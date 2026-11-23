@@ -282,8 +282,8 @@ async def test_pending_policy_cannot_be_saved_under_an_older_schema(streamed):
     agent = Agent(name="host", tools=[publish], model=ScriptedModel([[call("publish")]]))
     first = await run(streamed, agent, configure())
     data = first.to_state().to_json()
-    data["$schemaVersion"] = "1.22"
-    with pytest.raises(UserError, match="schema 1.23"):
+    data["$schemaVersion"] = "1.23"
+    with pytest.raises(UserError, match="schema 1.24"):
         await RunState.from_json(agent, data)
 
 
@@ -697,3 +697,27 @@ async def test_caller_change_during_declaration_stops_before_sampling(streamed):
     with pytest.raises(UserError, match="not prepared"):
         await run(streamed, agent, configure(prepare))
     assert not model.calls
+
+
+@pytest.mark.parametrize("source", ["peer", "description", "split"])
+async def test_redaction_checks_prepared_declarations_before_sampling(streamed, source):
+    secret = "report-marker"
+    peer = FakeMCPServer(
+        server_name=f"https://example.invalid/?{secret}" if source == "peer" else "reports"
+    )
+    peer.add_tool("report", {})
+    seen = []
+
+    async def prepare(ctx, declaration):
+        seen.append(declaration)
+        return "-marker" if source == "split" else secret
+
+    model = ScriptedModel([[call("report")]])
+    agent = Agent(name="worker", model=model, mcp_servers=[peer])
+    config = configure(prepare)
+    config.redact_text = lambda text: text.replace(secret, "[hidden]")
+    with pytest.raises(UserError) as caught:
+        await run(streamed, agent, config)
+    assert not model.calls and not peer.tool_calls
+    assert secret not in str(caught.value) + repr(seen)
+    assert bool(seen) == (source != "peer")

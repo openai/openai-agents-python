@@ -6,6 +6,7 @@ import copy
 from types import MethodType
 from typing import TYPE_CHECKING, Any
 
+from .._redaction import require_clean, require_clean_function
 from .._tool_identity import get_function_tool_lookup_key_for_tool, get_function_tool_qualified_name
 from .._tool_invocation import _fingerprint
 from ..exceptions import ModelBehaviorError, UserError
@@ -225,9 +226,11 @@ class PreparedTool:
         )
 
     async def describe(self, context: RunContextWrapper[Any]) -> str | None:
+        require_clean(self.view)
         result = await self.policy(context, self.view)
         if result is not None and not isinstance(result, str):
             raise UserError("prepare_tool_declaration must return a string or None.")
+        require_clean(result)
         return result
 
     async def check(self, context: RunContextWrapper[Any], config: RunConfig) -> None:
@@ -272,6 +275,7 @@ async def prepare_declarations(
             declaration = copy.copy(binding.tool)
             declaration.params_json_schema = copy.deepcopy(binding.schema)
             declaration.description = description
+            require_clean_function(declaration)
             presented.append(declaration)
         else:
             presented.append(tool)
