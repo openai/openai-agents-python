@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import functools
 import hashlib
 import inspect
 import json
@@ -235,6 +234,10 @@ def create_static_tool_filter(
         filter_dict["blocked_tool_names"] = blocked_tool_names
 
     return filter_dict
+
+
+class _DiscoveredToolMeta(dict[str, Any]):
+    """Discovery defaults forwarded through the public invocation hook."""
 
 
 class MCPUtil:
@@ -534,13 +537,18 @@ class MCPUtil:
         """
         tool_public_name = tool_name_override or tool.name
         static_meta = cls._extract_static_meta(tool)
-        invoke_func_impl = functools.partial(
-            cls.invoke_mcp_tool,
-            server,
-            tool,
-            tool_display_name=tool_public_name,
-            meta=static_meta,
-        )
+        defaults = _DiscoveredToolMeta(static_meta) if static_meta is not None else None
+
+        async def invoke_func_impl(context: ToolContext[Any], input_json: str) -> ToolOutput:
+            return await cls.invoke_mcp_tool(
+                server,
+                tool,
+                context,
+                input_json,
+                tool_display_name=tool_public_name,
+                meta=copy.deepcopy(defaults),
+            )
+
         effective_failure_error_function = server._get_failure_error_function(
             failure_error_function
         )
@@ -608,16 +616,21 @@ class MCPUtil:
     @staticmethod
     def _merge_mcp_meta(
         resolved_meta: dict[str, Any] | None,
-        explicit_meta: dict[str, Any] | None,
+        meta: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
-        if resolved_meta is None and explicit_meta is None:
+        if resolved_meta is None and meta is None:
             return None
+        # The resolver overrides discovery defaults, but explicit caller metadata wins.
+        sources = (
+            (meta, resolved_meta)
+            if isinstance(meta, _DiscoveredToolMeta)
+            else (resolved_meta, meta)
+        )
         merged: dict[str, Any] = {}
-        if resolved_meta is not None:
-            merged.update(copy.deepcopy(resolved_meta))
-        if explicit_meta is not None:
-            merged.update(copy.deepcopy(explicit_meta))
-        return merged
+        for source in sources:
+            if source is not None:
+                merged.update(source)
+        return copy.deepcopy(merged)
 
     @staticmethod
     def _copy_mapping_proxy(value: Any) -> Mapping[str, Any] | None:

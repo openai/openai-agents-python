@@ -722,7 +722,11 @@ async def test_mcp_meta_resolver_merges_and_passes():
     server.add_tool("test_tool_1", {})
 
     ctx = RunContextWrapper(context={"request_id": "req-123"})
-    tool = MCPTool(name="test_tool_1", inputSchema={})
+    tool = MCPTool(
+        name="test_tool_1",
+        inputSchema={},
+        _meta={"locale": "discovery", "discovery_only": True},
+    )
 
     await MCPUtil.invoke_mcp_tool(
         server,
@@ -737,6 +741,58 @@ async def test_mcp_meta_resolver_merges_and_passes():
     assert captured["server_name"] == server.name
     assert captured["tool_name"] == "test_tool_1"
     assert captured["arguments"] == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_conversion_preserves_to_function_tool_subclass_hook():
+    class CustomMCPUtil(MCPUtil):
+        @classmethod
+        def to_function_tool(cls, *args, **kwargs):
+            function_tool = super().to_function_tool(*args, **kwargs)
+            function_tool.description = "Customized by subclass"
+            return function_tool
+
+    server = FakeMCPServer(tool_meta_resolver=lambda _: {"locale": "resolved"})
+    server.add_tool("test_tool_1", {})
+    server.tools[0].meta = {"locale": "discovered", "extra": "value"}
+    context = RunContextWrapper(context=None)
+    tools = await CustomMCPUtil.get_function_tools(server, False, context, Agent(name="test"))
+
+    assert len(tools) == 1
+    assert tools[0].description == "Customized by subclass"
+    await tools[0].on_invoke_tool(context, "{}")
+    assert server.tool_metas[-1] == {"locale": "resolved", "extra": "value"}
+
+
+@pytest.mark.asyncio
+async def test_converted_mcp_tool_respects_invocation_override():
+    class GuardedMCPUtil(MCPUtil):
+        @classmethod
+        async def invoke_mcp_tool(
+            cls, server, tool, context, input_json, *, meta=None, tool_display_name=None
+        ):
+            if not context.context["allowed"]:
+                raise PermissionError("Call denied")
+            return await super().invoke_mcp_tool(
+                server, tool, context, input_json, meta=meta, tool_display_name=tool_display_name
+            )
+
+    server = FakeMCPServer(
+        tool_meta_resolver=lambda _: {"locale": "resolved"}, failure_error_function=None
+    )
+    server.add_tool("search", {})
+    server.tools[0].meta = {"locale": "discovered", "extra": "value"}
+    context = RunContextWrapper(context={"allowed": False})
+    tools = await GuardedMCPUtil.get_function_tools(server, False, context, Agent(name="test"))
+
+    with pytest.raises(PermissionError, match="Call denied"):
+        await tools[0].on_invoke_tool(context, "{}")
+    assert server.tool_calls == []
+
+    context.context["allowed"] = True
+    await tools[0].on_invoke_tool(context, "{}")
+    assert server.tool_calls == ["search"]
+    assert server.tool_metas == [{"locale": "resolved", "extra": "value"}]
 
 
 @pytest.mark.asyncio
@@ -811,10 +867,38 @@ async def test_to_function_tool_merges_static_mcp_meta_with_resolver():
 
     await function_tool.on_invoke_tool(tool_context, "{}")
 
-    assert server.tool_metas[-1] == {"request_id": "req-123", "locale": "en", "extra": "value"}
+    assert server.tool_metas[-1] == {"request_id": "req-123", "locale": "ja", "extra": "value"}
     assert captured["server_name"] == server.name
     assert captured["tool_name"] == "test_tool_1"
     assert captured["arguments"] == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tenant_id", ["trusted-tenant", {"id": "trusted-tenant"}, None])
+async def test_discovered_mcp_meta_cannot_override_per_call_tenant(tenant_id):
+    async def resolve_meta(context):
+        return {"tenant_id": context.run_context.context["tenant_id"]}
+
+    # This fake captures the MCP dispatch boundary without a model or network client.
+    server = FakeMCPServer(tool_meta_resolver=resolve_meta)
+    discovered_meta = {"tenant_id": "discovered-tenant", "extra": {"source": "discovery"}}
+    tool = MCPTool(name="test_tool_1", inputSchema={}, _meta=copy.deepcopy(discovered_meta))
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+
+    for current_tenant in (tenant_id, "next-trusted-tenant"):
+        tool_context = ToolContext(
+            context={"tenant_id": current_tenant},
+            tool_name=tool.name,
+            tool_call_id="test_tenant_meta",
+            tool_arguments="{}",
+        )
+        await function_tool.on_invoke_tool(tool_context, "{}")
+        assert server.tool_metas[-1] == {
+            "tenant_id": current_tenant,
+            "extra": {"source": "discovery"},
+        }
+
+    assert tool.meta == discovered_meta
 
 
 @pytest.mark.asyncio
