@@ -67,6 +67,9 @@ def _to_dump_compatible(obj: Any) -> Any:
 
 
 def _to_dump_compatible_internal(obj: Any) -> Any:
+    if type(obj) is str:
+        return obj
+
     if isinstance(obj, Mapping):
         return {k: _to_dump_compatible_internal(v) for k, v in obj.items()}
 
