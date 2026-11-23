@@ -49,6 +49,110 @@ class TestGuardrailFunctionality:
         if session._guardrail_tasks:
             await asyncio.gather(*session._guardrail_tasks, return_exceptions=True)
 
+    @pytest.mark.parametrize(
+        "delta_type", [RealtimeModelOutputTextDeltaEvent, RealtimeModelTranscriptDeltaEvent]
+    )
+    @pytest.mark.parametrize(
+        ("chunks", "before_end", "after_end"),
+        [
+            (["123456789"], [], ["123456789"]),
+            (["1234567890"], ["1234567890"], ["1234567890"]),
+            (["1234567890", "x"], ["1234567890"], ["1234567890", "1234567890x"]),
+        ],
+        ids=["below_threshold", "exact_threshold", "unchecked_tail"],
+    )
+    async def test_turn_end_checks_only_unchecked_output(
+        self, mock_model, delta_type, chunks, before_end, after_end
+    ):
+        checked = []
+
+        def guardrail(context, agent, output):
+            checked.append(output)
+            return GuardrailFunctionOutput(output_info={}, tripwire_triggered=False)
+
+        session = RealtimeSession(
+            mock_model,
+            RealtimeAgent(
+                name="source",
+                output_guardrails=[OutputGuardrail(guardrail_function=guardrail)],
+            ),
+            None,
+            run_config={"guardrails_settings": {"debounce_text_length": 10}},
+        )
+        try:
+            await session.on_event(RealtimeModelTurnStartedEvent(response_id="response_1"))
+            for chunk in chunks:
+                await session.on_event(
+                    delta_type(item_id="item_1", delta=chunk, response_id="response_1")
+                )
+                await self._wait_for_guardrail_tasks(session)
+            assert checked == before_end
+
+            await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_1"))
+            await self._wait_for_guardrail_tasks(session)
+            assert checked == after_end
+
+            await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_1"))
+            await self._wait_for_guardrail_tasks(session)
+            assert checked == after_end
+            assert mock_model.sent_events == ()
+        finally:
+            await session.close()
+
+    @pytest.mark.parametrize(
+        "delta_type", [RealtimeModelOutputTextDeltaEvent, RealtimeModelTranscriptDeltaEvent]
+    )
+    async def test_late_turn_end_checks_original_snapshot_after_newer_turn_ends(
+        self, mock_model, delta_type
+    ):
+        checked = []
+
+        def guardrail(context, agent, output):
+            checked.append((agent.name, output))
+            return GuardrailFunctionOutput(output_info={}, tripwire_triggered=output == "old")
+
+        output_guardrail = OutputGuardrail(guardrail_function=guardrail, name="check")
+        session = RealtimeSession(
+            mock_model,
+            RealtimeAgent(name="source", output_guardrails=[output_guardrail]),
+            None,
+            run_config={"guardrails_settings": {"debounce_text_length": 10}},
+        )
+        try:
+            await session.on_event(RealtimeModelTurnStartedEvent(response_id="response_1"))
+            await session.on_event(
+                delta_type(item_id="item_1", delta="old", response_id="response_1")
+            )
+            await session.update_agent(
+                RealtimeAgent(name="replacement", output_guardrails=[output_guardrail])
+            )
+            await session.on_event(RealtimeModelTurnStartedEvent(response_id="response_2"))
+            await session.on_event(
+                delta_type(item_id="item_2", delta="new", response_id="response_2")
+            )
+            await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_2"))
+            await self._wait_for_guardrail_tasks(session)
+            assert checked == [("replacement", "new")]
+
+            await session.on_event(RealtimeModelTurnEndedEvent(response_id="response_1"))
+            await self._wait_for_guardrail_tasks(session)
+            assert checked == [("replacement", "new"), ("source", "old")]
+            interrupts = [
+                event
+                for event in mock_model.sent_events
+                if isinstance(event, RealtimeModelSendInterrupt)
+            ]
+            if delta_type is RealtimeModelTranscriptDeltaEvent:
+                assert len(interrupts) == 1
+                assert interrupts[0].response_id == "response_1"
+                assert interrupts[0].playback_only is True
+            else:
+                assert interrupts == []
+            assert mock_model.sent_messages == []
+            assert mock_model.retired_audio_response_ids == ["response_2", "response_1"]
+        finally:
+            await session.close()
+
     @pytest.fixture
     def triggered_guardrail(self):
         """Creates a guardrail that always triggers"""
