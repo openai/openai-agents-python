@@ -942,6 +942,41 @@ async def test_sqlite_session_failed_add_items_releases_write_lock():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["append", "replace_suffix"])
+async def test_sqlite_session_late_serialization_failure_rolls_back(operation: str):
+    session = SQLiteSession("late_serialization_failure")
+    try:
+        history: list[TResponseInputItem] = [
+            {"role": "user", "content": "existing input"},
+            {"role": "assistant", "content": "existing output"},
+        ]
+        await session.add_items(history)
+        connection = session._shared_connection
+        batch: list[TResponseInputItem] = [
+            {"role": "user", "content": "discarded prefix"},
+            cast(TResponseInputItem, {"role": "user", "content": object()}),
+        ]
+
+        with pytest.raises(TypeError):
+            if operation == "append":
+                await session.add_items(batch)
+            else:
+                snapshot = await session._get_compaction_snapshot(10)
+                assert snapshot is not None
+                await snapshot.replace_suffix(1, batch)
+
+        assert session._shared_connection is connection
+        assert not connection.in_transaction
+        assert await session.get_items() == history
+
+        recovery: TResponseInputItem = {"role": "assistant", "content": "after failure"}
+        await session.add_items([recovery])
+        assert await session.get_items() == history + [recovery]
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
 async def test_session_add_items_exception_propagates_in_streamed():
     """Test that exceptions from session.add_items are properly propagated
     in run_streamed instead of causing the stream to hang forever.

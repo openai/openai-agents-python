@@ -266,7 +266,7 @@ class SQLiteSession(SessionABC):
             (self.session_id,),
         )
 
-        message_data = [(self.session_id, json.dumps(item)) for item in items]
+        message_data = ((self.session_id, json.dumps(item)) for item in items)
         conn.executemany(
             f"""
             INSERT INTO {self.messages_table} (session_id, message_data) VALUES (?, ?)
