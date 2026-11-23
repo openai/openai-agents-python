@@ -1,7 +1,7 @@
 """Approve or reject one native Codex command after recreating its worker.
 
-Development only; unavailable in alpha.1. Build and install a native wheel from
-the same source revision, then run with saved Codex login:
+Use the native wheel from the same release and a saved Codex login.
+
     python examples/codex/native_approval.py
 
 This live example keeps its SQLite checkpoint and command fixture in a temporary

@@ -3,8 +3,7 @@
 Run with the matching native wheel and saved Codex login:
     python examples/codex/native_workspace.py
 
-This example file is in development source; its public APIs support alpha.1.
-It sends live model requests and uses the host's native sandbox. It registers
+The example sends live model requests and uses the host's native sandbox. It registers
 no SDK shell executor or Python function tools.
 """
 
