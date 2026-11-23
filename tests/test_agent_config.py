@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -9,6 +10,18 @@ from agents.lifecycle import AgentHooksBase
 from agents.model_settings import ModelSettings
 from agents.retry import ModelRetryBackoffSettings
 from agents.run_internal.run_loop import get_handoffs, get_output_schema
+
+
+@dataclass
+class _CustomModelSettings(ModelSettings):
+    custom_value: str = "custom"
+
+
+@pytest.mark.parametrize("settings", [ModelSettings(), _CustomModelSettings()])
+def test_agent_preserves_typed_model_settings_identity(settings: ModelSettings) -> None:
+    agent = Agent(name="test", model_settings=settings)
+
+    assert agent.model_settings is settings
 
 
 @pytest.mark.asyncio

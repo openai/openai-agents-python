@@ -512,11 +512,12 @@ class Agent(AgentBase, Generic[TContext]):
                     f"Agent model must be a string, Model, or None, got {type(self.model).__name__}"
                 )
 
-        self.model_settings = _coerce_model_settings(
-            self.model_settings,
-            parameter_name="Agent model_settings",
-            model_settings_type=_declared_model_settings_type(type(self), "model_settings"),
-        )
+        if not isinstance(self.model_settings, ModelSettings):
+            self.model_settings = _coerce_model_settings(
+                self.model_settings,
+                parameter_name="Agent model_settings",
+                model_settings_type=_declared_model_settings_type(type(self), "model_settings"),
+            )
         settings_omitted = self.model_settings.__dict__.get("_agent_default_settings") is True
         if settings_omitted:
             self.model_settings = _initial_model_settings_for_model(self.model)
