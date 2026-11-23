@@ -501,3 +501,77 @@ async def test_policy_local_cancellation_keeps_completed_tool_in_session(streame
     assert effects == ["record"]
     assert [item.get("type") for item in items[1:]] == ["function_call", "function_call_output"]
     assert items[-1].get("output") == "recorded"
+
+
+async def test_redacted_tool_candidate_continues_after_approval(streamed):
+    secret = "private-example"
+    decisions = []
+    checked = []
+
+    @tool(needs_approval=True)
+    def lookup() -> str:
+        return secret
+
+    def decide(ctx, step):
+        decisions.append(step.output)
+        return "continue" if step.kind == "tool" else "finish"
+
+    @output_guardrail
+    def check(ctx, agent, output):
+        checked.append(output)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel(
+        [[get_function_tool_call("lookup", "{}", "call")], [get_text_message(f"Done {secret}")]]
+    )
+    agent = Agent(
+        name="worker",
+        tools=[lookup],
+        model=model,
+        tool_use_behavior="stop_on_first_tool",
+        hooks=AgentHooks(step_policy=decide),
+        output_guardrails=[check],
+    )
+    config = RunConfig(redact_text=lambda text: text.replace(secret, "[hidden]"))
+    session = SQLiteSession("redacted")
+    hooks = EndHooks()
+    try:
+        paused = await run(streamed, agent, session=session, run_config=config, hooks=hooks)
+        assert not decisions and not checked
+        state = await RunState.from_string(agent, paused.to_state().to_string())
+        state.approve(state.get_interruptions()[0])
+        if streamed:
+            result = Runner.run_streamed(
+                agent, state, session=session, run_config=config, hooks=hooks
+            )
+            events = [event async for event in result.stream_events()]
+            assert not any(event.type == "raw_response_event" for event in events)
+            assert secret not in str(events)
+        else:
+            result = await run(False, agent, state, session=session, run_config=config, hooks=hooks)
+        assert decisions == checked == ["[hidden]", "Done [hidden]"]
+        assert hooks.outputs == [result.final_output] == ["Done [hidden]"]
+        assert secret not in str((model.calls[1].input, await session.get_items()))
+        assert "[hidden]" in str(model.calls[1].input)
+    finally:
+        session.close()
+
+
+async def test_protected_continuation_redacts_guardrail_error(streamed):
+    secret = "private-example"
+
+    @output_guardrail
+    def fail(ctx, agent, output):
+        raise UserError(secret) from ValueError(secret)
+
+    model = ScriptedModel([[get_text_message("draft")]])
+    agent = Agent(name="worker", model=model, hooks=AgentHooks(step_policy=lambda *_: "continue"))
+    config = RunConfig(
+        redact_text=lambda text: text.replace(secret, "[hidden]"), output_guardrails=[fail]
+    )
+    with pytest.raises(RuntimeError) as caught:
+        await run(streamed, agent, run_config=config)
+    assert secret not in str(caught.value)
+    assert caught.value.__cause__ is caught.value.__context__ is None
+    assert getattr(caught.value, "run_data", None) is None
+    assert len(model.calls) == 1

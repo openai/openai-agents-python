@@ -11,6 +11,7 @@ from typing import Any, TypeVar, cast
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call import CallerDirect
 
+from .._redaction import current_redactor
 from ..agent import Agent
 from ..exceptions import (
     AgentsException,
@@ -196,6 +197,9 @@ def _sanitize_blocked_output_guardrail_results(
     sanitized_results = [sanitize(result) for result in results]
     if isinstance(error, OutputGuardrailTripwireTriggered):
         object.__setattr__(error, "guardrail_result", sanitize(error.guardrail_result))
+    elif current_redactor() is not None:
+        # Let the Runner replace untrusted validator diagnostics before marking them safe.
+        return sanitized_results
     if isinstance(error, AgentsException):
         # Do not attach the original candidate as run_data on a validator failure.
         _mark_error_data_redacted(error)

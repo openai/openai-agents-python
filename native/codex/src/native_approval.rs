@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use codex_core::restore_tool_call::{ApprovalCheck, ApprovalStage, NativeApproval};
 use codex_core_api::{CodexThread, StartIfIdleSubmission, TurnInputRequest, WithTurnExtensionData};
 use codex_exec_server::EnvironmentAccess;
-use codex_extension_api::ExtensionDataInit;
+use codex_extension_api::{ExtensionDataInit, ToolPayload, ToolStartInput};
+use codex_hooks::HookListEntry;
 use codex_protocol::approvals::ExecApprovalKind;
 use codex_protocol::error::{CodexErr, Result as CodexResult};
 use codex_protocol::models::ResponseItem;
@@ -174,18 +175,65 @@ impl Checks {
     }
 }
 
-pub(super) fn capture(request: TurnInputRequest) -> WithTurnExtensionData<TurnInputRequest> {
+// A paused call never reaches PostToolUse. Confirm the command Core accepted
+// after PreToolUse, independently of tracing. Only one call can be pending.
+#[derive(Default)]
+struct HookedInput(Mutex<Option<(String, String)>>);
+
+pub(super) fn observe_input(input: &ToolStartInput<'_>) {
+    let Some(seen) = input.turn_store.get::<HookedInput>() else {
+        return;
+    };
+    let args;
+    let command = match (input.tool_name.name.as_str(), input.payload) {
+        ("exec_command", ToolPayload::Function { arguments }) => {
+            args = serde_json::from_str::<Value>(arguments).unwrap_or_default();
+            args["cmd"].as_str()
+        }
+        ("apply_patch", ToolPayload::Custom { input }) => Some(input.as_str()),
+        _ => return,
+    };
+    *seen.0.lock().unwrap() = command.map(|s| {
+        (
+            input.call_id.to_owned(),
+            format!("{:x}", Sha256::digest(s.as_bytes())),
+        )
+    });
+}
+
+pub(super) fn capture(
+    request: TurnInputRequest,
+    hooks: Vec<HookListEntry>,
+) -> WithTurnExtensionData<TurnInputRequest> {
     let mut init = ExtensionDataInit::new();
+    if !hooks.is_empty() {
+        init.insert(HookedInput::default());
+    }
     init.insert(Checks::Capture(Mutex::default()));
     let checks = init.get::<Checks>().unwrap();
     init.insert(NativeApproval {
         check: checks,
         call: None,
+        hooks,
     });
     WithTurnExtensionData::new(request, init)
 }
 
-pub(super) async fn checkpoint(thread: &CodexThread, event: &mut Event) -> Option<Value> {
+pub(super) async fn checkpoint(
+    thread: &CodexThread,
+    event: &mut Event,
+) -> Option<(Value, Option<String>)> {
+    let mut input_hash = None;
+    if let Some(seen) = thread
+        .current_turn_extension_data::<HookedInput>(&event.id)
+        .await
+    {
+        let (id, hash) = seen.0.lock().unwrap().take()?;
+        if call_id(&event.msg)? != id {
+            return None;
+        }
+        input_hash = Some(hash);
+    }
     let checks = thread
         .current_turn_extension_data::<Checks>(&event.id)
         .await?;
@@ -208,7 +256,7 @@ pub(super) async fn checkpoint(thread: &CodexThread, event: &mut Event) -> Optio
         EventMsg::ExecApprovalRequest(e) if e.turn_id == event.id && patch.is_null() => {}
         _ => return None,
     }
-    Some(saved.checkpoint)
+    Some((saved.checkpoint, input_hash))
 }
 
 pub(super) async fn resolve(
@@ -217,6 +265,7 @@ pub(super) async fn resolve(
     expected: EventMsg,
     checkpoint: Value,
     operations: &crate::operation_tracing::Root,
+    hooks: Vec<HookListEntry>,
 ) -> NativeResult<String> {
     let (id, patch) = match (&call, &expected) {
         (
@@ -259,6 +308,7 @@ pub(super) async fn resolve(
     init.insert(NativeApproval {
         check: checks.clone(),
         call: Some(call),
+        hooks,
     });
     let request = WithTurnExtensionData::new(TurnInputRequest::user_input(Vec::new()), init);
     let StartIfIdleSubmission::Started { turn_id, .. } =
