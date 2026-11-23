@@ -1003,13 +1003,19 @@ class BaseSandboxSession(abc.ABC):
         data: io.IOBase,
         *,
         user: str | User | None = None,
+        owner_only: bool = False,
     ) -> None:
         """Backend hook for apply_patch creation.
 
         The default retains the provider's existing mkdir/write semantics. UnixLocal
         overrides this hook to claim the leaf exclusively; other backends need a native
         primitive before they can offer the same guarantee.
+
+        Owner-only alias staging requires a native implementation that restricts access
+        at creation, before any payload is written.
         """
+        if owner_only:
+            raise NotImplementedError("This backend does not support owner-only alias staging")
         target = self.normalize_path(path)
         await self.mkdir(target.parent, parents=True, user=user)
         await self.write(target, data, user=user)
