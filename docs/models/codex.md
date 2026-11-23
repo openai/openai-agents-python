@@ -11,14 +11,13 @@ Pass `RunConfig(model_provider=CodexProvider())` to the Runner to use Codex Core
 
 Use standard CPython 3.10 through 3.14. The preview wheel includes the Python SDK, Codex Core, and its execution helpers. You don't need a Codex CLI installation.
 
-!!! warning "Choose a build that supports the features you need"
+!!! warning "Check the prerelease before installing"
 
-    The [`v1.0.0-alpha.1` release](https://github.com/openai/openai-agents-python/releases/tag/v1.0.0-alpha.1) includes the provider but predates operation tracing, native approval recovery, and Runner text redaction. The preview build applies two [Codex patches](https://github.com/openai/openai-agents-python/tree/feat/simple-codex/native/codex/patches) to the embedded Core for tracing and recovery. Runner redaction runs in Python. Installing the wheel leaves any separate Codex CLI unchanged.
+    [`v1.0.0-alpha.1`](https://github.com/openai/openai-agents-python/releases/tag/v1.0.0-alpha.1) includes the provider but predates OpenTelemetry, operation tracing, native approval recovery, and Runner text redaction. For those features, wait for a tagged prerelease that lists them. Install wheels only from the SDK's GitHub Releases page. A passing CI run and its checksums do not establish release approval.
 
-1. Look for the features you need in the [GitHub prerelease notes](https://github.com/openai/openai-agents-python/releases). Download the wheel for your platform and `SHA256SUMS` from **Assets**.
-2. If no release includes those features, sign in to GitHub and select a successful [Codex preview wheels run on `feat/simple-codex`](https://github.com/openai/openai-agents-python/actions/workflows/codex-preview.yml?query=branch%3Afeat%2Fsimple-codex+event%3Apush). Download and unzip the `codex-preview-*` artifact within 14 days of the run.
-3. For an artifact, check `source_commit` in `BUILD.json`. For the examples in this guide, use [`ed728b68`](https://github.com/openai/openai-agents-python/commit/ed728b68ba8b8cf68b7a2bd27446c3328cf223dd) or a descendant. If you use error handlers or custom tool callbacks to produce final answers, also check that the build includes the [fallback redaction fix](https://github.com/openai/openai-agents-python/pull/6158). Development builds can share a wheel filename and version.
-4. Select the file for your platform and compare its SHA-256 digest with the entry in `SHA256SUMS`.
+1. Open [SDK releases](https://github.com/openai/openai-agents-python/releases) and select a tagged prerelease that supports the features you need.
+2. From that release's **Assets**, download `SHA256SUMS` and the wheel for your platform.
+3. Compute the wheel's SHA-256 digest with `sha256sum` on Linux, `shasum -a 256` on macOS, or `Get-FileHash` in PowerShell. Install only if the digest matches the entry for the exact filename in `SHA256SUMS`.
 
 | Platform | Wheel filename ending |
 | --- | --- |
@@ -33,7 +32,7 @@ For the tracing example, see **OpenTelemetry** in the English [tracing guide](..
 python -m pip install --only-binary=:all: "WHEEL_FILE"
 ```
 
-For repository examples, use the checkout matching the release tag or build commit. From the repository root, run `uv sync` with the extras required by the example. Then install the wheel in the project environment.
+For repository examples, check out the same release tag. From the repository root, run `uv sync` with the extras required by the example. Then install the verified wheel in the project environment.
 
 ```sh
 uv pip install --reinstall-package openai-agents "WHEEL_FILE"
@@ -184,6 +183,8 @@ Strict structured output uses Codex's output schema. With `strict_json_schema=Fa
 `OpenAIResponsesCompactionSession` can compact full input history and replay the encrypted result into Codex. It calls the separate OpenAI compact endpoint and needs an OpenAI client or credentials. `compaction_mode="previous_response_id"` cannot use Codex's local turn IDs as stored Responses IDs. See [session compaction](../sessions/index.md).
 
 ## Operation tracing
+
+The SDK preview uses two [Codex patches](https://github.com/openai/openai-agents-python/tree/feat/simple-codex/native/codex/patches) for operation tracing and approval recovery in the embedded Core. Installing the wheel leaves any separate Codex CLI unchanged. Runner text redaction runs in Python.
 
 Use the same SDK trace processors for Responses and embedded Codex. See **OpenTelemetry** in the English [tracing guide](../tracing.md) for a runnable example with a console exporter or collector. To capture metadata for a Codex run, pass this configuration to the Runner.
 

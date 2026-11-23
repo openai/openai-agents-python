@@ -156,7 +156,7 @@ When `trace_include_sensitive_data` is `False`, Responses model spans omit the r
 
 Use [`RunConfig.redact_text`][agents.run.RunConfig.redact_text] with either provider to remove known secrets from run inputs, model replies, and SDK tool arguments and results. Replacements change what the model and Python tools receive. Supply a synchronous function that returns the same string for the same input and leaves sanitized text unchanged. Never log its input.
 
-Install a [preview build with Runner text redaction](models/codex.md#install-a-github-prerelease-wheel). Run this example offline to check a sample policy. The scripted model deliberately returns the same test value that the caller supplied.
+This example requires a [tagged SDK prerelease with Runner text redaction](models/codex.md#install-a-github-prerelease-wheel). The `v1.0.0-alpha.1` wheel lacks this feature. Once a compatible release is available, run the example offline. The scripted model deliberately returns the same test value that the caller supplied.
 
 ```python
 import asyncio
@@ -223,7 +223,7 @@ The redactor and destination are trusted application code. They must not indepen
 
 Use [`OpenTelemetryTracingProcessor`](ref/extensions/tracing/opentelemetry.md) to send SDK spans to your application's OpenTelemetry (OTel) tracer provider. Register it once for both the default Responses provider and the [embedded Codex provider](models/codex.md#operation-tracing).
 
-For the example below, [download a preview wheel with operation tracing](models/codex.md#install-a-github-prerelease-wheel). The published `v1.0.0-alpha.1` release predates this integration. In a fresh virtual environment, replace `WHEEL_FILE` with the local path to the matching `.whl` file. Keep the `[opentelemetry]` extra after the filename.
+The `v1.0.0-alpha.1` wheel predates this integration. Once a tagged SDK prerelease includes OpenTelemetry and operation tracing, [download and verify its wheel](models/codex.md#install-a-github-prerelease-wheel). In a fresh virtual environment, replace `WHEEL_FILE` with the local path to the verified `.whl` file. Keep the `[opentelemetry]` extra after the filename.
 
 ```sh
 python -m pip install --only-binary=:all: "WHEEL_FILE[opentelemetry]" "opentelemetry-sdk>=1.45,<2"
