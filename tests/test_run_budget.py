@@ -14,6 +14,8 @@ from openai import APIConnectionError, AsyncOpenAI
 
 from agents import (
     Agent,
+    GuardrailFunctionOutput,
+    InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelProvider,
     ModelRetrySettings,
@@ -25,6 +27,7 @@ from agents import (
     RunState,
     Usage,
     UserError,
+    input_guardrail,
     retry_policies,
     tool_namespace,
 )
@@ -655,9 +658,9 @@ async def test_child_budget_stop_uses_existing_tool_error_policy(streamed):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("session_mode", ["none", "ordinary", "durable", "failed_save"])
 @pytest.mark.parametrize("protected", [False, True])
-async def test_stream_budget_stop_publishes_only_committed_work(fail, protected):
+async def test_stream_budget_stop_publishes_only_committed_work(session_mode, protected):
     effects = []
 
     @tool
@@ -666,9 +669,13 @@ async def test_stream_budget_stop_publishes_only_committed_work(fail, protected)
         return "saved"
 
     store = MemoryStore()
-    session = await ResumableSession.create(store)
-    store.block_checkpoint = True
-    store.fail_checkpoint = fail
+    fail = session_mode == "failed_save"
+    if session_mode in ("durable", "failed_save"):
+        session = await ResumableSession.create(store)
+        store.block_checkpoint = True
+        store.fail_checkpoint = fail
+    else:
+        session = SimpleListSession() if session_mode == "ordinary" else None
     model = ScriptedModel([[get_text_message("working"), get_function_tool_call("record")]])
     agent = Agent(name="root", model=model, tools=[record])
     result = Runner.run_streamed(
@@ -691,23 +698,80 @@ async def test_stream_budget_stop_publishes_only_committed_work(fail, protected)
             if event.type == "run_item_stream_event":
                 events.append(event.name)
 
+    if not isinstance(session, ResumableSession):
+        # Let the producer finish before the reader checks for errors.
+        assert result.run_loop_task is not None
+        _, pending = await asyncio.wait([result.run_loop_task], timeout=5)
+        assert not pending
     consumer = asyncio.create_task(consume())
     try:
-        await asyncio.wait_for(store.saving.wait(), timeout=5)
-        assert not events
+        if isinstance(session, ResumableSession):
+            await asyncio.wait_for(store.saving.wait(), timeout=5)
+            assert not events
     finally:
         store.release.set()
-        with pytest.raises(
+        expected = (
             ResumableSessionError if fail else (RuntimeError if protected else RunBudgetError)
-        ) as error:
+        )
+        with pytest.raises(expected) as error:
             await asyncio.wait_for(consumer, timeout=5)
     if protected and not fail:
         assert str(error.value) == "Error details are redacted."
         assert error.value.__context__ is None
     assert len(model.calls) == 1 and effects == [1]
-    assert store.checkpoint(session.session_id)["status"] == ("active" if fail else "ready")
+    if isinstance(session, ResumableSession):
+        assert store.checkpoint(session.session_id)["status"] == ("active" if fail else "ready")
     assert result.final_output is None
     assert events == ([] if fail else ["message_output_created", "tool_called", "tool_output"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable", [False, True])
+@pytest.mark.parametrize("verdict", ["accept", "reject", "cancel"])
+async def test_budget_stop_waits_for_parallel_input_verdict(durable, verdict):
+    ran = asyncio.Event()
+
+    @tool
+    async def record() -> str:
+        ran.set()
+        return "saved"
+
+    @input_guardrail
+    async def check(ctx, agent, input):
+        await ran.wait()
+        if verdict == "cancel":
+            raise asyncio.CancelledError
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=verdict == "reject")
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store) if durable else None
+    model = ScriptedModel([[get_text_message("working"), get_function_tool_call("record")]])
+    result = Runner.run_streamed(
+        Agent(name="root", model=model, tools=[record], input_guardrails=[check]),
+        "begin",
+        session=session,
+        run_config=RunConfig(budget=RunBudget(max_requests=1), tracing_disabled=True),
+    )
+    assert result.run_loop_task is not None
+    _, pending = await asyncio.wait([result.run_loop_task], timeout=5)
+    assert not pending
+    events = []
+    with pytest.raises(InputGuardrailTripwireTriggered if verdict == "reject" else RunBudgetError):
+        async for event in result.stream_events():
+            events.append(event)
+    assert ran.is_set() and len(model.calls) == 1 and result.final_output is None
+    if verdict != "accept":
+        assert not events
+    else:
+        assert [e.name for e in events if e.type == "run_item_stream_event"] == [
+            "message_output_created",
+            "tool_called",
+            "tool_output",
+        ]
+    if session is not None:
+        assert store.checkpoint(session.session_id)["status"] == (
+            "ready" if verdict == "accept" else "active"
+        )
 
 
 @pytest.mark.parametrize("value", [True, -0.01, float("nan"), float("inf"), "0.01"])

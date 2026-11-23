@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from ._redaction import current_redactor, protected_error
 from .exceptions import (
     AgentsException,
+    InputGuardrailTripwireTriggered,
     UserError,
     _mark_error_to_drain_stream_events,
     _raise_data_redacted_error,
@@ -340,16 +341,29 @@ async def _admit(
             budget.check()
             budget.requests += 1
     except (RunBudgetError, UserError) as error:
-        if isinstance(session, ResumableRun):
-            if streamed_result is None:
-                await session.finish_budget_stop()
-            else:
-                await checkpoint_streamed_result(streamed_result, interruptions=[])
-                if current_redactor() is not None:
-                    safe = protected_error(error)
-                    _mark_error_to_drain_stream_events(safe)
-                    _raise_data_redacted_error(safe)
-                _mark_error_to_drain_stream_events(error)
+        if streamed_result is not None:
+            from .run_internal.guardrails import input_guardrail_tripwire_triggered_for_stream
+
+            # A parallel check can reject the completed turn while its tools run.
+            await input_guardrail_tripwire_triggered_for_stream(
+                streamed_result, ignore_cancelled=True
+            )
+            tripwire = streamed_result._triggered_input_guardrail_result
+            if tripwire is not None:
+                raise InputGuardrailTripwireTriggered(tripwire) from None
+            checks = streamed_result._input_guardrails_task
+            if checks is not None:
+                if checks.cancelled():
+                    raise  # No verdict to authorize publishing the queued events.
+                checks.result()
+            await checkpoint_streamed_result(streamed_result, interruptions=[])
+            if current_redactor() is not None:
+                safe = protected_error(error)
+                _mark_error_to_drain_stream_events(safe)
+                _raise_data_redacted_error(safe)
+            _mark_error_to_drain_stream_events(error)
+        elif isinstance(session, ResumableRun):
+            await session.finish_budget_stop()
         raise
 
 
