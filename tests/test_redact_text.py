@@ -322,6 +322,42 @@ async def test_identical_omitted_handler_reply_is_still_a_separate_reply(streame
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
+async def test_final_output_includes_pending_max_turns_reply_in_check(streamed):
+    from pydantic import BaseModel
+
+    from agents import GuardrailFunctionOutput, output_guardrail
+
+    class Reply(BaseModel):
+        text: str
+
+    @output_guardrail
+    def change_reply(ctx, agent, output):
+        assert output.text == "private-"
+        output.text = "example"
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    agent = Agent(name="worker", output_type=Reply, output_guardrails=[change_reply])
+    options = {
+        "run_config": RunConfig(redact_text=scrub),
+        "max_turns": 0,
+        "error_handlers": {
+            "max_turns": lambda _: {
+                "final_output": {"text": "private-"},
+                "include_in_history": True,
+            }
+        },
+    }
+    with pytest.raises(UserError, match="redact_text"):
+        if streamed:
+            result = Runner.run_streamed(agent, "go", **options)
+            async for event in result.stream_events():
+                assert event.type != "run_item_stream_event"
+        else:
+            await Runner.run(agent, "go", **options)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("stage", ["schema", "guardrail"])
 @pytest.mark.parametrize("source", ["model", "saved_fallback", "omitted_fallback"])
 async def test_final_output_is_checked_after_validation_and_guardrails(streamed, stage, source):

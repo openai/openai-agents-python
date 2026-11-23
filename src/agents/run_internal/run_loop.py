@@ -585,6 +585,7 @@ async def _finalize_streamed_final_output(
     context_wrapper: RunContextWrapper[TContext],
     save_items: Callable[[list[RunItem], str | None, bool | None], Awaitable[None]],
     items: list[RunItem],
+    final_history: tuple[list[RunItem], ...],
     model_response: ModelResponse | None,
     processed_response: ProcessedResponse | None,
     owner_starts: _BlockedOutputOwnerStarts,
@@ -750,7 +751,8 @@ async def _finalize_streamed_final_output(
     if stream_items_after_guardrails:
         _publish_stream_items(items, streamed_result)
     await checkpoint_streamed_result(streamed_result)
-    require_clean_final_output(output, streamed_result.input, streamed_result.new_items)
+    # A fallback or a recovered tool turn can still be missing from new_items.
+    require_clean_final_output(output, streamed_result.input, *final_history)
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
         on_persisted_after_guardrails(True)
@@ -1597,6 +1599,7 @@ async def start_streaming(
                             context_wrapper=context_wrapper,
                             save_items=_save_resumed_items,
                             items=list(turn_session_items),
+                            final_history=(resumed_session_items,),
                             model_response=turn_result.model_response,
                             processed_response=streamed_result._last_processed_response,
                             owner_starts=blocked_output_owner_starts,
@@ -1792,6 +1795,7 @@ async def start_streaming(
                     if publish_events:
                         _publish_stream_items([synthesized_item], streamed_result)
 
+                handler_items: list[RunItem] = [synthesized_item] if include_in_history else []
                 await _finalize_streamed_final_output(
                     streamed_result=streamed_result,
                     agent=current_agent,
@@ -1799,7 +1803,8 @@ async def start_streaming(
                     output=validated_output,
                     context_wrapper=context_wrapper,
                     save_items=_save_max_turns_items,
-                    items=[synthesized_item] if include_in_history else [],
+                    items=handler_items,
+                    final_history=(streamed_result.new_items, handler_items),
                     model_response=None,
                     processed_response=None,
                     owner_starts=_BlockedOutputOwnerStarts(
@@ -2180,6 +2185,7 @@ async def start_streaming(
                         context_wrapper=context_wrapper,
                         save_items=_save_stream_items_with_count,
                         items=turn_session_items,
+                        final_history=(streamed_result.new_items,),
                         model_response=turn_result.model_response,
                         processed_response=turn_result.processed_response,
                         owner_starts=blocked_output_owner_starts,
