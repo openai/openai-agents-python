@@ -12,7 +12,7 @@ import pytest
 
 from agents import Agent, RunConfig, Runner, RunState, Session, SQLiteSession, ToolExecutionConfig
 from agents.decorators import tool
-from agents.exceptions import AgentsException, UserError
+from agents.exceptions import AgentsException, ModelBehaviorError, UserError
 from agents.memory.resumable_session import ResumableSession, ResumableSessionError
 from agents.result import RunResult, RunResultStreaming
 from agents.run import AgentRunner
@@ -299,6 +299,88 @@ async def test_fresh_handle_resolves_original_call_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+async def test_missing_approved_python_tool_preserves_checkpoint_for_compatible_worker(
+    streamed: bool,
+) -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    effects: list[str] = []
+
+    @tool(needs_approval=True)
+    async def change() -> str:
+        effects.append("changed")
+        return "original result"
+
+    original = Agent(
+        name="assistant",
+        tools=[change],
+        model=ScriptedModel([[get_function_tool_call("change", "{}", call_id="saved-call")]]),
+    )
+    await run_agent(original, "start", session, streamed)
+    saved = store.records[session.session_id]
+    missing_model = ScriptedModel([])
+    missing = Agent(name="assistant", model=missing_model)
+    recovered = await ResumableSession.resume(store, session.session_id)
+    state = await recovered.load_state(missing)
+    state.approve(state.get_interruptions()[0])
+    with pytest.raises(ModelBehaviorError, match="Tool change not found"):
+        await run_agent(missing, state, recovered, streamed)
+    assert effects == [] and not missing_model.calls
+    assert store.records[session.session_id] == saved
+
+    fresh = await ResumableSession.resume(store, session.session_id)
+    compatible_model = ScriptedModel([[get_text_message("resolved")]])
+    compatible = Agent(name="assistant", model=compatible_model, tools=[change])
+    state = await fresh.load_state(compatible)
+    (pending,) = state.get_interruptions()
+    assert pending.call_id == "saved-call"
+    state.approve(pending)
+    result = await run_agent(compatible, state, fresh, streamed)
+    assert result.final_output == "resolved"
+    assert effects == ["changed"] and len(compatible_model.calls) == 1
+    assert store.checkpoint(session.session_id)["status"] == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+async def test_missing_tool_after_approved_effect_keeps_active_without_replay(
+    streamed: bool,
+) -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    effects: list[str] = []
+
+    @tool(needs_approval=True)
+    async def change() -> str:
+        effects.append("changed")
+        return "effect completed"
+
+    original = Agent(
+        name="assistant",
+        tools=[change],
+        model=ScriptedModel([[get_function_tool_call("change", "{}", call_id="effect-call")]]),
+    )
+    await run_agent(original, "start", session, streamed)
+    recovered = await ResumableSession.resume(store, session.session_id)
+    later_model = ScriptedModel(
+        [[get_function_tool_call("missing_later", "{}", call_id="later-call")]]
+    )
+    worker = Agent(name="assistant", tools=[change], model=later_model)
+    state = await recovered.load_state(worker)
+    state.approve(state.get_interruptions()[0])
+    with pytest.raises(ModelBehaviorError, match="Tool missing_later not found"):
+        await run_agent(worker, state, recovered, streamed)
+    assert effects == ["changed"] and len(later_model.calls) == 1
+    assert store.checkpoint(session.session_id)["status"] == "active"
+    with pytest.raises(ResumableSessionError, match="unknown outcome"):
+        await ResumableSession.resume(store, session.session_id)
+    with pytest.raises(ResumableSessionError):
+        await run_agent(worker, state, recovered, streamed)
+    assert effects == ["changed"] and len(later_model.calls) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("paused", [False, True], ids=["completed", "approval"])
 async def test_stream_terminal_publication_waits_for_checkpoint(paused: bool) -> None:
     store = MemoryStore()
@@ -525,11 +607,11 @@ async def test_delayed_stream_claim_uses_history_after_shared_handle_advances(mo
     release = asyncio.Event()
     original_begin = session._begin_run
 
-    async def gated_begin(input: Any, tool_hooks: Any) -> None:
+    async def gated_begin(input: Any, *args: Any) -> None:
         if input == "later":
             entered.set()
             await release.wait()
-        await original_begin(input, tool_hooks)
+        await original_begin(input, *args)
 
     # Suspend only the claim boundary so another public run can advance the same handle.
     monkeypatch.setattr(session, "_begin_run", gated_begin)

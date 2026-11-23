@@ -350,16 +350,43 @@ async def test_child_native_depth_two_and_live_tree_isolation(
             return call("wait_agent", "wait", targets=[target], timeout_ms=20000)
         return final_message()
 
-    items.extend([step] * 9)
+    # A late completion notification can prompt one more reply per child after a wait.
+    items.extend([step] * 11)
     root = asyncio.create_task(ask(provider))
     try:
         assert await asyncio.to_thread(started.wait, 10)
         await ask(provider, prompt="FOREIGN")
         await root
-        receipts = [outputs(r) for r in requests]
-        assert any("not found" in r.get("foreign", "") for r in receipts)
-        assert sum("done" in r.get("wait", "") for r in receipts) == 2
-        assert len(requests) == 9
+        assert any("not found" in outputs(r).get("foreign", "") for r in requests)
+        waits = {}
+        notified = set()
+        for request in requests:
+            receipts = outputs(request)
+            if "wait" not in receipts:
+                continue
+            target = json.loads(receipts["spawn"])["agent_id"]
+            completed = {"completed": "done"}
+            assert json.loads(receipts["wait"]) == {
+                "timed_out": False,
+                "status": {target: completed},
+            }
+            history = request["input"]
+            if target not in waits:
+                waits[target] = history
+                continue
+
+            assert target not in notified and history[:-2] == waits[target]
+            answer, notice = history[-2:]
+            assert answer["type"] == notice["type"] == "message"
+            assert answer["role"] == "assistant" and answer["content"] == final_message()["content"]
+            assert notice["role"] == "user"
+            (part,) = notice["content"]
+            start, payload, end = part["text"].splitlines()
+            assert (start, end) == ("<subagent_notification>", "</subagent_notification>")
+            assert json.loads(payload) == {"agent_path": target, "status": completed}
+            notified.add(target)
+        assert len(waits) == 2
+        assert len(requests) == 9 + len(notified)
     finally:
         release.set()
         root.cancel()
