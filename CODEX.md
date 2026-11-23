@@ -78,7 +78,7 @@ Reuse the provider across runs in the same workspace, then close it once when yo
 | Call Python tools, return typed data, or stream text | [Task chooser](examples/codex/README.md#choose-a-task) |
 | Keep conversation history | Use an SDK session or pass `result.to_input_list()` to the next `Runner.run()` call. |
 | Inspect a workspace with native commands | Set `CodexProvider(cwd=...)`, choose a sandbox and approval policy, and leave `tool_choice` at its default. See [execution configuration](docs/models/codex.md#configure-execution). |
-| Approve and recover a native command or patch | Use `ResumableSession` with the Runner, the same workspace and permissions, no SDK workspace executor, and no required SDK-call mode. See [approval recovery](native/codex/patches/02-approval-recovery.md). |
+| Approve and recover a native command or patch | **Development only; unavailable in alpha.1.** Build a [current-source native wheel](native/codex/patches/README.md#test-a-change). Use `ResumableSession` with the Runner, the same workspace and permissions, no SDK workspace executor, and no required SDK-call mode. See [approval recovery](native/codex/patches/02-approval-recovery.md). |
 | Stream progress | Call `Runner.run_streamed()`, consume `result.stream_events()`, then inspect `result.final_output`. |
 | Compact history | Use SDK-managed input compaction. Native automatic compaction is unsupported; the OpenAI compact endpoint needs separate credentials. |
 
