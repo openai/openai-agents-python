@@ -1,8 +1,17 @@
+import hashlib
 import json
 
 import pytest
 
-from agents import ModelSettings, UserError
+from agents import (
+    Agent,
+    ModelSettings,
+    ResumableSession,
+    RunConfig,
+    Runner,
+    ToolExecutionConfig,
+    UserError,
+)
 from agents.models._codex_items import (
     CodexPendingCustomCall,
     CodexPendingFunctionCall,
@@ -41,6 +50,53 @@ def approval(call_id="pending"):
 
 def raw(item):
     return {"type": "raw_response_item", "item": item}
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_input_rewrite_never_reaches_approval(tmp_path, monkeypatch, threads):
+    from agents.models._codex_tool_hooks import CodexToolHooks
+    from tests.memory.test_resumable_session import MemoryStore
+
+    original = "printf native-result"
+
+    async def scrub(call):
+        return {"command": "printf safe"}
+
+    async def configure(self, resources):
+        decision = await self.decision(
+            {
+                "event": "PreToolUse",
+                "call_id": "pending",
+                "name": "Bash",
+                "arguments": {"command": original},
+            }
+        )
+        assert decision["hookSpecificOutput"]["updatedInput"]["command"] == "printf safe"
+        return {}
+
+    class MissedRewrite(ApprovalThread):
+        def tool_hook_orders(self, server):
+            return [("pre_tool_use", 0), ("post_tool_use", 1)]
+
+        async def next_event(self):
+            event = json.loads(await super().next_event())
+            if event["msg"]["type"] == "exec_approval_request":
+                event["input_hash"] = hashlib.sha256(original.encode()).hexdigest()
+            return json.dumps(event)
+
+    monkeypatch.setattr(CodexToolHooks, "configure", configure)
+    call, _ = native_pair(call_id="pending")
+    thread = MissedRewrite(events=[raw(call), approval(), {"type": "raw_response_completed"}])
+    threads[0].append(thread)
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    config = RunConfig(
+        model_provider=CodexProvider(cwd=tmp_path),
+        tool_execution=ToolExecutionConfig(prepare_tool_input=scrub),
+    )
+    with pytest.raises(UserError, match="confirm the prepared input"):
+        await Runner.run(Agent(name="worker"), "start", session=session, run_config=config)
+    assert thread.closed and original not in store.records[session.session_id]
 
 
 async def response(tmp_path, settings=None):

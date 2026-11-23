@@ -837,7 +837,11 @@ class RunResultStreaming(RunResultBase):
             task = asyncio.create_task(_cleanup_once())
             self._sandbox_cleanup_task = task
 
-        await task
+        if self.agent_tool_invocation is not None:
+            # The stream iterator joins this same save if the manager cancels the wrapper.
+            await asyncio.shield(task)
+        else:
+            await task
 
     def ensure_sandbox_cleanup_on_completion(self) -> None:
         if (

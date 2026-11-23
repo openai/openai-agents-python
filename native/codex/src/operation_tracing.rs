@@ -386,6 +386,7 @@ impl ModelRequestContributor for Observers {
 
 impl ToolLifecycleContributor for Observers {
     fn on_tool_start<'a>(&'a self, input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
+        crate::native_approval::observe_input(&input);
         if let Some(buffer) = input.thread_store.get::<Buffer>()
             && buffer.bounded_tool(input.call_id, input.tool_name)
         {

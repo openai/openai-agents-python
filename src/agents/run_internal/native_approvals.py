@@ -82,7 +82,9 @@ def validate_native_restore_hooks(processed: Any, bindings: ModelToolHooks) -> N
     _validate_native_plan(processed)
     if _native_decision(bindings.context, processed.native_approvals[0]):
         # Check hooks before claiming the session. Discover tools and recheck at dispatch.
-        _validate_native_restore([], bindings)
+        checkpoint = native_approval_checkpoint(processed.native_approvals[0].raw_item)
+        assert checkpoint is not None
+        _validate_native_restore([], bindings, checkpoint)
 
 
 def native_pending_step(
