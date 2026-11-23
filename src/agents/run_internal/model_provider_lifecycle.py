@@ -4,6 +4,7 @@ import asyncio
 from copy import copy
 from typing import Any
 
+from .._redaction import current_redactor
 from ..logger import log_model_action_warning, logger
 from ..models.interface import ModelProvider
 from ..run_config import RunConfig, _coerce_run_config
@@ -21,13 +22,20 @@ def _normalize_run_config_for_runner(
     detail = run_config.tracing.get("operation_detail") if run_config.tracing else None
     if detail not in (None, "metadata", "content"):
         raise ValueError("operation_detail must be 'metadata' or 'content'")
-    force_metadata = _metadata_only_runs.get() and detail != "metadata"
+    redactor = current_redactor()
+    if redactor is None:
+        redactor = run_config.redact_text
+    elif run_config.redact_text is not None and run_config.redact_text is not redactor:
+        raise ValueError("A nested run cannot replace its parent's redact_text policy.")
+    force_metadata = redactor is not None or (_metadata_only_runs.get() and detail != "metadata")
     if force_metadata or (detail == "metadata" and run_config.trace_include_sensitive_data):
         # Route every existing capture decision through the run's sensitive-data gate.
         run_config = copy(run_config)
+        run_config.trace_include_sensitive_data = False
+        if redactor is not None:
+            run_config.redact_text = redactor
         if force_metadata:
             run_config.tracing = {**(run_config.tracing or {}), "operation_detail": "metadata"}
-        run_config.trace_include_sensitive_data = False
     return run_config, owns_model_provider
 
 
