@@ -270,13 +270,16 @@ async def test_final_reply_counts_only_actual_tool_outputs(streamed, policy):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("wrapped", [False, True])
-async def test_parsed_final_output_does_not_duplicate_a_message(streamed, wrapped):
+@pytest.mark.parametrize("reordered", [False, True])
+async def test_parsed_final_output_does_not_duplicate_a_message(streamed, wrapped, reordered):
     from pydantic import BaseModel
 
     class Reply(BaseModel):
         text: str
+        count: int
 
-    payload = '{"response":[{"text":"half"}]}' if wrapped else '{"text":"half"}'
+    fields = {"count": 1, "text": "half"} if reordered else {"text": "half", "count": 1}
+    payload = json.dumps({"response": [fields]} if wrapped else fields)
     agent = Agent(
         name="worker",
         model=ScriptedModel([[assistant_message(payload)]]),
@@ -289,7 +292,35 @@ async def test_parsed_final_output_does_not_duplicate_a_message(streamed, wrappe
             pass
     else:
         result = await Runner.run(agent, "go", run_config=config)
-    assert result.final_output == ([Reply(text="half")] if wrapped else Reply(text="half"))
+    reply = Reply(text="half", count=1)
+    assert result.final_output == ([reply] if wrapped else reply)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_reordered_array_is_a_changed_final_reply(streamed):
+    from pydantic import BaseModel, field_validator
+
+    class Reply(BaseModel):
+        names: list[str]
+
+        @field_validator("names")
+        @classmethod
+        def reverse_names(cls, value):
+            return value[::-1]
+
+    agent = Agent(
+        name="worker",
+        model=ScriptedModel([[assistant_message('{"names":["head","tail"]}')]]),
+        output_type=Reply,
+    )
+    config = RunConfig(redact_text=lambda text: text.replace("tailtail", "[removed]"))
+    with pytest.raises(UserError, match="redact_text"):
+        if streamed:
+            async for _ in Runner.run_streamed(agent, "go", run_config=config).stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go", run_config=config)
 
 
 @pytest.mark.asyncio

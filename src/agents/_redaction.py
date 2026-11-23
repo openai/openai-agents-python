@@ -300,6 +300,17 @@ def redact_payload(value: _T) -> _T:
     return _apply(value, "payload")
 
 
+def _reply_value(value: Any) -> Any:
+    """Compare checked replies as data, ignoring object key order but preserving array order."""
+    if isinstance(value, str):
+        value = _decode_json(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_reply_value(item) for item in value]
+    return {key: _reply_value(item) for key, item in _entries(value).items()}
+
+
 def require_clean_final_output(
     value: object, original: str | list[TResponseInputItem], *batches: list[RunItem]
 ) -> None:
@@ -323,15 +334,14 @@ def require_clean_final_output(
         # Check the returned form in place. A transformed or independently
         # synthesized reply also needs checking alongside the original.
         require_clean([*history[:index], reply, *history[index + 1 :]])
-        parts = list(_text_parts(value))
+        returned = _reply_value(value)
         if isinstance(source, MessageOutputItem):
-            rendered = _decode_json(ItemHelpers.extract_text(source.raw_item) or "")
-            if isinstance(rendered, dict) and rendered.keys() == {_WRAPPER_DICT_KEY}:
-                if parts == list(_text_parts(rendered[_WRAPPER_DICT_KEY])):
-                    return
+            rendered = _reply_value(ItemHelpers.extract_text(source.raw_item) or "")
+            if rendered == {_WRAPPER_DICT_KEY: returned}:
+                return
         else:
-            rendered = _entries(history[index]).get("output")
-        if parts == list(_text_parts(rendered)):
+            rendered = _reply_value(_entries(history[index]).get("output"))
+        if returned == rendered:
             return
     require_clean([*history, reply])
 
