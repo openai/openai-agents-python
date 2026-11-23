@@ -102,6 +102,7 @@ from .. import _debug
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper, TContext
+from ..tracing import get_trace_provider
 from ..usage import Usage
 from ..version import __version__
 from ._tool_filtering import filter_enabled_tools, filter_statically_enabled_tools
@@ -705,7 +706,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self, tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None
     ) -> None:
         """Update tracing configuration via session.update event."""
-        if tracing_config is not None:
+        if tracing_config is not None and not get_trace_provider().is_disabled():
             converted_tracing_config = _ConversionHelper.convert_tracing_config(tracing_config)
             await self._send_raw_message(
                 OpenAISessionUpdateEvent(
