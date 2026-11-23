@@ -27,6 +27,7 @@ from agents import (
     Runner,
     UserError,
     function_tool,
+    output_guardrail,
 )
 from agents.memory import OpenAIResponsesCompactionSession
 from agents.models import openai_provider
@@ -542,14 +543,15 @@ async def test_hook_request_on_same_pool_is_excluded(peer):
 
 
 @pytest.mark.parametrize("stream", [False, True])
-async def test_failed_setup_claims_first_invocation(peer, stream):
+async def test_failed_setup_does_not_hide_next_invocation(peer, stream):
     agent = Agent(name="root", model=peer.provider.get_model("fixture"))
     with RequestCapture() as capture:
         with pytest.raises(UserError):
             await run(agent, stream, session=SimpleListSession(), conversation_id="conflict")
         await run(agent)
     assert peer.requests == ["/responses"]
-    assert capture.totals.routes == ()
+    assert capture.totals.model_submissions == 1
+    assert capture.totals.observed == TransportCounts(1, 1, 1)
     assert capture.totals.coverage == "complete"
 
 
@@ -565,14 +567,15 @@ async def test_immediate_stream_cancel_finishes_capture(peer):
     assert capture.totals.coverage == "complete"
 
 
-async def test_failed_sync_setup_claims_first_invocation(peer):
+async def test_failed_sync_setup_does_not_hide_next_invocation(peer):
     agent = Agent(name="root", model=peer.provider.get_model("fixture"))
     with RequestCapture() as capture:
         with pytest.raises(RuntimeError, match="already running"):
             Runner.run_sync(agent, "start")
         await run(agent)
     assert peer.requests == ["/responses"]
-    assert capture.totals.routes == ()
+    assert capture.totals.model_submissions == 1
+    assert capture.totals.observed == TransportCounts(1, 1, 1)
     assert capture.totals.coverage == "complete"
 
 
@@ -608,3 +611,87 @@ async def test_stream_guardrail_during_preparation_skips_submission(peer, enable
     assert capture.totals.model_submissions == 0
     if enabled:
         assert capture.totals.observed == TransportCounts(0, 0, 0)
+
+
+async def test_direct_calls_share_capture_and_nested_capture_is_isolated(peer):
+    agent = Agent(name="root", model=peer.provider.get_model("fixture"))
+    with RequestCapture() as outer:
+        await run(agent)
+        with RequestCapture() as inner:
+            await run(agent, True)
+        await asyncio.gather(run(agent), run(agent, True))
+    assert len(peer.requests) == 4
+    for capture, count in ((outer, 3), (inner, 1)):
+        assert capture.totals.model_submissions == count
+        assert capture.totals.observed == TransportCounts(count, count, count)
+        assert capture.totals.coverage == "complete"
+
+
+async def test_unfinished_run_stays_partial_when_another_finishes(peer):
+    agent = Agent(name="root", model=peer.provider.get_model("fixture"))
+    peer.release.clear()
+    with RequestCapture() as capture:
+        pending = Runner.run_streamed(agent, "start")
+        await asyncio.wait_for(peer.received.wait(), 5)
+        with pytest.raises(UserError):
+            await run(agent, session=SimpleListSession(), conversation_id="conflict")
+    peer.release.set()
+    async for _ in pending.stream_events():
+        pass
+    assert capture.totals.model_submissions == 1
+    assert capture.totals.coverage == "partial"
+    assert capture.totals.observed == TransportCounts(1, 1, 0)
+
+
+async def test_direct_calls_retain_transport_gaps(peer):
+    async def remove_trace(request):
+        request.extensions.pop("trace", None)
+
+    agent = Agent(name="root", model=peer.provider.get_model("fixture"))
+    hooks = openai_provider.shared_http_client().event_hooks["request"]
+    with RequestCapture() as capture:
+        hooks.append(remove_trace)
+        await run(agent)
+        hooks.remove(remove_trace)
+        await run(agent)
+    assert len(peer.requests) == capture.totals.model_submissions == 2
+    assert capture.totals.observed == TransportCounts(1, 1, 1)
+    assert capture.totals.coverage == "partial"
+
+
+async def test_sync_direct_runs():
+    def invoke():
+        agent = Agent(name="root", model=ScriptedModel([[get_text_message("done")]] * 2))
+        with RequestCapture() as capture:
+            Runner.run_sync(agent, "one")
+            Runner.run_sync(agent, "two")
+        assert capture.totals.model_submissions == 2
+        assert capture.totals.coverage == "unknown"
+
+    await asyncio.to_thread(invoke)
+
+
+async def test_unfinished_opaque_run_excludes_independent_guardrail_calls():
+    entered, release = asyncio.Event(), asyncio.Event()
+    judge = Agent(name="judge", model=ScriptedModel([[get_text_message("ok")]]))
+
+    @output_guardrail
+    async def check(ctx, agent, output):
+        await run(judge)
+        entered.set()
+        await release.wait()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    agent = Agent(
+        name="root", model=ScriptedModel([[get_text_message("done")]]), output_guardrails=[check]
+    )
+    with RequestCapture() as capture:
+        task = asyncio.create_task(run(agent))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+        finally:
+            release.set()
+    await task
+    assert capture.totals.coverage == "partial"
+    assert capture.totals.model_submissions == 1
+    assert capture.totals.observed is None

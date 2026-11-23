@@ -56,6 +56,8 @@ class RequestTotals:
         if self.coverage == "unknown":
             return None
         counts = [row.observed for row in self.routes if row.observed is not None]
+        if self.routes and not counts:
+            return None
         return TransportCounts(
             sum(c.attempts for c in counts),
             sum(c.writes for c in counts),
@@ -81,7 +83,7 @@ class _Counts:
 class _Scope:
     rows: dict[tuple[Owner, Operation, Route], _Counts] = field(default_factory=dict)
     claimed: bool = False
-    finished: bool = False
+    active: int = 0
     closed: bool = False
 
     def snapshot(self) -> RequestTotals:
@@ -93,14 +95,16 @@ class _Scope:
                 not counts.gap or counts.attempts or counts.writes or counts.replies
             ):
                 observed = TransportCounts(counts.attempts, counts.writes, counts.replies)
-                coverage = "partial" if counts.gap or not self.finished else "complete"
+                coverage = "partial" if counts.gap or self.active else "complete"
             rows.append(
                 RequestRoute(owner, operation, route, counts.submissions, coverage, observed)
             )
         statuses = {row.coverage for row in rows}
-        if not self.claimed or statuses == {"unknown"}:
+        if self.active:
+            coverage = "partial"
+        elif not self.claimed or statuses == {"unknown"}:
             coverage = "unknown"
-        elif not self.finished or statuses - {"complete"}:
+        elif statuses - {"complete"}:
             coverage = "partial"
         else:
             coverage = "complete"
@@ -114,7 +118,7 @@ class _Run:
 
     def finish(self, _task: object = None) -> None:
         if self.owner == "root":
-            self.scope.finished = True
+            self.scope.active -= 1
 
     def submit(self, operation: Operation, route: Route, *, first: bool = True) -> _Counts:
         counts = self.scope.rows.setdefault((self.owner, operation, route), _Counts())
@@ -130,21 +134,25 @@ _http: ContextVar[_Counts | None] = ContextVar("request_http", default=None)
 
 
 class RequestCapture:
-    """Observe the first Python Runner invocation in a with block.
+    """Observe all direct Python Runner calls in a with block.
 
     Example::
 
         capture = RequestCapture()
         try:
             with capture:
-                result = await Runner.run(agent, prompt)
+                for prompt in prompts:
+                    await Runner.run(agent, prompt)
         finally:
             print(capture.totals.coverage, capture.totals.observed)
 
     Read totals after success, cancellation or failure. Drain streams inside the
-    block. Early exit freezes a partial snapshot. Reuse starts a fresh capture,
-    including on approval resume. Handoffs, corrections and follow-ups belong
-    to the root. Agent tools count as children. Independent runs are excluded.
+    block. Exit with any run in progress freezes a partial snapshot. Re-entering
+    the context starts fresh. Direct calls, including concurrent calls and
+    approval resumes, share root totals. Handoffs, corrections and follow-ups
+    stay with their owning run. Agent tools count as children. Independent
+    Runner calls inside tools or guardrails are excluded. Nested captures
+    collect their own direct calls separately.
 
     One regular submission includes Runner and client retries. Automatic session
     compaction is separate. HTTP and SSE count local header write attempts,
@@ -186,12 +194,11 @@ class RequestCapture:
 
 def _claim_run() -> _Run | None:
     run = _next.get()
-    if run is None or run.scope.closed or run.scope.finished:
+    if run is None or run.scope.closed:
         return None
     if run.owner == "root":
-        if run.scope.claimed:
-            return None
         run.scope.claimed = True
+        run.scope.active += 1
     return run
 
 
