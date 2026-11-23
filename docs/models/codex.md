@@ -9,7 +9,15 @@ Pass `RunConfig(model_provider=CodexProvider())` to the Runner to use Codex Core
 
 ## Install a GitHub prerelease wheel
 
-The experimental `feat/simple-codex` branch packages the Python SDK, the compiled Codex extension, and its execution helpers in one `openai-agents` wheel. Use standard CPython 3.10 through 3.14. After publication, find **Agents SDK v1.0.0-alpha.1** in [GitHub Releases](https://github.com/openai/openai-agents-python/releases). Expand **Assets** and copy the link to the wheel for your platform. Its filename starts with `openai_agents-1.0.0a1-`.
+Use standard CPython 3.10 through 3.14. The preview wheel includes the Python SDK, Codex Core, and its execution helpers. You don't need a Codex CLI installation.
+
+!!! warning "Check the prerelease before installing"
+
+    [`v1.0.0-alpha.1`](https://github.com/openai/openai-agents-python/releases/tag/v1.0.0-alpha.1) includes the provider but predates OpenTelemetry, operation tracing, native approval recovery, and Runner text redaction. For those features, wait for a tagged prerelease that lists them. Install wheels only from the SDK's GitHub Releases page. A passing CI run and its checksums do not establish release approval.
+
+1. Open [SDK releases](https://github.com/openai/openai-agents-python/releases) and select a tagged prerelease that supports the features you need.
+2. From that release's **Assets**, download `SHA256SUMS` and the wheel for your platform.
+3. Compute the wheel's SHA-256 digest with `sha256sum` on Linux, `shasum -a 256` on macOS, or `Get-FileHash` in PowerShell. Install only if the digest matches the entry for the exact filename in `SHA256SUMS`.
 
 | Platform | Wheel filename ending |
 | --- | --- |
@@ -18,16 +26,16 @@ The experimental `feat/simple-codex` branch packages the Python SDK, the compile
 | macOS 11 or newer on Apple Silicon | `macosx_11_0_arm64.whl` |
 | Windows x64 | `win_amd64.whl` |
 
-In an activated virtual environment, replace `WHEEL_URL` with the asset link. This installs prebuilt binaries.
+For the tracing example, see **OpenTelemetry** in the English [tracing guide](../tracing.md) to install the wheel with the `opentelemetry` extra. Otherwise, activate a fresh virtual environment and replace `WHEEL_FILE` with the local path to your `.whl` file.
 
 ```sh
-python -m pip install --only-binary=:all: "WHEEL_URL"
+python -m pip install --only-binary=:all: "WHEEL_FILE"
 ```
 
-For repository examples, check out the preview tag. From the repository root, run `uv sync` with the extras required by the example. Then install the wheel in the project environment.
+For repository examples, check out the same release tag. From the repository root, run `uv sync` with the extras required by the example. Then install the verified wheel in the project environment.
 
 ```sh
-uv pip install --reinstall-package openai-agents "WHEEL_URL"
+uv pip install --reinstall-package openai-agents "WHEEL_FILE"
 ```
 
 Run the examples with `uv run --no-sync` to keep the wheel installed. You can also set `UV_NO_SYNC=1` in your shell and use the repository's `uv run` commands as written. Each project sync reinstalls the pure Python SDK from the checkout.
@@ -134,7 +142,15 @@ The workspace sandbox protects the directory that contains the installed helpers
 
 On Windows, the preview rejects a local Codex executor configured with the legacy elevated sandbox. That sandbox needs a setup helper that Codex cannot securely locate from a Python process. If your organization requires this sandbox, use an SDK-managed executor or configure a remote executor with `include_local = false` in `environments.toml`.
 
-Pass a [`ResumableSession`](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/docs/sessions/index.md#use-your-own-storage-for-resumable-sessions) to `Runner.run(..., session=session)` to pause a built-in `exec_command` or `apply_patch` for approval. A new worker can load that session and approve or reject the original call. Both workers need the same local workspace and permissions. See the [recovery requirements for tool hooks](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/native/codex/patches/02-approval-recovery.md). Other native approval requests fail the model call.
+To pause a direct built-in `exec_command` or `apply_patch` for human approval, start the run with a [`ResumableSession`](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/docs/sessions/index.md#use-your-own-storage-for-resumable-sessions). On the replacement worker, load the saved state, approve or reject the original request, and pass the Codex run configuration again. Protect the session store. It can contain the submitted command or patch even with tracing disabled.
+
+Recovery requires a single pending native call, one local environment, and the same workspace path and permissions. For edits, the affected files must still match the saved state. Other types of native approval requests fail the model call.
+
+Keep required security hooks enabled. Configure the same SDK `prepare_tool_input`, `prepare_tool_output`, and lifecycle hooks on both workers. A missing required hook leaves approval pending. Other native hooks or hook warnings stop recovery. See the [recovery requirements for tool hooks](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/native/codex/patches/02-approval-recovery.md#use-a-scrubber-with-approvals).
+
+Codex selects the sandbox for the first attempt. After a sandbox denial, Codex can retry an edit outside the sandbox only if the policy permits it without another approval and no edits have been committed. A partial edit stops recovery and leaves earlier writes on disk. After a partial edit or worker crash, inspect the workspace and reconcile any effects before retrying. See the [recovery limits](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/native/codex/patches/02-approval-recovery.md#safety-limits).
+
+In a container, check that the worker can start the sandbox helper. On a hard timeout, terminate the worker's commands and their child processes as well.
 
 For a non-interactive read-only workflow, disable approval prompts.
 
@@ -148,19 +164,69 @@ Commands that require more permission fail under this configuration. SDK tool ap
 
 A `SandboxAgent`, `ShellTool`, or `ApplyPatchTool` uses the SDK's executor or editor instead. The provider disables competing native workspace tools for these runs. Disable inherited Codex MCP servers when using isolated SDK execution tools; otherwise the provider rejects the configuration. SDK-managed MCP tools remain available through the SDK's own connection and approval policy. See [MCP](../mcp.md).
 
+!!! warning "When a tool requires a policy check"
+
+    If the native hook relay cannot deliver a decision, Codex may run the tool with its original arguments. If a failed check must always stop execution, enforce the check inside an SDK-managed tool and disable the corresponding native tool. Raw stream events and provider-managed history can still contain the original arguments.
+
 Input guardrails with `run_in_parallel=False` finish before model execution. Cancellation and output guardrails do not roll back native commands or tool side effects. Inspect the workspace before retrying a failed operation.
 
 ## Streaming, history, and cancellation
 
-Reuse a `CodexProvider` across calls in the same workspace. The provider shares a native thread manager and starts a fresh, ephemeral Codex thread for each model call. The SDK supplies the instructions, messages, tool results, and schemas for that call. Keep conversation history in an [SDK session](../sessions/index.md) or pass `result.to_input_list()` to the next run. When your application finishes using the provider, call `await provider.aclose()` to release its shared resources.
+Reuse a `CodexProvider` across calls in the same workspace. The provider shares a native thread manager and starts a fresh, ephemeral Codex thread for each request from the Runner. One request can include several model calls and native tool executions. The SDK supplies the instructions, messages, tool results, and schemas for the request. Keep conversation history in an [SDK session](../sessions/index.md) or pass `result.to_input_list()` to the next run. When your application finishes using the provider, call `await provider.aclose()` to release its shared resources.
 
 Use `Runner.run_streamed()` and consume `result.stream_events()` as with the default provider. Text deltas arrive during generation. When the model supplies a requested reasoning summary, the stream also includes `response.reasoning_summary_text.delta` events. SDK function calls supply their complete JSON arguments in one update, rather than an argument-by-argument stream.
 
-Call `result.cancel()` to stop a streaming run immediately, or `result.cancel(mode="after_turn")` to stop after the current turn. Continue consuming the stream to observe completion. For a non-streaming async run, cancel its asyncio task. The provider closes the ephemeral thread when the model call ends.
+Call `result.cancel()` to stop a streaming run immediately, or `result.cancel(mode="after_turn")` to stop after the current turn. Continue consuming the stream to observe completion. For a non-streaming async run, cancel its asyncio task. The provider has been closing the ephemeral thread at the end of each Runner request.
 
 Strict structured output uses Codex's output schema. With `strict_json_schema=False`, the provider puts the schema in the instructions and the SDK validates the final JSON. The latter does not constrain generation on the server.
 
 `OpenAIResponsesCompactionSession` can compact full input history and replay the encrypted result into Codex. It calls the separate OpenAI compact endpoint and needs an OpenAI client or credentials. `compaction_mode="previous_response_id"` cannot use Codex's local turn IDs as stored Responses IDs. See [session compaction](../sessions/index.md).
+
+## Operation tracing
+
+The SDK preview uses two [Codex patches](https://github.com/openai/openai-agents-python/tree/feat/simple-codex/native/codex/patches) for operation tracing and approval recovery in the embedded Core. Installing the wheel leaves any separate Codex CLI unchanged. Runner text redaction runs in Python.
+
+Use the same SDK trace processors for Responses and embedded Codex. See **OpenTelemetry** in the English [tracing guide](../tracing.md) for a runnable example with a console exporter or collector. To capture metadata for a Codex run, pass this configuration to the Runner.
+
+```python
+from agents import RunConfig
+from agents.models.codex import CodexProvider
+
+config = RunConfig(
+    model_provider=CodexProvider(),
+    tracing={"operation_detail": "metadata"},
+    trace_include_sensitive_data=False,
+)
+```
+
+One Runner turn can contain several model calls and native tool executions. For example, if Codex reads a file, calls a Python tool, and then answers, look for three model spans and two execution spans across two Runner turns. A retry adds an event to the same model span. Python tools appear once, when the Runner executes them.
+
+Nested native tool executions in the active Codex thread get their own spans. Tracing does not follow independently running Codex subagents onto other threads.
+
+With `trace_include_sensitive_data=True`, SDK processors receive the following fields for each Runner request to Codex.
+
+| `operation_detail` | Model spans | Native tool spans |
+| --- | --- | --- |
+| Omitted | Caller input on the first span (`.input`) and the raw returned response on the last successful span (`.response`). No `.output` or paused approval response. | Metadata |
+| `"metadata"` | Metadata | Metadata |
+| `"content"` | Bounded submitted messages (`.input`) and completed visible output items (`.output`) per call, without a raw `.response` | Bounded arguments and available results |
+
+With detail omitted, native tool results such as file contents can reach SDK processors through the returned response or replayed history. OpenTelemetry exports payloads only in `"content"` mode. Set `trace_include_sensitive_data=False` to suppress payloads in all three modes.
+
+`RunConfig.redact_text` restricts automatic traces to metadata even in content mode. Work inside Codex and native logs are outside its scope. See **Runner text redaction** in the English [tracing guide](../tracing.md).
+
+In content mode, model spans include completed output items and omit deltas from unfinished items. Native tool spans use the result Codex accepts after output hooks. The SDK excludes paused approval responses and their private recovery checkpoints from model spans.
+
+If a trace looks incomplete, check the following fields.
+
+| Signal | Meaning |
+| --- | --- |
+| `reason="output_unavailable"` in tool content | The tool finished, but the SDK received no accepted result. |
+| `reason="unsupported_or_oversized_content"` | The SDK omitted an unsupported value or one that exceeded the capture limit. |
+| `outcome="interrupted"` and `estimated_end=True` | Python estimated the end of an operation without a completion timestamp. |
+| `codex.tracing.coverage` with `coverage="partial"` | Check `reason`. For example, `missing_operations` means no model observations arrived, and `dropped_operations` can indicate a full queue. In OpenTelemetry, use `openai.agents.operation.coverage` and `openai.agents.operation.reason`. |
+
+Set `RunConfig(tracing_disabled=True)` to disable SDK tracing for the run.
 
 ## Supported features and limits
 

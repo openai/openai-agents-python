@@ -13,6 +13,7 @@ from openai.types.responses import ResponseComputerToolCall, ResponseFunctionToo
 from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
 
 from .._function_tool_arguments import FunctionToolApproval
+from .._redaction import require_clean_final_output, set_final_output_item
 from ..agent import Agent, ToolsToFinalOutputResult
 from ..guardrail import OutputGuardrailResult
 from ..handoffs import Handoff
@@ -243,6 +244,18 @@ class SingleStepResult:
 
     policy_error: BaseException | None = None
     """Failure to accept a guarded tool output, held only until blocked-output cleanup."""
+
+    def check_continued_output(self) -> None:
+        """Check guardrail mutations before releasing a provisional reply."""
+        if (
+            isinstance(self.next_step, NextStepFinalOutput)
+            and self.next_step.continue_after_guardrails
+        ):
+            require_clean_final_output(
+                self.next_step.output, self.original_input, self.pre_step_items, self.new_step_items
+            )
+            # A later reply, even an identical fallback, has a different source.
+            set_final_output_item(None)
 
     @property
     def generated_items(self) -> list[RunItem]:

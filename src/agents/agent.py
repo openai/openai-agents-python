@@ -55,6 +55,7 @@ from .tool import (
     ToolOriginType,
     _build_handled_function_tool_error_handler,
     _build_wrapped_function_tool,
+    _function_tool_enabled,
     _log_function_tool_invocation,
     _parse_function_tool_json_input,
     default_tool_error_function,
@@ -320,13 +321,7 @@ class AgentBase(Generic[TContext]):
             if not isinstance(tool, FunctionTool):
                 return True
 
-            attr = tool.is_enabled
-            if isinstance(attr, bool):
-                return attr
-            res = attr(run_context, get_public_agent(self))
-            if inspect.isawaitable(res):
-                return bool(await res)
-            return bool(res)
+            return await _function_tool_enabled(tool, run_context, self)
 
         results = await gather_with_cancel(*(_check_tool_enabled(t) for t in tools))
         enabled: list[Tool] = [t for t, ok in zip(tools, results, strict=False) if ok]

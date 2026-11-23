@@ -641,3 +641,74 @@ async def test_failed_policy_withholds_guarded_tool_output_but_records_effect(
     assert hooks.outputs == []
     assert effects == ["record"]
     assert len(model.calls) == 1
+
+
+async def test_omitted_refusal_reply_is_distinct_from_continued_answer(streamed):
+    decisions = []
+
+    def decide(ctx, step):
+        decisions.append(step.output)
+        return "continue"
+
+    model = ScriptedModel([[get_text_message("half")], [get_refusal_message("")]])
+    agent = Agent(name="worker", model=model, hooks=AgentHooks(step_policy=decide))
+    with pytest.raises(UserError, match="redact_text"):
+        await run(
+            streamed,
+            agent,
+            run_config=RunConfig(redact_text=lambda s: s.replace("halfhalf", "-")),
+            error_handlers={
+                "model_refusal": lambda _: {"final_output": "half", "include_in_history": False}
+            },
+        )
+    assert decisions == ["half"]
+    assert len(model.calls) == 2
+
+
+@pytest.mark.parametrize("stage", ["schema", "policy", "guardrail"])
+async def test_continued_reply_is_clean_at_each_callback_boundary(streamed, stage):
+    from pydantic import field_validator
+
+    class Reply(BaseModel):
+        text: str
+
+        @field_validator("text")
+        @classmethod
+        def validate_text(cls, value):
+            return "example" if stage == "schema" else value
+
+    seen = []
+
+    def decide(ctx, step):
+        seen.append(("policy", step.output.text))
+        if stage == "policy":
+            step.output.text = "example"
+        return "continue"
+
+    @output_guardrail
+    def check(ctx, agent, output):
+        seen.append(("guardrail", output.text))
+        output.text = "example"
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel([[get_text_message('{"text":"ok"}')]])
+    agent = Agent(
+        name="worker",
+        model=model,
+        output_type=Reply,
+        hooks=AgentHooks(step_policy=decide),
+        output_guardrails=[check],
+    )
+    with pytest.raises(UserError, match="redact_text"):
+        await run(
+            streamed,
+            agent,
+            "private-",
+            max_turns=1,
+            run_config=RunConfig(redact_text=lambda s: s.replace("private-example", "-")),
+        )
+    expected = [] if stage == "schema" else [("policy", "ok")]
+    if stage == "guardrail":
+        expected.append(("guardrail", "ok"))
+    assert seen == expected
+    assert len(model.calls) == 1
