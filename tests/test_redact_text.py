@@ -123,6 +123,61 @@ def scrub(value: str) -> str:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize(
+    "source", ["instructions", "filter", "parallel", "blocking", "output", "interrupt"]
+)
+async def test_callback_errors_release_private_context(streamed, source):
+    import traceback
+
+    from agents import input_guardrail, output_guardrail
+
+    error_type = BaseException if source == "interrupt" else RuntimeError
+
+    def fail(ctx, *_):
+        raise error_type(ctx.context) from ValueError(ctx.context)
+
+    agent = Agent(name="worker", model=ScriptedModel([[assistant_message("ok")]]))
+    config = RunConfig(redact_text=scrub)
+    if source in ("instructions", "interrupt"):
+        agent.instructions = fail
+    elif source == "filter":
+        config.call_model_input_filter = fail
+    elif source == "output":
+        agent.output_guardrails = [output_guardrail(fail)]
+    else:
+        agent.input_guardrails = [input_guardrail(run_in_parallel=source == "parallel")(fail)]
+
+    result = None
+    with pytest.raises(error_type) as caught:
+        if streamed:
+            result = Runner.run_streamed(agent, "go", context=SECRET, run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go", context=SECRET, run_config=config)
+    assert type(caught.value) is error_type
+    assert SECRET not in str(caught.value)
+    assert caught.value.__cause__ is caught.value.__context__ is None
+    for frame, _ in traceback.walk_tb(caught.tb):
+        if frame.f_globals.get("__name__", "").startswith("agents."):
+            assert SECRET not in repr(frame.f_locals)
+    if result is not None and result.run_loop_exception is not None:
+        assert SECRET not in str(result.run_loop_exception)
+
+
+@pytest.mark.asyncio
+async def test_unprotected_callback_error_keeps_original_diagnostics():
+    def fail(ctx, agent):
+        raise ValueError(ctx.context) from LookupError(ctx.context)
+
+    agent = Agent(name="worker", instructions=fail, model=ScriptedModel([]))
+    with pytest.raises(ValueError, match=SECRET) as caught:
+        await Runner.run(agent, "go", context=SECRET)
+    assert isinstance(caught.value.__cause__, LookupError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("filtered", [False, True])
 async def test_effective_instructions_are_scrubbed_before_model_call(streamed, filtered):
     def update(call):

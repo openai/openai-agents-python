@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
 from dataclasses import fields, is_dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from pydantic import BaseModel
 
@@ -42,11 +42,15 @@ def current_redactor() -> _Redactor | None:
     return _redactor.get()
 
 
-def raise_protected_error(error: BaseException) -> NoReturn:
-    """Remove diagnostics while preserving grouped interruptions in a protected run."""
-    if issubclass(type(error), BaseExceptionGroup):
-        _raise_data_redacted_error(_safe_data_redacted_error(error))
-    _raise_data_redacted_error(_prepare_data_redacted_error(error))
+def protected_error(error: BaseException) -> BaseException:
+    """Remove untrusted diagnostics, preserving interruptions and already safe errors."""
+    if _is_error_data_redacted(error):
+        return error
+    if issubclass(type(error), BaseExceptionGroup) or not issubclass(
+        type(error), (Exception, asyncio.CancelledError)
+    ):
+        return _safe_data_redacted_error(error)
+    return _prepare_data_redacted_error(error)
 
 
 @contextmanager
@@ -54,11 +58,10 @@ def redaction_scope(redactor: _Redactor | None) -> Iterator[None]:
     token = _redactor.set(redactor)
     try:
         yield
-    except (asyncio.CancelledError, BaseExceptionGroup) as error:
-        # Task can replace the sanitized cancellation on Python 3.10.
-        if redactor is None or _is_error_data_redacted(error):
+    except BaseException as error:
+        if redactor is None:
             raise
-        raise_protected_error(error)
+        _raise_data_redacted_error(protected_error(error))
     finally:
         _redactor.reset(token)
 

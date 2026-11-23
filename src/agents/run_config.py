@@ -609,11 +609,12 @@ class RunConfig:
 
     Protected runs withhold raw stream events, mute the ``openai.agents`` and
     ``openai.agents.tracing`` loggers and limit automatic traces to metadata, even when
-    content tracing is requested. Semantic events remain available. Tool errors and
-    provider failures after retries can lose their original exception type. Application and
-    provider logs, opaque media and work inside Codex are outside this policy. Keep
-    secrets out of configuration, identifiers and application metadata. No redactor
-    is active by default.
+    content tracing is requested. Semantic events remain available. To avoid exposing
+    private context, the Runner can replace failures, including guardrail and callback
+    errors, with a generic exception. Provider retries run before this replacement.
+    Application and provider logs, opaque media and work inside Codex are outside
+    this policy. Keep secrets out of configuration, identifiers and application
+    metadata. No redactor is active by default.
     """
 
     if TYPE_CHECKING:

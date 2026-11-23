@@ -6,8 +6,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .._redaction import current_redactor, raise_protected_error
-from ..exceptions import _is_error_data_redacted
+from .._redaction import current_redactor, redaction_scope
 
 if TYPE_CHECKING:
     from ..agent import Agent
@@ -34,13 +33,10 @@ _MODEL_RUN_CONTEXT: ContextVar[tuple[object | None, ModelToolHooks | None]] = Co
 def model_run_context(owner: object, hooks: ModelToolHooks | None = None) -> Iterator[None]:
     token = _MODEL_RUN_CONTEXT.set((owner, hooks))
     try:
-        yield
-    except BaseException as error:
-        if current_redactor() is None or _is_error_data_redacted(error):
-            raise
         # Retry decisions need the original provider error. Once they finish,
         # discard any reflected request, response body and exception chain.
-        raise_protected_error(error)
+        with redaction_scope(current_redactor()):
+            yield
     finally:
         _MODEL_RUN_CONTEXT.reset(token)
 

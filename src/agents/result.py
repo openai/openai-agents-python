@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
 
-from ._redaction import current_redactor, redaction_scope
+from ._redaction import current_redactor, protected_error, redaction_scope
 from ._tool_invocation import tool_output_identity
 from .agent import Agent
 from .agent_output import AgentOutputSchemaBase
@@ -1158,6 +1158,9 @@ class RunResultStreaming(RunResultBase):
 
         stored_exception = self._stored_exception
         if stored_exception is not None:
+            # Parallel guardrails can report failures outside the run loop's scope.
+            if self._redact_text is not None:
+                self._stored_exception = stored_exception = protected_error(stored_exception)
             if _is_error_data_redacted(stored_exception):
                 _detach_data_redacted_error_traceback(stored_exception)
                 # The streaming result retains caller-visible run data. Drop the local reference
