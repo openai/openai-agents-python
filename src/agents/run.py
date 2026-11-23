@@ -15,6 +15,7 @@ from ._redaction import (
     redaction_scope,
     require_clean,
     require_clean_agent,
+    require_clean_final_output,
 )
 from .agent import Agent
 from .agent_tool_state import set_agent_tool_state_scope
@@ -679,6 +680,9 @@ class AgentRunner:
                     )
                     with agent_tool_configuration_run(configuration_agent):
                         result = await self._run_impl(starting_agent, input, **kwargs)
+                        require_clean_final_output(
+                            result.final_output, result.input, result.new_items
+                        )
                         if isinstance(session, ResumableRun):
                             await session.finish(result)
                         return result
@@ -1750,6 +1754,7 @@ class AgentRunner:
                             save_items_after_guardrails=_save_max_turns_handler_output,
                             include_in_history=include_in_history,
                             run_state=run_state,
+                            history=run_error_data.history,
                         )
                         if include_in_history and not handler_output_recorded:
                             # Only reachable once the handler output cleared its guardrails and

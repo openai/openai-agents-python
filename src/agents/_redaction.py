@@ -28,7 +28,7 @@ from .exceptions import (
 
 if TYPE_CHECKING:
     from .agent import Agent
-    from .items import ModelResponse
+    from .items import ModelResponse, RunItem, TResponseInputItem
     from .run_config import ModelInputData
     from .tool import FunctionTool
 
@@ -283,6 +283,27 @@ def require_clean(value: object) -> None:
 
 def redact_payload(value: _T) -> _T:
     return _apply(value, "payload")
+
+
+def require_clean_final_output(
+    value: object, original: str | list[TResponseInputItem], *batches: list[RunItem]
+) -> None:
+    """Check the returned reply, even when history omits it or stores another form."""
+    if value is None or current_redactor() is None:
+        return
+    from .items import ItemHelpers, MessageOutputItem
+
+    items = [item for batch in batches for item in batch]
+    history = [*ItemHelpers.input_to_new_input_list(original), *(i.raw_item for i in items)]
+    reply = {"role": "assistant", "content": value}
+    if items and isinstance(items[-1], MessageOutputItem):
+        # A validator or guardrail can change the terminal message. Check the
+        # returned form in its place, without counting identical replies twice.
+        require_clean([*history[:-1], reply])
+        rendered = ItemHelpers.extract_text(items[-1].raw_item)
+        if list(_text_parts(value)) == list(_text_parts(rendered)):
+            return
+    require_clean([*history, reply])
 
 
 def redact_items(value: _T) -> _T:

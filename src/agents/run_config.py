@@ -594,10 +594,12 @@ class RunConfig:
 
     Supply a synchronous, deterministic function that leaves already sanitized text unchanged.
     For example, use ``lambda text: text.replace(secret, "[redacted]")``. Replacements affect
-    dynamic instructions and the inputs seen by models and Python tools. Static instructions
-    are checked without changing the agent attached to stream events. Unsupported values,
-    unsafe approvals and checkpoints that still need redaction fail closed. Results keep the
-    callback in memory to check each snapshot export. Supply it again when resuming.
+    dynamic instructions, model and tool inputs, and replies from error handlers and
+    custom tool callbacks. Replies are checked even when omitted from history.
+    Static instructions are checked without changing the agent attached to stream events.
+    Unsupported values, unsafe approvals and checkpoints that still need redaction fail
+    closed. Results keep the callback in memory to check each snapshot export. Supply it
+    again when resuming.
     A restored protected state must resume before it can be serialized again.
 
     A protected session append reads the available history to check for text split across

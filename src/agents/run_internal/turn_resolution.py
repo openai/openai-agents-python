@@ -34,7 +34,7 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from .. import _debug
 from .._function_tool_arguments import FunctionToolApproval
 from .._mcp_tool_metadata import collect_mcp_list_tools_metadata
-from .._redaction import require_clean_agent
+from .._redaction import redact_payload, require_clean_agent, require_clean_final_output
 from .._tool_identity import (
     FunctionToolLookupKey,
     build_function_tool_lookup_map,
@@ -274,7 +274,7 @@ async def _maybe_finalize_from_tool_results(
         new_response=new_response,
         pre_step_items=pre_step_items,
         new_step_items=new_step_items,
-        final_output=check_tool_use.final_output,
+        final_output=redact_payload(check_tool_use.final_output),
         hooks=hooks,
         context_wrapper=context_wrapper,
         tool_input_guardrail_results=tool_input_guardrail_results,
@@ -404,6 +404,7 @@ async def execute_final_output_step(
         if run_final_output_hooks_fn is not None
         else run_final_output_hooks
     )
+    require_clean_final_output(final_output, original_input, pre_step_items, new_step_items)
     await final_output_hooks(public_agent, hooks, context_wrapper, final_output)
 
     return SingleStepResult(

@@ -26,6 +26,7 @@ from .._redaction import (
     current_redactor,
     redact_model_input,
     redact_response,
+    require_clean_final_output,
 )
 from .._tool_identity import (
     get_tool_trace_name_for_tool,
@@ -748,6 +749,7 @@ async def _finalize_streamed_final_output(
     if stream_items_after_guardrails:
         _publish_stream_items(items, streamed_result)
     await checkpoint_streamed_result(streamed_result)
+    require_clean_final_output(output, streamed_result.input, streamed_result.new_items)
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
         on_persisted_after_guardrails(True)
@@ -767,6 +769,7 @@ async def finalize_max_turns_handler_output(
     save_items_after_guardrails: Callable[[list[RunItem]], Awaitable[None]],
     include_in_history: bool,
     run_state: RunState | None = None,
+    history: list[TResponseInputItem] | None = None,
 ) -> tuple[Any, RunItem]:
     """Validate and finalize one synthesized max-turn handler output.
 
@@ -780,6 +783,7 @@ async def finalize_max_turns_handler_output(
     reachable only through this batch.
     """
     validated_output = validate_handler_final_output(agent, output)
+    require_clean_final_output(validated_output, history or [])
     output_text = format_final_output_text(agent, validated_output)
     synthesized_item = create_message_output_item(agent, output_text)
 
@@ -1754,6 +1758,7 @@ async def start_streaming(
                 validated_output = validate_handler_final_output(
                     current_agent, handler_result.final_output
                 )
+                require_clean_final_output(validated_output, run_error_data.history)
                 output_text = format_final_output_text(current_agent, validated_output)
                 synthesized_item = create_message_output_item(current_agent, output_text)
                 require_clean_run_items(
