@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from ..items import TResponseStreamEvent
+from ..memory.session import await_session_mutation
 from ..stream_events import ApprovedText, FinalOutputAccepted
 
 if TYPE_CHECKING:
@@ -27,6 +28,7 @@ class ApprovedOutput:
         self.session_id: str | None = None
         self.accepted = False
         self.ready = asyncio.Event()
+        self._retired: asyncio.Future[None] | None = None
         self.error: str | None = None
         self.deadline: float | None = None
         self.turn = 0
@@ -37,7 +39,17 @@ class ApprovedOutput:
         self.deltas: deque[str] = deque()
         self.size = 0
 
+    def interrupt_preview(self) -> None:
+        self.ready.set()
+        if self._retired is not None:
+            self._retired.cancel()
+
+    def _fail(self, message: str) -> None:
+        self.error = message
+        self.interrupt_preview()
+
     def _reset(self) -> None:
+        self.interrupt_preview()
         # A new deque also invalidates approvals still awaiting the application.
         self.deltas.clear()
         self.deltas = deque()
@@ -54,8 +66,7 @@ class ApprovedOutput:
         from ..extensions.experimental.hosted_multi_agent import OpenAIHostedMultiAgentModel
 
         if isinstance(model, OpenAIHostedMultiAgentModel):
-            self.error = "Hosted multi-agent streams do not isolate root text."
-            self.ready.set()
+            self._fail("Hosted multi-agent streams do not isolate root text.")
             return None
         self.turn = turn
         return self
@@ -70,12 +81,12 @@ class ApprovedOutput:
             return
         self.ready.set()
         if getattr(event, "sequence_number", None) != self.sequence:
-            self.error = "Gap in the output stream."
+            self._fail("Gap in the output stream.")
             return
         self.sequence += 1
         if event.type == "response.created":
             if self.sequence != 1:
-                self.error = "Unexpected response within one attempt."
+                self._fail("Unexpected response within one attempt.")
                 return
             self.turn_id = event.response.id
         elif event.type in (
@@ -110,7 +121,7 @@ class ApprovedOutput:
                 or self.item != (event.item_id, event.output_index)
                 or event.content_index != self.content_index
             ):
-                self.error = "Text delta without an owned output item."
+                self._fail("Text delta without an owned output item.")
                 return
             if not event.delta:
                 return
@@ -119,13 +130,13 @@ class ApprovedOutput:
                 try:
                     size = len(event.delta.encode("utf-8"))
                 except UnicodeEncodeError:
-                    self.error = "Output text must be valid Unicode."
+                    self._fail("Output text must be valid Unicode.")
                     return
                 if size <= remaining:
                     self.size += size
                     self.deltas.append(event.delta)
                     return
-            self.error = "Pending output exceeds 65536 UTF-8 bytes."
+            self._fail("Pending output exceeds 65536 UTF-8 bytes.")
 
     async def read(
         self, result: RunResultStreaming
@@ -169,8 +180,27 @@ class ApprovedOutput:
                 pending += deltas.popleft()
                 prefix = self.approve(pending)
                 if inspect.isawaitable(prefix):
-                    # Join cancellation even if the callback catches CancelledError.
-                    (prefix,) = await asyncio.gather(prefix)
+                    retired = self._retired = asyncio.get_running_loop().create_future()
+                    owned = not asyncio.isfuture(prefix)
+                    preview = asyncio.ensure_future(prefix)
+                    try:
+                        if not revoked():
+                            await asyncio.wait(
+                                (preview, retired), return_when=asyncio.FIRST_COMPLETED
+                            )
+                        if revoked() or retired.done():
+                            continue
+                        prefix = preview.result()
+                    finally:
+                        self._retired = None
+                        # Only cancel work scheduled by this reader.
+                        if owned and not preview.done():
+                            preview.cancel()
+                            await await_session_mutation(
+                                asyncio.gather(preview, return_exceptions=True)
+                            )
+                        elif preview.done() and not preview.cancelled():
+                            preview.exception()
                 if (
                     revoked()
                     or expired()

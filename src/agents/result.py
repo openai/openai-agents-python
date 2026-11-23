@@ -981,6 +981,8 @@ class RunResultStreaming(RunResultBase):
         """
         # Store the cancel mode for the background task to check
         self._cancel_mode = mode
+        if self._approved_output is not None:
+            self._approved_output.interrupt_preview()
 
         if mode == "immediate":
             # Existing behavior - immediate shutdown
@@ -1018,17 +1020,19 @@ class RunResultStreaming(RunResultBase):
             await asyncio.gather(*tasks, return_exceptions=True)
 
     def subscribe_approved_output(
-        self, approve: Approve | None = None
+        self, approve_preview: Approve | None = None
     ) -> AsyncGenerator[ApprovedText | FinalOutputAccepted, None]:
         """Subscribe once, immediately after Runner.run_streamed and before yielding control.
 
         By default, yield only FinalOutputAccepted after guardrails, persistence and cleanup.
         Read final_output separately. Interrupted, failed and cancelled runs never notify.
 
-        A sync or async callback receives pending text from one assistant message part.
+        The optional approve_preview callback receives pending text from one assistant message part.
         Return an exact prefix to publish, or None or an empty string to wait.
         Previews are live only. A new item, part or turn discards pending text.
-        Item or response completion discards queued text and approvals still in progress.
+        Item or response completion discards queued text and pending previews.
+        The reader cancels and joins preview coroutines. Return an existing Task
+        or Future to retain ownership of it. Check final_output separately before display.
         Published ApprovedText cannot be retracted, even if guardrails or the run later fail.
 
         Prefixes require an isolated, numbered Responses stream with response and item IDs.
@@ -1058,12 +1062,12 @@ class RunResultStreaming(RunResultBase):
             or self._approved_output is not None
         ):
             raise RuntimeError("Subscribe once before the streaming run starts.")
-        reader = ApprovedOutput(approve)
+        reader = ApprovedOutput(approve_preview)
         self._approved_output = reader
 
         def finished(_task: object) -> None:
             if self._approved_output is not None:
-                self._approved_output.ready.set()
+                self._approved_output.interrupt_preview()
                 self._approved_output = None
 
         self.run_loop_task.add_done_callback(finished)
@@ -1071,13 +1075,13 @@ class RunResultStreaming(RunResultBase):
 
     @asynccontextmanager
     async def stream_approved_output(
-        self, approve: Approve | None = None
+        self, approve_preview: Approve | None = None
     ) -> AsyncIterator[AsyncIterator[ApprovedText | FinalOutputAccepted]]:
         """Own the streaming run and privately drain its raw events.
 
         Enter immediately after Runner.run_streamed(), before yielding control.
         The iterator uses the same approval rules as subscribe_approved_output().
-        Omit approve for final notifications only. Check final_output separately
+        Omit approve_preview for final notifications only. Check final_output separately
         for disclosure before displaying it. Published previews cannot be
         retracted, even if the run later fails or returns a different answer.
 
@@ -1086,7 +1090,7 @@ class RunResultStreaming(RunResultBase):
             from agents.stream_events import ApprovedText, FinalOutputAccepted
 
             run = Runner.run_streamed(agent, prompt)
-            async with run.stream_approved_output(approve) as events:
+            async with run.stream_approved_output(approve_preview) as events:
                 async for event in events:
                     if isinstance(event, ApprovedText):
                         await show_preview(event.text)
@@ -1100,7 +1104,7 @@ class RunResultStreaming(RunResultBase):
         """
         if self._active_stream_consumers:
             raise RuntimeError("stream_events() already has a reader.")
-        reader = self.subscribe_approved_output(approve)
+        reader = self.subscribe_approved_output(approve_preview)
 
         async def drain() -> None:
             async for _ in self.stream_events():
@@ -1158,7 +1162,7 @@ class RunResultStreaming(RunResultBase):
             if cancellation is not None:
                 raise cancellation
         if not joined:
-            del self, reader, events, approve, drain
+            del self, reader, events, approve_preview, drain
             await _await_data_redacted_error_boundary(lambda: driver)
 
     async def stream_events(self) -> AsyncIterator[StreamEvent]:

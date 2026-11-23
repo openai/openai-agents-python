@@ -106,13 +106,34 @@ async def test_invalid_approval_fails_only_reader(approval):
     assert run.final_output == "🙂"
 
 
-async def test_byte_bound_includes_unapproved_remainder(tmp_path, threads):
+@pytest.mark.parametrize("pending", [False, True])
+async def test_byte_bound_includes_unapproved_remainder(tmp_path, threads, pending):
     text = "🙂" * 16384 + "."
-    threads[0].append(FakeThread(text=text))
+    entered, finish = asyncio.Event(), asyncio.Event()
+    reply = asyncio.get_running_loop().create_future()
+
+    class Thread(FakeThread):
+        async def events(self):
+            async for event in super().events():
+                yield event
+                if event["type"] == "agent_message_content_delta":
+                    await (entered if event["delta"] == text[:2] else finish).wait()
+
+    def approve(prefix):
+        entered.set()
+        return reply if pending else None
+
+    threads[0].append(Thread(text=text))
     run = Runner.run_streamed(Agent(name="root"), "start", run_config=config(tmp_path))
-    with pytest.raises(ValueError, match="65536"):
-        await collect(run.subscribe_approved_output(lambda text: None))
-    await collect(run.stream_events())
+    try:
+        with pytest.raises(ValueError, match="65536"):
+            await asyncio.wait_for(anext(run.subscribe_approved_output(approve)), 5)
+        assert not reply.done()
+        assert not run.is_complete
+    finally:
+        entered.set()
+        finish.set()
+        await collect(run.stream_events())
     assert run.final_output == text
 
 
@@ -142,7 +163,6 @@ async def test_item_switch_revokes_awaited_approval(tmp_path, threads):
             await entered.wait()
             async for event in super().events():
                 yield event
-                release.set()
                 await finish.wait()
 
     threads[0].append(Thread(text="ok"))
@@ -191,7 +211,6 @@ async def test_cancel_during_approval(tmp_path, threads, cancel):
             assert not thread.closed
         else:
             run.cancel(mode=cancel)
-            release.set()
             assert await asyncio.wait_for(reading, 5) == []
     finally:
         release.set()
@@ -731,3 +750,75 @@ async def test_display_keeps_checkpoint_errors_detached(early):
                     async for _ in events:
                         pytest.fail("Unexpected receipt")
     assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("ending", ["cancel", "finish", "error"])
+async def test_display_retires_blocked_preview(ending):
+    entered, stopped = asyncio.Event(), asyncio.Event()
+
+    class Model(ScriptedModel):
+        async def stream_response(self, *args, **kwargs):
+            async for event in super().stream_response(*args, **kwargs):
+                yield event
+                if event.type == "response.output_text.delta":
+                    await entered.wait()
+                    if ending == "cancel":
+                        await asyncio.Event().wait()
+                    if ending == "error":
+                        raise ConnectionError("offline")
+
+    async def approve(text):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopped.set()
+            return text
+
+    run = Runner.run_streamed(
+        Agent(name="root", model=Model([[assistant_message("draft")]])), "start"
+    )
+    async with run.stream_approved_output(approve_preview=approve) as events:
+        reading = asyncio.create_task(collect(events))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            if ending == "cancel":
+                run.cancel()
+            if ending == "error":
+                with pytest.raises(ConnectionError, match="offline"):
+                    await asyncio.wait_for(reading, 5)
+            else:
+                receipts = await asyncio.wait_for(reading, 5)
+                assert [type(item) for item in receipts] == (
+                    [FinalOutputAccepted] if ending == "finish" else []
+                )
+            assert stopped.is_set()
+        finally:
+            reading.cancel()
+            await asyncio.gather(reading, return_exceptions=True)
+
+
+async def test_cancelling_preview_reader_leaves_borrowed_future_and_run_active(tmp_path, threads):
+    entered, gate = asyncio.Event(), asyncio.Event()
+    reply = asyncio.get_running_loop().create_future()
+    thread = FakeThread(gate=gate)
+    threads[0].append(thread)
+    run = Runner.run_streamed(Agent(name="root"), "start", run_config=config(tmp_path))
+
+    def approve(text):
+        entered.set()
+        return reply
+
+    reading = asyncio.create_task(collect(run.subscribe_approved_output(approve_preview=approve)))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        reading.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(reading, 5)
+        assert not reply.done() and not thread.closed
+    finally:
+        reply.cancel()
+        gate.set()
+        await collect(run.stream_events())
+        await asyncio.gather(reading, return_exceptions=True)
+    assert thread.closed and run.final_output == thread.text
