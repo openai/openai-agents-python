@@ -33,7 +33,6 @@ from agents.sandbox.entries import (
     Dir,
     DockerVolumeMountStrategy,
     File,
-    FuseMountPattern,
     GCSMount,
     InContainerMountStrategy,
     Mount,
@@ -1771,23 +1770,6 @@ async def test_docker_workspace_file_ops_reject_symlink_escape(tmp_path: Path) -
         await session.rm(Path("link/secret.txt"))
 
 
-def test_manifest_requires_fuse_detects_nested_mounts() -> None:
-    manifest = Manifest(
-        entries={
-            "workspace": Dir(
-                children={
-                    "mount": AzureBlobMount(
-                        account="account",
-                        container="container",
-                        mount_strategy=InContainerMountStrategy(pattern=FuseMountPattern()),
-                    )
-                }
-            )
-        }
-    )
-    assert docker_sandbox._manifest_requires_fuse(manifest) is True
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("member_name", "reason"),
@@ -2118,20 +2100,12 @@ async def test_docker_create_container_mounts_explicit_host_path(
 @pytest.mark.parametrize(
     "storage_mount",
     [
-        AzureBlobMount(
-            account="account",
-            container="container",
-            mount_strategy=InContainerMountStrategy(pattern=FuseMountPattern()),
-        ),
-        S3Mount(
-            bucket="bucket",
-            mount_strategy=InContainerMountStrategy(pattern=MountpointMountPattern()),
-        ),
         S3Mount(
             bucket="bucket", mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern())
         ),
         S3Mount(
             bucket="bucket",
+            read_only=False,
             mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern(mode="nfs")),
         ),
         S3FilesMount(
@@ -2139,10 +2113,9 @@ async def test_docker_create_container_mounts_explicit_host_path(
             mount_strategy=InContainerMountStrategy(pattern=S3FilesMountPattern()),
         ),
     ],
-    ids=["fuse", "mountpoint", "rclone-fuse", "rclone-nfs", "s3-files"],
+    ids=["read-only-rclone-fuse", "writable-rclone-nfs", "s3-files"],
 )
-async def test_docker_rejects_read_only_host_grant_with_privileged_storage_before_side_effects(
-    tmp_path: Path,
+async def test_docker_rejects_in_container_storage_before_side_effects(
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
     storage_mount: Mount,
@@ -2150,15 +2123,8 @@ async def test_docker_rejects_read_only_host_grant_with_privileged_storage_befor
     container = _StartedContainer()
     docker_client = _FakeCreateDockerClient(container)
     client = DockerSandboxClient(docker_client=cast(object, docker_client))
-    manifest = Manifest(
-        entries={"nested": Dir(children={"data": storage_mount})},
-        extra_path_grants=(
-            SandboxPathGrant(path="/mnt/shared-data", host_path=str(tmp_path), read_only=True),
-        ),
-    )
-    if isinstance(storage_mount.mount_strategy.pattern, MountpointMountPattern):
-        manifest = manifest.with_in_container_mount_credential_exposure_acknowledged("nested/data")
-    else:
+    manifest = Manifest(entries={"nested": Dir(children={"data": storage_mount})})
+    if isinstance(storage_mount, S3FilesMount):
         manifest = manifest.with_in_container_mount_broad_credential_exposure_acknowledged(
             "nested/data"
         )
@@ -2172,17 +2138,19 @@ async def test_docker_rejects_read_only_host_grant_with_privileged_storage_befor
     original_session_id = state.session_id
 
     def unexpected_provider_access(*args: object, **kwargs: object) -> None:
-        pytest.fail("incompatible grants must fail before Docker access or cleanup")
+        pytest.fail("unsupported mounts must fail before Docker access or cleanup")
 
     async def unexpected_environment_resolution(self: Environment) -> dict[str, str]:
-        pytest.fail("incompatible grants must fail before environment resolution")
+        pytest.fail("unsupported mounts must fail before environment resolution")
 
     monkeypatch.setattr(client, "image_exists", unexpected_provider_access)
     monkeypatch.setattr(client, "get_container", unexpected_provider_access)
     monkeypatch.setattr(client, "_cleanup_failed_create_resources", unexpected_provider_access)
     monkeypatch.setattr(Environment, "resolve", unexpected_environment_resolution)
 
-    with pytest.raises(MountConfigError, match="read-only host_path grants.*SYS_ADMIN"):
+    with pytest.raises(
+        MountConfigError, match="Docker does not support in-container storage mounts"
+    ):
         if operation == "create":
             await client.create(
                 manifest=manifest,
@@ -2203,8 +2171,8 @@ async def test_docker_rejects_read_only_host_grant_with_privileged_storage_befor
     ("storage", "explicit_host_path", "read_only"),
     [
         ("none", True, True),
-        ("in-container", True, False),
-        ("in-container", False, True),
+        ("none", True, False),
+        ("none", False, True),
         ("docker-volume", True, True),
     ],
     ids=["ordinary-read-only-bind", "writable-bind", "path-only-grant", "external-storage"],
@@ -2228,14 +2196,10 @@ async def test_docker_create_preserves_compatible_host_grants_and_storage(
             ),
         ),
     )
-    if storage != "none":
+    if storage == "docker-volume":
         manifest.entries["data"] = S3Mount(
             bucket="bucket",
-            mount_strategy=(
-                InContainerMountStrategy(pattern=RcloneMountPattern())
-                if storage == "in-container"
-                else DockerVolumeMountStrategy(driver="rclone")
-            ),
+            mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
         )
     monkeypatch.setattr(client, "image_exists", lambda _image: True)
 
@@ -2261,7 +2225,7 @@ async def test_docker_create_preserves_compatible_host_grants_and_storage(
         if explicit_host_path
         else []
     )
-    assert kwargs.get("cap_add") == (["SYS_ADMIN"] if storage == "in-container" else None)
+    assert not {"cap_add", "devices", "privileged", "security_opt"} & kwargs.keys()
     assert any(mount["Type"] == "volume" for mount in mounts) == (storage == "docker-volume")
 
 
@@ -3666,75 +3630,6 @@ def test_s3_files_mount_rejects_docker_volume_mount() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_docker_create_container_grants_fuse_for_in_container_rclone_mount(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    container = _ResumeContainer(status="created")
-    docker_client = _FakeCreateDockerClient(container)
-    client = DockerSandboxClient(docker_client=cast(object, docker_client))
-    manifest = Manifest(
-        entries={
-            "data": S3Mount(
-                bucket="bucket",
-                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
-            )
-        }
-    )
-
-    monkeypatch.setattr(client, "image_exists", lambda _image: True)
-
-    created = await client._create_container(DEFAULT_PYTHON_SANDBOX_IMAGE, manifest=manifest)
-
-    assert created is container
-    assert docker_client.containers.calls == [
-        {
-            "entrypoint": ["tail"],
-            "image": DEFAULT_PYTHON_SANDBOX_IMAGE,
-            "detach": True,
-            "command": ["-f", "/dev/null"],
-            "environment": {},
-            "devices": ["/dev/fuse"],
-            "cap_add": ["SYS_ADMIN"],
-            "security_opt": ["apparmor:unconfined"],
-        }
-    ]
-
-
-@pytest.mark.asyncio
-async def test_docker_create_container_grants_sys_admin_for_s3_files_mount(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    container = _ResumeContainer(status="created")
-    docker_client = _FakeCreateDockerClient(container)
-    client = DockerSandboxClient(docker_client=cast(object, docker_client))
-    manifest = Manifest(
-        entries={
-            "data": S3FilesMount(
-                file_system_id="fs-1234567890abcdef0",
-                mount_strategy=InContainerMountStrategy(pattern=S3FilesMountPattern()),
-            )
-        }
-    )
-
-    monkeypatch.setattr(client, "image_exists", lambda _image: True)
-
-    created = await client._create_container(DEFAULT_PYTHON_SANDBOX_IMAGE, manifest=manifest)
-
-    assert created is container
-    assert docker_client.containers.calls == [
-        {
-            "entrypoint": ["tail"],
-            "image": DEFAULT_PYTHON_SANDBOX_IMAGE,
-            "detach": True,
-            "command": ["-f", "/dev/null"],
-            "environment": {},
-            "cap_add": ["SYS_ADMIN"],
-            "security_opt": ["apparmor:unconfined"],
-        }
-    ]
-
-
 class _ExecRunContainer:
     def __init__(
         self,
@@ -3805,10 +3700,11 @@ class _ResumeContainer:
         self.id = container_id
         self.exec_calls: list[dict[str, object]] = []
         self._workspace_exists = workspace_exists
-        self.attrs = {
+        self.attrs: dict[str, object] = {
             "NetworkSettings": {"Ports": published_ports or {}},
             "Mounts": mounts or [],
             "Config": {"Labels": labels or {}},
+            "HostConfig": {"Privileged": False, "CapAdd": None},
         }
 
     def reload(self) -> None:
@@ -4488,6 +4384,37 @@ async def test_docker_resume_reconnects_serialized_credentialless_state() -> Non
     assert resumed._inner._container is container  # noqa: SLF001
     assert restored.container_id == "container"
     assert restored.workspace_root_ready is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "host_config",
+    [None, {"Privileged": True, "CapAdd": None}, {"Privileged": False, "CapAdd": ["SYS_ADMIN"]}],
+    ids=["missing-inspection", "privileged", "legacy-mount-capability"],
+)
+async def test_docker_resume_rejects_elevated_or_uninspectable_existing_container(
+    host_config: dict[str, object] | None,
+) -> None:
+    container = _ResumeContainer(status="running", container_id="container")
+    if host_config is None:
+        del container.attrs["HostConfig"]
+    else:
+        container.attrs["HostConfig"] = host_config
+    client = DockerSandboxClient(docker_client=_ResumeDockerClient(container))
+    state = DockerSandboxSessionState(
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id=container.id,
+        workspace_root_ready=True,
+    )
+
+    with pytest.raises(ValueError, match="create a fresh sandbox session"):
+        await client.resume(state)
+
+    assert container.exec_calls == []
+    assert state.container_id == container.id
+    assert state.workspace_root_ready is True
 
 
 @pytest.mark.asyncio

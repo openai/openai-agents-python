@@ -26,7 +26,11 @@ class RecordingContainer:
     id = "a" * 64
 
     def __init__(self) -> None:
-        self.attrs = {"State": {"Paused": False}, "Config": {"User": "1000:1000"}}
+        self.attrs = {
+            "State": {"Paused": False},
+            "Config": {"User": "1000:1000"},
+            "HostConfig": {"Privileged": False, "CapAdd": None},
+        }
         self.events: list[str] = []
 
     def pause(self) -> None:

@@ -292,10 +292,10 @@ class DockerRemovalService:
         # Reuse the Docker client's mount authority checks without a module import cycle.
         from .docker import (
             _assert_existing_container_path_grants_match,
-            _validate_docker_path_grants,
+            _validate_docker_manifest,
         )
 
-        _validate_docker_path_grants(manifest)
+        _validate_docker_manifest(manifest)
         _assert_existing_container_path_grants_match(container, manifest)
         if bootstrap_workspace:
             # Reject unsupported mounts and security settings before an image
