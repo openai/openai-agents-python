@@ -19,6 +19,7 @@ from openai.types.responses.response_input_item_param import (
 )
 from openai.types.responses.response_input_param import ComputerCallOutput
 
+from .._redaction import hook_payload_diagnostics
 from .._tool_identity import get_mapping_or_attr, get_tool_trace_name_for_tool
 from ..agent import Agent
 from ..exceptions import ModelBehaviorError, UserError
@@ -148,7 +149,8 @@ class ComputerAction:
             )
 
             try:
-                output = await cls._execute_action_and_capture(computer, action.tool_call)
+                with hook_payload_diagnostics("Tool execution failed.", redact_by_default=False):
+                    output = await cls._execute_action_and_capture(computer, action.tool_call)
             except Exception as exc:
                 error_text = format_shell_error(exc)
                 trace_error = get_trace_tool_error(

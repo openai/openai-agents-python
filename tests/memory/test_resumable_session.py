@@ -16,6 +16,7 @@ from agents.exceptions import AgentsException, UserError
 from agents.memory.resumable_session import ResumableSession, ResumableSessionError
 from agents.result import RunResult, RunResultStreaming
 from agents.run import AgentRunner
+from agents.run_state import CURRENT_SCHEMA_VERSION
 from agents.testing import ScriptedModel, UnexpectedModelCall
 from tests.test_error_logging_redaction import _assert_secret_absent_from_agents_traceback
 from tests.test_responses import get_function_tool_call, get_text_message
@@ -829,7 +830,7 @@ async def test_prepared_approval_survives_durable_restore(streamed: bool, approv
     assert json.loads(paused.interruptions[0].arguments) == {"text": "reviewed text"}
     checkpoint = store.checkpoint(session.session_id)
     snapshot = json.loads(checkpoint["run_state"])
-    assert snapshot["$schemaVersion"] == "1.23"
+    assert snapshot["$schemaVersion"] == CURRENT_SCHEMA_VERSION
     assert snapshot["requires_resumable_session"] is True
 
     restored = await ResumableSession.resume(store, session.session_id)
