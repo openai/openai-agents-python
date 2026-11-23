@@ -78,10 +78,39 @@ class CodexProvider(ModelProvider):
     Supply the same SDK tool hooks on both workers. The user reviews the prepared
     input. Output preparation runs after execution.
 
-    Pass `children=CodexChildren(roles=[role], max_delegation_attempts=2)` to isolate
-    native delegation within each model invocation. Select an exact V1 catalog model
-    with `get_model`. This profile disables workspace tools, Code Mode and
-    MCP servers. SDK tools, handoffs, native tool hooks and saved
+    To enable native children, run `codex debug models` with a CLI that matches
+    the Codex Core revision in the SDK wheel. Use the same workspace,
+    credentials, provider and catalog settings. Under `models`, look for
+    `visibility="list"` and `multi_agent_version="v1"`.
+    For API keys also require `supported_in_api=true`. A catalog entry does
+    not guarantee access. If none qualifies, there is no listed V1 candidate.
+
+    With a saved Codex login, pass the exact `slug` to `get_model`:
+
+    ```python
+    import asyncio
+
+    from agents import Agent, Runner
+    from agents.models.codex import CodexChildren, CodexProvider, CodexRole
+
+    async def main(slug):
+        editor = CodexRole("editor", "Edits prose", "Return a concise rewrite.")
+        provider = CodexProvider(children=CodexChildren(roles=[editor], max_delegation_attempts=1))
+        try:
+            agent = Agent(name="Manager", model=provider.get_model(slug))
+            result = await Runner.run(agent, "Ask the editor to shorten 'at this point in time'.")
+            print(result.final_output)
+        finally:
+            await provider.aclose()
+
+    asyncio.run(main(input("V1 model slug: ")))
+    ```
+
+    The model chooses whether to delegate. See `CodexChildren` for the attempts
+    that count. Limits reset on each native invocation and do not cap model
+    requests, tokens or cost.
+    This profile disables workspace tools and Code Mode. Enabled MCP servers,
+    SDK tools, handoffs, SDK sandboxes, native tool hooks and saved
     workspace approvals are incompatible. Core can still accept structured inputs and read local
     context under the parent's permissions. Core owns child results and joins
     the tree when the request ends. Child IDs cannot resume in another request.

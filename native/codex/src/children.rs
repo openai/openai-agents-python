@@ -139,16 +139,19 @@ impl Children {
     }
 }
 
+pub(crate) const MODEL_REQUIRED: &str = "Native children require an exact V1 model. \
+    Run `codex debug models` and pass a slug with multi_agent_version=v1 to provider.get_model(slug).";
+
 // Core selects collaboration and Code Mode from model metadata independently of
 // feature flags. Freeze one approved entry so neither refresh nor a child override
 // can select a different model. Only remove tool capabilities.
 pub fn catalog(mut catalog: ModelsResponse, model: &str) -> NativeResult<ModelsResponse> {
     catalog.models.retain(|entry| entry.slug == model);
     let [entry] = catalog.models.as_mut_slice() else {
-        return Err("Native children require an exact V1 catalog model.".into());
+        return Err(MODEL_REQUIRED.into());
     };
     if entry.multi_agent_version != Some(MultiAgentVersion::V1) {
-        return Err("Native children require a V1 Responses catalog model.".into());
+        return Err(MODEL_REQUIRED.into());
     }
     entry.tool_mode = Some(codex_protocol::openai_models::ToolMode::Direct);
     entry.supports_search_tool = false;

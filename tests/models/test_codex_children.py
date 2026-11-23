@@ -195,6 +195,7 @@ def outputs(request):
 @pytest.mark.parametrize(
     "model,extra",
     [
+        (None, []),
         ("v2", []),
         ("unknown", []),
         ("v1", ["agents.max_depth=2"]),
@@ -209,8 +210,15 @@ async def test_unsupported_children_before_generation(
     items.append(final_message())
     provider = codex_fixture(tmp_path, port, monkeypatch, catalog + extra, children=PROFILE)
     try:
-        with pytest.raises(RuntimeError, match="V1|conflict"):
+        with pytest.raises(RuntimeError) as exc:
             await ask(provider, model)
+        if extra:
+            assert "conflict" in str(exc.value)
+        else:
+            assert str(exc.value) == (
+                "Native children require an exact V1 model. Run `codex debug models` and pass "
+                "a slug with multi_agent_version=v1 to provider.get_model(slug)."
+            )
         assert not requests
     finally:
         await provider.aclose()

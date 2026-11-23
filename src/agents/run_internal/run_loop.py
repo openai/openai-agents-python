@@ -17,6 +17,7 @@ from uuid import uuid4
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
+    ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
 )
 from openai.types.responses.response_output_item import ResponseOutputItem
@@ -26,6 +27,8 @@ from .._redaction import (
     current_redactor,
     redact_model_input,
     redact_response,
+    require_clean_final_output,
+    set_final_output_item,
 )
 from .._tool_identity import (
     get_tool_trace_name_for_tool,
@@ -209,6 +212,7 @@ from .session_persistence import (
 )
 from .streaming import stream_step_items_to_queue, stream_step_result_to_queue
 from .tool_actions import ApplyPatchAction, ComputerAction, LocalShellAction, ShellAction
+from .tool_declarations import prepare_declarations, validate_prepared_choice
 from .tool_execution import (
     coerce_shell_call,
     execute_apply_patch_calls,
@@ -238,6 +242,7 @@ from .turn_preparation import (
     validate_run_hooks,
 )
 from .turn_resolution import (
+    _snapshot_function_calls,
     check_for_final_output_from_tools,
     execute_final_output,
     execute_handoffs,
@@ -583,6 +588,7 @@ async def _finalize_streamed_final_output(
     context_wrapper: RunContextWrapper[TContext],
     save_items: Callable[[list[RunItem], str | None, bool | None], Awaitable[None]],
     items: list[RunItem],
+    final_history: tuple[list[RunItem], ...],
     model_response: ModelResponse | None,
     processed_response: ProcessedResponse | None,
     owner_starts: _BlockedOutputOwnerStarts,
@@ -748,6 +754,8 @@ async def _finalize_streamed_final_output(
     if stream_items_after_guardrails:
         _publish_stream_items(items, streamed_result)
     await checkpoint_streamed_result(streamed_result)
+    # A fallback or a recovered tool turn can still be missing from new_items.
+    require_clean_final_output(output, streamed_result.input, *final_history)
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
         on_persisted_after_guardrails(True)
@@ -767,6 +775,7 @@ async def finalize_max_turns_handler_output(
     save_items_after_guardrails: Callable[[list[RunItem]], Awaitable[None]],
     include_in_history: bool,
     run_state: RunState | None = None,
+    history: list[TResponseInputItem] | None = None,
 ) -> tuple[Any, RunItem]:
     """Validate and finalize one synthesized max-turn handler output.
 
@@ -780,8 +789,10 @@ async def finalize_max_turns_handler_output(
     reachable only through this batch.
     """
     validated_output = validate_handler_final_output(agent, output)
+    require_clean_final_output(validated_output, history or [])
     output_text = format_final_output_text(agent, validated_output)
     synthesized_item = create_message_output_item(agent, output_text)
+    set_final_output_item(synthesized_item if include_in_history else None)
 
     await run_final_output_hooks(agent, hooks, context_wrapper, validated_output)
 
@@ -1591,6 +1602,7 @@ async def start_streaming(
                             context_wrapper=context_wrapper,
                             save_items=_save_resumed_items,
                             items=list(turn_session_items),
+                            final_history=(resumed_session_items,),
                             model_response=turn_result.model_response,
                             processed_response=streamed_result._last_processed_response,
                             owner_starts=blocked_output_owner_starts,
@@ -1754,12 +1766,14 @@ async def start_streaming(
                 validated_output = validate_handler_final_output(
                     current_agent, handler_result.final_output
                 )
+                require_clean_final_output(validated_output, run_error_data.history)
                 output_text = format_final_output_text(current_agent, validated_output)
                 synthesized_item = create_message_output_item(current_agent, output_text)
                 require_clean_run_items(
                     streamed_result.input, streamed_result.new_items, [synthesized_item]
                 )
                 include_in_history = handler_result.include_in_history
+                set_final_output_item(synthesized_item if include_in_history else None)
                 store_setting = current_agent.model_settings.resolve(
                     run_config.model_settings
                 ).store
@@ -1784,6 +1798,7 @@ async def start_streaming(
                     if publish_events:
                         _publish_stream_items([synthesized_item], streamed_result)
 
+                handler_items: list[RunItem] = [synthesized_item] if include_in_history else []
                 await _finalize_streamed_final_output(
                     streamed_result=streamed_result,
                     agent=current_agent,
@@ -1791,7 +1806,8 @@ async def start_streaming(
                     output=validated_output,
                     context_wrapper=context_wrapper,
                     save_items=_save_max_turns_items,
-                    items=[synthesized_item] if include_in_history else [],
+                    items=handler_items,
+                    final_history=(streamed_result.new_items, handler_items),
                     model_response=None,
                     processed_response=None,
                     owner_starts=_BlockedOutputOwnerStarts(
@@ -2172,6 +2188,7 @@ async def start_streaming(
                         context_wrapper=context_wrapper,
                         save_items=_save_stream_items_with_count,
                         items=turn_session_items,
+                        final_history=(streamed_result.new_items,),
                         model_response=turn_result.model_response,
                         processed_response=turn_result.processed_response,
                         owner_starts=blocked_output_owner_starts,
@@ -2448,6 +2465,9 @@ async def run_single_turn_streamed(
         handoffs,
         collision_policy=run_config.tool_name_collision_policy,
     )
+    all_tools, model_tools, prepared_tools, omitted = await prepare_declarations(
+        all_tools, bindings, context_wrapper, run_config
+    )
     if agent_span is not None:
         agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
         agent_span.span_data.tools = [
@@ -2473,6 +2493,7 @@ async def run_single_turn_streamed(
         has_tools=bool(all_tools or handoffs),
     )
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
+    validate_prepared_choice(omitted, model_settings.tool_choice, bool(all_tools or handoffs))
 
     final_response: ModelResponse | None = None
     streamed_response_output: list[ResponseOutputItem] = []
@@ -2586,7 +2607,7 @@ async def run_single_turn_streamed(
             filtered.instructions,
             filtered.input,
             model_settings,
-            all_tools,
+            model_tools,
             output_schema,
             handoffs,
             get_model_tracing_impl(
@@ -2638,14 +2659,30 @@ async def run_single_turn_streamed(
             if isinstance(event_response, Response):
                 stream_response_id = event_response.id
                 stream_request_id = getattr(event_response, "_request_id", None)
+            if (
+                isinstance(event, ResponseCompletedEvent)
+                and not event.response.output
+                and streamed_response_output
+            ):
+                # Some backends leave completed output empty after item.done events.
+                event.response.output = list(streamed_response_output)
+
             # A secret can span any number of deltas. Only publish completed, scrubbed items.
             if current_redactor() is None:
-                streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+                raw_event = event
+                if run_config.tool_execution is not None:
+                    item = getattr(event, "item", None)
+                    if isinstance(item, ResponseFunctionToolCall):
+                        raw_event = event.model_copy(update={"item": deepcopy(item)})
+                    elif isinstance(event_response, Response) and event_response.output:
+                        output = _snapshot_function_calls(event_response.output)
+                        if output is not event_response.output:
+                            response_view = event_response.model_copy(update={"output": output})
+                            raw_event = event.model_copy(update={"response": response_view})
+                streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=raw_event))
 
             terminal_response: Response | None = None
-            is_completed_event = False
             if isinstance(event, ResponseCompletedEvent):
-                is_completed_event = True
                 terminal_response = event.response
             elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
                 event_type = cast(str, event.type)
@@ -2661,11 +2698,6 @@ async def run_single_turn_streamed(
                 raise response_error_event_failure_error(cast(str, event.type), event)
 
             if terminal_response is not None:
-                if is_completed_event and not terminal_response.output and streamed_response_output:
-                    # Some streaming backends emit output items during item.done events while
-                    # leaving the terminal response output empty. Preserve those items so the
-                    # runner can resolve the completed step correctly.
-                    terminal_response.output = list(streamed_response_output)
                 # Always fold retry attempts into usage, even when the terminal response omits
                 # provider usage (common for some Chat Completions / LiteLLM streams). Skipping
                 # apply_retry_attempt_usage here would drop failed-attempt accounting and diverge
@@ -2741,7 +2773,8 @@ async def run_single_turn_streamed(
             )
             tool_execution = run_config.tool_execution
             if tool_execution is not None and (
-                tool_execution.prepare_tool_input is not None
+                tool_execution.prepare_tool_declaration is not None
+                or tool_execution.prepare_tool_input is not None
                 or tool_execution.prepare_tool_output is not None
             ):
                 # A stream consumer must not change the invocation seen by preparation hooks.
@@ -2776,6 +2809,7 @@ async def run_single_turn_streamed(
         new_response=final_response,
         output_schema=output_schema,
         all_tools=all_tools,
+        prepared_tools=prepared_tools,
         handoffs=handoffs,
         hooks=hooks,
         context_wrapper=context_wrapper,
@@ -2863,6 +2897,9 @@ async def run_single_turn(
         handoffs,
         collision_policy=run_config.tool_name_collision_policy,
     )
+    all_tools, model_tools, prepared_tools, omitted = await prepare_declarations(
+        all_tools, bindings, context_wrapper, run_config
+    )
     if agent_span is not None:
         agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
         agent_span.span_data.tools = [
@@ -2882,7 +2919,7 @@ async def run_single_turn(
         system_prompt,
         input,
         output_schema,
-        all_tools,
+        model_tools,
         handoffs,
         hooks,
         context_wrapper,
@@ -2894,6 +2931,7 @@ async def run_single_turn(
         session_items_to_rewind=session_items_to_rewind,
         prompt_cache_key_resolver=prompt_cache_key_resolver,
         defer_llm_end_hooks=True,
+        omitted=omitted,
         reasoning_item_id_policy=reasoning_item_id_policy,
     )
 
@@ -2927,6 +2965,7 @@ async def run_single_turn(
         new_response=new_response,
         output_schema=output_schema,
         all_tools=all_tools,
+        prepared_tools=prepared_tools,
         handoffs=handoffs,
         hooks=hooks,
         context_wrapper=context_wrapper,
@@ -2959,6 +2998,8 @@ async def get_new_response(
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
     defer_llm_end_hooks: bool = False,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    *,
+    omitted: set[str] | None = None,
 ) -> ModelResponse:
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
@@ -2991,6 +3032,7 @@ async def get_new_response(
         has_tools=bool(all_tools or handoffs),
     )
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
+    validate_prepared_choice(omitted, model_settings.tool_choice, bool(all_tools or handoffs))
 
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_pending_input_filter(filtered.input)

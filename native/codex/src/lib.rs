@@ -409,10 +409,14 @@ impl Manager {
 
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let cleanup = self.state.begin_close();
-        pyo3_async_runtimes::tokio::future_into_py(
-            py,
-            async move { cleanup.await.map_err(py_error) },
-        )
+        // asyncio.run joins its executor before interpreter shutdown. A Tokio
+        // callback can wake the caller while still attached to Python.
+        let wait = pyo3::types::PyCFunction::new_closure(py, None, None, move |args, _| {
+            args.py()
+                .detach(|| runtime().block_on(cleanup.clone()))
+                .map_err(py_error)
+        })?;
+        py.import("asyncio")?.call_method1("to_thread", (wait,))
     }
 }
 

@@ -427,7 +427,7 @@ pub async fn build_services(
     let mut models = build_models_manager(&config, auth.clone());
     if let Some(profile) = &children {
         profile.validate(&config)?;
-        let name = model.ok_or("Select an explicit V1 catalog model for native children.")?;
+        let name = model.ok_or(crate::children::MODEL_REQUIRED)?;
         let catalog = models
             .raw_model_catalog(
                 codex_models_manager::manager::RefreshStrategy::OnlineIfUncached,
