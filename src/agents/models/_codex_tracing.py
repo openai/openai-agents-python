@@ -8,6 +8,7 @@ from typing import Any
 
 from openai.types.responses import Response
 
+from .._redaction import require_clean
 from ..items import TResponseInputItem
 from ..tracing import (
     Span,
@@ -122,6 +123,7 @@ class CodexOperationTracing:
             return
         at = datetime.fromtimestamp(event["at"] / 1000, tz=timezone.utc).isoformat()
         if phase == "start":
+            require_clean(event)
             if key in self._active or len(self._active) >= 128:
                 self._reason = "dropped_operations"
                 return

@@ -19,6 +19,8 @@ from pydantic import (
 from pydantic.dataclasses import dataclass
 from pydantic_core import ArgsKwargs
 
+from ._redaction import require_clean
+
 _RAW_USAGE_ATTRIBUTE = "_agents_sdk_raw_usage"
 _NORMALIZED_USAGE_ATTRIBUTE = "_agents_sdk_normalized_usage"
 _RAW_USAGE_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
@@ -237,6 +239,7 @@ class Usage:
     """
 
     _total_missing = False
+    _reported_model = cast("str | None", None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -421,6 +424,8 @@ def _serialize_usage_details(details: Any, default: dict[str, int]) -> dict[str,
     if hasattr(details, "model_dump"):
         serialized = details.model_dump()
         if isinstance(serialized, dict) and serialized:
+            # Compatible endpoints can attach arbitrary text to usage details.
+            require_clean(serialized)
             return serialized
     return dict(default)
 

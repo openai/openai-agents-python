@@ -38,6 +38,11 @@ class ResumableRun:
         await self._source._begin_run(input, tool_hooks)
         self._items = self._source._get_history()
 
+    async def release_rejected_input(self) -> None:
+        """Release the claim with only the saved history, before any model or tool runs."""
+        assert self._source is not None
+        await self._source._save_checkpoint(self._source._checkpoint.history, None)
+
     def bind_state(self, state: Any) -> None:
         """Attach the current store claim to the internal execution state."""
         assert self._source is not None

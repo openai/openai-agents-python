@@ -38,6 +38,12 @@ from openai.types.responses.response_output_item import (
 from pydantic import BaseModel, StringConstraints, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
+from ._redaction import (
+    current_redactor,
+    hook_payload_diagnostics,
+    redaction_scope,
+    require_clean,
+)
 from ._run_state_agent_identity import (
     _build_agent_identity_keys_by_id,
     _build_agent_identity_map,
@@ -72,6 +78,7 @@ from .exceptions import (
     _mark_error_data_redacted,
     _prepare_data_redacted_error,
     _raise_data_redacted_error,
+    _sync_data_redacted_error_boundary,
 )
 from .guardrail import (
     GuardrailFunctionOutput,
@@ -252,7 +259,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.23"
+CURRENT_SCHEMA_VERSION = "1.24"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -317,8 +324,11 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.23": (
         "Binds prepared tool inputs to their original proposals across retries and resume, "
-        "records required ResumableSession ownership, and preserves native approval receipts "
-        "and optional root budgets."
+        "records required ResumableSession ownership, and preserves native approval receipts."
+    ),
+    "1.24": (
+        "Requires caller-supplied text redaction when resuming protected RunState snapshots "
+        "and preserves required continuation policies, including root budgets."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -972,6 +982,9 @@ class RunState(Generic[TContext, TAgent]):
     _sandbox: dict[str, Any] | None = field(default=None, repr=False)
     """Serialized sandbox resume payload for sandbox-aware runs."""
 
+    _requires_redaction: bool = field(default=False, init=False, repr=False)
+    """Whether resuming requires a trusted caller-supplied text redactor."""
+
     _schema_version: str = field(default=CURRENT_SCHEMA_VERSION, repr=False)
     """Schema version the snapshot was loaded from for schema-gated resume compatibility."""
 
@@ -1033,6 +1046,8 @@ class RunState(Generic[TContext, TAgent]):
         self._trace_state = None
         self._sandbox = None
         self._schema_version = CURRENT_SCHEMA_VERSION
+        self._redact_text = current_redactor()
+        self._requires_redaction = self._redact_text is not None
         self._pending_session_write = None
         self._resumable_binding = None
         self._session_write_in_progress = False
@@ -1961,6 +1976,7 @@ class RunState(Generic[TContext, TAgent]):
             self._generated_items_last_processed_marker = current_merge_marker
         return generated_items
 
+    @_sync_data_redacted_error_boundary
     def to_json(
         self,
         *,
@@ -1986,6 +2002,35 @@ class RunState(Generic[TContext, TAgent]):
                 cannot be distinguished without hook instance attributes. Use unique agent
                 names before starting a persistable run in that case.
         """
+        policy = self._redact_text
+        if policy is None:
+            policy = current_redactor()
+        if policy is None and self._requires_redaction:
+            error = UserError("Resume with RunConfig.redact_text before saving protected state.")
+            _mark_error_data_redacted(error)
+            raise error
+        with redaction_scope(policy):
+            with hook_payload_diagnostics(
+                "RunConfig.redact_text could not safely serialize this state.",
+                redact_by_default=False,
+            ):
+                snapshot = self._serialize_snapshot(
+                    context_serializer, strict_context, include_tracing_api_key
+                )
+            require_clean(snapshot)
+            if policy is not None:
+                # Restored items nest the transcript inside per-agent records.
+                prefix = ItemHelpers.input_to_new_input_list(snapshot["original_input"])
+                for key in ("generated_items", "session_items"):
+                    require_clean([*prefix, *(item["raw_item"] for item in snapshot[key])])
+            return snapshot
+
+    def _serialize_snapshot(
+        self,
+        context_serializer: ContextSerializer | None,
+        strict_context: bool,
+        include_tracing_api_key: bool,
+    ) -> dict[str, Any]:
         if self._current_agent is None:
             raise UserError("Cannot serialize RunState: No current agent")
         if self._context is None:
@@ -2113,6 +2158,8 @@ class RunState(Generic[TContext, TAgent]):
         result["current_turn_persisted_item_count"] = self._current_turn_persisted_item_count
         if self._pending_session_write is not None:
             result["pending_session_write"] = copy.deepcopy(self._pending_session_write)
+        if self._requires_redaction:
+            result["requires_redaction"] = True
         if self._resumable_binding is not None:
             result["requires_resumable_session"] = True
         if self._terminal_unrecoverable:
@@ -2350,6 +2397,7 @@ class RunState(Generic[TContext, TAgent]):
 
         return ""
 
+    @_sync_data_redacted_error_boundary
     def to_string(
         self,
         *,
@@ -3351,6 +3399,7 @@ async def _deserialize_processed_response(
     scope_id: str | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
+    defer_mcp_discovery: bool = False,
     program_call_ids: Collection[str] = (),
     completed_program_call_ids: Collection[str] = (),
     validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
@@ -3374,7 +3423,13 @@ async def _deserialize_processed_response(
     )
 
     if hasattr(current_agent, "get_all_tools"):
-        all_tools = await current_agent.get_all_tools(context)
+        inventory_agent = current_agent
+        if defer_mcp_discovery and current_agent.mcp_servers:
+            from ._public_agent import set_public_agent
+
+            # The Runner rebinds pending MCP calls once the caller supplies its redactor.
+            inventory_agent = set_public_agent(current_agent.clone(mcp_servers=[]), current_agent)
+        all_tools = await inventory_agent.get_all_tools(context)
     else:
         all_tools = []
 
@@ -4299,6 +4354,11 @@ def _validate_run_state_schema_version(
             f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}.",
             UserError,
         )
+    if "requires_redaction" in state_json and (
+        tuple(int(part) for part in schema_version.split(".")) < (1, 24)
+        or state_json["requires_redaction"] is not True
+    ):
+        raise validation_error_factory("Run state redaction marker is invalid", UserError)
     return schema_version
 
 
@@ -4377,8 +4437,8 @@ async def _build_run_state_from_json(
     context_data = state_json["context"]
     budget = None
     if "budget" in context_data:
-        if (schema_major, schema_minor) < (1, 23):
-            raise _BudgetCheckpointError("Run budgets require schema 1.23 or later.")
+        if (schema_major, schema_minor) < (1, 24):
+            raise _BudgetCheckpointError("Run budgets require schema 1.24 or later.")
         budget = _BudgetState.restore(context_data["budget"])
     usage = deserialize_usage(context_data.get("usage", {}))
 
@@ -4543,6 +4603,7 @@ async def _build_run_state_from_json(
     )
     state._starting_agent = initial_agent
     state._schema_version = schema_version
+    state._requires_redaction = state_json.get("requires_redaction", False)
     from .agent_tool_state import set_agent_tool_state_scope
 
     state._agent_tool_state_scope_id = uuid4().hex
@@ -4587,6 +4648,7 @@ async def _build_run_state_from_json(
             scope_id=state._agent_tool_state_scope_id,
             context_deserializer=context_deserializer,
             strict_context=strict_context,
+            defer_mcp_discovery=state._requires_redaction,
             program_call_ids=program_call_ids,
             completed_program_call_ids=completed_program_call_ids,
             validation_error_factory=validation_error_factory,
@@ -5774,6 +5836,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Invalid tool output guardrail result boundary",
         "Run state tool output guardrail result boundary requires schema 1.20.",
         "Run state session marker is invalid",
+        "Run state redaction marker is invalid",
         "Run state terminal marker is invalid",
         "Run state references an agent identity that is not present in the restored graph",
         "Function approval owner is absent from the restored graph.",

@@ -608,6 +608,7 @@ async def get_response_with_retry(
     replay_unsafe_request: bool = False,
     reported_usage: dict[int, Usage] | None = None,
     budget: _BudgetState | None = None,
+    pricing_model: str | None = None,
 ) -> ModelResponse:
     request_attempt = 1
     policy_attempt = 1
@@ -642,7 +643,7 @@ async def get_response_with_retry(
                 ):
                     response = await _await_model_attempt(get_response(), timeout)
                 if budget is not None:
-                    budget.observe(response.usage)
+                    budget.observe(pricing_model, response.usage)
                 response.usage = apply_retry_attempt_usage(
                     response.usage, request_attempt - 1, reported_usage
                 )

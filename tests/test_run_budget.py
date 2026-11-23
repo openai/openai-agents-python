@@ -15,6 +15,7 @@ from openai import APIConnectionError, AsyncOpenAI
 from agents import (
     Agent,
     MaxTurnsExceeded,
+    ModelProvider,
     ModelRetrySettings,
     ModelSettings,
     RunBudget,
@@ -64,10 +65,10 @@ def test_invalid_limits(value):
 
 @pytest.mark.parametrize("policy", ["stop", "continue"])
 def test_cost_limit_and_estimator_must_be_paired(policy):
-    with pytest.raises(ValueError, match="requires estimate_cost_micros"):
-        RunBudget(max_estimated_cost_micros=1, missing_usage=policy)
-    with pytest.raises(ValueError, match="requires max_estimated_cost_micros"):
-        RunBudget(max_requests=2, estimate_cost_micros=lambda _: 1, missing_usage=policy)
+    with pytest.raises(ValueError, match="requires estimate_cost_usd"):
+        RunBudget(max_estimated_cost_usd=1, missing_usage=policy)
+    with pytest.raises(ValueError, match="requires max_estimated_cost_usd"):
+        RunBudget(max_requests=2, estimate_cost_usd=lambda _model, _usage: 1, missing_usage=policy)
 
 
 @pytest.mark.asyncio
@@ -75,8 +76,8 @@ def test_cost_limit_and_estimator_must_be_paired(policy):
 async def test_missing_estimator_rejects_dict_before_dispatch(streamed):
     model = ScriptedModel()
     agent = Agent(name="root", model=model)
-    config = {"budget": {"max_estimated_cost_micros": 1, "missing_usage": "continue"}}
-    with pytest.raises(ValueError, match="requires estimate_cost_micros"):
+    config = {"budget": {"max_estimated_cost_usd": 1, "missing_usage": "continue"}}
+    with pytest.raises(ValueError, match="requires estimate_cost_usd"):
         if streamed:
             Runner.run_streamed(agent, "begin", run_config=config)
         else:
@@ -89,7 +90,7 @@ async def test_missing_estimator_rejects_dict_before_dispatch(streamed):
     [
         ({"max_requests": 0}, "requests"),
         ({"max_tokens": 0}, "tokens"),
-        ({"max_estimated_cost_micros": 0}, "estimated_cost"),
+        ({"max_estimated_cost_usd": 0}, "estimated_cost"),
         ({"max_requests": 0, "max_tokens": 0}, "requests"),
     ],
 )
@@ -147,7 +148,7 @@ async def test_correction_uses_observed_totals(streamed, total, policy, code):
         assert (await run(agent, budget, streamed)).final_output == "done"
 
 
-def failing_estimate(usage):
+def failing_estimate(model, usage):
     raise RuntimeError("private estimator detail")
 
 
@@ -155,17 +156,20 @@ def failing_estimate(usage):
 @pytest.mark.parametrize(
     "estimator,code",
     [
-        (lambda u: None, "run_budget_usage_unavailable"),
-        (lambda u: u.total_tokens * 2, "run_budget_exceeded"),
-        (lambda u: True, "run_budget_invalid_estimate"),
-        (lambda u: 2**53, "run_budget_invalid_estimate"),
+        (lambda _model, u: None, "run_budget_usage_unavailable"),
+        (lambda _model, u: u.total_tokens * 2, "run_budget_exceeded"),
+        (lambda _model, u: -0.01, "run_budget_invalid_estimate"),
+        (lambda _model, u: float("inf"), "run_budget_invalid_estimate"),
+        (lambda _model, u: "0.01", "run_budget_invalid_estimate"),
+        (lambda _model, u: True, "run_budget_invalid_estimate"),
+        (lambda _model, u: float("nan"), "run_budget_invalid_estimate"),
         (failing_estimate, "run_budget_invalid_estimate"),
     ],
 )
 @pytest.mark.parametrize("streamed", [False, True])
 async def test_estimates_fail_distinctly_without_callback_details(estimator, code, streamed):
     model = ScriptedModel([step(get_function_tool_call("unknown"), 3)])
-    budget = RunBudget(max_estimated_cost_micros=6, estimate_cost_micros=estimator)
+    budget = RunBudget(max_estimated_cost_usd=6, estimate_cost_usd=estimator)
     with pytest.raises(RunBudgetError) as error:
         await run(Agent(name="root", model=model), budget, streamed)
     assert error.value.limit == ("estimated_cost" if code == "run_budget_exceeded" else None)
@@ -235,7 +239,10 @@ async def test_durable_approval_stop_preserves_effect_and_idle_budget(streamed):
     budget = RunBudget(max_requests=1)
     for invalid, error in [
         (RunBudget(max_requests=0), RunBudgetError),
-        (RunBudget(max_estimated_cost_micros=1, estimate_cost_micros=lambda _: 1), UserError),
+        (
+            RunBudget(max_estimated_cost_usd=1, estimate_cost_usd=lambda _model, _usage: 1),
+            UserError,
+        ),
     ]:
         with pytest.raises(error):
             await run(root, invalid, streamed, session=session)
@@ -262,7 +269,9 @@ async def test_live_cost_approval_rejects_portable_capture():
         return "saved"
 
     budget = RunBudget(
-        max_estimated_cost_micros=1, estimate_cost_micros=lambda _: None, missing_usage="continue"
+        max_estimated_cost_usd=1,
+        estimate_cost_usd=lambda _model, _usage: None,
+        missing_usage="continue",
     )
     model = ScriptedModel([step(get_function_tool_call("record"), 1), [get_text_message("done")]])
     root = Agent(name="root", model=model, tools=[record])
@@ -392,7 +401,7 @@ async def test_explicit_child_budget_survives_nested_approval(cost):
     )
     child = Agent(name="child", model=child_model, tools=[record])
     child_budget = (
-        RunBudget(max_estimated_cost_micros=9, estimate_cost_micros=lambda u: u.total_tokens)
+        RunBudget(max_estimated_cost_usd=9, estimate_cost_usd=lambda _model, u: u.total_tokens)
         if cost
         else RunBudget(max_requests=2)
     )
@@ -435,6 +444,8 @@ async def test_missing_observation_survives_checkpoint():
     data = paused.to_state().to_json()
     with pytest.raises(UserError):
         await RunState.from_json(root, {**data, "$schemaVersion": "1.22"})
+    with pytest.raises(UserError):
+        await RunState.from_json(root, {**data, "$schemaVersion": "1.23"})
     state = await RunState.from_json(root, data)
     state.approve(state.get_interruptions()[0])
     with pytest.raises(RunBudgetError, match="unavailable"):
@@ -471,7 +482,7 @@ async def test_durable_child_policy_checked_before_claim(streamed):
     )
     child = Agent(name="child", model=inner, tools=[record])
     config = RunConfig(
-        budget=RunBudget(max_estimated_cost_micros=8, estimate_cost_micros=lambda _: 1),
+        budget=RunBudget(max_estimated_cost_usd=8, estimate_cost_usd=lambda _model, _usage: 1),
         tracing_disabled=True,
     )
     nested = child.as_tool("ask", "Ask", run_config=config, failure_error_function=None)
@@ -645,7 +656,8 @@ async def test_child_budget_stop_uses_existing_tool_error_policy(streamed):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fail", [False, True])
-async def test_stream_budget_stop_publishes_only_committed_work(fail):
+@pytest.mark.parametrize("protected", [False, True])
+async def test_stream_budget_stop_publishes_only_committed_work(fail, protected):
     effects = []
 
     @tool
@@ -663,12 +675,19 @@ async def test_stream_budget_stop_publishes_only_committed_work(fail):
         agent,
         "begin",
         session=session,
-        run_config=RunConfig(budget=RunBudget(max_requests=1), tracing_disabled=True),
+        run_config=RunConfig(
+            budget=RunBudget(max_requests=1),
+            tracing_disabled=True,
+            redact_text=(lambda s: s.replace("working", "public")) if protected else None,
+        ),
     )
     events = []
 
     async def consume():
         async for event in result.stream_events():
+            if protected:
+                assert event.type != "raw_response_event"
+                assert "working" not in repr(event)
             if event.type == "run_item_stream_event":
                 events.append(event.name)
 
@@ -678,9 +697,205 @@ async def test_stream_budget_stop_publishes_only_committed_work(fail):
         assert not events
     finally:
         store.release.set()
-        with pytest.raises(ResumableSessionError if fail else RunBudgetError):
+        with pytest.raises(
+            ResumableSessionError if fail else (RuntimeError if protected else RunBudgetError)
+        ) as error:
             await asyncio.wait_for(consumer, timeout=5)
+    if protected and not fail:
+        assert str(error.value) == "Error details are redacted."
+        assert error.value.__context__ is None
     assert len(model.calls) == 1 and effects == [1]
     assert store.checkpoint(session.session_id)["status"] == ("active" if fail else "ready")
     assert result.final_output is None
     assert events == ([] if fail else ["message_output_created", "tool_called", "tool_output"])
+
+
+@pytest.mark.parametrize("value", [True, -0.01, float("nan"), float("inf"), "0.01"])
+def test_invalid_dollar_limit(value):
+    with pytest.raises(ValueError, match="max_estimated_cost_usd"):
+        RunBudget(max_estimated_cost_usd=value, estimate_cost_usd=lambda m, u: 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("prices, ceiling", [((0.1, 0.7), 0.8), ((1e-8, 2e-8), 3e-8)])
+async def test_handoff_and_resume_charge_each_model_once(streamed, prices, ceiling):
+    @tool(needs_approval=True)
+    def record() -> str:
+        return "saved"
+
+    class PricedModel(ScriptedModel):
+        model = "first"
+
+    target_model = PricedModel([step(get_function_tool_call("record"), 7)])
+    target_model.model = "second"
+    target = Agent(name="target", model=target_model, tools=[record])
+    model = PricedModel([step(get_handoff_tool_call(target), 2)])
+    root = Agent(name="root", model=model, handoffs=[target])
+    charged = []
+
+    def estimate(name, usage):
+        charged.append((name, usage.total_tokens))
+        return {"first": prices[0], "second": prices[1]}[name]
+
+    budget = RunBudget(max_estimated_cost_usd=ceiling, estimate_cost_usd=estimate)
+    state = (await run(root, budget, streamed)).to_state()
+    assert charged == [("first", 2)]
+    state.approve(state.get_interruptions()[0])
+    target_model.model = "later"
+    with pytest.raises(RunBudgetError) as error:
+        await run(root, budget, not streamed, state)
+    assert error.value.limit == "estimated_cost"
+    assert charged == [("first", 2), ("second", 7)]
+    assert len(model.calls) == len(target_model.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("named", [False, True])
+async def test_override_prices_selected_name_or_none(streamed, named):
+    model = ScriptedModel([step(get_function_tool_call("unknown"), 1)])
+
+    class Provider(ModelProvider):
+        def get_model(self, model_name):
+            return model
+
+    provider = Provider()
+    charged = []
+
+    def estimate(name, usage):
+        charged.append(name)
+        return 0.01 if name else None
+
+    config = RunConfig(
+        model="override" if named else model,
+        model_provider=provider,
+        budget=RunBudget(max_estimated_cost_usd=0.01, estimate_cost_usd=estimate),
+        tool_not_found_behavior="return_error_to_model",
+        tracing_disabled=True,
+    )
+    agent = Agent(name="root", model="unused")
+    with pytest.raises(RunBudgetError) as error:
+        if streamed:
+            result = Runner.run_streamed(agent, "go", run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go", run_config=config)
+    assert charged == ["override" if named else None]
+    assert error.value.code == ("run_budget_exceeded" if named else "run_budget_usage_unavailable")
+    assert len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_compaction_uses_its_own_price_before_resume(streamed):
+    @tool(needs_approval=True)
+    def record() -> str:
+        return "saved"
+
+    model = ScriptedModel([step(get_function_tool_call("record"), 1)])
+    agent = Agent(name="root", model=model, tools=[record])
+    charged = []
+
+    def estimate(name, usage):
+        charged.append((name, usage.total_tokens))
+        return 0.01 if name is None else 0.02
+
+    budget = RunBudget(max_estimated_cost_usd=0.03, estimate_cost_usd=estimate)
+    result = await run(agent, budget, streamed)
+    client = MagicMock()
+    client.responses.compact = AsyncMock(
+        return_value=SimpleNamespace(
+            output=[{"type": "compaction", "encrypted_content": "synthetic"}],
+            usage=Usage(total_tokens=7),
+        )
+    )
+    history = SimpleListSession()
+    await history.add_items([{"role": "user", "content": "earlier"}])
+    session = OpenAIResponsesCompactionSession(
+        "example", history, client=client, should_trigger_compaction=lambda ctx: True
+    )
+    await session.run_compaction(wrapper=result.context_wrapper)
+    state = result.to_state()
+    state.approve(state.get_interruptions()[0])
+    with pytest.raises(RunBudgetError) as error:
+        await run(agent, budget, streamed, state)
+    assert error.value.limit == "estimated_cost"
+    assert charged == [(None, 1), (session.model, 7)]
+    assert len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_redaction_rejects_nonportable_budget_before_dispatch(streamed):
+    model = ScriptedModel()
+    root = Agent(name="root", model=model)
+    config = RunConfig(
+        redact_text=lambda text: text,
+        budget=RunBudget(max_estimated_cost_usd=1, estimate_cost_usd=lambda m, u: 0),
+    )
+    with pytest.raises(RuntimeError, match="redacted"):
+        if streamed:
+            Runner.run_streamed(root, "begin", run_config=config)
+        else:
+            await Runner.run(root, "begin", run_config=config)
+    assert not model.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("prompt_owned", [False, True])
+async def test_price_uses_openai_request_body_override_or_prompt_response(streamed, prompt_owned):
+    import json
+
+    sent = []
+    priced = []
+
+    def estimate(name, usage):
+        priced.append(name)
+        return 0.01 if name == "selected" else 0
+
+    def respond(request):
+        sent.append(json.loads(request.content).get("model"))
+        item = get_function_tool_call("unknown") if len(sent) == 1 else get_text_message("done")
+        payload = get_response_obj([item]).model_dump()
+        payload["model"] = "selected" if prompt_owned else "reported"
+        payload["usage"] = {
+            "total_tokens": 1,
+            "input_tokens": 1,
+            "output_tokens": 0,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        }
+        if streamed:
+            event = {"type": "response.completed", "sequence_number": 1, "response": payload}
+            return httpx2.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n",
+            )
+        return httpx2.Response(200, json=payload)
+
+    async with AsyncOpenAI(
+        api_key="test-key",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond)),
+    ) as client:
+        agent = Agent(
+            name="root",
+            model=OpenAIResponsesModel(
+                model="base", openai_client=client, model_is_explicit=not prompt_owned
+            ),
+            prompt={"id": "fixture"} if prompt_owned else None,
+            model_settings=ModelSettings(
+                extra_body=None if prompt_owned else {"model": "selected"}
+            ),
+        )
+        with pytest.raises(RunBudgetError) as error:
+            await run(
+                agent, RunBudget(max_estimated_cost_usd=0.01, estimate_cost_usd=estimate), streamed
+            )
+        assert error.value.limit == "estimated_cost"
+        assert sent == [None if prompt_owned else "selected"]
+        assert priced == ["selected"]
