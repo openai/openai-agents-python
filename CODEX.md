@@ -14,10 +14,23 @@ Selecting `CodexProvider` does not reroute explicit model objects, voice or Real
 
 ## Install the preview
 
-Use CPython 3.10 through 3.14 and an activated virtual environment. The [v1.0.0-alpha.1 GitHub prerelease](https://github.com/openai/openai-agents-python/releases/tag/v1.0.0-alpha.1), published November 20, 2026, provides `cp310-abi3` wheels for Linux x86-64/ARM64 with glibc 2.28+, macOS 11+ Apple Silicon, and Windows x64. Open **Assets** and copy the URL of the `openai_agents-1.0.0a1-` wheel matching your platform. Replace `WHEEL_URL` below with that URL:
+Use CPython 3.10 through 3.14 and an activated virtual environment. The [v1.0.0-alpha.1 GitHub prerelease](https://github.com/openai/openai-agents-python/releases/tag/v1.0.0-alpha.1), published November 20, 2026, provides `cp310-abi3` wheels for Linux x86-64/ARM64 with glibc 2.28+, macOS 11+ Apple Silicon, and Windows x64. From that tagged release's **Assets**, download `SHA256SUMS` and the `openai_agents-1.0.0a1-` wheel matching your platform. Use only approved, tagged GitHub release wheels; a passing CI run and checksums alone do not establish release approval.
+
+In the download directory, replace `WHEEL_FILE` with the exact local wheel filename and compute its SHA-256 digest using the command for your platform:
 
 ```sh
-python -m pip install --only-binary=:all: "WHEEL_URL"
+sha256sum "WHEEL_FILE"       # Linux
+shasum -a 256 "WHEEL_FILE"   # macOS
+```
+
+```powershell
+Get-FileHash -Algorithm SHA256 "WHEEL_FILE"
+```
+
+Open `SHA256SUMS` and compare the computed digest with the entry for that exact filename. Install only if both the filename and digest match. In the activated virtual environment, run:
+
+```sh
+python -m pip install --only-binary=:all: "./WHEEL_FILE"
 ```
 
 The PyPI instructions in the project README cover the standard SDK. The preview tag points to commit `87e8f533`; this development branch has later changes. Use the release wheel with the [matching release examples](examples/codex/README.md#set-up). For current development code, build a wheel from the same source revision. See [installation details](docs/models/codex.md#install-a-github-prerelease-wheel) and the [current-source wheel build](native/codex/patches/README.md#test-a-change).

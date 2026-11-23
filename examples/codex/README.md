@@ -4,11 +4,11 @@ Choose an example for your task. The live examples below are available in the al
 
 ## Set up
 
-For the released live examples, open the [alpha.1 source archive](https://github.com/openai/openai-agents-python/archive/refs/tags/v1.0.0-alpha.1.zip) or check out the preview tag. From that source root, install the matching [preview wheel](../../CODEX.md#install-the-preview). Replace `WHEEL_URL` with your platform's release asset URL:
+For the released live examples, open the [alpha.1 source archive](https://github.com/openai/openai-agents-python/archive/refs/tags/v1.0.0-alpha.1.zip) or check out the preview tag. Download and verify the matching [preview wheel](../../CODEX.md#install-the-preview). From the release source root, replace `WHEEL_FILE` with the path to that verified local wheel:
 
 ```sh
 uv sync
-uv pip install --reinstall-package openai-agents "WHEEL_URL"
+uv pip install --reinstall-package openai-agents "WHEEL_FILE"
 ```
 
 For the offline SDK check, use the current development checkout and run `uv sync`; no native wheel or credentials are needed. To run development code with embedded Codex, follow the [current-source wheel build](../../native/codex/patches/README.md#test-a-change) and install that wheel instead.
