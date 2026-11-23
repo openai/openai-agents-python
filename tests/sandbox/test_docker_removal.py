@@ -719,6 +719,7 @@ async def test_relative_parent_segments_use_the_normalized_request(service: Any)
     await session(manager, container, configured).rm("link/../build", recursive=True)
     assert worker.calls[-2] == {
         "operation": "inspect",
+        "max_cpu_seconds": 10,
         "path": "/workspace/build",
         "workspace_root": "/workspace",
     }
@@ -749,6 +750,7 @@ async def test_missing_target_still_checks_the_requested_user(
     assert calls == [
         {
             "operation": "inspect",
+            "max_cpu_seconds": 10,
             "path": "/workspace/private/missing",
             "workspace_root": "/workspace",
         },
@@ -999,7 +1001,12 @@ async def test_relative_removal_preserves_workspace_alias_traversal(
     else:
         with pytest.raises(WorkspaceArchiveWriteError):
             await current.rm("build", recursive=True, user="developer")
-    assert inspected == {"operation": "inspect", "path": alias + "/build", "workspace_root": alias}
+    assert inspected == {
+        "operation": "inspect",
+        "max_cpu_seconds": 10,
+        "path": alias + "/build",
+        "workspace_root": alias,
+    }
     assert worker.removed == (["/workspace/build"] if accessible else [])
 
 

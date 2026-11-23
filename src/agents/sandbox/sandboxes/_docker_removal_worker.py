@@ -18,9 +18,10 @@ import os
 import posixpath
 import resource
 import stat
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 
@@ -231,6 +232,26 @@ def _remove(path: str, *, max_entry_visits: int) -> None:
 def _remove_as_user(
     path: str, user: str, *, max_entry_visits: int, max_cpu_seconds: int
 ) -> dict[str, Any]:
+    def remove() -> dict[str, Any]:
+        uid, gid, groups = _user_ids(user)
+        os.setgroups(groups)
+        os.setgid(gid)
+        os.setuid(uid)
+        _remove(path, max_entry_visits=max_entry_visits)
+        return {"ok": True}
+
+    return _run_child(remove, max_cpu_seconds=max_cpu_seconds)
+
+
+def _inspect(bindings: _Bindings, path: str, workspace_alias: str | None) -> dict[str, Any]:
+    bindings.validate()
+    if workspace_alias is not None and _canonical(workspace_alias) != bindings.paths[0]:
+        raise ValueError("workspace_alias_changed")
+    selected, is_directory = _selected_path(path)
+    return {"ok": True, "path": selected, "is_directory": is_directory}
+
+
+def _run_child(action: Callable[[], dict[str, Any]], *, max_cpu_seconds: int) -> dict[str, Any]:
     read_fd, write_fd = os.pipe()
     try:
         pid = os.fork()
@@ -244,12 +265,7 @@ def _remove_as_user(
         try:
             try:
                 resource.setrlimit(resource.RLIMIT_CPU, (max_cpu_seconds, max_cpu_seconds))
-                uid, gid, groups = _user_ids(user)
-                os.setgroups(groups)
-                os.setgid(gid)
-                os.setuid(uid)
-                _remove(path, max_entry_visits=max_entry_visits)
-                outcome: dict[str, Any] = {"ok": True}
+                outcome = action()
             except Exception as exc:
                 outcome = {
                     "ok": False,
@@ -263,10 +279,13 @@ def _remove_as_user(
             os._exit(exit_code)
     os.close(write_fd)
     try:
-        result = os.read(read_fd, 4096)
-        _, wait_status = os.waitpid(pid, 0)
+        chunks = []
+        while chunk := os.read(read_fd, 4096):
+            chunks.append(chunk)
     finally:
         os.close(read_fd)
+        _, wait_status = os.waitpid(pid, 0)
+    result = b"".join(chunks)
     if wait_status != 0 or not result:
         raise RuntimeError("removal_worker_failed")
     data: dict[str, Any] = json.loads(result)
@@ -302,16 +321,12 @@ def main() -> None:
                     response["paths"] = bindings.paths
                 elif operation == "inspect" and bindings is not None:
                     requested_path = ""
-                    bindings.validate()
-                    workspace_alias = request.get("workspace_root")
-                    if (
-                        workspace_alias is not None
-                        and _canonical(workspace_alias) != bindings.paths[0]
-                    ):
-                        raise ValueError("workspace_alias_changed")
-                    selected, is_directory = _selected_path(request["path"])
-                    requested_path = request["path"]
-                    response.update(path=selected, is_directory=is_directory)
+                    response = _run_child(
+                        partial(_inspect, bindings, request["path"], request.get("workspace_root")),
+                        max_cpu_seconds=request["max_cpu_seconds"],
+                    )
+                    if response["ok"]:
+                        requested_path = request["path"]
                 elif operation == "remove" and requested_path:
                     # The workload stays paused; preserve user search permissions on aliases.
                     path, requested_path = requested_path, ""

@@ -5,7 +5,11 @@ from __future__ import annotations
 import errno
 import io
 import json
+import os
+import signal
 import stat
+import subprocess
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -33,6 +37,174 @@ service = removal_helpers.service
 worker_code = pytest.importorskip(
     "agents.sandbox.sandboxes._docker_removal_worker", exc_type=ImportError
 )
+
+
+@pytest.fixture
+def local_worker(tmp_path: Path) -> Iterator[tuple[_Worker, Path]]:
+    # This fixture has been substituting namespace entry while exercising real child cleanup.
+    trace = tmp_path / "worker-events.jsonl"
+    script = """
+import errno, json, os, runpy, signal, sys
+namespace = runpy.run_path(sys.argv[1])["main"].__globals__
+trace = sys.argv[2]
+def record(**event):
+    with open(trace, "a") as stream:
+        stream.write(json.dumps(event) + "\\n")
+namespace["_enter_container"] = lambda pid: None
+inspect = namespace["_inspect"]
+resource = namespace["resource"]
+set_limit = resource.setrlimit
+def limit(kind, limits):
+    if limits == (7, 7):
+        raise PermissionError(errno.EPERM, "limit unavailable")
+    set_limit(kind, limits)
+resource.setrlimit = limit
+def inspect_path(bindings, path, alias):
+    record(operation="inspect", pid=os.getpid(), limits=resource.getrlimit(resource.RLIMIT_CPU))
+    if path.endswith("/exceeded"):
+        os.kill(os.getpid(), signal.SIGKILL)
+    return inspect(bindings, path, alias)
+namespace["_inspect"] = inspect_path
+waitpid = os.waitpid
+def reap(pid, options):
+    result = waitpid(pid, options)
+    record(operation="reap", pid=result[0], status=result[1])
+    return result
+os.waitpid = reap
+sys.argv = ["worker", "0"]
+namespace["main"]()
+"""
+    worker = object.__new__(_Worker)
+    worker.process = subprocess.Popen(
+        [sys.executable, "-I", "-S", "-c", script, worker_code.__file__, str(trace)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    worker.uncertain = False
+    try:
+        yield worker, trace
+    finally:
+        if worker.process.stdin is not None and not worker.process.stdin.closed:
+            worker.process.stdin.close()
+        try:
+            worker.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            worker.process.kill()
+            worker.process.wait(timeout=5)
+        for stream in (worker.process.stdout, worker.process.stderr):
+            if stream is not None:
+                stream.close()
+
+
+def test_local_worker_inspects_with_child_limit_and_reaps(
+    local_worker: tuple[_Worker, Path], tmp_path: Path
+) -> None:
+    worker, trace = local_worker
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sentinel = workspace / "sentinel"
+    sentinel.write_text("unchanged")
+    long_path = workspace.joinpath(*(["é" * 90] * 8))
+    long_path.mkdir(parents=True)
+    worker.request(operation="bind", paths=[str(workspace)])
+    for path, is_directory in [
+        (sentinel, False),
+        (workspace, True),
+        (workspace / "missing", False),
+        (long_path, True),
+    ]:
+        result = worker.request(operation="inspect", path=str(path), max_cpu_seconds=3)
+        assert result == {
+            "ok": True,
+            "path": str(path) if path.exists() else "",
+            "is_directory": is_directory,
+        }
+    events = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert [event["operation"] for event in events] == ["inspect", "reap"] * 4
+    for inspected, reaped in zip(events[::2], events[1::2], strict=True):
+        assert inspected["limits"] == [3, 3]
+        assert inspected["pid"] != worker.process.pid
+        assert reaped == {"operation": "reap", "pid": inspected["pid"], "status": 0}
+    assert sentinel.read_text() == "unchanged"
+    worker.close()
+    assert worker.process.returncode == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "service"),
+    [
+        ("unavailable", {"max_concurrent_removals": 1, "max_cpu_seconds": 7}),
+        ("exceeded", {"max_concurrent_removals": 1, "max_cpu_seconds": 3}),
+    ],
+    indirect=["service"],
+)
+@pytest.mark.parametrize("already_paused", [False, True])
+async def test_inspection_failure_preserves_paths_and_cleans_up(
+    service: Any,
+    local_worker: tuple[_Worker, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    already_paused: bool,
+) -> None:
+    manager, container, _ = service
+    worker, trace = local_worker
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / failure
+    target.mkdir()
+    sentinel = target / "sentinel"
+    sentinel.write_text("unchanged")
+    configured = Manifest(root=str(workspace))
+    monkeypatch.setattr(docker_removal, "_Worker", lambda pid: worker)
+    manager.bind_new(container, configured)
+    worker.request(operation="inspect", path=str(sentinel), max_cpu_seconds=3)
+    trace.write_text("")
+    container.attrs["State"]["Paused"] = already_paused
+    container.events.clear()
+    try:
+        with pytest.raises(WorkspaceArchiveWriteError) as caught:
+            await session(manager, container, configured).rm(failure, recursive=True)
+        assert caught.value.context == {
+            "path": str(target),
+            "reason": "docker_removal_failed",
+            "worker_reason": "PermissionError" if failure == "unavailable" else "RuntimeError",
+            "errno": errno.EPERM if failure == "unavailable" else None,
+        }
+        assert container.attrs["State"]["Paused"] is already_paused
+        assert container.events == ([] if already_paused else ["pause", "unpause"])
+        assert not worker.uncertain
+        assert manager._removal_slots.acquire(blocking=False)
+        manager._removal_slots.release()
+        assert sentinel.read_text() == "unchanged"
+        assert sorted(path.relative_to(workspace).as_posix() for path in workspace.rglob("*")) == [
+            failure,
+            failure + "/sentinel",
+        ]
+        # This request has been checking that failed inspection clears earlier removal eligibility.
+        with pytest.raises(OSError) as rejected:
+            worker.request(operation="remove", user="0", max_entry_visits=10, max_cpu_seconds=3)
+        assert rejected.value.strerror == "ValueError"
+        events = [json.loads(line) for line in trace.read_text().splitlines()]
+        if failure == "unavailable":
+            assert len(events) == 1
+            assert events[0]["operation"] == "reap"
+            assert events[0]["status"] == 0
+        else:
+            assert [event["operation"] for event in events] == ["inspect", "reap"]
+            assert events[0]["limits"] == [3, 3]
+            assert events[0]["pid"] == events[1]["pid"]
+            assert os.WIFSIGNALED(events[1]["status"])
+            assert os.WTERMSIG(events[1]["status"]) == signal.SIGKILL
+        result = worker.request(operation="inspect", path=str(sentinel), max_cpu_seconds=3)
+        assert result["path"] == str(sentinel)
+    finally:
+        manager.close()
+    assert worker.process.returncode == 0
+    assert container.attrs["State"]["Paused"] is already_paused
 
 
 @pytest.fixture(autouse=True)
@@ -211,7 +383,7 @@ def test_worker_protocol_keeps_original_traversal_for_user_scoped_removal(
     canonical = "/workspace/shared/build"
     requests = [
         {"operation": "bind", "paths": ["/workspace"]},
-        {"operation": "inspect", "path": original},
+        {"operation": "inspect", "path": original, "max_cpu_seconds": 10},
         {
             "operation": "remove",
             "user": "1000:1000",
@@ -249,6 +421,7 @@ def test_worker_protocol_keeps_original_traversal_for_user_scoped_removal(
     monkeypatch.setattr(worker_code.os, "lstat", lstat)
     monkeypatch.setattr(worker_code.os, "rmdir", lambda path, **kwargs: removed.append(path))
     monkeypatch.setattr(worker_code, "_remove_as_user", remove_as_user)
+    monkeypatch.setattr(worker_code, "_run_child", lambda action, **limits: action())
     worker_code.main()
     responses = [json.loads(line) for line in output.getvalue().splitlines()]
     assert responses[1] == {
@@ -274,7 +447,7 @@ async def test_child_failure_reaches_structured_session_error(
     configured = manifest()
     requests = [
         {"operation": "bind", "paths": ["/workspace", "/external", "/grant-alias"]},
-        {"operation": "inspect", "path": "/workspace/build"},
+        {"operation": "inspect", "path": "/workspace/build", "max_cpu_seconds": 10},
         {
             "operation": "remove",
             "user": "developer",
@@ -300,7 +473,7 @@ async def test_child_failure_reaches_structured_session_error(
         worker_patch.setattr(worker_code.os, "pipe", lambda: (20, 21))
         worker_patch.setattr(worker_code.os, "fork", lambda: 123)
         worker_patch.setattr(
-            worker_code.os, "read", lambda fd, size: json.dumps(child_response).encode()
+            worker_code.os, "read", Mock(side_effect=[json.dumps(child_response).encode(), b""])
         )
         worker_patch.setattr(worker_code.os, "waitpid", lambda pid, options: (pid, 0))
         worker_patch.setattr(worker_code.os, "close", lambda fd: None)
@@ -878,7 +1051,7 @@ def test_worker_preserves_workspace_alias_permissions_and_bound_identity(
     original = alias + "/build"
     requests = [
         {"operation": "bind", "paths": [alias]},
-        {"operation": "inspect", "path": original, "workspace_root": alias},
+        {"operation": "inspect", "path": original, "workspace_root": alias, "max_cpu_seconds": 10},
         {
             "operation": "remove",
             "user": "developer",
@@ -918,6 +1091,7 @@ def test_worker_preserves_workspace_alias_permissions_and_bound_identity(
     monkeypatch.setattr(worker_code.os, "lstat", metadata)
     monkeypatch.setattr(worker_code.os, "rmdir", lambda path, **kwargs: removed.append(path))
     monkeypatch.setattr(worker_code, "_remove_as_user", remove_as_user)
+    monkeypatch.setattr(worker_code, "_run_child", lambda action, **limits: action())
     worker_code.main()
     responses = [json.loads(line) for line in output.getvalue().splitlines()]
     if outcome == "repointed":
