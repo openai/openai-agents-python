@@ -365,7 +365,22 @@ async def test_joined_refusals_are_checked_before_refusal_handling():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
-@pytest.mark.parametrize("source", ["prompt", "tool", "strings", "nested_strings"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "prompt",
+        "tool",
+        "mixed",
+        "strings",
+        "nested_strings",
+        "mapping",
+        "nested_mapping",
+        "keys",
+        "key_value",
+        "tagged",
+        "column",
+    ],
+)
 async def test_split_structured_text_never_reaches_model_session_or_events(streamed, source):
     from agents import SQLiteSession, ToolOutputText
 
@@ -377,6 +392,24 @@ async def test_split_structured_text_never_reaches_model_session_or_events(strea
             return parts
         if source == "nested_strings":
             return [[parts[0]], [parts[1]]]
+        if source == "mapping":
+            return {"left": parts[0], "right": parts[1]}
+        if source == "nested_mapping":
+            return [{"side": {"left": parts[0]}}, {"right": [parts[1]]}]
+        if source == "keys":
+            return dict.fromkeys(parts)
+        if source == "key_value":
+            return {parts[0]: parts[1]}
+        if source == "tagged":
+            return [{"type": "row", "value": part} for part in parts]
+        if source == "column":
+            return [{"label": "chunk", "value": part} for part in parts]
+        if source == "mixed":
+            return [
+                ToolOutputText(text=parts[0]),
+                {"type": "image", "image_url": "https://example.org/figure.png"},
+                ToolOutputText(text=parts[1]),
+            ]
         return [ToolOutputText(text=part) for part in parts]
 
     prompt = [{"role": "user", "content": [{"type": "input_text", "text": p} for p in parts]}]

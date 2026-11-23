@@ -100,18 +100,42 @@ def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _text_parts(value: Any) -> Iterator[str]:
-    """Read both structured content and sequences of text in publication order."""
+def _entries(value: Any) -> dict[str, Any]:
+    if isinstance(value, BaseModel):
+        return {**vars(value), **(value.model_extra or {})}
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: getattr(value, field.name) for field in fields(value)}
+    if isinstance(value, dict):
+        return value
+    # An arbitrary __str__ or serializer could expose uninspected content.
+    raise ValueError
+
+
+def _text_parts(value: Any, field: str = "") -> Iterator[tuple[str, str]]:
     if isinstance(value, str):
-        yield value
+        yield field, value
     elif isinstance(value, (list, tuple)):
         for item in value:
-            yield from _text_parts(item)
-    else:
-        for key in ("text", "content", "refusal"):
-            part = value.get(key) if isinstance(value, dict) else getattr(value, key, None)
-            if isinstance(part, (str, list, tuple)):
-                yield from _text_parts(part)
+            yield from _text_parts(item, field)
+    elif value is not None and not isinstance(value, (int, float, bool)):
+        for key, item in _entries(value).items():
+            # Text parts, messages and refusals can all contribute to the visible text.
+            name = "" if key in ("text", "content", "refusal") else key
+            yield from _text_parts(item, name)
+
+
+def _check_joined(value: Any, redact: _Redactor) -> None:
+    # A consumer can concatenate values or read one column across a list of records.
+    fields: dict[str, list[str]] = {}
+    ordered = []
+    for field, text in _text_parts(value):
+        fields.setdefault(field, []).append(text)
+        ordered.append(text)
+    if len(ordered) > 1:
+        _walk("".join(ordered), redact, "check")
+    for parts in fields.values():
+        if len(parts) > 1 and parts != ordered:
+            _walk("".join(parts), redact, "check")
 
 
 def _walk(value: Any, redact: _Redactor, mode: _Mode) -> Any:
@@ -134,21 +158,11 @@ def _walk(value: Any, redact: _Redactor, mode: _Mode) -> Any:
         items = [_walk(item, redact, mode) for item in value]
         # Structured prompts and tool results can split a secret across text parts.
         if len(items) > 1:
-            texts = list(_text_parts(items))
-            if len(texts) > 1:
-                _walk("".join(texts), redact, "check")
+            _check_joined(items, redact)
         if all(a is b for a, b in zip(items, value, strict=True)):
             return value
         return tuple(items) if isinstance(value, tuple) else items
-    if isinstance(value, BaseModel):
-        entries = {**vars(value), **(value.model_extra or {})}
-    elif is_dataclass(value) and not isinstance(value, type):
-        entries = {field.name: getattr(value, field.name) for field in fields(value)}
-    elif isinstance(value, dict):
-        entries = value
-    else:
-        # An arbitrary __str__ or serializer could expose uninspected content.
-        raise ValueError
+    entries = _entries(value)
 
     if mode == "item" and entries.get("type") == "mcp_approval_request":
         # The decision refers to server-held arguments. Never display an edited action.
@@ -168,8 +182,13 @@ def _walk(value: Any, redact: _Redactor, mode: _Mode) -> Any:
             else:
                 child = "check"
         clean = _walk(item, redact, child)
+        if isinstance(clean, str):
+            _text(key + clean, redact, check=True)
         if clean is not item:
             changes[key] = clean
+    if len(entries) > 1:
+        _text("".join(entries), redact, check=True)
+        _check_joined({**entries, **changes} if changes else entries, redact)
     if not changes:
         return value
     if isinstance(value, BaseModel):
