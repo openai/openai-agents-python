@@ -31,6 +31,7 @@ from ..tool import (
     ToolOutputTextDict,
     _build_handled_function_tool_error_handler,
     _build_wrapped_function_tool,
+    _ToolEligibilityError,
     default_tool_error_function,
 )
 from ..tool_context import ToolContext
@@ -55,7 +56,7 @@ else:
     ToolOutput = Union[str, ToolOutputItem, list[ToolOutputItem]]  # noqa: UP007
 
 if TYPE_CHECKING:
-    from mcp.types import Tool as MCPTool
+    from mcp.types import CallToolResult, Tool as MCPTool
 
     from ..agent import AgentBase
     from .server import MCPServer
@@ -726,19 +727,45 @@ class MCPUtil:
                 f"Invalid JSON input for tool {tool_name_for_display}: expected a JSON object"
             )
 
+        async def call_peer() -> CallToolResult:
+            if merged_meta is None:
+                return await server.call_tool(tool.name, json_data)
+            return await server.call_tool(tool.name, json_data, meta=merged_meta)
+
+        invoke = call_peer
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug("Invoking MCP tool")
         else:
             logger.debug("Invoking MCP tool %s with input %s", tool_name_for_display, input_json)
 
         try:
+            if (
+                isinstance(context, ToolContext)
+                and (record := context._tool_invocations.get(context.tool_call_id)) is not None
+                and record.declaration is not None
+            ):
+                binding = record.declaration
+
+                async def check_and_call() -> CallToolResult:
+                    # Check inside the scheduled task, after metadata resolution.
+                    try:
+                        if context.run_config is None or binding.server is not server:
+                            raise UserError("MCP recipient or policy changed.")
+                        if not await server._apply_tool_filter([tool], context, binding.agent):
+                            raise UserError("MCP tool filter refused the call.")
+                        await binding.check(context, context.run_config)
+                        if tool.name != binding.view.mcp_tool_name:
+                            raise UserError("MCP tool name changed.")
+                    except Exception as error:
+                        raise _ToolEligibilityError(
+                            "Prepared MCP tool is no longer eligible."
+                        ) from error
+                    return await call_peer()
+
+                invoke = check_and_call
             resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
             merged_meta = cls._merge_mcp_meta(resolved_meta, meta)
-            call_task = asyncio.create_task(
-                server.call_tool(tool.name, json_data)
-                if merged_meta is None
-                else server.call_tool(tool.name, json_data, meta=merged_meta)
-            )
+            call_task = asyncio.create_task(invoke())
             try:
                 done, _ = await asyncio.wait({call_task}, return_when=asyncio.FIRST_COMPLETED)
                 finished_task = done.pop()

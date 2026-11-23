@@ -15,6 +15,7 @@ from ._redaction import (
     redaction_scope,
     require_clean,
     require_clean_agent,
+    require_clean_final_output,
 )
 from .agent import Agent
 from .agent_tool_state import set_agent_tool_state_scope
@@ -54,7 +55,7 @@ from .memory import Session
 from .memory.resumable_session import ResumableSession
 from .models._run_context import ModelToolHooks
 from .result import RunResult, RunResultStreaming
-from .run_budget import _prepare_budget
+from .run_budget import _check_resume, _prepare_budget
 from .run_config import (
     DEFAULT_MAX_TURNS,
     CallModelData,
@@ -66,6 +67,7 @@ from .run_config import (
     RunConfig,
     RunOptions,
     ToolCallHookContext,
+    ToolDeclaration,
     ToolErrorFormatter,
     ToolErrorFormatterArgs,
     ToolExecutionConfig,
@@ -178,6 +180,7 @@ from .run_internal.session_persistence import (
     take_held_session_write,
     update_run_state_after_resume,
 )
+from .run_internal.tool_declarations import validate_resume_policy
 from .run_internal.tool_use_tracker import (
     AgentToolUseTracker,
     hydrate_tool_use_tracker,
@@ -222,6 +225,7 @@ __all__ = [
     "ReasoningItemIdPolicy",
     "ToolExecutionConfig",
     "ToolCallHookContext",
+    "ToolDeclaration",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "ToolNotFoundBehavior",
@@ -680,6 +684,9 @@ class AgentRunner:
                     )
                     with agent_tool_configuration_run(configuration_agent):
                         result = await self._run_impl(starting_agent, input, **kwargs)
+                        require_clean_final_output(
+                            result.final_output, result.input, result.new_items
+                        )
                         if isinstance(session, ResumableRun):
                             await session.finish(result)
                         return result
@@ -760,6 +767,8 @@ class AgentRunner:
                 context=context,
             )
             context_wrapper._resolve_function_approval_owners(starting_agent)
+            validate_resume_policy(run_state, context_wrapper, run_config)
+            await _check_resume(run_state, run_config.budget, context_wrapper)
             context = context_wrapper.context
 
             reject_unrecoverable_terminal_state(run_state)
@@ -772,6 +781,7 @@ class AgentRunner:
                         hooks,
                         run_config.tool_execution,
                     ),
+                    run_config.tool_not_found_behavior,
                 )
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             max_turns = run_state._max_turns
@@ -792,6 +802,7 @@ class AgentRunner:
                     ModelToolHooks(
                         starting_agent, context_wrapper, hooks, run_config.tool_execution
                     ),
+                    run_config.tool_not_found_behavior,
                 )
             context_wrapper._resolve_function_approval_owners(starting_agent)
             context = context_wrapper.context
@@ -1752,6 +1763,7 @@ class AgentRunner:
                             save_items_after_guardrails=_save_max_turns_handler_output,
                             include_in_history=include_in_history,
                             run_state=run_state,
+                            history=run_error_data.history,
                         )
                         if include_in_history and not handler_output_recorded:
                             # Only reachable once the handler output cleared its guardrails and
@@ -2816,6 +2828,7 @@ class AgentRunner:
                     context=context,
                 )
                 context_wrapper._resolve_function_approval_owners(starting_agent)
+                validate_resume_policy(run_state, context_wrapper, run_config)
 
                 # Override max_turns with the state's max_turns to preserve it across resumption
                 max_turns = run_state._max_turns
@@ -3001,19 +3014,22 @@ class AgentRunner:
                 if run_config.tracing_disabled
                 else contextlib.nullcontext(),
             ):
-                if isinstance(session, ResumableRun):
-                    try:
+                try:
+                    if is_resumed_state and run_state is not None:
+                        await _check_resume(run_state, run_config.budget, context_wrapper)
+                    if isinstance(session, ResumableRun):
                         await session.begin(
                             input,
                             ModelToolHooks(
                                 schema_agent, context_wrapper, hooks, run_config.tool_execution
                             ),
+                            run_config.tool_not_found_behavior,
                         )
                         session.bind_state(run_state)
-                    except BaseException:
-                        streamed_result.is_complete = True
-                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                        raise
+                except BaseException:
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    raise
                 configuration_agent = (
                     run_state._current_agent
                     if run_state is not None and run_state._current_agent is not None

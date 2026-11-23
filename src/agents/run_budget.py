@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from .models.interface import Model
     from .result import RunResultStreaming
     from .run_config import RunConfig
+    from .run_context import RunContextWrapper
     from .run_state import RunState
     from .tool import Tool
 
@@ -367,11 +368,13 @@ async def _admit(
         raise
 
 
-def _check_resume(state: RunState[Any], limits: RunBudget | None) -> bool:
+async def _check_resume(
+    state: RunState[Any], limits: RunBudget | None, context: RunContextWrapper[Any]
+) -> bool:
     """Validate pending policies and report whether this subtree owns a budget."""
     from ._tool_identity import get_function_tool_lookup_key_for_call, get_function_tool_lookup_keys
     from .agent_tool_state import get_agent_tool_resume_state, peek_agent_tool_run_result
-    from .tool import FunctionTool
+    from .tool import FunctionTool, _function_tool_enabled
 
     saved = state._context._budget if state._context is not None else None
     if (saved.limits if saved is not None else None) != limits:
@@ -389,7 +392,7 @@ def _check_resume(state: RunState[Any], limits: RunBudget | None) -> bool:
         if child is None:
             continue
         # Turn resolution can rebind a queued call after load_state(). Check
-        # the current qualified binding without running enablement callbacks.
+        # the current qualified binding and grant only for required branches.
         key = get_function_tool_lookup_key_for_call(action.tool_call)
         tools = state._current_agent.tools if state._current_agent is not None else []
         bindings = [
@@ -399,13 +402,22 @@ def _check_resume(state: RunState[Any], limits: RunBudget | None) -> bool:
         ]
         policies = (_tool_budget(tool) for tool in bindings)
         policy = next((value for value in policies if value is not None), None)
-        if _check_resume(child, policy):
+        if await _check_resume(child, policy, context):
+            owner = state._context
+            if owner is not None and owner is not context:
+                # Agent.as_tool keeps the nested wrapper but forwards application
+                # context and usage. Leave the saved state untouched on refusal.
+                owner = copy.copy(owner)
+                owner.context = context.context
+                owner.usage = context.usage
             if (
                 len(bindings) != 1
-                or bindings[0].is_enabled is False
                 or bindings[0]._agent_instance is not action.function_tool._agent_instance
+                or owner is None
+                or state._current_agent is None
+                or not await _function_tool_enabled(bindings[0], owner, state._current_agent)
             ):
-                raise UserError("A pending RunBudget requires the same unique agent tool.")
+                raise UserError("A pending RunBudget requires the same unique enabled agent tool.")
             budgeted = True
     return budgeted
 
@@ -417,8 +429,6 @@ def _prepare_budget(
     from .run_internal.resumable_session import ResumableRun
 
     limits = config.budget
-    if state is not None:
-        _check_resume(state, limits)
     current = (
         state._current_agent if state is not None and state._current_agent is not None else agent
     )

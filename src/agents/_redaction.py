@@ -9,10 +9,10 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, RootModel
 
 from . import _debug
 from .exceptions import (
@@ -28,18 +28,33 @@ from .exceptions import (
 
 if TYPE_CHECKING:
     from .agent import Agent
-    from .items import ModelResponse
+    from .items import ModelResponse, RunItem, TResponseInputItem
     from .run_config import ModelInputData
     from .tool import FunctionTool
 
 _T = TypeVar("_T")
 _Redactor = Callable[[str], str]
 _Mode = Literal["payload", "item", "check"]
-_redactor: ContextVar[_Redactor | None] = ContextVar("agents_redact_text", default=None)
+
+
+@dataclass(repr=False)
+class _RunRedaction:
+    redact: _Redactor
+    final_item: RunItem | None = None
+
+
+_redaction: ContextVar[_RunRedaction | None] = ContextVar("agents_redact_text", default=None)
 
 
 def current_redactor() -> _Redactor | None:
-    return _redactor.get()
+    scope = _redaction.get()
+    return scope.redact if scope is not None else None
+
+
+def set_final_output_item(item: RunItem | None) -> None:
+    """Remember the source across hooks and guardrails, only in this invocation."""
+    if (scope := _redaction.get()) is not None:
+        scope.final_item = item
 
 
 def protected_error(error: BaseException) -> BaseException:
@@ -55,7 +70,7 @@ def protected_error(error: BaseException) -> BaseException:
 
 @contextmanager
 def redaction_scope(redactor: _Redactor | None) -> Iterator[None]:
-    token = _redactor.set(redactor)
+    token = _redaction.set(_RunRedaction(redactor) if redactor is not None else None)
     try:
         yield
     except BaseException as error:
@@ -63,7 +78,7 @@ def redaction_scope(redactor: _Redactor | None) -> Iterator[None]:
             raise
         _raise_data_redacted_error(protected_error(error))
     finally:
-        _redactor.reset(token)
+        _redaction.reset(token)
 
 
 @contextmanager
@@ -283,6 +298,79 @@ def require_clean(value: object) -> None:
 
 def redact_payload(value: _T) -> _T:
     return _apply(value, "payload")
+
+
+def _reply_value(value: Any, wire: Any = None) -> Any:
+    """Match parsed fields to submitted JSON names without re-running app serializers."""
+    if isinstance(value, RootModel):
+        return _reply_value(value.root, wire)
+    if isinstance(value, str):
+        value = _decode_json(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple)):
+        prior = iter(wire) if isinstance(wire, list) else iter(())
+        return [_reply_value(item, next(prior, None)) for item in value]
+    names = wire if isinstance(wire, dict) else {}
+    fields = type(value).model_fields if isinstance(value, BaseModel) else {}
+    result = {}
+    for key, item in _entries(value).items():
+        if key not in names and (field := fields.get(key)) is not None:
+            alias = field.validation_alias
+            choices = alias.choices if isinstance(alias, AliasChoices) else (alias,)
+            for name in (*choices, field.alias, field.serialization_alias):
+                if isinstance(name, str) and name in names:
+                    key = name
+                    break
+            else:
+                # A default absent from the wire adds no second copy of the text.
+                if isinstance(wire, dict) and (item is None or isinstance(item, (int, float))):
+                    continue
+        if key in result:
+            raise ValueError("Ambiguous reply fields")
+        result[key] = _reply_value(item, names.get(key))
+    return result
+
+
+def require_clean_final_output(
+    value: object, original: str | list[TResponseInputItem], *batches: list[RunItem]
+) -> None:
+    """Check the returned reply, even when history omits it or stores another form."""
+    scope = _redaction.get()
+    if value is None or scope is None:
+        return
+    from .agent_output import _WRAPPER_DICT_KEY
+    from .items import ItemHelpers, MessageOutputItem
+
+    history: list[Any] = ItemHelpers.input_to_new_input_list(original)
+    source = scope.final_item
+    index = None
+    for batch in batches:
+        for item in batch:
+            if item is source:
+                index = len(history)
+            history.append(item.raw_item)
+    reply = {"role": "assistant", "content": value}
+    if index is not None:
+        # Check the returned form in place. A transformed or independently
+        # synthesized reply also needs checking alongside the original.
+        require_clean([*history[:index], reply, *history[index + 1 :]])
+        if isinstance(source, MessageOutputItem):
+            rendered = _reply_value(ItemHelpers.extract_text(source.raw_item) or "")
+            if isinstance(rendered, dict) and rendered.keys() == {_WRAPPER_DICT_KEY}:
+                # A schema can itself declare a field named "response".
+                if _reply_value(value, rendered) == rendered:
+                    return
+                rendered = rendered[_WRAPPER_DICT_KEY]
+        else:
+            rendered = _reply_value(_entries(history[index]).get("output"))
+        returned = _reply_value(value, rendered)
+        if returned == rendered:
+            return
+        # Compare changed fields even when the raw message has other protocol
+        # fields between the two versions or validation renamed a field.
+        require_clean([rendered, returned])
+    require_clean([*history, reply])
 
 
 def redact_items(value: _T) -> _T:

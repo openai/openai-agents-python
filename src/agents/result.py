@@ -846,7 +846,11 @@ class RunResultStreaming(RunResultBase):
                 task = asyncio.create_task(_cleanup_once())
             self._sandbox_cleanup_task = task
 
-        await task
+        if self.agent_tool_invocation is not None:
+            # The stream iterator joins this same save if the manager cancels the wrapper.
+            await asyncio.shield(task)
+        else:
+            await task
 
     def ensure_sandbox_cleanup_on_completion(self) -> None:
         if (
@@ -1075,7 +1079,7 @@ class RunResultStreaming(RunResultBase):
             current_task.add_done_callback(consumer_task_done)
 
         register_current_consumer()
-        cancelled = False
+        skip_cleanup_wait = False
         try:
             while True:
                 register_current_consumer()
@@ -1100,8 +1104,10 @@ class RunResultStreaming(RunResultBase):
                     self._waiting_on_event_queue = True
                     item = await self._event_queue.get()
                 except asyncio.CancelledError:
-                    cancelled = True
-                    self.cancel()
+                    # An agent tool must settle its nested run before returning to the manager.
+                    skip_cleanup_wait = self.agent_tool_invocation is None
+                    if skip_cleanup_wait or self._cancel_mode != "immediate":
+                        self.cancel()
                     raise
                 finally:
                     self._waiting_on_event_queue = False
@@ -1129,9 +1135,8 @@ class RunResultStreaming(RunResultBase):
             unregister_consumer()
             try:
                 try:
-                    if cancelled:
-                        # Queue-wait cancellation should return without awaiting long-running tasks.
-                        # Tasks have already been cancelled above.
+                    if skip_cleanup_wait:
+                        # Top-level consumers can stop without waiting for long-running tasks.
                         self._cleanup_tasks()
                     else:
                         # Ensure main execution completes before cleanup to avoid race conditions
@@ -1144,7 +1149,7 @@ class RunResultStreaming(RunResultBase):
                         # Safely terminate background tasks after main execution has finished.
                         self._cleanup_tasks()
                 finally:
-                    if not cancelled:
+                    if not skip_cleanup_wait:
                         await self._await_model_provider_cleanup()
                         await self._run_sandbox_cleanup()
             finally:

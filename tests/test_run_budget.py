@@ -435,6 +435,114 @@ async def test_explicit_child_budget_survives_nested_approval(cost):
 
 
 @pytest.mark.asyncio
+async def test_child_budget_requires_supported_schema_on_child_and_parent():
+    @tool(needs_approval=True)
+    def record() -> str:
+        pytest.fail("Restoring an approval must not execute the tool.")
+
+    child = Agent(
+        name="child",
+        model=ScriptedModel([step(get_function_tool_call("record", call_id="inner"), 7)]),
+        tools=[record],
+    )
+    nested = child.as_tool(
+        "ask", "Ask", run_config=RunConfig(budget=RunBudget(max_tokens=7), tracing_disabled=True)
+    )
+    parent = Agent(
+        name="parent",
+        model=ScriptedModel([step(get_function_tool_call("ask", '{"input":"check"}'), 1)]),
+        tools=[nested],
+    )
+    state = (await run(parent, None)).to_state()
+    for downgrade_parent in (True, False):
+        data = state.to_json()
+        inner = data["last_processed_response"]["functions"][0]["agent_run_state"]
+        assert "budget" not in data["context"] and inner["context"]["budget"]["tokens"] == 7
+        (data if downgrade_parent else inner)["$schemaVersion"] = "1.24"
+        with pytest.raises(UserError, match="RunBudget"):
+            await RunState.from_json(parent, data)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approved", [False, True])
+async def test_unavailable_budgeted_grandchild_refuses_restore_before_sibling(approved):
+    effects = []
+
+    @tool(needs_approval=True)
+    def record() -> str:
+        effects.append("record")
+        return "saved"
+
+    def model(*calls):
+        return ScriptedModel([ModelStep(output=list(calls)), step(get_text_message("done"), 1)])
+
+    leaf_model = model(get_function_tool_call("record", call_id="leaf"))
+    leaf = Agent(name="leaf", tools=[record], model=leaf_model)
+    config = RunConfig(budget=RunBudget(max_requests=2), tracing_disabled=True)
+    allowed = True
+
+    async def grant(ctx, agent):
+        assert agent.name == "middle"
+        return allowed and ctx.context["allowed"]
+
+    inner = leaf.as_tool("inner", "Delegate", run_config=config, is_enabled=grant)
+    middle_model = model(get_function_tool_call("inner", '{"input":"go"}', "inner"))
+    middle = Agent(name="middle", tools=[inner], model=middle_model)
+    root_model = model(
+        get_function_tool_call("record", call_id="sibling"),
+        get_function_tool_call("ask", '{"input":"go"}', "outer"),
+    )
+    root = Agent(name="root", tools=[record, middle.as_tool("ask", "Ask")], model=root_model)
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    state = (await run(root, None, session=session, context={"allowed": True})).to_state()
+    if approved:
+        for item in state.get_interruptions():
+            state.approve(item)
+    saved = state.to_string()
+    checks = []
+
+    def disabled(ctx, agent):
+        checks.append(agent.name)
+        return False
+
+    unavailable = leaf.as_tool("inner", "Delegate", run_config=config, is_enabled=disabled)
+    replacement = Agent(name="other", tools=[record]).as_tool(
+        "inner", "Delegate", run_config=config
+    )
+    for tools in (
+        [],
+        [unavailable],
+        [inner, inner],
+        [replacement],
+        [replace(record, name="inner")],
+    ):
+        middle.tools = list(tools)
+        with pytest.raises(UserError):
+            await RunState.from_string(root, saved)
+    assert checks == ["middle"]
+    middle.tools = [replace(inner, is_enabled=False)]
+    with pytest.raises(UserError, match="required pending agent tool"):
+        await RunState.from_string(root, saved, strict_context=True)
+    assert not effects
+    assert len(root_model.calls) == len(middle_model.calls) == len(leaf_model.calls) == 1
+    middle.tools = [inner]
+    pending = await session.load_state(root, context_override={"allowed": False})
+    for item in pending.get_interruptions():
+        pending.approve(item)
+    for enabled, context in [(True, None), (False, {"allowed": True}), (True, {"allowed": False})]:
+        allowed = enabled
+        with pytest.raises(UserError, match="RunBudget"):
+            await run(root, None, approved, pending, context=context)
+        assert store.checkpoint(session.session_id)["status"] == "paused"
+        assert not effects
+        assert len(root_model.calls) == len(middle_model.calls) == len(leaf_model.calls) == 1
+    result = await run(root, None, approved, pending, context={"allowed": True})
+    assert result.final_output == "done" and effects == ["record", "record"]
+    assert len(root_model.calls) == len(middle_model.calls) == len(leaf_model.calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_missing_observation_survives_checkpoint():
     @tool(needs_approval=True)
     def record() -> str:
@@ -445,10 +553,9 @@ async def test_missing_observation_survives_checkpoint():
     budget = RunBudget(max_tokens=5)
     paused = await run(root, budget)
     data = paused.to_state().to_json()
-    with pytest.raises(UserError):
-        await RunState.from_json(root, {**data, "$schemaVersion": "1.22"})
-    with pytest.raises(UserError):
-        await RunState.from_json(root, {**data, "$schemaVersion": "1.23"})
+    for version in ("1.22", "1.23", "1.24"):
+        with pytest.raises(UserError, match="RunBudget"):
+            await RunState.from_json(root, {**data, "$schemaVersion": version})
     state = await RunState.from_json(root, data)
     state.approve(state.get_interruptions()[0])
     with pytest.raises(RunBudgetError, match="unavailable"):
