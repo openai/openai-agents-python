@@ -500,30 +500,23 @@ def _build_agent_identity_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]
 
     agent_identity_map: dict[str, Agent[Any]] = {}
     used_identities: set[str] = set()
-    processed_names: set[str] = set()
 
-    for agent in ordered_agents:
-        agent_name = agent.name
-        if agent_name in processed_names:
-            continue
-        processed_names.add(agent_name)
+    for agent_name, group in agents_by_name.items():
+        if len(group) > 1:
+            group.sort(
+                key=lambda candidate: _agent_identity_sort_key(
+                    candidate,
+                    root_agent=initial_agent,
+                    original_index=original_indices[id(candidate)],
+                ),
+            )
 
-        group = agents_by_name[agent_name]
-        sorted_group = sorted(
-            group,
-            key=lambda candidate: _agent_identity_sort_key(
-                candidate,
-                root_agent=initial_agent,
-                original_index=original_indices[id(candidate)],
-            ),
-        )
-
-        base_agent = sorted_group[0]
+        base_agent = group[0]
         used_identities.add(agent_name)
         agent_identity_map[agent_name] = base_agent
 
         next_index = 2
-        for duplicate_agent in sorted_group[1:]:
+        for duplicate_agent in group[1:]:
             candidate = f"{agent_name}#{next_index}"
             while candidate in used_identities or candidate in literal_names:
                 next_index += 1
