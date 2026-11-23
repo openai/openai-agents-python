@@ -18,6 +18,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
+from .._redaction import current_redactor, require_clean
 from ..exceptions import (
     UserError,
     _data_redacted_error_boundary,
@@ -110,7 +111,7 @@ def _history_adapter() -> TypeAdapter[list[TResponseInputItem]]:
 class _Checkpoint(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    version: Literal[1]
+    version: Literal[1, 2]
     revision: str = Field(min_length=1)
     status: Literal["ready", "paused", "active"]
     history: list[Any]
@@ -324,6 +325,8 @@ class ResumableSession:
 
     async def _begin_run(self, input: Any, tool_hooks: ModelToolHooks) -> None:
         self._validate_run(input)
+        if current_redactor() is not None:
+            require_clean(tool_hooks.context.context)
         if self.is_paused:
             from ..run_internal.native_approvals import validate_native_restore_hooks
             from ..run_internal.tool_text import validate_pending_text_transforms
@@ -332,7 +335,13 @@ class ResumableSession:
             if processed is not None and processed.native_approvals:
                 validate_native_restore_hooks(processed, tool_hooks)
             validate_pending_text_transforms(input, tool_hooks.settings)
-        active = self._checkpoint.model_copy(update={"status": "active", "revision": uuid4().hex})
+        active = self._checkpoint.model_copy(
+            update={
+                "version": 2 if current_redactor() is not None else self._checkpoint.version,
+                "status": "active",
+                "revision": uuid4().hex,
+            }
+        )
         await self._replace(active, expected=self._serialized)
 
     async def _save_checkpoint(
@@ -343,7 +352,7 @@ class ResumableSession:
         checkpoint = None
         try:
             checkpoint = _Checkpoint(
-                version=1,
+                version=self._checkpoint.version,
                 revision=uuid4().hex,
                 status="paused" if state is not None else "ready",
                 history=copy.deepcopy(history),
@@ -357,6 +366,10 @@ class ResumableSession:
         return _ResumableSessionBinding(self, checkpoint.revision)
 
     async def _replace(self, checkpoint: _Checkpoint, *, expected: str | None) -> None:
+        if checkpoint.version == 2 and current_redactor() is None:
+            error = UserError("Continuing this resumable session requires RunConfig.redact_text.")
+            _mark_error_data_redacted(error)
+            raise error
         value = None
         try:
             value = json.dumps(checkpoint.model_dump(), allow_nan=False, separators=(",", ":"))
@@ -364,6 +377,7 @@ class ResumableSession:
             pass
         if value is None:
             raise ResumableSessionError("malformed")
+        require_clean(value)
         committed = None
         try:
             committed = await await_session_mutation(

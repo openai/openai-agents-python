@@ -228,6 +228,7 @@ class ToolExecutionConfig:
     or an SDK-normalized or server-prefixed name requires an exact raw-name registration. For
     example, register `read.report` even if the model sees `mcp_Reports__read_report`.
     If a different raw tool is named `read_report`, register both to call both.
+    When configured, `RunConfig.redact_text` scrubs the edited text before validation.
     An editor can return its input unchanged. Catalogs may be filtered or change
     between calls, so unrelated misspellings can go undetected.
 
@@ -679,6 +680,34 @@ class RunConfig:
     output and guardrail ``output_info`` are never passed to the formatter.
     """
 
+    redact_text: Callable[[str], str] | None = field(default=None, repr=False)
+    """Optional text scrubber for Runner inputs, model items and SDK tool payloads.
+
+    Supply a synchronous, deterministic function that leaves already sanitized text unchanged.
+    For example, use ``lambda text: text.replace(secret, "[redacted]")``. Replacements affect
+    dynamic instructions and the inputs seen by models and Python tools. Static instructions
+    are checked without changing the agent attached to stream events. Unsupported values,
+    unsafe approvals and checkpoints that still need redaction fail closed. Results keep the
+    callback in memory to check each snapshot export. Supply it again when resuming.
+    A restored protected state must resume before it can be serialized again.
+
+    A protected session append reads the available history to check for text split across
+    turns. This adds a read per append. Serialize writers to the same session.
+    Automatic compaction skips a replacement if the retained prefix is unavailable.
+    The Runner rejects caller-supplied ``conversation_id`` and ``previous_response_id``
+    because it cannot inspect earlier messages. Use a session or replay the history.
+    Automatic response chaining can start in a protected run and resume from its state.
+
+    Protected runs withhold raw stream events, mute the ``openai.agents`` and
+    ``openai.agents.tracing`` loggers and limit automatic traces to metadata, even when
+    content tracing is requested. Semantic events remain available. To avoid exposing
+    private context, the Runner can replace failures, including guardrail and callback
+    errors, with a generic exception. Provider retries run before this replacement.
+    Application and provider logs, opaque media and work inside Codex are outside
+    this policy. Keep secrets out of configuration, identifiers and application
+    metadata. No redactor is active by default.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -710,9 +739,14 @@ class RunConfig:
             output_guardrail_blocked_message: (
                 str | OutputGuardrailBlockedMessageFormatter | None
             ) = None,
+            redact_text: Callable[[str], str] | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
+        if self.redact_text is not None and (
+            not callable(self.redact_text) or inspect.iscoroutinefunction(self.redact_text)
+        ):
+            raise TypeError("redact_text must be a synchronous callable or None")
         if self.tool_name_collision_policy not in ("warn", "error"):
             raise ValueError("tool_name_collision_policy must be either 'warn' or 'error'")
         blocked_message = self.output_guardrail_blocked_message

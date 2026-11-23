@@ -857,7 +857,7 @@ async def test_pending_text_requirement_uses_current_checkpoint_schema():
     config = RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=[(report, edit)]))
     paused = await Runner.run(agent, "go", run_config=config)
     snapshot = paused.to_state().to_json()
-    snapshot["$schemaVersion"] = "1.22"
+    snapshot["$schemaVersion"] = "1.23"
     with pytest.raises(UserError, match="require RunState schema"):
         await RunState.from_json(agent, snapshot)
     del snapshot["context"]["tool_invocations"]["one"]["requires_text_transform"]
@@ -1134,3 +1134,80 @@ async def test_rotated_mcp_url_requires_current_server(streamed, transport, sele
     assert source.tool_calls == ["read.report"]
     assert SAFE in repr(model.calls[-1].input)
     assert RAW not in repr(model.calls[-1].input) + result.to_state().to_string()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("remote", [False, True])
+async def test_redact_text_after_selected_edit_on_approval_resume(streamed, remote, exporter):
+    from agents import ResumableSession
+
+    from .memory.test_resumable_session import MemoryStore
+
+    secret = "synthetic-editor-secret"
+    observed = []
+
+    @function_tool(output_type=Preview, needs_approval=True)
+    def report():
+        return Preview(text=RAW)
+
+    async def edit(call, slots):
+        assert RAW in slots[0]
+        return tuple(text.replace(RAW, secret) for text in slots)
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            observed.append(result)
+
+    peer = Source(require_approval="always")
+    model = model_for("read.report" if remote else "report")
+    agent = Agent(name="reports", model=model, tools=[report], mcp_servers=[peer])
+    settings = RunConfig(
+        redact_text=lambda text: text.replace(secret, SAFE),
+        tracing={"operation_detail": "content"},
+        tool_execution=ToolExecutionConfig(
+            tool_text_transforms=[((peer, "read.report") if remote else report, edit)]
+        ),
+    )
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+
+    async def run(value):
+        if not streamed:
+            return await Runner.run(
+                agent, value, session=session, run_config=settings, hooks=Hooks()
+            )
+        result = Runner.run_streamed(
+            agent, value, session=session, run_config=settings, hooks=Hooks()
+        )
+        async for event in result.stream_events():
+            assert event.type != "raw_response_event"
+            if event.type == "run_item_stream_event" and event.name == "tool_output":
+                observed.append(event.item.output)
+        return result
+
+    await run("go")
+    session = await ResumableSession.resume(store, session.session_id)
+    state = await session.load_state(agent)
+    state.approve(state.get_interruptions()[0])
+    saved = store.records[session.session_id]
+    execution = settings.tool_execution
+    settings.tool_execution = None
+    with pytest.raises(RuntimeError, match="redacted"):
+        await run(state)
+    assert saved == store.records[session.session_id] and not peer.tool_calls and not observed
+    settings.tool_execution = execution
+    result = await run(state)
+    assert observed and all(SAFE in str(value) for value in observed)
+    assert SAFE in str(model.calls[-1].input)
+    if not remote:
+        assert next(i.output for i in result.new_items if i.type == "tool_call_output_item") == {
+            "text": SAFE
+        }
+    spans = [s.export() for s in fetch_ordered_spans()]
+    otel = [s.to_json() for s in exporter.get_finished_spans()]
+    assert spans and otel and SAFE not in str((spans, otel))
+    published = str(
+        (observed, spans, otel, model.calls[-1].input, store.records, result.to_input_list())
+    )
+    assert secret not in published and RAW not in published

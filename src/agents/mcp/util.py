@@ -17,6 +17,7 @@ from typing_extensions import NotRequired, TypedDict
 
 from .. import _debug
 from .._mcp_tool_metadata import resolve_mcp_tool_description_for_model, resolve_mcp_tool_title
+from .._redaction import hook_payload_diagnostics, require_clean, require_clean_function
 from ..exceptions import AgentsException, MCPToolCancellationError, ModelBehaviorError, UserError
 from ..logger import log_tool_action_error, logger
 from ..run_context import RunContextWrapper
@@ -348,8 +349,16 @@ class MCPUtil:
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
     ) -> list[MCPTool]:
-        with mcp_tools_span(server=get_mcp_server_log_name(server.name)) as span:
-            tools = await server.list_tools(run_context, agent)
+        server_name = get_mcp_server_log_name(server.name)
+        require_clean(server_name)
+        with mcp_tools_span(server=server_name) as span:
+            with hook_payload_diagnostics(
+                "MCP tool discovery failed with RunConfig.redact_text enabled.",
+                redact_by_default=False,
+            ):
+                tools = await server.list_tools(run_context, agent)
+            # Reject unsafe identities and schemas before exposing even the tool names.
+            require_clean(tools)
             span.span_data.result = [tool.name for tool in tools]
             return tools
 
@@ -605,6 +614,7 @@ class MCPUtil:
         function_tool._mcp_server_ref = weakref.ref(server)
         function_tool._mcp_annotations = copy.deepcopy(tool.annotations)
         function_tool._mcp_tool_binding = (get_mcp_server_log_name(server.name), tool.name, None)
+        require_clean_function(function_tool)
         return function_tool
 
     @staticmethod

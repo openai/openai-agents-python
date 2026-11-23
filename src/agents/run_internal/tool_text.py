@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
+from .._redaction import redact_payload, require_clean
 from .._tool_identity import get_function_tool_lookup_key_for_tool
 from ..exceptions import (
     UserError,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from mcp.types import CallToolResult
 
     from ..agent import Agent
+    from ..mcp import MCPServer
     from ..run_config import RunConfig, ToolExecutionConfig
     from ..run_context import _ToolInvocationRecord
     from ..run_state import RunState
@@ -46,16 +48,24 @@ def bind_text_transform(
     settings: ToolExecutionConfig | None,
     tool: FunctionTool | None,
     record: _ToolInvocationRecord | None,
+    *,
+    deferred_mcp: tuple[MCPServer, str, str] | None = None,
 ) -> int | None:
     """Require an exact selector at admission, on resume and before invocation."""
     ambiguous = False
-    if settings is not None and tool is not None:
-        binding = tool._mcp_tool_binding
+    if settings is not None and settings.tool_text_transforms:
+        binding = tool._mcp_tool_binding if tool else None
+        server = tool._mcp_server_ref() if tool and tool._mcp_server_ref else None
+        exposed = tool.name if tool else ""
+        if deferred_mcp is not None:
+            from ..mcp._logging import get_mcp_server_log_name
+
+            server, raw_name, exposed = deferred_mcp
+            binding = (get_mcp_server_log_name(server.name), raw_name, None)
         for index, (target, _) in enumerate(settings.tool_text_transforms):
             if isinstance(target, tuple):
                 if binding is None:
                     continue
-                server = tool._mcp_server_ref() if tool._mcp_server_ref else None
                 if server is not target[0]:
                     from ..mcp._logging import get_mcp_server_log_name
 
@@ -68,7 +78,7 @@ def bind_text_transform(
                     # A filtered catalog cannot prove absence. A visible alias can
                     # signal a mistake, but only the exact raw name can select.
                     ambiguous |= target[1] in (
-                        tool.name,
+                        exposed,
                         MCPUtil._safe_tool_name_part(binding[1], "tool"),
                         MCPUtil._build_prefixed_tool_base_name(binding[0], binding[1]),
                     )
@@ -77,7 +87,12 @@ def bind_text_transform(
                     ambiguous = True
                     continue
             elif target is not tool:
-                if binding is None and not tool._is_agent_tool and not tool._is_codex_tool:
+                if (
+                    tool is not None
+                    and binding is None
+                    and not tool._is_agent_tool
+                    and not tool._is_codex_tool
+                ):
                     ambiguous |= get_function_tool_lookup_key_for_tool(
                         target
                     ) == get_function_tool_lookup_key_for_tool(tool)
@@ -140,6 +155,24 @@ def validate_pending_text_transforms(
             (run.function_tool for run in processed.functions if run.tool_call.call_id == call_id),
             None,
         )
+        # Protected loads defer MCP discovery. Check the saved recipient before the
+        # session claim. Reconciliation still checks the live binding before execution.
+        binding = processed.mcp_tool_bindings.get(call_id)
+        if tool is None and state._requires_redaction and binding is not None:
+            from ..mcp._logging import get_mcp_server_log_name
+
+            name, raw_name, index = binding
+            if index is not None and 0 <= index < len(agent.mcp_servers):
+                peer = agent.mcp_servers[index]
+                if get_mcp_server_log_name(peer.name) == name:
+                    bind_text_transform(
+                        settings,
+                        None,
+                        record if record.requires_text_transform else None,
+                        deferred_mcp=(peer, raw_name, item.tool_name or ""),
+                    )
+                    required |= record.requires_text_transform
+                    continue
         if not record.requires_text_transform:
             # An editor added on resume can also name an alias. Check before
             # claiming the session, without changing the saved requirement.
@@ -198,7 +231,7 @@ async def _validated_edit(edit: _Edit, name: str, texts: tuple[str, ...]) -> tup
         raise ValueError
     for text in result:
         text.encode("utf-8")
-    return result
+    return redact_payload(result)
 
 
 async def invoke_selected_tool(
@@ -215,9 +248,9 @@ async def invoke_selected_tool(
         if function_tool._mcp_tool_binding is not None:
             # The MCP adapter edits before its extractor and live span see the result.
             return result
-        return _FunctionToolInvocationResult(
-            await _edit_function_result(edit, function_tool, result.output)
-        )
+        output = await _edit_function_result(edit, function_tool, result.output)
+        require_clean(output)
+        return _FunctionToolInvocationResult(output)
     except BaseException as error:
         result = None
         if type(error) is _SelectedTaskExit:
@@ -311,4 +344,5 @@ async def edit_mcp_result(
     edited = await edit(tuple(slot.text for slot in slots))
     for slot, text in zip(slots, edited, strict=True):
         slot.text = text
+    require_clean(clean)
     return clean
