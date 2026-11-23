@@ -153,6 +153,15 @@ class _PendingToolOutput:
 
 
 @dataclasses.dataclass(frozen=True)
+class _PendingOutputGuardrail:
+    text: str
+    response_id: str
+    agent_snapshot: RealtimeAgent[Any] | None
+    output_response_generation: int | None
+    is_audio_output: bool
+
+
+@dataclasses.dataclass(frozen=True)
 class _RealtimeDispatchSnapshot:
     agent: RealtimeAgent[Any]
     tools: tuple[Tool, ...]
@@ -246,6 +255,7 @@ class RealtimeSession(RealtimeModelListener):
         self._interrupted_response_ids: set[str] = set()
         self._item_transcripts: dict[str, str] = {}  # item_id -> accumulated transcript
         self._item_guardrail_run_counts: dict[str, int] = {}  # item_id -> run count
+        self._pending_output_guardrails: dict[str, _PendingOutputGuardrail] = {}
         self._latest_output_response_generation = 0
         self._active_output_response_generation: int | None = None
         self._active_output_response_id: str | None = None
@@ -614,6 +624,17 @@ class RealtimeSession(RealtimeModelListener):
         elif event.type == "turn_ended":
             response_id = event.response_id or self._active_output_response_id
             if response_id is not None:
+                # Schedule unchecked output before retiring response audio or clearing turn state.
+                for item_id, pending in list(self._pending_output_guardrails.items()):
+                    if pending.response_id == response_id:
+                        del self._pending_output_guardrails[item_id]
+                        self._enqueue_guardrail_task(
+                            pending.text,
+                            pending.response_id,
+                            agent_snapshot=pending.agent_snapshot,
+                            output_response_generation=pending.output_response_generation,
+                            is_audio_output=pending.is_audio_output,
+                        )
                 self._finish_response_guardrail_lifecycle(response_id)
 
             is_active_response_ended = (
@@ -1824,6 +1845,7 @@ class RealtimeSession(RealtimeModelListener):
         next_run_threshold = (self._item_guardrail_run_counts[item_id] + 1) * threshold
 
         if current_length >= next_run_threshold:
+            self._pending_output_guardrails.pop(item_id, None)
             crossed_thresholds = current_length // threshold if threshold > 0 else 1
             self._item_guardrail_run_counts[item_id] = max(
                 self._item_guardrail_run_counts[item_id] + 1, crossed_thresholds
@@ -1831,6 +1853,14 @@ class RealtimeSession(RealtimeModelListener):
             self._enqueue_guardrail_task(
                 self._item_transcripts[item_id],
                 response_id,
+                agent_snapshot=agent_snapshot,
+                output_response_generation=output_response_generation,
+                is_audio_output=is_audio_output,
+            )
+        elif delta:
+            self._pending_output_guardrails[item_id] = _PendingOutputGuardrail(
+                text=self._item_transcripts[item_id],
+                response_id=response_id,
                 agent_snapshot=agent_snapshot,
                 output_response_generation=output_response_generation,
                 is_audio_output=is_audio_output,
@@ -2037,6 +2067,7 @@ class RealtimeSession(RealtimeModelListener):
         self._active_output_response_agent = None
         self._item_transcripts.clear()
         self._item_guardrail_run_counts.clear()
+        self._pending_output_guardrails.clear()
         self._guardrail_tasks_by_response_id.clear()
         self._responses_awaiting_guardrail_cleanup.clear()
 
