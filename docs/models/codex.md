@@ -166,7 +166,7 @@ A `SandboxAgent`, `ShellTool`, or `ApplyPatchTool` uses the SDK's executor or ed
 
 Codex blocks a native tool call if a synchronous `PreToolUse` hook fails or times out. After an approval pause, the replacement worker runs any configured `on_tool_start` callbacks before executing the call. The worker reuses the approved input, including any changes from the original `prepare_tool_input` callback.
 
-Use [Runner text redaction](../tracing.md#runner-text-redaction) to protect completed SDK items and stored session data. Raw provider stream events and provider-managed history can contain the original arguments.
+Use [Runner text redaction](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/docs/tracing.md#runner-text-redaction) to protect completed SDK items and stored session data. Raw provider stream events and provider-managed history can contain the original arguments.
 
 Input guardrails with `run_in_parallel=False` finish before model execution. Cancellation and output guardrails do not roll back native commands or tool side effects. Inspect the workspace before retrying a failed operation.
 
