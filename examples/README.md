@@ -1,5 +1,7 @@
 # Running the example suite
 
+For individual Codex-capable examples, start with the [Codex task chooser](codex/README.md). It separates offline SDK checks from authenticated live runs and lists commands, prerequisites, results, and side effects.
+
 Example execution is owned by the repository runner and Make targets. Run the complete auto-mode workflow in the foreground with:
 
     make examples-run
