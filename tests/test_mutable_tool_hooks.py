@@ -161,7 +161,8 @@ async def test_patch_editor_gets_rewritten_path_and_model_gets_replacement(legac
 
 
 @pytest.mark.asyncio
-async def test_approval_binds_rewrite_across_serialized_resume():
+@pytest.mark.parametrize("policy", ["allow", "fail", "timeout"])
+async def test_approval_binds_rewrite_across_serialized_resume(policy):
     effects = []
     model = ScriptedModel([[function_call("publish", {"text": "proposed"}, call_id="req")]])
 
@@ -189,6 +190,20 @@ async def test_approval_binds_rewrite_across_serialized_resume():
             await RunState.from_json(agent, {**snapshot, "$schemaVersion": old_version})
     state = await RunState.from_json(agent, snapshot)
     state.approve(state.get_interruptions()[0])
+    if policy != "allow":
+
+        class Unavailable(RunHooks):
+            async def on_tool_start(self, context, agent, tool):
+                if policy == "timeout":
+                    await asyncio.wait_for(asyncio.Event().wait(), timeout=0)
+                raise RuntimeError("Policy unavailable")
+
+        with pytest.raises(UserError) as error:
+            await Runner.run(agent, state, run_config=config, hooks=Unavailable())
+        expected = asyncio.TimeoutError if policy == "timeout" else RuntimeError
+        assert isinstance(error.value.__cause__, expected)
+        assert effects == [("rewrite", "proposed"), ("approval", "review this")]
+        return
     resumed = await Runner.run(agent, state, run_config=config)
     assert resumed.final_output == "review this"
     assert effects == [

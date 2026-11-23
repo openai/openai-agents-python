@@ -189,6 +189,47 @@ def approval_hooks(folder):
     return ToolExecutionConfig(prepare_tool_input=prepare_input, prepare_tool_output=prepare_output)
 
 
+async def check_failed_relay(agent, config, session_id, saved, *, timeout):
+    from unittest.mock import patch
+
+    from agents import Runner
+    from agents.memory.resumable_session import ResumableSession
+    from agents.models._codex_tool_hooks import CodexToolHooks
+
+    # Start each fault from a separate copy of the exited worker's pending approval.
+    store = ApprovalStore()
+    store.value = saved
+    session = await ResumableSession.resume(store, session_id)
+    state = await session.load_state(agent)
+    state.approve(state.get_interruptions()[0])
+    events = []
+    configure = CodexToolHooks.configure
+
+    async def short_deadline(self, resources):
+        settings = await configure(self, resources)
+        settings["handlers"]["PreToolUse"]["hooks"][0]["timeout"] = 1
+        return settings
+
+    async def unavailable(self, data):
+        events.append(data["event"])
+        if timeout:
+            await asyncio.Event().wait()
+        raise RuntimeError("Synthetic relay failure")
+
+    # Keep the real MCP transport and Codex's own deadline and approval checks.
+    with (
+        patch.object(CodexToolHooks, "configure", short_deadline),
+        patch.object(CodexToolHooks, "decision", unavailable),
+    ):
+        try:
+            await asyncio.wait_for(Runner.run(agent, state, run_config=config), timeout=20)
+        except RuntimeError as error:
+            assert "approval" in str(error), str(error)
+        else:
+            raise AssertionError("A failed hook allowed the approved call.")
+    assert events == ["PreToolUse"], events
+
+
 def supports_file_sandbox():
     if sys.platform != "linux":
         return sys.platform == "darwin"  # The Windows test runner has no sandbox provisioned.
@@ -582,6 +623,15 @@ request_max_retries = 0
                 tracing_disabled=True,
                 tool_execution=approval_hooks(folder),
             )
+            if approved and hooked:
+                await check_failed_relay(
+                    plain,
+                    options,
+                    session_id,
+                    store.value,
+                    timeout=approval_item["name"] == "apply_patch",
+                )
+                assert (target.read_bytes() if target.exists() else None) == before
             result = await Runner.run(plain, state, run_config=options)
             if hooked:
                 assert events.read_text() == ("output" if approved else "input")
