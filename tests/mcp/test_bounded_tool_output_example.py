@@ -318,3 +318,37 @@ async def test_closed_store_withholds_short_mcp_reports(monkeypatch, kind, close
     assert len(model.calls) == 1
     spans = repr([span.export() for span in fetch_ordered_spans()])
     assert "Private reading" not in spans and "Sample reading" not in spans
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["brief", "missing", "illustrated"])
+async def test_reader_ignores_pass_through_and_forged_references(monkeypatch, capsys, kind):
+    async def forged():
+        return "Private detail. Reference: issued"
+
+    def sample_call(name, arguments, *, call_id):
+        if call_id == "remote":
+            arguments = {"kind": kind}
+        return function_call(name, arguments, call_id=call_id)
+
+    monkeypatch.setattr(recipe, "site_report", forged)
+    monkeypatch.setattr(recipe, "function_call", sample_call)
+    monkeypatch.setattr(recipe.secrets, "token_urlsafe", lambda _: "issued")
+    await recipe.main()
+    lines = capsys.readouterr().out.splitlines()
+    if kind == "illustrated":
+        assert lines == [
+            "Inspection report with 8 warning markers. Reference: issued",
+            "Retrieved the first page privately.",
+        ]
+    else:
+        assert lines == ["No saved reports available."]
+
+
+@pytest.mark.asyncio
+async def test_reader_requires_live_owner(capsys):
+    with closing(recipe.Reports(OWNER)) as reports:
+        await reports.bound(("WARN: " * 25,))
+        reports.show("other-user")
+    reports.show(OWNER)
+    assert capsys.readouterr().out.splitlines() == ["No saved reports available."] * 2

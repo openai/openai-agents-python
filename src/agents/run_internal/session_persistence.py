@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 from .. import _debug
+from .._redaction import current_redactor, require_clean
 from .._tool_identity import get_hosted_mcp_approval_request_identity
 from .._tool_invocation import tool_output_identity
 from ..agent import Agent
@@ -76,6 +77,7 @@ from .items import (
     strip_internal_input_item_metadata,
 )
 from .oai_conversation import OpenAIServerConversationTracker
+from .resumable_session import ResumableRun
 from .run_steps import (
     NextStepHandoff,
     NextStepInterruption,
@@ -202,6 +204,7 @@ async def admit_pending_input(
     admission_items: list[RunItem] = [
         InputItem(agent=agent, raw_item=item) for item in pending_input
     ]
+    require_clean_run_items(run_state._original_input, run_state._session_items, admission_items)
 
     if session is not None and server_conversation_tracker is None:
         await save_result_to_session(
@@ -318,6 +321,9 @@ async def _session_add_items(
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """Append session items while preserving the legacy method call shape."""
+    if current_redactor() is not None:
+        history = await _session_get_items(session, wrapper=wrapper)
+        require_clean([*history, *items])
     session_wrapper = _get_session_wrapper(session, wrapper)
 
     async def write_items() -> None:
@@ -517,22 +523,27 @@ async def prepare_input_with_session(
                 if len(converted_history) == resolved_settings.limit:
                     _omit_boundary_assistant_message_ids(converted_history)
     else:
-        if not callable(session_input_callback):
-            raise UserError(
-                f"Invalid `session_input_callback` value: {session_input_callback}. "
-                "Choose between `None` or a custom callable function."
-            )
         history_for_callback = copy.deepcopy(converted_history)
         new_items_for_callback = copy.deepcopy(new_input_list)
         # Keep the original history objects alive so their identities remain valid even if the
         # callback removes them from the list it receives.
         original_history_objects = list(history_for_callback)
         original_history_object_ids = {id(item) for item in original_history_objects}
-        combined = session_input_callback(history_for_callback, new_items_for_callback)
-        if inspect.isawaitable(combined):
-            combined = await combined
-        if not isinstance(combined, list):
-            raise UserError("Session input callback must return a list of input items.")
+        try:
+            if not callable(session_input_callback):
+                raise UserError(
+                    f"Invalid `session_input_callback` value: {session_input_callback}. "
+                    "Choose between `None` or a custom callable function."
+                )
+            combined = session_input_callback(history_for_callback, new_items_for_callback)
+            if inspect.isawaitable(combined):
+                combined = await combined
+            if not isinstance(combined, list):
+                raise UserError("Session input callback must return a list of input items.")
+        except BaseException:
+            if isinstance(session, ResumableRun):
+                await session.release_rejected_input()
+            raise
 
         # The callback may reorder, drop, or duplicate items. Keep separate reference maps for
         # the copied history and copied new-input lists so we can reconstruct which output items
@@ -642,6 +653,23 @@ async def persist_session_items_for_guardrail_trip(
     return updated_session_input_items
 
 
+def require_clean_run_items(
+    original: str | list[TResponseInputItem], prior: Sequence[RunItem], items: Sequence[RunItem]
+) -> None:
+    """Check locally accumulated items even when the next request sends only a delta."""
+    if not items or current_redactor() is None:
+        return
+    # Some resume and guardrail paths have already appended this batch.
+    batch = {id(item) for item in items}
+    require_clean(
+        [
+            *ItemHelpers.input_to_new_input_list(original),
+            *(item.raw_item for item in prior if id(item) not in batch),
+            *(item.raw_item for item in items),
+        ]
+    )
+
+
 def session_items_for_turn(turn_result: SingleStepResult) -> list[RunItem]:
     """Return the items to persist for a turn, preferring session_step_items when set."""
     items = (
@@ -705,6 +733,7 @@ def resumed_turn_items(
     turn_session_items = order_current_turn_tool_outputs(
         session_items_for_turn(turn_result), start=0, call_positions=call_positions
     )
+    require_clean_run_items(turn_result.original_input, session_items, turn_session_items)
     session_items = [*session_items, *turn_session_items]
     return generated_items, session_items, turn_session_items
 

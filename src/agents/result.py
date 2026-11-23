@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
 
+from ._redaction import current_redactor, protected_error, redaction_scope
 from ._tool_invocation import tool_output_identity
 from .agent import Agent
 from .agent_output import AgentOutputSchemaBase
@@ -123,6 +124,8 @@ def _populate_state_from_result(
 ) -> RunState[Any]:
     """Populate a RunState with common fields from a RunResult."""
     state._resumable_binding = result._resumable_binding
+    state._redact_text = result._redact_text
+    state._requires_redaction = result._redact_text is not None
     state._current_agent = result.last_agent
     model_input_items = getattr(result, "_model_input_items", None)
     if isinstance(model_input_items, list):
@@ -399,6 +402,11 @@ class RunResultBase(abc.ABC):
 
     context_wrapper: RunContextWrapper[Any]
     """The context wrapper for the agent run."""
+
+    _redact_text: Callable[[str], str] | None = field(
+        default_factory=current_redactor, init=False, repr=False, compare=False
+    )
+    """In-memory policy for cleanup and snapshot writes after the run task exits."""
 
     _trace_state: TraceState | None = field(default=None, init=False, repr=False)
     """Serialized trace metadata captured during the run."""
@@ -834,10 +842,15 @@ class RunResultStreaming(RunResultBase):
                         error,
                     )
 
-            task = asyncio.create_task(_cleanup_once())
+            with redaction_scope(self._redact_text):
+                task = asyncio.create_task(_cleanup_once())
             self._sandbox_cleanup_task = task
 
-        await task
+        if self.agent_tool_invocation is not None:
+            # The stream iterator joins this same save if the manager cancels the wrapper.
+            await asyncio.shield(task)
+        else:
+            await task
 
     def ensure_sandbox_cleanup_on_completion(self) -> None:
         if (
@@ -911,7 +924,8 @@ class RunResultStreaming(RunResultBase):
         async def run_cleanup() -> None:
             await cleanup()
 
-        task = asyncio.create_task(run_cleanup())
+        with redaction_scope(self._redact_text):
+            task = asyncio.create_task(run_cleanup())
         self._model_provider_cleanup_task = task
         return task
 
@@ -1065,7 +1079,7 @@ class RunResultStreaming(RunResultBase):
             current_task.add_done_callback(consumer_task_done)
 
         register_current_consumer()
-        cancelled = False
+        skip_cleanup_wait = False
         try:
             while True:
                 register_current_consumer()
@@ -1090,8 +1104,10 @@ class RunResultStreaming(RunResultBase):
                     self._waiting_on_event_queue = True
                     item = await self._event_queue.get()
                 except asyncio.CancelledError:
-                    cancelled = True
-                    self.cancel()
+                    # An agent tool must settle its nested run before returning to the manager.
+                    skip_cleanup_wait = self.agent_tool_invocation is None
+                    if skip_cleanup_wait or self._cancel_mode != "immediate":
+                        self.cancel()
                     raise
                 finally:
                     self._waiting_on_event_queue = False
@@ -1119,9 +1135,8 @@ class RunResultStreaming(RunResultBase):
             unregister_consumer()
             try:
                 try:
-                    if cancelled:
-                        # Queue-wait cancellation should return without awaiting long-running tasks.
-                        # Tasks have already been cancelled above.
+                    if skip_cleanup_wait:
+                        # Top-level consumers can stop without waiting for long-running tasks.
                         self._cleanup_tasks()
                     else:
                         # Ensure main execution completes before cleanup to avoid race conditions
@@ -1134,7 +1149,7 @@ class RunResultStreaming(RunResultBase):
                         # Safely terminate background tasks after main execution has finished.
                         self._cleanup_tasks()
                 finally:
-                    if not cancelled:
+                    if not skip_cleanup_wait:
                         await self._await_model_provider_cleanup()
                         await self._run_sandbox_cleanup()
             finally:
@@ -1148,6 +1163,9 @@ class RunResultStreaming(RunResultBase):
 
         stored_exception = self._stored_exception
         if stored_exception is not None:
+            # Parallel guardrails can report failures outside the run loop's scope.
+            if self._redact_text is not None:
+                self._stored_exception = stored_exception = protected_error(stored_exception)
             if _is_error_data_redacted(stored_exception):
                 _detach_data_redacted_error_traceback(stored_exception)
                 # The streaming result retains caller-visible run data. Drop the local reference

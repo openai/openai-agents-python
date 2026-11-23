@@ -38,21 +38,32 @@ class Reports:
 
     def __init__(self, owner: str):
         self._owner = owner
-        self._texts: dict[str, tuple[str, ...]] | None = {}
+        self._reports: dict[str, tuple[str, tuple[str, ...]]] | None = {}
 
     def close(self) -> None:
-        self._texts = None
+        self._reports = None
 
     def fetch(self, requester: str, reference: str, *, part: int = 0, offset: int = 0) -> str:
         self.authorize(requester)
-        if self._texts is None or reference not in self._texts:
+        if self._reports is None or reference not in self._reports:
             raise PermissionError("Report unavailable")
         if part < 0 or offset < 0:
             raise ValueError("Use a nonnegative part and offset")
-        return self._texts[reference][part][offset : offset + 64]
+        _, texts = self._reports[reference]
+        return texts[part][offset : offset + 64]
+
+    def show(self, requester: str) -> None:
+        """Display only summaries issued by this store to its owner."""
+        if requester != self._owner or not self._reports:
+            print("No saved reports available.")
+            return
+        for reference, (summary, _) in self._reports.items():
+            page = self.fetch(requester, reference)
+            print(summary)
+            print("Retrieved the first page privately." if page else "The first page is empty.")
 
     def ensure_open(self) -> None:
-        if self._texts is None:
+        if self._reports is None:
             raise PermissionError("Report unavailable")
 
     def authorize(self, requester: str) -> None:
@@ -85,9 +96,9 @@ class Reports:
         replacement = f"{summary} Reference: {reference}"
         if len(replacement.encode()) > MAX_TEXT_BYTES:
             raise UserError("Report summary exceeds the text budget")
-        if self._texts is None:
+        if self._reports is None:
             raise RuntimeError("Report storage closed")
-        self._texts[reference] = texts
+        self._reports[reference] = replacement, texts
         return replacement
 
 
@@ -170,19 +181,13 @@ async def main() -> None:
                 mcp_servers=[server],
                 mcp_config={"include_server_in_tool_names": True},
             )
-            result = await Runner.run(
+            await Runner.run(
                 agent,
                 "Inspect both sites.",
                 context=requester,
                 run_config=RunConfig(tracing_disabled=True),
             )
-        for item in result.new_items:
-            if item.type == "tool_call_output_item":
-                summary = item.output if isinstance(item.output, str) else item.output["text"]
-                print(summary)
-                reference = summary.split("Reference: ")[1]
-                page = reports.fetch(requester, reference)
-                print(f"Retrieved {len(page)} characters privately.")
+        reports.show(requester)
 
 
 if __name__ == "__main__":

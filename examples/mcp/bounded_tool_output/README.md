@@ -6,7 +6,7 @@ Run the example from this source checkout. It uses a scripted model and a local 
 uv run python examples/mcp/bounded_tool_output/main.py
 ```
 
-Both inspection reports exceed the example's 128-byte text budget. The next model request, SDK history and caller receive warning counts of 20 and 8 with random references. The application fetches a page of each original report without adding it to the conversation.
+Both inspection reports exceed the example's 128-byte text budget. The next model request, SDK history and caller receive warning counts of 20 and 8 with random references. The example prints each saved summary and checks the first page privately.
 
 ## Choose what to share
 
@@ -21,7 +21,9 @@ At the tool boundary, the budget covers the sum of UTF-8 text bytes per result, 
 
 ## Retrieve privately
 
-Create one `Reports` instance per run. Load the owner from a trusted application record. Pass only the authenticated requester as the run context. Never accept either identity from tool arguments or a reference. Call `reports.fetch(requester, reference, part=0, offset=0)` in application code. Each page contains up to 64 characters. Advance the offset by the page length, or select another text part. Structured reports have one JSON part.
+Create one `Reports` instance per run. Load the owner from a trusted application record. Pass only the authenticated requester as the run context. Never accept either identity from tool arguments or a reference. The reader uses only summaries and references issued by this store. It ignores tool output, including short reports, errors and text that looks like a reference. Without an authorized saved report, it prints a fixed message.
+
+Call `reports.fetch(requester, reference, part=0, offset=0)` in application code. Each page contains up to 64 characters. Advance the offset by the page length, or select another text part. Structured reports have one JSON part.
 
 The originals stay in process memory outside SDK context. Leaving the `closing` block revokes every reference, including on failure or cancellation. Saved conversations cannot restore the originals. This example has no storage quota or durable store.
 
