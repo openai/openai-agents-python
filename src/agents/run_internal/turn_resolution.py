@@ -245,6 +245,7 @@ def is_handoff_tool_call(output: Any, handoff_tool_names: Container[str]) -> boo
 
 async def _maybe_finalize_from_tool_results(
     *,
+    run_config: RunConfig,
     current_turn: int,
     public_agent: Agent[TContext],
     original_input: str | list[TResponseInputItem],
@@ -284,6 +285,7 @@ async def _maybe_finalize_from_tool_results(
         on_tool_error_selected=on_tool_error_selected,
         current_turn=current_turn,
         kind="tool",
+        guarded_tool=_should_defer_interrupted_session_items(public_agent, run_config),
         items=(
             (*model_items, *(r.run_item for r in function_results if r.run_item is not None))
             if public_agent.hooks is not None and public_agent.hooks.step_policy is not None
@@ -437,6 +439,7 @@ async def execute_final_output(
     current_turn: int,
     kind: Literal["text", "structured", "tool"] | None = None,
     items: tuple[RunItem, ...] | None = None,
+    guarded_tool: bool = False,
     public_agent: Agent[Any],
     original_input: str | list[TResponseInputItem],
     new_response: ModelResponse,
@@ -477,7 +480,17 @@ async def execute_final_output(
                 if on_tool_error_selected is not None:
                     on_tool_error_selected()
 
-        (decision,) = await gather_with_cancel(decide(), on_child_failure=on_policy_failure)
+        policy_error: BaseException | None = None
+        try:
+            (decision,) = await gather_with_cancel(decide(), on_child_failure=on_policy_failure)
+            if decision not in ("continue", "finish"):
+                raise UserError('Agent step_policy must return "continue" or "finish"')
+        except (Exception, asyncio.CancelledError) as exc:
+            if not guarded_tool:
+                raise
+            # Let the blocked-output path record the effect without its unchecked result.
+            policy_error = exc
+            decision = "continue"
         if decision == "continue":
             return SingleStepResult(
                 original_input=original_input,
@@ -485,11 +498,10 @@ async def execute_final_output(
                 pre_step_items=pre_step_items,
                 new_step_items=new_step_items,
                 next_step=NextStepFinalOutput(final_output, continue_after_guardrails=True),
+                policy_error=policy_error,
                 tool_input_guardrail_results=tool_input_guardrail_results,
                 tool_output_guardrail_results=tool_output_guardrail_results,
             )
-        if decision != "finish":
-            raise UserError('Agent step_policy must return "continue" or "finish"')
 
     return await execute_final_output_step(
         public_agent=public_agent,
@@ -1265,6 +1277,7 @@ async def execute_tools_and_side_effects(
                 tool_output_guardrail_results=tool_output_guardrail_results,
             )
         tool_final_output = await _maybe_finalize_from_tool_results(
+            run_config=run_config,
             current_turn=current_turn,
             on_tool_error_selected=on_tool_error_selected,
             model_items=processed_response.new_items,
@@ -3247,6 +3260,7 @@ async def resolve_interrupted_turn(
             )
 
     tool_final_output = await _maybe_finalize_from_tool_results(
+        run_config=run_config,
         current_turn=run_state._current_turn if run_state is not None else 1,
         on_tool_error_selected=on_tool_error_selected,
         model_items=processed_response.new_items,

@@ -593,10 +593,13 @@ async def _finalize_streamed_final_output(
     stream_items_after_guardrails: bool = False,
     retry_on_guardrail_error: bool = False,
     continue_after_guardrails: bool = False,
+    policy_error: BaseException | None = None,
 ) -> None:
     output_guardrail_result_start = len(streamed_result.output_guardrail_results)
     redacted_persistence_error: BaseException | None = None
     try:
+        if policy_error is not None:
+            raise policy_error
         output_guardrail_results = await _run_output_guardrails_for_stream(
             agent=agent,
             run_config=run_config,
@@ -1506,7 +1509,10 @@ async def start_streaming(
                         streamed_result._replay_from_model_input_items = (
                             streamed_result._model_input_items != streamed_result.new_items
                         )
-                    else:
+                    elif not (
+                        isinstance(turn_result.next_step, NextStepFinalOutput)
+                        and turn_result.next_step.continue_after_guardrails
+                    ):
                         _publish_resumed_stream_turn(
                             streamed_result,
                             run_state,
@@ -1600,6 +1606,7 @@ async def start_streaming(
                             run_config=run_config,
                             output=turn_result.next_step.output,
                             continue_after_guardrails=turn_result.next_step.continue_after_guardrails,
+                            policy_error=turn_result.policy_error,
                             context_wrapper=context_wrapper,
                             save_items=_save_resumed_items,
                             items=list(turn_session_items),
@@ -1613,7 +1620,7 @@ async def start_streaming(
                         )
                         if streamed_result._stored_exception is not None:
                             break
-                        if retry_terminal_output:
+                        if retry_terminal_output or turn_result.next_step.continue_after_guardrails:
                             _publish_resumed_stream_turn(
                                 streamed_result,
                                 run_state,
@@ -2102,11 +2109,15 @@ async def start_streaming(
                     streamed_result._original_input = copy_input_items(turn_result.original_input)
                     if run_state is not None:
                         run_state._original_input = copy_input_items(turn_result.original_input)
-                streamed_result._model_input_items = (
-                    turn_result.pre_step_items + turn_result.new_step_items
-                )
                 turn_session_items = session_items_for_turn(turn_result)
-                streamed_result.new_items.extend(turn_session_items)
+                # Callers can keep a reference to new_items even after cleanup replaces it.
+                model_input_items = turn_result.pre_step_items + turn_result.new_step_items
+                if not (
+                    isinstance(turn_result.next_step, NextStepFinalOutput)
+                    and turn_result.next_step.continue_after_guardrails
+                ):
+                    streamed_result._model_input_items = model_input_items
+                    streamed_result.new_items.extend(turn_session_items)
                 if pending_input_admission_items and run_state is not None:
                     run_state._generated_items = list(streamed_result._model_input_items)
                     run_state._session_items = list(streamed_result.new_items)
@@ -2190,6 +2201,7 @@ async def start_streaming(
                         run_config=run_config,
                         output=turn_result.next_step.output,
                         continue_after_guardrails=turn_result.next_step.continue_after_guardrails,
+                        policy_error=turn_result.policy_error,
                         context_wrapper=context_wrapper,
                         save_items=_save_stream_items_with_count,
                         items=turn_session_items,
@@ -2202,6 +2214,11 @@ async def start_streaming(
                     if streamed_result._stored_exception is not None:
                         break
                     if turn_result.next_step.continue_after_guardrails:
+                        streamed_result._model_input_items = model_input_items
+                        streamed_result.new_items.extend(turn_session_items)
+                        streamed_result._replay_from_model_input_items = (
+                            model_input_items != streamed_result.new_items
+                        )
                         if run_state is not None:
                             run_state._current_step = NextStepRunAgain()
                         if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
@@ -2820,11 +2837,12 @@ async def run_single_turn_streamed(
         on_tool_error_selected=on_tool_error_selected,
     )
 
-    _publish_stream_items(
-        session_items_for_turn(single_step_result),
-        streamed_result,
-        emitted_model_item_occurrence_keys,
-    )
+    if single_step_result.policy_error is None:
+        _publish_stream_items(
+            session_items_for_turn(single_step_result),
+            streamed_result,
+            emitted_model_item_occurrence_keys,
+        )
     return single_step_result
 
 

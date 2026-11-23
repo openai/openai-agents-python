@@ -1446,6 +1446,8 @@ class AgentRunner:
                                 )
                                 output_guardrail_result_start = len(output_guardrail_results)
                                 try:
+                                    if turn_result.policy_error is not None:
+                                        raise turn_result.policy_error
                                     await run_output_guardrails(
                                         current_agent.output_guardrails
                                         + (run_config.output_guardrails or []),
@@ -2211,6 +2213,8 @@ class AgentRunner:
                                 )
                             output_guardrail_result_start = len(output_guardrail_results)
                             try:
+                                if turn_result.policy_error is not None:
+                                    raise turn_result.policy_error
                                 await run_output_guardrails(
                                     current_agent.output_guardrails
                                     + (run_config.output_guardrails or []),

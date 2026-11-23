@@ -271,6 +271,7 @@ async def test_blocked_continue_never_reaches_next_turn_or_session(streamed, kin
                 stream = Runner.run_streamed(
                     agent, value, session=session, hooks=hooks, run_config=config
                 )
+                live_items = stream.new_items
                 async for _ in stream.stream_events():
                     pass
             else:
@@ -278,6 +279,7 @@ async def test_blocked_continue_never_reaches_next_turn_or_session(streamed, kin
         if streamed:
             assert stream.final_output is None
             assert marker not in str(stream.new_items)
+            assert marker not in str(live_items)
         saved = await session.get_items()
         assert marker not in str(saved)
         if tool_step:
@@ -574,4 +576,68 @@ async def test_protected_continuation_redacts_guardrail_error(streamed):
     assert secret not in str(caught.value)
     assert caught.value.__cause__ is caught.value.__context__ is None
     assert getattr(caught.value, "run_data", None) is None
+    assert len(model.calls) == 1
+
+
+@pytest.mark.parametrize("approval", [False, True])
+@pytest.mark.parametrize("error", [UserError, asyncio.CancelledError])
+async def test_failed_policy_withholds_guarded_tool_output_but_records_effect(
+    streamed, approval, error
+):
+    marker = "unchecked-result"
+    effects = []
+
+    @tool(needs_approval=approval)
+    def record() -> str:
+        effects.append("record")
+        return marker
+
+    @output_guardrail
+    def check(ctx, agent, output):
+        pytest.fail("The policy failed before output validation")
+
+    def fail(ctx, step):
+        assert step.output == marker
+        raise error("decision failed")
+
+    model = ScriptedModel([[get_function_tool_call("record", "{}", "r")]])
+    agent = Agent(
+        name="worker",
+        tools=[record],
+        model=model,
+        tool_use_behavior="stop_on_first_tool",
+        hooks=AgentHooks(step_policy=fail),
+        output_guardrails=[check],
+    )
+    hooks = EndHooks()
+    session = SQLiteSession("effects")
+    value: str | RunState = "start"
+    try:
+        if approval:
+            paused = await run(streamed, agent, session=session)
+            value = await RunState.from_string(agent, paused.to_state().to_string())
+            value.approve(value.get_interruptions()[0])
+        with pytest.raises(error) as caught:
+            if streamed:
+                stream = Runner.run_streamed(agent, value, session=session, hooks=hooks)
+                live_items = stream.new_items
+                async for event in stream.stream_events():
+                    assert marker not in str(event)
+            else:
+                await run(False, agent, value, session=session, hooks=hooks)
+        if streamed:
+            assert stream.final_output is None
+            assert marker not in str(stream.new_items)
+            assert marker not in str(live_items)
+        if isinstance(caught.value, UserError):
+            assert caught.value.run_data is None
+        saved = await session.get_items()
+        assert marker not in str(saved)
+        assert [item.get("type") for item in saved[1:]] == ["function_call", "function_call_output"]
+        assert saved[1].get("call_id") == saved[2].get("call_id") == "r"
+        assert saved[2].get("output") == "Output withheld by an output guardrail."
+    finally:
+        session.close()
+    assert hooks.outputs == []
+    assert effects == ["record"]
     assert len(model.calls) == 1
