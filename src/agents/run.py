@@ -1844,6 +1844,14 @@ class AgentRunner:
                                         raise
                                     _, turn_result = guardrail_model_future.result()
                                 except InputGuardrailTripwireTriggered:
+                                    # A nested run can trip while this run's checks are pending.
+                                    if not guardrail_task.done() and not input_guardrails_triggered(
+                                        _attempt_input_guardrail_results()
+                                    ):
+                                        guardrail_task.cancel()
+                                        await asyncio.gather(guardrail_task, return_exceptions=True)
+                                        raise
+
                                     # Tool scheduling can now observe rejection before the
                                     # guardrail task has finished draining its siblings.
                                     await asyncio.gather(guardrail_task, return_exceptions=True)

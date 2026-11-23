@@ -528,3 +528,50 @@ async def test_input_rejection_blocks_invocation_after_tool_validation_suppresse
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_nested_input_rejection_cancels_pending_outer_guardrail():
+    outer_started = asyncio.Event()
+    outer_finished = asyncio.Event()
+
+    @input_guardrail
+    async def outer_check(context, agent, input) -> GuardrailFunctionOutput:
+        outer_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            outer_finished.set()
+        raise AssertionError("The outer guardrail should be cancelled")
+
+    @input_guardrail(run_in_parallel=False)
+    async def nested_reject(context, agent, input):
+        await outer_started.wait()
+        return GuardrailFunctionOutput(output_info="nested rejection", tripwire_triggered=True)
+
+    nested = Agent(
+        name="nested",
+        model=ScriptedModel(),
+        input_guardrails=[nested_reject],
+    ).as_tool(
+        tool_name="nested_tool",
+        tool_description="Run the nested agent",
+        failure_error_function=None,
+    )
+    outer = Agent(
+        name="outer",
+        model=ScriptedModel(
+            [[function_call("nested_tool", {"input": "nested input"}, call_id="nested")]]
+        ),
+        input_guardrails=[outer_check],
+        tools=[nested],
+    )
+
+    with pytest.raises(InputGuardrailTripwireTriggered) as rejection:
+        await asyncio.wait_for(
+            Runner.run(outer, "outer input", run_config=RunConfig(tracing_disabled=True)),
+            timeout=2,
+        )
+
+    assert rejection.value.guardrail_result.guardrail is nested_reject
+    assert outer_finished.is_set()
