@@ -39,7 +39,7 @@ from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
-from ..memory.resumable_session import CodexChecklist
+from ..memory.resumable_session import CodexChecklist, CodexChecklistStep
 from ..memory.session import await_session_mutation as _join_close
 from ..model_settings import ModelSettings
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
@@ -586,11 +586,18 @@ class _CodexModel(Model):
                 if kind == "plan_update":
                     # Core emits this only after accepting update_plan on the leased thread.
                     if checkpoint is not None and turn_id and event.get("id") == turn_id:
+                        from .. import _redaction
+
                         checklist = CodexChecklist(
                             thread_id=thread.thread_id,
                             turn_id=turn_id,
-                            explanation=message.get("explanation"),
-                            plan=tuple(message["plan"]),
+                            explanation=_redaction.redact_payload(message.get("explanation")),
+                            plan=tuple(
+                                CodexChecklistStep(
+                                    **dict(item, step=_redaction.redact_payload(item["step"]))
+                                )
+                                for item in message["plan"]
+                            ),
                         )
                     continue
                 if kind == "dynamic_tool_call_request":

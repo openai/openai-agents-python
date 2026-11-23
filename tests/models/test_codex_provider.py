@@ -2353,3 +2353,39 @@ async def test_checklist_survives_approval_and_excludes_nested_updates(tmp_path,
     with pytest.raises(ResumableSessionError) as error:
         await ResumableSession.resume(store, session.session_id)
     assert error.value.reason == "malformed"
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_checklist_redacts_display_text_before_saving(tmp_path, threads, streamed):
+    from agents import ResumableSession
+    from tests.memory.test_resumable_session import MemoryStore
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    agent = Agent(name="Planner")
+    cfg = config(tmp_path)
+    marker = "PRIVATE_PLAN_TEXT"
+    cfg.redact_text = lambda text: text.replace(marker, "[hidden]")
+    threads[0].append(
+        PlanThread(
+            events=[
+                {
+                    "type": "plan_update",
+                    "explanation": marker,
+                    "plan": [{"step": f"Check {marker}", "status": "pending"}],
+                }
+            ]
+        )
+    )
+    if streamed:
+        result = Runner.run_streamed(agent, "Go", session=session, run_config=cfg)
+        async for event in result.stream_events():
+            assert event.type != "raw_response_event" and marker not in repr(event)
+    else:
+        await Runner.run(agent, "Go", session=session, run_config=cfg)
+    assert marker not in store.records[session.session_id]
+    assert store.checkpoint(session.session_id)["version"] == 2
+    reopened = await ResumableSession.resume(store, session.session_id)
+    saved = reopened.codex_checklist
+    assert saved is not None and saved.explanation == "[hidden]"
+    assert [(s.step, s.status) for s in saved.plan] == [("Check [hidden]", "pending")]
