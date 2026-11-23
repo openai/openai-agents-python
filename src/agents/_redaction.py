@@ -12,7 +12,7 @@ from copy import copy
 from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, RootModel
 
 from . import _debug
 from .exceptions import (
@@ -300,15 +300,36 @@ def redact_payload(value: _T) -> _T:
     return _apply(value, "payload")
 
 
-def _reply_value(value: Any) -> Any:
-    """Compare checked replies as data, ignoring object key order but preserving array order."""
+def _reply_value(value: Any, wire: Any = None) -> Any:
+    """Match parsed fields to submitted JSON names without re-running app serializers."""
+    if isinstance(value, RootModel):
+        return _reply_value(value.root, wire)
     if isinstance(value, str):
         value = _decode_json(value)
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, (list, tuple)):
-        return [_reply_value(item) for item in value]
-    return {key: _reply_value(item) for key, item in _entries(value).items()}
+        prior = iter(wire) if isinstance(wire, list) else iter(())
+        return [_reply_value(item, next(prior, None)) for item in value]
+    names = wire if isinstance(wire, dict) else {}
+    fields = type(value).model_fields if isinstance(value, BaseModel) else {}
+    result = {}
+    for key, item in _entries(value).items():
+        if key not in names and (field := fields.get(key)) is not None:
+            alias = field.validation_alias
+            choices = alias.choices if isinstance(alias, AliasChoices) else (alias,)
+            for name in (*choices, field.alias, field.serialization_alias):
+                if isinstance(name, str) and name in names:
+                    key = name
+                    break
+            else:
+                # A default absent from the wire adds no second copy of the text.
+                if isinstance(wire, dict) and (item is None or isinstance(item, (int, float))):
+                    continue
+        if key in result:
+            raise ValueError("Ambiguous reply fields")
+        result[key] = _reply_value(item, names.get(key))
+    return result
 
 
 def require_clean_final_output(
@@ -334,15 +355,21 @@ def require_clean_final_output(
         # Check the returned form in place. A transformed or independently
         # synthesized reply also needs checking alongside the original.
         require_clean([*history[:index], reply, *history[index + 1 :]])
-        returned = _reply_value(value)
         if isinstance(source, MessageOutputItem):
             rendered = _reply_value(ItemHelpers.extract_text(source.raw_item) or "")
-            if rendered == {_WRAPPER_DICT_KEY: returned}:
-                return
+            if isinstance(rendered, dict) and rendered.keys() == {_WRAPPER_DICT_KEY}:
+                # A schema can itself declare a field named "response".
+                if _reply_value(value, rendered) == rendered:
+                    return
+                rendered = rendered[_WRAPPER_DICT_KEY]
         else:
             rendered = _reply_value(_entries(history[index]).get("output"))
+        returned = _reply_value(value, rendered)
         if returned == rendered:
             return
+        # Compare changed fields even when the raw message has other protocol
+        # fields between the two versions or validation renamed a field.
+        require_clean([rendered, returned])
     require_clean([*history, reply])
 
 

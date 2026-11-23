@@ -270,15 +270,21 @@ async def test_final_reply_counts_only_actual_tool_outputs(streamed, policy):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("wrapped", [False, True])
-@pytest.mark.parametrize("reordered", [False, True])
-async def test_parsed_final_output_does_not_duplicate_a_message(streamed, wrapped, reordered):
-    from pydantic import BaseModel
+@pytest.mark.parametrize("form", ["ordered", "reordered", "alias", "alternate"])
+async def test_parsed_final_output_does_not_duplicate_a_message(streamed, wrapped, form):
+    from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
     class Reply(BaseModel):
-        text: str
-        count: int
+        model_config = ConfigDict(validate_by_name=True)
 
-    fields = {"count": 1, "text": "half"} if reordered else {"text": "half", "count": 1}
+        text: str = Field(alias="wire_text", validation_alias=AliasChoices("wire_text", "alt"))
+        count: int
+        label: str
+
+    key = {"alias": "wire_text", "alternate": "alt"}.get(form, "text")
+    fields = {key: "value", "count": 1, "label": "half"}
+    if form != "ordered":
+        fields = dict(reversed(fields.items()))
     payload = json.dumps({"response": [fields]} if wrapped else fields)
     agent = Agent(
         name="worker",
@@ -292,17 +298,44 @@ async def test_parsed_final_output_does_not_duplicate_a_message(streamed, wrappe
             pass
     else:
         result = await Runner.run(agent, "go", run_config=config)
-    reply = Reply(text="half", count=1)
+    reply = Reply(wire_text="value", count=1, label="half")
     assert result.final_output == ([reply] if wrapped else reply)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
-async def test_reordered_array_is_a_changed_final_reply(streamed):
-    from pydantic import BaseModel, field_validator
+@pytest.mark.parametrize("root", [False, True])
+async def test_nested_aliased_reply_with_omitted_count_is_still_one_reply(streamed, root):
+    from pydantic import BaseModel, Field, RootModel
 
     class Reply(BaseModel):
-        names: list[str]
+        text: str = Field(alias="wire_text")
+        count: int | None = None
+
+    payload = '{"wire_text":"half"}' if root else '{"response":{"wire_text":"half"}}'
+    agent = Agent(
+        name="worker",
+        model=ScriptedModel([[assistant_message(payload)]]),
+        output_type=RootModel[Reply] if root else Reply | None,
+    )
+    config = RunConfig(redact_text=lambda text: text.replace("halfhalf", "[removed]"))
+    if streamed:
+        result = Runner.run_streamed(agent, "go", run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "go", run_config=config)
+    reply = result.final_output.root if root else result.final_output
+    assert reply == Reply(wire_text="half")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_reordered_array_is_a_changed_final_reply(streamed):
+    from pydantic import BaseModel, Field, field_validator
+
+    class Reply(BaseModel):
+        names: list[str] = Field(alias="wire_names")
 
         @field_validator("names")
         @classmethod
@@ -311,7 +344,7 @@ async def test_reordered_array_is_a_changed_final_reply(streamed):
 
     agent = Agent(
         name="worker",
-        model=ScriptedModel([[assistant_message('{"names":["head","tail"]}')]]),
+        model=ScriptedModel([[assistant_message('{"wire_names":["head","tail"]}')]]),
         output_type=Reply,
     )
     config = RunConfig(redact_text=lambda text: text.replace("tailtail", "[removed]"))
