@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from collections.abc import Callable, Iterator
@@ -18,6 +19,7 @@ from .exceptions import (
     ModelBehaviorError,
     UserError,
     _mark_error_data_redacted,
+    _prepare_data_redacted_error,
     _raise_data_redacted_error,
 )
 
@@ -115,6 +117,9 @@ def _walk(value: Any, redact: _Redactor, mode: _Mode) -> Any:
         # An arbitrary __str__ or serializer could expose uninspected content.
         raise ValueError
 
+    if mode == "item" and entries.get("type") == "mcp_approval_request":
+        # The decision refers to server-held arguments. Never display an edited action.
+        mode = "check"
     changes = {}
     for key, item in entries.items():
         if not isinstance(key, str):
@@ -147,6 +152,8 @@ def _apply(value: _T, mode: _Mode) -> _T:
         return value
     try:
         return cast(_T, _walk(value, redact, mode))
+    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit, GeneratorExit) as interrupted:
+        _raise_data_redacted_error(_prepare_data_redacted_error(interrupted))
     except Exception:
         # Neither callback exceptions nor validation errors are safe diagnostics.
         pass

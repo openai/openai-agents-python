@@ -8,7 +8,7 @@ from typing import Any, cast
 
 from openai.types.responses.response_usage import OutputTokensDetails
 
-from .._redaction import current_redactor, require_clean
+from .._redaction import current_redactor
 from ..agent import Agent
 from ..agent_tool_state import set_agent_tool_state_scope
 from ..exceptions import UserError
@@ -362,8 +362,9 @@ def resolve_resumed_context(
     set_agent_tool_state_scope(run_state._context, run_state._agent_tool_state_scope_id)
     if current_redactor() is not None:
         # Check exactly what can be saved, without rewriting an approved action.
-        require_clean(run_state.to_json())
+        run_state._redact_text = current_redactor()
         run_state._requires_redaction = True
+        run_state.to_json()
     return run_state._context
 
 

@@ -211,6 +211,30 @@ async def test_standalone_approval_retains_redaction_requirement(streamed: bool)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_standalone_serialization_checks_context_at_every_export(streamed: bool) -> None:
+    from agents import RunState
+
+    context = {"value": SECRET}
+    agent = Agent(name="worker", model=ScriptedModel([[get_text_message("safe")]]))
+    result = await run(
+        agent, "go", streamed=streamed, context=context, run_config=RunConfig(redact_text=redact)
+    )
+    state = result.to_state()
+    with pytest.raises(UserError, match="redact_text"):
+        state.to_json()
+    state._context.context["value"] = "safe"
+    clean = state.to_string()
+    assert SECRET not in clean
+    state._context.context["value"] = SECRET
+    with pytest.raises(UserError, match="redact_text"):
+        state.to_string()
+    restored = await RunState.from_string(agent, clean)
+    with pytest.raises(UserError, match="redact_text"):
+        restored.to_json()
+
+
+@pytest.mark.asyncio
 async def test_standalone_dirty_legacy_state_is_refused_before_execution() -> None:
     from agents import RunState
 

@@ -38,7 +38,7 @@ from openai.types.responses.response_output_item import (
 from pydantic import BaseModel, StringConstraints, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
-from ._redaction import current_redactor
+from ._redaction import current_redactor, hook_payload_diagnostics, redaction_scope, require_clean
 from ._run_state_agent_identity import (
     _build_agent_identity_keys_by_id,
     _build_agent_identity_map,
@@ -73,6 +73,7 @@ from .exceptions import (
     _mark_error_data_redacted,
     _prepare_data_redacted_error,
     _raise_data_redacted_error,
+    _sync_data_redacted_error_boundary,
 )
 from .guardrail import (
     GuardrailFunctionOutput,
@@ -1036,7 +1037,8 @@ class RunState(Generic[TContext, TAgent]):
         self._trace_state = None
         self._sandbox = None
         self._schema_version = CURRENT_SCHEMA_VERSION
-        self._requires_redaction = current_redactor() is not None
+        self._redact_text = current_redactor()
+        self._requires_redaction = self._redact_text is not None
         self._pending_session_write = None
         self._resumable_binding = None
         self._session_write_in_progress = False
@@ -1965,6 +1967,7 @@ class RunState(Generic[TContext, TAgent]):
             self._generated_items_last_processed_marker = current_merge_marker
         return generated_items
 
+    @_sync_data_redacted_error_boundary
     def to_json(
         self,
         *,
@@ -1990,6 +1993,30 @@ class RunState(Generic[TContext, TAgent]):
                 cannot be distinguished without hook instance attributes. Use unique agent
                 names before starting a persistable run in that case.
         """
+        policy = self._redact_text
+        if policy is None:
+            policy = current_redactor()
+        if policy is None and self._requires_redaction:
+            error = UserError("Resume with RunConfig.redact_text before saving protected state.")
+            _mark_error_data_redacted(error)
+            raise error
+        with redaction_scope(policy):
+            with hook_payload_diagnostics(
+                "RunConfig.redact_text could not safely serialize this state.",
+                redact_by_default=False,
+            ):
+                snapshot = self._serialize_snapshot(
+                    context_serializer, strict_context, include_tracing_api_key
+                )
+            require_clean(snapshot)
+            return snapshot
+
+    def _serialize_snapshot(
+        self,
+        context_serializer: ContextSerializer | None,
+        strict_context: bool,
+        include_tracing_api_key: bool,
+    ) -> dict[str, Any]:
         if self._current_agent is None:
             raise UserError("Cannot serialize RunState: No current agent")
         if self._context is None:
@@ -2353,6 +2380,7 @@ class RunState(Generic[TContext, TAgent]):
 
         return ""
 
+    @_sync_data_redacted_error_boundary
     def to_string(
         self,
         *,

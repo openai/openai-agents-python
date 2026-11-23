@@ -91,6 +91,49 @@ async def test_refuses_uneditable_items_before_streaming(reply):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_hosted_approval_never_shows_different_arguments_from_the_server(streamed):
+    from openai.types.responses.response_output_item import McpApprovalRequest
+
+    from agents import HostedMCPTool
+
+    from .model_test_helpers import get_exact_output_stream_step
+
+    approvals = []
+
+    async def approve(request):
+        approvals.append(request)
+        return {"approve": True}
+
+    hosted = HostedMCPTool(
+        tool_config={"type": "mcp", "server_label": "files", "server_url": "https://example.org"},
+        on_approval_request=approve,
+    )
+    proposal = McpApprovalRequest(
+        id="permission",
+        type="mcp_approval_request",
+        server_label="files",
+        name="write",
+        arguments=json.dumps({"value": SECRET}),
+    )
+    step = get_exact_output_stream_step([proposal]) if streamed else [proposal]
+    model = ScriptedModel([step, [assistant_message("done")]])
+    agent = Agent(name="worker", model=model, tools=[hosted])
+    config = RunConfig(redact_text=scrub)
+    with pytest.raises(UserError, match="redact_text"):
+        if streamed:
+            result = Runner.run_streamed(
+                agent, "go", run_config=config, previous_response_id="prior"
+            )
+            async for event in result.stream_events():
+                assert event.type == "agent_updated_stream_event"
+        else:
+            await Runner.run(agent, "go", run_config=config, previous_response_id="prior")
+    assert not approvals
+    assert len(model.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_never_rewrites_or_publishes_a_private_native_approval(tmp_path, monkeypatch):
     agent, store, session, config, pending, calls, _ = await setup_native(tmp_path, monkeypatch)
     pending.checkpoint["request"]["reason"] = SECRET
@@ -174,27 +217,56 @@ async def test_streamed_cleanup_respects_the_policy(caplog, monkeypatch):
 @pytest.mark.asyncio
 async def test_streamed_sandbox_cleanup_respects_the_policy(caplog, monkeypatch):
     from agents import _debug
-    from agents.sandbox import Manifest, SandboxAgent
+    from agents.sandbox import SandboxAgent, SandboxRunConfig
 
-    from .sandbox.test_runtime import _FakeClient, _FakeSession, _sandbox_run_config
+    from .sandbox._filesystem_test_session import (
+        FilesystemTestSandboxClient,
+        FilesystemTestSandboxSession,
+    )
 
-    class FailingSession(_FakeSession):
-        async def stop(self):
-            await super().stop()
-            raise RuntimeError(SECRET)
+    stops = []
 
+    async def fail_stop(session):
+        stops.append(True)
+        raise RuntimeError(SECRET)
+
+    monkeypatch.setattr(FilesystemTestSandboxSession, "stop", fail_stop)
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
-    session = FailingSession(Manifest())
-    config = _sandbox_run_config(_FakeClient(session))
-    config.redact_text = scrub
+    config = RunConfig(
+        redact_text=scrub, sandbox=SandboxRunConfig(client=FilesystemTestSandboxClient())
+    )
     agent = SandboxAgent(name="worker", model=ScriptedModel([[assistant_message("safe")]]))
     result = Runner.run_streamed(agent, "go", run_config=config)
     async for _ in result.stream_events():
         pass
     assert result.final_output == "safe"
-    assert session.stop_calls == 1
+    assert stops == [True]
     assert SECRET not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_policy_cancellation_does_not_disclose_private_input(streamed):
+    import traceback
+
+    def cancel(text):
+        if text == SECRET:
+            raise asyncio.CancelledError(text)
+        return text
+
+    agent = Agent(name="worker", model=ScriptedModel([]))
+    config = RunConfig(redact_text=cancel)
+    with pytest.raises(asyncio.CancelledError) as caught:
+        if streamed:
+            Runner.run_streamed(agent, SECRET, run_config=config)
+        else:
+            await Runner.run(agent, SECRET, run_config=config)
+    assert not caught.value.args
+    assert caught.value.__context__ is caught.value.__cause__ is None
+    for frame, _ in traceback.walk_tb(caught.tb):
+        if frame.f_globals.get("__name__", "").startswith("agents."):
+            assert SECRET not in repr(frame.f_locals)
 
 
 @pytest.mark.asyncio
