@@ -17,6 +17,7 @@ from agents import (
     ModelTimeoutError,
     OutputGuardrailTripwireTriggered,
     RetryDecision,
+    RunConfig,
     Runner,
     function_tool,
     output_guardrail,
@@ -87,6 +88,46 @@ async def test_native_prefixes_and_raw_consumer_are_independent(tmp_path, thread
         FinalOutputAccepted(root, "session"),
     ]
     assert thread.closed and run.final_output == "a🙂bc"
+
+
+@pytest.mark.parametrize("passive", [False, True])
+@pytest.mark.parametrize("inherited", [False, True])
+async def test_redacted_run_skips_preview_callback(passive, inherited):
+    config = RunConfig(redact_text=lambda text: text.replace("marker", "X"))
+    seen = []
+
+    def approve(text):
+        seen.append(text)
+        return text
+
+    async def read():
+        run = scripted("marker", run_config=None if inherited else config)
+        if passive:
+            reader = run.subscribe_approved_output(approve)
+            raw, events = await asyncio.gather(collect(run.stream_events()), collect(reader))
+            assert all(event.type != "raw_response_event" for event in raw)
+        else:
+            async with run.stream_approved_output(approve) as reader:
+                events = await collect(reader)
+        assert run.final_output == "X"
+        assert [type(event) for event in events] == [FinalOutputAccepted]
+
+    if inherited:
+
+        async def instructions(context, agent):
+            await read()
+            return "Answer briefly."
+
+        parent = Agent(
+            name="parent",
+            model=ScriptedModel([[assistant_message("ok")]]),
+            instructions=instructions,
+        )
+        await Runner.run(parent, "start", run_config=config)
+    else:
+        await read()
+
+    assert not seen
 
 
 @pytest.mark.parametrize("approval", [None, ""])

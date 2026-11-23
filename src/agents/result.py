@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
 
+from ._redaction import current_redactor, protected_error, redaction_scope
 from ._tool_invocation import tool_output_identity
 from .agent import Agent
 from .agent_output import AgentOutputSchemaBase
@@ -125,6 +126,8 @@ def _populate_state_from_result(
 ) -> RunState[Any]:
     """Populate a RunState with common fields from a RunResult."""
     state._resumable_binding = result._resumable_binding
+    state._redact_text = result._redact_text
+    state._requires_redaction = result._redact_text is not None
     state._current_agent = result.last_agent
     model_input_items = getattr(result, "_model_input_items", None)
     if isinstance(model_input_items, list):
@@ -401,6 +404,11 @@ class RunResultBase(abc.ABC):
 
     context_wrapper: RunContextWrapper[Any]
     """The context wrapper for the agent run."""
+
+    _redact_text: Callable[[str], str] | None = field(
+        default_factory=current_redactor, init=False, repr=False, compare=False
+    )
+    """In-memory policy for cleanup and snapshot writes after the run task exits."""
 
     _trace_state: TraceState | None = field(default=None, init=False, repr=False)
     """Serialized trace metadata captured during the run."""
@@ -839,7 +847,8 @@ class RunResultStreaming(RunResultBase):
                         error,
                     )
 
-            task = asyncio.create_task(_cleanup_once())
+            with redaction_scope(self._redact_text):
+                task = asyncio.create_task(_cleanup_once())
             self._sandbox_cleanup_task = task
 
         await task
@@ -916,7 +925,8 @@ class RunResultStreaming(RunResultBase):
         async def run_cleanup() -> None:
             await cleanup()
 
-        task = asyncio.create_task(run_cleanup())
+        with redaction_scope(self._redact_text):
+            task = asyncio.create_task(run_cleanup())
         self._model_provider_cleanup_task = task
         return task
 
@@ -1036,6 +1046,8 @@ class RunResultStreaming(RunResultBase):
         Published ApprovedText cannot be retracted, even if guardrails or the run later fail.
 
         Prefixes require an isolated, numbered Responses stream with response and item IDs.
+        With active or inherited RunConfig.redact_text, the reader skips approve_preview
+        and yields only FinalOutputAccepted on success. Private text can span deltas.
         Hosted multi-agent streams support final notifications only.
         Gaps, invalid prefixes and buffers over 65536 UTF-8 bytes raise ValueError in this reader.
         The submission_id identifies this result. The turn_id is the provider response ID.
@@ -1081,6 +1093,7 @@ class RunResultStreaming(RunResultBase):
 
         Enter immediately after Runner.run_streamed(), before yielding control.
         The iterator uses the same approval rules as subscribe_approved_output().
+        Active or inherited RunConfig.redact_text suppresses previews and skips the callback.
         Omit approve_preview for final notifications only. Check final_output separately
         for disclosure before displaying it. Published previews cannot be
         retracted, even if the run later fails or returns a different answer.
@@ -1303,6 +1316,9 @@ class RunResultStreaming(RunResultBase):
 
         stored_exception = self._stored_exception
         if stored_exception is not None:
+            # Parallel guardrails can report failures outside the run loop's scope.
+            if self._redact_text is not None:
+                self._stored_exception = stored_exception = protected_error(stored_exception)
             if _is_error_data_redacted(stored_exception):
                 _detach_data_redacted_error_traceback(stored_exception)
                 # The streaming result retains caller-visible run data. Drop the local reference
