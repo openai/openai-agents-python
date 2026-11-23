@@ -210,6 +210,7 @@ class CodexToolHooks:
             "key": self.key,
             "timeout": budget,
             "sdk_names": sorted(self.sdk_names),
+            "prepare_tool_output": "prepare_tool_output" in self.required,
         }
 
     def verify(self, thread: Any) -> None:

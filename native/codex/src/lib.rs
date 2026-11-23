@@ -97,6 +97,7 @@ impl ThreadRecord {
                     .await;
                     // Detach even when a joined shutdown returns an error; the buffer remains drainable.
                     operations.close();
+                    services.mcp_results.close(&id.to_string());
                     result
                 });
                 async move {
@@ -220,6 +221,11 @@ async fn start_thread(
         .await
         .map_err(|_| "Unable to start the Codex thread.".to_owned())?;
     let operations = services.operations.root(created.thread_id.to_string());
+    if mcp_results.is_some() && settings["sdk_tool_hooks"]["prepare_tool_output"] == true {
+        services
+            .mcp_results
+            .guard_calls(created.thread_id.to_string());
+    }
     Ok(Arc::new(ThreadLease {
         mcp_results,
         record: Arc::new(ThreadRecord {

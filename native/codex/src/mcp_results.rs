@@ -1,12 +1,18 @@
 //! Each selected call owns its reply, even when attempts reuse call IDs.
 use codex_extension_api::{
-    McpToolResultInput, McpToolSource, ToolLifecycleContributor, ToolLifecycleFuture,
+    McpToolResultInput, McpToolSource, ModelRequestContributor, ModelRequestInput,
+    ModelResponseError, ModelResponseInterceptor, ModelResponseStream, ResponseEvent,
+    ToolLifecycleContributor, ToolLifecycleFuture,
 };
 use codex_mcp::{McpServerSource, McpSnapshotDetail};
 use codex_protocol::mcp::CallToolResult;
+use codex_protocol::models::ResponseItem;
+use futures::{StreamExt, stream};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 pub struct Selection {
@@ -110,7 +116,55 @@ impl PendingResult {
     }
 }
 
-pub struct Transform;
+// PostToolUse can collapse distinct raw tool names. When both editors run, reject
+// repeated model call IDs before dispatch, even if the Python reader is behind.
+#[derive(Debug, Default, Clone)]
+struct CallIds(Arc<Mutex<HashSet<String>>>);
+
+impl ModelResponseInterceptor for CallIds {
+    fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
+        stream::try_unfold((self, stream), |(ids, mut stream)| async move {
+            let Some(event) = stream.next().await else {
+                return Ok(None);
+            };
+            let event = event?;
+            if let ResponseEvent::OutputItemDone(
+                ResponseItem::FunctionCall { call_id, .. }
+                | ResponseItem::CustomToolCall { call_id, .. },
+            ) = &event
+                && (call_id.is_empty() || !ids.0.lock().unwrap().insert(call_id.clone()))
+            {
+                return Err(ModelResponseError::InvalidRequest {
+                    message: "Codex returned an invalid native tool call.".to_owned(),
+                });
+            }
+            Ok(Some((event, (ids, stream))))
+        })
+        .boxed()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Transform {
+    guarded: Mutex<HashMap<String, CallIds>>,
+}
+
+impl Transform {
+    pub fn guard_calls(&self, thread_id: String) {
+        self.guarded.lock().unwrap().entry(thread_id).or_default();
+    }
+
+    pub fn close(&self, thread_id: &str) {
+        self.guarded.lock().unwrap().remove(thread_id);
+    }
+}
+
+impl ModelRequestContributor for Transform {
+    fn request(&self, input: ModelRequestInput<'_>) -> Option<Box<dyn ModelResponseInterceptor>> {
+        let ids = self.guarded.lock().unwrap().get(input.thread_id)?.clone();
+        Some(Box::new(ids))
+    }
+}
 
 impl ToolLifecycleContributor for Transform {
     fn on_mcp_tool_result<'a>(&'a self, input: McpToolResultInput<'a>) -> ToolLifecycleFuture<'a> {

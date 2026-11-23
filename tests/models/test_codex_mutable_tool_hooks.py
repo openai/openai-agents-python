@@ -50,14 +50,17 @@ def model_endpoint():
                 "created_at": 1,
                 "model": request.get("model", "gpt-5.4"),
                 "status": "completed",
-                "output": [item],
+                "output": item if isinstance(item, list) else [item],
                 "parallel_tool_calls": True,
                 "tools": [],
                 "tool_choice": "auto",
             }
             events = [
                 {"type": "response.created", "response": response},
-                {"type": "response.output_item.done", "item": item},
+                *(
+                    {"type": "response.output_item.done", "item": value}
+                    for value in response["output"]
+                ),
                 {"type": "response.completed", "response": response},
             ]
             body = (
@@ -511,6 +514,106 @@ def test_native_mcp_result_registrations():
 
 
 @pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize("first", ["lookup", "_lookup"])
+@pytest.mark.parametrize("duplicate", [True, False])
+async def test_native_mcp_parallel_editors(tmp_path, model_endpoint, monkeypatch, first, duplicate):
+    port, requests, items = model_endpoint
+    second = "_lookup" if first == "lookup" else "lookup"
+    # Both raw tools have the same PostToolUse name and arguments. With valid IDs,
+    # hold the first invocation until the second one reaches its editor.
+    script = (
+        "import asyncio\nfrom pathlib import Path\n"
+        "try:\n from mcp.server.mcpserver import MCPServer\n"
+        "except ImportError:\n from mcp.server.fastmcp import FastMCP as MCPServer\n"
+        "from mcp.types import ToolAnnotations\n"
+        "server = MCPServer('fixture')\n"
+        f"root = Path({str(tmp_path)!r})\n"
+        "def register(name):\n"
+        " @server.tool(name=name, annotations=ToolAnnotations(readOnlyHint=True))\n"
+        " async def query(value: str):\n"
+        "  (root / name).touch()\n"
+        f"  while name == {first!r} and {not duplicate} and not (root / 'ready').exists():\n"
+        "   await asyncio.sleep(0.01)\n"
+        "  return name\n"
+        "register('lookup')\nregister('_lookup')\nserver.run(transport='stdio')\n"
+    )
+    provider = codex_fixture(
+        tmp_path,
+        port,
+        monkeypatch,
+        [
+            "features.code_mode=false",
+            'approval_policy="never"',
+            f"mcp_servers.peer.command={json.dumps(sys.executable)}",
+            f"mcp_servers.peer.args={json.dumps(['-I', '-c', script])}",
+            'mcp_servers.peer.default_tools_approval_mode="approve"',
+            "mcp_servers.peer.required=true",
+        ],
+    )
+
+    def proposed(request):
+        names = {
+            tool["name"]: spec["name"]
+            for spec in request["tools"]
+            if spec.get("type") == "namespace"
+            for tool in spec["tools"]
+        }
+        return [
+            {
+                "type": "function_call",
+                "call_id": "same" if duplicate else name,
+                "namespace": names[name],
+                "name": name,
+                "arguments": '{"value":"same"}',
+            }
+            for name in (first, second)
+        ]
+
+    items.extend([proposed, final_message()])
+    seen = []
+
+    async def selected(call, result):
+        seen.append("lookup")
+        (tmp_path / "ready").touch()
+        return {"content": [{"type": "text", "text": "edited"}]}
+
+    async def ordinary(call, result):
+        assert "_lookup" in json.dumps(result)
+        seen.append("_lookup")
+        (tmp_path / "ready").touch()
+        return result
+
+    config = RunConfig(
+        model_provider=provider,
+        tracing_disabled=True,
+        tool_execution=ToolExecutionConfig(
+            native_mcp_result_transforms=[(("peer", "lookup"), selected)],
+            prepare_tool_output=ordinary,
+        ),
+    )
+    try:
+        run = asyncio.wait_for(
+            Runner.run(
+                Agent(name="test", model="fixture-direct-tools"), "Look up", run_config=config
+            ),
+            30,
+        )
+        if duplicate:
+            with pytest.raises(RuntimeError, match="Codex model turn failed"):
+                await run
+            assert not (tmp_path / second).exists()
+            assert seen in ([], [first])
+            assert len(requests) == 1
+        else:
+            assert (await run).final_output == "done"
+            assert seen == [second, first]
+            assert "edited" in json.dumps(requests[1]["input"])
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
 async def test_native_mcp_edit_skips_only_one_matching_completion():
     from agents import RunContextWrapper
     from agents.models._codex_tool_hooks import CodexToolHooks
@@ -623,8 +726,6 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
     changed_input = mode in ("peer_error", "force_error")
     protected = mode in ("protected", "protected_stream")
     argument = {"peer_error": "fail", "media": "media"}.get(mode, "search")
-    legacy_calls = []
-    other_finished = asyncio.Event()
 
     def proposed(request):
         other = mode == "reused_id" and len(requests) == 2
@@ -654,15 +755,7 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
     async def record(thread):
         event = await next_event(thread)
         if isinstance(event, str):
-            message = json.loads(event)["msg"]
-            if (
-                mode == "reused_id"
-                and message["type"] == "raw_response_item"
-                and message["item"].get("name", "").endswith("other")
-            ):
-                # The native hook can finish before a slow reader rejects the duplicate ID.
-                await asyncio.wait_for(other_finished.wait(), 30)
-            events.append(message)
+            events.append(json.loads(event)["msg"])
         return event
 
     monkeypatch.setattr(native_thread, "next_event", record)
@@ -718,10 +811,7 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
         }
 
     async def legacy(call, result):
-        assert mode == "reused_id" and call.tool.name.endswith("other")
-        legacy_calls.append(call.call_id)
-        other_finished.set()
-        return result
+        pytest.fail("Neither a selected call nor a rejected duplicate should reach this hook")
 
     target = {
         "unselected": ("raw-peer", "other"),
@@ -756,9 +846,14 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
     try:
         run = execute()
         if mode == "reused_id":
-            with pytest.raises(RuntimeError, match="invalid native tool call"):
+            with pytest.raises(RuntimeError, match="Codex model turn failed"):
                 await run
-            assert entered.is_set() and legacy_calls == ["lookup_1"]
+            assert entered.is_set() and len(requests) == 2
+            assert not any(
+                event["type"] == "raw_response_item"
+                and event["item"].get("name", "").endswith("other")
+                for event in events
+            )
             return
         if mode in ("trace_path", "trace_empty"):
             monkeypatch.chdir(tmp_path)
