@@ -143,10 +143,15 @@ hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.glob(
 checksums = [line.split() for line in (root / 'SHA256SUMS').read_text().splitlines()]
 assert len(hashes) == len(checksums) == 4
 assert hashes == build['sha256'] == {name: digest for digest, name in checksums}
+base = f"https://github.com/{build['repository']}/releases/download/{build['tag']}"
+for name, digest in sorted(hashes.items()):
+    print(f'python -m pip install --only-binary=:all: "{base}/{name}#sha256={digest}"')
 PY
 ```
 
-Verify that the `Tests` run succeeded for the push of this commit to `feat/simple-codex`. Retain `BUILD.json` as evidence. Confirm the tag is available and check for draft releases. Save reviewed notes in `$RELEASE_STAGE/notes.md`. The commands below publish the four wheels and their checksums.
+Verify that the `Tests` run succeeded for the push of this commit to `feat/simple-codex`. Retain `BUILD.json` as evidence. Confirm the tag is available and check for draft releases.
+
+In the release notes, add an **Install** section with the four commands printed above. Label each command with its platform and put it in its own code block. Pip checks the hash in the URL before installing the wheel. Save the reviewed notes in `$RELEASE_STAGE/notes.md`. The commands below publish the four wheels and their checksums.
 
 ```sh
 git tag -a "$RELEASE_TAG" "$RELEASE_SHA" -m "Agents SDK $RELEASE_TAG"

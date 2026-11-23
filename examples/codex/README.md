@@ -6,22 +6,9 @@ Use the [v1.0.0-alpha.2 prerelease](https://github.com/openai/openai-agents-pyth
 
 Use CPython 3.10 through 3.14. Create a virtual environment with `python -m venv .venv`, then activate it with `source .venv/bin/activate` on macOS or Linux, or `.\.venv\Scripts\Activate.ps1` in PowerShell.
 
-From the release's **Assets**, download `SHA256SUMS` and the `openai_agents-1.0.0a2-cp310-abi3-` wheel with the ending for your platform.
+Run the `pip install` command for your platform under **Install** in the [alpha.2 release notes](https://github.com/openai/openai-agents-python/releases/tag/v1.0.0-alpha.2). Pip downloads the wheel, checks its SHA-256 hash and installs the SDK and embedded Codex runtime.
 
-| Platform | Filename ending |
-| --- | --- |
-| macOS 11+ on Apple silicon | `macosx_11_0_arm64.whl` |
-| Linux ARM64 with glibc 2.28+ | `manylinux_2_28_aarch64.whl` |
-| Linux x86-64 with glibc 2.28+ | `manylinux_2_28_x86_64.whl` |
-| Windows x64 | `win_amd64.whl` |
-
-[Verify the wheel's SHA-256 digest](../../docs/models/codex.md#install-a-github-prerelease-wheel) against the entry for its exact filename. If they match, replace `WHEEL_FILE` with the local path to the wheel and run this command.
-
-```sh
-python -m pip install --only-binary=:all: "WHEEL_FILE"
-```
-
-For an unreleased checkout, [build and install a native wheel](../../native/codex/patches/README.md#test-a-change) from the same revision.
+If you already have a wheel, [verify and install the local file](../../docs/models/codex.md#install-a-github-prerelease-wheel). For an unreleased checkout, [build and install a native wheel](../../native/codex/patches/README.md#test-a-change) from the same revision.
 
 ## Authenticate
 
